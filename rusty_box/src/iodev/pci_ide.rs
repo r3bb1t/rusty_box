@@ -405,6 +405,30 @@ impl BxPciIde {
     /// Drain a deferred one-shot timer arm request (microseconds) for a
     /// channel. Set by the BM-DMA command-register write; the emulator loop
     /// (which owns `BxPcSystemC`) drains it and activates the channel timer.
+    /// Timer id for a bus-master channel, offset past the four seek timers so
+    /// both halves of the IDE controller share one id space.
+    #[inline]
+    pub(crate) const fn bmdma_timer_local(channel: usize) -> u16 {
+        (4 + channel) as u16
+    }
+
+    /// Arm the bus-master callbacks this access produced. Tick-denominated:
+    /// Bochs pci_ide.cc schedules the engine one tick out, and routing that
+    /// through microseconds would round it away.
+    pub(crate) fn drain_bmdma_timers(&mut self, ctx: &mut crate::iodev::device_api::DeviceCtx<'_>) {
+        for channel in 0..2usize {
+            if let Some(delay_ticks) = self.take_pending_timer_arm(channel) {
+                ctx.timers.arm_oneshot_ticks(
+                    crate::iodev::device_api::TimerKey {
+                        device: crate::iodev::device_api::DeviceKind::Ide,
+                        local: Self::bmdma_timer_local(channel),
+                    },
+                    u64::from(delay_ticks),
+                );
+            }
+        }
+    }
+
     pub(crate) fn take_pending_timer_arm(&mut self, channel: usize) -> Option<u32> {
         if channel < 2 {
             self.pending_timer_arm[channel].take()

@@ -2432,9 +2432,20 @@ mod tests {
             assert!(dm.pci_ide.pci_write(0x20, 0x0000_C001, 4));
             dm.register_pci_ide_bmdma_ports(&mut io);
 
+            // The engine needs real scheduler slots to arm.
+            use crate::pc_system::TimerOwner;
+            let ch0 = pc_system
+                .register_timer(TimerOwner::PciIdeCh0, 0, false, false, "PIIX IDE")
+                .unwrap();
+            let ch1 = pc_system
+                .register_timer(TimerOwner::PciIdeCh1, 0, false, false, "PIIX IDE")
+                .unwrap();
+            dm.pci_ide.bmdma[0].timer_index = Some(ch0);
+            dm.pci_ide.bmdma[1].timer_index = Some(ch1);
+
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
 
-            // Guest programs DTPR and starts the engine. Bochs requests the
+            // Guest programs DTPR and starts the engine. Bochs arms the
             // one-tick BM-DMA callback at this issuing instruction's epoch.
             io.outp(0xC004, 0x8000, 4, 41, &mut pc_system);
             io.outp(0xC000, 0x09, 1, 41, &mut pc_system);
@@ -2445,19 +2456,15 @@ mod tests {
                 None,
                 "I/O transport must drain the IDE producer"
             );
-            assert!(io.take_scheduler_boundary_requested());
-            let requests = io.take_timer_requests();
-            assert_eq!(
-                requests.get(DeviceTimerOwner::PciIdeCh0),
-                TimerRequest::Activate {
-                    deadline_ticks: 42,
-                    period_ticks: 1,
-                    continuous: false,
-                }
-            );
-            assert_eq!(
-                requests.get(DeviceTimerOwner::PciIdeCh1),
-                TimerRequest::Unchanged
+
+            // Anchored to the issuing tick (41), not to the wheel's position
+            // (still 0 here): the wheel lags the CPU while a batch is in
+            // flight, so anchoring there would fire the callback early.
+            assert!(pc_system.timer_is_active(ch0));
+            assert_eq!(pc_system.timer_time_to_fire(ch0), 42);
+            assert!(
+                !pc_system.timer_is_active(ch1),
+                "only the programmed channel arms"
             );
         });
     }

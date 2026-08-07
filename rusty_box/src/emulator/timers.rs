@@ -377,6 +377,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
                     let mut timers = crate::iodev::wiring::WheelTimerService {
                         pc_system: &mut self.pc_system,
                         handles,
+                        now_ticks: current_ticks,
                     };
                     let mut ctx = crate::iodev::device_api::DeviceCtx {
                         now_ticks: current_ticks,
@@ -513,6 +514,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         let mut timers = crate::iodev::wiring::WheelTimerService {
             pc_system: &mut self.pc_system,
             handles,
+            now_ticks: current_ticks,
         };
         let mut ctx = crate::iodev::device_api::DeviceCtx {
             now_ticks: current_ticks,
@@ -535,6 +537,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         let mut timers = crate::iodev::wiring::WheelTimerService {
             pc_system: &mut self.pc_system,
             handles: crate::iodev::wiring::TimerHandles::default(),
+            now_ticks: current_ticks,
         };
         let mut ctx = crate::iodev::device_api::DeviceCtx {
             now_ticks: current_ticks,
@@ -562,6 +565,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         let mut timers = crate::iodev::wiring::WheelTimerService {
             pc_system: &mut self.pc_system,
             handles,
+            now_ticks: current_ticks,
         };
         let mut ctx = crate::iodev::device_api::DeviceCtx {
             now_ticks: current_ticks,
@@ -602,6 +606,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         let mut timers = crate::iodev::wiring::WheelTimerService {
             pc_system: &mut self.pc_system,
             handles,
+            now_ticks: current_ticks,
         };
         let mut ctx = crate::iodev::device_api::DeviceCtx {
             now_ticks: current_ticks,

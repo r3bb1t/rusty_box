@@ -2191,6 +2191,32 @@ impl BxHardDriveC {
         self.pending_seek_arm_usec[channel][device].take()
     }
 
+    /// Timer id for one drive's seek callback — Bochs harddrv.cc uses
+    /// `setTimerParam((channel << 1) | device)` for the same purpose.
+    #[inline]
+    pub(crate) const fn seek_timer_local(channel: usize, device: usize) -> u16 {
+        ((channel << 1) | device) as u16
+    }
+
+    /// Arm the seek deadlines this access produced. Bochs harddrv.cc
+    /// `start_seek` calls `activate_timer` inline, so the deadline belongs to
+    /// the instruction that issued the command.
+    pub(crate) fn drain_seek_timers(&mut self, ctx: &mut crate::iodev::device_api::DeviceCtx<'_>) {
+        for channel in 0..2usize {
+            for device in 0..2usize {
+                if let Some(seek_usec) = self.take_pending_seek_arm(channel, device) {
+                    ctx.timers.arm_oneshot_usec(
+                        crate::iodev::device_api::TimerKey {
+                            device: crate::iodev::device_api::DeviceKind::Ide,
+                            local: Self::seek_timer_local(channel, device),
+                        },
+                        u64::from(seek_usec),
+                    );
+                }
+            }
+        }
+    }
+
     /// Seek-timer deadline handler — Bochs harddrv.cc `seek_timer`.
     /// `param` encodes `(channel << 1) | device` (Bochs `setTimerParam`).
     pub fn seek_timer(

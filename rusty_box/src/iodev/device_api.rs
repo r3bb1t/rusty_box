@@ -74,6 +74,10 @@ pub enum DeviceKind {
     Cmos,
     Pit,
     Keyboard,
+    /// The ATA/ATAPI drives and the PIIX bus-master engine share one kind:
+    /// they are one controller in hardware, and ids 0-3 are the per-drive seek
+    /// timers with 4-5 the two bus-master channels.
+    Ide,
 }
 
 /// Interrupt delivery, as seen by a device.
@@ -113,6 +117,13 @@ pub trait TimerService {
     /// Arm `key` to fire every `period_usec` microseconds until cancelled —
     /// Bochs `activate_timer(..., continuous = 1)`.
     fn arm_periodic_usec(&mut self, key: TimerKey, period_usec: u64);
+
+    /// Arm `key` as a one-shot `delay_ticks` scheduler ticks from now.
+    ///
+    /// For deadlines that are inherently tick-denominated rather than
+    /// wall-clock — the PIIX bus-master engine schedules its callback one tick
+    /// out, and routing that through microseconds would round it away.
+    fn arm_oneshot_ticks(&mut self, key: TimerKey, delay_ticks: u64);
 
     /// Disarm `key`. Disarming an already-idle timer is a no-op.
     fn cancel(&mut self, key: TimerKey);

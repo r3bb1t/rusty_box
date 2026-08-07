@@ -664,8 +664,6 @@ impl BxDevicesC {
         if has_handler {
             let mut pic_intr_level = None;
             let mut hrq_level = None;
-            let mut ide_timer_delays = [None; 2];
-            let mut seek_arms = [[None; 2]; 2];
             let mut cmos_timer_sync = None;
             let mut machine_boundary_pending = false;
             let dispatched = if let Some(dm) = self.device_manager_mut() {
@@ -696,22 +694,14 @@ impl BxDevicesC {
                         );
                     }
                 }
-                // Seek-timer arms latched by harddrv during this dispatch —
-                // drained here so the deadline is anchored to the issuing OUT
-                // (Bochs harddrv.cc start_seek calls activate_timer inline).
-                for (channel, channel_arms) in seek_arms.iter_mut().enumerate() {
-                    for (device, arm) in channel_arms.iter_mut().enumerate() {
-                        *arm = dm.harddrv.take_pending_seek_arm(channel, device);
-                    }
-                }
+                // The IDE controller arms its own seek and bus-master
+                // deadlines, still anchored to this OUT.
+                Self::drain_ide_timers(dm, pc_system, current_ticks);
                 let (fwds, count) = dm.pic.take_ioapic_forwards();
                 hrq_level = dm.dma.take_hrq_request();
                 let devices::DeviceManager { pic, ioapic, .. } = dm;
                 for &(irq, level) in &fwds[..count] {
                     ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
-                }
-                for (channel, delay_ticks) in ide_timer_delays.iter_mut().enumerate() {
-                    *delay_ticks = dm.pci_ide.take_pending_timer_arm(channel);
                 }
                 pic_intr_level = Self::take_pic_level_after_dispatch(dm);
                 machine_boundary_pending = dm.has_pending_machine_boundary();
@@ -731,36 +721,6 @@ impl BxDevicesC {
             }
             if let Some(level) = hrq_level {
                 self.hrq_level = Some(level);
-            }
-            for (channel, delay_ticks) in ide_timer_delays.into_iter().enumerate() {
-                if let Some(delay_ticks) = delay_ticks {
-                    let owner = match channel {
-                        0 => DeviceTimerOwner::PciIdeCh0,
-                        1 => DeviceTimerOwner::PciIdeCh1,
-                        _ => unreachable!(),
-                    };
-                    self.request_timer(
-                        owner,
-                        TimerRequest::Activate {
-                            deadline_ticks: current_ticks.saturating_add(u64::from(delay_ticks)),
-                            period_ticks: u64::from(delay_ticks),
-                            continuous: false,
-                        },
-                    );
-                }
-            }
-            for (channel, channel_arms) in seek_arms.into_iter().enumerate() {
-                for (device, arm) in channel_arms.into_iter().enumerate() {
-                    if let Some(seek_usec) = arm {
-                        // Bochs harddrv.cc start_seek: activate_timer(seek_time)
-                        // — one-shot, microsecond units.
-                        self.request_timer_after_usec(
-                            DeviceTimerOwner::HdSeek((channel << 1) | device),
-                            current_ticks,
-                            Some(u64::from(seek_usec)),
-                        );
-                    }
-                }
             }
             if dispatched {
                 return;
@@ -1077,7 +1037,11 @@ impl BxDevicesC {
         } = *dm;
         let mut irq = wiring::PicIrqSink { pic };
         let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut timers = wiring::WheelTimerService {
+            pc_system,
+            handles,
+            now_ticks: current_ticks,
+        };
         let mut ctx = device_api::DeviceCtx {
             now_ticks: current_ticks,
             ips: pc_system_ips,
@@ -1108,7 +1072,11 @@ impl BxDevicesC {
             } = *dm;
             let mut irq = wiring::PicIrqSink { pic };
             let pc_system_ips = pc_system.ips();
-            let mut timers = wiring::WheelTimerService { pc_system, handles };
+            let mut timers = wiring::WheelTimerService {
+            pc_system,
+            handles,
+            now_ticks: current_ticks,
+        };
             let mut ctx = device_api::DeviceCtx {
                 now_ticks: current_ticks,
                 ips: pc_system_ips,
@@ -1142,7 +1110,11 @@ impl BxDevicesC {
         } = *dm;
         let mut irq = wiring::PicIrqSink { pic };
         let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut timers = wiring::WheelTimerService {
+            pc_system,
+            handles,
+            now_ticks: current_ticks,
+        };
         let mut ctx = device_api::DeviceCtx {
             now_ticks: current_ticks,
             ips: pc_system_ips,
@@ -1169,7 +1141,11 @@ impl BxDevicesC {
         } = *dm;
         let mut irq = wiring::PicIrqSink { pic };
         let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut timers = wiring::WheelTimerService {
+            pc_system,
+            handles,
+            now_ticks: current_ticks,
+        };
         let mut ctx = device_api::DeviceCtx {
             now_ticks: current_ticks,
             ips: pc_system_ips,
@@ -1199,6 +1175,7 @@ impl BxDevicesC {
         let mut timers = wiring::WheelTimerService {
             pc_system,
             handles: wiring::TimerHandles::default(),
+            now_ticks: current_ticks,
         };
         let mut ctx = device_api::DeviceCtx {
             now_ticks: current_ticks,
@@ -1227,6 +1204,7 @@ impl BxDevicesC {
         let mut timers = wiring::WheelTimerService {
             pc_system,
             handles: wiring::TimerHandles::default(),
+            now_ticks: current_ticks,
         };
         let mut ctx = device_api::DeviceCtx {
             now_ticks: current_ticks,
@@ -1235,6 +1213,49 @@ impl BxDevicesC {
             timers: &mut timers,
         };
         device_api::PioDevice::pio_write(keyboard, port, value, width, &mut ctx);
+    }
+
+    /// Arm the IDE controller's own deadlines, anchored to the access that
+    /// produced them.
+    fn drain_ide_timers(
+        dm: &mut devices::DeviceManager,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
+        current_ticks: u64,
+    ) {
+        let mut handles = wiring::TimerHandles::default();
+        for channel in 0..2usize {
+            for device in 0..2usize {
+                handles.set(
+                    harddrv::BxHardDriveC::seek_timer_local(channel, device),
+                    dm.harddrv.seek_timer_handles[channel][device],
+                );
+            }
+            handles.set(
+                pci_ide::BxPciIde::bmdma_timer_local(channel),
+                dm.pci_ide.bmdma[channel].timer_index,
+            );
+        }
+        let devices::DeviceManager {
+            ref mut harddrv,
+            ref mut pci_ide,
+            ref mut pic,
+            ..
+        } = *dm;
+        let mut irq = wiring::PicIrqSink { pic };
+        let pc_system_ips = pc_system.ips();
+        let mut timers = wiring::WheelTimerService {
+            pc_system,
+            handles,
+            now_ticks: current_ticks,
+        };
+        let mut ctx = device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            ips: pc_system_ips,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        harddrv.drain_seek_timers(&mut ctx);
+        pci_ide.drain_bmdma_timers(&mut ctx);
     }
 
     /// Scheduler handles owned by the RTC.
@@ -1267,7 +1288,11 @@ impl BxDevicesC {
         } = *dm;
         let mut irq = wiring::PicIrqSink { pic };
         let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut timers = wiring::WheelTimerService {
+            pc_system,
+            handles,
+            now_ticks: current_ticks,
+        };
         let mut ctx = device_api::DeviceCtx {
             now_ticks: current_ticks,
             ips: pc_system_ips,
@@ -1293,7 +1318,11 @@ impl BxDevicesC {
         } = *dm;
         let mut irq = wiring::PicIrqSink { pic };
         let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut timers = wiring::WheelTimerService {
+            pc_system,
+            handles,
+            now_ticks: current_ticks,
+        };
         let mut ctx = device_api::DeviceCtx {
             now_ticks: current_ticks,
             ips: pc_system_ips,
@@ -1343,7 +1372,11 @@ impl BxDevicesC {
         } = *dm;
         let mut irq = wiring::PicIrqSink { pic };
         let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut timers = wiring::WheelTimerService {
+            pc_system,
+            handles,
+            now_ticks: current_ticks,
+        };
         let mut ctx = device_api::DeviceCtx {
             now_ticks: current_ticks,
             ips: pc_system_ips,
@@ -1370,7 +1403,11 @@ impl BxDevicesC {
         } = *dm;
         let mut irq = wiring::PicIrqSink { pic };
         let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut timers = wiring::WheelTimerService {
+            pc_system,
+            handles,
+            now_ticks: current_ticks,
+        };
         let mut ctx = device_api::DeviceCtx {
             now_ticks: current_ticks,
             ips: pc_system_ips,

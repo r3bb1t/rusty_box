@@ -64,6 +64,51 @@ impl TimerHandles {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::iodev::device_api::DeviceKind;
+    use crate::pc_system::TimerOwner;
+
+    /// A device arming a timer mid-batch must anchor the deadline at the tick
+    /// of the access that produced it, not at the wheel's position. The wheel
+    /// only advances at batch boundaries, so it lags the CPU while a batch is
+    /// in flight; anchoring there would fire every device timer early by that
+    /// lag. Bochs arms from inside the handler with time already current.
+    #[test]
+    fn deadlines_anchor_at_the_issuing_tick_not_the_wheel() {
+        let mut pc_system = BxPcSystemC::new();
+        pc_system.initialize(1_000_000);
+        let handle = pc_system
+            .register_timer(TimerOwner::Pit, 0, false, false, "test")
+            .unwrap();
+
+        // The wheel sits at 0 while the issuing access is at tick 500.
+        assert_eq!(pc_system.time_ticks(), 0);
+        let mut handles = TimerHandles::default();
+        handles.set(0, Some(handle));
+        let mut service = WheelTimerService {
+            pc_system: &mut pc_system,
+            handles,
+            now_ticks: 500,
+        };
+        service.arm_oneshot_ticks(
+            TimerKey {
+                device: DeviceKind::Pit,
+                local: 0,
+            },
+            7,
+        );
+
+        assert!(pc_system.timer_is_active(handle));
+        assert_eq!(
+            pc_system.timer_time_to_fire(handle),
+            507,
+            "deadline must be issuing tick + delay, not wheel tick + delay"
+        );
+    }
+}
+
 /// A timer service that accepts and discards every request.
 ///
 /// For contexts with no scheduler: unit tests that exercise a device's
@@ -77,35 +122,46 @@ pub(crate) struct NullTimerService;
 impl TimerService for NullTimerService {
     fn arm_oneshot_usec(&mut self, _key: TimerKey, _delay_usec: u64) {}
     fn arm_periodic_usec(&mut self, _key: TimerKey, _period_usec: u64) {}
+    fn arm_oneshot_ticks(&mut self, _key: TimerKey, _delay_ticks: u64) {}
     fn cancel(&mut self, _key: TimerKey) {}
 }
 
 /// Arms and cancels scheduler timers on behalf of a converted device.
+///
+/// Deadlines are anchored to `now_ticks` — the tick count of the access being
+/// serviced — and not to the wheel's current position. The two differ: the
+/// wheel only advances at batch boundaries, so while a CPU batch is in flight
+/// it lags the CPU's live tick count. Arming relative to the wheel would make
+/// every converted device's timer fire early by that lag. Bochs has no such
+/// gap, because it arms from inside the handler with time already current, so
+/// anchoring at the issuing tick is what reproduces its timing.
 pub(crate) struct WheelTimerService<'a> {
     pub(crate) pc_system: &'a mut BxPcSystemC,
     pub(crate) handles: TimerHandles,
+    /// Tick count of the access being serviced.
+    pub(crate) now_ticks: u64,
 }
 
 impl WheelTimerService<'_> {
-    /// The wheel takes a `u32` microsecond delay. Saturating is safe rather
-    /// than merely convenient: a delay past `u32::MAX` microseconds (~71
-    /// minutes) is far beyond any device's re-arm interval, so clamping can
-    /// only ever fire a stale one-shot late, which every `*_timer_fired`
-    /// handler already treats as a cancelled callback.
+    /// Microseconds to scheduler ticks — the same conversion the deferred
+    /// request table used, so converted and unconverted devices asking for the
+    /// same delay land on the same deadline.
     #[inline]
-    fn clamp_usec(delay_usec: u64) -> u32 {
-        delay_usec.min(u32::MAX as u64) as u32
+    fn usec_to_ticks(&self, delay_usec: u64) -> u64 {
+        (u128::from(delay_usec) * u128::from(self.pc_system.ips()))
+            .div_ceil(1_000_000)
+            .max(1)
+            .min(u128::from(u64::MAX)) as u64
     }
-}
 
-impl WheelTimerService<'_> {
-    fn arm(&mut self, key: TimerKey, delay_usec: u64, continuous: bool) {
+    fn arm_ticks(&mut self, key: TimerKey, delay_ticks: u64, continuous: bool) {
         let Some(handle) = self.handles.get(key.local) else {
             return;
         };
+        let deadline = self.now_ticks.saturating_add(delay_ticks);
         match self
             .pc_system
-            .activate_timer_usec(handle, Self::clamp_usec(delay_usec), continuous)
+            .activate_timer_at_ticks_with_period(handle, deadline, delay_ticks, continuous)
         {
             Ok(()) => {}
             Err(error) => {
@@ -118,6 +174,11 @@ impl WheelTimerService<'_> {
             }
         }
     }
+
+    fn arm(&mut self, key: TimerKey, delay_usec: u64, continuous: bool) {
+        let ticks = self.usec_to_ticks(delay_usec);
+        self.arm_ticks(key, ticks, continuous);
+    }
 }
 
 impl TimerService for WheelTimerService<'_> {
@@ -127,6 +188,10 @@ impl TimerService for WheelTimerService<'_> {
 
     fn arm_periodic_usec(&mut self, key: TimerKey, period_usec: u64) {
         self.arm(key, period_usec, true);
+    }
+
+    fn arm_oneshot_ticks(&mut self, key: TimerKey, delay_ticks: u64) {
+        self.arm_ticks(key, delay_ticks, false);
     }
 
     fn cancel(&mut self, key: TimerKey) {

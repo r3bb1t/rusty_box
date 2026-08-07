@@ -1182,6 +1182,18 @@ impl BxPcSystemC {
     /// Deactivate a timer.
     ///
     /// Corresponds to `bx_pc_system_c::deactivate_timer()` in Bochs (pc_system.cc).
+    /// Absolute tick at which a timer is due. Pair with
+    /// [`Self::timer_is_active`] — an unarmed timer reads zero.
+    #[cfg(test)]
+    pub(crate) fn timer_time_to_fire(&self, timer_index: usize) -> u64 {
+        self.timers[timer_index].time_to_fire
+    }
+
+    #[cfg(test)]
+    pub(crate) fn timer_is_active(&self, timer_index: usize) -> bool {
+        self.timers[timer_index].flags.contains(TimerFlags::ACTIVE)
+    }
+
     pub fn deactivate_timer(&mut self, timer_index: usize) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
         self.timers[timer_index].flags.remove(TimerFlags::ACTIVE);
