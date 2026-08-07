@@ -67,9 +67,12 @@ impl TimerHandles {
 /// A timer service that accepts and discards every request.
 ///
 /// For contexts with no scheduler: unit tests that exercise a device's
-/// interrupt behaviour in isolation, and CPU-only emulation, where no machine
-/// timer wheel exists.
+/// interrupt behaviour in isolation, and — once it exists — CPU-only
+/// emulation, which has no machine timer wheel.
+#[cfg(test)]
 pub(crate) struct NullTimerService;
+
+#[cfg(test)]
 
 impl TimerService for NullTimerService {
     fn arm_oneshot_usec(&mut self, _key: TimerKey, _delay_usec: u64) {}

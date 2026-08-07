@@ -69,6 +69,10 @@ pub use serial::BxSerialC;
 #[cfg(feature = "alloc")]
 pub use geforce::BxGeForceC;
 
+/// The port tables span the whole port space twice, so this struct's size is
+/// multiplied by 131072. Pinned here so a future field addition is a
+/// deliberate 128 KiB-per-table decision rather than an accident.
+const _: () = assert!(core::mem::size_of::<IoHandlerEntry>() == 2);
 /// Number of I/O ports (0x0000 - 0xFFFF)
 pub const IO_PORTS: usize = 0x10000;
 /// Number of serial timer-owner slots reserved by the no-allocation I/O
@@ -227,8 +231,6 @@ pub enum DeviceId {
 pub struct IoHandlerEntry {
     /// Which device owns this port
     pub(crate) device_id: DeviceId,
-    /// Handler name for debugging
-    pub(crate) name: &'static str,
     /// I/O length mask (bit 0 = 1 byte, bit 1 = 2 bytes, bit 2 = 4 bytes)
     pub(crate) mask: u8,
 }
@@ -237,7 +239,9 @@ impl Default for IoHandlerEntry {
     fn default() -> Self {
         Self {
             device_id: DeviceId::None,
-            name: "",
+            // NOTE: keep this struct at two bytes — it is instantiated 131072
+            // times (a read and a write table over the whole port space), so
+            // every added byte costs 128 KiB per table.
             mask: 0x7, // All lengths supported by default
         }
     }
@@ -490,8 +494,10 @@ impl BxDevicesC {
     ) {
         let entry = &mut self.read_handlers[port as usize];
         entry.device_id = device_id;
-        entry.name = name;
         entry.mask = mask;
+        // `name` is not retained: the port tables span the whole 64 Ki port
+        // space twice, so a stored `&'static str` costs 2 MiB to carry a
+        // string nothing reads back. It is logged here instead.
         tracing::trace!(
             "Registered I/O read handler for port {:#06x}: {}",
             port,
@@ -509,8 +515,8 @@ impl BxDevicesC {
     ) {
         let entry = &mut self.write_handlers[port as usize];
         entry.device_id = device_id;
-        entry.name = name;
         entry.mask = mask;
+        // See `register_io_read_handler`: the name is logged, not stored.
         tracing::trace!(
             "Registered I/O write handler for port {:#06x}: {}",
             port,
