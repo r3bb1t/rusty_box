@@ -6,9 +6,39 @@
 //! timer wheel, while these adapters are the single place that knows how a
 //! request reaches real hardware state.
 
-use super::device_api::{IrqLine, IrqSink, TimerKey, TimerService};
+use super::device_api::{DeviceCtx, IrqLine, IrqSink, TimerKey, TimerService};
 use crate::pc_system::BxPcSystemC;
 use crate::pic::BxPicC;
+
+/// Build a device context over the machine's parts and run `f` with it.
+///
+/// The single place a [`DeviceCtx`] is assembled. The parts arrive already
+/// borrowed disjointly — the caller has to split them out of the device manager
+/// anyway, since the device being dispatched lives in the same struct as the
+/// PIC — so this owns only the assembly, not the split.
+#[inline]
+pub(crate) fn with_device_ctx<R>(
+    pic: &mut BxPicC,
+    pc_system: &mut BxPcSystemC,
+    handles: TimerHandles,
+    now_ticks: u64,
+    f: impl FnOnce(&mut DeviceCtx<'_>) -> R,
+) -> R {
+    let ips = pc_system.ips();
+    let mut irq = PicIrqSink { pic };
+    let mut timers = WheelTimerService {
+        pc_system,
+        handles,
+        now_ticks,
+    };
+    let mut ctx = DeviceCtx {
+        now_ticks,
+        ips,
+        irq: &mut irq,
+        timers: &mut timers,
+    };
+    f(&mut ctx)
+}
 
 /// Routes device interrupts to the 8259 pair — Bochs `DEV_pic_raise_irq` /
 /// `DEV_pic_lower_irq`.

@@ -188,50 +188,91 @@ impl TimerRequestTable {
     }
 }
 
-/// Identifies which hardware device owns an I/O port registration.
+/// Identifies the device that owns an I/O port registration.
 ///
-/// Used for safe enum-based dispatch instead of C-style `fn ptr + *mut c_void`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceId {
-    /// No device registered (unhandled port)
-    None,
-    /// 8259 PIC (Programmable Interrupt Controller)
-    Pic,
-    /// 8254 PIT (Programmable Interval Timer)
-    Pit,
-    /// CMOS/RTC
-    Cmos,
-    /// 8237 DMA Controller
-    Dma,
-    /// 8042 Keyboard/Mouse Controller
-    Keyboard,
-    /// ATA/IDE Hard Drive Controller
-    HardDrive,
-    /// 16550 UART Serial Port
-    Serial,
-    /// VGA Display Controller
-    Vga,
-    /// Port 92h System Control (A20/reset)
-    Port92,
-    /// PCI bus (config addr/data, PIIX3 ELCR, BM-DMA)
-    Pci,
-    /// PCI IDE Controller (BM-DMA ports)
-    PciIde,
-    /// PIIX4 ACPI Power Management
-    Acpi,
-    /// I/O APIC (MMIO-only, no port I/O)
-    Ioapic,
-    /// QEMU fw_cfg Firmware Configuration Device
-    FwCfg,
+/// An opaque index, not a variant per device. Bochs registers a port to a
+/// `(handler, this_ptr)` pair, so the bus there carries no knowledge of the
+/// device set; this is the safe equivalent — the port tables carry a number the
+/// bus assigns, and only [`DeviceManager`](devices::DeviceManager) knows which
+/// device a number names. Adding a device is a new constant plus a routing arm,
+/// not an edit to a type every port-table consumer must match exhaustively.
+///
+/// Slots are compile-time constants rather than runtime-allocated because the
+/// PC machine's device set is fixed at build time. They are never serialized:
+/// the port tables are rebuilt by device registration on restore, so the
+/// numbering below is free to change.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct DevSlot(u8);
+
+impl DevSlot {
+    /// No device registered — an unclaimed port.
+    pub const NONE: Self = Self(0);
+    /// 8259 PIC (Programmable Interrupt Controller).
+    pub const PIC: Self = Self(1);
+    /// 8254 PIT (Programmable Interval Timer).
+    pub const PIT: Self = Self(2);
+    /// CMOS/RTC.
+    pub const CMOS: Self = Self(3);
+    /// 8237 DMA controller.
+    pub const DMA: Self = Self(4);
+    /// 8042 keyboard/mouse controller.
+    pub const KEYBOARD: Self = Self(5);
+    /// ATA/ATAPI task-file registers.
+    pub const IDE: Self = Self(6);
+    /// 16550 UART serial port.
+    pub const SERIAL: Self = Self(7);
+    /// VGA display controller.
+    pub const VGA: Self = Self(8);
+    /// Port 92h system control (A20/reset).
+    pub const PORT92: Self = Self(9);
+    /// PCI bus — config address/data, PIIX3 ELCR and APM ports.
+    pub const PCI: Self = Self(10);
+    /// PIIX4 ACPI power management.
+    pub const ACPI: Self = Self(11);
+    /// QEMU fw_cfg firmware configuration device.
+    pub const FW_CFG: Self = Self(12);
+
+    /// True for the unclaimed-port slot.
+    #[inline]
+    pub const fn is_none(self) -> bool {
+        self.0 == Self::NONE.0
+    }
+
+    /// Human-readable name, for diagnostics and registration logging.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NONE => "unclaimed",
+            Self::PIC => "8259 PIC",
+            Self::PIT => "8254 PIT",
+            Self::CMOS => "CMOS/RTC",
+            Self::DMA => "8237 DMA",
+            Self::KEYBOARD => "8042 keyboard controller",
+            Self::IDE => "ATA/ATAPI",
+            Self::SERIAL => "16550 UART",
+            Self::VGA => "VGA",
+            Self::PORT92 => "port 92h",
+            Self::PCI => "PCI bus",
+            Self::ACPI => "PIIX4 ACPI",
+            Self::FW_CFG => "fw_cfg",
+            _ => "unknown device slot",
+        }
+    }
+}
+
+impl core::fmt::Debug for DevSlot {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "DevSlot({}, {})", self.0, self.name())
+    }
 }
 
 /// I/O handler registration entry for a single port.
 ///
-/// Each port maps to a `DeviceId` for safe dispatch through `DeviceManager`.
+/// Each port maps to a [`DevSlot`] for safe dispatch through `DeviceManager`.
 #[derive(Clone, Copy)]
 pub struct IoHandlerEntry {
     /// Which device owns this port
-    pub(crate) device_id: DeviceId,
+    pub(crate) slot: DevSlot,
     /// I/O length mask (bit 0 = 1 byte, bit 1 = 2 bytes, bit 2 = 4 bytes)
     pub(crate) mask: u8,
 }
@@ -239,7 +280,7 @@ pub struct IoHandlerEntry {
 impl Default for IoHandlerEntry {
     fn default() -> Self {
         Self {
-            device_id: DeviceId::None,
+            slot: DevSlot::NONE,
             // NOTE: keep this struct at two bytes — it is instantiated 131072
             // times (a read and a write table over the whole port space), so
             // every added byte costs 128 KiB per table.
@@ -488,13 +529,13 @@ impl BxDevicesC {
     /// Register a read handler for a specific I/O port
     pub fn register_io_read_handler(
         &mut self,
-        device_id: DeviceId,
+        slot: DevSlot,
         port: u16,
         name: &'static str,
         mask: u8,
     ) {
         let entry = &mut self.read_handlers[port as usize];
-        entry.device_id = device_id;
+        entry.slot = slot;
         entry.mask = mask;
         // `name` is not retained: the port tables span the whole 64 Ki port
         // space twice, so a stored `&'static str` costs 2 MiB to carry a
@@ -509,13 +550,13 @@ impl BxDevicesC {
     /// Register a write handler for a specific I/O port
     pub fn register_io_write_handler(
         &mut self,
-        device_id: DeviceId,
+        slot: DevSlot,
         port: u16,
         name: &'static str,
         mask: u8,
     ) {
         let entry = &mut self.write_handlers[port as usize];
-        entry.device_id = device_id;
+        entry.slot = slot;
         entry.mask = mask;
         // See `register_io_read_handler`: the name is logged, not stored.
         tracing::trace!(
@@ -526,15 +567,9 @@ impl BxDevicesC {
     }
 
     /// Register both read and write handlers for a port
-    pub fn register_io_handler(
-        &mut self,
-        device_id: DeviceId,
-        port: u16,
-        name: &'static str,
-        mask: u8,
-    ) {
-        self.register_io_read_handler(device_id, port, name, mask);
-        self.register_io_write_handler(device_id, port, name, mask);
+    pub fn register_io_handler(&mut self, slot: DevSlot, port: u16, name: &'static str, mask: u8) {
+        self.register_io_read_handler(slot, port, name, mask);
+        self.register_io_write_handler(slot, port, name, mask);
     }
 
     /// Unregister the read and write handlers for a port, restoring the
@@ -584,35 +619,36 @@ impl BxDevicesC {
     ) -> u32 {
         self.diag_io_reads += 1;
         let entry = &self.read_handlers[port as usize];
-        let device_id = entry.device_id;
+        let slot = entry.slot;
         let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
-        // A width outside {1,2,4} has no architectural encoding, so it can
-        // never reach a device model — the default handler answers it.
-        let io_width = device_api::IoLen::from_bytes(io_len);
-        let has_handler =
-            device_id != DeviceId::None && (entry.mask & len_mask) != 0 && io_width.is_some();
+        // Present only for an access a device model can actually service: a
+        // claimed port, a width the registration allows, and a width with an
+        // architectural encoding — one outside {1,2,4} can never be issued, so
+        // the default handler answers it.
+        let handler_width = device_api::IoLen::from_bytes(io_len)
+            .filter(|_| !slot.is_none() && (entry.mask & len_mask) != 0);
 
         let mut pic_intr_level = None;
         let mut hrq_level = None;
-        let value = if has_handler {
+        let value = if let Some(width) = handler_width {
             if let Some(dm) = self.device_manager_mut() {
-                let result = match (device_id, io_width) {
-                    (DeviceId::Serial, Some(width)) => {
-                        Self::serial_read(dm, pc_system, port, width, current_ticks)
-                    }
-                    (DeviceId::Acpi, Some(width)) => {
-                        Self::acpi_read(dm, pc_system, port, width, current_ticks)
-                    }
-                    (DeviceId::Cmos, Some(width)) => {
-                        Self::cmos_read(dm, pc_system, port, width, current_ticks)
-                    }
-                    (DeviceId::Pit, Some(width)) => {
-                        Self::pit_read(dm, pc_system, port, width, current_ticks)
-                    }
-                    (DeviceId::Keyboard, Some(width)) => {
-                        Self::keyboard_read(dm, pc_system, port, width, current_ticks)
-                    }
-                    _ => Self::dispatch_read(dm, device_id, port, io_len, current_ticks),
+                // Devices on the device API route through one context; the
+                // rest still go through per-device dispatch. The two sets are
+                // disjoint by construction — `bind_pio` answers for exactly the
+                // converted slots — so neither path can shadow the other.
+                let mut routed = None;
+                if let Some(bound) = dm.bind_pio(slot, port) {
+                    routed = Some(wiring::with_device_ctx(
+                        bound.pic,
+                        pc_system,
+                        bound.handles,
+                        current_ticks,
+                        |ctx| bound.device.pio_read(port, width, ctx),
+                    ));
+                }
+                let result = match routed {
+                    Some(value) => value,
+                    None => Self::dispatch_read(dm, slot, port, io_len, current_ticks),
                 };
                 let (fwds, count) = dm.pic.take_ioapic_forwards();
                 hrq_level = dm.dma.take_hrq_request();
@@ -655,46 +691,33 @@ impl BxDevicesC {
     ) {
         self.diag_io_writes += 1;
         let entry = &self.write_handlers[port as usize];
-        let device_id = entry.device_id;
+        let slot = entry.slot;
         let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
-        // See `inp`: an unencodable width never reaches a device model.
-        let io_width = device_api::IoLen::from_bytes(io_len);
-        let has_handler =
-            device_id != DeviceId::None && (entry.mask & len_mask) != 0 && io_width.is_some();
+        // See `inp`.
+        let handler_width = device_api::IoLen::from_bytes(io_len)
+            .filter(|_| !slot.is_none() && (entry.mask & len_mask) != 0);
 
-        if has_handler {
+        if let Some(width) = handler_width {
             let mut pic_intr_level = None;
             let mut hrq_level = None;
-            let mut cmos_timer_sync = None;
             let mut machine_boundary_pending = false;
             let dispatched = if let Some(dm) = self.device_manager_mut() {
-                match (device_id, io_width) {
-                    (DeviceId::Serial, Some(width)) => {
-                        Self::serial_write(dm, pc_system, port, value, width, current_ticks);
-                    }
-                    (DeviceId::Acpi, Some(width)) => {
-                        Self::acpi_write(dm, pc_system, port, value, width, current_ticks);
-                    }
-                    (DeviceId::Cmos, Some(width)) => {
-                        Self::cmos_write(dm, pc_system, port, value, width, current_ticks);
-                    }
-                    (DeviceId::Pit, Some(width)) => {
-                        Self::pit_write(dm, pc_system, port, value, width, current_ticks);
-                    }
-                    (DeviceId::Keyboard, Some(width)) => {
-                        Self::keyboard_write(dm, pc_system, port, value, width, current_ticks);
-                    }
-                    _ => {
-                        cmos_timer_sync = Self::dispatch_write(
-                            dm,
-                            device_id,
-                            port,
-                            value,
-                            io_len,
-                            current_ticks,
-                        );
-                    }
+                // See `inp` on why the two paths cannot overlap.
+                let mut routed = false;
+                if let Some(bound) = dm.bind_pio(slot, port) {
+                    wiring::with_device_ctx(
+                        bound.pic,
+                        pc_system,
+                        bound.handles,
+                        current_ticks,
+                        |ctx| bound.device.pio_write(port, value, width, ctx),
+                    );
+                    routed = true;
                 }
+                if !routed {
+                    Self::dispatch_write(dm, slot, port, value, io_len);
+                }
+                dm.apply_cross_device_stores();
                 // The IDE controller arms its own seek and bus-master
                 // deadlines, still anchored to this OUT.
                 Self::drain_ide_timers(dm, pc_system, current_ticks);
@@ -713,9 +736,6 @@ impl BxDevicesC {
 
             if machine_boundary_pending {
                 self.scheduler_boundary_requested = true;
-            }
-            if let Some(sync) = cmos_timer_sync {
-                self.apply_cmos_timer_sync(current_ticks, sync);
             }
             if let Some(level) = pic_intr_level {
                 self.pic_intr_level = Some(level);
@@ -749,7 +769,7 @@ impl BxDevicesC {
             return 0;
         }
         let entry = &self.read_handlers[port as usize];
-        if entry.device_id != DeviceId::HardDrive {
+        if entry.slot != DevSlot::IDE {
             return 0;
         }
 
@@ -1012,209 +1032,6 @@ impl BxDevicesC {
         self.device_manager.map(|mut pointer| unsafe { pointer.as_mut() })
     }
 
-    /// Dispatch to one converted device with a [`device_api::DeviceCtx`] built
-    /// from the machine's PIC and the scheduler.
-    ///
-    /// A macro rather than a function because the context borrows the PIC out
-    /// of the same device manager that owns the device: the split has to be
-    /// visible to the borrow checker at the call site.
-    fn acpi_read(
-        dm: &mut devices::DeviceManager,
-        pc_system: &mut crate::pc_system::BxPcSystemC,
-        port: u16,
-        width: device_api::IoLen,
-        current_ticks: u64,
-    ) -> u32 {
-        let mut handles = wiring::TimerHandles::default();
-        handles.set(
-            acpi::BxAcpiCtrl::OVERFLOW_TIMER_LOCAL,
-            dm.acpi.overflow_timer_handle,
-        );
-        let devices::DeviceManager {
-            ref mut acpi,
-            ref mut pic,
-            ..
-        } = *dm;
-        let mut irq = wiring::PicIrqSink { pic };
-        let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService {
-            pc_system,
-            handles,
-            now_ticks: current_ticks,
-        };
-        let mut ctx = device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        device_api::PioDevice::pio_read(acpi, port, width, &mut ctx)
-    }
-
-    fn acpi_write(
-        dm: &mut devices::DeviceManager,
-        pc_system: &mut crate::pc_system::BxPcSystemC,
-        port: u16,
-        value: u32,
-        width: device_api::IoLen,
-        current_ticks: u64,
-    ) {
-        let mut handles = wiring::TimerHandles::default();
-        handles.set(
-            acpi::BxAcpiCtrl::OVERFLOW_TIMER_LOCAL,
-            dm.acpi.overflow_timer_handle,
-        );
-        {
-            let devices::DeviceManager {
-                ref mut acpi,
-                ref mut pic,
-                ..
-            } = *dm;
-            let mut irq = wiring::PicIrqSink { pic };
-            let pc_system_ips = pc_system.ips();
-            let mut timers = wiring::WheelTimerService {
-            pc_system,
-            handles,
-            now_ticks: current_ticks,
-        };
-            let mut ctx = device_api::DeviceCtx {
-                now_ticks: current_ticks,
-                ips: pc_system_ips,
-                irq: &mut irq,
-                timers: &mut timers,
-            };
-            device_api::PioDevice::pio_write(acpi, port, value, width, &mut ctx);
-        }
-        // Bochs acpi.cc PM1_CNT suspend-to-ram (S3) calls DEV_cmos_set_reg(0xF,
-        // 0xFE) — the shutdown-status byte the BIOS reads on the resume path.
-        // A cross-device store, so it stays outside the device's own context
-        // until chipset effects carry it.
-        if core::mem::take(&mut dm.acpi.suspend_to_ram_pending) {
-            dm.cmos.ram[0x0F] = 0xFE;
-        }
-    }
-
-    fn pit_read(
-        dm: &mut devices::DeviceManager,
-        pc_system: &mut crate::pc_system::BxPcSystemC,
-        port: u16,
-        width: device_api::IoLen,
-        current_ticks: u64,
-    ) -> u32 {
-        let mut handles = wiring::TimerHandles::default();
-        handles.set(pit::BxPitC::EVENT_TIMER_LOCAL, dm.pit.timer_handle);
-        let devices::DeviceManager {
-            ref mut pit,
-            ref mut pic,
-            ..
-        } = *dm;
-        let mut irq = wiring::PicIrqSink { pic };
-        let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService {
-            pc_system,
-            handles,
-            now_ticks: current_ticks,
-        };
-        let mut ctx = device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        device_api::PioDevice::pio_read(pit, port, width, &mut ctx)
-    }
-
-    fn pit_write(
-        dm: &mut devices::DeviceManager,
-        pc_system: &mut crate::pc_system::BxPcSystemC,
-        port: u16,
-        value: u32,
-        width: device_api::IoLen,
-        current_ticks: u64,
-    ) {
-        let mut handles = wiring::TimerHandles::default();
-        handles.set(pit::BxPitC::EVENT_TIMER_LOCAL, dm.pit.timer_handle);
-        let devices::DeviceManager {
-            ref mut pit,
-            ref mut pic,
-            ..
-        } = *dm;
-        let mut irq = wiring::PicIrqSink { pic };
-        let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService {
-            pc_system,
-            handles,
-            now_ticks: current_ticks,
-        };
-        let mut ctx = device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        device_api::PioDevice::pio_write(pit, port, value, width, &mut ctx);
-    }
-
-    /// The 8042 owns no scheduler slot it arms itself — its timer is
-    /// continuous and registered by the machine — so its context carries no
-    /// timer handles.
-    fn keyboard_read(
-        dm: &mut devices::DeviceManager,
-        pc_system: &mut crate::pc_system::BxPcSystemC,
-        port: u16,
-        width: device_api::IoLen,
-        current_ticks: u64,
-    ) -> u32 {
-        let devices::DeviceManager {
-            ref mut keyboard,
-            ref mut pic,
-            ..
-        } = *dm;
-        let mut irq = wiring::PicIrqSink { pic };
-        let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService {
-            pc_system,
-            handles: wiring::TimerHandles::default(),
-            now_ticks: current_ticks,
-        };
-        let mut ctx = device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        device_api::PioDevice::pio_read(keyboard, port, width, &mut ctx)
-    }
-
-    fn keyboard_write(
-        dm: &mut devices::DeviceManager,
-        pc_system: &mut crate::pc_system::BxPcSystemC,
-        port: u16,
-        value: u32,
-        width: device_api::IoLen,
-        current_ticks: u64,
-    ) {
-        let devices::DeviceManager {
-            ref mut keyboard,
-            ref mut pic,
-            ..
-        } = *dm;
-        let mut irq = wiring::PicIrqSink { pic };
-        let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService {
-            pc_system,
-            handles: wiring::TimerHandles::default(),
-            now_ticks: current_ticks,
-        };
-        let mut ctx = device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        device_api::PioDevice::pio_write(keyboard, port, value, width, &mut ctx);
-    }
-
     /// Arm the IDE controller's own deadlines, anchored to the access that
     /// produced them.
     fn drain_ide_timers(
@@ -1241,252 +1058,74 @@ impl BxDevicesC {
             ..
         } = *dm;
         let (harddrv, pci_ide, _scratch) = ide.split();
-        let mut irq = wiring::PicIrqSink { pic };
-        let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService {
-            pc_system,
-            handles,
-            now_ticks: current_ticks,
-        };
-        let mut ctx = device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        harddrv.drain_seek_timers(&mut ctx);
-        pci_ide.drain_bmdma_timers(&mut ctx);
+        wiring::with_device_ctx(pic, pc_system, handles, current_ticks, |ctx| {
+            harddrv.drain_seek_timers(ctx);
+            pci_ide.drain_bmdma_timers(ctx);
+        });
     }
 
-    /// Scheduler handles owned by the RTC.
-    fn cmos_timer_handles(cmos: &cmos::BxCmosC) -> wiring::TimerHandles {
-        let mut handles = wiring::TimerHandles::default();
-        handles.set(
-            cmos::BxCmosC::PERIODIC_TIMER_LOCAL,
-            cmos.periodic_timer_handle,
-        );
-        handles.set(
-            cmos::BxCmosC::ONE_SECOND_TIMER_LOCAL,
-            cmos.one_second_timer_handle,
-        );
-        handles.set(cmos::BxCmosC::UIP_TIMER_LOCAL, cmos.uip_timer_handle);
-        handles
-    }
-
-    fn cmos_read(
-        dm: &mut devices::DeviceManager,
-        pc_system: &mut crate::pc_system::BxPcSystemC,
-        port: u16,
-        width: device_api::IoLen,
-        current_ticks: u64,
-    ) -> u32 {
-        let handles = Self::cmos_timer_handles(&dm.cmos);
-        let devices::DeviceManager {
-            ref mut cmos,
-            ref mut pic,
-            ..
-        } = *dm;
-        let mut irq = wiring::PicIrqSink { pic };
-        let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService {
-            pc_system,
-            handles,
-            now_ticks: current_ticks,
-        };
-        let mut ctx = device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        device_api::PioDevice::pio_read(cmos, port, width, &mut ctx)
-    }
-
-    fn cmos_write(
-        dm: &mut devices::DeviceManager,
-        pc_system: &mut crate::pc_system::BxPcSystemC,
-        port: u16,
-        value: u32,
-        width: device_api::IoLen,
-        current_ticks: u64,
-    ) {
-        let handles = Self::cmos_timer_handles(&dm.cmos);
-        let devices::DeviceManager {
-            ref mut cmos,
-            ref mut pic,
-            ..
-        } = *dm;
-        let mut irq = wiring::PicIrqSink { pic };
-        let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService {
-            pc_system,
-            handles,
-            now_ticks: current_ticks,
-        };
-        let mut ctx = device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        device_api::PioDevice::pio_write(cmos, port, value, width, &mut ctx);
-    }
-
-    /// Snapshot the scheduler handles the UART owns for one port, so its
-    /// timer requests can be applied while the device itself is borrowed.
-    fn serial_timer_handles(
-        serial: &serial::BxSerialC,
-        port_index: Option<usize>,
-    ) -> wiring::TimerHandles {
-        let mut handles = wiring::TimerHandles::default();
-        if let Some(index) = port_index {
-            handles.set(
-                serial::BxSerialC::fifo_timer_local(index),
-                serial.fifo_timer_handle(index),
-            );
-            handles.set(
-                serial::BxSerialC::tx_timer_local(index),
-                serial.tx_timer_handle(index),
-            );
-        }
-        handles
-    }
-
-    /// Dispatch a UART port read through the device API.
+    /// Dispatch a port read to a device not yet on the device API.
     ///
-    /// The UART raises interrupts and arms its FIFO/TX timers from inside this
-    /// call, exactly as Bochs serial.cc does, instead of leaving them latched
-    /// for the dispatcher to forward afterwards.
-    fn serial_read(
-        dm: &mut devices::DeviceManager,
-        pc_system: &mut crate::pc_system::BxPcSystemC,
-        port: u16,
-        width: device_api::IoLen,
-        current_ticks: u64,
-    ) -> u32 {
-        let handles = Self::serial_timer_handles(&dm.serial, dm.serial.port_index_for_address(port));
-        let devices::DeviceManager {
-            ref mut serial,
-            ref mut pic,
-            ..
-        } = *dm;
-        let mut irq = wiring::PicIrqSink { pic };
-        let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService {
-            pc_system,
-            handles,
-            now_ticks: current_ticks,
-        };
-        let mut ctx = device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        device_api::PioDevice::pio_read(serial, port, width, &mut ctx)
-    }
-
-    /// Dispatch a UART port write through the device API. See [`Self::serial_read`].
-    fn serial_write(
-        dm: &mut devices::DeviceManager,
-        pc_system: &mut crate::pc_system::BxPcSystemC,
-        port: u16,
-        value: u32,
-        width: device_api::IoLen,
-        current_ticks: u64,
-    ) {
-        let handles = Self::serial_timer_handles(&dm.serial, dm.serial.port_index_for_address(port));
-        let devices::DeviceManager {
-            ref mut serial,
-            ref mut pic,
-            ..
-        } = *dm;
-        let mut irq = wiring::PicIrqSink { pic };
-        let pc_system_ips = pc_system.ips();
-        let mut timers = wiring::WheelTimerService {
-            pc_system,
-            handles,
-            now_ticks: current_ticks,
-        };
-        let mut ctx = device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        device_api::PioDevice::pio_write(serial, port, value, width, &mut ctx);
-    }
-
-    /// Dispatch a port read to the device identified by `id`.
+    /// Disjoint from [`devices::DeviceManager::bind_pio`] by construction: a
+    /// slot is answered by exactly one of the two, so a device converted to the
+    /// device API loses its arm here in the same change.
     #[inline]
     fn dispatch_read(
         dm: &mut devices::DeviceManager,
-        id: DeviceId,
+        slot: DevSlot,
         port: u16,
         io_len: u8,
         current_ticks: u64,
     ) -> u32 {
-        match id {
-            DeviceId::Pic => dm.pic.read(port, io_len),
-            // Routed through the device API by `inp`/`outp` before this match.
-            DeviceId::Pit => 0xFFFF_FFFF,
-            // Routed through the device API by `inp`/`outp` before this match.
-            DeviceId::Cmos => 0xFFFF_FFFF,
-            DeviceId::Dma => dm.dma.read(port, io_len),
-            // Routed through the device API by `inp`/`outp` before this match.
-            DeviceId::Keyboard => 0xFFFF_FFFF,
-            DeviceId::HardDrive => {
+        match slot {
+            DevSlot::PIC => dm.pic.read(port, io_len),
+            DevSlot::DMA => dm.dma.read(port, io_len),
+            DevSlot::IDE => {
                 let devices::DeviceManager { ide, pic, .. } = dm;
                 ide.read(port, io_len, pic)
             }
-            // The UART is routed through the device API by `inp` before this
-            // match, so it never arrives here. Answering as an unclaimed port
-            // keeps that a visibly dead read rather than a plausible one.
-            DeviceId::Serial => 0xFFFF_FFFF,
-            DeviceId::Vga => dm.vga.read_port(port, io_len, current_ticks),
-            DeviceId::Port92 => dm.port92_read(port, io_len),
-            DeviceId::Pci => dm.pci_read(port, io_len),
-            DeviceId::Acpi => dm.acpi_read(port, io_len, current_ticks),
-            DeviceId::PciIde => dm.pci_ide_read(port, io_len),
-            DeviceId::FwCfg => dm.fw_cfg.read_port_mut(port, io_len),
-            DeviceId::Ioapic => 0xFF, // IOAPIC uses MMIO, not port I/O
-            DeviceId::None => 0xFFFF_FFFF,
+            DevSlot::VGA => dm.vga.read_port(port, io_len, current_ticks),
+            DevSlot::PORT92 => dm.port92_read(port, io_len),
+            DevSlot::PCI => dm.pci_read(port, io_len),
+            DevSlot::FW_CFG => dm.fw_cfg.read_port_mut(port, io_len),
+            // A registered slot that neither path claims is a wiring mistake,
+            // and it presents to the guest as a dead port rather than a
+            // plausible value — the failure mode a routing table should have.
+            _ => {
+                tracing::warn!(
+                    "I/O read of port {port:#06x} routed to {slot:?}, which has no read handler"
+                );
+                0xFFFF_FFFF
+            }
         }
     }
 
-    /// Dispatch a port write to the device identified by `id`.
+    /// Dispatch a port write to a device not yet on the device API. See
+    /// [`Self::dispatch_read`].
     #[inline]
     fn dispatch_write(
         dm: &mut devices::DeviceManager,
-        id: DeviceId,
+        slot: DevSlot,
         port: u16,
         value: u32,
         io_len: u8,
-        current_ticks: u64,
-    ) -> Option<cmos::CmosTimerSync> {
-        match id {
-            DeviceId::Pic => dm.pic.write(port, value, io_len),
-            DeviceId::Dma => dm.dma.write(port, value, io_len),
-            DeviceId::HardDrive => {
+    ) {
+        match slot {
+            DevSlot::PIC => dm.pic.write(port, value, io_len),
+            DevSlot::DMA => dm.dma.write(port, value, io_len),
+            DevSlot::IDE => {
                 let devices::DeviceManager { ide, pic, .. } = dm;
                 ide.write(port, value, io_len, pic)
             }
-            DeviceId::Vga => dm.vga.write_port(port, value, io_len),
-            DeviceId::Port92 => dm.port92_write(port, value, io_len),
-            DeviceId::Pci => dm.pci_write(port, value, io_len),
-            DeviceId::Acpi => dm.acpi_write(port, value, io_len, current_ticks),
-            DeviceId::PciIde => dm.pci_ide_write(port, value, io_len),
-            DeviceId::FwCfg => dm.fw_cfg_write(port, value, io_len),
-            // Serial is routed through the device API by `outp` before this
-            // match and never arrives here.
-            DeviceId::Serial
-            | DeviceId::Cmos
-            | DeviceId::Pit
-            | DeviceId::Keyboard
-            | DeviceId::Ioapic
-            | DeviceId::None => {}
+            DevSlot::VGA => dm.vga.write_port(port, value, io_len),
+            DevSlot::PORT92 => dm.port92_write(port, value, io_len),
+            DevSlot::PCI => dm.pci_write(port, value, io_len),
+            DevSlot::FW_CFG => dm.fw_cfg_write(port, value, io_len),
+            // See `dispatch_read`.
+            _ => tracing::warn!(
+                "I/O write of port {port:#06x} routed to {slot:?}, which has no write handler"
+            ),
         }
-        None
     }
 }
 
@@ -1738,8 +1377,9 @@ mod tests {
         unsafe {
             let ptr = alloc::alloc::alloc_zeroed(layout) as *mut BxDevicesC;
             assert!(!ptr.is_null());
-            // IoHandlerEntry is all-zero-valid: device_id=None(0), name="" is ptr+len
-            // but &'static str zero bits aren't valid. Write defaults properly:
+            // Zero bits give DevSlot::NONE, which is the right slot, but a
+            // zero width mask is not the default (0x7 = all widths), so the
+            // entries still have to be written rather than left zeroed.
             for i in 0..IO_PORTS {
                 core::ptr::addr_of_mut!((*ptr).read_handlers[i]).write(IoHandlerEntry::default());
                 core::ptr::addr_of_mut!((*ptr).write_handlers[i]).write(IoHandlerEntry::default());
@@ -1757,6 +1397,58 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// Every slot must be answered by exactly one of the two dispatch paths.
+    ///
+    /// The bus routes a claimed port either through `bind_pio` (device API) or
+    /// through `dispatch_read`/`dispatch_write`, and picks between them on the
+    /// slot alone. A slot claimed by both would make the legacy arm dead code
+    /// that still looks live; a slot claimed by neither would present a
+    /// registered port as unclaimed. Neither is visible at a call site, so it
+    /// is pinned here — a device conversion that forgets to delete its legacy
+    /// arm fails this test rather than leaving a plausible-looking duplicate.
+    #[test]
+    fn every_slot_is_claimed_by_exactly_one_dispatch_path() {
+        const ALL: &[DevSlot] = &[
+            DevSlot::PIC,
+            DevSlot::PIT,
+            DevSlot::CMOS,
+            DevSlot::DMA,
+            DevSlot::KEYBOARD,
+            DevSlot::IDE,
+            DevSlot::SERIAL,
+            DevSlot::VGA,
+            DevSlot::PORT92,
+            DevSlot::PCI,
+            DevSlot::ACPI,
+            DevSlot::FW_CFG,
+        ];
+        /// Slots whose device is on the device API. Kept as data so the two
+        /// sets are compared, not merely asserted about one at a time.
+        const ON_DEVICE_API: &[DevSlot] = &[
+            DevSlot::SERIAL,
+            DevSlot::ACPI,
+            DevSlot::CMOS,
+            DevSlot::PIT,
+            DevSlot::KEYBOARD,
+        ];
+
+        on_big_stack(|| {
+            let mut dm = alloc::boxed::Box::new(devices::DeviceManager::new());
+            for &slot in ALL {
+                let bound = dm.bind_pio(slot, 0).is_some();
+                assert_eq!(
+                    bound,
+                    ON_DEVICE_API.contains(&slot),
+                    "{slot:?} is routed by the wrong dispatch path"
+                );
+            }
+            assert!(
+                dm.bind_pio(DevSlot::NONE, 0).is_none(),
+                "the unclaimed slot must never bind to a device"
+            );
+        });
     }
 
     #[test]
@@ -1840,7 +1532,7 @@ mod tests {
         let mut dev2 = boxed_devices();
 
         // Register handler only on dev1
-        dev1.register_io_read_handler(DeviceId::Pic, 0x100, "test", 0x1);
+        dev1.register_io_read_handler(DevSlot::PIC, 0x100, "test", 0x1);
 
         // dev1 has a device registered, dev2 does not.
         // Without a device_manager, both return default.
@@ -1933,7 +1625,7 @@ mod tests {
             dm.pic.irq_pending = true;
             dm.pic.master.int_pin = true;
 
-            io.register_io_read_handler(DeviceId::Pic, 0x20, "PIC", 0x1);
+            io.register_io_read_handler(DevSlot::PIC, 0x20, "PIC", 0x1);
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
             let _ = io.inp(0x20, 1, 91, &mut pc_system);
             io.clear_device_manager();
@@ -1961,7 +1653,7 @@ mod tests {
             assert_ne!(dm.pic.master.irq_in[1], 0);
 
             io.set_timer_ips(1_000_000);
-            io.register_io_read_handler(DeviceId::Keyboard, keyboard::KBD_DATA_PORT, "Keyboard", 0x1);
+            io.register_io_read_handler(DevSlot::KEYBOARD, keyboard::KBD_DATA_PORT, "Keyboard", 0x1);
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
             assert_eq!(io.inp(keyboard::KBD_DATA_PORT, 1, 77, &mut pc_system), delivered);
             io.clear_device_manager();

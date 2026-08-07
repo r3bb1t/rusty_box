@@ -42,9 +42,23 @@ use super::pit::{
     BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_SYSTEM_CONTROL_B,
 };
 use super::serial::BxSerialC;
-use super::vga::BxVgaC;
 use super::BxDevicesC;
-use super::DeviceId;
+use super::device_api::PioDevice;
+use super::vga::BxVgaC;
+use super::wiring;
+use super::DevSlot;
+
+/// One port-mapped device bound to the machine parts its context is built from.
+///
+/// The device and the interrupt controller are disjoint borrows out of the same
+/// [`DeviceManager`], which is why they travel together: the borrow checker has
+/// to see the split, and the only place that can perform it is the manager
+/// itself.
+pub(crate) struct PioBinding<'a> {
+    pub(crate) device: &'a mut dyn PioDevice,
+    pub(crate) pic: &'a mut BxPicC,
+    pub(crate) handles: wiring::TimerHandles,
+}
 
 /// Port 0x92 - System Control Port
 /// Bit 0: Fast A20 gate control (1 = A20 enabled)
@@ -499,7 +513,7 @@ impl DeviceManager {
             PIC_SLAVE_CMD,
             PIC_SLAVE_DATA,
         ] {
-            io.register_io_handler(DeviceId::Pic, port, "8259 PIC", 0x1);
+            io.register_io_handler(DevSlot::PIC, port, "8259 PIC", 0x1);
         }
     }
 
@@ -514,14 +528,14 @@ impl DeviceManager {
             PIT_CONTROL,
             PIT_SYSTEM_CONTROL_B,
         ] {
-            io.register_io_handler(DeviceId::Pit, port, "8254 PIT", 0x1);
+            io.register_io_handler(DevSlot::PIT, port, "8254 PIT", 0x1);
         }
     }
 
     /// Register CMOS I/O handlers
     fn register_cmos_handlers(&mut self, io: &mut BxDevicesC) {
-        io.register_io_handler(DeviceId::Cmos, CMOS_ADDR, "CMOS Address", 0x1);
-        io.register_io_handler(DeviceId::Cmos, CMOS_DATA, "CMOS Data", 0x1);
+        io.register_io_handler(DevSlot::CMOS, CMOS_ADDR, "CMOS Address", 0x1);
+        io.register_io_handler(DevSlot::CMOS, CMOS_DATA, "CMOS Data", 0x1);
         // Bochs cmos.cc init() registers the extended-bank ports 0x72/0x73
         // ONLY when a 256-byte `cmosimage` is configured (s.max_reg == 255).
         // With the default 128-byte CMOS (no image) those ports are left
@@ -536,18 +550,18 @@ impl DeviceManager {
     fn register_dma_handlers(&mut self, io: &mut BxDevicesC) {
         // DMA1 ports 0x0000-0x000F (Bochs dma.cc)
         for port in 0x0000..=0x000F_u16 {
-            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x7);
+            io.register_io_handler(DevSlot::DMA, port, "DMA controller", 0x7);
         }
 
         // Page registers 0x0080-0x008F (Bochs dma.cc)
         for port in 0x0080..=0x008F_u16 {
-            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x7);
+            io.register_io_handler(DevSlot::DMA, port, "DMA controller", 0x7);
         }
 
         // DMA2 ports 0x00C0-0x00DE, step 2 (Bochs dma.cc)
         let mut port = 0x00C0_u16;
         while port <= 0x00DE {
-            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x7);
+            io.register_io_handler(DevSlot::DMA, port, "DMA controller", 0x7);
             port += 2;
         }
     }
@@ -555,16 +569,16 @@ impl DeviceManager {
     /// Register Keyboard I/O handlers
     fn register_keyboard_handlers(&mut self, io: &mut BxDevicesC) {
         // Issue #610 — Darwin boot fix: allow 1/2/4-byte reads (width 7), write stays 1-byte
-        io.register_io_read_handler(DeviceId::Keyboard, KBD_DATA_PORT, "Keyboard Data", 0x7);
-        io.register_io_write_handler(DeviceId::Keyboard, KBD_DATA_PORT, "Keyboard Data", 0x1);
+        io.register_io_read_handler(DevSlot::KEYBOARD, KBD_DATA_PORT, "Keyboard Data", 0x7);
+        io.register_io_write_handler(DevSlot::KEYBOARD, KBD_DATA_PORT, "Keyboard Data", 0x1);
         io.register_io_read_handler(
-            DeviceId::Keyboard,
+            DevSlot::KEYBOARD,
             KBD_STATUS_PORT,
             "Keyboard Status/Command",
             0x7,
         );
         io.register_io_write_handler(
-            DeviceId::Keyboard,
+            DevSlot::KEYBOARD,
             KBD_STATUS_PORT,
             "Keyboard Status/Command",
             0x1,
@@ -577,22 +591,22 @@ impl DeviceManager {
     fn register_harddrv_handlers(&mut self, io: &mut BxDevicesC) {
         // Primary ATA (0x1F0-0x1F7, 0x3F6)
         for port in 0x1F0..=0x1F7_u16 {
-            io.register_io_handler(DeviceId::HardDrive, port, "ATA Primary", 0x7);
+            io.register_io_handler(DevSlot::IDE, port, "ATA Primary", 0x7);
         }
-        io.register_io_handler(DeviceId::HardDrive, 0x3F6, "ATA Primary Control", 0x1);
+        io.register_io_handler(DevSlot::IDE, 0x3F6, "ATA Primary Control", 0x1);
 
         // Secondary ATA (0x170-0x177, 0x376)
         for port in 0x170..=0x177_u16 {
-            io.register_io_handler(DeviceId::HardDrive, port, "ATA Secondary", 0x7);
+            io.register_io_handler(DevSlot::IDE, port, "ATA Secondary", 0x7);
         }
-        io.register_io_handler(DeviceId::HardDrive, 0x376, "ATA Secondary Control", 0x1);
+        io.register_io_handler(DevSlot::IDE, 0x376, "ATA Secondary Control", 0x1);
     }
 
     /// Register Serial Port I/O handlers
     fn register_serial_handlers(&mut self, io: &mut BxDevicesC) {
         // COM1: 0x3F8-0x3FF (8 registers)
         for port in 0x3F8..=0x3FF_u16 {
-            io.register_io_handler(DeviceId::Serial, port, "16550 COM1", 0x1);
+            io.register_io_handler(DevSlot::SERIAL, port, "16550 COM1", 0x1);
         }
     }
 
@@ -604,7 +618,7 @@ impl DeviceManager {
         //   DEV_register_iowrite_handler(..., ACPI_DBG_IO_ADDR, "ACPI", 4)
         // WRITE only, and only 4-byte accesses. Reads and 1/2-byte writes are
         // unmapped in Bochs (default handler: 0xFFFFFFFF / ignored).
-        io.register_io_write_handler(DeviceId::Acpi, 0xB044, "ACPI Debug", 0x4);
+        io.register_io_write_handler(DevSlot::ACPI, 0xB044, "ACPI Debug", 0x4);
         // NOTE: the SMI command port (0xB2) is NOT registered by Bochs acpi.cc —
         // it belongs to the PIIX3 bridge (pci2isa.cc), which forwards writes to
         // DEV_acpi_generate_smi. rusty registers it in register_pci_handlers.
@@ -620,7 +634,7 @@ impl DeviceManager {
         for offset in 0..64u16 {
             let mask = self.acpi.pm_io_mask(offset as u8);
             if mask != 0 {
-                io.register_io_handler(DeviceId::Acpi, base + offset, "ACPI PM", mask);
+                io.register_io_handler(DevSlot::ACPI, base + offset, "ACPI PM", mask);
             }
         }
         self.acpi.pm_ports_registered = true;
@@ -637,7 +651,7 @@ impl DeviceManager {
         for offset in 0..16u16 {
             let mask = self.acpi.sm_io_mask(offset as u8);
             if mask != 0 {
-                io.register_io_handler(DeviceId::Acpi, base + offset, "ACPI SMBus", mask);
+                io.register_io_handler(DevSlot::ACPI, base + offset, "ACPI SMBus", mask);
             }
         }
         self.acpi.sm_ports_registered = true;
@@ -651,7 +665,7 @@ impl DeviceManager {
     fn register_pci_handlers(&mut self, io: &mut BxDevicesC) {
         // PCI config address register (0xCF8) — 4-byte write only
         io.register_io_handler(
-            DeviceId::Pci,
+            DevSlot::PCI,
             super::pci::PCI_CONFIG_ADDR,
             "PCI Config Addr",
             0x4,
@@ -659,7 +673,7 @@ impl DeviceManager {
 
         // PCI config data register (0xCFC-0xCFF) — 1/2/4-byte
         for port in 0x0CFC..=0x0CFF_u16 {
-            io.register_io_handler(DeviceId::Pci, port, "PCI Config Data", 0x7);
+            io.register_io_handler(DevSlot::PCI, port, "PCI Config Data", 0x7);
         }
 
         // PIIX3 I/O ports: APM (0xB2-0xB3), ELCR (0x4D0-0x4D1), CPU reset
@@ -667,15 +681,15 @@ impl DeviceManager {
         // handler is registered with mask 3 so the 16-bit `outw 0xB2, ax`
         // idiom reaches the handler (apms loads from the high byte); all
         // other ports and the 0xB2 read side are 1-byte.
-        io.register_io_read_handler(DeviceId::Pci, super::pci2isa::APM_CMD_PORT, "PIIX3", 0x1);
-        io.register_io_write_handler(DeviceId::Pci, super::pci2isa::APM_CMD_PORT, "PIIX3", 0x3);
+        io.register_io_read_handler(DevSlot::PCI, super::pci2isa::APM_CMD_PORT, "PIIX3", 0x1);
+        io.register_io_write_handler(DevSlot::PCI, super::pci2isa::APM_CMD_PORT, "PIIX3", 0x3);
         for port in [
             super::pci2isa::APM_STS_PORT,
             super::pci2isa::ELCR1_PORT,
             super::pci2isa::ELCR2_PORT,
             super::pci2isa::PCI_RESET_PORT,
         ] {
-            io.register_io_handler(DeviceId::Pci, port, "PIIX3", 0x1);
+            io.register_io_handler(DevSlot::PCI, port, "PIIX3", 0x1);
         }
     }
 
@@ -683,14 +697,14 @@ impl DeviceManager {
     /// Ports: 0x510 (selector), 0x511 (data), 0x514-0x51B (DMA).
     fn register_fw_cfg_handlers(&mut self, io: &mut BxDevicesC) {
         // Selector port: 1-byte read, 2-byte write
-        io.register_io_read_handler(DeviceId::FwCfg, 0x510, "fw_cfg selector", 0x1);
-        io.register_io_write_handler(DeviceId::FwCfg, 0x510, "fw_cfg selector", 0x3);
+        io.register_io_read_handler(DevSlot::FW_CFG, 0x510, "fw_cfg selector", 0x1);
+        io.register_io_write_handler(DevSlot::FW_CFG, 0x510, "fw_cfg selector", 0x3);
         // Data port: 1-byte read and write
-        io.register_io_read_handler(DeviceId::FwCfg, 0x511, "fw_cfg data", 0x1);
-        io.register_io_write_handler(DeviceId::FwCfg, 0x511, "fw_cfg data", 0x3);
+        io.register_io_read_handler(DevSlot::FW_CFG, 0x511, "fw_cfg data", 0x1);
+        io.register_io_write_handler(DevSlot::FW_CFG, 0x511, "fw_cfg data", 0x3);
         // DMA ports: 0x514-0x51B, 1/2/4-byte read and write
         for port in 0x514..=0x51B_u16 {
-            io.register_io_handler(DeviceId::FwCfg, port, "fw_cfg dma", 0x7);
+            io.register_io_handler(DevSlot::FW_CFG, port, "fw_cfg dma", 0x7);
         }
     }
 
@@ -769,8 +783,16 @@ impl DeviceManager {
             for offset in 0..16u16 {
                 let mask = self.ide.bus_master.bmdma_io_mask(offset as u8);
                 if mask != 0 {
+                    // The bus-master window registers to the PCI slot, not a
+                    // slot of its own: `pci_io_read`/`pci_write` recognise it
+                    // by range against the live BAR4 value, which keeps the
+                    // routing correct even between a BAR write and the
+                    // re-registration below. Bochs gives `bx_pci_ide_c` its own
+                    // handler instead, so a dedicated slot is the more faithful
+                    // shape — it needs the stale-registration window closed
+                    // first, which is why it is not one yet.
                     io.register_io_handler(
-                        DeviceId::Pci,
+                        DevSlot::PCI,
                         new_base + offset,
                         "PCI IDE BM-DMA",
                         mask,
@@ -1243,7 +1265,92 @@ impl DeviceManager {
         )
     }
 
-    // ─── Dispatch methods called from BxDevicesC via DeviceId ───
+    /// Bind `slot` to the device that owns it, together with the machine parts
+    /// its context is built from.
+    ///
+    /// `None` means the slot has no device-API device behind it — either it is
+    /// unclaimed, or it belongs to a device still on the legacy dispatch path.
+    /// This is the sole statement of which slots are on the device API; the
+    /// legacy dispatch answers exactly the complement.
+    ///
+    /// The interrupt controller comes out alongside the device because every
+    /// context needs it and it lives in this same struct; returning both from
+    /// one place is what lets the caller build a context without knowing which
+    /// field the device came from.
+    ///
+    /// Each arm also snapshots the scheduler handles its device may arm during
+    /// the access. Those handles live on the device, which is mutably borrowed
+    /// for the duration of its call, so the bus reads them here and hands them
+    /// to the timer service instead — see [`wiring::TimerHandles`]. Reading
+    /// them per arm rather than up front keeps the cost off the slots that do
+    /// not bind, which is most accesses.
+    pub(crate) fn bind_pio(&mut self, slot: DevSlot, port: u16) -> Option<PioBinding<'_>> {
+        let Self {
+            ref mut pic,
+            ref mut pit,
+            ref mut cmos,
+            ref mut keyboard,
+            ref mut acpi,
+            ref mut serial,
+            ..
+        } = *self;
+        let mut handles = wiring::TimerHandles::default();
+        let device: &mut dyn PioDevice = match slot {
+            DevSlot::SERIAL => {
+                if let Some(index) = serial.port_index_for_address(port) {
+                    handles.set(
+                        BxSerialC::fifo_timer_local(index),
+                        serial.fifo_timer_handle(index),
+                    );
+                    handles.set(
+                        BxSerialC::tx_timer_local(index),
+                        serial.tx_timer_handle(index),
+                    );
+                }
+                serial
+            }
+            DevSlot::ACPI => {
+                handles.set(BxAcpiCtrl::OVERFLOW_TIMER_LOCAL, acpi.overflow_timer_handle);
+                acpi
+            }
+            DevSlot::CMOS => {
+                handles.set(BxCmosC::PERIODIC_TIMER_LOCAL, cmos.periodic_timer_handle);
+                handles.set(BxCmosC::ONE_SECOND_TIMER_LOCAL, cmos.one_second_timer_handle);
+                handles.set(BxCmosC::UIP_TIMER_LOCAL, cmos.uip_timer_handle);
+                cmos
+            }
+            DevSlot::PIT => {
+                handles.set(BxPitC::EVENT_TIMER_LOCAL, pit.timer_handle);
+                pit
+            }
+            // The 8042's timer is continuous and registered by the machine, so
+            // the device never arms it itself and its context carries none.
+            DevSlot::KEYBOARD => keyboard,
+            _ => return None,
+        };
+        Some(PioBinding {
+            device,
+            pic,
+            handles,
+        })
+    }
+
+    /// Apply stores one device asks the chipset to make into another.
+    ///
+    /// Bochs acpi.cc PM1_CNT suspend-to-ram (S3) calls `DEV_cmos_set_reg(0xF,
+    /// 0xFE)` — the shutdown-status byte the BIOS reads on the resume path.
+    /// A device context reaches only its own device, so a cross-device store
+    /// stays a request the bus applies here, drained on the same schedule as
+    /// the interrupt and DMA latches. `ChipsetEffect` will carry these as data
+    /// once the MMIO inversion lands; until then this is the whole set.
+    #[inline]
+    pub(crate) fn apply_cross_device_stores(&mut self) {
+        if core::mem::take(&mut self.acpi.suspend_to_ram_pending) {
+            self.cmos.ram[0x0F] = 0xFE;
+        }
+    }
+
+    // ─── Dispatch methods called from BxDevicesC via DevSlot ───
 
     /// Port 92h read dispatch (System Control Port)
     pub(crate) fn port92_read(&self, _port: u16, _io_len: u8) -> u32 {
@@ -1379,39 +1486,6 @@ impl DeviceManager {
         }
     }
 
-    /// ACPI I/O read dispatch
-    pub(crate) fn acpi_read(&mut self, address: u16, io_len: u8, icount: u64) -> u32 {
-        self.acpi.read(address, io_len, icount)
-    }
-
-    /// ACPI I/O write dispatch.
-    ///
-    /// Port 0xB2 is deliberately absent: Bochs routes the SMI command port
-    /// through the PIIX3 bridge (pci2isa.cc write case 0x00b2 ->
-    /// DEV_acpi_generate_smi), which the PCI dispatch already does. An arm here
-    /// was dead code — `register_pci_handlers` runs after
-    /// `register_acpi_handlers` and last registration wins for a port.
-    pub(crate) fn acpi_write(&mut self, address: u16, value: u32, io_len: u8, icount: u64) {
-        self.acpi.write(address, value, io_len, icount);
-        // Bochs acpi.cc PM1_CNT suspend-to-ram (S3) calls DEV_cmos_set_reg(0xF,
-        // 0xFE) — a plain store of the shutdown-status byte the BIOS reads on
-        // the resume path — before requesting the hardware reset. Applied here
-        // because only the DeviceManager can reach the CMOS from the ACPI write.
-        if core::mem::take(&mut self.acpi.suspend_to_ram_pending) {
-            self.cmos.ram[0x0F] = 0xFE;
-        }
-    }
-
-    /// PCI IDE I/O read dispatch (BM-DMA ports)
-    pub(crate) fn pci_ide_read(&self, address: u16, io_len: u8) -> u32 {
-        self.ide.bus_master.bmdma_read(address, io_len)
-    }
-
-    /// PCI IDE I/O write dispatch (BM-DMA ports)
-    pub(crate) fn pci_ide_write(&mut self, address: u16, value: u32, io_len: u8) {
-        self.ide.bus_master.bmdma_write(address, value, io_len);
-    }
-
     /// fw_cfg I/O write dispatch — reconstructs the stable active pin slice.
     pub(crate) fn fw_cfg_write(&mut self, address: u16, value: u32, io_len: u8) {
         let mem = self.mem_ptr.map(|mut p| unsafe { p.as_mut() });
@@ -1440,7 +1514,7 @@ impl BxDevicesC {
         tracing::debug!("Initializing device subsystem");
 
         // Register Port 92h - System Control Port (A20 gate, fast reset)
-        self.register_io_handler(DeviceId::Port92, PORT_92H, "Port 92h System Control", 0x1);
+        self.register_io_handler(DevSlot::PORT92, PORT_92H, "Port 92h System Control", 0x1);
 
         tracing::debug!("Device initialization complete");
         Ok(())
@@ -2392,17 +2466,17 @@ mod tests {
             let mut emu = guest_emulator(false);
 
             guest_pci_bar_write(&mut emu, 0x09, 0x20, 0x0000_C001).unwrap();
-            assert_eq!(emu.devices.read_handlers[0xC000].device_id, DeviceId::Pci);
-            assert_eq!(emu.devices.write_handlers[0xC004].device_id, DeviceId::Pci);
+            assert_eq!(emu.devices.read_handlers[0xC000].slot, DevSlot::PCI);
+            assert_eq!(emu.devices.write_handlers[0xC004].slot, DevSlot::PCI);
             let reads_before = emu.devices.diag_io_reads;
             let _ = guest_inb(&mut emu, 0xC000).unwrap();
             assert_eq!(emu.devices.diag_io_reads, reads_before + 1);
 
             guest_pci_bar_write(&mut emu, 0x09, 0x20, 0x0000_D001).unwrap();
-            assert_eq!(emu.devices.read_handlers[0xC000].device_id, DeviceId::None);
-            assert_eq!(emu.devices.write_handlers[0xC004].device_id, DeviceId::None);
-            assert_eq!(emu.devices.read_handlers[0xD000].device_id, DeviceId::Pci);
-            assert_eq!(emu.devices.write_handlers[0xD004].device_id, DeviceId::Pci);
+            assert_eq!(emu.devices.read_handlers[0xC000].slot, DevSlot::NONE);
+            assert_eq!(emu.devices.write_handlers[0xC004].slot, DevSlot::NONE);
+            assert_eq!(emu.devices.read_handlers[0xD000].slot, DevSlot::PCI);
+            assert_eq!(emu.devices.write_handlers[0xD004].slot, DevSlot::PCI);
             let reads_before = emu.devices.diag_io_reads;
             let _ = guest_inb(&mut emu, 0xD000).unwrap();
             assert_eq!(emu.devices.diag_io_reads, reads_before + 1);
@@ -2494,13 +2568,13 @@ mod tests {
             dm.register_pci_handlers(&mut io);
 
             assert_eq!(
-                io.write_handlers[0x0CF9].device_id,
-                DeviceId::Pci,
+                io.write_handlers[0x0CF9].slot,
+                DevSlot::PCI,
                 "port 0xCF9 write must be registered (Bochs pci2isa.cc init)"
             );
             assert_eq!(
-                io.read_handlers[0x0CF9].device_id,
-                DeviceId::Pci,
+                io.read_handlers[0x0CF9].slot,
+                DevSlot::PCI,
                 "port 0xCF9 read must be registered (Bochs pci2isa.cc init)"
             );
 
@@ -2886,17 +2960,17 @@ mod tests {
 
             guest_pci_bar_write(&mut emu, 0x0B, 0x40, 0x0000_B001).unwrap();
             guest_pci_bar_write(&mut emu, 0x0B, 0x90, 0x0000_B101).unwrap();
-            assert_eq!(emu.devices.read_handlers[0xB000].device_id, DeviceId::Acpi);
-            assert_eq!(emu.devices.write_handlers[0xB100].device_id, DeviceId::Acpi);
+            assert_eq!(emu.devices.read_handlers[0xB000].slot, DevSlot::ACPI);
+            assert_eq!(emu.devices.write_handlers[0xB100].slot, DevSlot::ACPI);
             let _ = guest_inb(&mut emu, 0xB000).unwrap();
             let _ = guest_inb(&mut emu, 0xB100).unwrap();
 
             guest_pci_bar_write(&mut emu, 0x0B, 0x40, 0x0000_C001).unwrap();
             guest_pci_bar_write(&mut emu, 0x0B, 0x90, 0x0000_C101).unwrap();
-            assert_eq!(emu.devices.read_handlers[0xB000].device_id, DeviceId::None);
-            assert_eq!(emu.devices.write_handlers[0xB100].device_id, DeviceId::None);
-            assert_eq!(emu.devices.read_handlers[0xC000].device_id, DeviceId::Acpi);
-            assert_eq!(emu.devices.write_handlers[0xC100].device_id, DeviceId::Acpi);
+            assert_eq!(emu.devices.read_handlers[0xB000].slot, DevSlot::NONE);
+            assert_eq!(emu.devices.write_handlers[0xB100].slot, DevSlot::NONE);
+            assert_eq!(emu.devices.read_handlers[0xC000].slot, DevSlot::ACPI);
+            assert_eq!(emu.devices.write_handlers[0xC100].slot, DevSlot::ACPI);
             let _ = guest_inb(&mut emu, 0xC000).unwrap();
             let _ = guest_inb(&mut emu, 0xC100).unwrap();
         });
@@ -2929,9 +3003,9 @@ mod tests {
             target.register_fw_cfg_handlers(&mut io);
             io.pci_conf_addr = 0xA000_0000;
 
-            assert_eq!(io.read_handlers[PORT_92H as usize].device_id, DeviceId::Port92);
-            assert_eq!(io.write_handlers[0x0CF8].device_id, DeviceId::Pci);
-            assert_eq!(io.read_handlers[0x0511].device_id, DeviceId::FwCfg);
+            assert_eq!(io.read_handlers[PORT_92H as usize].slot, DevSlot::PORT92);
+            assert_eq!(io.write_handlers[0x0CF8].slot, DevSlot::PCI);
+            assert_eq!(io.read_handlers[0x0511].slot, DevSlot::FW_CFG);
 
             let mut reader =
                 SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
@@ -2954,9 +3028,9 @@ mod tests {
                 "component decode must not overwrite the live I/O dispatch latch"
             );
 
-            assert_eq!(io.read_handlers[PORT_92H as usize].device_id, DeviceId::Port92);
-            assert_eq!(io.write_handlers[0x0CF8].device_id, DeviceId::Pci);
-            assert_eq!(io.read_handlers[0x0511].device_id, DeviceId::FwCfg);
+            assert_eq!(io.read_handlers[PORT_92H as usize].slot, DevSlot::PORT92);
+            assert_eq!(io.write_handlers[0x0CF8].slot, DevSlot::PCI);
+            assert_eq!(io.read_handlers[0x0511].slot, DevSlot::FW_CFG);
         });
     }
 

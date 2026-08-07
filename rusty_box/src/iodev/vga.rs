@@ -1022,12 +1022,12 @@ impl BxVgaC {
         tracing::debug!("Initializing VGA text mode");
 
         // Register I/O port handlers
-        use super::DeviceId;
+        use super::DevSlot;
 
         // All VGA write handlers use mask 0x3 (byte+word) matching Bochs vgacore.cc.
         // Word writes are split into two byte writes in write_port().
 
-        // Register all VGA ports with DeviceId::Vga
+        // Register all VGA ports with DevSlot::VGA
         let vga_ports: &[(u16, &str)] = &[
             (VGA_CRTC_INDEX_MONO, "VGA CRTC Index (mono)"),
             (VGA_CRTC_DATA_MONO, "VGA CRTC Data (mono)"),
@@ -1055,7 +1055,7 @@ impl BxVgaC {
             (0x3CD, "VGA EGA Compat"),
         ];
         for &(port, name) in vga_ports {
-            io.register_io_handler(DeviceId::Vga, port, name, 0x3);
+            io.register_io_handler(DevSlot::VGA, port, name, 0x3);
         }
 
         // Register memory handlers for VGA memory range (0xA0000-0xBFFFF)
