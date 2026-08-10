@@ -34,6 +34,3 @@ pub const MAX_PERM_PAGES: usize = 262144;
 
 /// Maximum MMIO regions for device mapping.
 pub const MAX_MMIO_REGIONS: usize = 16;
-
-/// Overflow pool for chained memory handlers.
-pub const MAX_HANDLER_OVERFLOW: usize = 16;

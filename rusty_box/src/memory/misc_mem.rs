@@ -1,11 +1,9 @@
 #![allow(private_interfaces, dead_code)]
 #![allow(non_snake_case)]
 
-#[cfg(feature = "alloc")]
-use alloc::vec::Vec;
-
+use super::PhysAccess;
 use crate::{
-    config::{BxPhyAddress, MAX_HANDLER_OVERFLOW},
+    config::BxPhyAddress,
     cpu::rusty_box::MemoryAccessType,
     memory::{
         memory_rusty_box::{
@@ -26,8 +24,6 @@ pub(super) const FLASH_ERASE_SUSP: u8 = 0xb0;
 pub(super) const FLASH_PROG_SETUP: u8 = 0x40;
 pub(super) const FLASH_ERASE: u8 = 0xd0;
 
-const BX_PHY_ADDRESS_WIDTH: u64 = 40;
-const BX_MEM_HANDLERS: usize = ((1u64 << BX_PHY_ADDRESS_WIDTH) >> 20) as usize;
 
 #[inline]
 fn direct_host_write_allowed(
@@ -60,16 +56,7 @@ impl BxMemC<'_> {
             smram_available: false,
             smram_enable: false,
             smram_restricted: false,
-            #[cfg(feature = "alloc")]
-            memory_handlers: {
-                let mut v = Vec::with_capacity(BX_MEM_HANDLERS);
-                v.resize_with(BX_MEM_HANDLERS, || None);
-                v
-            },
-            #[cfg(not(feature = "alloc"))]
-            memory_handlers: [const { None }; 4096],
-            handler_overflow: [const { None }; MAX_HANDLER_OVERFLOW],
-            handler_overflow_count: 0,
+            mmio: super::mmio_map::MmioMap::new(),
 
             pci_enabled,
             // Bochs defaults bios_write_enabled to false (misc_mem.cc
@@ -91,7 +78,6 @@ impl BxMemC<'_> {
 
             // A20 starts DISABLED at boot (synced from PC system during init)
             a20_mask: 0xFFFF_FFFF_FFEF_FFFFu64,
-            hpet_access_clock: core::cell::Cell::new((0, 0)),
             _marker: core::marker::PhantomData,
         }
     }
@@ -149,20 +135,9 @@ impl<'c> BxMemC<'c> {
             return Ok(None);
         }
 
-        // Registered handlers always win over direct RAM.
-        let page_idx = (a20_addr >> 20) as usize;
-        if page_idx < self.memory_handlers.len() {
-            if let Some(handler_struct) = &self.memory_handlers[page_idx] {
-                let mut current_handler = Some(handler_struct);
-                while let Some(handler) = current_handler {
-                    if handler.begin <= a20_addr && handler.end >= a20_addr {
-                        return Ok(None);
-                    }
-                    current_handler = handler
-                        .next
-                        .and_then(|idx| self.handler_overflow[idx as usize].as_ref());
-                }
-            }
+        // Registered MMIO regions always win over direct RAM.
+        if self.mmio.covers(a20_addr) {
+            return Ok(None);
         }
 
         if !write {
@@ -432,7 +407,7 @@ impl BxMemC<'_> {
         addr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
-    ) -> Result<()> {
+    ) -> Result<PhysAccess> {
         use crate::memory::memory_rusty_box::{bios_map_last128k, MemoryAreaT, BIOSROMSZ};
 
         let mut a20_addr = self.a20_addr(addr);
@@ -463,42 +438,20 @@ impl BxMemC<'_> {
             && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted));
         if smram_hit {
             // Write to SMRAM - delegate to stub for regular memory write
-            return self.inherited_memory_stub.write_physical_page(
+            self.inherited_memory_stub.write_physical_page(
                 pins,
                 addr,
                 len,
                 data,
                 self.a20_mask,
-            );
+            )?;
+            return Ok(PhysAccess::Done);
         }
 
-        // Check memory handlers
-        let page_idx = (a20_addr >> 20) as usize;
-        if page_idx < self.memory_handlers.len() {
-            if let Some(handler_struct) = &self.memory_handlers[page_idx] {
-                let mut current_handler: Option<&super::MemoryHandlerStruct> = Some(handler_struct);
-
-                while let Some(handler) = current_handler {
-                    if handler.begin <= a20_addr && handler.end >= a20_addr {
-                        // Bochs: memory_handler->write_handler(a20addr, 1, buf, param)
-                        if let Some(vga) = handler.device_id.vga_mut() {
-                            vga.mem_write(a20_addr, len as u32, &data[..len]);
-                            return Ok(());
-                        } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
-                            ioapic.mem_write(a20_addr, len as u32, &data[..len]);
-                            return Ok(());
-                        } else if let Some(hpet) = handler.device_id.hpet_mut() {
-                            let (ticks, ips) = self.hpet_access_clock.get();
-                            hpet.set_now(ticks, ips);
-                            hpet.mem_write(a20_addr, len as u32, &data[..len]);
-                            return Ok(());
-                        }
-                    }
-                    current_handler = handler
-                        .next
-                        .and_then(|idx| self.handler_overflow[idx as usize].as_ref());
-                }
-            }
+        // Bochs calls the device's write_handler here. This reports the owner
+        // instead; the caller runs it, because only the caller holds devices.
+        if let Some(token) = self.mmio.lookup(a20_addr) {
+            return Ok(PhysAccess::Mmio(token));
         }
 
         // mem_write: (from memory.cc)
@@ -513,13 +466,14 @@ impl BxMemC<'_> {
             if !(0x000a0000..0x00100000).contains(&a20_addr) {
                 // Log writes to very low RAM (first 4KB) - these might be IVT/BDA initialization
                 // Regular RAM - delegate to stub
-                return self.inherited_memory_stub.write_physical_page(
+                self.inherited_memory_stub.write_physical_page(
                     pins,
                     addr,
                     len,
                     data,
                     self.a20_mask,
-                );
+                )?;
+                return Ok(PhysAccess::Done);
             }
 
             // Address must be in range 0x000A0000..0x000FFFFF
@@ -579,7 +533,7 @@ impl BxMemC<'_> {
                 a20_addr += 1;
             }
 
-            Ok(())
+            Ok(PhysAccess::Done)
         } else if self.bios_write_enabled && is_bios {
             // Volatile BIOS write support (from memory.cc)
             for &data_byte in &data[..len] {
@@ -592,10 +546,10 @@ impl BxMemC<'_> {
                 }
                 a20_addr += 1;
             }
-            Ok(())
+            Ok(PhysAccess::Done)
         } else {
             // Access outside limits of physical memory, ignore (from memory.cc)
-            Ok(())
+            Ok(PhysAccess::Done)
         }
     }
 
@@ -608,7 +562,7 @@ impl BxMemC<'_> {
         addr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
-    ) -> Result<()> {
+    ) -> Result<PhysAccess> {
         use crate::memory::memory_rusty_box::{
             bios_map_last128k, MemoryAreaT, BIOSROMSZ, EXROM_MASK,
         };
@@ -638,42 +592,19 @@ impl BxMemC<'_> {
             && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted))
         {
             // Read from SMRAM - delegate to stub for regular memory read
-            return self.inherited_memory_stub.read_physical_page(
+            self.inherited_memory_stub.read_physical_page(
                 pins,
                 addr,
                 len,
                 data,
                 self.a20_mask,
-            );
+            )?;
+            return Ok(PhysAccess::Done);
         }
 
-        // Check memory handlers
-        let page_idx = (a20_addr >> 20) as usize;
-        if page_idx < self.memory_handlers.len() {
-            if let Some(handler_struct) = &self.memory_handlers[page_idx] {
-                let mut current_handler: Option<&super::MemoryHandlerStruct> = Some(handler_struct);
-
-                while let Some(handler) = current_handler {
-                    if handler.begin <= a20_addr && handler.end >= a20_addr {
-                        // Bochs: memory_handler->read_handler(a20addr, 1, buf, param)
-                        if let Some(vga) = handler.device_id.vga_mut() {
-                            vga.mem_read(a20_addr, len as u32, data);
-                            return Ok(());
-                        } else if let Some(hpet) = handler.device_id.hpet_mut() {
-                            let (ticks, ips) = self.hpet_access_clock.get();
-                            hpet.set_now(ticks, ips);
-                            hpet.mem_read(a20_addr, len as u32, data);
-                            return Ok(());
-                        } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
-                            ioapic.mem_read(a20_addr, len as u32, data);
-                            return Ok(());
-                        }
-                    }
-                    current_handler = handler
-                        .next
-                        .and_then(|idx| self.handler_overflow[idx as usize].as_ref());
-                }
-            }
+        // See `write_physical_page`: the owner is reported, not invoked.
+        if let Some(token) = self.mmio.lookup(a20_addr) {
+            return Ok(PhysAccess::Mmio(token));
         }
 
         // mem_read:
@@ -683,13 +614,14 @@ impl BxMemC<'_> {
             // All of data is within limits of physical memory
             if !(0x000a0000..0x00100000).contains(&a20_addr) {
                 // Regular RAM - delegate to stub
-                return self.inherited_memory_stub.read_physical_page(
+                self.inherited_memory_stub.read_physical_page(
                     pins,
                     addr,
                     len,
                     data,
                     self.a20_mask,
-                );
+                )?;
+                return Ok(PhysAccess::Done);
             }
 
             // Address must be in range 0x000A0000..0x000FFFFF
@@ -746,13 +678,13 @@ impl BxMemC<'_> {
                 a20_addr += 1;
             }
 
-            Ok(())
+            Ok(PhysAccess::Done)
         } else {
             // Access outside limits of physical memory
 
             if a20_addr > 0xffffffffu64 {
                 data.fill(0xFF);
-                return Ok(());
+                return Ok(PhysAccess::Done);
             }
 
             if is_bios {
@@ -776,329 +708,52 @@ impl BxMemC<'_> {
                 data.fill(0xFF);
             }
 
-            Ok(())
+            Ok(PhysAccess::Done)
         }
     }
 
-    /// Register a memory-mapped I/O handler for a specific address range.
+    /// Map an address range to the device that owns it.
     ///
-    /// Based on BX_MEM_C::registerMemoryHandlers in misc_mem.cc
-    ///
-    /// # Arguments
-    /// * `device_id` - Identifies the device and carries a pointer to its instance
-    /// * `begin_addr` - Start address of the range
-    /// * `end_addr` - End address of the range (inclusive)
+    /// Bochs misc_mem.cc `registerMemoryHandlers`, minus the handler pointers:
+    /// the range is recorded against `token`, and an access that lands in it is
+    /// reported to the caller rather than dispatched here.
     pub fn register_memory_handlers(
         &mut self,
-        device_id: super::MemoryDeviceId,
+        token: super::mmio_map::MmioToken,
         begin_addr: BxPhyAddress,
         end_addr: BxPhyAddress,
     ) -> Result<()> {
-        use crate::memory::error::MemoryError;
-
-        if end_addr < begin_addr {
-            return Err(MemoryError::InvalidAddressRange.into());
-        }
-
-        tracing::debug!(
-            "Register memory access handlers: {:#x} - {:#x}",
-            begin_addr,
-            end_addr
-        );
-
-        // Register handlers for each 1MB page in the range
-        let start_page = (begin_addr >> 20) as usize;
-        let end_page = (end_addr >> 20) as usize;
-
-        // Ensure handlers array/vec is large enough
-        let required_len = end_page + 1;
-        #[cfg(feature = "alloc")]
-        if required_len > self.memory_handlers.len() {
-            let current_len = self.memory_handlers.len();
-            self.memory_handlers.reserve(required_len - current_len);
-            for _ in current_len..required_len {
-                self.memory_handlers.push(None);
-            }
-        }
-        #[cfg(not(feature = "alloc"))]
-        assert!(
-            required_len <= self.memory_handlers.len(),
-            "memory handler page index {} exceeds no-alloc limit {}",
-            required_len,
-            self.memory_handlers.len()
-        );
-
-        for page_idx in start_page..=end_page {
-            self.register_page(page_idx, device_id, begin_addr, end_addr)?;
-        }
-
+        self.mmio.map(token, begin_addr, end_addr)?;
         Ok(())
     }
 
-    /// Return the 64KB-subrange bitmap occupied by a handler on one 1MB page.
-    #[inline]
-    fn handler_page_bitmap(
-        page_idx: usize,
-        begin_addr: BxPhyAddress,
-        end_addr: BxPhyAddress,
-    ) -> u16 {
-        let mut bitmap = 0xFFFFu16;
-        let page_base = (page_idx as BxPhyAddress) << 20;
-        if begin_addr > page_base {
-            let sub_page = ((begin_addr >> 16) & 0xF) as u16;
-            bitmap &= 0xFFFFu16 << sub_page;
-        }
-        if end_addr < page_base + 0x100000 {
-            let sub_page = ((end_addr >> 16) & 0xF) as u16;
-            bitmap &= 0xFFFFu16 >> (0x0F - sub_page);
-        }
-        bitmap
-    }
-
-    /// Register one 1 MB page's slice of a handler range. Factored out of
-    /// `register_memory_handlers` so `unregister_memory_handlers` can rebuild a
-    /// page's handler chain from the surviving handlers.
-    fn register_page(
-        &mut self,
-        page_idx: usize,
-        device_id: super::MemoryDeviceId,
-        begin_addr: BxPhyAddress,
-        end_addr: BxPhyAddress,
-    ) -> Result<()> {
-        use crate::memory::error::MemoryError;
-
-        let mut bitmap = Self::handler_page_bitmap(page_idx, begin_addr, end_addr);
-
-        // Check for overlapping handlers
-        if let Some(existing) = &self.memory_handlers[page_idx] {
-            if (bitmap & existing.bitmap) != 0 {
-                tracing::error!("Register failed: overlapping memory handlers!");
-                return Err(MemoryError::OverlappingHandlers.into());
-            }
-            bitmap |= existing.bitmap;
-        }
-
-        // If this page already has a handler, move it to the overflow pool
-        let next_idx = if let Some(existing) = self.memory_handlers[page_idx].take() {
-            let idx = self.alloc_overflow_slot();
-            self.handler_overflow[idx] = Some(existing);
-            Some(idx as u16)
-        } else {
-            None
-        };
-
-        self.memory_handlers[page_idx] = Some(super::MemoryHandlerStruct {
-            next: next_idx,
-            begin: begin_addr,
-            end: end_addr,
-            bitmap,
-            device_id,
-        });
-        Ok(())
-    }
-
-    /// Allocate an overflow-pool slot, reusing a freed (`None`) slot before
-    /// extending the high-water mark. Without this, repeated register/unregister
-    /// cycles (PCI BAR relocation) would leak the fixed 16-entry pool.
-    fn alloc_overflow_slot(&mut self) -> usize {
-        for idx in 0..self.handler_overflow_count {
-            if self.handler_overflow[idx].is_none() {
-                return idx;
-            }
-        }
-        assert!(
-            self.handler_overflow_count < MAX_HANDLER_OVERFLOW,
-            "handler overflow pool exhausted"
-        );
-        let idx = self.handler_overflow_count;
-        self.handler_overflow_count += 1;
-        idx
-    }
-
-    /// Atomically replace one device handler range with another.
+    /// Move `token`'s mapping from `old_range` to `new_range`, atomically.
     ///
-    /// The complete final state is preflighted before the old range is removed,
-    /// so overlap or capacity failure leaves every mapping unchanged. `None`
-    /// supports initial registration and removal.
+    /// Either side may be absent, covering first registration and removal. A
+    /// rejected move leaves every mapping unchanged, which is what lets a PCI
+    /// BAR write be reported to the device only when it actually took effect.
     pub(crate) fn relocate_memory_handlers(
         &mut self,
-        device_id: super::MemoryDeviceId,
+        token: super::mmio_map::MmioToken,
         old_range: Option<(BxPhyAddress, BxPhyAddress)>,
         new_range: Option<(BxPhyAddress, BxPhyAddress)>,
     ) -> Result<()> {
-        use crate::memory::error::MemoryError;
-
-        for (begin_addr, end_addr) in old_range.into_iter().chain(new_range) {
-            if end_addr < begin_addr {
-                return Err(MemoryError::InvalidAddressRange.into());
-            }
-        }
-
-        let new_pages = new_range.map(|(begin_addr, end_addr)| {
-            ((begin_addr >> 20) as usize, (end_addr >> 20) as usize)
-        });
-        if let Some((_, end_page)) = new_pages {
-            if end_page >= self.memory_handlers.len() {
-                return Err(
-                    MemoryError::Internal("memory handler range exceeds handler table capacity")
-                        .into(),
-                );
-            }
-        }
-
-        let mut projected_overflow = self.handler_overflow[..self.handler_overflow_count]
-            .iter()
-            .filter(|slot| slot.is_some())
-            .count() as isize;
-        let old_pages = old_range.map(|(begin_addr, end_addr)| {
-            ((begin_addr >> 20) as usize, (end_addr >> 20) as usize)
-        });
-
-        if let Some((start_page, end_page)) = old_pages {
-            if start_page < self.memory_handlers.len() {
-                for page_idx in start_page..=end_page.min(self.memory_handlers.len() - 1) {
-                    let page_new_range = new_range.filter(|_| {
-                        new_pages.is_some_and(|(new_start, new_end)| {
-                            (new_start..=new_end).contains(&page_idx)
-                        })
-                    });
-                    projected_overflow += self.preflight_relocation_page(
-                        page_idx,
-                        device_id,
-                        old_range,
-                        page_new_range,
-                    )?;
-                }
-            }
-        }
-
-        if let Some((start_page, end_page)) = new_pages {
-            for page_idx in start_page..=end_page {
-                if old_pages.is_some_and(|(old_start, old_end)| {
-                    (old_start..=old_end).contains(&page_idx)
-                }) {
-                    continue;
-                }
-                projected_overflow +=
-                    self.preflight_relocation_page(page_idx, device_id, old_range, new_range)?;
-            }
-        }
-
-        if projected_overflow > MAX_HANDLER_OVERFLOW as isize {
-            return Err(MemoryError::Internal("memory handler overflow pool exhausted").into());
-        }
-
-        if let Some((begin_addr, end_addr)) = old_range {
-            self.unregister_memory_handlers(device_id, begin_addr, end_addr)
-                .expect("preflighted handler relocation must unregister");
-        }
-        if let Some((begin_addr, end_addr)) = new_range {
-            self.register_memory_handlers(device_id, begin_addr, end_addr)
-                .expect("preflighted handler relocation must register");
-        }
+        self.mmio.relocate(token, old_range, new_range)?;
         Ok(())
     }
 
-    /// Validate a relocation page and return its projected overflow-slot delta.
-    fn preflight_relocation_page(
-        &self,
-        page_idx: usize,
-        device_id: super::MemoryDeviceId,
-        old_range: Option<(BxPhyAddress, BxPhyAddress)>,
-        new_range: Option<(BxPhyAddress, BxPhyAddress)>,
-    ) -> Result<isize> {
-        use crate::memory::error::MemoryError;
-
-        let new_bitmap = new_range
-            .map(|(begin_addr, end_addr)| Self::handler_page_bitmap(page_idx, begin_addr, end_addr));
-        let mut current_count = 0usize;
-        let mut survivor_count = 0usize;
-        let mut current = self.memory_handlers[page_idx].as_ref();
-        while let Some(handler) = current {
-            current_count += 1;
-            let is_old = old_range.is_some_and(|(begin_addr, end_addr)| {
-                handler.begin == begin_addr
-                    && handler.end == end_addr
-                    && handler.device_id.same_device(&device_id)
-            });
-            if !is_old {
-                survivor_count += 1;
-                if let Some(bitmap) = new_bitmap {
-                    if bitmap
-                        & Self::handler_page_bitmap(page_idx, handler.begin, handler.end)
-                        != 0
-                    {
-                        return Err(MemoryError::OverlappingHandlers.into());
-                    }
-                }
-            }
-            current = handler
-                .next
-                .and_then(|idx| self.handler_overflow[idx as usize].as_ref());
-        }
-
-        let final_count = survivor_count + usize::from(new_range.is_some());
-        if final_count > MAX_HANDLER_OVERFLOW + 1 {
-            return Err(MemoryError::Internal("memory handler page capacity exhausted").into());
-        }
-        Ok(final_count.saturating_sub(1) as isize
-            - current_count.saturating_sub(1) as isize)
-    }
-
-    /// Remove the memory handler covering exactly `[begin_addr, end_addr]` for
-    /// `device_id`, restoring any other handlers that shared its pages. The
-    /// inverse of [`register_memory_handlers`]; required for PCI BAR relocation
-    /// (e.g. moving the VGA LFB to a BIOS-assigned base). Pages with no matching
-    /// handler are left untouched.
+    /// Remove `token`'s mapping of exactly `[begin_addr, end_addr]`.
+    ///
+    /// Bochs `unregisterMemoryHandlers` matches the owner *and* the exact
+    /// range, so one device cannot drop another's mapping by naming its
+    /// addresses; an unmatched range is not an error.
     pub fn unregister_memory_handlers(
         &mut self,
-        device_id: super::MemoryDeviceId,
+        token: super::mmio_map::MmioToken,
         begin_addr: BxPhyAddress,
         end_addr: BxPhyAddress,
     ) -> Result<()> {
-        use crate::memory::error::MemoryError;
-
-        if end_addr < begin_addr {
-            return Err(MemoryError::InvalidAddressRange.into());
-        }
-
-        let start_page = (begin_addr >> 20) as usize;
-        let end_page = (end_addr >> 20) as usize;
-        // A page holds at most one handler per non-overlapping 64 KB sub-range.
-        const MAX_PAGE_HANDLERS: usize = MAX_HANDLER_OVERFLOW + 1;
-
-        for page_idx in start_page..=end_page {
-            if page_idx >= self.memory_handlers.len() {
-                break;
-            }
-
-            // Detach the whole chain for this page, freeing its overflow slots.
-            let mut survivors: [Option<(super::MemoryDeviceId, BxPhyAddress, BxPhyAddress)>;
-                MAX_PAGE_HANDLERS] = [None; MAX_PAGE_HANDLERS];
-            let mut nsurv = 0usize;
-            let mut cur = self.memory_handlers[page_idx].take();
-            while let Some(handler) = cur {
-                let next = handler
-                    .next
-                    .and_then(|idx| self.handler_overflow[idx as usize].take());
-                let is_target = handler.begin == begin_addr
-                    && handler.end == end_addr
-                    && handler.device_id.same_device(&device_id);
-                if !is_target {
-                    survivors[nsurv] = Some((handler.device_id, handler.begin, handler.end));
-                    nsurv += 1;
-                }
-                cur = next;
-            }
-
-            // Rebuild from the survivors, earliest-registered first, so the chain
-            // order and the union bitmap are reconstructed exactly.
-            for i in (0..nsurv).rev() {
-                let (did, begin, end) = survivors[i].expect("survivor slot populated");
-                self.register_page(page_idx, did, begin, end)?;
-            }
-        }
-
+        self.mmio.unmap(token, begin_addr, end_addr)?;
         Ok(())
     }
 
@@ -1233,7 +888,6 @@ mod handler_tests {
 /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
-    use crate::memory::MemoryDeviceId;
 
     fn test_mem() -> BxMemC<'static> {
         let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
@@ -1248,224 +902,155 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert!(direct_host_write_allowed(0x1_0000_0000, 0xC000_0001, false));
     }
 
-    // Fake device pointers — the handler table only stores/compares them here;
-    // these tests never dispatch through them, so they are never dereferenced.
-    fn vga_a() -> MemoryDeviceId {
-        MemoryDeviceId::Vga(core::ptr::null_mut())
-    }
-    fn vga_b() -> MemoryDeviceId {
-        MemoryDeviceId::Vga(4usize as *mut crate::iodev::vga::BxVgaC)
+    // Two owners. The map stores tokens, so these are values, not pointers —
+    // the identity a mapping is matched on can no longer dangle.
+    const OWNER_A: super::super::mmio_map::MmioToken = super::super::mmio_map::MmioToken(1);
+    const OWNER_B: super::super::mmio_map::MmioToken = super::super::mmio_map::MmioToken(2);
+
+    /// Whether a mapped region shadows direct RAM at `addr`.
+    ///
+    /// This is the property the routing actually depends on: a mapped range
+    /// must make `get_host_mem_addr_pinned` decline, so the CPU falls off its
+    /// direct path and into the reporting one.
+    fn direct_ram_available(mem: &mut BxMemC<'_>, addr: u64) -> bool {
+        matches!(
+            mem.get_host_mem_addr_pinned(
+                addr,
+                MemoryAccessType::Read,
+                &[],
+                CpuMemoryPolicy::default(),
+            ),
+            Ok(Some(_))
+        )
     }
 
-    fn handler_range_at(mem: &BxMemC<'_>, addr: u64) -> Option<(u64, u64)> {
-        let page = (addr >> 20) as usize;
-        if page >= mem.memory_handlers.len() {
-            return None;
-        }
-        let mut cur = mem.memory_handlers[page].as_ref();
-        while let Some(h) = cur {
-            if h.begin <= addr && h.end >= addr {
-                return Some((h.begin, h.end));
-            }
-            cur = h.next.and_then(|i| mem.handler_overflow[i as usize].as_ref());
-        }
-        None
-    }
-
-    fn handler_device_snapshot(device_id: MemoryDeviceId) -> (u8, usize) {
-        match device_id {
-            MemoryDeviceId::Vga(pointer) => (0, pointer as usize),
-            MemoryDeviceId::IoApic(pointer) => (1, pointer as usize),
-            MemoryDeviceId::None => (2, 0),
-            MemoryDeviceId::Hpet(pointer) => (3, pointer as usize),
-        }
-    }
-
-    fn handler_page_snapshot(
-        mem: &BxMemC<'_>,
-        page: usize,
-    ) -> (
-        [Option<(Option<u16>, u64, u64, u16, (u8, usize))>; MAX_HANDLER_OVERFLOW + 1],
-        usize,
-    ) {
-        let mut snapshot = [None; MAX_HANDLER_OVERFLOW + 1];
-        let mut count = 0;
-        let mut current = mem.memory_handlers[page].as_ref();
-        while let Some(handler) = current {
-            snapshot[count] = Some((
-                handler.next,
-                handler.begin,
-                handler.end,
-                handler.bitmap,
-                handler_device_snapshot(handler.device_id),
-            ));
-            count += 1;
-            current = handler
-                .next
-                .and_then(|idx| mem.handler_overflow[idx as usize].as_ref());
-        }
-        (snapshot, mem.handler_overflow_count)
-    }
-
+    /// A mapped region must hide direct RAM, and unmapping must give it back.
+    /// Bochs decides this the same way — a registered handler wins over the
+    /// direct path — and getting it wrong is invisible until a device's
+    /// registers start reading as stale RAM.
     #[test]
-    fn handler_relocation_is_atomic_on_overlap() {
+    fn a_mapped_region_shadows_direct_ram_until_it_is_unmapped() {
         let mut mem = test_mem();
-        let old = (0xE000_0000u64, 0xE01F_FFFFu64);
-        let new = (0xD000_0000u64, 0xD01F_FFFFu64);
-        let conflicting = (0xD010_0000u64, 0xD010_FFFFu64);
-        mem.register_memory_handlers(vga_a(), old.0, old.1).unwrap();
-        mem.register_memory_handlers(vga_b(), conflicting.0, conflicting.1)
-            .unwrap();
+        mem.set_a20_mask(u64::MAX);
+        assert!(direct_ram_available(&mut mem, 0x2000));
 
-        let old_page = (old.0 >> 20) as usize;
-        let first_new_page = (new.0 >> 20) as usize;
-        let conflicting_page = (conflicting.0 >> 20) as usize;
-        let before = (
-            handler_page_snapshot(&mem, old_page),
-            handler_page_snapshot(&mem, first_new_page),
-            handler_page_snapshot(&mem, conflicting_page),
+        mem.register_memory_handlers(OWNER_A, 0x2000, 0x2FFF).unwrap();
+        assert!(
+            !direct_ram_available(&mut mem, 0x2000),
+            "a mapped region must not be served from RAM"
         );
 
+        mem.unregister_memory_handlers(OWNER_A, 0x2000, 0x2FFF)
+            .unwrap();
         assert!(
-            mem.relocate_memory_handlers(vga_a(), Some(old), Some(new))
-                .is_err()
+            direct_ram_available(&mut mem, 0x2000),
+            "unmapping must restore the direct path"
+        );
+    }
+
+    /// A physical access inside a mapped region reports its owner instead of
+    /// touching RAM, and one outside it does not.
+    #[test]
+    fn a_physical_access_reports_the_owning_token() {
+        let mut mem = test_mem();
+        mem.set_a20_mask(u64::MAX);
+        mem.register_memory_handlers(OWNER_B, 0x4000, 0x4FFF).unwrap();
+
+        let mut data = [0u8; 4];
+        assert_eq!(
+            mem.read_physical_page(&[], CpuMemoryPolicy::default(), 0x4010, 4, &mut data)
+                .unwrap(),
+            PhysAccess::Mmio(OWNER_B)
         );
         assert_eq!(
-            (
-                handler_page_snapshot(&mem, old_page),
-                handler_page_snapshot(&mem, first_new_page),
-                handler_page_snapshot(&mem, conflicting_page),
-            ),
-            before
+            mem.write_physical_page(&[], CpuMemoryPolicy::default(), 0x4010, 4, &mut data)
+                .unwrap(),
+            PhysAccess::Mmio(OWNER_B)
+        );
+        assert_eq!(
+            mem.read_physical_page(&[], CpuMemoryPolicy::default(), 0x5010, 4, &mut data)
+                .unwrap(),
+            PhysAccess::Done,
+            "an address outside every region is ordinary memory"
         );
     }
 
+    /// A rejected relocation must leave the old mapping serving, because the
+    /// device has already been told its BAR moved.
     #[test]
-    fn relocate_memory_handlers_moves_and_removes_handler() {
+    fn a_rejected_relocation_leaves_the_old_region_mapped() {
         let mut mem = test_mem();
-        let initial = (0xE000_0000u64, 0xE00F_FFFFu64);
-        let moved = (0xD000_0000u64, 0xD00F_FFFFu64);
+        mem.set_a20_mask(u64::MAX);
+        let old = (0xA000_0000u64, 0xA000_FFFFu64);
+        let blocker = (0xB000_0000u64, 0xB000_FFFFu64);
+        mem.register_memory_handlers(OWNER_A, old.0, old.1).unwrap();
+        mem.register_memory_handlers(OWNER_B, blocker.0, blocker.1)
+            .unwrap();
 
-        mem.relocate_memory_handlers(vga_a(), None, Some(initial))
-            .unwrap();
-        assert_eq!(handler_range_at(&mem, initial.0), Some(initial));
-        mem.relocate_memory_handlers(vga_a(), Some(initial), Some(moved))
-            .unwrap();
-        assert_eq!(handler_range_at(&mem, initial.0), None);
-        assert_eq!(handler_range_at(&mem, moved.0), Some(moved));
-        mem.relocate_memory_handlers(vga_a(), Some(moved), None)
-            .unwrap();
-        assert_eq!(handler_range_at(&mem, moved.0), None);
+        assert!(mem
+            .relocate_memory_handlers(OWNER_A, Some(old), Some(blocker))
+            .is_err());
+
+        let mut data = [0u8; 4];
+        assert_eq!(
+            mem.read_physical_page(&[], CpuMemoryPolicy::default(), old.0, 4, &mut data)
+                .unwrap(),
+            PhysAccess::Mmio(OWNER_A)
+        );
+        assert_eq!(
+            mem.read_physical_page(&[], CpuMemoryPolicy::default(), blocker.0, 4, &mut data)
+                .unwrap(),
+            PhysAccess::Mmio(OWNER_B)
+        );
     }
 
+    /// Relocation covers first registration and removal, which is how a PCI
+    /// BAR that has never been programmed and one being torn down are handled.
     #[test]
-    fn relocate_memory_handlers_is_atomic_on_overflow_capacity() {
+    fn relocation_registers_moves_and_removes() {
         let mut mem = test_mem();
-        let old = (0xC000_0000u64, 0xC000_FFFFu64);
-        let new = (0xD001_0000u64, 0xD001_FFFFu64);
-        let blocker = (0xD000_0000u64, 0xD000_FFFFu64);
-        mem.register_memory_handlers(vga_a(), old.0, old.1).unwrap();
+        mem.set_a20_mask(u64::MAX);
+        let initial = (0xA000_0000u64, 0xA000_FFFFu64);
+        let moved = (0xA010_0000u64, 0xA010_FFFFu64);
+        let mut data = [0u8; 4];
+        let read = |mem: &mut BxMemC<'_>, addr: u64, data: &mut [u8; 4]| {
+            mem.read_physical_page(&[], CpuMemoryPolicy::default(), addr, 4, data)
+                .unwrap()
+        };
 
-        for sub_page in 0..16u64 {
-            let begin = 0xA000_0000 + (sub_page << 16);
-            mem.register_memory_handlers(vga_b(), begin, begin + 0xFFFF)
+        mem.relocate_memory_handlers(OWNER_A, None, Some(initial))
+            .unwrap();
+        assert_eq!(read(&mut mem, initial.0, &mut data), PhysAccess::Mmio(OWNER_A));
+
+        mem.relocate_memory_handlers(OWNER_A, Some(initial), Some(moved))
+            .unwrap();
+        assert_eq!(read(&mut mem, initial.0, &mut data), PhysAccess::Done);
+        assert_eq!(read(&mut mem, moved.0, &mut data), PhysAccess::Mmio(OWNER_A));
+
+        mem.relocate_memory_handlers(OWNER_A, Some(moved), None)
+            .unwrap();
+        assert_eq!(read(&mut mem, moved.0, &mut data), PhysAccess::Done);
+    }
+
+    /// Register/unregister cycles must not leak region slots. The old chain
+    /// leaked its fixed overflow pool without a free-list; a table that fills
+    /// up silently would start refusing a relocating BAR.
+    #[test]
+    fn repeated_register_unregister_does_not_leak_region_slots() {
+        let mut mem = test_mem();
+        mem.set_a20_mask(u64::MAX);
+        let kept = (0xA_0000u64, 0xA_FFFFu64);
+        let churned = (0xB_0000u64, 0xB_FFFFu64);
+        mem.register_memory_handlers(OWNER_A, kept.0, kept.1).unwrap();
+
+        for _ in 0..200 {
+            mem.register_memory_handlers(OWNER_B, churned.0, churned.1)
+                .unwrap();
+            mem.unregister_memory_handlers(OWNER_B, churned.0, churned.1)
                 .unwrap();
         }
-        mem.register_memory_handlers(vga_b(), 0xB000_0000, 0xB000_FFFF)
-            .unwrap();
-        mem.register_memory_handlers(vga_b(), 0xB001_0000, 0xB001_FFFF)
-            .unwrap();
-        mem.register_memory_handlers(vga_b(), blocker.0, blocker.1)
-            .unwrap();
-        assert_eq!(mem.handler_overflow_count, MAX_HANDLER_OVERFLOW);
 
-        let before = (
-            handler_page_snapshot(&mem, (old.0 >> 20) as usize),
-            handler_page_snapshot(&mem, (new.0 >> 20) as usize),
-        );
-        assert!(
-            mem.relocate_memory_handlers(vga_a(), Some(old), Some(new))
-                .is_err()
-        );
-        assert_eq!(
-            (
-                handler_page_snapshot(&mem, (old.0 >> 20) as usize),
-                handler_page_snapshot(&mem, (new.0 >> 20) as usize),
-            ),
-            before
-        );
-    }
-
-    #[test]
-    fn unregister_removes_sole_handler_and_frees_the_range() {
-        let mut mem = test_mem();
-        let begin = 0xE000_0000u64;
-        let end = begin + (16 << 20) - 1; // 16 MB LFB, 16 pages
-
-        mem.register_memory_handlers(vga_a(), begin, end).unwrap();
-        assert_eq!(handler_range_at(&mem, begin + 0x1234), Some((begin, end)));
-
-        mem.unregister_memory_handlers(vga_a(), begin, end).unwrap();
-        for p in (begin >> 20)..=(end >> 20) {
-            assert!(
-                mem.memory_handlers[p as usize].is_none(),
-                "page {p:#x} not cleared"
-            );
-        }
-        // Bitmap was cleared, so the same range can be registered again.
-        mem.register_memory_handlers(vga_a(), begin, end).unwrap();
-        assert_eq!(handler_range_at(&mem, begin), Some((begin, end)));
-    }
-
-    #[test]
-    fn unregister_preserves_other_handler_on_shared_page() {
-        let mut mem = test_mem();
-        let a = (0xA0000u64, 0xAFFFFu64); // page 0, 64 KB sub-range 0xA
-        let b = (0xB0000u64, 0xBFFFFu64); // page 0, 64 KB sub-range 0xB
-
-        mem.register_memory_handlers(vga_a(), a.0, a.1).unwrap();
-        mem.register_memory_handlers(vga_b(), b.0, b.1).unwrap();
-
-        mem.unregister_memory_handlers(vga_a(), a.0, a.1).unwrap();
-
-        assert_eq!(handler_range_at(&mem, 0xB_8000), Some(b), "B must survive");
-        assert_eq!(handler_range_at(&mem, 0xA_8000), None, "A must be gone");
-
-        // A's sub-range is free again.
-        mem.register_memory_handlers(vga_a(), a.0, a.1).unwrap();
-        assert_eq!(handler_range_at(&mem, 0xA_8000), Some(a));
-        assert_eq!(handler_range_at(&mem, 0xB_8000), Some(b));
-    }
-
-    #[test]
-    fn unregister_matches_device_identity() {
-        let mut mem = test_mem();
-        let r = (0xC0000u64, 0xCFFFFu64);
-        mem.register_memory_handlers(vga_a(), r.0, r.1).unwrap();
-
-        // Wrong device id must not remove the handler.
-        mem.unregister_memory_handlers(vga_b(), r.0, r.1).unwrap();
-        assert_eq!(handler_range_at(&mem, 0xC_8000), Some(r));
-
-        mem.unregister_memory_handlers(vga_a(), r.0, r.1).unwrap();
-        assert_eq!(handler_range_at(&mem, 0xC_8000), None);
-    }
-
-    #[test]
-    fn repeated_register_unregister_does_not_leak_overflow_pool() {
-        let mut mem = test_mem();
-        let a = (0xA0000u64, 0xAFFFFu64);
-        let b = (0xB0000u64, 0xBFFFFu64);
-        mem.register_memory_handlers(vga_a(), a.0, a.1).unwrap();
-
-        // Far more cycles than the 16-entry pool could hold if it leaked.
-        for _ in 0..200 {
-            mem.register_memory_handlers(vga_b(), b.0, b.1).unwrap();
-            mem.unregister_memory_handlers(vga_b(), b.0, b.1).unwrap();
-        }
-
-        assert!(mem.handler_overflow_count <= MAX_HANDLER_OVERFLOW);
-        assert_eq!(handler_range_at(&mem, 0xA_8000), Some(a));
+        assert_eq!(mem.mmio.len(), 1, "only the kept region may remain");
     }
 
     // ─── Finding #8: enable_smram/disable_smram actually switch routing ──────
@@ -1501,7 +1086,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     fn enable_smram_bypasses_vga_handler_disable_restores_it() {
         use crate::cpu::builder::BxCpuBuilder;
         use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
-        use crate::iodev::vga::BxVgaC;
 
         // BxICache contains ~19MB fixed arrays; the debug-mode struct literal
         // built by BxCpuBuilder::build() overflows the small default test
@@ -1512,51 +1096,59 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(move || {
                 let mut mem = test_mem();
 
-                // Register a VGA memory handler over the SMRAM window (0xA0000-0xBFFFF),
-                // matching real hardware where VGA legacy memory owns that range when
-                // SMRAM shadowing is closed.
-                let mut vga = BxVgaC::new();
-                let vga_id = MemoryDeviceId::Vga(&mut vga as *mut BxVgaC);
-                mem.register_memory_handlers(vga_id, 0xA0000, 0xBFFFF).unwrap();
+                // Map the VGA aperture over the SMRAM window (0xA0000-0xBFFFF),
+                // matching real hardware where VGA legacy memory owns that range
+                // when SMRAM shadowing is closed. Only the owner's identity
+                // matters here, so the token stands in for the device.
+                mem.register_memory_handlers(OWNER_A, 0xA0000, 0xBFFFF)
+                    .unwrap();
 
                 let cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
                 let pins = [CpuTlbPin::new(&*cpu)];
 
                 // SMRAM open (DOPEN, unrestricted): the write must land in RAM,
-                // bypassing the VGA handler entirely — write_physical_page checks
-                // smram_available/smram_enable BEFORE the memory-handler table.
+                // bypassing the mapped region entirely — write_physical_page
+                // checks smram_available/smram_enable BEFORE the region map.
                 mem.enable_smram(true, false);
                 let mut data = [0x42u8];
-                mem.write_physical_page(
-                    &pins,
-                    CpuMemoryPolicy::default(),
-                    0xA1000,
-                    1,
-                    &mut data,
-                )
-                .unwrap();
+                assert_eq!(
+                    mem.write_physical_page(
+                        &pins,
+                        CpuMemoryPolicy::default(),
+                        0xA1000,
+                        1,
+                        &mut data,
+                    )
+                    .unwrap(),
+                    PhysAccess::Done,
+                    "SMRAM open must complete in memory, reaching no device"
+                );
                 let mut ram_byte = [0];
                 assert_eq!(mem.read_ram(&pins, 0xA1000, &mut ram_byte).unwrap(), 1);
                 assert_eq!(ram_byte, [0x42], "SMRAM open must route the write to RAM");
 
-                // disable_smram() must restore prior (VGA-handler) routing: the same
-                // address now goes to the VGA handler, not RAM, so the RAM byte
-                // written above stays untouched by the second write.
+                // disable_smram() must restore the prior routing: the same
+                // address is now the mapped region's, so the access is reported
+                // to its owner and RAM is left as the first write set it.
                 mem.disable_smram();
                 let mut data2 = [0x99u8];
-                mem.write_physical_page(
-                    &pins,
-                    CpuMemoryPolicy::default(),
-                    0xA1000,
-                    1,
-                    &mut data2,
-                )
-                .unwrap();
+                assert_eq!(
+                    mem.write_physical_page(
+                        &pins,
+                        CpuMemoryPolicy::default(),
+                        0xA1000,
+                        1,
+                        &mut data2,
+                    )
+                    .unwrap(),
+                    PhysAccess::Mmio(OWNER_A),
+                    "SMRAM disabled must route the write to the mapped device"
+                );
                 assert_eq!(mem.read_ram(&pins, 0xA1000, &mut ram_byte).unwrap(), 1);
                 assert_eq!(
                     ram_byte,
                     [0x42],
-                    "SMRAM disabled must route the write to the VGA handler, not RAM"
+                    "a reported MMIO write must not also touch RAM"
                 );
             })
             .unwrap()
@@ -1596,14 +1188,18 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // false): the write must be dropped, not land in ROM.
                 assert!(!mem.bios_write_enabled());
                 let mut data = [0xAAu8];
-                mem.write_physical_page(
-                    &pins,
-                    CpuMemoryPolicy::default(),
-                    addr,
-                    1,
-                    &mut data,
-                )
-                .unwrap();
+                assert_eq!(
+                    mem.write_physical_page(
+                        &pins,
+                        CpuMemoryPolicy::default(),
+                        addr,
+                        1,
+                        &mut data,
+                    )
+                    .unwrap(),
+                    PhysAccess::Done,
+                    "the BIOS mirror is memory's own, not a device's"
+                );
                 assert_ne!(
                     mem.inherited_memory_stub.rom()[rom_offset],
                     0xAA,
@@ -1614,14 +1210,18 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // the same write must now land.
                 mem.set_bios_write_enabled(true);
                 let mut data2 = [0xAAu8];
-                mem.write_physical_page(
-                    &pins,
-                    CpuMemoryPolicy::default(),
-                    addr,
-                    1,
-                    &mut data2,
-                )
-                .unwrap();
+                assert_eq!(
+                    mem.write_physical_page(
+                        &pins,
+                        CpuMemoryPolicy::default(),
+                        addr,
+                        1,
+                        &mut data2,
+                    )
+                    .unwrap(),
+                    PhysAccess::Done,
+                    "the BIOS mirror is memory's own, not a device's"
+                );
                 assert_eq!(
                     mem.inherited_memory_stub.rom()[rom_offset],
                     0xAA,

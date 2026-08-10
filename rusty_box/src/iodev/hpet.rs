@@ -823,6 +823,38 @@ impl BxHpetC {
     }
 }
 
+/// The HPET register block as a memory-mapped device.
+///
+/// Bochs hpet.cc reads `bx_pc_system.time_nsec()` inside the handler, so the
+/// counter a guest observes is the one live at the access. That clock arrives
+/// as a value here; it used to be stamped onto the memory subsystem by the CPU
+/// before every access that might land in this range.
+impl crate::iodev::device_api::MmioDevice for BxHpetC {
+    #[inline]
+    fn mmio_read(
+        &mut self,
+        addr: u64,
+        len: u32,
+        data: &mut [u8],
+        clock: crate::iodev::device_api::DeviceClock,
+    ) {
+        self.set_now(clock.now_ticks, clock.ips);
+        self.mem_read(addr, len, data);
+    }
+
+    #[inline]
+    fn mmio_write(
+        &mut self,
+        addr: u64,
+        len: u32,
+        data: &[u8],
+        clock: crate::iodev::device_api::DeviceClock,
+    ) {
+        self.set_now(clock.now_ticks, clock.ips);
+        self.mem_write(addr, len, data);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

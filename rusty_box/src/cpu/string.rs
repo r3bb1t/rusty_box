@@ -2115,8 +2115,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             }
 
             let mut data = [0u8; 1];
-            if mem
-                .read_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data)
+            if self
+                .read_physical_routed(mem, policy, paddr, 1, &mut data)
                 .is_ok()
             {
                 return data[0];
@@ -2191,7 +2191,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             // Vetoed: go through handler-aware physical write.
             let mut data = [value];
             if let Err(e) =
-                mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data)
+                self.write_physical_routed(mem, policy, paddr, 1, &mut data)
             {
                 tracing::warn!("physical write failed at paddr={:#x}: {e}", paddr);
             }
@@ -2216,8 +2216,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             let paddr = addr as BxPhyAddress;
             if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
                 let mut data = [0u8; 2];
-                if mem
-                    .read_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data)
+                if self
+                    .read_physical_routed(mem, policy, paddr, 2, &mut data)
                     .is_ok()
                 {
                     return u16::from_le_bytes(data);
@@ -2253,8 +2253,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             let paddr = addr as BxPhyAddress;
             if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
                 let mut data = value.to_le_bytes();
-                if mem
-                    .write_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data)
+                if self
+                    .write_physical_routed(mem, policy, paddr, 2, &mut data)
                     .is_ok()
                 {
                     self.smc_write_check(paddr, 2);
@@ -2286,8 +2286,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let paddr: BxPhyAddress = addr as BxPhyAddress;
         if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 4];
-            if mem
-                .read_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data)
+            if self
+                .read_physical_routed(mem, policy, paddr, 4, &mut data)
                 .is_ok()
             {
                 return u32::from_le_bytes(data);
@@ -2321,8 +2321,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let paddr: BxPhyAddress = addr as BxPhyAddress;
         if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = value.to_le_bytes();
-            if mem
-                .write_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data)
+            if self
+                .write_physical_routed(mem, policy, paddr, 4, &mut data)
                 .is_ok()
             {
                 self.smc_write_check(paddr, 4);

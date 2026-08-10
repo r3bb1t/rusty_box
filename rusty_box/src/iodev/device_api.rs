@@ -153,6 +153,38 @@ pub trait PioDevice {
     fn pio_write(&mut self, port: u16, value: u32, len: IoLen, ctx: &mut DeviceCtx<'_>);
 }
 
+/// Emulated time at an access.
+///
+/// Bochs devices read `bx_pc_system.time_ticks()` / `time_nsec()` from inside a
+/// handler. A device reached through memory gets it as a value instead, which
+/// is what lets the memory subsystem stop carrying a clock of its own for the
+/// HPET's benefit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeviceClock {
+    /// Scheduler ticks at the access.
+    pub now_ticks: u64,
+    /// Emulated instructions per second — Bochs `bx_pc_system.m_ips`.
+    pub ips: u64,
+}
+
+/// A device that occupies a physical address range.
+///
+/// Mirrors the Bochs `memory_handler_t` read/write pair, minus the `void
+/// *param` trampoline: the device is `self`, and the region it was registered
+/// for is identified by a token the platform routes rather than by a pointer
+/// the memory subsystem dereferences.
+///
+/// Only a clock is supplied, not a full [`DeviceCtx`]: the memory-mapped
+/// devices this machine registers — VGA, the I/O APIC, the HPET — raise no
+/// interrupt and arm no timer from inside an MMIO access. The HPET does produce
+/// timer work, but latches it for the scheduler boundary to drain, which is a
+/// device conversion of its own rather than something this contract should
+/// anticipate with capabilities nothing yet calls.
+pub trait MmioDevice {
+    fn mmio_read(&mut self, addr: u64, len: u32, data: &mut [u8], clock: DeviceClock);
+    fn mmio_write(&mut self, addr: u64, len: u32, data: &[u8], clock: DeviceClock);
+}
+
 /// A device that owns scheduler timers.
 pub trait TimedDevice {
     /// One or more expirations of the device's `local` timer have come due.

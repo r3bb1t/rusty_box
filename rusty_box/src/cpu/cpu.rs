@@ -1987,21 +1987,96 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
         let a20_addr = unsafe { mem_bus.as_ref().a20_addr(addr) };
         let policy = self.memory_access_policy(a20_addr);
         let mem = unsafe { &mut *mem_bus.as_ptr() };
-        // HPET registers convert emulated time inside the memory handler
-        // (Bochs hpet.cc reads bx_pc_system.time_nsec() there); stamp this
-        // access with the CPU's live clock so mid-batch counter reads are
-        // exact. Range-gated so ordinary slow-path accesses pay one compare.
-        if (crate::iodev::hpet::HPET_BASE
-            ..crate::iodev::hpet::HPET_BASE + crate::iodev::hpet::HPET_LEN)
-            .contains(&a20_addr)
-        {
-            let ips = self
-                .pc_system_ref()
-                .map(|ps| ps.ips())
-                .unwrap_or(0);
-            mem.stamp_hpet_access_clock(self.system_ticks(), ips);
-        }
         Some((policy, mem))
+    }
+
+    /// Emulated time for a device reached through memory.
+    ///
+    /// Bochs devices read `bx_pc_system` from inside their handler, so the
+    /// clock a guest observes is the one live at the access. The HPET is the
+    /// one device here that depends on it; this used to be stamped onto the
+    /// memory subsystem before every access that might land in its range,
+    /// because the dispatch happened down there with no clock in reach.
+    #[inline]
+    fn device_clock(&self) -> crate::iodev::device_api::DeviceClock {
+        crate::iodev::device_api::DeviceClock {
+            now_ticks: self.system_ticks(),
+            ips: self.pc_system_ref().map(|ps| ps.ips()).unwrap_or(0),
+        }
+    }
+
+    /// Complete a physical read, running the device if memory reported one.
+    ///
+    /// Memory answers whose an address is and stops; this is the layer that
+    /// can reach both, so it performs the dispatch. Every physical access the
+    /// CPU issues goes through here — a caller that talked to memory directly
+    /// would silently drop MMIO, which is what `PhysAccess` being `#[must_use]`
+    /// prevents.
+    pub(super) fn read_physical_routed(
+        &self,
+        mem: &mut crate::memory::BxMemC<'_>,
+        policy: CpuMemoryPolicy,
+        paddr: BxPhyAddress,
+        len: usize,
+        data: &mut [u8],
+    ) -> crate::Result<()> {
+        match mem.read_physical_page(self.active_tlb_pins(), policy, paddr, len, data)? {
+            crate::memory::PhysAccess::Done => Ok(()),
+            crate::memory::PhysAccess::Mmio(token) => {
+                let clock = self.device_clock();
+                let a20_addr = mem.a20_addr(paddr);
+                match self.io_bus_ref() {
+                    Some(io) => {
+                        io.mmio_read(token, a20_addr, len as u32, data, clock);
+                    }
+                    // Bochs cannot reach this: a region is only registered by a
+                    // device that is present. Leaving the buffer untouched
+                    // reads as an unclaimed region rather than as stale data.
+                    None => tracing::error!(
+                        "MMIO read of {paddr:#x} has no device bus to route {token:?} to"
+                    ),
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Complete a physical write. See [`Self::read_physical_routed`].
+    pub(super) fn write_physical_routed(
+        &self,
+        mem: &mut crate::memory::BxMemC<'_>,
+        policy: CpuMemoryPolicy,
+        paddr: BxPhyAddress,
+        len: usize,
+        data: &mut [u8],
+    ) -> crate::Result<()> {
+        match mem.write_physical_page(self.active_tlb_pins(), policy, paddr, len, data)? {
+            crate::memory::PhysAccess::Done => Ok(()),
+            crate::memory::PhysAccess::Mmio(token) => {
+                let clock = self.device_clock();
+                let a20_addr = mem.a20_addr(paddr);
+                match self.io_bus_ref() {
+                    Some(io) => {
+                        io.mmio_write(token, a20_addr, len as u32, &data[..len], clock);
+                    }
+                    None => tracing::error!(
+                        "MMIO write of {paddr:#x} has no device bus to route {token:?} to"
+                    ),
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The device bus, from a shared CPU borrow.
+    ///
+    /// Same wiring invariant as `mem_bus_with_policy`: the pointer is installed
+    /// for the duration of CPU execution, and the slow memory paths that route
+    /// MMIO hold only `&self`.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    fn io_bus_ref(&self) -> Option<&mut crate::iodev::BxDevicesC> {
+        self.io_bus.map(|mut pointer| unsafe { pointer.as_mut() })
     }
 
     /// Apply final I/O state after a port dispatch.

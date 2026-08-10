@@ -1060,13 +1060,13 @@ impl BxVgaC {
 
         // Register memory handlers for VGA memory range (0xA0000-0xBFFFF)
         // This matches DEV_register_memory_handlers in vgacore.cc line 177
-        let device_id = crate::memory::MemoryDeviceId::Vga(self as *mut BxVgaC);
+        let device_id = crate::iodev::DevSlot::VGA.mmio_token();
         mem.register_memory_handlers(device_id, VGA_WINDOW_GRAPHICS_BASE, VGA_WINDOW_GRAPHICS_END)?;
         #[cfg(feature = "alloc")]
         {
             let begin = self.vbe.base_address as BxPhyAddress;
             let end = begin + self.vbe_memsize as BxPhyAddress - 1;
-            let device_id = crate::memory::MemoryDeviceId::Vga(self as *mut BxVgaC);
+            let device_id = crate::iodev::DevSlot::VGA.mmio_token();
             mem.register_memory_handlers(device_id, begin, end)?;
         }
 
@@ -5949,5 +5949,35 @@ mod tests {
         let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
         let error = restored.restore_snapshot_v3(&mut reader).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+}
+
+/// The VGA apertures as a memory-mapped device.
+///
+/// Bochs vgacore.cc registers `mem_read`/`mem_write` for the legacy window and
+/// the LFB; the return value reports whether the access was claimed, which the
+/// dispatcher has never consulted — an address only reaches here because the
+/// map already decided it belongs to this device.
+impl crate::iodev::device_api::MmioDevice for BxVgaC {
+    #[inline]
+    fn mmio_read(
+        &mut self,
+        addr: u64,
+        len: u32,
+        data: &mut [u8],
+        _clock: crate::iodev::device_api::DeviceClock,
+    ) {
+        let _claimed = self.mem_read(addr, len, data);
+    }
+
+    #[inline]
+    fn mmio_write(
+        &mut self,
+        addr: u64,
+        len: u32,
+        data: &[u8],
+        _clock: crate::iodev::device_api::DeviceClock,
+    ) {
+        let _claimed = self.mem_write(addr, len, data);
     }
 }

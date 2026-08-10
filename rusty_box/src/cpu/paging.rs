@@ -183,7 +183,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let policy = self.memory_access_policy(mem.a20_addr(paddr));
         // read_physical_page returns crate::memory::Result which is
         // converted into the CPU-facing error type below.
-        match mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data) {
+        match self.read_physical_routed(mem, policy, paddr, 4, &mut data) {
             Ok(()) => {}
             Err(crate::error::Error::Memory(e)) => return Err(super::CpuError::Memory(e)),
             Err(_) => {
@@ -206,7 +206,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let policy = self.memory_access_policy(mem.a20_addr(paddr));
         // write_physical_page returns crate::memory::Result which is
         // converted into the CPU-facing error type below.
-        let result = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data);
+        let result = self.write_physical_routed(mem, policy, paddr, 4, &mut data);
         // Bochs handleSMC flushes the writer synchronously at the store — a
         // guest page table living inside a cached code page must invalidate
         // the stale traces immediately (A/D-bit updates land here).
@@ -231,7 +231,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let policy = self.memory_access_policy(mem.a20_addr(paddr));
         // write_physical_page returns crate::memory::Result which is
         // converted into the CPU-facing error type below.
-        let result = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 8, &mut data);
+        let result = self.write_physical_routed(mem, policy, paddr, 8, &mut data);
         // Bochs handleSMC flushes the writer synchronously at the store — a
         // guest page table living inside a cached code page must invalidate
         // the stale traces immediately (A/D-bit updates land here).
@@ -627,9 +627,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             let mut buf = [0u8; 8];
             let policy =
                 self.memory_access_policy(mem.a20_addr(entry_addr[BX_LEVEL_PDE]));
-            match mem.read_physical_page(
-                self.active_tlb_pins(),
-                policy,
+            match self.read_physical_routed(mem, policy,
                 entry_addr[BX_LEVEL_PDE],
                 8,
                 &mut buf,
@@ -744,9 +742,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             let mut buf = [0u8; 8];
             let policy =
                 self.memory_access_policy(mem.a20_addr(entry_addr[BX_LEVEL_PTE]));
-            match mem.read_physical_page(
-                self.active_tlb_pins(),
-                policy,
+            match self.read_physical_routed(mem, policy,
                 entry_addr[BX_LEVEL_PTE],
                 8,
                 &mut buf,
@@ -888,9 +884,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             let entry_val = {
                 let mut buf = [0u8; 8];
                 let policy = self.memory_access_policy(mem.a20_addr(entry_addr[leaf]));
-                match mem.read_physical_page(
-                    self.active_tlb_pins(),
-                    policy,
+                match self.read_physical_routed(mem, policy,
                     entry_addr[leaf],
                     8,
                     &mut buf,

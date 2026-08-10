@@ -630,7 +630,7 @@ impl BxIoApic {
         base_offset: u16,
         mem: &mut BxMemC,
     ) -> crate::Result<bool> {
-        let device_id = crate::memory::MemoryDeviceId::IoApic(self as *mut BxIoApic);
+        let device_id = crate::iodev::DevSlot::IOAPIC.mmio_token();
         let mut changed = false;
         if new_enabled != self.enabled {
             if new_enabled {
@@ -1403,6 +1403,31 @@ impl BxIoApic {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// The I/O APIC window as a memory-mapped device — Bochs ioapic.cc.
+impl crate::iodev::device_api::MmioDevice for BxIoApic {
+    #[inline]
+    fn mmio_read(
+        &mut self,
+        addr: u64,
+        len: u32,
+        data: &mut [u8],
+        _clock: crate::iodev::device_api::DeviceClock,
+    ) {
+        let _claimed = BxIoApic::mem_read(self, addr, len, data);
+    }
+
+    #[inline]
+    fn mmio_write(
+        &mut self,
+        addr: u64,
+        len: u32,
+        data: &[u8],
+        _clock: crate::iodev::device_api::DeviceClock,
+    ) {
+        let _claimed = BxIoApic::mem_write(self, addr, len, data);
+    }
+}
 
 #[cfg(test)]
 mod tests {

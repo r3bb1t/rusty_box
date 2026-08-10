@@ -850,7 +850,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     fn smram_read_physical_dword(&mut self, paddr: u64) -> u32 {
         if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 4];
-        if mem.read_physical_page(self.active_tlb_pins(), policy, paddr as _, 4, &mut data)
+        if self.read_physical_routed(mem, policy, paddr as _, 4, &mut data)
             .is_ok()
         {
             return u32::from_le_bytes(data);
@@ -861,7 +861,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     fn smram_write_physical_dword(&mut self, paddr: u64, value: u32) {
         if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } { let mut data = value.to_le_bytes();
         // SMM state save write — physical RAM write cannot meaningfully fail
-        let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr as _, 4, &mut data);
+        let _ = self.write_physical_routed(mem, policy, paddr as _, 4, &mut data);
         // Bochs handleSMC flushes the writer synchronously at the store.
         self.smc_sync_after_phys_write(); }
     }
@@ -1054,14 +1054,14 @@ mod tests {
     /// SMBASE 0x30000, which is plain DRAM with no routing involved.
     #[test]
     fn relocated_smbase_save_area_is_routed_under_the_vga_window() {
-        use crate::iodev::vga::BxVgaC;
-        use crate::memory::{CpuMemoryPolicy, CpuTlbPin, MemoryDeviceId};
+        use crate::memory::{CpuMemoryPolicy, CpuTlbPin};
 
         let (mut cpu, mut mem) = cpu_with_memory();
 
-        // VGA owns 0xa0000-0xbffff, exactly as the machine registers it.
-        let mut vga = alloc::boxed::Box::new(BxVgaC::new());
-        let vga_id = MemoryDeviceId::Vga(&mut *vga as *mut BxVgaC);
+        // VGA owns 0xa0000-0xbffff, exactly as the machine registers it. The
+        // map stores the owner's token, so no device instance is needed to
+        // establish who the range belongs to.
+        let vga_id = crate::iodev::DevSlot::VGA.mmio_token();
         mem.register_memory_handlers(vga_id, 0xA0000, 0xBFFFF)
             .expect("VGA handler registration");
         // SMRAM control 0x0a: available, not open, not restricted.
@@ -1102,18 +1102,17 @@ mod tests {
         // A non-SMM read of the same address must NOT see SMRAM: it belongs to
         // the VGA handler while DOPEN is clear.
         let mut via_vga = [0xffu8; 4];
-        mem.read_physical_page(
-            &pins,
-            CpuMemoryPolicy::default(),
-            0xafefc,
-            4,
-            &mut via_vga,
-        )
-        .expect("non-SMM read is served by the VGA handler");
-        assert_ne!(
-            u32::from_le_bytes(via_vga),
-            SMM_REVISION_ID,
-            "outside SMM the save area must stay hidden behind the VGA window"
+        assert_eq!(
+            mem.read_physical_page(
+                &pins,
+                CpuMemoryPolicy::default(),
+                0xafefc,
+                4,
+                &mut via_vga,
+            )
+            .expect("non-SMM read resolves"),
+            crate::memory::PhysAccess::Mmio(crate::iodev::DevSlot::VGA.mmio_token()),
+            "outside SMM the save area is the VGA window's, not DRAM's"
         );
 
         // ...and the CPU's own SMM-mode read of it does see SMRAM.
@@ -1128,19 +1127,22 @@ mod tests {
         // so DMA and device-issued writes fall through to the VGA handler.
         mem.enable_smram(true, false);
         let mut via_cpu = [0xffu8; 4];
-        mem.read_physical_page(&pins, CpuMemoryPolicy::default(), 0xafefc, 4, &mut via_cpu)
-            .expect("CPU read with SMRAM open");
+        assert_eq!(
+            mem.read_physical_page(&pins, CpuMemoryPolicy::default(), 0xafefc, 4, &mut via_cpu)
+                .expect("CPU read with SMRAM open"),
+            crate::memory::PhysAccess::Done,
+            "with SMRAM open a CPU access is served by memory, not a device"
+        );
         assert_eq!(
             u32::from_le_bytes(via_cpu),
             SMM_REVISION_ID,
             "with SMRAM open a CPU access sees the save area"
         );
         let mut via_device = [0xffu8; 4];
-        mem.read_physical_page(&pins, CpuMemoryPolicy::device(), 0xafefc, 4, &mut via_device)
-            .expect("device read with SMRAM open");
-        assert_ne!(
-            u32::from_le_bytes(via_device),
-            SMM_REVISION_ID,
+        assert_eq!(
+            mem.read_physical_page(&pins, CpuMemoryPolicy::device(), 0xafefc, 4, &mut via_device)
+                .expect("device read with SMRAM open"),
+            crate::memory::PhysAccess::Mmio(crate::iodev::DevSlot::VGA.mmio_token()),
             "a device access must never see SMRAM (Bochs memory.cc cpu != NULL)"
         );
         mem.enable_smram(false, false);

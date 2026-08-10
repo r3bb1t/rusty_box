@@ -43,7 +43,7 @@ use super::pit::{
 };
 use super::serial::BxSerialC;
 use super::BxDevicesC;
-use super::device_api::PioDevice;
+use super::device_api::{MmioDevice, PioDevice};
 use super::vga::BxVgaC;
 use super::wiring;
 use super::DevSlot;
@@ -408,7 +408,7 @@ impl DeviceManager {
         // probes 0xFED00000 for the 0x8086 vendor id).
         {
             use super::hpet::{HPET_BASE, HPET_LEN};
-            let device_id = crate::memory::MemoryDeviceId::Hpet(&mut self.hpet as *mut _);
+            let device_id = DevSlot::HPET.mmio_token();
             mem.register_memory_handlers(device_id, HPET_BASE, HPET_BASE + HPET_LEN - 1)?;
         }
         // 9. ACPI Power Management (Bochs: pluginACPIController->init() in devices.cc)
@@ -916,7 +916,7 @@ impl DeviceManager {
         mem: &mut crate::memory::BxMemC<'_>,
     ) -> Result<bool> {
         use crate::iodev::vga::PCI_VGA_MMIO_SIZE;
-        let device_id = crate::memory::MemoryDeviceId::Vga(&mut self.vga as *mut BxVgaC);
+        let device_id = DevSlot::VGA.mmio_token();
         let mut changed = false;
 
         if let Some((old_base, new_base)) = self.vga.peek_pending_lfb_relocate() {
@@ -1333,6 +1333,22 @@ impl DeviceManager {
             pic,
             handles,
         })
+    }
+
+    /// Bind `slot` to the device behind its memory-mapped range.
+    ///
+    /// The memory counterpart of [`Self::bind_pio`], and the sole statement of
+    /// which slots answer a physical address. No interrupt controller comes
+    /// with it: a memory-mapped access here reaches a device that drives
+    /// neither an interrupt line nor a timer synchronously, so the binding is
+    /// the device alone.
+    pub(crate) fn bind_mmio(&mut self, slot: DevSlot) -> Option<&mut dyn MmioDevice> {
+        match slot {
+            DevSlot::VGA => Some(&mut self.vga),
+            DevSlot::IOAPIC => Some(&mut self.ioapic),
+            DevSlot::HPET => Some(&mut self.hpet),
+            _ => None,
+        }
     }
 
     /// Apply stores one device asks the chipset to make into another.
@@ -2017,7 +2033,7 @@ impl DeviceManager {
         self.relocate_acpi_sm_ports(io);
         self.acpi_sm_needs_reregister = false;
 
-        let device_id = crate::memory::MemoryDeviceId::Vga(&mut self.vga as *mut BxVgaC);
+        let device_id = DevSlot::VGA.mmio_token();
         let lfb_size = u64::from(self.vga.lfb_size());
         let old_lfb = (live_vga.lfb_base != 0).then_some((
             u64::from(live_vga.lfb_base),
@@ -2272,7 +2288,6 @@ mod tests {
     #[test]
     fn vga_bar_moves_are_visible_before_next_access() {
         on_big_stack(|| {
-            use crate::memory::MemoryDeviceId;
 
             let mut emu = guest_emulator(true);
             let lfb_size = u64::from(emu.device_manager.vga.lfb_size());
@@ -2287,7 +2302,7 @@ mod tests {
             assert!(
                 emu.memory
                     .register_memory_handlers(
-                        MemoryDeviceId::None,
+                        DevSlot::NONE.mmio_token(),
                         u64::from(initial_lfb),
                         u64::from(initial_lfb) + lfb_size - 1,
                     )
@@ -2296,7 +2311,7 @@ mod tests {
             );
             emu.memory
                 .unregister_memory_handlers(
-                    MemoryDeviceId::None,
+                    DevSlot::NONE.mmio_token(),
                     u64::from(initial_lfb),
                     u64::from(initial_lfb) + lfb_size - 1,
                 )
@@ -2312,7 +2327,7 @@ mod tests {
             assert!(emu.device_manager.vga.is_mmio_addr(0xF100_0500));
             assert!(
                 emu.memory
-                    .register_memory_handlers(MemoryDeviceId::None, 0xF000_0000, 0xF000_0FFF)
+                    .register_memory_handlers(DevSlot::NONE.mmio_token(), 0xF000_0000, 0xF000_0FFF)
                     .is_ok(),
                 "moving BAR2 must unregister the previous MMIO window"
             );
@@ -2325,7 +2340,7 @@ mod tests {
             let failed_target = 0xD000_0000u32;
             emu.memory
                 .register_memory_handlers(
-                    MemoryDeviceId::None,
+                    DevSlot::NONE.mmio_token(),
                     u64::from(failed_target),
                     u64::from(failed_target) + lfb_size - 1,
                 )
@@ -2341,7 +2356,7 @@ mod tests {
             assert!(
                 emu.memory
                     .register_memory_handlers(
-                        MemoryDeviceId::None,
+                        DevSlot::NONE.mmio_token(),
                         u64::from(committed_lfb),
                         u64::from(committed_lfb) + lfb_size - 1,
                     )
@@ -2536,7 +2551,7 @@ mod tests {
     #[test]
     fn vga_pci_bar2_commit_registers_mmio_window() {
         on_big_stack(|| {
-            use crate::memory::{BxMemC, BxMemoryStubC, MemoryDeviceId};
+            use crate::memory::{BxMemC, BxMemoryStubC};
 
             let mut dm = DeviceManager::new();
             dm.vga.enable_pci();
@@ -2550,7 +2565,7 @@ mod tests {
 
             assert!(dm.vga.is_mmio_addr(0xF000_0500));
             assert!(
-                mem.register_memory_handlers(MemoryDeviceId::None, 0xF000_0000, 0xF000_0FFF)
+                mem.register_memory_handlers(DevSlot::NONE.mmio_token(), 0xF000_0000, 0xF000_0FFF)
                     .is_err(),
                 "BAR2 MMIO window must be registered"
             );

@@ -389,7 +389,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             unsafe { *host }
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 1];
-            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data);
+            let _ = self.read_physical_routed(mem, policy, paddr, 1, &mut data);
             data[0]
         } else {
             0
@@ -404,7 +404,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             u16::from_le_bytes(unsafe { *host })
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 2];
-            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data);
+            let _ = self.read_physical_routed(mem, policy, paddr, 2, &mut data);
             u16::from_le_bytes(data)
         } else {
             0
@@ -419,7 +419,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             u32::from_le_bytes(unsafe { *host })
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 4];
-            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data);
+            let _ = self.read_physical_routed(mem, policy, paddr, 4, &mut data);
             u32::from_le_bytes(data)
         } else {
             0
@@ -434,7 +434,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             u64::from_le_bytes(unsafe { *host })
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 8];
-            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 8, &mut data);
+            let _ = self.read_physical_routed(mem, policy, paddr, 8, &mut data);
             u64::from_le_bytes(data)
         } else {
             0
@@ -452,7 +452,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             }
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [val];
-            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data);
+            let _ = self.write_physical_routed(mem, policy, paddr, 1, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -468,7 +468,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             }
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = val.to_le_bytes();
-            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data);
+            let _ = self.write_physical_routed(mem, policy, paddr, 2, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -484,7 +484,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             }
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = val.to_le_bytes();
-            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data);
+            let _ = self.write_physical_routed(mem, policy, paddr, 4, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -500,7 +500,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             }
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = val.to_le_bytes();
-            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 8, &mut data);
+            let _ = self.write_physical_routed(mem, policy, paddr, 8, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -1539,7 +1539,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     pub(super) fn read_physical_byte(&mut self, paddr: u64) -> u8 {
         let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return 0xff; };
         let mut data = [0u8; 1];
-        match mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data) {
+        match self.read_physical_routed(mem, policy, paddr, 1, &mut data) {
             Ok(()) => data[0],
             Err(e) => {
                 tracing::warn!(

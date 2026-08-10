@@ -232,11 +232,32 @@ impl DevSlot {
     pub const ACPI: Self = Self(11);
     /// QEMU fw_cfg firmware configuration device.
     pub const FW_CFG: Self = Self(12);
+    /// 82093AA I/O APIC. Memory-mapped only — it occupies no I/O port.
+    pub const IOAPIC: Self = Self(13);
+    /// High Precision Event Timer. Memory-mapped only.
+    pub const HPET: Self = Self(14);
 
     /// True for the unclaimed-port slot.
     #[inline]
     pub const fn is_none(self) -> bool {
         self.0 == Self::NONE.0
+    }
+
+    /// This slot as the token a memory-map registration carries.
+    ///
+    /// Device identity is one namespace: a device that answers both port I/O
+    /// and a physical range — the VGA — is the same slot on both buses. The
+    /// memory subsystem stores the token without interpreting it and hands it
+    /// back on an access, which is the whole of what it knows about devices.
+    #[inline]
+    pub(crate) const fn mmio_token(self) -> crate::memory::mmio_map::MmioToken {
+        crate::memory::mmio_map::MmioToken(self.0 as u16)
+    }
+
+    /// Recover the slot a memory access reported. Inverse of [`Self::mmio_token`].
+    #[inline]
+    pub(crate) const fn from_mmio_token(token: crate::memory::mmio_map::MmioToken) -> Self {
+        Self(token.0 as u8)
     }
 
     /// Human-readable name, for diagnostics and registration logging.
@@ -255,6 +276,8 @@ impl DevSlot {
             Self::PCI => "PCI bus",
             Self::ACPI => "PIIX4 ACPI",
             Self::FW_CFG => "fw_cfg",
+            Self::IOAPIC => "82093AA I/O APIC",
+            Self::HPET => "HPET",
             _ => "unknown device slot",
         }
     }
@@ -749,6 +772,65 @@ impl BxDevicesC {
         }
 
         self.default_write_handler(port, value, io_len);
+    }
+
+    /// Service a memory-mapped read that the memory map attributed to `token`.
+    ///
+    /// The counterpart of [`Self::inp`] for physical addresses. Memory decides
+    /// *that* an address is claimed and by whom; this decides what that means,
+    /// which is the split that lets the memory subsystem hold no device
+    /// references at all.
+    ///
+    /// Returns whether a device serviced the access. `false` means the token
+    /// named no memory-mapped device — the caller leaves the buffer as it found
+    /// it, which reads as an unclaimed region rather than as stale data.
+    pub fn mmio_read(
+        &mut self,
+        token: crate::memory::mmio_map::MmioToken,
+        addr: u64,
+        len: u32,
+        data: &mut [u8],
+        clock: device_api::DeviceClock,
+    ) -> bool {
+        let slot = DevSlot::from_mmio_token(token);
+        let Some(dm) = self.device_manager_mut() else {
+            return false;
+        };
+        match dm.bind_mmio(slot) {
+            Some(device) => {
+                device.mmio_read(addr, len, data, clock);
+                true
+            }
+            None => {
+                tracing::warn!("MMIO read of {addr:#x} routed to {slot:?}, which maps no device");
+                false
+            }
+        }
+    }
+
+    /// Service a memory-mapped write attributed to `token`. See [`Self::mmio_read`].
+    pub fn mmio_write(
+        &mut self,
+        token: crate::memory::mmio_map::MmioToken,
+        addr: u64,
+        len: u32,
+        data: &[u8],
+        clock: device_api::DeviceClock,
+    ) -> bool {
+        let slot = DevSlot::from_mmio_token(token);
+        let Some(dm) = self.device_manager_mut() else {
+            return false;
+        };
+        match dm.bind_mmio(slot) {
+            Some(device) => {
+                device.mmio_write(addr, len, data, clock);
+                true
+            }
+            None => {
+                tracing::warn!("MMIO write of {addr:#x} routed to {slot:?}, which maps no device");
+                false
+            }
+        }
     }
 
     /// Bulk-read from an I/O port.
@@ -1399,6 +1481,50 @@ mod tests {
             .unwrap();
     }
 
+    /// A memory-mapped access must reach the device the map named.
+    ///
+    /// The port and memory buses now share one slot namespace, so this pins the
+    /// half memory cannot check for itself: the token a physical access reports
+    /// has to bind to a real device and that device has to observe the write.
+    /// The VGA text buffer is the case the whole boot depends on.
+    #[test]
+    fn a_reported_mmio_token_reaches_the_device_that_owns_it() {
+        on_big_stack(|| {
+            let mut dm = alloc::boxed::Box::new(devices::DeviceManager::new());
+            let clock = device_api::DeviceClock {
+                now_ticks: 0,
+                ips: 1_000_000,
+            };
+
+            // Writing through the slot the map would report must land in the
+            // device, not merely be accepted. IOREGSEL is the cleanest witness:
+            // an unconditional register that reads back what was written,
+            // needing no mode programming first.
+            const IOREGSEL: u64 = 0xFEC0_0000;
+            let device = dm
+                .bind_mmio(DevSlot::IOAPIC)
+                .expect("the I/O APIC slot must map a device");
+            device.mmio_write(IOREGSEL, 4, &0x12u32.to_ne_bytes(), clock);
+
+            let mut readback = [0u8; 4];
+            let device = dm.bind_mmio(DevSlot::IOAPIC).expect("still bound");
+            device.mmio_read(IOREGSEL, 4, &mut readback, clock);
+            assert_eq!(
+                u32::from_ne_bytes(readback),
+                0x12,
+                "the value must come back from the device that took it"
+            );
+
+            // The other memory-mapped slots bind too, and a port-only one does not.
+            assert!(dm.bind_mmio(DevSlot::VGA).is_some());
+            assert!(dm.bind_mmio(DevSlot::HPET).is_some());
+            assert!(
+                dm.bind_mmio(DevSlot::SERIAL).is_none(),
+                "a slot with no physical range must not bind a memory device"
+            );
+        });
+    }
+
     /// Every slot must be answered by exactly one of the two dispatch paths.
     ///
     /// The bus routes a claimed port either through `bind_pio` (device API) or
@@ -1423,6 +1549,10 @@ mod tests {
             DevSlot::PCI,
             DevSlot::ACPI,
             DevSlot::FW_CFG,
+            // Memory-mapped only: they claim no port, so the port bus must
+            // answer for neither of them.
+            DevSlot::IOAPIC,
+            DevSlot::HPET,
         ];
         /// Slots whose device is on the device API. Kept as data so the two
         /// sets are compared, not merely asserted about one at a time.

@@ -5,6 +5,7 @@ pub(crate) mod memory_rusty_box;
 pub mod memory_stub;
 pub mod misc_mem;
 pub mod mmio;
+pub mod mmio_map;
 pub mod permissions;
 
 #[cfg(test)]
@@ -12,7 +13,7 @@ mod tests;
 
 pub use super::error::Result;
 use crate::{
-    config::{BxPhyAddress, MAX_HANDLER_OVERFLOW, MAX_MEM_BLOCKS},
+    config::{BxPhyAddress, MAX_MEM_BLOCKS},
     cpu::{BxCpuC},
 };
 #[cfg(feature = "alloc")]
@@ -332,91 +333,20 @@ impl Drop for BxMemoryStubC {
 
 type Unsigned = u32;
 
-/// Identifies which device owns a memory-mapped I/O handler.
+/// What a physical access still needs from its caller.
 ///
-/// Each variant carries a raw pointer to the device instance, replacing the
-/// former `*const c_void` param + fn-ptr pair with a typed discriminant that
-/// the dispatch code in `misc_mem.rs` matches on directly.
-#[derive(Clone, Copy)]
-pub(crate) enum MemoryDeviceId {
-    Vga(*mut crate::iodev::vga::BxVgaC),
-    IoApic(*mut crate::iodev::ioapic::BxIoApic),
-    Hpet(*mut crate::iodev::hpet::BxHpetC),
-    None,
-}
-
-impl core::fmt::Debug for MemoryDeviceId {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Vga(p) => write!(f, "Vga({:p})", p),
-            Self::IoApic(p) => write!(f, "IoApic({:p})", p),
-            Self::Hpet(p) => write!(f, "Hpet({:p})", p),
-            Self::None => write!(f, "None"),
-        }
-    }
-}
-
-impl MemoryDeviceId {
-    /// Dereference the VGA device pointer.
-    ///
-    /// # Safety (internal)
-    /// The raw pointer was set once at init and remains valid for the emulator lifetime.
-    /// Aliasing is the caller's responsibility (same as the prior inline `unsafe` blocks).
-    #[inline(always)]
-    pub(crate) fn vga_mut(&self) -> Option<&mut crate::iodev::vga::BxVgaC> {
-        match self {
-            MemoryDeviceId::Vga(ptr) => Some(unsafe { &mut **ptr }),
-            _ => None,
-        }
-    }
-
-    /// Dereference the IOAPIC device pointer.
-    ///
-    /// # Safety (internal)
-    /// The raw pointer was set once at init and remains valid for the emulator lifetime.
-    /// Aliasing is the caller's responsibility (same as the prior inline `unsafe` blocks).
-    #[inline(always)]
-    pub(crate) fn ioapic_mut(&self) -> Option<&mut crate::iodev::ioapic::BxIoApic> {
-        match self {
-            MemoryDeviceId::IoApic(ptr) => Some(unsafe { &mut **ptr }),
-            _ => None,
-        }
-    }
-
-    /// Dereference the HPET device pointer.
-    ///
-    /// # Safety (internal)
-    /// The raw pointer was set once at init and remains valid for the emulator lifetime.
-    /// Aliasing is the caller's responsibility (same as the prior inline `unsafe` blocks).
-    #[inline(always)]
-    pub(crate) fn hpet_mut(&self) -> Option<&mut crate::iodev::hpet::BxHpetC> {
-        match self {
-            MemoryDeviceId::Hpet(ptr) => Some(unsafe { &mut **ptr }),
-            _ => None,
-        }
-    }
-
-    /// Whether two ids refer to the same device instance (pointer identity).
-    /// Used by `unregister_memory_handlers` to match the handler to remove.
-    #[inline]
-    pub(crate) fn same_device(&self, other: &MemoryDeviceId) -> bool {
-        match (self, other) {
-            (MemoryDeviceId::Vga(a), MemoryDeviceId::Vga(b)) => core::ptr::eq(*a, *b),
-            (MemoryDeviceId::IoApic(a), MemoryDeviceId::IoApic(b)) => core::ptr::eq(*a, *b),
-            (MemoryDeviceId::Hpet(a), MemoryDeviceId::Hpet(b)) => core::ptr::eq(*a, *b),
-            (MemoryDeviceId::None, MemoryDeviceId::None) => true,
-            _ => false,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct MemoryHandlerStruct {
-    next: Option<u16>,
-    pub(super) begin: BxPhyAddress,
-    pub(super) end: BxPhyAddress,
-    bitmap: u16,
-    pub(super) device_id: MemoryDeviceId,
+/// Bochs calls a device's handler from inside `writePhysicalPage`, which is why
+/// this port carried raw device pointers on the memory subsystem. Memory now
+/// answers *whose* the address is and stops; the caller — which owns the
+/// devices — performs the dispatch. `#[must_use]` is what keeps that honest: a
+/// caller that ignores the outcome silently drops every MMIO access.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysAccess {
+    /// Memory serviced the access completely.
+    Done,
+    /// The address belongs to a memory-mapped device, which has not run yet.
+    Mmio(mmio_map::MmioToken),
 }
 
 //#define BIOS_MAP_LAST128K(addr) (((addr) | 0xfff00000) & BIOS_MASK)
@@ -427,12 +357,7 @@ pub(crate) const BIOS_ROM_1MEG: u8 = 0x04;
 
 #[derive(Debug)]
 pub struct BxMemC<'a> {
-    #[cfg(feature = "alloc")]
-    memory_handlers: Vec<Option<MemoryHandlerStruct>>,
-    #[cfg(not(feature = "alloc"))]
-    memory_handlers: [Option<MemoryHandlerStruct>; 4096],
-    handler_overflow: [Option<MemoryHandlerStruct>; MAX_HANDLER_OVERFLOW],
-    handler_overflow_count: usize,
+    pub(crate) mmio: mmio_map::MmioMap,
     pci_enabled: bool,
     bios_write_enabled: bool,
 
@@ -454,12 +379,6 @@ pub struct BxMemC<'a> {
     /// A20 address mask - controls address line 20 gating
     /// This is synchronized from BxPcSystemC when A20 state changes
     a20_mask: BxPhyAddress,
-
-    /// `(system_ticks, ips)` of the in-flight HPET MMIO access, stamped by
-    /// the CPU slow path before dispatch. The HPET converts this to the
-    /// nanosecond clock Bochs reads via `bx_pc_system.time_nsec()` inside
-    /// its handlers; a plain field would need `&mut` on read paths.
-    hpet_access_clock: core::cell::Cell<(u64, u64)>,
 
     /// Keeps the lifetime parameter used by callers (CPU borrows, emulator context).
     _marker: core::marker::PhantomData<&'a ()>,
@@ -483,20 +402,6 @@ impl BxMemC<'_> {
         self.a20_mask
     }
 
-    /// Stamp the emulated clock for an in-flight HPET MMIO access — the CPU
-    /// slow path records its `system_ticks()`/`ips` pair here so the HPET
-    /// handler observes the same clock Bochs reads via
-    /// `bx_pc_system.time_nsec()` inside `hpet_read`/`hpet_write`.
-    #[inline]
-    pub(crate) fn stamp_hpet_access_clock(&self, system_ticks: u64, ips: u64) {
-        self.hpet_access_clock.set((system_ticks, ips));
-    }
-
-    /// The `(system_ticks, ips)` pair stamped for the current HPET access.
-    #[inline]
-    pub(crate) fn hpet_access_clock(&self) -> (u64, u64) {
-        self.hpet_access_clock.get()
-    }
 
 
     // ── SMC write-stamp table forwarders (table lives in the stub) ─────────
@@ -885,7 +790,7 @@ impl<'m> BxMemC<'m> {
 
     /// Count how many registered (non-None) memory handlers exist (for diagnostics).
     pub fn memory_handler_info(&self) -> usize {
-        self.memory_handlers.iter().filter(|h| h.is_some()).count()
+        self.mmio.len()
     }
 
     /// Set memory type for a specific area (PAM register support).
@@ -1313,7 +1218,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 let cpu = BxCpuBuilder::new().build().unwrap();
                 let pins = [CpuTlbPin::new(&*cpu)];
                 let mut written = [0x11, 0x22, 0x33, 0x44];
-                mem.write_physical_page(
+                let wrote = mem.write_physical_page(
                     &pins,
                     CpuMemoryPolicy::default(),
                     1022,
@@ -1321,9 +1226,10 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                     &mut written,
                 )
                 .unwrap();
+                assert_eq!(wrote, super::PhysAccess::Done, "plain RAM reaches no device");
 
                 let mut read = [0; 4];
-                mem.read_physical_page(
+                let got = mem.read_physical_page(
                     &pins,
                     CpuMemoryPolicy::default(),
                     1022,
@@ -1331,6 +1237,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                     &mut read,
                 )
                 .unwrap();
+                assert_eq!(got, super::PhysAccess::Done, "plain RAM reaches no device");
                 assert_eq!(read, written);
             })
             .unwrap()

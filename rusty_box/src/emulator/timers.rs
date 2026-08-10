@@ -680,7 +680,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
             // 32-bit message. Bochs never advertises the FSB capability bit,
             // so guests do not normally reach this.
             let mut bytes = value.to_le_bytes();
-            if let Err(error) = self.memory.write_physical_page(
+            match self.memory.write_physical_page(
                 &[],
                 // DEV_MEM_WRITE_PHYSICAL — a device access, so it must not see
                 // SMRAM (Bochs memory.cc `cpu == NULL`).
@@ -689,7 +689,28 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
                 bytes.len(),
                 &mut bytes,
             ) {
-                tracing::error!("HPET: FSB message write to {address:#x} failed: {error:?}");
+                Ok(crate::memory::PhysAccess::Done) => {}
+                // A device writing into another device's window. Bochs would
+                // recurse into the target's handler from inside the memory
+                // write; the routing is explicit here instead.
+                Ok(crate::memory::PhysAccess::Mmio(token)) => {
+                    let clock = crate::iodev::device_api::DeviceClock {
+                        now_ticks: self.pc_system.time_ticks(),
+                        ips: self.pc_system.ips(),
+                    };
+                    let slot = crate::iodev::DevSlot::from_mmio_token(token);
+                    match self.device_manager.bind_mmio(slot) {
+                        Some(device) => {
+                            device.mmio_write(address, bytes.len() as u32, &bytes, clock)
+                        }
+                        None => tracing::error!(
+                            "HPET: FSB message to {address:#x} routed to {slot:?}, which maps no device"
+                        ),
+                    }
+                }
+                Err(error) => {
+                    tracing::error!("HPET: FSB message write to {address:#x} failed: {error:?}");
+                }
             }
         }
         for (index, op) in pending.timer_ops.iter().enumerate() {
