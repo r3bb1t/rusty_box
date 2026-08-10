@@ -13,7 +13,7 @@ use crate::memory::memory_rusty_box::{
     bx_guest_ram_span, bx_is_pci_hole_addr, BIOSROMSZ, EXROMSIZE,
 };
 
-use core::cell::{Cell, UnsafeCell};
+use core::cell::UnsafeCell;
 
 #[cfg(feature = "std")]
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -204,23 +204,23 @@ impl BxMemoryStubC {
             core::ptr::addr_of_mut!((*ptr).rom_offset).write(rom_offset);
             core::ptr::addr_of_mut!((*ptr).bogus_offset).write(bogus_offset);
             // Initialize blocks to SwappedOut in-place on heap
-            let blocks = &mut *(*ptr).blocks_offsets.get();
+            let blocks = &mut (*ptr).blocks_offsets;
             if allocated >= len {
                 for (guest_block, entry) in blocks.iter_mut().take(num_blocks).enumerate() {
                     *entry = Block::Block {
                         offset: guest_block * block_size,
                     };
                 }
-                core::ptr::addr_of_mut!((*ptr).used_blocks).write(Cell::new(num_blocks));
+                core::ptr::addr_of_mut!((*ptr).used_blocks).write(num_blocks);
             } else {
                 for entry in blocks.iter_mut().take(num_blocks) {
                     *entry = Block::SwappedOut;
                 }
-                core::ptr::addr_of_mut!((*ptr).used_blocks).write(Cell::new(0));
+                core::ptr::addr_of_mut!((*ptr).used_blocks).write(0);
             }
-            core::ptr::addr_of_mut!((*ptr).next_swapout_idx).write(Cell::new(0));
+            core::ptr::addr_of_mut!((*ptr).next_swapout_idx).write(0);
             // Full residency lays blocks out as an identity map above.
-            core::ptr::addr_of_mut!((*ptr).identity_map).write(Cell::new(allocated >= len));
+            core::ptr::addr_of_mut!((*ptr).identity_map).write(allocated >= len);
             #[cfg(feature = "std")]
             core::ptr::addr_of_mut!((*ptr).overflow_file).write(UnsafeCell::new(overflow_file));
             // Machine-wide SMC write-stamp table (Bochs icache.h
@@ -335,12 +335,12 @@ impl BxMemoryStubC {
             allocated: host,
             resident_backing_len,
             block_size,
-            blocks_offsets: UnsafeCell::new(blocks),
+            blocks_offsets: blocks,
             num_blocks,
             vector_offset,
             rom_offset,
             bogus_offset,
-            used_blocks: Cell::new(used_blocks),
+            used_blocks,
             smc_stamps,
             smc_pending: [crate::cpu::icache::PendingSmc::default();
                 crate::cpu::icache::SMC_PENDING_CAP],
@@ -348,9 +348,9 @@ impl BxMemoryStubC {
             smc_seq_next: 0,
             smc_overflow_seq: 0,
             apic_scratch: [0u8; 4096],
-            next_swapout_idx: Cell::new(0),
+            next_swapout_idx: 0,
             // Full residency lays blocks out as an identity map above.
-            identity_map: Cell::new(host >= guest),
+            identity_map: host >= guest,
             #[cfg(feature = "std")]
             overflow_file: UnsafeCell::new(overflow_file),
         })
@@ -563,8 +563,8 @@ impl BxMemoryStubC {
             block_size: self.block_size as u64,
             num_blocks: self.num_blocks as u32,
             resident_capacity: self.snapshot_resident_capacity() as u32,
-            used_blocks: self.used_blocks.get() as u32,
-            next_swapout_guest_block: self.next_swapout_idx.get() as u32,
+            used_blocks: self.used_blocks as u32,
+            next_swapout_guest_block: self.next_swapout_idx as u32,
         }
     }
 
@@ -806,7 +806,7 @@ impl BxMemoryStubC {
         // succeeded. ROM, bogus/APIC scratch, padding, and CPU TLB pointers are
         // intentionally outside this block-logical state.
         for (guest_block, saved) in saved_map.iter().copied().enumerate() {
-            self.blocks_offsets()[guest_block] = match saved {
+            self.blocks_offsets_mut()[guest_block] = match saved {
                 MemorySnapshotResidency::Swapped => Block::SwappedOut,
                 MemorySnapshotResidency::Resident { slot } => Block::Block {
                     offset: usize::try_from(slot)
@@ -815,8 +815,8 @@ impl BxMemoryStubC {
                 },
             };
         }
-        self.used_blocks.set(used_blocks);
-        self.next_swapout_idx.set(next_swapout);
+        self.used_blocks = used_blocks;
+        self.next_swapout_idx = next_swapout;
         self.recompute_identity_map();
         self.smc_stamps.fill(0);
         self.smc_pending.fill(crate::cpu::icache::PendingSmc::default());
@@ -862,7 +862,7 @@ impl BxMemoryStubC {
     }
 
     #[cfg(feature = "std")]
-    fn read_block_into(&self, block: usize, slot_offset: usize) -> Result<()> {
+    fn read_block_into(&mut self, block: usize, slot_offset: usize) -> Result<()> {
         let logical_len = self.logical_block_len(block);
         let slot_end = slot_offset
             .checked_add(self.block_size)
@@ -887,7 +887,7 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub(crate) fn allocate_block(&self, block: usize, pins: &[CpuTlbPin]) -> Result<()> {
+    pub(crate) fn allocate_block(&mut self, block: usize, pins: &[CpuTlbPin]) -> Result<()> {
         if block >= self.num_blocks {
             return Err(MemoryError::Internal("guest block out of range").into());
         }
@@ -905,14 +905,14 @@ impl BxMemoryStubC {
             if capacity == 0 {
                 return Err(MemoryError::InsufficientRam.into());
             }
-            let used_blocks = self.used_blocks.get();
+            let used_blocks = self.used_blocks;
             let (slot_offset, victim, uses_new_slot) = if used_blocks < capacity {
                 (used_blocks * self.block_size, None, true)
             } else {
                 let mut selected = None;
                 for _ in 0..self.num_blocks {
-                    let guest = self.next_swapout_idx.get();
-                    self.next_swapout_idx.set((guest + 1) % self.num_blocks);
+                    let guest = self.next_swapout_idx;
+                    self.next_swapout_idx = (guest + 1) % self.num_blocks;
                     let Block::Block { offset } = self.blocks_offsets()[guest] else {
                         continue;
                     };
@@ -955,19 +955,19 @@ impl BxMemoryStubC {
                 return Err(error);
             }
             if let Some(victim_guest) = victim {
-                self.blocks_offsets()[victim_guest] = Block::SwappedOut;
+                self.blocks_offsets_mut()[victim_guest] = Block::SwappedOut;
             }
-            self.blocks_offsets()[block] = Block::Block {
+            self.blocks_offsets_mut()[block] = Block::Block {
                 offset: slot_offset,
             };
             if uses_new_slot {
-                self.used_blocks.set(used_blocks + 1);
+                self.used_blocks = used_blocks + 1;
             }
             // Swapping regime: blocks land at arbitrary slots (and this path
             // is only reachable when residency is partial), so the identity
             // map is broken. Exact by construction — under full residency no
             // block is ever SwappedOut and this function is never entered.
-            self.identity_map.set(false);
+            self.identity_map = false;
             Ok(())
         }
     }

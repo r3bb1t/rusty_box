@@ -20,7 +20,7 @@ use crate::{
 use alloc::vec::Vec;
 pub use error::*;
 
-use core::cell::{Cell, UnsafeCell};
+use core::cell::UnsafeCell;
 
 /// The fixed TLB host-pointer capacities are architectural CPU cache sizes.
 ///
@@ -269,14 +269,14 @@ pub struct BxMemoryStubC {
     /// aligned correctly
     vector_offset: usize,
     /// None if swapped out
-    blocks_offsets: UnsafeCell<[Block; MAX_MEM_BLOCKS]>,
+    blocks_offsets: [Block; MAX_MEM_BLOCKS],
     num_blocks: usize,
     /// 512k BIOS rom space + 128k expansion rom space
     rom_offset: usize,
     /// 4k for unexisting memory
     bogus_offset: usize,
 
-    used_blocks: Cell<usize>,
+    used_blocks: usize,
 
     /// Machine-wide SMC page-write-stamp table — Bochs icache.h
     /// `bxPageWriteStampTable::fineGranularityMapping`. ONE table for the
@@ -304,14 +304,14 @@ pub struct BxMemoryStubC {
     /// Zero-initialized 4KB scratch buffer for APIC MMIO (0xFEE00000-0xFEEFFFFF)
     apic_scratch: [u8; 4096],
 
-    next_swapout_idx: Cell<usize>,
+    next_swapout_idx: usize,
 
     /// Cached "host backing is a full identity map" verdict consumed by
     /// `identity_guest_base` on every cpu-loop entry (per SMP slice — the
     /// O(num_blocks) table walk this replaces dominated the SMP hot path).
     /// Maintained at every block-table mutation: construction, block
     /// allocation/eviction, and snapshot restore.
-    identity_map: Cell<bool>,
+    identity_map: bool,
     #[cfg(feature = "std")]
     //overflow_file: Option<Arc<Mutex<std::fs::File>>>,
     overflow_file: UnsafeCell<File>,
@@ -549,9 +549,18 @@ impl BxMemoryStubC {
     }
 
     #[allow(clippy::mut_from_ref)]
-    fn blocks_offsets(&self) -> &mut [Block] {
-        let arr = unsafe { &mut (*self.blocks_offsets.get()) };
-        &mut arr[..self.num_blocks]
+    fn blocks_offsets(&self) -> &[Block] {
+        &self.blocks_offsets[..self.num_blocks]
+    }
+
+    /// The block table, for the paths that move a block between residency and
+    /// the swap file. Separate from the shared accessor because those paths now
+    /// hold `&mut self` — the residency swap used to launder `&self` into
+    /// `&mut` through an `UnsafeCell`, which is exactly the borrow-checker
+    /// evasion the decomposition removes.
+    fn blocks_offsets_mut(&mut self) -> &mut [Block] {
+        let num_blocks = self.num_blocks;
+        &mut self.blocks_offsets[..num_blocks]
     }
 
     /// Full O(num_blocks) identity-map scan — the ground truth behind the
@@ -572,8 +581,8 @@ impl BxMemoryStubC {
     }
 
     /// Re-derive the cached identity verdict after a bulk block-table rewrite.
-    pub(super) fn recompute_identity_map(&self) {
-        self.identity_map.set(self.scan_identity_map());
+    pub(super) fn recompute_identity_map(&mut self) {
+        self.identity_map = self.scan_identity_map();
     }
 
     pub(super) fn rom(&mut self) -> &mut [u8] {
@@ -732,11 +741,11 @@ impl<'m> BxMemC<'m> {
     pub(crate) fn identity_guest_base(&mut self) -> (*mut u8, usize) {
         let stub = &self.inherited_memory_stub;
         debug_assert_eq!(
-            stub.identity_map.get(),
+            stub.identity_map,
             stub.scan_identity_map(),
             "cached identity-map verdict diverged from the block table"
         );
-        if !stub.identity_map.get() {
+        if !stub.identity_map {
             return (core::ptr::null_mut(), 0);
         }
         let ptr = unsafe { stub.actual_vector.add(stub.vector_offset) };
@@ -1448,7 +1457,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
 
         let mut byte = [0];
         assert!(mem.read_ram(&[], MIB as u64, &mut byte).is_err());
-        let blocks = unsafe { &*mem.inherited_memory_stub.blocks_offsets.get() };
+        let blocks = &mem.inherited_memory_stub.blocks_offsets;
         assert!(matches!(blocks[1], super::Block::SwappedOut));
 
         unsafe {
