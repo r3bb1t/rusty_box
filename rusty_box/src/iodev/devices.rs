@@ -43,7 +43,7 @@ use super::pit::{
 };
 use super::serial::BxSerialC;
 use super::BxDevicesC;
-use super::device_api::{MmioDevice, PioDevice};
+use super::device_api::{ChipsetEffect, MmioDevice, PioDevice, SmramControl};
 use super::vga::BxVgaC;
 use super::wiring;
 use super::DevSlot;
@@ -871,35 +871,36 @@ impl DeviceManager {
             self.acpi_sm_needs_reregister = false;
         }
         if self.pam_needs_update {
-            self.pci_bridge.apply_pam_to_memory(mem);
+            let effect = self.pci_bridge.shadow_ram_effect();
+            self.apply_chipset_effect(effect, mem)?;
             self.pam_needs_update = false;
             effects.memory_mapping_changed = true;
         }
         if self.smram_needs_update {
-            self.pci_bridge.apply_smram_to_memory(mem);
+            let effect = self.pci_bridge.smram_effect();
+            self.apply_chipset_effect(effect, mem)?;
             self.smram_needs_update = false;
             effects.memory_mapping_changed = true;
         }
         if self.bios_write_needs_update {
-            self.pci2isa.apply_bios_write_to_memory(mem);
+            let effect = self.pci2isa.bios_rom_effect();
+            self.apply_chipset_effect(effect, mem)?;
             self.bios_write_needs_update = false;
             effects.memory_mapping_changed = true;
         }
         if self.ioapic_enable_needs_update {
-            // Bochs pci2isa.cc pci_write_handler cases 0x4f/0x80:
-            // DEV_ioapic_set_enabled(pci_conf[0x4f] & 0x01,
-            //   (pci_conf[0x80] & 0x3f) << 10). Only flag a memory-map change
-            // when the IOAPIC MMIO window was actually (un)registered/moved.
-            if self.pci2isa.apply_ioapic_enable(&mut self.ioapic, mem)? {
+            // Only flag a memory-map change when the IOAPIC MMIO window was
+            // actually (un)registered or moved.
+            let effect = self.pci2isa.ioapic_enable_effect();
+            if self.apply_chipset_effect(effect, mem)? {
                 effects.memory_mapping_changed = true;
             }
             self.ioapic_enable_needs_update = false;
         }
         if let Some(enabled) = self.bios_1meg_access_pending.take() {
-            // Bochs pci2isa.cc case 0x4f:
-            // DEV_mem_set_bios_rom_access(BIOS_ROM_1MEG, ...). Tracked-but-inert
-            // bitmask (Bochs logs "not supported"), so no memory_mapping_changed.
-            mem.set_bios_rom_access(crate::memory::BIOS_ROM_1MEG, enabled);
+            // Tracked-but-inert bitmask (Bochs logs "not supported"), so no
+            // memory_mapping_changed.
+            self.apply_chipset_effect(ChipsetEffect::BiosRom1Meg(enabled), mem)?;
         }
         if self.vga_bar_needs_reregister {
             effects.memory_mapping_changed |= self.reregister_vga_bars(mem)?;
@@ -908,6 +909,68 @@ impl DeviceManager {
 
         io.pci_conf_addr = self.pci_conf_addr;
         Ok(effects)
+    }
+
+    /// Carry out one [`ChipsetEffect`] against the machine.
+    ///
+    /// The single place a chipset request becomes a change to memory or another
+    /// device. Devices describe what they want; this performs it, so no device
+    /// holds the memory bus. Returns whether the physical memory map moved, so
+    /// the caller can invalidate CPU caches over the affected pages.
+    fn apply_chipset_effect(
+        &mut self,
+        effect: ChipsetEffect,
+        mem: &mut crate::memory::BxMemC<'_>,
+    ) -> Result<bool> {
+        match effect {
+            // Bochs pci.cc reset()/pci_write_handler: DEV_mem_set_memory_type
+            // per PAM area.
+            ChipsetEffect::ShadowRam(areas) => {
+                for (area, [readable, writable]) in areas.iter().enumerate() {
+                    mem.set_memory_type(area, 0, *readable);
+                    mem.set_memory_type(area, 1, *writable);
+                }
+                Ok(true)
+            }
+            // Bochs pci.cc smram_control.
+            ChipsetEffect::Smram(SmramControl::Disable) => {
+                mem.disable_smram();
+                Ok(true)
+            }
+            ChipsetEffect::Smram(SmramControl::Enable { dopen, dcls }) => {
+                mem.enable_smram(dopen, dcls);
+                Ok(true)
+            }
+            // Bochs pci2isa.cc case 0x4e: DEV_mem_set_bios_write() +
+            // DEV_mem_set_bios_rom_access().
+            ChipsetEffect::BiosRom {
+                write_enabled,
+                lower,
+                extended,
+            } => {
+                mem.set_bios_write_enabled(write_enabled);
+                mem.set_bios_rom_access(crate::memory::BIOS_ROM_LOWER, lower);
+                mem.set_bios_rom_access(crate::memory::BIOS_ROM_EXTENDED, extended);
+                Ok(true)
+            }
+            ChipsetEffect::BiosRom1Meg(enabled) => {
+                mem.set_bios_rom_access(crate::memory::BIOS_ROM_1MEG, enabled);
+                Ok(false)
+            }
+            // Bochs pci2isa.cc cases 0x4f/0x80: DEV_ioapic_set_enabled().
+            ChipsetEffect::IoApicEnable {
+                enabled,
+                base_offset,
+            } => self.ioapic.set_enabled_with_mem(enabled, base_offset, mem),
+            // Bochs DEV_cmos_set_reg — one device storing into another.
+            ChipsetEffect::CmosByte { index, value } => {
+                match self.cmos.ram.get_mut(usize::from(index)) {
+                    Some(byte) => *byte = value,
+                    None => tracing::error!("CMOS index {index:#x} is out of range"),
+                }
+                Ok(false)
+            }
+        }
     }
 
     /// Transactionally relocate both VGA PCI memory BARs.
@@ -1351,18 +1414,19 @@ impl DeviceManager {
         }
     }
 
-    /// Apply stores one device asks the chipset to make into another.
+    /// Apply the chipset effects devices raised during a port dispatch.
     ///
-    /// Bochs acpi.cc PM1_CNT suspend-to-ram (S3) calls `DEV_cmos_set_reg(0xF,
-    /// 0xFE)` — the shutdown-status byte the BIOS reads on the resume path.
-    /// A device context reaches only its own device, so a cross-device store
-    /// stays a request the bus applies here, drained on the same schedule as
-    /// the interrupt and DMA latches. `ChipsetEffect` will carry these as data
-    /// once the MMIO inversion lands; until then this is the whole set.
+    /// Drained on the same schedule as the interrupt and DMA latches. Only
+    /// effects a device can raise from inside a port access land here; the
+    /// memory-routing ones are deferred to the machine boundary, where memory
+    /// is borrowable, and drained by `apply_machine_boundary`.
     #[inline]
-    pub(crate) fn apply_cross_device_stores(&mut self) {
-        if core::mem::take(&mut self.acpi.suspend_to_ram_pending) {
-            self.cmos.ram[0x0F] = 0xFE;
+    pub(crate) fn apply_dispatch_effects(&mut self) {
+        if let Some(ChipsetEffect::CmosByte { index, value }) = self.acpi.take_pending_effect() {
+            match self.cmos.ram.get_mut(usize::from(index)) {
+                Some(byte) => *byte = value,
+                None => tracing::error!("CMOS index {index:#x} is out of range"),
+            }
         }
     }
 
@@ -2015,9 +2079,15 @@ impl DeviceManager {
         self.pci2isa.elcr1_changed = false;
         self.pci2isa.elcr2_changed = false;
 
-        self.pci_bridge.apply_pam_to_memory(mem);
-        self.pci_bridge.apply_smram_to_memory(mem);
-        self.pci2isa.apply_bios_write_to_memory(mem);
+        // Restore re-applies the chipset's routing from the config it just
+        // loaded, through the same applier the boundary drain uses.
+        for effect in [
+            self.pci_bridge.shadow_ram_effect(),
+            self.pci_bridge.smram_effect(),
+            self.pci2isa.bios_rom_effect(),
+        ] {
+            self.apply_chipset_effect(effect, mem)?;
+        }
         self.pam_needs_update = false;
         self.smram_needs_update = false;
         self.bios_write_needs_update = false;

@@ -740,7 +740,7 @@ impl BxDevicesC {
                 if !routed {
                     Self::dispatch_write(dm, slot, port, value, io_len);
                 }
-                dm.apply_cross_device_stores();
+                dm.apply_dispatch_effects();
                 // The IDE controller arms its own seek and bus-master
                 // deadlines, still anchored to this OUT.
                 Self::drain_ide_timers(dm, pc_system, current_ticks);
@@ -1479,6 +1479,55 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// A chipset device must describe an effect, never perform it.
+    ///
+    /// The producers are pure functions of committed configuration, so asking
+    /// twice must give the same answer — the boundary drain calls them from a
+    /// path that can run any number of times, and a producer that mutated
+    /// would make the second drain disagree with the first.
+    #[test]
+    fn chipset_effects_are_derived_from_configuration_not_performed() {
+        on_big_stack(|| {
+            let mut dm = alloc::boxed::Box::new(devices::DeviceManager::new());
+            dm.pci_bridge.reset();
+            dm.pci2isa.reset();
+
+            // SMRAME|DOPEN: open and unrestricted.
+            dm.pci_bridge.pci_write(0x72, 0x48, 1);
+            let first = dm.pci_bridge.smram_effect();
+            assert_eq!(
+                first,
+                device_api::ChipsetEffect::Smram(device_api::SmramControl::Enable {
+                    dopen: true,
+                    dcls: false
+                })
+            );
+            assert_eq!(first, dm.pci_bridge.smram_effect(), "producer must be pure");
+
+            // Every PAM area is described, not just the ones that changed.
+            let device_api::ChipsetEffect::ShadowRam(areas) = dm.pci_bridge.shadow_ram_effect()
+            else {
+                panic!("the bridge must describe shadow RAM as such")
+            };
+            assert_eq!(areas.len(), device_api::PAM_AREAS);
+
+            // The ACPI suspend-to-ram store is a request, taken once.
+            dm.acpi.suspend_to_ram_pending = true;
+            assert_eq!(
+                dm.acpi.take_pending_effect(),
+                Some(device_api::ChipsetEffect::CmosByte {
+                    index: 0x0F,
+                    value: 0xFE
+                })
+            );
+            assert_eq!(
+                dm.acpi.take_pending_effect(),
+                None,
+                "a taken effect must not be raised twice"
+            );
+        });
     }
 
     /// A memory-mapped access must reach the device the map named.

@@ -15,6 +15,7 @@
 
 #[cfg(feature = "std")]
 use std::io::{self, Error, ErrorKind, Read, Write};
+use super::device_api::{ChipsetEffect, SmramControl, PAM_AREAS};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
@@ -334,50 +335,53 @@ impl BxPciBridge {
     /// Bochs: bx_pci_bridge_c::smram_control() (pci.cc) — the
     /// mem->enable_smram()/disable_smram() half of that function. Idempotent:
     /// derives state from the already-committed `pci_conf[0x72]`, so it is
-    /// safe to call any number of times from the shared machine-boundary
-    /// drain.
-    pub fn apply_smram_to_memory<'c>(&self, mem: &mut crate::memory::BxMemC<'c>) {
+    /// safe to ask any number of times from the shared machine-boundary drain.
+    pub fn smram_effect(&self) -> ChipsetEffect {
         let v = self.pci_conf[0x72];
         if (v & 0x08) == 0 {
-            // SMRAME=0: disable SMRAM (Bochs pci.cc smram_control).
-            mem.disable_smram();
-        } else {
-            let dopen = (v & 0x40) != 0;
-            let dcls = (v & 0x20) != 0;
-            if dopen && dcls {
-                // Bochs: BX_PANIC(("SMRAM control: DOPEN not mutually
-                // exclusive with DCLS !")). Divergence (intentional, safer):
-                // a guest-controlled register write must not crash the host,
-                // so we log and treat the illegal combination as SMRAM
-                // disabled instead of panicking.
-                tracing::error!(
-                    "SMRAM control: DOPEN and DCLS both set (illegal combo per i440FX \
-                     spec); Bochs would BX_PANIC — disabling SMRAM instead"
-                );
-                mem.disable_smram();
-            } else {
-                mem.enable_smram(dopen, dcls);
-            }
+            // SMRAME=0: the window is closed (Bochs pci.cc smram_control).
+            return ChipsetEffect::Smram(SmramControl::Disable);
         }
+        let dopen = (v & 0x40) != 0;
+        let dcls = (v & 0x20) != 0;
+        if dopen && dcls {
+            // Bochs: BX_PANIC(("SMRAM control: DOPEN not mutually
+            // exclusive with DCLS !")). Divergence (intentional, safer):
+            // a guest-controlled register write must not crash the host,
+            // so we log and treat the illegal combination as SMRAM
+            // disabled instead of panicking.
+            tracing::error!(
+                "SMRAM control: DOPEN and DCLS both set (illegal combo per i440FX                  spec); Bochs would BX_PANIC — disabling SMRAM instead"
+            );
+            return ChipsetEffect::Smram(SmramControl::Disable);
+        }
+        ChipsetEffect::Smram(SmramControl::Enable { dopen, dcls })
     }
 
-    /// Apply PAM register settings to the memory subsystem.
-    /// Called after pci_write returns pam_changed=true.
-    pub fn apply_pam_to_memory<'c>(&self, mem: &mut crate::memory::BxMemC<'c>) {
+    /// The shadow-RAM routing the PAM registers currently describe.
+    ///
+    /// Bochs pci.cc calls `DEV_mem_set_memory_type` per area from inside the
+    /// handler. Decoding stays here — which PAM bit means readable is i440FX
+    /// knowledge — while the machine performs the routing change.
+    ///
+    /// Idempotent: derived from the already-committed `pci_conf`, so it is safe
+    /// to ask any number of times from the shared machine-boundary drain.
+    pub fn shadow_ram_effect(&self) -> ChipsetEffect {
+        let mut areas = [[false; 2]; PAM_AREAS];
         let pam59 = self.pci_conf[0x59];
-        mem.set_memory_type(12, 0, (pam59 >> 4) & 0x1 != 0);
-        mem.set_memory_type(12, 1, (pam59 >> 5) & 0x1 != 0);
+        areas[12][0] = (pam59 >> 4) & 0x1 != 0;
+        areas[12][1] = (pam59 >> 5) & 0x1 != 0;
 
         for reg_idx in 0x5Au8..=0x5F {
             let pam_val = self.pci_conf[reg_idx as usize];
             let base_area = ((reg_idx - 0x5A) as usize) << 1;
-            mem.set_memory_type(base_area, 0, pam_val & 0x1 != 0);
-            mem.set_memory_type(base_area, 1, (pam_val >> 1) & 0x1 != 0);
-            mem.set_memory_type(base_area + 1, 0, (pam_val >> 4) & 0x1 != 0);
-            mem.set_memory_type(base_area + 1, 1, (pam_val >> 5) & 0x1 != 0);
+            areas[base_area][0] = pam_val & 0x1 != 0;
+            areas[base_area][1] = (pam_val >> 1) & 0x1 != 0;
+            areas[base_area + 1][0] = (pam_val >> 4) & 0x1 != 0;
+            areas[base_area + 1][1] = (pam_val >> 5) & 0x1 != 0;
         }
 
-        tracing::debug!("PAM registers applied to memory subsystem (deferred)");
+        ChipsetEffect::ShadowRam(areas)
     }
 
     /// Read from PCI configuration space.
@@ -641,31 +645,36 @@ mod tests {
 
     #[test]
     fn apply_smram_to_memory_derives_state_from_register() {
-        use crate::memory::{BxMemC, BxMemoryStubC};
-
         let mut bridge = BxPciBridge::new();
         bridge.reset();
-        let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-        let mut mem = BxMemC::new(stub, false);
 
         // SMRAME|DOPEN (0x48): SMRAM open, unrestricted (DOPEN=1, DCLS=0).
         let effects = bridge.pci_write(0x72, 0x48, 1);
         assert!(effects.smram_changed);
-        bridge.apply_smram_to_memory(&mut mem);
-        assert_eq!(mem.smram_state(), (true, true, false));
+        assert_eq!(
+            bridge.smram_effect(),
+            ChipsetEffect::Smram(SmramControl::Enable {
+                dopen: true,
+                dcls: false
+            })
+        );
 
         // SMRAME off (0x02): SMRAM fully disabled.
         let effects = bridge.pci_write(0x72, 0x02, 1);
         assert!(effects.smram_changed);
-        bridge.apply_smram_to_memory(&mut mem);
-        assert_eq!(mem.smram_state(), (false, false, false));
+        assert_eq!(
+            bridge.smram_effect(),
+            ChipsetEffect::Smram(SmramControl::Disable)
+        );
 
         // Illegal DOPEN&&DCLS combo (SMRAME|DOPEN|DCLS = 0x68): Bochs
         // BX_PANICs here; we must not panic the host on a guest register
-        // write, so we log and treat it as disabled instead.
+        // write, so we log and describe it as disabled instead.
         let effects = bridge.pci_write(0x72, 0x68, 1);
         assert!(effects.smram_changed);
-        bridge.apply_smram_to_memory(&mut mem);
-        assert_eq!(mem.smram_state(), (false, false, false));
+        assert_eq!(
+            bridge.smram_effect(),
+            ChipsetEffect::Smram(SmramControl::Disable)
+        );
     }
 }

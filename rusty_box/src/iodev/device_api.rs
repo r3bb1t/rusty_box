@@ -185,6 +185,56 @@ pub trait MmioDevice {
     fn mmio_write(&mut self, addr: u64, len: u32, data: &[u8], clock: DeviceClock);
 }
 
+/// The i440FX SMRAM control state — Bochs pci.cc `smram_control`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmramControl {
+    /// SMRAME clear: the window is closed.
+    Disable,
+    /// SMRAME set, with the open/close-on-store qualifiers.
+    Enable { dopen: bool, dcls: bool },
+}
+
+/// Number of shadow-RAM areas the i440FX PAM registers cover.
+pub const PAM_AREAS: usize = 13;
+
+/// A change to machine-wide state that a chipset device asks for but cannot
+/// perform itself.
+///
+/// Bochs chipset handlers call `DEV_mem_set_memory_type`, `mem->enable_smram()`
+/// and friends directly, so its devices hold the memory bus. This port
+/// inherited that: `apply_pam_to_memory(&mut BxMemC)` and three siblings handed
+/// a device the whole memory subsystem to poke. A device now describes what it
+/// wants in its own terms and the machine — which owns memory — carries it out,
+/// the same split the MMIO inversion made in the other direction.
+///
+/// Each variant carries decoded intent rather than raw configuration bytes, so
+/// chipset semantics (which PAM bit means writable, how the I/O APIC base is
+/// scaled) stay with the chipset that defines them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipsetEffect {
+    /// Shadow-RAM routing for every PAM area, indexed `[area][write]`.
+    ///
+    /// One effect for the whole table rather than one per area: the PAM
+    /// registers are written as a set and applied as a set, and Bochs's own
+    /// reset path re-applies all of them in a loop.
+    ShadowRam([[bool; 2]; PAM_AREAS]),
+    /// SMRAM window control.
+    Smram(SmramControl),
+    /// PIIX3 XBCS (0x4E): BIOS write-enable and the two ROM access windows.
+    BiosRom {
+        write_enabled: bool,
+        lower: bool,
+        extended: bool,
+    },
+    /// PIIX3 0x4F bit 1: the 1 MB extended BIOS access window.
+    BiosRom1Meg(bool),
+    /// PIIX3 0x4F/0x80: I/O APIC enable state and its MMIO base offset.
+    IoApicEnable { enabled: bool, base_offset: u16 },
+    /// A byte one device asks the chipset to store into the CMOS RAM —
+    /// Bochs `DEV_cmos_set_reg`.
+    CmosByte { index: u8, value: u8 },
+}
+
 /// A device that owns scheduler timers.
 pub trait TimedDevice {
     /// One or more expirations of the device's `local` timer have come due.

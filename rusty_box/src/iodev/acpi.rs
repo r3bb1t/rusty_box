@@ -623,6 +623,23 @@ impl BxAcpiCtrl {
 
     /// Reset the ACPI controller.
     /// Bochs: bx_acpi_ctrl_c::reset() (acpi.cc)
+    /// The chipset store this controller is asking for, if any.
+    ///
+    /// Bochs acpi.cc PM1_CNT suspend-to-ram (S3) calls `DEV_cmos_set_reg(0xF,
+    /// 0xFE)` — the shutdown-status byte the BIOS reads on the resume path —
+    /// before requesting the hardware reset. A device reaches only its own
+    /// state, so the store is described here and performed by the chipset.
+    pub(crate) fn take_pending_effect(
+        &mut self,
+    ) -> Option<crate::iodev::device_api::ChipsetEffect> {
+        core::mem::take(&mut self.suspend_to_ram_pending).then_some(
+            crate::iodev::device_api::ChipsetEffect::CmosByte {
+                index: 0x0F,
+                value: 0xFE,
+            },
+        )
+    }
+
     pub fn reset(&mut self) {
         // PCI command/status (acpi.cc)
         self.pci_conf[0x04] = 0x00;

@@ -16,6 +16,7 @@
 
 #[cfg(feature = "std")]
 use std::io::{self, Error, ErrorKind, Read, Write};
+use super::device_api::ChipsetEffect;
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
@@ -400,11 +401,13 @@ impl BxPiix3 {
     /// Idempotent: derives state from the already-committed
     /// `pci_conf[0x4E]`, so it is safe to call any number of times from the
     /// shared machine-boundary drain.
-    pub fn apply_bios_write_to_memory<'c>(&self, mem: &mut crate::memory::BxMemC<'c>) {
+    pub fn bios_rom_effect(&self) -> ChipsetEffect {
         let v = self.pci_conf[0x4E];
-        mem.set_bios_write_enabled((v & 0x04) != 0);
-        mem.set_bios_rom_access(crate::memory::BIOS_ROM_LOWER, (v & 0x40) != 0);
-        mem.set_bios_rom_access(crate::memory::BIOS_ROM_EXTENDED, (v & 0x80) != 0);
+        ChipsetEffect::BiosRom {
+            write_enabled: (v & 0x04) != 0,
+            lower: (v & 0x40) != 0,
+            extended: (v & 0x80) != 0,
+        }
     }
 
     /// Re-sync the I/O APIC enable state and MMIO base from the committed PIIX3
@@ -412,16 +415,13 @@ impl BxPiix3 {
     /// 0x4f/0x80 call `DEV_ioapic_set_enabled(pci_conf[0x4f] & 0x01,
     /// (pci_conf[0x80] & 0x3f) << 10)`. Derived entirely from `pci_conf`, so this
     /// is idempotent and safe to call any number of times from the shared
-    /// machine-boundary drain. Returns whether the IOAPIC MMIO mapping actually
-    /// changed (so the caller can invalidate CPU caches over the affected pages).
-    pub fn apply_ioapic_enable<'c>(
-        &self,
-        ioapic: &mut super::ioapic::BxIoApic,
-        mem: &mut crate::memory::BxMemC<'c>,
-    ) -> crate::Result<bool> {
-        let enabled = (self.pci_conf[0x4F] & 0x01) != 0;
-        let base_offset = ((self.pci_conf[0x80] as u16) & 0x3F) << 10;
-        ioapic.set_enabled_with_mem(enabled, base_offset, mem)
+    /// machine-boundary drain. The machine applies it and reports whether the
+    /// MMIO mapping actually moved, so it can invalidate the affected pages.
+    pub fn ioapic_enable_effect(&self) -> ChipsetEffect {
+        ChipsetEffect::IoApicEnable {
+            enabled: (self.pci_conf[0x4F] & 0x01) != 0,
+            base_offset: ((self.pci_conf[0x80] as u16) & 0x3F) << 10,
+        }
     }
 
     /// Read from PCI configuration space.
@@ -746,27 +746,33 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_bios_write_to_memory_drives_mem_from_xbcs() {
-        use crate::memory::{BxMemC, BxMemoryStubC};
-
+    fn bios_rom_effect_describes_xbcs() {
         let mut bridge = BxPiix3::new();
         bridge.reset();
-        let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-        let mut mem = BxMemC::new(stub, false);
 
         // Bit2 set -> BIOS write enabled; bits 6-7 clear -> both rom-access
         // region bits disabled.
         bridge.pci_write(0x4E, 0x04, 1);
-        bridge.apply_bios_write_to_memory(&mut mem);
-        assert!(mem.bios_write_enabled());
-        assert_eq!(mem.bios_rom_access(), 0x00);
+        assert_eq!(
+            bridge.bios_rom_effect(),
+            ChipsetEffect::BiosRom {
+                write_enabled: true,
+                lower: false,
+                extended: false
+            }
+        );
 
         // Bit2 clear, bits 6+7 set -> BIOS write disabled; both rom-access
         // region bits enabled.
         bridge.pci_write(0x4E, 0xC0, 1);
-        bridge.apply_bios_write_to_memory(&mut mem);
-        assert!(!mem.bios_write_enabled());
-        assert_eq!(mem.bios_rom_access(), 0x03); // BIOS_ROM_LOWER | BIOS_ROM_EXTENDED
+        assert_eq!(
+            bridge.bios_rom_effect(),
+            ChipsetEffect::BiosRom {
+                write_enabled: false,
+                lower: true,
+                extended: true
+            }
+        );
     }
 
     #[test]
@@ -837,22 +843,36 @@ mod tests {
         let mut bridge = BxPiix3::new();
         bridge.reset();
 
+        // The bridge describes the state; the chipset carries it out. This
+        // drives both steps by hand so the relocation behaviour stays covered
+        // without a whole DeviceManager.
+        let apply = |bridge: &BxPiix3, ioapic: &mut BxIoApic, mem: &mut BxMemC<'_>| {
+            let ChipsetEffect::IoApicEnable {
+                enabled,
+                base_offset,
+            } = bridge.ioapic_enable_effect()
+            else {
+                panic!("the PIIX3 must describe I/O APIC enable as such")
+            };
+            ioapic.set_enabled_with_mem(enabled, base_offset, mem).unwrap()
+        };
+
         // pci_conf[0x4f]=1, [0x80]=0 -> enabled at default base. Idempotent
         // no-op because init already enabled at 0xFEC00000.
         bridge.pci_conf[0x4F] = 0x01;
         bridge.pci_conf[0x80] = 0x00;
-        assert!(!bridge.apply_ioapic_enable(&mut ioapic, &mut mem).unwrap());
+        assert!(!apply(&bridge, &mut ioapic, &mut mem));
         assert!(ioapic.is_enabled());
         assert_eq!(ioapic.base_address(), 0xFEC0_0000);
 
         // Relocate via 0x80: base offset (0x04 & 0x3f) << 10 = 0x1000.
         bridge.pci_conf[0x80] = 0x04;
-        assert!(bridge.apply_ioapic_enable(&mut ioapic, &mut mem).unwrap());
+        assert!(apply(&bridge, &mut ioapic, &mut mem));
         assert_eq!(ioapic.base_address(), 0xFEC0_1000);
 
         // Disable via 0x4f bit 0 = 0.
         bridge.pci_conf[0x4F] = 0x00;
-        assert!(bridge.apply_ioapic_enable(&mut ioapic, &mut mem).unwrap());
+        assert!(apply(&bridge, &mut ioapic, &mut mem));
         assert!(!ioapic.is_enabled());
     }
 }
