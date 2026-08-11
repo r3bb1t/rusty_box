@@ -43,29 +43,17 @@ enum MemType {
 }
 
 impl TLBEntry {
-    fn new() -> Self {
-        let lpf = BX_INVALID_TLB_ENTRY;
-        let access_bits = 0;
-
-        let ppf = 0;
-        let host_page_addr = 0;
-
-        let pkey = 0;
-
-        let lpf_mask = 0;
-
-        let memtype = MemType::default();
-
-        Self {
-            lpf,
-            ppf,
-            host_page_addr,
-            access_bits,
-            pkey,
-            lpf_mask,
-            memtype,
-        }
-    }
+    /// An invalid entry — `lpf` carries the sentinel every lookup compares
+    /// against. A `const` so a whole TLB can be built without running code.
+    const INVALID: Self = Self {
+        lpf: BX_INVALID_TLB_ENTRY,
+        ppf: 0,
+        host_page_addr: 0,
+        access_bits: 0,
+        pkey: 0,
+        lpf_mask: 0,
+        memtype: MemType::UC,
+    };
 
     fn valid(&self) -> bool {
         self.lpf != BX_INVALID_TLB_ENTRY
@@ -125,19 +113,14 @@ pub struct Tlb<const SIZE: usize> {
 
 impl<const SIZE: usize> Tlb<SIZE> {
     /// Create a new, flushed TLB
-    pub fn new() -> Self {
-        // Initialize each entry via its `Default` or `new()` constructor:
-        let entries: [TLBEntry; SIZE] = {
-            // Trick: build from an array of `TLBEntry::new()`
-            core::array::from_fn(|_| TLBEntry::new())
-        };
-
-        // If we had a split_large field, initialize it here:
-        let split_large = false;
-
+    /// A flushed TLB, constructible in a const context.
+    ///
+    /// `const` so it can live in `.bss` under no_alloc. `core::array::from_fn`
+    /// is not const, so the entry array is built from a const element.
+    pub const fn new() -> Self {
         Self {
-            entries,
-            split_large,
+            entries: [TLBEntry::INVALID; SIZE],
+            split_large: false,
         }
     }
 
@@ -273,4 +256,29 @@ pub(super) fn lpf_of(laddr: BxAddress) -> BxAddress {
 #[inline]
 pub(super) fn ppf_of(paddr: BxAddress) -> BxAddress {
     paddr & PPF_MASK
+}
+
+#[cfg(test)]
+mod const_initialiser_tests {
+    use super::*;
+
+    /// `Tlb::new` builds its entries from a const element now. That element
+    /// must carry the invalid-line sentinel, exactly as the deleted
+    /// `TLBEntry::new()` did — note the derived `TLBEntry::default()` does NOT
+    /// (it zeroes `lpf`, which is a legitimate linear page frame), so the
+    /// const must not be defined in terms of it.
+    #[test]
+    fn a_fresh_tlb_holds_only_invalid_entries() {
+        assert_eq!(TLBEntry::INVALID.lpf, BX_INVALID_TLB_ENTRY);
+        assert_ne!(
+            TLBEntry::INVALID.lpf,
+            TLBEntry::default().lpf,
+            "derived Default is not the flushed state"
+        );
+        let tlb = Tlb::<8>::new();
+        for index in 0..8 {
+            assert_eq!(tlb.entries[index].lpf, BX_INVALID_TLB_ENTRY);
+        }
+        assert!(!tlb.split_large);
+    }
 }

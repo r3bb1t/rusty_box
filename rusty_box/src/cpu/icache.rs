@@ -99,6 +99,18 @@ pub struct BxICacheEntry {
 // pAddr + traceMask + tlen + the `i` pointer, which our `mpool_start_idx` stands in.
 const _: () = assert!(core::mem::size_of::<BxICacheEntry>() == 24);
 
+impl BxICacheEntry {
+    /// An entry holding no trace. `p_addr` carries the invalid sentinel, which
+    /// is what `find_entry` tests — exactly the state `BxICache::new` used to
+    /// build per element at run time.
+    pub(super) const INVALID: Self = Self {
+        p_addr: BX_ICACHE_INVALID_PHY_ADDRESS,
+        trace_mask: 0,
+        tlen: 0,
+        mpool_start_idx: 0,
+    };
+}
+
 pub struct BxICache {
     pub(crate) entry: [BxICacheEntry; BX_ICACHE_ENTRIES],
     /// Large array (~15 MB) — struct should be heap-allocated (e.g. via Box).
@@ -136,6 +148,14 @@ pub(crate) struct TraceLink {
 }
 
 impl TraceLink {
+    /// An unlinked slot, identical to `TraceLink::default()`. A zero timestamp
+    /// can never match `trace_link_time_stamp`, which starts at 1.
+    pub(crate) const EMPTY: Self = Self {
+        timestamp: 0,
+        packed: 0,
+        expected_rip: 0,
+    };
+
     #[inline]
     pub(crate) fn store(timestamp: u32, start: usize, tlen: usize, expected_rip: u64) -> Self {
         debug_assert!(start < (1 << 20) && tlen < (1 << 7));
@@ -167,12 +187,18 @@ struct PageSplitEntry {
     entry_idx: usize,
 }
 
+impl PageSplitEntry {
+    /// An unused split slot. `ppf` carries the invalid sentinel, which is what
+    /// the split lookup tests.
+    const EMPTY: Self = Self {
+        ppf: BX_ICACHE_INVALID_PHY_ADDRESS,
+        entry_idx: 0,
+    };
+}
+
 impl Default for PageSplitEntry {
     fn default() -> Self {
-        Self {
-            ppf: BX_ICACHE_INVALID_PHY_ADDRESS,
-            entry_idx: 0,
-        }
+        Self::EMPTY
     }
 }
 
@@ -183,19 +209,20 @@ impl Default for BxICache {
 }
 
 impl BxICache {
-    pub fn new() -> Self {
+    /// A flushed icache, constructible in a const context.
+    ///
+    /// `const` so the whole cache can live in `.bss` under no_alloc instead of
+    /// being written field-by-field into a raw allocation. That rules out
+    /// `core::array::from_fn`, which is not const — every array is built from a
+    /// const element instead.
+    pub const fn new() -> Self {
         Self {
-            entry: core::array::from_fn(|_| BxICacheEntry {
-                p_addr: BX_ICACHE_INVALID_PHY_ADDRESS,
-                trace_mask: 0,
-                tlen: 0,
-                mpool_start_idx: 0,
-            }),
-            mpool: core::array::from_fn(|_| Instruction::default()),
+            entry: [BxICacheEntry::INVALID; BX_ICACHE_ENTRIES],
+            mpool: [Instruction::EMPTY; BX_ICACHE_MEM_POOL],
             mpindex: 0,
             next_page_split_index: 0,
-            page_split_index: core::array::from_fn(|_| PageSplitEntry::default()),
-            trace_links: [TraceLink::default(); BX_ICACHE_MEM_POOL],
+            page_split_index: [PageSplitEntry::EMPTY; BX_ICACHE_PAGE_SPLIT_ENTRIES],
+            trace_links: [TraceLink::EMPTY; BX_ICACHE_MEM_POOL],
             // Start at 1 so zero-initialized link slots can never match.
             trace_link_time_stamp: 1,
         }
@@ -1435,5 +1462,38 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap()
             .join()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod const_initialiser_tests {
+    use super::*;
+
+    /// The icache's arrays are now built from const elements rather than
+    /// `core::array::from_fn`, which is not const. Each element must be the
+    /// same value the closure produced — a flushed cache whose entries do not
+    /// carry the invalid sentinel would serve stale traces on the first lookup.
+    #[test]
+    fn const_elements_match_the_flushed_state_they_replace() {
+        assert_eq!(BxICacheEntry::INVALID.p_addr, BX_ICACHE_INVALID_PHY_ADDRESS);
+        assert_eq!(BxICacheEntry::INVALID.trace_mask, 0);
+        assert_eq!(BxICacheEntry::INVALID.tlen, 0);
+        assert_eq!(BxICacheEntry::INVALID.mpool_start_idx, 0);
+
+        assert_eq!(PageSplitEntry::EMPTY.ppf, PageSplitEntry::default().ppf);
+        assert_eq!(
+            PageSplitEntry::EMPTY.entry_idx,
+            PageSplitEntry::default().entry_idx
+        );
+
+        // A zero timestamp can never match `trace_link_time_stamp`, which
+        // starts at 1 — that is what makes an unlinked slot unusable.
+        assert_eq!(TraceLink::EMPTY.timestamp, 0);
+        let cache = BxICache::new();
+        assert_eq!(cache.trace_link_time_stamp, 1);
+        assert!(
+            cache.trace_links[0].target(cache.trace_link_time_stamp, 0).is_none(),
+            "a fresh link slot must not resolve"
+        );
     }
 }
