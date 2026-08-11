@@ -97,5 +97,12 @@ impl BxCpuBuilder {
         core::ptr::addr_of_mut!((*ptr).mmio).write(crate::memory::mmio::MmioRegistry::new());
         (*ptr).dtlb.flush();
         (*ptr).itlb.flush();
+        // The allocation arrives zeroed, and zero is a MEANINGFUL value for both
+        // of the icache's validity guards — an entry's `p_addr` of 0 is a real
+        // physical address that `find_entry` will match, and a link timestamp of
+        // 0 equals the stamp every zeroed `TraceLink` carries, which is exactly
+        // what `BxICache::new` starts at 1 to prevent. Establish the flushed
+        // state the type defines, as the TLBs above already do.
+        (*ptr).i_cache.flush_all();
     }
 }

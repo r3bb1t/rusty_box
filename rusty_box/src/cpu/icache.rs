@@ -1497,3 +1497,40 @@ mod const_initialiser_tests {
         );
     }
 }
+
+
+#[cfg(test)]
+mod power_on_state_tests {
+    use super::*;
+
+    /// A freshly constructed CPU must arrive with a FLUSHED icache, not merely
+    /// a zeroed one. Zero is a meaningful value for both validity guards:
+    /// `find_entry` matches an entry whose `p_addr` equals the fetch address,
+    /// so a zeroed entry claims physical address 0; and `TraceLink::target`
+    /// matches a link whose timestamp equals `trace_link_time_stamp`, so a
+    /// zeroed stamp validates every never-written link. The allocation is
+    /// zeroed, so this only holds because construction flushes.
+    #[test]
+    fn a_constructed_cpu_starts_with_a_flushed_icache() {
+        let cpu = crate::cpu::builder::BxCpuBuilder::new().build().unwrap();
+
+        assert_eq!(
+            cpu.i_cache.entry[0].p_addr, BX_ICACHE_INVALID_PHY_ADDRESS,
+            "a zeroed entry would be served for a fetch at physical address 0"
+        );
+        assert!(
+            cpu.i_cache.find_entry(0, 0).is_none(),
+            "physical address 0 must not hit an unfilled icache"
+        );
+        assert_ne!(
+            cpu.i_cache.trace_link_time_stamp, 0,
+            "a zero stamp is the value every zeroed TraceLink carries"
+        );
+        assert!(
+            cpu.i_cache.trace_links[0]
+                .target(cpu.i_cache.trace_link_time_stamp, 0)
+                .is_none(),
+            "an unwritten trace link must not resolve"
+        );
+    }
+}
