@@ -13,6 +13,9 @@ use crate::memory::memory_rusty_box::{
     bx_guest_ram_span, bx_is_pci_hole_addr, BIOSROMSZ, EXROMSIZE,
 };
 
+// Only the swap-overflow file is still behind interior mutability, and that
+// field is std-only.
+#[cfg(feature = "std")]
 use core::cell::UnsafeCell;
 
 #[cfg(feature = "std")]

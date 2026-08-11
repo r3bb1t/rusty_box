@@ -680,3 +680,80 @@ impl<T: Instrumentation + Default> InstrumentationRegistry<T> {
         Self::with_tracer(T::default())
     }
 }
+
+impl InstrumentationRegistry<()> {
+    /// A power-on registry for the no-op tracer, constructible in a const
+    /// context.
+    ///
+    /// Scoped to `T = ()` on purpose. Static (`.bss`) placement is the no_alloc
+    /// path, and `instrumentation` implies `alloc`, so a statically placed CPU
+    /// always carries the unit tracer — the closure vectors below do not even
+    /// exist there. Making this generic would mean requiring `const INIT: Self`
+    /// from every `Instrumentation` implementor, which a tracer holding a
+    /// `String` could not supply.
+    ///
+    /// `with_tracer` cannot be const: it ends by calling `refresh_active`,
+    /// which asks the tracer through a trait method. For the unit tracer that
+    /// answer is statically `HookMask::empty()`, which is what makes the mask
+    /// below correct rather than merely plausible — a test pins it against the
+    /// runtime constructor.
+    pub const fn const_new() -> Self {
+        Self {
+            active: HookMask::empty(),
+            stop_request: false,
+            tracer: Some(()),
+            #[cfg(feature = "instrumentation")]
+            code_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            code_after_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            mem_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            intr_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            hw_intr_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            exception_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            io_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            branch_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            block_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            invalid_insn_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            mem_unmapped_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            next_handle: 1,
+        }
+    }
+}
+
+#[cfg(test)]
+mod const_constructor_tests {
+    use super::*;
+
+    /// `const_new` hand-writes the mask that `with_tracer` derives by asking
+    /// the tracer at run time. For the unit tracer that answer is statically
+    /// empty, but nothing in the type system says so — if `()` ever gained a
+    /// hook, the const would silently disagree with every other construction
+    /// path and the CPU would skip dispatches it should make.
+    #[test]
+    fn const_new_matches_the_runtime_constructor() {
+        let runtime: InstrumentationRegistry<()> = InstrumentationRegistry::new();
+        let constructed = InstrumentationRegistry::<()>::const_new();
+
+        assert_eq!(constructed.active, runtime.active);
+        assert_eq!(constructed.stop_request, runtime.stop_request);
+        assert!(constructed.tracer.is_some());
+
+        #[cfg(feature = "instrumentation")]
+        {
+            assert_eq!(constructed.next_handle, runtime.next_handle);
+            assert!(constructed.code_hooks.is_empty());
+            assert!(constructed.mem_hooks.is_empty());
+            assert!(constructed.mem_unmapped_hooks.is_empty());
+        }
+    }
+}
