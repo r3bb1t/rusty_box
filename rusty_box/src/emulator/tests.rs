@@ -1059,7 +1059,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 for cpu_index in 0..emu.cpu_count() {
                     let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
                     entry.lpf = 0;
-                    entry.host_page_addr = old_host_base as _;
+                    entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(old_host_base as crate::config::BxPtrEquiv);
                 }
                 emu.refresh_tlb_pins();
                 for pin in emu.tlb_pins() {
@@ -1122,7 +1122,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let host_base = resident_host_base(&mut emu);
                 let entry = &mut emu.cpu_mut_at(AP_INDEX).dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = host_base as _;
+                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
                 assert!(!emu.tlb_pins()[AP_INDEX]
                     .is_range_pinned(host_base as usize, host_base as usize + MIB));
                 emu.refresh_tlb_pins();
@@ -1173,7 +1173,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let host_base = resident_host_base(&mut emu);
                 let entry = &mut emu.cpu_mut_at(AP_INDEX).dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = host_base as _;
+                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
                 assert!(!emu.tlb_pins()[AP_INDEX]
                     .is_range_pinned(host_base as usize, host_base as usize + MIB));
                 emu.refresh_tlb_pins();
@@ -1227,7 +1227,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let cpu_address = emu.cpu() as *const BxCpuC;
                 let entry = &mut unsafe { emu.cpu_mut_unchecked() }.dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = host_base as _;
+                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
 
                 assert_eq!(cpu_address, emu.cpu() as *const BxCpuC);
                 assert!(!emu.tlb_pins()[BSP_INDEX]
@@ -2100,7 +2100,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 for cpu_index in 0..emu.cpu_count() {
                     let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
                     entry.lpf = 0;
-                    entry.host_page_addr = host_base as _;
+                    entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
                 }
                 emu.refresh_tlb_pins();
                 assert!(emu
@@ -2142,7 +2142,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 for cpu_index in 0..emu.cpu_count() {
                     let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
                     entry.lpf = 0;
-                    entry.host_page_addr = host_base as _;
+                    entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
                 }
                 emu.refresh_tlb_pins();
                 emu.write_port_92h(0x00);
@@ -2155,7 +2155,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 for cpu_index in 0..emu.cpu_count() {
                     let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
                     entry.lpf = 0;
-                    entry.host_page_addr = host_base as _;
+                    entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
                 }
                 emu.refresh_tlb_pins();
                 emu.device_manager.keyboard.write(

@@ -344,9 +344,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let lpf = offset & super::tlb::LPF_MASK;
         let host_ptr: Option<*mut u64> = {
             let tlb = self.dtlb.get_entry_of(offset, 7);
-            if tlb.lpf == lpf && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS {
+            if tlb.lpf == lpf && tlb.host_page_addr.is_some() {
                 let byte_ptr =
-                    super::access::host_at_page_offset_mut(tlb.host_page_addr as *mut u8, offset);
+                    super::access::host_at_page_offset_mut(super::tlb::host_page_ptr(tlb.host_page_addr), offset);
                 // SSP is architecturally 8-byte aligned on every caller; the
                 // raw byte pointer thus aligns for u64/AtomicU64.
                 debug_assert_eq!(offset & 0x7, 0, "SS cmpxchg offset must be 8-byte aligned");

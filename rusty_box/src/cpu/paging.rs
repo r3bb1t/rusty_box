@@ -1716,9 +1716,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             let host_len = self.mem_host_len;
             let plain_ram = a20_ppf < 0xA0000 || a20_ppf >= 0x100000;
             if !host_base.is_null() && plain_ram {
-                bx_guest_ram_span(a20_ppf, 0x1000, host_len)
-                    .map(|span| super::access::host_offset(host_base, span.start) as BxHostpageaddr)
-                    .unwrap_or(super::tlb::NO_DIRECT_ACCESS)
+                bx_guest_ram_span(a20_ppf, 0x1000, host_len).and_then(|span| {
+                    crate::config::BxPtrEquivNonZero::new(
+                        super::access::host_offset(host_base, span.start) as BxHostpageaddr,
+                    )
+                })
             } else {
                 super::tlb::NO_DIRECT_ACCESS
             }

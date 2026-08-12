@@ -1272,7 +1272,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 // execution scope; no allocator check dereferences `cpu`.
                 let entry = &mut cpu.dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = 0x4000;
+                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(0x4000);
                 cpu.refresh_tlb_pin(&pin);
                 assert!(pin.is_range_pinned(0x4000, 0x5000));
 
@@ -1313,7 +1313,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                     .as_ptr() as usize;
                 let entry = &mut sibling.dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = host_ptr as _;
+                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_ptr as crate::config::BxPtrEquiv);
                 sibling.refresh_tlb_pin(&pins[0]);
 
                 assert!(matches!(
@@ -1414,7 +1414,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                     .as_ptr() as usize;
                 let entry = &mut sibling.dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = resident_base as _;
+                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(resident_base as crate::config::BxPtrEquiv);
                 sibling.refresh_tlb_pin(&pins[0]);
                 assert!(pins[0].is_range_pinned(resident_base, resident_base + MIB));
 

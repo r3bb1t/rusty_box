@@ -3677,7 +3677,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             let fetch_ptr_as_ptr =
                 // SAFETY: an ITLB entry is installed only for a complete
                 // contiguous host page (see below).
-                unsafe { super::access::host_slice_u8(fetch_ptr as *const u8, 4096) };
+                unsafe { super::access::host_slice_u8(super::tlb::host_page_ptr(fetch_ptr), 4096) };
             self.eip_fetch_ptr = Some(fetch_ptr_as_ptr);
             direct_page_mapping = true;
         } else {
@@ -3764,7 +3764,9 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             // particular, sub-page guest blocks are not host-contiguous.
             if itlb_should_update && direct_page_mapping {
                 if let Some(fp) = self.eip_fetch_ptr {
-                    let host_page_ptr = fp.as_ptr() as super::tlb::BxHostpageaddr;
+                    // A live page pointer is never null, so the niche always fits.
+                    let host_page_ptr =
+                        crate::config::BxPtrEquivNonZero::new(fp.as_ptr() as super::tlb::BxHostpageaddr);
                     let ppf = self.p_addr_fetch_page;
                     let access_bits = 1u32 << (self.user_pl as u32);
                     let tlb_entry = self.itlb.get_entry_of(lpf, 0);
@@ -4652,7 +4654,7 @@ mod tests {
         let slot = cpu.dtlb.get_index_of(TARGET, 0);
         let entry = &mut cpu.dtlb.entries[slot];
         entry.lpf = TARGET;
-        entry.host_page_addr = host_ptr as _;
+        entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_ptr as crate::config::BxPtrEquiv);
         entry.access_bits = 1;
 
         cpu.sync_dtlb_pin_slot(TARGET, 0);
@@ -4693,7 +4695,7 @@ mod tests {
         let slot = cpu.dtlb.get_index_of(TARGET, 0);
         let entry = &mut cpu.dtlb.entries[slot];
         entry.lpf = OLD_LPF;
-        entry.host_page_addr = host_ptr as _;
+        entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_ptr as crate::config::BxPtrEquiv);
         entry.access_bits = 1;
         cpu.sync_dtlb_pin_slot(TARGET, 0);
         assert!(pin.is_range_pinned(host_ptr, host_ptr + 0x1000));
@@ -4726,14 +4728,14 @@ mod tests {
         {
             let e = &mut cpu.dtlb.entries[dslot];
             e.lpf = DTLB_TARGET;
-            e.host_page_addr = dtlb_host as _;
+            e.host_page_addr = crate::config::BxPtrEquivNonZero::new(dtlb_host as crate::config::BxPtrEquiv);
             e.access_bits = 1;
         }
         let islot = cpu.itlb.get_index_of(ITLB_TARGET, 0);
         {
             let e = &mut cpu.itlb.entries[islot];
             e.lpf = ITLB_TARGET;
-            e.host_page_addr = itlb_host as _;
+            e.host_page_addr = crate::config::BxPtrEquivNonZero::new(itlb_host as crate::config::BxPtrEquiv);
             e.access_bits = 1;
         }
 
@@ -4832,7 +4834,7 @@ mod tests {
                         {
                             let e = &mut cpu.dtlb.entries[slot];
                             e.lpf = laddr;
-                            e.host_page_addr = host as _;
+                            e.host_page_addr = crate::config::BxPtrEquivNonZero::new(host as crate::config::BxPtrEquiv);
                             // bit31 == TLB_GLOBAL_PAGE (tlb.rs); low bit is a
                             // normal access-permission bit marking the entry live.
                             e.access_bits = 1 | if global { 0x8000_0000 } else { 0 };
@@ -4851,7 +4853,7 @@ mod tests {
                         {
                             let e = &mut cpu.itlb.entries[slot];
                             e.lpf = laddr;
-                            e.host_page_addr = host as _;
+                            e.host_page_addr = crate::config::BxPtrEquivNonZero::new(host as crate::config::BxPtrEquiv);
                             e.access_bits = 1 | if global { 0x8000_0000 } else { 0 };
                             e.lpf_mask = 0xFFF;
                         }
@@ -4949,7 +4951,7 @@ mod tests {
         let slot = cpu.itlb.get_index_of(TARGET, 0);
         let entry = &mut cpu.itlb.entries[slot];
         entry.lpf = TARGET;
-        entry.host_page_addr = host_ptr as _;
+        entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_ptr as crate::config::BxPtrEquiv);
         entry.access_bits = 1;
         cpu.eip_fetch_ptr = Some(&[0]);
         cpu.sync_itlb_pin_slot(TARGET, 0);

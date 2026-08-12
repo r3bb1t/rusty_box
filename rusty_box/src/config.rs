@@ -5,9 +5,16 @@ pub type BxAddress = u64;
 
 #[cfg(target_pointer_width = "32")]
 pub type BxPtrEquiv = u32;
+/// The non-zero counterpart of [`BxPtrEquiv`], so a pointer-sized value can be
+/// held in an `Option` for free — the niche makes `None` the all-zero pattern.
+#[cfg(target_pointer_width = "32")]
+pub type BxPtrEquivNonZero = core::num::NonZeroU32;
 
 #[cfg(target_pointer_width = "64")]
 pub type BxPtrEquiv = u64;
+/// See the 32-bit arm above.
+#[cfg(target_pointer_width = "64")]
+pub type BxPtrEquivNonZero = core::num::NonZeroU64;
 
 #[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))]
 compile_error!("could not define BxPtrEquivT to size of pointer");

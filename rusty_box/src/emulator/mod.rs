@@ -1843,7 +1843,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
             entry.lpf,
             entry.ppf,
             entry.access_bits,
-            entry.host_page_addr,
+            crate::cpu::tlb::host_page_addr_bits(entry.host_page_addr),
         )
     }
 

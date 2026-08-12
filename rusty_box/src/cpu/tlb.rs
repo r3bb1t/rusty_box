@@ -14,13 +14,46 @@ const TLB_GLOBAL_PAGE: u32 = 0x80000000;
 
 const BX_INVALID_TLB_ENTRY: u64 = 0xffffffffffffffffu64;
 
-/// `host_page_addr` value meaning "this page has no direct host mapping".
+/// A page's direct host mapping, or its absence.
 ///
-/// Named rather than written as a bare `0` at each test because the value is
-/// about to stop being zero: once the entry caches a RAM *offset* instead of a
-/// host address, zero becomes a legitimate page — guest physical page 0 — and
-/// every `!= 0` test would silently start claiming direct access to it.
-pub(crate) const NO_DIRECT_ACCESS: BxHostpageaddr = 0;
+/// `None` is the state every fast path tests before dereferencing. Encoding it
+/// as an `Option` rather than a reserved value means the check cannot be
+/// forgotten and the "absent" case cannot be confused with a real mapping —
+/// which matters because the value stops being zero when this becomes a RAM
+/// offset and guest physical page 0 turns legitimate.
+pub(crate) type HostPageAddr = Option<crate::config::BxPtrEquivNonZero>;
+
+/// No direct host mapping — take the slow path.
+pub(crate) const NO_DIRECT_ACCESS: HostPageAddr = None;
+
+/// The raw bits of a mapping, or 0 when absent — for the paths that OR in a
+/// page offset before turning the result into a pointer.
+#[inline(always)]
+pub(crate) fn host_page_addr_bits(addr: HostPageAddr) -> BxHostpageaddr {
+    match addr {
+        Some(a) => a.get(),
+        None => 0,
+    }
+}
+
+/// The host pointer for a mapping the caller has already established is
+/// present. `None` yields a null pointer, which every caller has guarded
+/// against with `is_some()` — the same contract as the old zero sentinel,
+/// now stated where it cannot be skipped by accident.
+#[inline(always)]
+pub(crate) fn host_page_ptr(addr: HostPageAddr) -> *mut u8 {
+    match addr {
+        Some(a) => a.get() as *mut u8,
+        None => core::ptr::null_mut(),
+    }
+}
+
+/// The `Option` must cost nothing: `NonZeroU64`'s niche makes `None` the
+/// all-zero pattern, so the entry is the same size it was as a bare integer.
+/// A regression here would grow every one of the 3072 TLB entries per CPU.
+const _: () = assert!(
+    core::mem::size_of::<HostPageAddr>() == core::mem::size_of::<BxHostpageaddr>()
+);
 
 #[derive(Default)]
 pub(crate) struct TLBEntry {
@@ -28,13 +61,16 @@ pub(crate) struct TLBEntry {
     pub(crate) lpf: BxAddress,
     // physical page frame
     pub(crate) ppf: BxPhyAddress,
-    /// Host address of the page backing this entry, or
-    /// [`NO_DIRECT_ACCESS`] when the page must take the slow path — it carries
-    /// MMIO handlers, is ROM, or falls outside guest RAM.
+    /// Host address of the page backing this entry, or `None` when the page
+    /// must take the slow path — it carries MMIO handlers, is ROM, or falls
+    /// outside guest RAM.
     ///
     /// Bochs stores `hostPageAddr` here for the same reason: a hit can then be
-    /// served without re-resolving the mapping.
-    pub(crate) host_page_addr: BxHostpageaddr,
+    /// served without re-resolving the mapping. It spells "no mapping" as a
+    /// zero address; `Option<NonZero>` says the same thing in the type, and
+    /// niche optimisation makes it the same byte — see the size assertion
+    /// below, which is what keeps this free.
+    pub(crate) host_page_addr: HostPageAddr,
     pub(crate) access_bits: u32,
     pub(super) pkey: u32,
     // linear address mask of the page size
@@ -247,7 +283,7 @@ impl<const SIZE: usize> Tlb<SIZE> {
     pub(super) fn pinned_host_page(&self, slot: usize) -> usize {
         let entry = &self.entries[slot];
         if entry.valid() {
-            entry.host_page_addr as usize
+            host_page_addr_bits(entry.host_page_addr) as usize
         } else {
             0
         }
