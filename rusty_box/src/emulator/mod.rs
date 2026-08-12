@@ -354,7 +354,7 @@ pub struct Emulator<'a, T: Instrumentation = ()> {
     #[cfg(not(feature = "alloc"))]
     cpu_tlb_pin_count: usize,
     /// Memory subsystem
-    pub(crate) memory: BxMemC<'a>,
+    pub(crate) memory: BxMemC,
     /// Device controller (I/O port handlers)
     pub devices: BxDevicesC,
     /// Device manager (actual hardware devices)

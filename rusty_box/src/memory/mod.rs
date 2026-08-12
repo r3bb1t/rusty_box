@@ -356,7 +356,7 @@ pub(crate) const BIOS_ROM_EXTENDED: u8 = 0x02;
 pub(crate) const BIOS_ROM_1MEG: u8 = 0x04;
 
 #[derive(Debug)]
-pub struct BxMemC<'a> {
+pub struct BxMemC {
     pub(crate) mmio: mmio_map::MmioMap,
     pci_enabled: bool,
     bios_write_enabled: bool,
@@ -380,11 +380,9 @@ pub struct BxMemC<'a> {
     /// This is synchronized from BxPcSystemC when A20 state changes
     a20_mask: BxPhyAddress,
 
-    /// Keeps the lifetime parameter used by callers (CPU borrows, emulator context).
-    _marker: core::marker::PhantomData<&'a ()>,
 }
 
-impl BxMemC<'_> {
+impl BxMemC {
     /// Apply A20 masking to an address
     #[inline]
     pub fn a20_addr(&self, addr: BxPhyAddress) -> BxPhyAddress {
@@ -619,7 +617,7 @@ impl BxMemoryStubC {
         unsafe { &mut *self.overflow_file.get() }
     }
 }
-impl<'m> BxMemC<'m> {
+impl BxMemC {
 
     /// Copy RAM through the checked, block-resident backing store. This bypasses
     /// device handlers just like Bochs's physical DMA RAM path.
@@ -836,7 +834,7 @@ impl<'m> BxMemC<'m> {
     }
 }
 #[cfg(feature = "alloc")]
-impl<'m> BxMemC<'m> {
+impl BxMemC {
     pub fn init_memory(
         &mut self,
         guest_size: usize,
@@ -875,7 +873,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
 
     const MIB: usize = 1024 * 1024;
 
-    fn swapped_memory() -> BxMemC<'static> {
+    fn swapped_memory() -> BxMemC {
         let mut memory = BxMemC::new(
             BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("memory allocation"),
             false,
@@ -884,7 +882,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         memory
     }
 
-    fn snapshot_map(memory: &BxMemC<'_>) -> (MemorySnapshotGeometry, Vec<MemorySnapshotResidency>) {
+    fn snapshot_map(memory: &BxMemC) -> (MemorySnapshotGeometry, Vec<MemorySnapshotResidency>) {
         let stub = &memory.inherited_memory_stub;
         let geometry = stub.snapshot_geometry();
         let mut map = Vec::with_capacity(geometry.num_blocks as usize);

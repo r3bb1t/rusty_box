@@ -38,7 +38,7 @@ fn direct_host_write_allowed(
         && !(0x000c0000..0x00100000).contains(&a20_addr)
 }
 
-impl BxMemC<'_> {
+impl BxMemC {
     #[cfg(feature = "alloc")]
     pub fn new(mem_stub: alloc::boxed::Box<BxMemoryStubC>, pci_enabled: bool) -> Self {
         Self::new_inner(*mem_stub, pci_enabled)
@@ -78,12 +78,11 @@ impl BxMemC<'_> {
 
             // A20 starts DISABLED at boot (synced from PC system during init)
             a20_mask: 0xFFFF_FFFF_FFEF_FFFFu64,
-            _marker: core::marker::PhantomData,
         }
     }
 }
 
-impl<'c> BxMemC<'c> {
+impl BxMemC {
     /// Return a resident, block-bounded host span for an already A20-adjusted
     /// GPA after checked PCI-hole/high-RAM translation.
     fn resident_ram_span<'m>(
@@ -198,7 +197,7 @@ impl<'c> BxMemC<'c> {
     }
 }
 
-impl BxMemC<'_> {
+impl BxMemC {
     pub fn load_ROM(
         &mut self,
         rom_data: &[u8],
@@ -889,7 +888,7 @@ mod handler_tests {
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
 
-    fn test_mem() -> BxMemC<'static> {
+    fn test_mem() -> BxMemC {
         let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
         BxMemC::new(stub, false)
     }
@@ -912,7 +911,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     /// This is the property the routing actually depends on: a mapped range
     /// must make `get_host_mem_addr_pinned` decline, so the CPU falls off its
     /// direct path and into the reporting one.
-    fn direct_ram_available(mem: &mut BxMemC<'_>, addr: u64) -> bool {
+    fn direct_ram_available(mem: &mut BxMemC, addr: u64) -> bool {
         matches!(
             mem.get_host_mem_addr_pinned(
                 addr,
@@ -1013,7 +1012,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         let initial = (0xA000_0000u64, 0xA000_FFFFu64);
         let moved = (0xA010_0000u64, 0xA010_FFFFu64);
         let mut data = [0u8; 4];
-        let read = |mem: &mut BxMemC<'_>, addr: u64, data: &mut [u8; 4]| {
+        let read = |mem: &mut BxMemC, addr: u64, data: &mut [u8; 4]| {
             mem.read_physical_page(&[], CpuMemoryPolicy::default(), addr, 4, data)
                 .unwrap()
         };

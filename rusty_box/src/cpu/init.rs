@@ -391,7 +391,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         // invalidate current stack page
         self.esp_page_bias = 0;
         self.esp_page_window_size = 0;
-        self.esp_host_ptr = None;
 
         // Reset the Floating Point Unit
         if source == ResetReason::Hardware {
@@ -540,7 +539,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     }
 
     pub(super) fn invalidate_stack_cache(&mut self) {
-        self.esp_host_ptr = None;
         self.esp_page_bias = 0;
         self.esp_page_window_size = 0;
     }

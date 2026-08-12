@@ -707,7 +707,6 @@ pub struct BxCpuC<'c, T: super::instrumentation::Instrumentation = ()> {
     // Linear address of current stack page
     pub(super) esp_page_bias: BxAddress,
     pub(super) esp_page_window_size: u32,
-    pub(super) esp_host_ptr: Option<&'c [u8]>,
     /// Guest physical address of current stack page
     pub(super) p_addr_stack_page: BxPhyAddress,
 
@@ -780,7 +779,7 @@ pub struct BxCpuC<'c, T: super::instrumentation::Instrumentation = ()> {
     /// when allowed, and fall back to handler-aware reads/writes when access is vetoed.
     ///
     /// It must only be set for the duration of a CPU execution call and cleared afterwards.
-    pub(super) mem_bus: Option<NonNull<crate::memory::BxMemC<'c>>>,
+    pub(super) mem_bus: Option<NonNull<crate::memory::BxMemC>>,
 
     /// SMP scheduling quantum — Bochs BXPN_SMP_QUANTUM (`cpu: quantum=N`),
     /// range 1-32, default 16. Caps SMP trace length in serve_icache_miss
@@ -1982,7 +1981,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     pub(super) unsafe fn mem_bus_with_policy(
         &self,
         addr: BxPhyAddress,
-    ) -> Option<(CpuMemoryPolicy, &mut crate::memory::BxMemC<'c>)> {
+    ) -> Option<(CpuMemoryPolicy, &mut crate::memory::BxMemC)> {
         let mem_bus = self.mem_bus?;
         let a20_addr = unsafe { mem_bus.as_ref().a20_addr(addr) };
         let policy = self.memory_access_policy(a20_addr);
@@ -2014,7 +2013,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     /// prevents.
     pub(super) fn read_physical_routed(
         &self,
-        mem: &mut crate::memory::BxMemC<'_>,
+        mem: &mut crate::memory::BxMemC,
         policy: CpuMemoryPolicy,
         paddr: BxPhyAddress,
         len: usize,
@@ -2044,7 +2043,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     /// Complete a physical write. See [`Self::read_physical_routed`].
     pub(super) fn write_physical_routed(
         &self,
-        mem: &mut crate::memory::BxMemC<'_>,
+        mem: &mut crate::memory::BxMemC,
         policy: CpuMemoryPolicy,
         paddr: BxPhyAddress,
         len: usize,
@@ -2160,7 +2159,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     }
 
     #[inline]
-    pub fn set_mem_bus_ptr(&mut self, mem: NonNull<crate::memory::BxMemC<'c>>) {
+    pub fn set_mem_bus_ptr(&mut self, mem: NonNull<crate::memory::BxMemC>) {
         self.mem_bus = Some(mem);
     }
     /// Wire memory and the complete stable machine pin set for a bounded
@@ -2170,7 +2169,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     #[inline]
     pub(crate) fn wire_memory_access(
         &mut self,
-        mem: NonNull<crate::memory::BxMemC<'c>>,
+        mem: NonNull<crate::memory::BxMemC>,
         pins: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
     ) {
@@ -2428,7 +2427,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     #[inline]
     pub(crate) fn cpu_loop_n_with_io(
         &mut self,
-        mem: &'c mut BxMemC<'c>,
+        mem: &'c mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
@@ -2476,7 +2475,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     #[inline]
     pub(crate) fn cpu_run_trace_with_io(
         &mut self,
-        mem: &'c mut BxMemC<'c>,
+        mem: &'c mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
@@ -2515,7 +2514,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
 
     pub(crate) fn cpu_loop(
         &mut self,
-        mem: &'c mut BxMemC<'c>,
+        mem: &'c mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
     ) -> super::Result<()> {
@@ -2557,7 +2556,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     /// Returns Ok(instructions_executed) when limit is reached or async event occurs.
     pub(crate) fn cpu_loop_n(
         &mut self,
-        mem: &'c mut BxMemC<'c>,
+        mem: &'c mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
@@ -2585,7 +2584,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
         const STRICT_INSTRUCTION_BUDGET: bool,
     >(
         &mut self,
-        mem: &'c mut BxMemC<'c>,
+        mem: &'c mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
@@ -2722,7 +2721,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
 
             // Get raw pointer to mem before the loop to work around borrow checker
             // SAFETY: We'll use this raw pointer to create new references after borrows are released
-            let mem_ptr: *mut BxMemC<'c> = mem;
+            let mem_ptr: *mut BxMemC = mem;
 
             // SAFETY: We extend the lifetime of mem temporarily for this call only.
             // The borrow is released at the end of the expression.
@@ -2730,7 +2729,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             let _t0 = std::time::Instant::now();
             // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
             let (mut instr_idx, mut trace_end) = unsafe {
-                let mem_extended: &'c mut BxMemC<'c> = &mut *mem_ptr;
+                let mem_extended: &'c mut BxMemC = &mut *mem_ptr;
                 match self.get_icache_entry(mem_extended, cpus) {
                     Ok((start, tlen)) => (start, start + tlen),
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
@@ -2979,7 +2978,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
                     // (matching C++ line 218-220: entry=getICacheEntry; i=entry->i; last=...)
                     // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
                     let (start, tlen) = unsafe {
-                        let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
+                        let mem_reborrowed: &'c mut BxMemC = &mut *mem_ptr;
                         match self.get_icache_entry(mem_reborrowed, cpus) {
                             Ok(v) => v,
                             Err(crate::cpu::CpuError::CpuLoopRestart) => {
@@ -3098,13 +3097,13 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
 
     fn fetch_next_instruction(
         &mut self,
-        mem: &'c mut BxMemC<'c>,
+        mem: &'c mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<Instruction> {
-        let mem_ptr: *mut BxMemC<'c> = mem;
+        let mem_ptr: *mut BxMemC = mem;
         // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
         let (mpool_start_idx, _tlen) = unsafe {
-            let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
+            let mem_reborrowed: &'c mut BxMemC = &mut *mem_ptr;
             self.get_icache_entry(mem_reborrowed, cpus)?
         };
         Ok(self.i_cache.mpool[mpool_start_idx])
@@ -3165,7 +3164,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     #[inline]
     fn get_icache_entry(
         &mut self,
-        mem: &'c mut BxMemC<'c>,
+        mem: &'c mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<(usize, usize)> {
         // Apply machine-wide SMC invalidations this cpu has not seen before
@@ -3192,7 +3191,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             || eip_biased_64 >= u64::from(self.eip_page_window_size);
         // Get raw pointer to mem before calling prefetch() to work around borrow checker
         // SAFETY: addr_of_mut avoids creating intermediate reference; pointer valid for fn scope
-        let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
+        let mem_ptr: *mut BxMemC = unsafe { core::ptr::addr_of_mut!(*mem) };
 
         if needs_prefetch {
             #[cfg(feature = "profiling")]
@@ -3202,7 +3201,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             let mut retry_count = 0;
             loop {
                 // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
-                let mem_reborrowed: &'c mut BxMemC<'c> = unsafe { &mut *mem_ptr };
+                let mem_reborrowed: &'c mut BxMemC = unsafe { &mut *mem_ptr };
                 self.prefetch(mem_reborrowed, cpus)?;
 
                 if self.eip_page_window_size == 0 || self.eip_fetch_ptr.is_none() {
@@ -3265,7 +3264,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
 
         // SAFETY: prefetch() borrow is released before serve_icache_miss is called
         let miss_entry = unsafe {
-            let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
+            let mem_reborrowed: &'c mut BxMemC = &mut *mem_ptr;
             self.serve_icache_miss(eip_biased, p_addr, mem_reborrowed, cpus)?
         };
         Ok((miss_entry.mpool_start_idx, miss_entry.tlen as usize))
@@ -3477,7 +3476,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     //  * segment boundary:         any
     pub(super) fn prefetch(
         &mut self,
-        mem: &'c mut BxMemC<'c>,
+        mem: &'c mut BxMemC,
         pins: &[crate::memory::CpuTlbPin],
     ) -> Result<()> {
         let laddr: BxAddress;
@@ -3687,7 +3686,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             let current_p_addr = page_base.wrapping_add(u64::from(page_offset));
             let page_policy = self.memory_access_policy(mem.a20_addr(page_base));
 
-            let mem_ptr: *mut BxMemC<'c> = mem;
+            let mem_ptr: *mut BxMemC = mem;
             let page_mapping = unsafe {
                 (&mut *mem_ptr)
                     .get_host_mem_addr_pinned(
@@ -4339,7 +4338,7 @@ mod tests {
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
         );
-        let mem_ptr: *mut BxMemC<'_> = &mut mem;
+        let mem_ptr: *mut BxMemC = &mut mem;
         let pin = CpuTlbPin::new(&cpu);
         let pins = core::slice::from_ref(&pin);
         cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
@@ -4476,7 +4475,7 @@ mod tests {
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
         );
-        let mem_ptr: *mut BxMemC<'_> = &mut mem;
+        let mem_ptr: *mut BxMemC = &mut mem;
         let pin = CpuTlbPin::new(&cpu);
         let pins = core::slice::from_ref(&pin);
         cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);

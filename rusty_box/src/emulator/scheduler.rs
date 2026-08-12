@@ -21,18 +21,18 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     /// 3. CPU does not retain the reference beyond the call
     /// 4. No other code path accesses self.memory during CPU execution
     #[inline]
-    unsafe fn borrow_memory_for_cpu(&mut self) -> &'a mut BxMemC<'a> {
-        core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory)
+    unsafe fn borrow_memory_for_cpu(&mut self) -> &'a mut BxMemC {
+        core::mem::transmute::<&mut BxMemC, &'a mut BxMemC>(&mut self.memory)
     }
 
-    /// Transmute a `NonNull<BxMemC<'a>>` to `NonNull<BxMemC<'static>>` for wiring
+    /// Transmute a `NonNull<BxMemC>` to `NonNull<BxMemC>` for wiring
     /// into BxDevicesC during a CPU batch. The pointer remains valid for the
     /// duration of the batch because memory is owned by Emulator.
     ///
     /// # Safety
     /// Caller must ensure the returned pointer is not used after the batch completes.
     #[inline]
-    unsafe fn mem_nonnull_static(&mut self) -> core::ptr::NonNull<BxMemC<'static>> {
+    unsafe fn mem_nonnull_static(&mut self) -> core::ptr::NonNull<BxMemC> {
         core::mem::transmute(core::ptr::NonNull::from(&mut self.memory))
     }
 
@@ -267,7 +267,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         let smp = cpu_count > 1;
         let pins_ptr = self.tlb_pins().as_ptr();
         let pins_len = self.tlb_pins().len();
-        let mem_ptr: *mut BxMemC<'a> = &mut self.memory;
+        let mem_ptr: *mut BxMemC = &mut self.memory;
         let io_ptr = core::ptr::NonNull::from(&mut self.devices);
         let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
         let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
@@ -354,8 +354,8 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
                     core::ptr::NonNull::new(pins_ptr as *mut CpuTlbPin);
                 (*dm_ptr.as_ptr()).active_tlb_pin_count = pins_len;
 
-                let mem_extended: &'a mut BxMemC<'a> =
-                    core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut *mem_ptr);
+                let mem_extended: &'a mut BxMemC =
+                    core::mem::transmute::<&mut BxMemC, &'a mut BxMemC>(&mut *mem_ptr);
                 let pins = core::slice::from_raw_parts(pins_ptr, pins_len);
                 let current_pin = &*pins_ptr.add(cpu_index);
                 let ticks_before = self.cpu_ref(cpu_index).cpu_ticks();
@@ -535,7 +535,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
             return;
         }
         let newest = self.memory.smc_seq_next();
-        let mem_ptr: *const BxMemC<'a> = &self.memory;
+        let mem_ptr: *const BxMemC = &self.memory;
         for cpu_index in 0..self.cpu_count() {
             if self.cpu_ref(cpu_index).smc_seq_seen < newest {
                 // SAFETY: memory and the cpu array are distinct fields of

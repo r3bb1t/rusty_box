@@ -652,13 +652,13 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
         &mut self,
         eip_biased: u32,
         p_addr: BxPhyAddress,
-        mem: &'c mut BxMemC<'c>,
+        mem: &'c mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<BxICacheEntry> {
         // Raw pointer for stamp-table marking after `mem` is moved into
         // boundary_fetch below (same reborrow discipline as cpu_loop's
         // mem_ptr; the borrows never overlap).
-        let mem_raw: *mut BxMemC<'c> = mem;
+        let mem_raw: *mut BxMemC = mem;
         // Get entry index first to avoid borrow conflicts
         let entry_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
 
@@ -1046,7 +1046,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
         &mut self,
         fetch_ptr: &[u8],
         remaining_in_page: usize,
-        mem: &'c mut BxMemC<'c>,
+        mem: &'c mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<Instruction> {
         let mut fetch_buffer = [0u8; 32];

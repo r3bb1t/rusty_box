@@ -75,7 +75,7 @@ pub struct Port92State {
 /// Fetch a BM-DMA PRD entry (physical address, raw size dword) from guest
 /// RAM. Reads past a hole or the configured guest length are zero-filled.
 fn read_bmdma_prd(
-    mem: &mut BxMemC<'_>,
+    mem: &mut BxMemC,
     pins: &[CpuTlbPin],
     prd_addr: u32,
 ) -> (u32, u32) {
@@ -250,7 +250,7 @@ pub struct DeviceManager {
     /// Diagnostic: iac vector histogram [0..256]
     pub diag_vector_hist: [u32; 256],
     /// Pointer to BxMemC for fw_cfg DMA. Set temporarily during CPU execution.
-    pub(crate) mem_ptr: Option<core::ptr::NonNull<BxMemC<'static>>>,
+    pub(crate) mem_ptr: Option<core::ptr::NonNull<BxMemC>>,
     /// Complete stable TLB-pin slice for fw_cfg DMA allocation/eviction.
     pub(crate) active_tlb_pins: Option<core::ptr::NonNull<CpuTlbPin>>,
     pub(crate) active_tlb_pin_count: usize,
@@ -854,7 +854,7 @@ impl DeviceManager {
     pub(crate) fn apply_pending_machine_boundary(
         &mut self,
         io: &mut BxDevicesC,
-        mem: &mut crate::memory::BxMemC<'_>,
+        mem: &mut crate::memory::BxMemC,
     ) -> Result<MachineBoundaryEffects> {
         let mut effects = MachineBoundaryEffects::default();
 
@@ -920,7 +920,7 @@ impl DeviceManager {
     fn apply_chipset_effect(
         &mut self,
         effect: ChipsetEffect,
-        mem: &mut crate::memory::BxMemC<'_>,
+        mem: &mut crate::memory::BxMemC,
     ) -> Result<bool> {
         match effect {
             // Bochs pci.cc reset()/pci_write_handler: DEV_mem_set_memory_type
@@ -976,7 +976,7 @@ impl DeviceManager {
     /// Transactionally relocate both VGA PCI memory BARs.
     fn reregister_vga_bars(
         &mut self,
-        mem: &mut crate::memory::BxMemC<'_>,
+        mem: &mut crate::memory::BxMemC,
     ) -> Result<bool> {
         use crate::iodev::vga::PCI_VGA_MMIO_SIZE;
         let device_id = DevSlot::VGA.mmio_token();
@@ -1020,7 +1020,7 @@ impl DeviceManager {
         &mut self,
         channel: usize,
         pcs: &mut crate::pc_system::BxPcSystemC,
-        mem: &mut crate::memory::BxMemC<'c>,
+        mem: &mut crate::memory::BxMemC,
         pins: &[CpuTlbPin],
     ) {
         if channel >= 2 {
@@ -2043,7 +2043,7 @@ impl DeviceManager {
     pub(crate) fn apply_snapshot_v3_restore(
         &mut self,
         io: &mut BxDevicesC,
-        mem: &mut BxMemC<'_>,
+        mem: &mut BxMemC,
         live_bmdma: u16,
         live_pm: u16,
         live_sm: u16,

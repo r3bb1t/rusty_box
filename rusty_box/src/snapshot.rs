@@ -259,11 +259,11 @@ fn memory_payload_len_for_geometry(geometry: MemorySnapshotGeometry) -> io::Resu
 }
 
 #[cfg(feature = "std")]
-fn memory_payload_len(memory: &BxMemC<'_>) -> io::Result<u64> {
+fn memory_payload_len(memory: &BxMemC) -> io::Result<u64> {
     memory_payload_len_for_geometry(memory.snapshot_geometry())
 }
 #[cfg(feature = "std")]
-fn save_memory<W: Write>(memory: &BxMemC<'_>, writer: &mut W) -> io::Result<()> {
+fn save_memory<W: Write>(memory: &BxMemC, writer: &mut W) -> io::Result<()> {
     let g = memory.snapshot_geometry();
     writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
     writer.write_u64(g.guest_len)?; writer.write_u64(g.host_ram_len)?; writer.write_u64(g.block_size)?;
@@ -278,7 +278,7 @@ fn save_memory<W: Write>(memory: &BxMemC<'_>, writer: &mut W) -> io::Result<()> 
     Ok(())
 }
 #[cfg(feature = "std")]
-fn restore_memory<R: Read>(memory: &mut BxMemC<'_>, reader: &mut SnapshotReader<R>) -> io::Result<()> {
+fn restore_memory<R: Read>(memory: &mut BxMemC, reader: &mut SnapshotReader<R>) -> io::Result<()> {
     if reader.read_u32()? != SNAPSHOT_SECTION_VERSION { return Err(invalid_snapshot("unsupported memory snapshot section version")); }
     let saved = MemorySnapshotGeometry {
         guest_len: reader.read_u64()?, host_ram_len: reader.read_u64()?, block_size: reader.read_u64()?,

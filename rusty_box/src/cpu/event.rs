@@ -14,7 +14,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
         &mut self,
         pic: Option<&mut crate::pic::BxPicC>,
         mut dma: Option<&mut crate::dma::BxDmaC>,
-        mut mem: Option<&mut crate::memory::BxMemC<'c>>,
+        mut mem: Option<&mut crate::memory::BxMemC>,
         pins: &[crate::memory::CpuTlbPin],
     ) -> bool {
         // Check if CPU is in non-active state (HLT, MWAIT, etc.)
@@ -581,7 +581,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     fn handle_wait_for_event(
         &mut self,
         dma: Option<&mut crate::dma::BxDmaC>,
-        mem: Option<&mut crate::memory::BxMemC<'c>>,
+        mem: Option<&mut crate::memory::BxMemC>,
         pins: &[crate::memory::CpuTlbPin],
     ) -> bool {
         // For WAIT_FOR_SIPI, just return (matches Bochs event.cc)

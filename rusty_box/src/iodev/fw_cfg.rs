@@ -534,7 +534,7 @@ impl BxFwCfg {
         address: u16,
         value: u32,
         io_len: u8,
-        mem: Option<&mut BxMemC<'_>>,
+        mem: Option<&mut BxMemC>,
         pins: &[CpuTlbPin],
     ) {
         match address {
@@ -583,7 +583,7 @@ impl BxFwCfg {
     }
 
     /// Trigger DMA processing if memory is available, then clear dma_addr.
-    fn trigger_dma(&mut self, mem: Option<&mut BxMemC<'_>>, pins: &[CpuTlbPin]) {
+    fn trigger_dma(&mut self, mem: Option<&mut BxMemC>, pins: &[CpuTlbPin]) {
         let addr = self.dma_addr;
         if let Some(m) = mem {
             self.process_dma(addr, m, pins);
@@ -604,7 +604,7 @@ impl BxFwCfg {
     /// - control (4 bytes): SELECT/READ/SKIP/WRITE flags + key in upper 16 bits
     /// - length (4 bytes)
     /// - address (8 bytes): guest physical address for data transfer
-    fn process_dma(&mut self, dma_addr: u64, mem: &mut BxMemC<'_>, pins: &[CpuTlbPin]) {
+    fn process_dma(&mut self, dma_addr: u64, mem: &mut BxMemC, pins: &[CpuTlbPin]) {
         // A DMA descriptor is indivisible: do not interpret a short/hole
         // prefix, because its control word may not belong to this request.
         let mut desc = [0u8; 16];

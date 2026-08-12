@@ -846,7 +846,7 @@ mod tests {
         // The bridge describes the state; the chipset carries it out. This
         // drives both steps by hand so the relocation behaviour stays covered
         // without a whole DeviceManager.
-        let apply = |bridge: &BxPiix3, ioapic: &mut BxIoApic, mem: &mut BxMemC<'_>| {
+        let apply = |bridge: &BxPiix3, ioapic: &mut BxIoApic, mem: &mut BxMemC| {
             let ChipsetEffect::IoApicEnable {
                 enabled,
                 base_offset,

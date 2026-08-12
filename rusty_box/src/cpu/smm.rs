@@ -941,7 +941,7 @@ mod tests {
     /// default SMBASE 0x30000 save area at 0x3fe00..0x40000.
     fn cpu_with_memory() -> (
         alloc::boxed::Box<BxCpuC<'static>>,
-        alloc::boxed::Box<BxMemC<'static>>,
+        alloc::boxed::Box<BxMemC>,
     ) {
         let mut mem = alloc::boxed::Box::new(BxMemC::new(
             BxMemoryStubC::create_and_init(4 * MIB, 4 * MIB, 128 * 1024)

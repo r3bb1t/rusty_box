@@ -443,7 +443,7 @@ impl BxDmaC {
     ///
     /// The caller supplies memory only while the exclusive CPU batch owns it.
     /// Without that context, HRQ remains asserted and no DMA state advances.
-    pub(crate) fn raise_hlda(&mut self, mem: Option<&mut BxMemC<'_>>, pins: &[CpuTlbPin]) {
+    pub(crate) fn raise_hlda(&mut self, mem: Option<&mut BxMemC>, pins: &[CpuTlbPin]) {
         let Some(mem) = mem else {
             return;
         };
