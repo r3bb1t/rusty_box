@@ -498,6 +498,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         self.i_cache.break_links();
         self.i_cache.flush_all();
         self.sync_vmcb_pin();
+        // Forget where RAM was, in the same breath as the mappings that named
+        // pages within it. Data TLB entries hold page numbers, so an entry and
+        // the base it was filled against are only meaningful together — this
+        // is the one place the two are allowed to change, and they change as a
+        // pair. The next execution scope reinstalls both.
+        self.mem_host_base = core::ptr::null_mut();
+        self.mem_host_len = 0;
+        self.mem_alloc_base = core::ptr::null_mut();
+        self.mem_alloc_len = 0;
     }
 
     /// Flush non-global TLB entries only (preserves entries with G bit set).

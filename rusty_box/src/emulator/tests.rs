@@ -127,21 +127,25 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const CPUID_TOPOLOGY_LEVEL_TYPE_SMT: u32 = 1;
     const CPUID_TOPOLOGY_LEVEL_TYPE_CORE: u32 = 2;
 
-    fn resident_host_base(emu: &mut Emulator<'_>) -> *mut u8 {
+    /// Allocation offset of the resident block backing guest address 0, and the
+    /// base it is measured from.
+    ///
+    /// A synthetic DTLB entry needs BOTH: the sidecar publishes allocation
+    /// offsets, so a test that sets only `mem_host_base` publishes a wild
+    /// offset, and the pin silently stops covering the block it names — which
+    /// is exactly what these eviction tests exist to prove it does cover.
+    fn resident_block(emu: &mut Emulator<'_>) -> (usize, *mut u8) {
         let pins_ptr = emu.tlb_pins().as_ptr();
         let pins_len = emu.tlb_pins().len();
         // Stable CPU pin storage outlives the exclusive memory borrow.
         let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
-        emu.memory
-            .get_host_mem_addr_pinned(
-                0,
-                MemoryAccessType::RW,
-                pins,
-                CpuMemoryPolicy::default(),
-            )
+        let start = emu
+            .memory
+            .host_mem_range_pinned(0, MemoryAccessType::RW, pins, CpuMemoryPolicy::default())
             .unwrap()
             .expect("resident block must have a pinned direct span")
-            .as_mut_ptr()
+            .start;
+        (start, emu.memory.allocation_span().0)
     }
 
     fn topology_level_ecx(subleaf: u32, level_type: u32) -> u32 {
@@ -1054,22 +1058,25 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.memory_block_size = MIB;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
                 let mut emu = Emulator::new(config).unwrap();
-                let old_host_base = resident_host_base(&mut emu) as usize;
+                let (block, alloc_base) = resident_block(&mut emu);
 
                 for cpu_index in 0..emu.cpu_count() {
-                    let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
+                    let cpu = emu.cpu_mut_at(cpu_index);
+                    cpu.mem_host_base = alloc_base.wrapping_add(block);
+                    cpu.mem_alloc_base = alloc_base;
+                    let entry = &mut cpu.dtlb.entries[0];
                     entry.lpf = 0;
-                    entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(old_host_base as crate::config::BxPtrEquiv);
+                    entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 }
                 emu.refresh_tlb_pins();
                 for pin in emu.tlb_pins() {
-                    assert!(pin.is_range_pinned(old_host_base, old_host_base + MIB));
+                    assert!(pin.is_alloc_range_pinned(block, block + MIB));
                 }
 
                 emu.init_memory_and_pc_system().unwrap();
 
                 for pin in emu.tlb_pins() {
-                    assert!(!pin.is_range_pinned(old_host_base, old_host_base + MIB));
+                    assert!(!pin.is_alloc_range_pinned(block, block + MIB));
                 }
             })
             .unwrap()
@@ -1119,15 +1126,18 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.memory.set_a20_mask(u64::MAX);
 
                 emu.load_ram(&[0x5a], 0).unwrap();
-                let host_base = resident_host_base(&mut emu);
-                let entry = &mut emu.cpu_mut_at(AP_INDEX).dtlb.entries[0];
+                let (block, alloc_base) = resident_block(&mut emu);
+                let cpu = emu.cpu_mut_at(AP_INDEX);
+                cpu.mem_host_base = alloc_base.wrapping_add(block);
+                cpu.mem_alloc_base = alloc_base;
+                let entry = &mut cpu.dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
+                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 assert!(!emu.tlb_pins()[AP_INDEX]
-                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+                    .is_alloc_range_pinned(block, block + MIB));
                 emu.refresh_tlb_pins();
                 assert!(emu.tlb_pins()[AP_INDEX]
-                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+                    .is_alloc_range_pinned(block, block + MIB));
 
                 assert!(matches!(
                     emu.load_ram(&[0xa5], MIB as u64),
@@ -1170,15 +1180,18 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.load_ram(&[0x5a], 0).unwrap();
                 emu.load_ram(&[0xC6, 0x07, 0xA5, 0xEB, 0xFE], MIB as u64 + 0x1000)
                     .unwrap();
-                let host_base = resident_host_base(&mut emu);
-                let entry = &mut emu.cpu_mut_at(AP_INDEX).dtlb.entries[0];
+                let (block, alloc_base) = resident_block(&mut emu);
+                let cpu = emu.cpu_mut_at(AP_INDEX);
+                cpu.mem_host_base = alloc_base.wrapping_add(block);
+                cpu.mem_alloc_base = alloc_base;
+                let entry = &mut cpu.dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
+                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 assert!(!emu.tlb_pins()[AP_INDEX]
-                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+                    .is_alloc_range_pinned(block, block + MIB));
                 emu.refresh_tlb_pins();
                 assert!(emu.tlb_pins()[AP_INDEX]
-                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+                    .is_alloc_range_pinned(block, block + MIB));
 
 
                 emu.reg_write(X86Reg::Rip, MIB as u64 + 0x1000);
@@ -1187,7 +1200,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert!(executed >= 1);
                 assert!(
                     emu.tlb_pins()[AP_INDEX]
-                        .is_range_pinned(host_base as usize, host_base as usize + MIB),
+                        .is_alloc_range_pinned(block, block + MIB),
                     "a non-running sibling's direct mapping must survive a BSP slice"
                 );
 
@@ -1223,18 +1236,21 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.memory.set_a20_mask(u64::MAX);
 
                 emu.load_ram(&[0x5a], 0).unwrap();
-                let host_base = resident_host_base(&mut emu);
+                let (block, alloc_base) = resident_block(&mut emu);
                 let cpu_address = emu.cpu() as *const BxCpuC;
-                let entry = &mut unsafe { emu.cpu_mut_unchecked() }.dtlb.entries[0];
+                let cpu = unsafe { emu.cpu_mut_unchecked() };
+                cpu.mem_host_base = alloc_base.wrapping_add(block);
+                cpu.mem_alloc_base = alloc_base;
+                let entry = &mut cpu.dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
+                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
 
                 assert_eq!(cpu_address, emu.cpu() as *const BxCpuC);
                 assert!(!emu.tlb_pins()[BSP_INDEX]
-                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+                    .is_alloc_range_pinned(block, block + MIB));
                 emu.refresh_tlb_pins();
                 assert!(emu.tlb_pins()[BSP_INDEX]
-                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+                    .is_alloc_range_pinned(block, block + MIB));
                 assert!(matches!(
                     emu.load_ram(&[0xa5], MIB as u64),
                     Err(Error::Memory(MemoryError::InsufficientRam))
@@ -2095,18 +2111,21 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
                 let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                let host_base = resident_host_base(&mut emu) as usize;
+                let (block, alloc_base) = resident_block(&mut emu);
 
                 for cpu_index in 0..emu.cpu_count() {
-                    let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
+                    let cpu = emu.cpu_mut_at(cpu_index);
+                    cpu.mem_host_base = alloc_base.wrapping_add(block);
+                    cpu.mem_alloc_base = alloc_base;
+                    let entry = &mut cpu.dtlb.entries[0];
                     entry.lpf = 0;
-                    entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
+                    entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 }
                 emu.refresh_tlb_pins();
                 assert!(emu
                     .tlb_pins()
                     .iter()
-                    .all(|pin| pin.is_range_pinned(host_base, host_base + MIB)));
+                    .all(|pin| pin.is_alloc_range_pinned(block, block + MIB)));
 
                 emu.device_manager.pci_conf_addr = 0x8000_0058;
                 emu.device_manager.pci_write(0x0CFD, 0x30, 1);
@@ -2116,7 +2135,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert!(emu
                     .tlb_pins()
                     .iter()
-                    .all(|pin| !pin.is_range_pinned(host_base, host_base + MIB)));
+                    .all(|pin| !pin.is_alloc_range_pinned(block, block + MIB)));
                 assert!(emu.memory.memory_type(12, 1));
             })
             .unwrap()
@@ -2137,12 +2156,15 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
                 let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                let host_base = resident_host_base(&mut emu) as usize;
+                let (block, alloc_base) = resident_block(&mut emu);
 
                 for cpu_index in 0..emu.cpu_count() {
-                    let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
+                    let cpu = emu.cpu_mut_at(cpu_index);
+                    cpu.mem_host_base = alloc_base.wrapping_add(block);
+                    cpu.mem_alloc_base = alloc_base;
+                    let entry = &mut cpu.dtlb.entries[0];
                     entry.lpf = 0;
-                    entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
+                    entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 }
                 emu.refresh_tlb_pins();
                 emu.write_port_92h(0x00);
@@ -2150,12 +2172,15 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert!(emu
                     .tlb_pins()
                     .iter()
-                    .all(|pin| !pin.is_range_pinned(host_base, host_base + MIB)));
+                    .all(|pin| !pin.is_alloc_range_pinned(block, block + MIB)));
 
                 for cpu_index in 0..emu.cpu_count() {
-                    let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
+                    let cpu = emu.cpu_mut_at(cpu_index);
+                    cpu.mem_host_base = alloc_base.wrapping_add(block);
+                    cpu.mem_alloc_base = alloc_base;
+                    let entry = &mut cpu.dtlb.entries[0];
                     entry.lpf = 0;
-                    entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_base as crate::config::BxPtrEquiv);
+                    entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 }
                 emu.refresh_tlb_pins();
                 emu.device_manager.keyboard.write(
@@ -2169,7 +2194,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert!(emu
                     .tlb_pins()
                     .iter()
-                    .all(|pin| !pin.is_range_pinned(host_base, host_base + MIB)));
+                    .all(|pin| !pin.is_alloc_range_pinned(block, block + MIB)));
 
                 // Regression for independent controller mirrors. Before the
                 // boundary synchronization, each second write matched its own

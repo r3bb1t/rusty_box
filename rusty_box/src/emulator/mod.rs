@@ -1834,7 +1834,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     }
 
     /// Get DTLB entry info for a given linear address.
-    /// Returns (lpf, ppf, access_bits, host_page_addr) for the TLB slot
+    /// Returns (lpf, ppf, access_bits, host page address) for the TLB slot
     /// that would be used for a dword read at `laddr`.
     pub fn get_dtlb_info(&self, laddr: u64) -> (u64, u64, u32, crate::config::BxPtrEquiv) {
         let idx = self.cpu.dtlb.get_index_of(laddr, 3);
@@ -1843,7 +1843,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
             entry.lpf,
             entry.ppf,
             entry.access_bits,
-            crate::cpu::tlb::host_page_addr_bits(entry.host_page_addr),
+            crate::cpu::tlb::host_page_addr_bits(self.cpu.mem_host_base, entry.host_page),
         )
     }
 

@@ -32,21 +32,30 @@ use core::cell::UnsafeCell;
 pub(crate) const CPU_TLB_PIN_DTLB_SLOTS: usize = 2048;
 pub(crate) const CPU_TLB_PIN_ITLB_SLOTS: usize = 1024;
 
-/// Pin-visible host pointers copied out of one CPU.
+/// Pin-visible memory references copied out of one CPU.
 ///
 /// The emulator is single-threaded. It refreshes this state before wiring a
 /// CPU memory scope and each CPU synchronously updates it after changing a
-/// TLB/VMCB host pointer or invalidating a TLB entry. `UnsafeCell` permits
-/// those updates through a stable descriptor without touching the mutably
-/// borrowed CPU during an allocator eviction check.
+/// TLB/VMCB mapping or invalidating a TLB entry. `UnsafeCell` permits those
+/// updates through a stable descriptor without touching the mutably borrowed
+/// CPU during an allocator eviction check.
+///
+/// Every field is a **byte offset into the memory allocation, biased by one**:
+/// zero means "nothing published", and offset `n` is stored as `n + 1`.
+///
+/// The bias exists because offset 0 is a perfectly legitimate first byte of the
+/// allocation, so it cannot double as the absence marker the way a null pointer
+/// could. Keeping absence at all-zero is what lets `clear_tlb_hosts` stay a
+/// memset, and it makes the absence test disappear into the bounds comparison
+/// in `is_alloc_range_pinned` — see there.
 struct CpuTlbPinState {
-    dtlb_hosts: [usize; CPU_TLB_PIN_DTLB_SLOTS],
-    itlb_hosts: [usize; CPU_TLB_PIN_ITLB_SLOTS],
-    vmcb_host: usize,
-    /// Bounded non-ITLB instruction-fetch window (`eip_fetch_ptr`) host
-    /// interval; `fetch_window_end == 0` means no window. Bochs cpu.cc
-    /// `prefetch`: `eipFetchPtr` stays valid until the next refill, so its
-    /// backing block must never be evicted while retained.
+    dtlb_offsets: [usize; CPU_TLB_PIN_DTLB_SLOTS],
+    itlb_offsets: [usize; CPU_TLB_PIN_ITLB_SLOTS],
+    vmcb_offset: usize,
+    /// Bounded non-ITLB instruction-fetch window (`eip_fetch_ptr`) interval;
+    /// `fetch_window_end == 0` means no window. Bochs cpu.cc `prefetch`:
+    /// `eipFetchPtr` stays valid until the next refill, so its backing block
+    /// must never be evicted while retained.
     fetch_window_start: usize,
     fetch_window_end: usize,
 }
@@ -54,21 +63,26 @@ struct CpuTlbPinState {
 impl CpuTlbPinState {
     const fn empty() -> Self {
         Self {
-            dtlb_hosts: [0; CPU_TLB_PIN_DTLB_SLOTS],
-            itlb_hosts: [0; CPU_TLB_PIN_ITLB_SLOTS],
-            vmcb_host: 0,
+            dtlb_offsets: [0; CPU_TLB_PIN_DTLB_SLOTS],
+            itlb_offsets: [0; CPU_TLB_PIN_ITLB_SLOTS],
+            vmcb_offset: 0,
             fetch_window_start: 0,
             fetch_window_end: 0,
         }
     }
 }
 
-/// A stable, external view of one CPU's direct host-memory references.
+/// A stable, external view of one CPU's direct memory references.
 ///
 /// This descriptor never retains a CPU pointer. Its interior state is updated
 /// only by the owning CPU while the emulator has exclusive machine access, and
 /// it remains separately addressable while that CPU has an active `&mut`
 /// borrow. Allocator checks therefore inspect only this sidecar.
+///
+/// Everything published here is an **allocation offset**, never a host address.
+/// The allocator asks its questions in offsets — it is deciding which block of
+/// its own allocation to evict — so this side is where the units belong, and
+/// the publisher, not the checker, is the one that has a base in hand.
 pub(crate) struct CpuTlbPin {
     state: UnsafeCell<CpuTlbPinState>,
 }
@@ -89,56 +103,84 @@ impl CpuTlbPin {
         // SAFETY: sidecar mutation is serialized by the emulator's
         // single-threaded CPU/memory scope contract.
         let state = unsafe { &mut *self.state.get() };
-        state.dtlb_hosts.fill(0);
-        state.itlb_hosts.fill(0);
-        state.vmcb_host = 0;
+        state.dtlb_offsets.fill(0);
+        state.itlb_offsets.fill(0);
+        state.vmcb_offset = 0;
         state.fetch_window_start = 0;
         state.fetch_window_end = 0;
     }
 
+    /// Apply the absent-is-zero bias. `None` is 0; offset `n` is `n + 1`.
+    #[inline(always)]
+    fn biased(offset: Option<usize>) -> usize {
+        match offset {
+            Some(o) => o.wrapping_add(1),
+            None => 0,
+        }
+    }
+
     #[inline]
-    pub(crate) fn set_dtlb_host(&self, slot: usize, host: usize) {
+    pub(crate) fn set_dtlb_offset(&self, slot: usize, offset: Option<usize>) {
         debug_assert!(slot < CPU_TLB_PIN_DTLB_SLOTS);
         // SAFETY: see `clear_tlb_hosts`.
-        unsafe { (*self.state.get()).dtlb_hosts[slot] = host };
+        unsafe { (*self.state.get()).dtlb_offsets[slot] = Self::biased(offset) };
     }
 
     #[inline]
-    pub(crate) fn set_itlb_host(&self, slot: usize, host: usize) {
+    pub(crate) fn set_itlb_offset(&self, slot: usize, offset: Option<usize>) {
         debug_assert!(slot < CPU_TLB_PIN_ITLB_SLOTS);
         // SAFETY: see `clear_tlb_hosts`.
-        unsafe { (*self.state.get()).itlb_hosts[slot] = host };
+        unsafe { (*self.state.get()).itlb_offsets[slot] = Self::biased(offset) };
     }
 
     #[inline]
-    pub(crate) fn set_vmcb_host(&self, host: usize) {
+    pub(crate) fn set_vmcb_offset(&self, offset: Option<usize>) {
         // SAFETY: see `clear_tlb_hosts`.
-        unsafe { (*self.state.get()).vmcb_host = host };
+        unsafe { (*self.state.get()).vmcb_offset = Self::biased(offset) };
     }
 
-    /// Publish (or clear, with `len == 0`) the bounded instruction-fetch
-    /// window so eviction never steals the block backing `eip_fetch_ptr`.
+    /// Publish (or clear, with `None`) the bounded instruction-fetch window so
+    /// eviction never steals the block backing `eip_fetch_ptr`.
     #[inline]
-    pub(crate) fn set_fetch_window(&self, start: usize, len: usize) {
+    pub(crate) fn set_fetch_window(&self, window: Option<(usize, usize)>) {
         // SAFETY: see `clear_tlb_hosts`.
         let state = unsafe { &mut *self.state.get() };
-        state.fetch_window_start = start;
-        state.fetch_window_end = start.wrapping_add(len);
+        match window {
+            // Biased like every other field, so a window starting at offset 0
+            // is distinguishable from no window at all.
+            Some((start, len)) => {
+                state.fetch_window_start = start.wrapping_add(1);
+                state.fetch_window_end = start.wrapping_add(len).wrapping_add(1);
+            }
+            None => {
+                state.fetch_window_start = 0;
+                state.fetch_window_end = 0;
+            }
+        }
     }
 
+    /// Does this CPU hold a direct reference into `[start, end)` of the
+    /// allocation? Both bounds are allocation offsets, matching what the
+    /// allocator already computes for the block it wants to evict.
     #[inline]
-    pub(crate) fn is_range_pinned(&self, start: usize, end: usize) -> bool {
+    pub(crate) fn is_alloc_range_pinned(&self, start: usize, end: usize) -> bool {
         // SAFETY: eviction checks only read this separately addressable state;
         // mutation is serialized before/after each CPU instruction operation.
         let state = unsafe { &*self.state.get() };
-        let contains = |host: usize| host != 0 && host >= start && host < end;
-        contains(state.vmcb_host)
-            || (state.fetch_window_start < end && state.fetch_window_end > start)
-            || state.dtlb_hosts.iter().copied().any(contains)
-            || state.itlb_hosts.iter().copied().any(contains)
+        // Compare in biased space: shifting both bounds up by one costs two
+        // adds here instead of a subtract per slot, and it makes the absence
+        // check free — an unpublished slot holds 0, and `lo` is always >= 1,
+        // so zero can never fall inside the range.
+        let lo = start.wrapping_add(1);
+        let hi = end.wrapping_add(1);
+        let contains = |biased: usize| biased >= lo && biased < hi;
+        contains(state.vmcb_offset)
+            || (state.fetch_window_start < hi && state.fetch_window_end > lo)
+            || state.dtlb_offsets.iter().copied().any(contains)
+            || state.itlb_offsets.iter().copied().any(contains)
     }
 
-    /// Exact equality of every published host pin. Used by the Track B property
+    /// Exact equality of every published pin. Used by the Track B property
     /// test to assert that incrementally maintained sidecars stay byte-identical
     /// to a fresh `refresh_tlb_pin` rescan after each TLB operation.
     #[cfg(test)]
@@ -146,9 +188,9 @@ impl CpuTlbPin {
         // SAFETY: single-threaded test access; no concurrent sidecar mutation.
         let a = unsafe { &*self.state.get() };
         let b = unsafe { &*other.state.get() };
-        a.dtlb_hosts == b.dtlb_hosts
-            && a.itlb_hosts == b.itlb_hosts
-            && a.vmcb_host == b.vmcb_host
+        a.dtlb_offsets == b.dtlb_offsets
+            && a.itlb_offsets == b.itlb_offsets
+            && a.vmcb_offset == b.vmcb_offset
             && a.fetch_window_start == b.fetch_window_start
             && a.fetch_window_end == b.fetch_window_end
     }
@@ -750,6 +792,18 @@ impl BxMemC {
         (ptr, stub.len)
     }
 
+    /// Base and length of the single allocation every direct host mapping
+    /// lives in — guest RAM, the ROM image and the bogus page alike.
+    ///
+    /// Unlike `identity_guest_base` this stays valid when residency is partial,
+    /// which is precisely why instruction fetch needs it: fetch also runs out
+    /// of ROM, which is not guest RAM at all, and out of relocated RAM slots.
+    /// A range from `host_mem_range_pinned` is an offset into exactly this.
+    pub(crate) fn allocation_span(&self) -> (*mut u8, usize) {
+        let stub = &self.inherited_memory_stub;
+        (stub.actual_vector, stub.actual_vector_len)
+    }
+
     /// Block-logical snapshot geometry; no caller receives the host backing.
     #[cfg(feature = "std")]
     pub(crate) fn snapshot_geometry(&self) -> MemorySnapshotGeometry {
@@ -1266,20 +1320,21 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 let pins = core::slice::from_ref(&pin);
 
                 cpu.wire_memory_access(core::ptr::NonNull::from(&mut mem), pins, &pin);
-                assert!(!pin.is_range_pinned(0x4000, 0x5000));
+                assert!(!pin.is_alloc_range_pinned(0x4000, 0x5000));
 
                 // A batch refresh publishes a mapping installed before the
                 // execution scope; no allocator check dereferences `cpu`.
+                cpu.mem_host_base = 0x4000 as *mut u8;
                 let entry = &mut cpu.dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(0x4000);
+                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 cpu.refresh_tlb_pin(&pin);
-                assert!(pin.is_range_pinned(0x4000, 0x5000));
+                assert!(pin.is_alloc_range_pinned(0x4000, 0x5000));
 
                 // The CPU's real invalidation path synchronously removes the
                 // slot, so stale over-pinning does not survive the scope.
                 cpu.tlb_flush();
-                assert!(!pin.is_range_pinned(0x4000, 0x5000));
+                assert!(!pin.is_alloc_range_pinned(0x4000, 0x5000));
 
                 cpu.clear_memory_access();
             })
@@ -1301,19 +1356,24 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 let mut sibling = BxCpuBuilder::new().build().unwrap();
                 mem.write_ram(&[], 0, &[0x5a]).unwrap();
                 let pins = [CpuTlbPin::new(&*sibling)];
-                let host_ptr = mem
-                    .get_host_mem_addr_pinned(
+                let resident = mem
+                    .host_mem_range_pinned(
                         0,
                         MemoryAccessType::Read,
                         &pins,
                         CpuMemoryPolicy::default(),
                     )
                     .unwrap()
-                    .unwrap()
-                    .as_ptr() as usize;
+                    .unwrap();
+                // Both bases — the published pin is an allocation offset, so
+                // leaving `mem_alloc_base` null would measure the data TLB's
+                // offset from nothing and quietly stop blocking eviction.
+                let alloc_base = mem.allocation_span().0;
+                sibling.mem_host_base = alloc_base.wrapping_add(resident.start);
+                sibling.mem_alloc_base = alloc_base;
                 let entry = &mut sibling.dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_ptr as crate::config::BxPtrEquiv);
+                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 sibling.refresh_tlb_pin(&pins[0]);
 
                 assert!(matches!(
@@ -1346,23 +1406,24 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 let cpu = BxCpuBuilder::new().build().unwrap();
                 let pins = [CpuTlbPin::new(&*cpu)];
 
-                // Make guest block 0 resident and locate its host span.
+                // Make guest block 0 resident and locate its span. Asking for
+                // the range rather than a pointer yields the allocation offset
+                // the sidecar and the evictor both speak in.
                 mem.write_ram(&[], 0, &[0x5a]).unwrap();
-                let host = mem
-                    .get_host_mem_addr_pinned(
+                let block = mem
+                    .host_mem_range_pinned(
                         0,
                         MemoryAccessType::Execute,
                         &pins,
                         CpuMemoryPolicy::default(),
                     )
                     .unwrap()
-                    .unwrap()
-                    .as_ptr() as usize;
+                    .unwrap();
 
                 // Publish a bounded sub-block fetch window inside block 0,
                 // exactly as `sync_fetch_window_pin` would.
-                pins[0].set_fetch_window(host + 0x100, 0x80);
-                assert!(pins[0].is_range_pinned(host, host + MIB));
+                pins[0].set_fetch_window(Some((block.start + 0x100, 0x80)));
+                assert!(pins[0].is_alloc_range_pinned(block.start, block.start + MIB));
 
                 // A data access to a swapped block must NOT evict the pinned
                 // code block — the sole victim candidate is protected.
@@ -1378,7 +1439,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 assert_eq!(retained, [0x5a]);
 
                 // Clearing the window releases the block for eviction.
-                pins[0].set_fetch_window(0, 0);
+                pins[0].set_fetch_window(None);
                 assert_eq!(mem.read_ram(&pins, 2 * MIB as u64, &mut buf).unwrap(), 1);
                 assert_eq!(buf, [0]);
             })
@@ -1402,21 +1463,27 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
 
                 let mut sibling = BxCpuBuilder::new().build().unwrap();
                 let pins = [CpuTlbPin::new(&*sibling)];
-                let resident_base = mem
-                    .get_host_mem_addr_pinned(
+                let resident = mem
+                    .host_mem_range_pinned(
                         0,
                         MemoryAccessType::Read,
                         &pins,
                         CpuMemoryPolicy::default(),
                     )
                     .unwrap()
-                    .unwrap()
-                    .as_ptr() as usize;
+                    .unwrap();
+                let alloc_base = mem.allocation_span().0;
+                // Both bases, because the data TLB's offsets are measured from
+                // guest RAM but published against the allocation. Setting only
+                // `mem_host_base` would publish a wild offset and silently stop
+                // blocking eviction, which is the very thing under test.
+                sibling.mem_host_base = alloc_base.wrapping_add(resident.start);
+                sibling.mem_alloc_base = alloc_base;
                 let entry = &mut sibling.dtlb.entries[0];
                 entry.lpf = 0;
-                entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(resident_base as crate::config::BxPtrEquiv);
+                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 sibling.refresh_tlb_pin(&pins[0]);
-                assert!(pins[0].is_range_pinned(resident_base, resident_base + MIB));
+                assert!(pins[0].is_alloc_range_pinned(resident.start, resident.start + MIB));
 
                 let mut read = [0xcc; 4];
                 assert_eq!(mem.read_ram(&pins, start, &mut read).unwrap(), 2);

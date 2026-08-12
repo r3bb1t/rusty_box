@@ -9,7 +9,7 @@ use crate::{
     config::{BxAddress, BxPhyAddress},
     cpu::{
         rusty_box::MemoryAccessType,
-        tlb::{BxHostpageaddr, TLBEntry, LPF_MASK},
+        tlb::LPF_MASK,
     },
     memory::{memory_rusty_box::bx_guest_ram_span, BxMemC},
 };
@@ -475,7 +475,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// page (paging.cc: `ITLB.split_large = true` on large execute leaves).
     pub(super) fn translate_linear(
         &mut self,
-        _tlb_entry: &TLBEntry,
         laddr: BxAddress,
         user: bool,
         rw: MemoryAccessType,
@@ -1523,7 +1522,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// without this test a page table placed in the legacy window was read
     /// and had its A/D bits written straight to host RAM, behind whatever
     /// mapping the chipset had in effect. The DTLB fill uses the same test
-    /// when deciding whether to cache a `host_page_addr`.
+    /// when deciding whether to cache a host page.
     #[inline]
     fn is_plain_ram_for_walk(a20_addr: u64) -> bool {
         a20_addr < 0xA0000 || a20_addr >= 0x100000
@@ -1710,17 +1709,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         // Bochs stores hostPageAddr in each TLB entry so subsequent accesses
         // bypass the pinned host-mapping slow path. Pages with MMIO handlers
         // (VGA 0xA0000-0xBFFFF) or ROM get `NO_DIRECT_ACCESS`.
-        let host_page_addr = {
+        let host_page = {
             let a20_ppf = self.apply_a20(ppf);
-            let host_base = self.mem_host_base;
             let host_len = self.mem_host_len;
             let plain_ram = a20_ppf < 0xA0000 || a20_ppf >= 0x100000;
-            if !host_base.is_null() && plain_ram {
-                bx_guest_ram_span(a20_ppf, 0x1000, host_len).and_then(|span| {
-                    crate::config::BxPtrEquivNonZero::new(
-                        super::access::host_offset(host_base, span.start) as BxHostpageaddr,
-                    )
-                })
+            if !self.mem_host_base.is_null() && plain_ram {
+                // The span is already the offset of this page into the RAM
+                // allocation, which is exactly what the entry caches — the
+                // base is added back at each hit.
+                bx_guest_ram_span(a20_ppf, 0x1000, host_len)
+                    .and_then(|span| super::tlb::RamPage::from_ram_offset(span.start))
             } else {
                 super::tlb::NO_DIRECT_ACCESS
             }
@@ -1732,7 +1730,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             tlb_entry.ppf = ppf;
             tlb_entry.access_bits = access_bits;
             tlb_entry.lpf_mask = lpf_mask;
-            tlb_entry.host_page_addr = host_page_addr;
+            tlb_entry.host_page = host_page;
             tlb_entry.pkey = pkey;
         }
         self.sync_dtlb_pin_slot(laddr, 0);
@@ -2725,7 +2723,6 @@ mod tests {
             cpu::CpuMode,
             crregs::{BxCr0, BxCr4},
             rusty_box::MemoryAccessType,
-            tlb::TLBEntry,
         },
         memory::{BxMemC, BxMemoryStubC, CpuTlbPin},
     };
@@ -2782,6 +2779,70 @@ mod tests {
     }
 
     #[test]
+    fn a_data_walk_caches_plain_ram_and_refuses_the_legacy_window() {
+        // The fill decides whether a hit can be served directly, and it can
+        // only ever say "no" more often than it should — which costs speed and
+        // fails nothing. So assert both directions explicitly: a plain-RAM page
+        // must come back with a cached offset that resolves to the right host
+        // address, and a page in the legacy VGA/ROM window must come back with
+        // none at all. Without this, a wrong span, a wrong alignment rule or a
+        // wrong gate is invisible until someone benchmarks a boot.
+        const PAGE_DIRECTORY: u64 = 0x3000;
+        const PAGE_TABLE: u64 = 0x4000;
+        const RAM_FRAME: u64 = 0x4000;
+        const LEGACY_FRAME: u64 = 0x000A_0000;
+        const RAM_VADDR: u64 = 0x0000;
+        const LEGACY_VADDR: u64 = 0x1000;
+
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
+            false,
+        );
+        let pin = CpuTlbPin::new(&cpu);
+        let pins = core::slice::from_ref(&pin);
+        let (host_base, host_len) = mem.identity_guest_base();
+        assert!(!host_base.is_null(), "full residency must be an identity map");
+        cpu.install_memory_bases(&mut mem);
+        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
+
+        mem.write_ram(pins, PAGE_DIRECTORY, &(PAGE_TABLE | 0x3).to_le_bytes())
+            .unwrap();
+        mem.write_ram(pins, PAGE_TABLE, &(RAM_FRAME | 0x3).to_le_bytes())
+            .unwrap();
+        mem.write_ram(pins, PAGE_TABLE + 8, &(LEGACY_FRAME | 0x3).to_le_bytes())
+            .unwrap();
+        cpu.pdptrcache.entry[0] = PAGE_DIRECTORY | 0x1;
+        cpu.cr0 = BxCr0::PE | BxCr0::PG;
+        cpu.cr4 = BxCr4::PAE;
+        cpu.cpu_mode = CpuMode::Ia32Protected;
+
+        assert_eq!(cpu.translate_data_read(RAM_VADDR).unwrap(), RAM_FRAME);
+        let slot = cpu.dtlb.get_index_of(RAM_VADDR, 0);
+        let cached = cpu.dtlb.entries[slot].host_page;
+        assert!(
+            cached.is_some(),
+            "a plain-RAM walk must cache a direct mapping, or every hit on this \
+             page silently takes the slow path"
+        );
+        assert_eq!(
+            crate::cpu::tlb::host_page_ptr(cpu.mem_host_base, cached),
+            host_base.wrapping_add(RAM_FRAME as usize),
+            "the cached offset must resolve to the frame's host address"
+        );
+
+        assert_eq!(cpu.translate_data_read(LEGACY_VADDR).unwrap(), LEGACY_FRAME);
+        let slot = cpu.dtlb.get_index_of(LEGACY_VADDR, 0);
+        assert!(
+            cpu.dtlb.entries[slot].host_page.is_none(),
+            "the legacy 0xA0000 window carries handlers, so it must never be \
+             cached for direct access (Bochs misc_mem.cc getHostMemAddr)"
+        );
+
+        cpu.clear_memory_access();
+    }
+
+    #[test]
     fn page_walk_handler_write_qword_syncs_writer() {
         const PAGE_DIRECTORY: u64 = 0x3000;
         const PAGE_TABLE: u64 = 0x4000;
@@ -2814,7 +2875,6 @@ mod tests {
         );
         assert_eq!(
             cpu.translate_linear(
-                &TLBEntry::default(),
                 0,
                 false,
                 MemoryAccessType::Write,

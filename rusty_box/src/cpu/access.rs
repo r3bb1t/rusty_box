@@ -1148,7 +1148,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     //
     // Used by FastRep string ops and REP INSW for direct memcpy/memset to host memory.
     // Returns a mutable host pointer if the linear address hits a TLB entry with a valid
-    // host page addr. Returns None on TLB miss or MMIO (host_page_addr == 0).
+    // host page. Returns None on TLB miss or MMIO (no cached host page).
 
     /// Resolve a linear address to a host write pointer via TLB.
     /// Returns (host_ptr, bytes_remaining_in_page) or None on miss.
@@ -1194,7 +1194,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
-                && tlb.host_page_addr.is_some()
+                && tlb.host_page.is_some()
                 && !self.mem_host_base.is_null()
             {
                 let page_offset = (laddr & 0xFFF) as usize;
@@ -1211,7 +1211,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 if remaining == 0 {
                     return Ok(None);
                 }
-                let ptr = super::tlb::host_page_ptr(tlb.host_page_addr).wrapping_add(page_offset);
+                let ptr = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page).wrapping_add(page_offset);
                 return Ok(Some((ptr, remaining, paddr)));
             }
             if translated || !self.cr0.pg() {
@@ -1273,7 +1273,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
-                && tlb.host_page_addr.is_some()
+                && tlb.host_page.is_some()
                 && !self.mem_host_base.is_null()
             {
                 let page_offset = (laddr & 0xFFF) as usize;
@@ -1290,7 +1290,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 if remaining == 0 {
                     return Ok(None);
                 }
-                let ptr = super::tlb::host_page_ptr(tlb.host_page_addr).wrapping_add(page_offset);
+                let ptr = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page).wrapping_add(page_offset);
                 return Ok(Some((ptr, remaining)));
             }
             if translated || !self.cr0.pg() {
@@ -1450,10 +1450,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr.is_some() {
+                != 0 && tlb.host_page.is_some() {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr_hit, 1)?;
             let v = unsafe { *host_at_page_offset(host, laddr) };
@@ -1499,10 +1499,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr.is_some() {
+                != 0 && tlb.host_page.is_some() {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr_hit, 2)?;
             let ptr = host_at_page_offset(host, laddr);
@@ -1559,10 +1559,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr.is_some() {
+                != 0 && tlb.host_page.is_some() {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr_hit, 4)?;
             let ptr = host_at_page_offset(host, laddr);
@@ -1620,10 +1620,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr.is_some() {
+                != 0 && tlb.host_page.is_some() {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr_hit, 8)?;
             let ptr = host_at_page_offset(host, laddr);
@@ -1680,9 +1680,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr.is_some() {
+                != 0 && tlb.host_page.is_some() {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 1)?;
             self.smc_write_check(paddr, 1);
@@ -1735,9 +1735,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr.is_some() {
+                != 0 && tlb.host_page.is_some() {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 2)?;
             self.smc_write_check(paddr, 2);
@@ -1832,9 +1832,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr.is_some() {
+                != 0 && tlb.host_page.is_some() {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 4)?;
             self.smc_write_check(paddr, 4);
@@ -1901,9 +1901,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr.is_some() {
+                != 0 && tlb.host_page.is_some() {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 8)?;
             self.smc_write_check(paddr, 8);
@@ -1965,9 +1965,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let tlb = self.dtlb.get_entry_of(laddr, 3);
         let pkey_mask = self.rd_pkey[tlb.pkey as usize];
-        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page_addr.is_some()
+        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page.is_some()
         {
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: TLB-validated host pointer; unaligned read OK.
             return Ok(read_unaligned_u32(ptr));
@@ -1988,9 +1988,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let tlb = self.dtlb.get_entry_of(laddr, 7);
         let pkey_mask = self.rd_pkey[tlb.pkey as usize];
-        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page_addr.is_some()
+        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page.is_some()
         {
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             let ptr = host_at_page_offset(host, laddr);
             return Ok(read_unaligned_u64(ptr));
         }
@@ -2012,10 +2012,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let pkey_mask = self.wr_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf
             && tlb.is_shadow_stack_write_ok(user, pkey_mask)
-            && tlb.host_page_addr.is_some()
+            && tlb.host_page.is_some()
         {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.smc_write_check(paddr, 4);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: TLB-validated host pointer; unaligned write OK.
@@ -2042,10 +2042,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let pkey_mask = self.wr_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf
             && tlb.is_shadow_stack_write_ok(user, pkey_mask)
-            && tlb.host_page_addr.is_some()
+            && tlb.host_page.is_some()
         {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            let host = super::tlb::host_page_ptr(tlb.host_page_addr);
+            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.smc_write_check(paddr, 8);
             let ptr = host_at_page_offset_mut(host, laddr);
             write_unaligned_u64(ptr, val);
@@ -2072,9 +2072,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr.is_some() {
+                != 0 && tlb.host_page.is_some() {
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
-            let host_addr = super::tlb::host_page_addr_bits(tlb.host_page_addr) | page_offset;
+            let host_addr = super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.smc_write_check(paddr, 8);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
@@ -2133,10 +2133,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
-            && tlb.host_page_addr.is_some()
+            && tlb.host_page.is_some()
         {
             self.address_xlation.pages =
-                super::tlb::host_page_addr_bits(tlb.host_page_addr) | (laddr & 0x0fff) as BxPtrEquiv;
+                super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | (laddr & 0x0fff) as BxPtrEquiv;
             self.address_xlation.paddress1 =
                 tlb.ppf | (laddr & 0x0fff) as BxPhyAddress;
             return Ok(());
@@ -2183,10 +2183,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
-            && tlb.host_page_addr.is_some()
+            && tlb.host_page.is_some()
         {
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
-            let host_addr = super::tlb::host_page_addr_bits(tlb.host_page_addr) | page_offset;
+            let host_addr = super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
@@ -2262,10 +2262,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
-            && tlb.host_page_addr.is_some()
+            && tlb.host_page.is_some()
         {
             self.address_xlation.pages =
-                super::tlb::host_page_addr_bits(tlb.host_page_addr) | (laddr & 0x0fff) as BxPtrEquiv;
+                super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | (laddr & 0x0fff) as BxPtrEquiv;
             self.address_xlation.paddress1 =
                 tlb.ppf | (laddr & 0x0fff) as BxPhyAddress;
             return Ok(());
@@ -2850,7 +2850,7 @@ mod tests {
         entry.lpf = laddr & super::super::tlb::LPF_MASK;
         entry.ppf = 0x1_0000_0000;
         entry.access_bits = 1 << 2; // supervisor write
-        entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(fake_base.wrapping_add(3 * GIB) as crate::config::BxPtrEquiv);
+        entry.host_page = super::super::tlb::RamPage::from_ram_offset(3 * GIB);
         let (ptr, remaining, paddr) = cpu
             .get_host_write_ptr_for_bulk(laddr)
             .unwrap()
@@ -2865,7 +2865,7 @@ mod tests {
         entry.lpf = laddr & super::super::tlb::LPF_MASK;
         entry.ppf = PCI_HOLE;
         entry.access_bits = 1 << 2;
-        entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(fake_base as crate::config::BxPtrEquiv);
+        entry.host_page = super::super::tlb::RamPage::from_ram_offset(0);
         assert!(
             cpu.get_host_write_ptr_for_bulk(laddr).unwrap().is_none(),
             "a TLB pointer must not bypass the PCI hole"

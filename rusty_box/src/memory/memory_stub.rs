@@ -829,13 +829,18 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    /// Return the resident host slice for an already translated guest-RAM
-    /// offset. The slice never crosses a guest block.
-    pub(super) fn get_vector_offset<'a>(
-        &'a mut self,
+    /// Where an already translated guest-RAM offset currently lives *within
+    /// the allocation*, and how far the span runs. Never crosses a guest
+    /// block, and makes the block resident first if it was swapped out.
+    ///
+    /// The offset, not a pointer, is the primitive: it is what the CPU caches
+    /// and what the eviction check compares, and unlike an address it does not
+    /// depend on where the allocation happens to sit.
+    pub(super) fn resident_slot_range(
+        &mut self,
         addr: usize,
         pins: &[CpuTlbPin],
-    ) -> Result<&'a mut [u8]> {
+    ) -> Result<core::ops::Range<usize>> {
         if addr >= self.len {
             return Err(MemoryError::Internal("translated RAM offset out of range").into());
         }
@@ -853,7 +858,33 @@ impl BxMemoryStubC {
             .and_then(|n| n.checked_add(within))
             .ok_or(MemoryError::Internal("resident block offset overflow"))?;
         let remaining = (self.block_size - within).min(self.len - addr);
-        Ok(unsafe { core::slice::from_raw_parts_mut(self.actual_vector.add(start), remaining) })
+        Ok(start..start + remaining)
+    }
+
+    /// The same resident span as `resident_slot_range`, as bytes.
+    pub(super) fn get_vector_offset<'a>(
+        &'a mut self,
+        addr: usize,
+        pins: &[CpuTlbPin],
+    ) -> Result<&'a mut [u8]> {
+        let range = self.resident_slot_range(addr, pins)?;
+        Ok(&mut self.actual_vector_mut()[range])
+    }
+
+    /// Where the ROM image sits in the allocation, from `offset` onwards.
+    ///
+    /// Runs to the END of the allocation, exactly as `rom()[offset..]` does
+    /// rather than stopping at the ROM's nominal size — instruction fetch
+    /// tests the returned length against a full page, so a tighter bound here
+    /// would silently drop the ITLB entry for the top of the ROM.
+    pub(super) fn rom_range(&self, offset: usize) -> core::ops::Range<usize> {
+        (self.rom_offset + offset)..self.actual_vector_len
+    }
+
+    /// Where the bogus page sits in the allocation, from `offset` onwards.
+    /// Open-ended for the same reason as `rom_range`.
+    pub(super) fn bogus_range(&self, offset: usize) -> core::ops::Range<usize> {
+        (self.bogus_offset + offset)..self.actual_vector_len
     }
 
 
@@ -919,11 +950,13 @@ impl BxMemoryStubC {
                     let Block::Block { offset } = self.blocks_offsets()[guest] else {
                         continue;
                     };
-                    let start = unsafe { self.actual_vector.add(self.vector_offset + offset) }
-                        as usize;
+                    // The sidecar speaks allocation offsets, which is the unit
+                    // this loop already has — no pointer needs materialising
+                    // just to ask whether a block is still referenced.
+                    let start = self.vector_offset + offset;
                     if !pins
                         .iter()
-                        .any(|pin| pin.is_range_pinned(start, start + self.block_size))
+                        .any(|pin| pin.is_alloc_range_pinned(start, start + self.block_size))
                     {
                         selected = Some((guest, offset));
                         break;

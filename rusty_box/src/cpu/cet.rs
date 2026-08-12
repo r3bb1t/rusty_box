@@ -344,9 +344,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let lpf = offset & super::tlb::LPF_MASK;
         let host_ptr: Option<*mut u64> = {
             let tlb = self.dtlb.get_entry_of(offset, 7);
-            if tlb.lpf == lpf && tlb.host_page_addr.is_some() {
-                let byte_ptr =
-                    super::access::host_at_page_offset_mut(super::tlb::host_page_ptr(tlb.host_page_addr), offset);
+            if tlb.lpf == lpf && tlb.host_page.is_some() {
+                let byte_ptr = super::access::host_at_page_offset_mut(
+                    super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page),
+                    offset,
+                );
                 // SSP is architecturally 8-byte aligned on every caller; the
                 // raw byte pointer thus aligns for u64/AtomicU64.
                 debug_assert_eq!(offset & 0x7, 0, "SS cmpxchg offset must be 8-byte aligned");
@@ -1028,10 +1030,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // Mirror the execution scope: even this one-CPU fixture has
                 // a complete stable pin set for any physical fallback.
                 cpu.a20_mask = mem.a20_mask();
-                let (host_base, host_len) = mem.identity_guest_base();
-                assert!(!host_base.is_null());
-                cpu.mem_host_base = host_base;
-                cpu.mem_host_len = host_len;
+                cpu.install_memory_bases(&mut mem);
+                assert!(!cpu.mem_host_base.is_null());
                 let pin = CpuTlbPin::new(&cpu);
                 cpu.wire_memory_access(
                     NonNull::from(&mut mem),

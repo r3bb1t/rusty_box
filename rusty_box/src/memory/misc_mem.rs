@@ -83,20 +83,22 @@ impl BxMemC {
 }
 
 impl BxMemC {
-    /// Return a resident, block-bounded host span for an already A20-adjusted
-    /// GPA after checked PCI-hole/high-RAM translation.
-    fn resident_ram_span<'m>(
-        &'m mut self,
+    /// Return a resident, block-bounded allocation range for an already
+    /// A20-adjusted GPA after checked PCI-hole/high-RAM translation.
+    fn resident_ram_range(
+        &mut self,
         pins: &[CpuTlbPin],
         addr: BxPhyAddress,
-    ) -> Result<&'m mut [u8]> {
+    ) -> Result<core::ops::Range<usize>> {
         let span = bx_guest_ram_span(addr, 1, self.inherited_memory_stub.len)
             .ok_or(MemoryError::Internal("physical address is not guest RAM"))?;
-        self.inherited_memory_stub.get_vector_offset(span.start, pins)
+        self.inherited_memory_stub
+            .resident_slot_range(span.start, pins)
     }
 
-    /// The sole CPU-facing direct host mapping. Its complete stable pin set
-    /// guards eviction; the caller supplies a by-value CPU memory policy.
+    /// The sole CPU-facing direct host mapping, as bytes. Its complete stable
+    /// pin set guards eviction; the caller supplies a by-value CPU memory
+    /// policy.
     pub(crate) fn get_host_mem_addr_pinned(
         &mut self,
         addr: BxPhyAddress,
@@ -104,6 +106,30 @@ impl BxMemC {
         pins: &[CpuTlbPin],
         policy: CpuMemoryPolicy,
     ) -> Result<Option<&mut [u8]>> {
+        let Some(range) = self.host_mem_range_pinned(addr, rw, pins, policy)? else {
+            return Ok(None);
+        };
+        Ok(Some(&mut self.inherited_memory_stub.actual_vector_mut()[range]))
+    }
+
+    /// The same mapping decision, reported as a range *within the memory
+    /// allocation* instead of as borrowed bytes.
+    ///
+    /// This is the primitive: every arm below already knows the offset before
+    /// it would build a slice, and an offset is what a caller can cache. It
+    /// also lets a caller ask where a page lives without holding a borrow of
+    /// the whole memory system for as long as it keeps the answer.
+    ///
+    /// Guest RAM, the ROM image and the bogus page all live in that one
+    /// allocation, so a single range type spans every arm — which is why the
+    /// instruction side can be offset-based at all.
+    pub(crate) fn host_mem_range_pinned(
+        &mut self,
+        addr: BxPhyAddress,
+        rw: MemoryAccessType,
+        pins: &[CpuTlbPin],
+        policy: CpuMemoryPolicy,
+    ) -> Result<Option<core::ops::Range<usize>>> {
         let a20_addr = self.a20_addr(addr);
         let is_bios = if a20_addr > u64::from(u32::MAX) {
             false
@@ -127,7 +153,7 @@ impl BxMemC {
             && self.smram_available
             && (self.smram_enable || policy.smm_mode())
         {
-            return Ok(Some(self.resident_ram_span(pins, a20_addr)?));
+            return Ok(Some(self.resident_ram_range(pins, a20_addr)?));
         }
 
         if write && policy.monitor_hit() {
@@ -149,7 +175,7 @@ impl BxMemC {
                     area = MemoryAreaT::F0000 as usize;
                 }
                 if self.memory_type[area][0] {
-                    return Ok(Some(self.resident_ram_span(pins, a20_addr)?));
+                    return Ok(Some(self.resident_ram_range(pins, a20_addr)?));
                 }
                 let rom_offset = if (a20_addr & 0xfffe0000) == 0x000e0000 {
                     bios_map_last128k(a20_addr as usize)
@@ -157,25 +183,25 @@ impl BxMemC {
                     ((a20_addr & EXROM_MASK as BxPhyAddress) + BIOSROMSZ as BxPhyAddress)
                         as usize
                 };
-                return Ok(Some(&mut self.inherited_memory_stub.rom()[rom_offset..]));
+                return Ok(Some(self.inherited_memory_stub.rom_range(rom_offset)));
             }
             if bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.len).is_some() && !is_bios
             {
                 if !(0x000c0000..0x00100000).contains(&a20_addr) {
-                    return Ok(Some(self.resident_ram_span(pins, a20_addr)?));
+                    return Ok(Some(self.resident_ram_range(pins, a20_addr)?));
                 }
                 if (a20_addr & 0xfffe0000) == 0x000e0000 {
                     let mapped = bios_map_last128k(a20_addr as usize);
-                    return Ok(Some(&mut self.inherited_memory_stub.rom()[mapped..]));
+                    return Ok(Some(self.inherited_memory_stub.rom_range(mapped)));
                 }
                 let rom_offset =
                     ((a20_addr & EXROM_MASK as BxPhyAddress) + BIOSROMSZ as BxPhyAddress)
                         as usize;
-                return Ok(Some(&mut self.inherited_memory_stub.rom()[rom_offset..]));
+                return Ok(Some(self.inherited_memory_stub.rom_range(rom_offset)));
             }
             if a20_addr > u64::from(u32::MAX) {
                 return Ok(Some(
-                    &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff) as usize..],
+                    self.inherited_memory_stub.bogus_range((a20_addr & 0xfff) as usize),
                 ));
             }
             if (0xFEE00000..0xFEF00000).contains(&a20_addr) {
@@ -183,17 +209,17 @@ impl BxMemC {
             }
             if is_bios {
                 let rom_offset = bios_map_last128k(a20_addr as usize);
-                return Ok(Some(&mut self.inherited_memory_stub.rom()[rom_offset..]));
+                return Ok(Some(self.inherited_memory_stub.rom_range(rom_offset)));
             }
             return Ok(Some(
-                &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff) as usize..],
+                self.inherited_memory_stub.bogus_range((a20_addr & 0xfff) as usize),
             ));
         }
 
         if !direct_host_write_allowed(a20_addr, self.inherited_memory_stub.len, is_bios) {
             return Ok(None);
         }
-        Ok(Some(self.resident_ram_span(pins, a20_addr)?))
+        Ok(Some(self.resident_ram_range(pins, a20_addr)?))
     }
 }
 
@@ -891,6 +917,47 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     fn test_mem() -> BxMemC {
         let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
         BxMemC::new(stub, false)
+    }
+
+    /// Instruction fetch decides whether it may install an ITLB entry by
+    /// asking whether the returned span covers a whole page. The ROM and bogus
+    /// arms answer with a span that runs to the end of the allocation, not to
+    /// the end of their nominal region — so the page holding the reset vector,
+    /// which sits at the very top of the ROM image, still reports a full page.
+    ///
+    /// Bounding those spans at their region instead would cost nothing
+    /// visible: the guest boots either way, just without a cached mapping for
+    /// the top of the ROM. This is the only thing that would notice.
+    #[test]
+    fn rom_and_bogus_spans_run_to_the_end_of_the_allocation() {
+        let mut mem = test_mem();
+        // A20 defaults to masked, which pulls the reset vector below
+        // `bios_rom_addr` and routes it to the bogus page instead of the ROM.
+        // The BIOS enables A20 long before anything fetches from the top of
+        // the image, so this is the configuration that matters here.
+        mem.set_a20_mask(u64::MAX);
+        let (_, allocation_len) = mem.allocation_span();
+
+        for (what, addr) in [("reset vector", 0xFFFF_FFF0u64), ("bogus page", 0x1_0000_0000)] {
+            let range = mem
+                .host_mem_range_pinned(
+                    addr,
+                    MemoryAccessType::Execute,
+                    &[],
+                    CpuMemoryPolicy::default(),
+                )
+                .unwrap()
+                .unwrap_or_else(|| panic!("{what} must have a direct mapping"));
+            assert!(
+                range.end <= allocation_len,
+                "{what} span must stay inside the allocation"
+            );
+            assert!(
+                range.len() >= 4096,
+                "{what} span is {} bytes, so fetch would refuse to cache the page",
+                range.len()
+            );
+        }
     }
 
     #[test]

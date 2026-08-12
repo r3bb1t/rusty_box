@@ -459,7 +459,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let paddr = self.translate_data_read(laddr)?;
 
         // Bochs mwait.cc: validate monitored address has valid host mapping.
-        // MMIO addresses (host_page_addr=0) cannot be monitored — MWAIT may
+        // MMIO addresses (no cached host page) cannot be monitored — MWAIT may
         // never wake. MONITOR still succeeds (acceptable — just warn).
         if self.get_host_write_ptr(laddr)?.is_none() {
             tracing::warn!(

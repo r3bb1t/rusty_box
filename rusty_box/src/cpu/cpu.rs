@@ -11,7 +11,7 @@ use crate::{
         decoder::{features::X86Feature, BxSegregs, BX_64BIT_REG_RIP},
         rusty_box::MemoryAccessType,
         smm::SMMRAM_Fields,
-        tlb::{lpf_of, ppf_of, TLBEntry, Tlb},
+        tlb::{lpf_of, ppf_of, Tlb},
         CpuError,
     },
     impl_eflag,
@@ -564,8 +564,6 @@ pub struct BxCpuC<'c, T: super::instrumentation::Instrumentation = ()> {
     // Bochs uses jmp_buf for exception longjmp; we use CpuLoopRestart instead
     pub(super) last_exception_type: i32,
 
-    pub(super) cpuloop_stack_anchor: Option<&'c [u8]>,
-
     // Perf counters (for diagnosing slowdowns)
     pub(crate) perf_icache_miss: u64,
     pub(crate) perf_prefetch: u64,
@@ -727,8 +725,22 @@ pub struct BxCpuC<'c, T: super::instrumentation::Instrumentation = ()> {
 
     pub(crate) mmio: crate::memory::mmio::MmioRegistry,
 
-    pub(crate) dtlb: Tlb<BX_DTLB_SIZE>,
-    pub(super) itlb: Tlb<BX_ITLB_SIZE>,
+    /// Data TLB. Only ever caches identity-backed guest RAM, so its entries
+    /// name a page by its number within the RAM allocation.
+    ///
+    /// Those page numbers are resolved against `mem_host_base`, so an entry
+    /// outliving the base it was filled against would read the wrong memory.
+    /// Every path that moves the base already invalidates the mappings first
+    /// (`invalidate_all_cpu_host_mappings`, called before memory re-init, on
+    /// snapshot restore, and on any A20 or chipset remap), and residency
+    /// cannot stop being an identity map mid-life — a stub with full
+    /// residency never swaps a block out. Anything new that moves the base
+    /// must flush this TLB.
+    pub(crate) dtlb: Tlb<super::tlb::RamPage, BX_DTLB_SIZE>,
+    /// Instruction TLB. Fetch also runs out of ROM and the bogus page, so its
+    /// entries are offsets into the whole allocation, resolved against
+    /// `mem_alloc_base` rather than `mem_host_base`.
+    pub(super) itlb: Tlb<super::tlb::AllocPage, BX_ITLB_SIZE>,
 
     pub(super) pdptrcache: PdptrCache,
 
@@ -759,6 +771,18 @@ pub struct BxCpuC<'c, T: super::instrumentation::Instrumentation = ()> {
     /// Usable guest RAM length (not including ROM/bogus).  Physical addresses below this
     /// (and outside VGA/MMIO ranges) can be accessed directly via mem_host_base.
     pub(crate) mem_host_len: usize,
+
+    /// Base of the whole memory allocation — guest RAM, the ROM image and the
+    /// bogus page alike. Instruction TLB entries are offsets from HERE, not
+    /// from `mem_host_base`: fetch runs out of ROM too, and stays valid when
+    /// residency is partial, where `mem_host_base` is null.
+    ///
+    /// The two are equal whenever residency is full, so confusing them is
+    /// invisible to every test that does not deliberately under-provision host
+    /// memory. Retired together with the mappings, same as `mem_host_base`.
+    pub(crate) mem_alloc_base: *mut u8,
+    /// Byte length of that allocation.
+    pub(crate) mem_alloc_len: usize,
 
     /// Stable all-CPU pin slice wired for one execution batch. It is a raw
     /// descriptor slice so the currently running CPU is never shared-borrowed.
@@ -840,7 +864,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> Drop
     fn drop(&mut self) {
         // SAFETY: `new` receives the live CPU borrowed by its enclosing
         // cpu-loop call. The guard is local to that call and drops first.
-        unsafe { (*self.cpu).clear_execution_memory_wiring() };
+        unsafe { (*self.cpu).clear_memory_access() };
     }
 }
 
@@ -1041,7 +1065,47 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             }
         }
     }
-    /// Copy every currently valid host mapping into an external pin sidecar.
+    /// Where identity guest RAM begins within the whole allocation.
+    ///
+    /// The data TLB numbers its pages from here while the instruction TLB
+    /// numbers them from the allocation start, so this delta is what lets both
+    /// publish into one sidecar that speaks a single unit.
+    ///
+    /// Meaningful only while an identity base exists. When residency is partial
+    /// there is none, and the data TLB then holds no direct mapping at all —
+    /// `pinned_alloc_offset` yields `None` for every slot, so this is never
+    /// combined with anything.
+    #[inline(always)]
+    fn ram_region_offset(&self) -> usize {
+        (self.mem_host_base as usize).wrapping_sub(self.mem_alloc_base as usize)
+    }
+
+    /// Offset of a host address within the memory allocation.
+    #[inline(always)]
+    fn alloc_offset_of(&self, addr: usize) -> usize {
+        addr.wrapping_sub(self.mem_alloc_base as usize)
+    }
+
+    /// The SVM VMCB backing pin, as an allocation offset.
+    #[inline]
+    fn vmcb_pin_offset(&self) -> Option<usize> {
+        // A null `vmcbhostptr` means no direct backing rather than "offset
+        // zero"; publishing its difference from the base would pin a wild range.
+        if self.in_svm_guest && self.vmcbhostptr != 0 {
+            Some(self.alloc_offset_of(self.vmcbhostptr as usize))
+        } else {
+            None
+        }
+    }
+
+    /// The bounded instruction-fetch window pin, as (allocation offset, length).
+    #[inline]
+    fn fetch_window_pin(&self) -> Option<(usize, usize)> {
+        self.eip_fetch_ptr
+            .map(|slice| (self.alloc_offset_of(slice.as_ptr() as usize), slice.len()))
+    }
+
+    /// Copy every currently valid mapping into an external pin sidecar.
     ///
     /// Full rescans are needed only when the sidecar is created or CPU state
     /// changed outside a wired scope. Wired execution publishes each mapping
@@ -1049,21 +1113,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     #[inline]
     pub(crate) fn refresh_tlb_pin(&self, pin: &crate::memory::CpuTlbPin) {
         pin.clear_tlb_hosts();
+        let ram_region = self.ram_region_offset();
         for slot in 0..BX_DTLB_SIZE {
-            pin.set_dtlb_host(slot, self.dtlb.pinned_host_page(slot));
+            pin.set_dtlb_offset(slot, self.dtlb.pinned_alloc_offset(ram_region, slot));
         }
         for slot in 0..BX_ITLB_SIZE {
-            pin.set_itlb_host(slot, self.itlb.pinned_host_page(slot));
+            pin.set_itlb_offset(slot, self.itlb.pinned_alloc_offset(0, slot));
         }
-        pin.set_vmcb_host(if self.in_svm_guest {
-            self.vmcbhostptr as usize
-        } else {
-            0
-        });
-        match self.eip_fetch_ptr {
-            Some(slice) => pin.set_fetch_window(slice.as_ptr() as usize, slice.len()),
-            None => pin.set_fetch_window(0, 0),
-        }
+        pin.set_vmcb_offset(self.vmcb_pin_offset());
+        pin.set_fetch_window(self.fetch_window_pin());
         self.tlb_pin_dirty.set(false);
     }
 
@@ -1101,8 +1159,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     pub(crate) fn clear_active_tlb_pin_hosts(&self) {
         if let Some(pin) = self.active_tlb_pin_sidecar() {
             pin.clear_tlb_hosts();
-            if self.in_svm_guest {
-                pin.set_vmcb_host(self.vmcbhostptr as usize);
+            if let Some(offset) = self.vmcb_pin_offset() {
+                pin.set_vmcb_offset(Some(offset));
             }
             self.tlb_pin_dirty.set(false);
         } else {
@@ -1134,9 +1192,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 // serializes all sidecar mutation.
                 let pin: &crate::memory::CpuTlbPin = unsafe { pin_ptr.as_ref() };
                 self.dtlb
-                    .flush_non_global_publishing(|slot| pin.set_dtlb_host(slot, 0));
+                    .flush_non_global_publishing(|slot| pin.set_dtlb_offset(slot, None));
                 self.itlb
-                    .flush_non_global_publishing(|slot| pin.set_itlb_host(slot, 0));
+                    .flush_non_global_publishing(|slot| pin.set_itlb_offset(slot, None));
                 self.republish_scalar_pins(pin);
                 self.tlb_pin_dirty.set(false);
             }
@@ -1159,9 +1217,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 // SAFETY: see `flush_non_global_and_publish_pin`.
                 let pin: &crate::memory::CpuTlbPin = unsafe { pin_ptr.as_ref() };
                 self.dtlb
-                    .invlpg_publishing(laddr, |slot| pin.set_dtlb_host(slot, 0));
+                    .invlpg_publishing(laddr, |slot| pin.set_dtlb_offset(slot, None));
                 self.itlb
-                    .invlpg_publishing(laddr, |slot| pin.set_itlb_host(slot, 0));
+                    .invlpg_publishing(laddr, |slot| pin.set_itlb_offset(slot, None));
                 self.republish_scalar_pins(pin);
                 self.tlb_pin_dirty.set(false);
             }
@@ -1180,15 +1238,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// dependence on a pre-existing VMCB/fetch-window invariant.
     #[inline]
     fn republish_scalar_pins(&self, pin: &crate::memory::CpuTlbPin) {
-        pin.set_vmcb_host(if self.in_svm_guest {
-            self.vmcbhostptr as usize
-        } else {
-            0
-        });
-        match self.eip_fetch_ptr {
-            Some(slice) => pin.set_fetch_window(slice.as_ptr() as usize, slice.len()),
-            None => pin.set_fetch_window(0, 0),
-        }
+        pin.set_vmcb_offset(self.vmcb_pin_offset());
+        pin.set_fetch_window(self.fetch_window_pin());
     }
 
     /// Publish one freshly installed DTLB host pointer without re-copying the
@@ -1197,7 +1248,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     pub(crate) fn sync_dtlb_pin_slot(&self, laddr: BxAddress, len: u32) {
         if let Some(pin) = self.active_tlb_pin_sidecar() {
             let slot = self.dtlb.get_index_of(laddr, len);
-            pin.set_dtlb_host(slot, self.dtlb.pinned_host_page(slot));
+            pin.set_dtlb_offset(
+                slot,
+                self.dtlb.pinned_alloc_offset(self.ram_region_offset(), slot),
+            );
         } else {
             self.tlb_pin_dirty.set(true);
         }
@@ -1216,7 +1270,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     pub(crate) fn sync_itlb_pin_slot(&self, laddr: BxAddress, len: u32) {
         if let Some(pin) = self.active_tlb_pin_sidecar() {
             let slot = self.itlb.get_index_of(laddr, len);
-            pin.set_itlb_host(slot, self.itlb.pinned_host_page(slot));
+            pin.set_itlb_offset(slot, self.itlb.pinned_alloc_offset(0, slot));
         } else {
             self.tlb_pin_dirty.set(true);
         }
@@ -1239,10 +1293,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     #[inline]
     pub(crate) fn sync_fetch_window_pin(&self) {
         if let Some(pin) = self.active_tlb_pin_sidecar() {
-            match self.eip_fetch_ptr {
-                Some(slice) => pin.set_fetch_window(slice.as_ptr() as usize, slice.len()),
-                None => pin.set_fetch_window(0, 0),
-            }
+            pin.set_fetch_window(self.fetch_window_pin());
         } else {
             self.tlb_pin_dirty.set(true);
         }
@@ -1253,11 +1304,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     #[inline]
     pub(crate) fn sync_vmcb_pin(&self) {
         if let Some(pin) = self.active_tlb_pin_sidecar() {
-            pin.set_vmcb_host(if self.in_svm_guest {
-                self.vmcbhostptr as usize
-            } else {
-                0
-            });
+            pin.set_vmcb_offset(self.vmcb_pin_offset());
         } else {
             self.tlb_pin_dirty.set(true);
         }
@@ -2181,19 +2228,39 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
         self.active_tlb_pin_count = pins.len();
     }
 
+    /// Tell this CPU where its memory lives.
+    ///
+    /// Both bases, always, together: the data TLB measures offsets from the
+    /// identity guest-RAM base, the instruction TLB from the allocation base,
+    /// and a cached instruction offset resolved against a base that was never
+    /// installed is a wild pointer. The two coincide whenever residency is
+    /// full, so installing only one is invisible to everything except a
+    /// machine whose host memory is smaller than its guest memory — which is
+    /// why this is a single call and not two assignments.
+    pub(crate) fn install_memory_bases(&mut self, mem: &mut crate::memory::BxMemC) {
+        let (host_base, host_len) = mem.identity_guest_base();
+        self.mem_host_base = host_base;
+        self.mem_host_len = host_len;
+        let (alloc_base, alloc_len) = mem.allocation_span();
+        self.mem_alloc_base = alloc_base;
+        self.mem_alloc_len = alloc_len;
+    }
+
     /// Tear down a `wire_memory_access` scope.
+    ///
+    /// Deliberately leaves `mem_host_base` / `mem_host_len` alone. They say
+    /// where the machine's RAM is, not whether this CPU is currently wired to
+    /// it — the wiring is `mem_bus` and the pin set, cleared here. Data TLB
+    /// entries name pages *within* that RAM, and the sidecar refresh that runs
+    /// between execution scopes has to resolve them, so the base has to outlive
+    /// the scope. `invalidate_host_memory_mappings` clears the base together
+    /// with the mappings when the RAM itself changes.
     #[inline]
     pub(crate) fn clear_memory_access(&mut self) {
         self.active_tlb_pins = core::ptr::null();
         self.active_tlb_pin_count = 0;
         self.active_tlb_pin_sidecar = None;
         self.clear_mem_bus();
-    }
-    #[inline]
-    fn clear_execution_memory_wiring(&mut self) {
-        self.mem_host_base = core::ptr::null_mut();
-        self.mem_host_len = 0;
-        self.clear_memory_access();
     }
 
 
@@ -2518,10 +2585,6 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
         cpus: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
     ) -> super::Result<()> {
-        let _stack_anchor = 0;
-
-        self.cpuloop_stack_anchor = None;
-
         // Bochs uses setjmp here; we use CpuLoopRestart via Rust error propagation.
         // We get here either by a normal function call, or by a CpuLoopRestart
         // back from an exception() call.  In either case, commit the
@@ -2595,14 +2658,16 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
         // This enables Bochs-style "host-pointer-or-fallback" access in mem_read/mem_write.
         // Reborrow `mem` so we don't move the `&mut` binding.
         self.a20_mask = mem.a20_mask();
-        self.wire_memory_access(NonNull::from(&mut *mem), cpus, current_pin);
-        let _memory_wiring = CpuMemoryWiringGuard::new(self);
 
         // Direct pointers are available only for a complete, identity-backed
         // guest RAM mapping. All other accesses use the wired memory bus.
-        let (host_base, host_len) = mem.identity_guest_base();
-        self.mem_host_base = host_base;
-        self.mem_host_len = host_len;
+        // Installed BEFORE the wiring, because `wire_memory_access` republishes
+        // any dirty pin sidecar, and resolving a data TLB entry's page number
+        // to the host address a pin holds needs this base.
+        self.install_memory_bases(mem);
+
+        self.wire_memory_access(NonNull::from(&mut *mem), cpus, current_pin);
+        let _memory_wiring = CpuMemoryWiringGuard::new(self);
 
         let mut iteration = 0u64;
         // `iteration` is the batch budget counter (one per handler dispatch).
@@ -3600,7 +3665,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             let tlb_entry = self.itlb.get_entry_of(laddr, 0);
             let hit = (tlb_entry.lpf == lpf)
                 && (tlb_entry.access_bits & (1 << u32::from(self.user_pl))) != 0;
-            (hit, tlb_entry.ppf, tlb_entry.host_page_addr)
+            (hit, tlb_entry.ppf, tlb_entry.host_page)
         };
 
         // Track whether translate_linear succeeded so we can populate the iTLB afterward.
@@ -3630,10 +3695,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             // TLB miss - need to walk page tables
             // Get a20_mask before borrowing mem mutably
             let a20_mask = mem.a20_mask();
-            // Create a dummy TLB entry (not actually used for page walk)
-            let dummy_tlb_entry = TLBEntry::default();
             match self.translate_linear(
-                &dummy_tlb_entry,
                 laddr,
                 self.user_pl,
                 MemoryAccessType::Execute,
@@ -3677,7 +3739,12 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             let fetch_ptr_as_ptr =
                 // SAFETY: an ITLB entry is installed only for a complete
                 // contiguous host page (see below).
-                unsafe { super::access::host_slice_u8(super::tlb::host_page_ptr(fetch_ptr), 4096) };
+                unsafe {
+                    super::access::host_slice_u8(
+                        super::tlb::host_page_ptr(self.mem_alloc_base, fetch_ptr),
+                        4096,
+                    )
+                };
             self.eip_fetch_ptr = Some(fetch_ptr_as_ptr);
             direct_page_mapping = true;
         } else {
@@ -3686,23 +3753,28 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             let current_p_addr = page_base.wrapping_add(u64::from(page_offset));
             let page_policy = self.memory_access_policy(mem.a20_addr(page_base));
 
-            let mem_ptr: *mut BxMemC = mem;
-            let page_mapping = unsafe {
-                (&mut *mem_ptr)
-                    .get_host_mem_addr_pinned(
-                        page_base,
-                        MemoryAccessType::Execute,
-                        pins,
-                        page_policy,
-                    )
-                    .map(|mapping| mapping.map(|slice| (slice.as_mut_ptr(), slice.len())))
-            };
+            // Asking where the page lives, rather than for the bytes, is what
+            // lets `mem` stay borrowed normally here: the answer is a range,
+            // so nothing outlives the call and the arms below can still use
+            // `mem`. This used to require laundering `mem` through a raw
+            // pointer purely to escape the returned slice's borrow.
+            let mut direct_page_offset: Option<usize> = None;
+            let page_mapping = mem.host_mem_range_pinned(
+                page_base,
+                MemoryAccessType::Execute,
+                pins,
+                page_policy,
+            );
             match page_mapping {
-                Ok(Some((fetch_ptr, fetch_len))) if fetch_len >= 4096 => {
+                Ok(Some(ref range)) if range.len() >= 4096 => {
                     // An ITLB host page is necessarily a full contiguous page.
                     self.eip_fetch_ptr = Some(unsafe {
-                        super::access::host_slice_u8(fetch_ptr as *const u8, 4096)
+                        super::access::host_slice_u8(
+                            self.mem_alloc_base.wrapping_add(range.start) as *const u8,
+                            4096,
+                        )
                     });
+                    direct_page_offset = Some(range.start);
                     direct_page_mapping = true;
                 }
                 Ok(Some(_)) => {
@@ -3713,20 +3785,15 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
                     // create an ITLB page mapping from this short slice.
                     let current_policy =
                         self.memory_access_policy(mem.a20_addr(current_p_addr));
-                    let current_mapping = unsafe {
-                        (&mut *mem_ptr)
-                            .get_host_mem_addr_pinned(
-                                current_p_addr,
-                                MemoryAccessType::Execute,
-                                pins,
-                                current_policy,
-                            )
-                            .map(|mapping| {
-                                mapping.map(|slice| (slice.as_mut_ptr(), slice.len()))
-                            })
-                    };
+                    let current_mapping = mem.host_mem_range_pinned(
+                        current_p_addr,
+                        MemoryAccessType::Execute,
+                        pins,
+                        current_policy,
+                    );
                     match current_mapping {
-                        Ok(Some((fetch_ptr, available))) => {
+                        Ok(Some(range)) => {
+                            let available = range.len();
                             let page_remaining = self
                                 .eip_page_window_size
                                 .saturating_sub(page_offset) as usize;
@@ -3739,7 +3806,8 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
                                     .expect("resident block length exceeds u32");
                                 self.eip_fetch_ptr = Some(unsafe {
                                     super::access::host_slice_u8(
-                                        fetch_ptr as *const u8,
+                                        self.mem_alloc_base.wrapping_add(range.start)
+                                            as *const u8,
                                         fetch_len,
                                     )
                                 });
@@ -3763,10 +3831,10 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             // Only complete page mappings can be placed in the ITLB.  In
             // particular, sub-page guest blocks are not host-contiguous.
             if itlb_should_update && direct_page_mapping {
-                if let Some(fp) = self.eip_fetch_ptr {
-                    // A live page pointer is never null, so the niche always fits.
-                    let host_page_ptr =
-                        crate::config::BxPtrEquivNonZero::new(fp.as_ptr() as super::tlb::BxHostpageaddr);
+                if let Some(offset) = direct_page_offset {
+                    // Where memory said the page lives, stored verbatim — the
+                    // entry never has to be recovered from the window pointer.
+                    let host_page = super::tlb::AllocPage::from_alloc_offset(offset);
                     let ppf = self.p_addr_fetch_page;
                     let access_bits = 1u32 << (self.user_pl as u32);
                     let tlb_entry = self.itlb.get_entry_of(lpf, 0);
@@ -3778,7 +3846,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
                     // page's every 4 KiB frame dies on one INVLPG (Bochs
                     // paging.cc translate_linear `tlbEntry->lpf_mask`).
                     tlb_entry.lpf_mask = itlb_lpf_mask;
-                    tlb_entry.host_page_addr = host_page_ptr;
+                    tlb_entry.host_page = host_page;
                 }
                 if itlb_lpf_mask > 0xFFF {
                     // Bochs paging.cc: `if (isExecute) ITLB.split_large = true`
@@ -4293,9 +4361,10 @@ mod tests {
     #[test]
     fn fetch_window_pin_cleared_by_itlb_invalidation() {
         // Bochs cpu.cc prefetch: `eipFetchPtr` remains valid until the next
-        // refill. The publisher must pin its exact host span and the ITLB
+        // refill. The publisher must pin its exact span and the ITLB
         // invalidation path must clear both the pointer and the pin.
-        static CODE: [u8; 0x80] = [0x90; 0x80];
+        const WINDOW: usize = 0x2000;
+        const WINDOW_LEN: usize = 0x80;
 
         let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut mem = BxMemC::new(
@@ -4304,23 +4373,31 @@ mod tests {
         );
         let pin = CpuTlbPin::new(&cpu);
         let pins = core::slice::from_ref(&pin);
+        cpu.install_memory_bases(&mut mem);
         cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
 
-        cpu.eip_fetch_ptr = Some(&CODE);
+        // The window has to lie inside the allocation. It is published as an
+        // offset into it, so pointing this at an unrelated static — as this
+        // test once did — would name a meaningless offset that happens to
+        // compare equal only because nothing else is pinned.
+        // SAFETY: WINDOW + WINDOW_LEN is well inside the 1 MiB allocation.
+        let code: &[u8] =
+            unsafe { core::slice::from_raw_parts(cpu.mem_alloc_base.add(WINDOW), WINDOW_LEN) };
+
+        cpu.eip_fetch_ptr = Some(code);
         cpu.sync_fetch_window_pin();
-        let start = CODE.as_ptr() as usize;
-        assert!(pin.is_range_pinned(start, start + CODE.len()));
+        assert!(pin.is_alloc_range_pinned(WINDOW, WINDOW + WINDOW_LEN));
         // Only the exact window is pinned, not neighbouring ranges.
-        assert!(!pin.is_range_pinned(start + CODE.len(), start + 2 * CODE.len()));
+        assert!(!pin.is_alloc_range_pinned(WINDOW + WINDOW_LEN, WINDOW + 2 * WINDOW_LEN));
 
         cpu.invalidate_itlb_pin_slot(0, 0);
         assert!(cpu.eip_fetch_ptr.is_none());
-        assert!(!pin.is_range_pinned(start, start + CODE.len()));
+        assert!(!pin.is_alloc_range_pinned(WINDOW, WINDOW + WINDOW_LEN));
 
         // The full-rescan recovery path republishes a live window.
-        cpu.eip_fetch_ptr = Some(&CODE);
+        cpu.eip_fetch_ptr = Some(code);
         cpu.refresh_tlb_pin(&pin);
-        assert!(pin.is_range_pinned(start, start + CODE.len()));
+        assert!(pin.is_alloc_range_pinned(WINDOW, WINDOW + WINDOW_LEN));
 
         cpu.clear_memory_access();
     }
@@ -4345,8 +4422,7 @@ mod tests {
         let pins = core::slice::from_ref(&pin);
         cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
         let (host_base, host_len) = mem.identity_guest_base();
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
+        cpu.install_memory_bases(&mut mem);
 
         // The leaf PTE itself starts as executable code.  Cache it through the
         // normal prefetch/decode path while paging is off, then make a real
@@ -4482,8 +4558,7 @@ mod tests {
         let pins = core::slice::from_ref(&pin);
         cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
         let (host_base, host_len) = mem.identity_guest_base();
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
+        cpu.install_memory_bases(&mut mem);
 
         // Flat 32-bit protected code with two virtual pages.  The five-byte
         // MOV begins two bytes before the boundary, so `get_icache_entry`
@@ -4623,8 +4698,7 @@ mod tests {
             &pin,
         );
         let (host_base, host_len) = mem.identity_guest_base();
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
+        cpu.install_memory_bases(&mut mem);
 
         let result: super::Result<()> = (|| {
             let _memory_wiring = CpuMemoryWiringGuard::new(&mut cpu);
@@ -4633,11 +4707,137 @@ mod tests {
         })();
 
         assert!(matches!(result, Err(CpuError::CpuNotInitialized)));
-        assert!(cpu.mem_host_base.is_null());
-        assert_eq!(cpu.mem_host_len, 0);
         assert!(cpu.mem_bus.is_none());
         assert!(cpu.active_tlb_pins().is_empty());
         assert!(cpu.active_tlb_pin_sidecar.is_none());
+        // The RAM base deliberately SURVIVES the teardown: it says where the
+        // machine's RAM is, not whether this CPU is wired to it, and the data
+        // TLB entries that name pages within that RAM outlive the scope too.
+        // Only `invalidate_host_memory_mappings` retires the pair together.
+        assert_eq!(cpu.mem_host_base, host_base);
+        assert_eq!(cpu.mem_host_len, host_len);
+        cpu.invalidate_host_memory_mappings();
+        assert!(cpu.mem_host_base.is_null());
+        assert_eq!(cpu.mem_host_len, 0);
+    }
+
+    #[test]
+    fn an_instruction_page_in_rom_resolves_with_no_identity_base_at_all() {
+        // The trap this exists to catch: guest RAM and the allocation start at
+        // the same address whenever residency is full, so measuring an
+        // instruction offset from `mem_host_base` passes every ordinary test.
+        // Here host memory is a fifth of guest memory, so there is no identity
+        // base at all — and the page being fetched is ROM, which is not guest
+        // RAM in any regime. Getting the base wrong is a wild pointer, and
+        // only a machine configured like this one notices.
+        const MIB: usize = 1024 * 1024;
+        const BIOS_MARKER: u8 = 0x5A;
+
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(5 * MIB, MIB, MIB).unwrap(),
+            false,
+        );
+        mem.set_a20_mask(u64::MAX);
+        let mut rom = std::vec![0u8; 0x10000];
+        rom[0] = BIOS_MARKER;
+        mem.load_ROM(&rom, 0xFFFF_0000, 0).unwrap();
+
+        cpu.install_memory_bases(&mut mem);
+        assert!(
+            cpu.mem_host_base.is_null(),
+            "partial residency must leave no identity base — otherwise this \
+             test proves nothing"
+        );
+        assert!(!cpu.mem_alloc_base.is_null());
+
+        let offset = mem
+            .host_mem_range_pinned(
+                0xFFFF_0000,
+                MemoryAccessType::Execute,
+                &[],
+                crate::memory::CpuMemoryPolicy::default(),
+            )
+            .unwrap()
+            .expect("the BIOS image must be directly fetchable")
+            .start;
+
+        let slot = cpu.itlb.get_index_of(0xFFFF_0000, 0);
+        {
+            let entry = &mut cpu.itlb.entries[slot];
+            entry.lpf = 0xFFFF_0000;
+            entry.host_page = crate::cpu::tlb::AllocPage::from_alloc_offset(offset);
+            entry.access_bits = 1;
+        }
+
+        let resolved =
+            crate::cpu::tlb::host_page_ptr(cpu.mem_alloc_base, cpu.itlb.entries[slot].host_page);
+        assert_eq!(
+            unsafe { *resolved },
+            BIOS_MARKER,
+            "a cached ROM page must resolve to the ROM image itself"
+        );
+    }
+
+    #[test]
+    fn the_ram_base_outlives_an_execution_scope_so_cached_pages_still_resolve() {
+        // A data TLB entry names a page NUMBER, so it only means anything
+        // alongside the base it was filled against. Tearing down a batch's
+        // wiring must therefore NOT forget the base: entries outlive the scope,
+        // and the pin-sidecar refresh that runs between scopes has to resolve
+        // them. Only `invalidate_host_memory_mappings` retires the two together.
+        const TARGET: u64 = 0x4000;
+
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
+            false,
+        );
+        let pin = CpuTlbPin::new(&cpu);
+        let (host_base, host_len) = mem.identity_guest_base();
+        cpu.install_memory_bases(&mut mem);
+        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+
+        let slot = cpu.dtlb.get_index_of(TARGET, 0);
+        {
+            let entry = &mut cpu.dtlb.entries[slot];
+            entry.lpf = TARGET;
+            entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(TARGET as usize);
+            entry.access_bits = 1;
+        }
+        cpu.sync_dtlb_pin_slot(TARGET, 0);
+        let expected = host_base.wrapping_add(TARGET as usize);
+        // Captured before the base is retired below; the sidecar publishes
+        // allocation offsets, so this is the unit the assertions ask in.
+        let alloc_base = cpu.mem_alloc_base as usize;
+        let pinned = expected as usize - alloc_base;
+        assert!(pin.is_alloc_range_pinned(pinned, pinned + 0x1000));
+
+        // Exactly what `CpuMemoryWiringGuard` does when a batch ends.
+        cpu.clear_memory_access();
+
+        assert_eq!(
+            crate::cpu::tlb::host_page_ptr(cpu.mem_host_base, cpu.dtlb.entries[slot].host_page),
+            expected,
+            "the cached page must still resolve to the same host address"
+        );
+        cpu.refresh_tlb_pin(&pin);
+        assert!(
+            pin.is_alloc_range_pinned(pinned, pinned + 0x1000),
+            "a between-scope sidecar refresh must still publish the real host page"
+        );
+
+        cpu.invalidate_host_memory_mappings();
+        assert!(cpu.mem_host_base.is_null());
+        assert_eq!(cpu.mem_host_len, 0);
+        // Unwired, so the flush could only mark the sidecar dirty; the refresh
+        // that `invalidate_all_cpu_host_mappings` runs next is what publishes
+        // the removal. Nothing survives to be resolved against the gone base.
+        cpu.refresh_tlb_pin(&pin);
+        assert!(
+            !pin.is_alloc_range_pinned(pinned, pinned + 0x1000),
+            "retiring the base must retire the mappings named against it"
+        );
     }
 
     #[test]
@@ -4650,15 +4850,17 @@ mod tests {
             false,
         );
         let pin = CpuTlbPin::new(&cpu);
-        let host_ptr = mem.identity_guest_base().0 as usize + TARGET as usize;
+        let (host_base, host_len) = mem.identity_guest_base();
+        cpu.install_memory_bases(&mut mem);
+        let pinned = (host_base as usize + TARGET as usize) - cpu.mem_alloc_base as usize;
         let slot = cpu.dtlb.get_index_of(TARGET, 0);
         let entry = &mut cpu.dtlb.entries[slot];
         entry.lpf = TARGET;
-        entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_ptr as crate::config::BxPtrEquiv);
+        entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(TARGET as usize);
         entry.access_bits = 1;
 
         cpu.sync_dtlb_pin_slot(TARGET, 0);
-        assert!(!pin.is_range_pinned(host_ptr, host_ptr + 0x1000));
+        assert!(!pin.is_alloc_range_pinned(pinned, pinned + 0x1000));
 
         cpu.wire_memory_access(
             NonNull::from(&mut mem),
@@ -4666,7 +4868,7 @@ mod tests {
             &pin,
         );
 
-        assert!(pin.is_range_pinned(host_ptr, host_ptr + 0x1000));
+        assert!(pin.is_alloc_range_pinned(pinned, pinned + 0x1000));
         cpu.clear_memory_access();
     }
 
@@ -4684,25 +4886,24 @@ mod tests {
         let pins = core::slice::from_ref(&pin);
         cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
         let (host_base, host_len) = mem.identity_guest_base();
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
+        cpu.install_memory_bases(&mut mem);
         cpu.cpu_mode = CpuMode::Ia32Protected;
         cpu.cr0 = BxCr0::PE | BxCr0::PG;
         cpu.cr4 = BxCr4::empty();
         cpu.cr3 = 0;
 
-        let host_ptr = host_base as usize;
+        let pinned = host_base as usize - cpu.mem_alloc_base as usize;
         let slot = cpu.dtlb.get_index_of(TARGET, 0);
         let entry = &mut cpu.dtlb.entries[slot];
         entry.lpf = OLD_LPF;
-        entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_ptr as crate::config::BxPtrEquiv);
+        entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
         entry.access_bits = 1;
         cpu.sync_dtlb_pin_slot(TARGET, 0);
-        assert!(pin.is_range_pinned(host_ptr, host_ptr + 0x1000));
+        assert!(pin.is_alloc_range_pinned(pinned, pinned + 0x1000));
 
         assert!(cpu.translate_data_read(TARGET).is_err());
-        assert!(!pin.is_range_pinned(host_ptr, host_ptr + 0x1000));
-        cpu.clear_execution_memory_wiring();
+        assert!(!pin.is_alloc_range_pinned(pinned, pinned + 0x1000));
+        cpu.clear_memory_access();
     }
 
     #[test]
@@ -4720,34 +4921,39 @@ mod tests {
             false,
         );
         let pin = CpuTlbPin::new(&cpu);
-        let host_base = mem.identity_guest_base().0 as usize;
-        let dtlb_host = host_base + DTLB_TARGET as usize;
-        let itlb_host = host_base + ITLB_TARGET as usize;
+        cpu.install_memory_bases(&mut mem);
+        let alloc_base = cpu.mem_alloc_base as usize;
+        // Both sides are asked in allocation offsets, but they are *derived*
+        // from their own bases — the data side from identity RAM, the
+        // instruction side from the allocation. Those coincide only because
+        // residency here is full.
+        let dtlb_pinned = (cpu.mem_host_base as usize + DTLB_TARGET as usize) - alloc_base;
+        let itlb_pinned = ITLB_TARGET as usize;
 
         let dslot = cpu.dtlb.get_index_of(DTLB_TARGET, 0);
         {
             let e = &mut cpu.dtlb.entries[dslot];
             e.lpf = DTLB_TARGET;
-            e.host_page_addr = crate::config::BxPtrEquivNonZero::new(dtlb_host as crate::config::BxPtrEquiv);
+            e.host_page = crate::cpu::tlb::RamPage::from_ram_offset(DTLB_TARGET as usize);
             e.access_bits = 1;
         }
         let islot = cpu.itlb.get_index_of(ITLB_TARGET, 0);
         {
             let e = &mut cpu.itlb.entries[islot];
             e.lpf = ITLB_TARGET;
-            e.host_page_addr = crate::config::BxPtrEquivNonZero::new(itlb_host as crate::config::BxPtrEquiv);
+            e.host_page = crate::cpu::tlb::AllocPage::from_alloc_offset(ITLB_TARGET as usize);
             e.access_bits = 1;
         }
 
         cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
         cpu.sync_dtlb_pin_slot(DTLB_TARGET, 0);
         cpu.sync_itlb_pin_slot(ITLB_TARGET, 0);
-        assert!(pin.is_range_pinned(dtlb_host, dtlb_host + 0x1000));
-        assert!(pin.is_range_pinned(itlb_host, itlb_host + 0x1000));
+        assert!(pin.is_alloc_range_pinned(dtlb_pinned, dtlb_pinned + 0x1000));
+        assert!(pin.is_alloc_range_pinned(itlb_pinned, itlb_pinned + 0x1000));
 
         cpu.tlb_flush();
-        assert!(!pin.is_range_pinned(dtlb_host, dtlb_host + 0x1000));
-        assert!(!pin.is_range_pinned(itlb_host, itlb_host + 0x1000));
+        assert!(!pin.is_alloc_range_pinned(dtlb_pinned, dtlb_pinned + 0x1000));
+        assert!(!pin.is_alloc_range_pinned(itlb_pinned, itlb_pinned + 0x1000));
 
         cpu.clear_memory_access();
     }
@@ -4766,14 +4972,19 @@ mod tests {
         let vmcb_host = mem.identity_guest_base().0 as usize + 0x1_0000;
         cpu.in_svm_guest = true;
         cpu.vmcbhostptr = vmcb_host as _;
+        // The VMCB pointer is published as an offset, so the CPU needs the base
+        // it is measured against. Without this the test would still pass, but
+        // only because a null base leaves the raw address unchanged.
+        cpu.install_memory_bases(&mut mem);
+        let vmcb_pinned = vmcb_host - cpu.mem_alloc_base as usize;
 
         cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
         cpu.sync_vmcb_pin();
-        assert!(pin.is_range_pinned(vmcb_host, vmcb_host + 0x1000));
+        assert!(pin.is_alloc_range_pinned(vmcb_pinned, vmcb_pinned + 0x1000));
 
         cpu.tlb_flush();
         assert!(
-            pin.is_range_pinned(vmcb_host, vmcb_host + 0x1000),
+            pin.is_alloc_range_pinned(vmcb_pinned, vmcb_pinned + 0x1000),
             "a full flush must not drop the active SVM guest's VMCB pin"
         );
 
@@ -4794,10 +5005,21 @@ mod tests {
         for &svm in &[false, true] {
             let mut cpu = BxCpuBuilder::new().build().unwrap();
             let mut mem = BxMemC::new(
-                BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).unwrap(),
+                BxMemoryStubC::create_and_init(4 * MIB, 4 * MIB, MIB).unwrap(),
                 false,
             );
-            let host_base = mem.identity_guest_base().0 as usize;
+            // Fully resident, so there is a real identity base. The data TLB
+            // only ever caches pages of identity-backed RAM, so a base is the
+            // state its entries are filled in — with none, a fill stores no
+            // page at all and this property has nothing to check.
+            cpu.install_memory_bases(&mut mem);
+            assert!(!cpu.mem_host_base.is_null());
+            assert_eq!(
+                cpu.mem_host_base, cpu.mem_alloc_base,
+                "under full residency guest RAM starts the allocation, which is \
+                 what lets one `host_base` stand for both sides here"
+            );
+            let host_base = cpu.mem_host_base as usize;
 
             if svm {
                 cpu.in_svm_guest = true;
@@ -4827,14 +5049,13 @@ mod tests {
                 match next() % 6 {
                     0 | 1 => {
                         let laddr = laddr_of(next());
-                        let host = host_base + laddr as usize;
                         let global = (next() & 1) != 0;
                         let large = (next() & 7) == 0;
                         let slot = cpu.dtlb.get_index_of(laddr, 0);
                         {
                             let e = &mut cpu.dtlb.entries[slot];
                             e.lpf = laddr;
-                            e.host_page_addr = crate::config::BxPtrEquivNonZero::new(host as crate::config::BxPtrEquiv);
+                            e.host_page = crate::cpu::tlb::RamPage::from_ram_offset(laddr as usize);
                             // bit31 == TLB_GLOBAL_PAGE (tlb.rs); low bit is a
                             // normal access-permission bit marking the entry live.
                             e.access_bits = 1 | if global { 0x8000_0000 } else { 0 };
@@ -4853,7 +5074,8 @@ mod tests {
                         {
                             let e = &mut cpu.itlb.entries[slot];
                             e.lpf = laddr;
-                            e.host_page_addr = crate::config::BxPtrEquivNonZero::new(host as crate::config::BxPtrEquiv);
+                            e.host_page =
+                                crate::cpu::tlb::AllocPage::from_alloc_offset(laddr as usize);
                             e.access_bits = 1 | if global { 0x8000_0000 } else { 0 };
                             e.lpf_mask = 0xFFF;
                         }
@@ -4938,8 +5160,15 @@ mod tests {
         cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
 
         mem.write_ram(&[], 0, &[0x5a]).unwrap();
-        let host_ptr = mem
-            .get_host_mem_addr_pinned(
+        // Host memory is a fifth of guest memory here, so residency is partial
+        // and there is NO identity base — `mem_host_base` stays null. This is
+        // the regime the instruction side must survive, and the only thing it
+        // can be measured from is the allocation.
+        cpu.install_memory_bases(&mut mem);
+        assert!(cpu.mem_host_base.is_null());
+        assert!(!cpu.mem_alloc_base.is_null());
+        let offset = mem
+            .host_mem_range_pinned(
                 0,
                 MemoryAccessType::Read,
                 &[],
@@ -4947,20 +5176,30 @@ mod tests {
             )
             .unwrap()
             .unwrap()
-            .as_ptr() as usize;
+            .start;
         let slot = cpu.itlb.get_index_of(TARGET, 0);
         let entry = &mut cpu.itlb.entries[slot];
         entry.lpf = TARGET;
-        entry.host_page_addr = crate::config::BxPtrEquivNonZero::new(host_ptr as crate::config::BxPtrEquiv);
+        entry.host_page = crate::cpu::tlb::AllocPage::from_alloc_offset(offset);
         entry.access_bits = 1;
-        cpu.eip_fetch_ptr = Some(&[0]);
+        // A live fetch window, placed in the tail of the allocation so it does
+        // NOT overlap the block under test — otherwise the pin assertion below
+        // would pass on the window alone and prove nothing about the ITLB slot.
+        // (It used to point at a `&[0]` static, which is outside the allocation
+        // and has no meaningful offset into it at all.)
+        let window_offset = cpu.mem_alloc_len - 8;
+        assert!(window_offset >= offset + MIB, "window must clear the block");
+        // SAFETY: the last eight bytes of the live allocation.
+        cpu.eip_fetch_ptr =
+            Some(unsafe { core::slice::from_raw_parts(cpu.mem_alloc_base.add(window_offset), 8) });
         cpu.sync_itlb_pin_slot(TARGET, 0);
-        assert!(pin.is_range_pinned(host_ptr, host_ptr + MIB));
+        cpu.sync_fetch_window_pin();
+        assert!(pin.is_alloc_range_pinned(offset, offset + MIB));
 
         cpu.invalidate_itlb_pin_slot(TARGET, 0);
 
         assert!(cpu.eip_fetch_ptr.is_none());
-        assert!(!pin.is_range_pinned(host_ptr, host_ptr + MIB));
+        assert!(!pin.is_alloc_range_pinned(offset, offset + MIB));
         mem.write_ram(pins, TARGET, &[0xa5]).unwrap();
         let mut replaced = [0];
         assert_eq!(mem.read_ram(pins, TARGET, &mut replaced).unwrap(), 1);
@@ -4985,11 +5224,11 @@ mod tests {
         cpu.in_svm_guest = true;
         cpu.vmcbhostptr = 0x6000;
         cpu.sync_vmcb_pin();
-        assert!(pin.is_range_pinned(0x6000, 0x7000));
+        assert!(pin.is_alloc_range_pinned(0x6000, 0x7000));
 
         cpu.in_svm_guest = false;
         cpu.sync_vmcb_pin();
-        assert!(!pin.is_range_pinned(0x6000, 0x7000));
+        assert!(!pin.is_alloc_range_pinned(0x6000, 0x7000));
         cpu.clear_memory_access();
     }
 }
