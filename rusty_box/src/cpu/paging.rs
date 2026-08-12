@@ -1709,7 +1709,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         // Cache host pointer for direct memory access on future TLB hits.
         // Bochs stores hostPageAddr in each TLB entry so subsequent accesses
         // bypass the pinned host-mapping slow path. Pages with MMIO handlers
-        // (VGA 0xA0000-0xBFFFF) or ROM get host_page_addr=0.
+        // (VGA 0xA0000-0xBFFFF) or ROM get `NO_DIRECT_ACCESS`.
         let host_page_addr = {
             let a20_ppf = self.apply_a20(ppf);
             let host_base = self.mem_host_base;
@@ -1718,9 +1718,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             if !host_base.is_null() && plain_ram {
                 bx_guest_ram_span(a20_ppf, 0x1000, host_len)
                     .map(|span| super::access::host_offset(host_base, span.start) as BxHostpageaddr)
-                    .unwrap_or(0)
+                    .unwrap_or(super::tlb::NO_DIRECT_ACCESS)
             } else {
-                0
+                super::tlb::NO_DIRECT_ACCESS
             }
         };
 

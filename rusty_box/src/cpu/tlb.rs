@@ -14,12 +14,26 @@ const TLB_GLOBAL_PAGE: u32 = 0x80000000;
 
 const BX_INVALID_TLB_ENTRY: u64 = 0xffffffffffffffffu64;
 
+/// `host_page_addr` value meaning "this page has no direct host mapping".
+///
+/// Named rather than written as a bare `0` at each test because the value is
+/// about to stop being zero: once the entry caches a RAM *offset* instead of a
+/// host address, zero becomes a legitimate page — guest physical page 0 — and
+/// every `!= 0` test would silently start claiming direct access to it.
+pub(crate) const NO_DIRECT_ACCESS: BxHostpageaddr = 0;
+
 #[derive(Default)]
 pub(crate) struct TLBEntry {
     /// linear page frame
     pub(crate) lpf: BxAddress,
     // physical page frame
     pub(crate) ppf: BxPhyAddress,
+    /// Host address of the page backing this entry, or
+    /// [`NO_DIRECT_ACCESS`] when the page must take the slow path — it carries
+    /// MMIO handlers, is ROM, or falls outside guest RAM.
+    ///
+    /// Bochs stores `hostPageAddr` here for the same reason: a hit can then be
+    /// served without re-resolving the mapping.
     pub(crate) host_page_addr: BxHostpageaddr,
     pub(crate) access_bits: u32,
     pub(super) pkey: u32,
@@ -48,7 +62,7 @@ impl TLBEntry {
     const INVALID: Self = Self {
         lpf: BX_INVALID_TLB_ENTRY,
         ppf: 0,
-        host_page_addr: 0,
+        host_page_addr: NO_DIRECT_ACCESS,
         access_bits: 0,
         pkey: 0,
         lpf_mask: 0,

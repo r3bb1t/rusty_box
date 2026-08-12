@@ -1194,7 +1194,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
-                && tlb.host_page_addr != 0
+                && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS
                 && !self.mem_host_base.is_null()
             {
                 let page_offset = (laddr & 0xFFF) as usize;
@@ -1273,7 +1273,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
-                && tlb.host_page_addr != 0
+                && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS
                 && !self.mem_host_base.is_null()
             {
                 let page_offset = (laddr & 0xFFF) as usize;
@@ -1450,7 +1450,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr != 0 {
+                != 0 && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
@@ -1499,7 +1499,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr != 0 {
+                != 0 && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
@@ -1559,7 +1559,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr != 0 {
+                != 0 && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
@@ -1620,7 +1620,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr != 0 {
+                != 0 && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
@@ -1680,7 +1680,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr != 0 {
+                != 0 && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
@@ -1735,7 +1735,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr != 0 {
+                != 0 && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
@@ -1832,7 +1832,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr != 0 {
+                != 0 && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
@@ -1901,7 +1901,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr != 0 {
+                != 0 && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
@@ -1965,7 +1965,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let tlb = self.dtlb.get_entry_of(laddr, 3);
         let pkey_mask = self.rd_pkey[tlb.pkey as usize];
-        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page_addr != 0
+        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS
         {
             let host = tlb.host_page_addr as *const u8;
             let ptr = host_at_page_offset(host, laddr);
@@ -1988,7 +1988,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let tlb = self.dtlb.get_entry_of(laddr, 7);
         let pkey_mask = self.rd_pkey[tlb.pkey as usize];
-        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page_addr != 0
+        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS
         {
             let host = tlb.host_page_addr as *const u8;
             let ptr = host_at_page_offset(host, laddr);
@@ -2012,7 +2012,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let pkey_mask = self.wr_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf
             && tlb.is_shadow_stack_write_ok(user, pkey_mask)
-            && tlb.host_page_addr != 0
+            && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS
         {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
@@ -2042,7 +2042,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         let pkey_mask = self.wr_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf
             && tlb.is_shadow_stack_write_ok(user, pkey_mask)
-            && tlb.host_page_addr != 0
+            && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS
         {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
@@ -2072,7 +2072,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         if tlb.lpf == lpf && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page_addr != 0 {
+                != 0 && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS {
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
             let host_addr = tlb.host_page_addr | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
@@ -2133,7 +2133,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
-            && tlb.host_page_addr != 0
+            && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS
         {
             self.address_xlation.pages =
                 tlb.host_page_addr | (laddr & 0x0fff) as BxPtrEquiv;
@@ -2183,7 +2183,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
-            && tlb.host_page_addr != 0
+            && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS
         {
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
             let host_addr = tlb.host_page_addr | page_offset;
@@ -2262,7 +2262,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
-            && tlb.host_page_addr != 0
+            && tlb.host_page_addr != super::tlb::NO_DIRECT_ACCESS
         {
             self.address_xlation.pages =
                 tlb.host_page_addr | (laddr & 0x0fff) as BxPtrEquiv;
