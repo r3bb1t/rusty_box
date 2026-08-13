@@ -520,6 +520,40 @@ impl<'a, T: Instrumentation> Emulator<T> {
         )
     }
 
+    /// No-alloc counterpart. Same split, different storage: the BSP is
+    /// caller-provided, the APs are pointers, and the pin set is an
+    /// initialised prefix of a fixed array.
+    #[cfg(not(feature = "alloc"))]
+    pub(crate) fn exec_ctx(&mut self, index: usize) -> crate::cpu::exec_ctx::ExecCtx<'_, T> {
+        let Self {
+            cpu,
+            ap_cpu_ptrs,
+            memory,
+            devices,
+            pc_system,
+            cpu_tlb_pins,
+            cpu_tlb_pin_count,
+            ..
+        } = self;
+        let this_cpu: &mut BxCpuC<T> = if index == 0 {
+            cpu
+        } else {
+            // SAFETY: `init_at_with_ap_cpus` stores live CPUs the caller keeps
+            // alive for the emulator's life; `&mut self` excludes any other
+            // borrow of this one.
+            unsafe { &mut *ap_cpu_ptrs[index - 1] }
+        };
+        // SAFETY: exactly this prefix is initialised before the emulator is
+        // exposed — the same contract `raw_tlb_pins` relies on.
+        let pins = unsafe {
+            core::slice::from_raw_parts(
+                cpu_tlb_pins.as_ptr().cast::<crate::memory::CpuTlbPin>(),
+                *cpu_tlb_pin_count,
+            )
+        };
+        crate::cpu::exec_ctx::ExecCtx::new(this_cpu, memory, devices, pc_system, pins, index)
+    }
+
     #[cfg(not(feature = "alloc"))]
     pub(crate) fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<T> {
         if index == 0 {

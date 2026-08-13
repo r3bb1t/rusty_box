@@ -56,30 +56,37 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         }
     }
 
-    /// This CPU's own eviction sidecar.
-    #[inline]
-    pub(crate) fn pin(&self) -> &CpuTlbPin {
-        &self.pins[self.pin_index]
-    }
-
-    /// The CPU and its memory at the same time.
+    /// Everything a scheduler slice hands to the CPU loop, in one borrow.
     ///
-    /// Handlers that translate an address and then touch the bytes need both
-    /// halves live at once. Returning them together from disjoint fields is
-    /// what makes that expressible without a stored pointer.
+    /// This is also the proof the whole design rests on: a handler that
+    /// translates an address and then touches the bytes needs the CPU and
+    /// memory live at once, and here they are, from disjoint machine fields.
+    ///
+    /// The pin set is shared while the CPU and memory are mutable, which the
+    /// borrow checker accepts only because all three are distinct fields of the
+    /// machine. The scheduler previously rebuilt these from a raw pointer and a
+    /// `from_raw_parts` because it could not name that split.
     #[inline]
-    pub(crate) fn cpu_and_memory(&mut self) -> (&mut BxCpuC<T>, &mut BxMemC) {
-        (self.cpu, self.memory)
+    pub(crate) fn slice_parts(
+        &mut self,
+    ) -> (
+        &mut BxCpuC<T>,
+        &mut BxMemC,
+        &mut BxDevicesC,
+        &mut BxPcSystemC,
+        &'a [CpuTlbPin],
+        &'a CpuTlbPin,
+    ) {
+        (
+            self.cpu,
+            self.memory,
+            self.devices,
+            self.pc_system,
+            self.pins,
+            &self.pins[self.pin_index],
+        )
     }
 
-    /// The CPU with the device bus and PC system, mirroring the existing
-    /// `io_and_pc_system_mut` shape used by port I/O.
-    #[inline]
-    pub(crate) fn cpu_io_and_pc_system(
-        &mut self,
-    ) -> (&mut BxCpuC<T>, &mut BxDevicesC, &mut BxPcSystemC) {
-        (self.cpu, self.devices, self.pc_system)
-    }
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -106,25 +113,24 @@ mod tests {
                 // in a handler body keeps working unchanged.
                 let rip = ctx.rip();
 
-                // Memory is reachable in the same scope, with no pointer stored
-                // on the CPU and nothing wired beforehand.
+                // Memory and the device bus are reachable in the same scope,
+                // with no pointer stored on the CPU and nothing wired first.
                 ctx.memory.set_a20_mask(u64::MAX);
+                let _ = ctx.pc_system.get_enable_a20();
 
-                // And both halves together, which is what any handler that
-                // translates an address and then touches bytes requires.
-                let (cpu, memory) = ctx.cpu_and_memory();
+                // All four at once — the CPU and memory mutable, the pin set
+                // shared. A handler that translates an address and then touches
+                // the bytes needs exactly this, and it is the combination the
+                // raw wiring existed to fake.
+                let (cpu, memory, _devices, _pc_system, pins, current_pin) = ctx.slice_parts();
                 cpu.install_memory_bases(memory);
                 assert!(!cpu.mem_alloc_base.is_null());
                 assert_eq!(cpu.rip(), rip, "deref must reach the same cpu");
-
-                // The device bus and PC system come out of the same borrow.
-                let (_cpu, _devices, pc_system) = ctx.cpu_io_and_pc_system();
-                let _ = pc_system.get_enable_a20();
-
-                // The sidecar set is shared while the CPU is mutable, which is
-                // the split the eviction check needs.
-                assert!(ctx.pins.len() >= 1);
-                assert!(!ctx.pin().is_alloc_range_pinned(usize::MAX, usize::MAX));
+                assert!(!pins.is_empty());
+                assert!(
+                    core::ptr::eq(current_pin, &pins[0]),
+                    "cpu 0's sidecar is the first in the set"
+                );
             })
             .unwrap()
             .join()

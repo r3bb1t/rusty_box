@@ -1688,7 +1688,7 @@ impl Uintr {
 /// Type alias for instruction handler function pointer
 pub(super) type InstructionHandler<T> = fn(&mut BxCpuC<T>, &Instruction) -> Result<()>;
 
-impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Bochs `signal_event()`: set event bit and force async check.
     /// Called by PIC (via raw pointer) when master int_pin asserts.
     #[inline]
@@ -2518,7 +2518,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     #[inline]
     pub(crate) fn cpu_loop_n_with_io(
         &mut self,
-        mem: &'c mut BxMemC,
+        mem: &mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
@@ -2566,7 +2566,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     #[inline]
     pub(crate) fn cpu_run_trace_with_io(
         &mut self,
-        mem: &'c mut BxMemC,
+        mem: &mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
@@ -2605,7 +2605,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     pub(crate) fn cpu_loop(
         &mut self,
-        mem: &'c mut BxMemC,
+        mem: &mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
     ) -> super::Result<()> {
@@ -2643,7 +2643,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Returns Ok(instructions_executed) when limit is reached or async event occurs.
     pub(crate) fn cpu_loop_n(
         &mut self,
-        mem: &'c mut BxMemC,
+        mem: &mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
@@ -2671,7 +2671,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         const STRICT_INSTRUCTION_BUDGET: bool,
     >(
         &mut self,
-        mem: &'c mut BxMemC,
+        mem: &mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
         current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
@@ -2816,10 +2816,8 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             // The borrow is released at the end of the expression.
             #[cfg(feature = "profiling")]
             let _t0 = std::time::Instant::now();
-            // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
-            let (mut instr_idx, mut trace_end) = unsafe {
-                let mem_extended: &'c mut BxMemC = &mut *mem_ptr;
-                match self.get_icache_entry(mem_extended, cpus) {
+            let (mut instr_idx, mut trace_end) = {
+                match self.get_icache_entry(&mut *mem, cpus) {
                     Ok((start, tlen)) => (start, start + tlen),
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
                         // Bochs setjmp handler (cpu.cc): icount++, then
@@ -3065,10 +3063,8 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     }
                     // Chain to new trace without breaking to outer loop
                     // (matching C++ line 218-220: entry=getICacheEntry; i=entry->i; last=...)
-                    // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
-                    let (start, tlen) = unsafe {
-                        let mem_reborrowed: &'c mut BxMemC = &mut *mem_ptr;
-                        match self.get_icache_entry(mem_reborrowed, cpus) {
+                    let (start, tlen) = {
+                        match self.get_icache_entry(&mut *mem, cpus) {
                             Ok(v) => v,
                             Err(crate::cpu::CpuError::CpuLoopRestart) => {
                                 // Bochs setjmp handler: icount++, prev_rip = RIP
@@ -3186,15 +3182,13 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     fn fetch_next_instruction(
         &mut self,
-        mem: &'c mut BxMemC,
+        mem: &mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<Instruction> {
-        let mem_ptr: *mut BxMemC = mem;
-        // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
-        let (mpool_start_idx, _tlen) = unsafe {
-            let mem_reborrowed: &'c mut BxMemC = &mut *mem_ptr;
-            self.get_icache_entry(mem_reborrowed, cpus)?
-        };
+        // A plain reborrow: the raw pointer here existed only to manufacture a
+        // borrow with the impl's `'c` lifetime, which a reborrow cannot produce.
+        // With `'c` gone there is nothing to work around.
+        let (mpool_start_idx, _tlen) = self.get_icache_entry(mem, cpus)?;
         Ok(self.i_cache.mpool[mpool_start_idx])
     }
 
@@ -3253,7 +3247,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     #[inline]
     fn get_icache_entry(
         &mut self,
-        mem: &'c mut BxMemC,
+        mem: &mut BxMemC,
         cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<(usize, usize)> {
         // Apply machine-wide SMC invalidations this cpu has not seen before
@@ -3289,9 +3283,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             let mut retry_count = 0;
             loop {
-                // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
-                let mem_reborrowed: &'c mut BxMemC = unsafe { &mut *mem_ptr };
-                self.prefetch(mem_reborrowed, cpus)?;
+                self.prefetch(&mut *mem, cpus)?;
 
                 if self.eip_page_window_size == 0 || self.eip_fetch_window.is_none() {
                     retry_count += 1;
@@ -3351,11 +3343,9 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.perf_icache_miss += 1;
         }
 
-        // SAFETY: prefetch() borrow is released before serve_icache_miss is called
-        let miss_entry = unsafe {
-            let mem_reborrowed: &'c mut BxMemC = &mut *mem_ptr;
-            self.serve_icache_miss(eip_biased, p_addr, mem_reborrowed, cpus)?
-        };
+        // The prefetch borrow above ends before this call, so an ordinary
+        // reborrow is all this ever needed.
+        let miss_entry = self.serve_icache_miss(eip_biased, p_addr, &mut *mem, cpus)?;
         Ok((miss_entry.mpool_start_idx, miss_entry.tlen as usize))
     }
 
@@ -3565,7 +3555,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     //  * segment boundary:         any
     pub(super) fn prefetch(
         &mut self,
-        mem: &'c mut BxMemC,
+        mem: &mut BxMemC,
         pins: &[crate::memory::CpuTlbPin],
     ) -> Result<()> {
         let laddr: BxAddress;

@@ -354,37 +354,46 @@ impl<'a, T: Instrumentation> Emulator<T> {
                     core::ptr::NonNull::new(pins_ptr as *mut CpuTlbPin);
                 (*dm_ptr.as_ptr()).active_tlb_pin_count = pins_len;
 
-                let mem_extended: &'a mut BxMemC =
-                    core::mem::transmute::<&mut BxMemC, &'a mut BxMemC>(&mut *mem_ptr);
-                let pins = core::slice::from_raw_parts(pins_ptr, pins_len);
-                let current_pin = &*pins_ptr.add(cpu_index);
                 let ticks_before = self.cpu_ref(cpu_index).cpu_ticks();
-                let slice_result = if smp {
-                    self.cpu_mut_at(cpu_index).cpu_run_trace_with_io(
-                        mem_extended,
-                        pins,
-                        current_pin,
-                        per_cpu_batch,
-                        strict_smp_deadline,
-                        cpu_count as u64,
-                        io_ptr,
-                        ps_ptr,
-                        Some(&mut *pic_ref),
-                        Some(&mut *dma_ref),
-                    )
-                } else {
-                    self.cpu_mut_at(cpu_index).cpu_loop_n_with_io(
-                        mem_extended,
-                        pins,
-                        current_pin,
-                        per_cpu_batch,
-                        strict_up_deadline,
-                        1,
-                        io_ptr,
-                        ps_ptr,
-                        Some(&mut *pic_ref),
-                        Some(&mut *dma_ref),
-                    )
+                // The CPU, memory and pin set now come from one borrow of the
+                // machine rather than three raw pointers and a lifetime
+                // transmute. Scoped to the call, so the bookkeeping below can
+                // use `self` again.
+                let slice_result = {
+                    let mut ctx = self.exec_ctx(cpu_index);
+                    let (cpu, memory, devices, pc_system, pins, current_pin) = ctx.slice_parts();
+                    // The bus pointers are derived from live borrows rather
+                    // than captured from `self` before the loop. They stay
+                    // `NonNull` only until the CPU stops storing them.
+                    let io = core::ptr::NonNull::from(devices);
+                    let ps = core::ptr::NonNull::from(pc_system);
+                    if smp {
+                        cpu.cpu_run_trace_with_io(
+                            memory,
+                            pins,
+                            current_pin,
+                            per_cpu_batch,
+                            strict_smp_deadline,
+                            cpu_count as u64,
+                            io,
+                            ps,
+                            Some(&mut *pic_ref),
+                            Some(&mut *dma_ref),
+                        )
+                    } else {
+                        cpu.cpu_loop_n_with_io(
+                            memory,
+                            pins,
+                            current_pin,
+                            per_cpu_batch,
+                            strict_up_deadline,
+                            1,
+                            io,
+                            ps,
+                            Some(&mut *pic_ref),
+                            Some(&mut *dma_ref),
+                        )
+                    }
                 };
 
                 // CPU wrappers clear their own buses. Clear every device-side
@@ -564,13 +573,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
         self.refresh_tlb_pins();
         let pins_ptr = self.tlb_pins().as_ptr();
         let pins_len = self.tlb_pins().len();
-        let mem_extended = self.borrow_memory_for_cpu();
         let pins = core::slice::from_raw_parts(pins_ptr, pins_len);
-        self.cpu.wire_memory_access(
-            core::ptr::NonNull::from(&mut *mem_extended),
-            pins,
-            &*pins_ptr,
-        );
+        // Destructured: the CPU and memory are disjoint fields, so this needs
+        // no lifetime extension — the transmute it replaces existed only to
+        // hand the CPU a borrow that outlived the statement.
+        let Self { cpu, memory, .. } = self;
+        cpu.wire_memory_access(core::ptr::NonNull::from(&mut *memory), pins, &*pins_ptr);
         let result = self.cpu.inject_external_interrupt(vector);
         self.cpu.clear_memory_access();
         self.refresh_cpu_masks(0);
