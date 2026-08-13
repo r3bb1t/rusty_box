@@ -43,53 +43,82 @@ fn snapshot_other(message: &'static str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, message)
 }
 
+/// One page of guest RAM, carrying the allocation's alignment in its type.
+///
+/// The backing must be `BX_MEM_VECTOR_ALIGN`-aligned. Expressing that as an
+/// alignment on the element type rather than on a hand-built `Layout` is what
+/// lets the owned case be an ordinary `Box<[GuestPage]>`: it is `Send`, it
+/// frees itself, and it cannot be deallocated with the wrong alignment — the
+/// hazard that forced the previous hand-rolled buffer and its manual `Drop`.
+///
+/// It also keeps `vector_offset` at zero. Were alignment instead absorbed as
+/// leading padding, `rom()` (which indexes by `rom_offset` alone) and the
+/// construction path (which computes `vector_offset + rom_offset`) would stop
+/// agreeing; they coincide today only because the offset is zero.
 #[cfg(feature = "alloc")]
-struct OwnedAlignedBuffer {
-    ptr: core::ptr::NonNull<u8>,
-    len: usize,
-    layout: alloc::alloc::Layout,
+#[repr(C, align(4096))]
+#[derive(Clone, Copy)]
+struct GuestPage([u8; BX_MEM_VECTOR_ALIGN]);
+
+#[cfg(feature = "alloc")]
+const _: () = assert!(core::mem::size_of::<GuestPage>() == BX_MEM_VECTOR_ALIGN);
+
+/// Where the guest's memory bytes live.
+///
+/// Both variants are plain owned or borrowed data, so `BxMemoryStubC` derives
+/// `Send` instead of promising it.
+pub(super) enum RamBacking {
+    /// Allocated and freed by this struct.
+    #[cfg(feature = "alloc")]
+    Owned(alloc::boxed::Box<[GuestPage]>),
+    /// Caller-provided storage for no-alloc targets, handed over for the life
+    /// of the machine by `create_from_raw`.
+    Borrowed(&'static mut [u8]),
 }
 
-#[cfg(feature = "alloc")]
-impl OwnedAlignedBuffer {
-    fn allocate(bytes: usize, alignment: usize) -> Result<Self> {
-        let layout = alloc::alloc::Layout::from_size_align(bytes, alignment)
-            .map_err(|_| MemoryError::UnableToAllocateGuestMemory(bytes))?;
-        let ptr = core::ptr::NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) })
-            .ok_or(MemoryError::UnableToAllocateGuestMemory(bytes))?;
-        Ok(Self {
-            ptr,
-            len: bytes,
-            layout,
-        })
-    }
-
-    fn into_raw_parts(self) -> (*mut u8, usize, alloc::alloc::Layout) {
-        let owned = core::mem::ManuallyDrop::new(self);
-        (owned.ptr.as_ptr(), owned.len, owned.layout)
+impl core::fmt::Debug for RamBacking {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The bytes themselves are guest RAM; only the shape is useful here.
+        let (kind, len) = match self {
+            #[cfg(feature = "alloc")]
+            Self::Owned(pages) => ("Owned", pages.len() * BX_MEM_VECTOR_ALIGN),
+            Self::Borrowed(bytes) => ("Borrowed", bytes.len()),
+        };
+        write!(f, "RamBacking::{kind}({len} bytes)")
     }
 }
 
-#[cfg(feature = "alloc")]
-impl core::ops::Deref for OwnedAlignedBuffer {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+impl RamBacking {
+    #[inline(always)]
+    pub(super) fn as_slice(&self) -> &[u8] {
+        match self {
+            #[cfg(feature = "alloc")]
+            // SAFETY: `GuestPage` is `repr(C)` over `[u8; BX_MEM_VECTOR_ALIGN]`,
+            // so a run of them is exactly that many contiguous initialised
+            // bytes. This is a reinterpreting cast, not an owning pointer.
+            Self::Owned(pages) => unsafe {
+                core::slice::from_raw_parts(
+                    pages.as_ptr() as *const u8,
+                    pages.len() * BX_MEM_VECTOR_ALIGN,
+                )
+            },
+            Self::Borrowed(bytes) => bytes,
+        }
     }
-}
 
-#[cfg(feature = "alloc")]
-impl core::ops::DerefMut for OwnedAlignedBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl Drop for OwnedAlignedBuffer {
-    fn drop(&mut self) {
-        unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) };
+    #[inline(always)]
+    pub(super) fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            #[cfg(feature = "alloc")]
+            // SAFETY: see `as_slice`.
+            Self::Owned(pages) => unsafe {
+                core::slice::from_raw_parts_mut(
+                    pages.as_mut_ptr() as *mut u8,
+                    pages.len() * BX_MEM_VECTOR_ALIGN,
+                )
+            },
+            Self::Borrowed(bytes) => bytes,
+        }
     }
 }
 
@@ -137,12 +166,20 @@ impl BxMemoryStubC {
         let total_len = resident_backing_len
             .checked_add(aux_len)
             .ok_or(MemoryError::UnableToAllocateGuestMemory(host))?;
-        let mut actual_vector = OwnedAlignedBuffer::allocate(total_len, BX_MEM_VECTOR_ALIGN)?;
+        // Rounded up to whole pages so the backing can be `[GuestPage]`, which
+        // carries the required alignment in its type. `actual_vector_len` keeps
+        // the exact figure, so the slack is never addressable.
+        let total_pages = total_len.div_ceil(BX_MEM_VECTOR_ALIGN);
+        let mut pages: alloc::vec::Vec<GuestPage> = alloc::vec::Vec::new();
+        pages
+            .try_reserve_exact(total_pages)
+            .map_err(|_| MemoryError::UnableToAllocateGuestMemory(total_len))?;
+        pages.resize(total_pages, GuestPage([0u8; BX_MEM_VECTOR_ALIGN]));
+        let mut actual_vector = RamBacking::Owned(pages.into_boxed_slice());
         let vector_offset = 0;
         tracing::debug!(
-            "allocated memory at {:p}. after alignment, vector={:p}, block_size = {}k",
-            actual_vector.as_ptr(),
-            actual_vector[vector_offset..].as_ptr(),
+            "allocated memory at {:p}, block_size = {}k",
+            actual_vector.as_slice().as_ptr(),
             block_size / 1024
         );
 
@@ -155,7 +192,7 @@ impl BxMemoryStubC {
             .ok_or(MemoryError::UnableToAllocateGuestMemory(host))?;
 
         let rom_start = vector_offset + rom_offset;
-        actual_vector[rom_start..].fill(0xFF);
+        actual_vector.as_mut_slice()[rom_start..total_len].fill(0xFF);
 
         let num_blocks = len
             .checked_add(block_size - 1)
@@ -191,13 +228,9 @@ impl BxMemoryStubC {
             return Err(MemoryError::UnableToAllocateGuestMemory(layout.size()).into());
         }
 
-        let (actual_vector_ptr, actual_vector_len, actual_vector_layout) =
-            actual_vector.into_raw_parts();
-
         unsafe {
-            core::ptr::addr_of_mut!((*ptr).actual_vector).write(actual_vector_ptr);
-            core::ptr::addr_of_mut!((*ptr).actual_vector_len).write(actual_vector_len);
-            core::ptr::addr_of_mut!((*ptr).actual_vector_layout).write(Some(actual_vector_layout));
+            core::ptr::addr_of_mut!((*ptr).backing).write(actual_vector);
+            core::ptr::addr_of_mut!((*ptr).actual_vector_len).write(total_len);
             core::ptr::addr_of_mut!((*ptr).len).write(len);
             core::ptr::addr_of_mut!((*ptr).allocated).write(allocated);
             core::ptr::addr_of_mut!((*ptr).resident_backing_len).write(resident_backing_len);
@@ -331,9 +364,15 @@ impl BxMemoryStubC {
             0
         };
         Ok(Self {
-            actual_vector: ptr,
+            // SAFETY: the caller of this raw entry point guarantees `ptr` is
+            // valid, 4 KiB-aligned (checked above), `len` bytes long, and
+            // unaliased for the life of the machine. Wrapping it once here is
+            // the only place that contract is taken on trust; everything below
+            // works from the resulting slice.
+            backing: RamBacking::Borrowed(unsafe {
+                core::slice::from_raw_parts_mut(ptr, len)
+            }),
             actual_vector_len: len,
-            actual_vector_layout: None,
             len: guest,
             allocated: host,
             resident_backing_len,
@@ -541,7 +580,7 @@ impl BxMemoryStubC {
             .vector_offset
             .checked_add(offset)
             .ok_or_else(|| snapshot_invalid("snapshot resident block offset overflow"))?;
-        Ok(unsafe { core::slice::from_raw_parts(self.actual_vector.add(start), len) })
+        Ok(&self.backing.as_slice()[start..start + len])
     }
 
     #[cfg(feature = "std")]
@@ -555,7 +594,7 @@ impl BxMemoryStubC {
             .vector_offset
             .checked_add(offset)
             .ok_or_else(|| snapshot_invalid("snapshot resident block offset overflow"))?;
-        Ok(unsafe { core::slice::from_raw_parts_mut(self.actual_vector.add(start), len) })
+        Ok(&mut self.backing.as_mut_slice()[start..start + len])
     }
     /// Return the configured block geometry without exposing host backing.
     #[cfg(feature = "std")]
@@ -797,10 +836,7 @@ impl BxMemoryStubC {
                         .vector_offset
                         .checked_add(tail_start_offset)
                         .ok_or_else(|| snapshot_invalid("snapshot final slot tail overflow"))?;
-                    unsafe {
-                        core::slice::from_raw_parts_mut(self.actual_vector.add(tail_start), tail_len)
-                    }
-                    .fill(0);
+                    self.backing.as_mut_slice()[tail_start..tail_start + tail_len].fill(0);
                 }
             }
         }
@@ -904,17 +940,24 @@ impl BxMemoryStubC {
         if slot_end > self.resident_backing_len {
             return Err(MemoryError::Internal("resident slot outside host backing").into());
         }
-        let chosen = unsafe {
-            core::slice::from_raw_parts_mut(
-                self.actual_vector.add(self.vector_offset + slot_offset),
-                self.block_size,
-            )
-        };
-        chosen.fill(0);
+        let chosen_start = self.vector_offset + slot_offset;
+        let chosen_end = chosen_start + self.block_size;
         let offset = block
             .checked_mul(self.block_size)
             .ok_or(MemoryError::Internal("overflow file offset overflow"))?;
-        let file = self.overflow_file_mut();
+        // Destructured so the slot and the swap file are borrowed as the
+        // disjoint fields they are. The raw pointer this replaces existed only
+        // to dodge that borrow.
+        let Self {
+            backing,
+            overflow_file,
+            ..
+        } = self;
+        let chosen = &mut backing.as_mut_slice()[chosen_start..chosen_end];
+        chosen.fill(0);
+        // SAFETY: pre-existing interior mutability on the swap file; `&mut self`
+        // above means no other borrow of it is live.
+        let file = unsafe { &mut *overflow_file.get() };
         file.seek(SeekFrom::Start(u64::try_from(offset)?))
             .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(offset, e))?;
         file.read_exact(&mut chosen[..logical_len])?;
@@ -970,12 +1013,9 @@ impl BxMemoryStubC {
                 let file_offset = victim_guest
                     .checked_mul(self.block_size)
                     .ok_or(MemoryError::Internal("overflow file offset overflow"))?;
-                let victim_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        self.actual_vector.add(self.vector_offset + slot_offset),
-                        logical_len,
-                    )
-                };
+                let victim_start = self.vector_offset + slot_offset;
+                let victim_bytes =
+                    &self.backing.as_slice()[victim_start..victim_start + logical_len];
                 let file = self.overflow_file_mut();
                 file.seek(SeekFrom::Start(u64::try_from(file_offset)?))
                     .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(file_offset, e))?;

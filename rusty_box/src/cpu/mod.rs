@@ -63,6 +63,7 @@ pub(super) mod cet;
 #[allow(clippy::module_inception)]
 pub mod cpu;
 mod cpu_getters_and_setters;
+pub(crate) mod exec_ctx;
 pub(super) mod cpu_macros;
 pub(super) mod cpudb;
 pub(super) mod cpuid;

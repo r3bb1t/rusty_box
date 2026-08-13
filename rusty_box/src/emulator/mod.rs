@@ -487,6 +487,39 @@ impl<'a, T: Instrumentation> Emulator<T> {
         }
     }
 
+    /// Borrow one CPU together with the machine it executes against.
+    ///
+    /// This is the whole point of `ExecCtx`: the CPU, memory, devices, PC
+    /// system and pin set are separate fields, so a single destructuring hands
+    /// out `&mut` to each simultaneously. The scheduler's raw `mem_ptr` /
+    /// `io_ptr` / `ps_ptr` wiring exists only because it re-borrows `self`
+    /// inside its loop; nothing about the data itself requires a pointer.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn exec_ctx(&mut self, index: usize) -> crate::cpu::exec_ctx::ExecCtx<'_, T> {
+        let Self {
+            cpu,
+            ap_cpus,
+            memory,
+            devices,
+            pc_system,
+            cpu_tlb_pins,
+            ..
+        } = self;
+        let this_cpu: &mut BxCpuC<T> = if index == 0 {
+            cpu
+        } else {
+            &mut ap_cpus[index - 1]
+        };
+        crate::cpu::exec_ctx::ExecCtx::new(
+            this_cpu,
+            memory,
+            devices,
+            pc_system,
+            &cpu_tlb_pins[..],
+            index,
+        )
+    }
+
     #[cfg(not(feature = "alloc"))]
     pub(crate) fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<T> {
         if index == 0 {

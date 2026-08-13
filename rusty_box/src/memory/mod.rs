@@ -304,10 +304,13 @@ pub struct BxMemoryStubC {
     resident_backing_len: usize,
     /// individual block size, must be power of 2
     block_size: usize,
-    actual_vector: *mut u8,
+    /// The guest's memory bytes. Owned data rather than a raw pointer, so
+    /// `Send` derives — see `RamBacking`.
+    backing: memory_stub::RamBacking,
+    /// Bytes of `backing` this machine actually uses. The owned case rounds its
+    /// allocation up to a whole number of pages, so the backing may be slightly
+    /// longer; every accessor is bounded by this instead.
     actual_vector_len: usize,
-    /// Allocation layout for owned buffers; `None` for external raw memory.
-    actual_vector_layout: Option<core::alloc::Layout>,
     /// aligned correctly
     vector_offset: usize,
     /// None if swapped out
@@ -360,18 +363,15 @@ pub struct BxMemoryStubC {
     //swapped_out: *const u8,
 }
 
-// SAFETY: The raw pointer `actual_vector` is owned exclusively by this struct
-// (allocated once, never aliased). UnsafeCell fields are only accessed single-threaded.
-unsafe impl Send for BxMemoryStubC {}
-
-impl Drop for BxMemoryStubC {
-    fn drop(&mut self) {
-        #[cfg(feature = "alloc")]
-        if let Some(layout) = self.actual_vector_layout.take() {
-            unsafe { alloc::alloc::dealloc(self.actual_vector, layout) };
-        }
-    }
-}
+// `Send` is derived, not promised: every field is owned or borrowed data. The
+// hand-written `unsafe impl` this replaces asserted that the raw backing
+// pointer was never aliased — true, but a claim the compiler could not check.
+// The `Drop` that freed that pointer is gone too; `Box<[GuestPage]>` frees
+// itself with the alignment it was allocated with.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<BxMemoryStubC>();
+};
 
 type Unsigned = u32;
 
@@ -579,13 +579,14 @@ impl BxMemoryStubC {
     /// Reconstruct the complete owned backing slice for memory-internal
     /// storage operations only. It is never a guest-linear RAM view.
     pub(super) fn actual_vector_slice(&self) -> &[u8] {
-        unsafe { core::slice::from_raw_parts(self.actual_vector, self.actual_vector_len) }
+        &self.backing.as_slice()[..self.actual_vector_len]
     }
 
     /// Mutable counterpart to `actual_vector_slice`, restricted to memory
     /// internals such as ROM and resident-slot maintenance.
     pub(super) fn actual_vector_mut(&mut self) -> &mut [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.actual_vector, self.actual_vector_len) }
+        let len = self.actual_vector_len;
+        &mut self.backing.as_mut_slice()[..len]
     }
 
     #[allow(clippy::mut_from_ref)]
@@ -637,20 +638,6 @@ impl BxMemoryStubC {
 
     pub(super) fn apic_scratch(&mut self) -> &mut [u8] {
         &mut self.apic_scratch
-    }
-
-    #[allow(clippy::mut_from_ref)]
-    pub(super) fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
-        if let Some(Block::Block { offset }) = self.blocks_offsets().get(index) {
-            let start = self.vector_offset + *offset;
-            // SAFETY: We're accessing within bounds of actual_vector via interior mutability pattern
-            let slice = unsafe {
-                core::slice::from_raw_parts_mut(self.actual_vector.add(start), self.block_size)
-            };
-            Some(slice)
-        } else {
-            None
-        }
     }
 
     #[cfg(feature = "std")]
@@ -788,8 +775,12 @@ impl BxMemC {
         if !stub.identity_map {
             return (core::ptr::null_mut(), 0);
         }
-        let ptr = unsafe { stub.actual_vector.add(stub.vector_offset) };
-        (ptr, stub.len)
+        let (guest_len, vector_offset) = (stub.len, stub.vector_offset);
+        let stub = &mut self.inherited_memory_stub;
+        // A returned pointer is fine — it is a FIELD holding one that would
+        // block `Send`, and there is no longer any such field.
+        let ptr = stub.backing.as_mut_slice()[vector_offset..].as_mut_ptr();
+        (ptr, guest_len)
     }
 
     /// Base and length of the single allocation every direct host mapping
@@ -799,9 +790,10 @@ impl BxMemC {
     /// which is precisely why instruction fetch needs it: fetch also runs out
     /// of ROM, which is not guest RAM at all, and out of relocated RAM slots.
     /// A range from `host_mem_range_pinned` is an offset into exactly this.
-    pub(crate) fn allocation_span(&self) -> (*mut u8, usize) {
-        let stub = &self.inherited_memory_stub;
-        (stub.actual_vector, stub.actual_vector_len)
+    pub(crate) fn allocation_span(&mut self) -> (*mut u8, usize) {
+        let stub = &mut self.inherited_memory_stub;
+        let len = stub.actual_vector_len;
+        (stub.backing.as_mut_slice().as_mut_ptr(), len)
     }
 
     /// Block-logical snapshot geometry; no caller receives the host backing.
