@@ -374,18 +374,33 @@ use super::{
     segment_ctrl_pro::parse_selector,
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =====================================================================
     //  VMCB physical-memory access helpers
     // =====================================================================
 
+    /// Host address of `offset` bytes into the VMCB, given its allocation
+    /// offset `base`.
+    ///
+    /// Bochs svm.cc ORs the field offset into the cached host pointer. That is
+    /// only equivalent to adding while the pointer is page-aligned and the
+    /// offset stays inside the page — true of a 4 KiB VMCB, but a property of
+    /// the layout rather than of the operation. Adding says what is meant and
+    /// costs the same.
+    #[inline(always)]
+    fn vmcb_host_ptr(&self, base: usize, offset: u32) -> *mut u8 {
+        self.mem_alloc_base
+            .wrapping_add(base)
+            .wrapping_add(offset as usize)
+    }
+
     /// Read a u8 from the VMCB at `offset`.
     fn vmcb_read8(&mut self, offset: u32) -> u8 {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
+        if let Some(base) = self.vmcb_host_offset {
             // Fast path: host pointer available
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const u8;
-            // SAFETY: vmcbhostptr validated by set_vmcbptr; single-threaded
+            let host = self.vmcb_host_ptr(base, offset) as *const u8;
+            // SAFETY: the offset was validated by set_vmcbptr; single-threaded
             unsafe { *host }
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 1];
@@ -399,8 +414,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Read a u16 from the VMCB at `offset`.
     fn vmcb_read16(&mut self, offset: u32) -> u16 {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 2];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *const [u8; 2];
             u16::from_le_bytes(unsafe { *host })
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 2];
@@ -414,8 +429,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Read a u32 from the VMCB at `offset`.
     fn vmcb_read32(&mut self, offset: u32) -> u32 {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 4];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *const [u8; 4];
             u32::from_le_bytes(unsafe { *host })
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 4];
@@ -429,8 +444,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Read a u64 from the VMCB at `offset`.
     fn vmcb_read64(&mut self, offset: u32) -> u64 {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 8];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *const [u8; 8];
             u64::from_le_bytes(unsafe { *host })
         } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 8];
@@ -444,9 +459,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Write a u8 to the VMCB at `offset`.
     fn vmcb_write8(&mut self, offset: u32, val: u8) {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut u8;
-            // SAFETY: vmcbhostptr validated; single-threaded
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *mut u8;
+            // SAFETY: the offset was validated by set_vmcbptr; single-threaded
             unsafe {
                 *host = val;
             }
@@ -461,8 +476,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Write a u16 to the VMCB at `offset`.
     fn vmcb_write16(&mut self, offset: u32, val: u16) {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut [u8; 2];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *mut [u8; 2];
             unsafe {
                 *host = val.to_le_bytes();
             }
@@ -477,8 +492,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Write a u32 to the VMCB at `offset`.
     fn vmcb_write32(&mut self, offset: u32, val: u32) {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut [u8; 4];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *mut [u8; 4];
             unsafe {
                 *host = val.to_le_bytes();
             }
@@ -493,8 +508,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Write a u64 to the VMCB at `offset`.
     fn vmcb_write64(&mut self, offset: u32, val: u64) {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut [u8; 8];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *mut [u8; 8];
             unsafe {
                 *host = val.to_le_bytes();
             }
@@ -569,23 +584,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             // Try to get a direct host pointer for fast VMCB access
             if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(vmcbptr) } {
                 use super::rusty_box::MemoryAccessType;
-                match mem.get_host_mem_addr_pinned(
+                match mem.host_mem_range_pinned(
                     vmcbptr,
                     MemoryAccessType::RW,
                     self.active_tlb_pins(),
                     policy,
                 ) {
-                    // VMCB accessors directly offset this pointer through PAT.
+                    // VMCB accessors directly offset this base through PAT.
                     // A block-backed span may end sooner, in which case the
                     // handler-aware physical-access paths remain authoritative.
-                    Ok(Some(slice)) if slice.len() >= (SVM_GUEST_PAT as usize + 8) => {
-                        self.vmcbhostptr = slice.as_ptr() as super::tlb::BxHostpageaddr
+                    Ok(Some(range)) if range.len() >= (SVM_GUEST_PAT as usize + 8) => {
+                        self.vmcb_host_offset = Some(range.start)
                     }
-                    _ => self.vmcbhostptr = 0,
+                    _ => self.vmcb_host_offset = None,
                 }
             }
         } else {
-            self.vmcbhostptr = 0;
+            self.vmcb_host_offset = None;
         }
         self.sync_vmcb_pin();
     }

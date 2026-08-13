@@ -58,7 +58,7 @@ fn saturate_dword_s_to_word_s(val: i32) -> i16 {
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ========================================================================
     // MMX infrastructure
     // ========================================================================

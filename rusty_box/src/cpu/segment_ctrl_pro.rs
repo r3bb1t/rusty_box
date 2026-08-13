@@ -86,7 +86,7 @@ pub(super) fn set_segment_ar_data(
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation>
-    super::cpu::BxCpuC<'_, T>
+    super::cpu::BxCpuC<T>
 {
     /// Fetch raw descriptor from GDT or LDT
     /// Based on BX_CPU_C::fetch_raw_descriptor in segment_ctrl_pro.cc
@@ -658,7 +658,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation>
         self.handle_alignment_check();
 
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         Ok(())

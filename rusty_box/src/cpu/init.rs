@@ -41,7 +41,7 @@ pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
 // ResetReason is defined in cpu/mod.rs (always available without alloc)
 use super::ResetReason;
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn initialize(&mut self, _config: BxParams) -> Result<()> {
         tracing::debug!("Initialized cpu model {}", self.cpuid.get_name());
 
@@ -386,7 +386,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         // invalidate the code prefetch queue
         self.eip_page_bias = 0;
         self.eip_page_window_size = 0;
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
 
         // invalidate current stack page
         self.esp_page_bias = 0;
@@ -493,7 +493,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// `wakeup_monitor` here would disarm a monitor (and wake an MWAIT / cancel
     /// the mwaitx timer) that a snapshot restore has just reinstated.
     pub(crate) fn invalidate_host_memory_mappings(&mut self) {
-        self.vmcbhostptr = 0;
+        self.vmcb_host_offset = None;
         self.tlb_flush_hosts();
         self.i_cache.break_links();
         self.i_cache.flush_all();
@@ -542,7 +542,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     }
 
     pub(super) fn invalidate_prefetch_q(&mut self) {
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_bias = 0;
         self.eip_page_window_size = 0;
     }
@@ -714,7 +714,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// allocator checks can run again.
     fn set_VMCBPTR(&mut self, vmcb_ptr: u64) {
         self.vmcbptr = vmcb_ptr;
-        self.vmcbhostptr = 0;
+        self.vmcb_host_offset = None;
         self.sync_vmcb_pin();
     }
 }

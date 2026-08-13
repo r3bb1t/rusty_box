@@ -11,7 +11,7 @@ use crate::{
 
 use super::{CpuMask, Emulator, BOCHS_APIC_BUS_ID_MASK};
 
-impl<'a, T: Instrumentation> Emulator<'a, T> {
+impl<'a, T: Instrumentation> Emulator<T> {
     /// Extend the borrow of memory owned by this Emulator to match lifetime 'a.
     ///
     /// # Safety
@@ -578,7 +578,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     }
 }
 
-impl<'a, T: Instrumentation> Emulator<'a, T> {
+impl<'a, T: Instrumentation> Emulator<T> {
     /// Check for pending reset requests (keyboard 0xFE, port 92h, PCI CF9).
     /// If a reset is pending, clears the request flags and performs that reset type.
     /// Returns true if a reset was performed.

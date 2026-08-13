@@ -408,7 +408,7 @@ fn aggregate(bool_res: &[[u8; 16]; 16], len1: usize, len2: usize, imm: u8) -> u1
 // SSE4.2 instruction handlers
 // ============================================================================
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// PCMPESTRM — Packed Compare Explicit-Length Strings, Return Mask (66 0F 3A 60)
     ///
     /// Lengths from EAX/RAX (op1 length) and EDX/RDX (op2 length).

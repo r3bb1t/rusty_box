@@ -75,7 +75,7 @@ impl StopHandle {
 // feature-gated. When the feature is off, the methods simply do not exist.
 
 #[cfg(all(feature = "instrumentation", feature = "alloc"))]
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Register a hook fired before each instruction whose RIP is in `range`.
     /// Callback receives `(rip, &Instruction)`.
     pub fn hook_add_code<R, F>(&mut self, range: R, cb: F) -> HookHandle
@@ -217,7 +217,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
 
 // ─────────────────────────── reg_read / reg_write ───────────────────────────
 
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Read any register by enum tag. Narrower registers are zero-extended
     /// into the returned `u64`.
     pub fn reg_read(&self, reg: X86Reg) -> u64 {
@@ -329,7 +329,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
 
 // ─────────────────────────── Wide register read/write ───────────────────────────
 
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Read an x87 FPU register as 10 bytes (80-bit extended precision).
     /// `reg` must be Fpr0..Fpr7.
     pub fn reg_read_fp80(&self, reg: X86Reg) -> [u8; 10] {
@@ -571,7 +571,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
 
 // ─────────────────────────── mem_read / mem_write ───────────────────────────
 
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Read bytes from guest physical memory into the caller's buffer.
     /// Returns the number of bytes read (always `buf.len()` on success).
     /// Bypasses MMIO handlers — matches Unicorn `uc_mem_read` semantics.
@@ -823,7 +823,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
 
 // ─────────────────────────── emu_start / emu_stop ───────────────────────────
 
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Obtain a cross-thread [`StopHandle`] that breaks the `emu_start` loop
     /// at its next batch boundary.
     #[cfg(feature = "alloc")]
@@ -927,7 +927,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
 // ─────────────────────────── CpuSetupMode builders ───────────────────────────
 
 #[cfg(feature = "alloc")]
-impl<'a> Emulator<'a, ()> {
+impl<'a> Emulator<()> {
     /// Create a new emulator with guest memory allocated but no BIOS loaded,
     /// pre-configured for the given CPU mode. See [`CpuSetupMode`].
     ///
@@ -946,7 +946,7 @@ impl<'a> Emulator<'a, ()> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Create a new emulator pre-configured for the given CPU mode with a
     /// monomorphized tracer. Combines `new_with_instrumentation` + `setup_cpu_mode`.
     pub fn new_with_mode_and_instrumentation(
@@ -962,7 +962,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
     }
 }
 
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Reconfigure an existing emulator for the given CPU mode, skipping BIOS.
     /// Must be called after `initialize()` (or from `new_with_mode`).
     pub fn setup_cpu_mode(&mut self, mode: CpuSetupMode) -> Result<()> {

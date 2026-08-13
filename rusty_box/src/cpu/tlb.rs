@@ -140,6 +140,22 @@ impl CachedHostPage for AllocPage {
     }
 }
 
+/// The span instruction fetch is currently reading from, located within the
+/// memory allocation.
+///
+/// Bochs cpu.cc keeps a bare `eipFetchPtr`; carrying the length alongside the
+/// location is what lets the window be handed out as a bounded slice rather
+/// than a pointer whose extent the caller has to know. Unlike [`AllocPage`]
+/// this is not page-granular — a window near the end of a resident block
+/// legitimately stops short of a page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct FetchWindow {
+    /// Byte offset of the first fetchable byte within the allocation.
+    pub(crate) start: usize,
+    /// How many bytes may be fetched from `start` without refilling.
+    pub(crate) len: usize,
+}
+
 /// No direct host mapping — take the slow path.
 pub(crate) const NO_DIRECT_ACCESS: Option<RamPage> = None;
 

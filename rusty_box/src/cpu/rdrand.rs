@@ -1,6 +1,6 @@
 use super::{cpu::BxCpuC, decoder::Instruction};
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Bit-mix hash of icount for pseudo-random values (splitmix64 variant).
     fn hw_rand64(&self) -> u64 {
         let mut x = self.icount.wrapping_mul(0x517cc1b727220a95);

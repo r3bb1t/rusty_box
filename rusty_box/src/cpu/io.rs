@@ -9,7 +9,7 @@ use super::{
 };
 use crate::cpu::rusty_box::MemoryAccessType;
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ========================================================================
     // I/O Privilege Check — Bochs io.cc
     // ========================================================================

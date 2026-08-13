@@ -12,7 +12,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 const CODE: u64 = 0x0020_0000;
 
 /// Build an emulator in flat long mode with the full AVX-512 XCR0 enabled.
-fn evex_emulator() -> Box<Emulator<'static>> {
+fn evex_emulator() -> Box<Emulator> {
     let cfg = EmulatorConfig::default();
     let mut emu =
         Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");

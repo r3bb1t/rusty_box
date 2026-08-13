@@ -189,7 +189,7 @@ pub const BX_MSR_APICBASE_DEFAULT: u64 = 0xFEE00900;
 /// Default MTRRCAP value (WC + 8 variable ranges)
 pub const BX_MSR_MTRRCAP_DEFAULT: u64 = 0x0508;
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Initialize MSR infrastructure before reset.
     /// Bochs init.cc: zeros configurable MSR array.
     /// Actual MSR default values are set in reset() matching Bochs init.cc.

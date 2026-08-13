@@ -107,7 +107,7 @@ fn pmov_convert(raw: u64, src: PmovSrc, dst: PmovDst, sat: PmovSat) -> u64 {
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
 fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, T>,
+    cpu: &BxCpuC<T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -122,7 +122,7 @@ fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
 /// Read ZMM register as a ZMM-width value
 #[inline]
 fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, T>,
+    cpu: &BxCpuC<T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
@@ -130,7 +130,7 @@ fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register with dword-granularity masking, zeroing upper bits beyond VL
 fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -154,7 +154,7 @@ fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register with qword-granularity masking
 fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -175,7 +175,7 @@ fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ========================================================================
     // VPCOMPRESSD — Compress packed dwords (EVEX.66.0F38.W0 8B)
     // ========================================================================

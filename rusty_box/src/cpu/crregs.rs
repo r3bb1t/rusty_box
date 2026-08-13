@@ -731,7 +731,7 @@ type XSaveStateInUsePtr_tR = fn() -> bool;
 type XSavePtr_tR = fn(&Instruction, usize);
 type XRestorPtr_tR = fn(&Instruction, usize);
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn xsave_xrestor_init(&mut self) {
         //self
     }
@@ -742,7 +742,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
 // Matching Bochs crregs.cc
 // =========================================================================
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ----- MOV Rd, CRn (reads) -----
     // All MOV CRn require CPL=0, matching Bochs crregs.cc
 

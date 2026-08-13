@@ -12,7 +12,7 @@ use super::{
     Result,
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// LGDT - Load Global Descriptor Table Register
     /// Based on Bochs protect_ctrl.cc
     pub fn lgdt_ms(&mut self, instr: &Instruction) -> Result<()> {

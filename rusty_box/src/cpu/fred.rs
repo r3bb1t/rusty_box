@@ -17,7 +17,7 @@ use super::Result;
 /// Selector RPL mask: clears RPL bits.
 const BX_SELECTOR_RPL_MASK: u64 = 0xFFFC;
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ========================================================================
     // CSL (Current Stack Level) — low 2 bits of ia32_fred_cfg
     // ========================================================================

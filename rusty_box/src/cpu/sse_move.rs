@@ -22,7 +22,7 @@ use super::{
     xmm::BxPackedXmmRegister,
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ========================================================================
     // MOVUPS / MOVUPD — Unaligned packed single/double (0F 10, 0F 11)
     // MOVDQU          — Unaligned packed integer (F3 0F 6F, F3 0F 7F)

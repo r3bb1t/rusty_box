@@ -31,7 +31,6 @@ use super::{
     icache::BxICache,
     lazy_flags::BxLazyflagsEntry,
     svm::VmcbCache,
-    tlb::BxHostpageaddr,
     vmx::{VmcsCache, VmcsMapping, VmxCap},
     xmm::{BxMxcsr, BxZmmReg},
     Result,
@@ -332,7 +331,7 @@ impl From<CpuActivityState> for u8 {
 
 #[allow(unused)]
 //#[derive(Debug)]
-pub struct BxCpuC<'c, T: super::instrumentation::Instrumentation = ()> {
+pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     pub(super) bx_cpuid: u32,
     pub(super) cpu_topology: CpuTopology,
 
@@ -524,7 +523,14 @@ pub struct BxCpuC<'c, T: super::instrumentation::Instrumentation = ()> {
     /// global interrupt enable flag, when zero all external interrupt disabled
     pub(super) svm_gif: bool,
     pub(super) vmcbptr: BxPhyAddress,
-    pub(super) vmcbhostptr: BxHostpageaddr,
+    /// Direct backing for the VMCB, as an offset into the memory allocation,
+    /// or `None` when the accessors must go through the handler-aware
+    /// physical-access paths instead.
+    ///
+    /// Bochs svm.cc keeps a host pointer here (`vmcbhostptr`). An offset says
+    /// the same thing without depending on where the allocation currently
+    /// sits, and is what the eviction sidecar publishes.
+    pub(super) vmcb_host_offset: Option<usize>,
     pub(super) vmcb_memtype: BxMemType,
 
     pub(super) vmcb: Option<VmcbCache>,
@@ -697,8 +703,13 @@ pub struct BxCpuC<'c, T: super::instrumentation::Instrumentation = ()> {
     // Boundaries of current code page, based on EIP
     pub(super) eip_page_bias: BxAddress,
     pub(super) eip_page_window_size: u32,
-    // pub(super) eip_fetch_ptr: &'c [u8],
-    pub(super) eip_fetch_ptr: Option<&'c [u8]>,
+    /// Where the current instruction-fetch window lives in the allocation.
+    ///
+    /// Bochs cpu.cc holds a raw `eipFetchPtr` here. Recording the location
+    /// instead of the pointer means the window survives being described
+    /// without a base in hand — the eviction sidecar publishes it directly —
+    /// and it is what removes the last borrowed pointer from this struct.
+    pub(super) eip_fetch_window: Option<super::tlb::FetchWindow>,
     pub(super) p_addr_fetch_page: BxPhyAddress, // Guest physical address of current instruction page
 
     // Boundaries of current stack page, based on ESP
@@ -845,22 +856,18 @@ pub struct BxCpuC<'c, T: super::instrumentation::Instrumentation = ()> {
 /// Clears transient direct-memory wiring even when CPU execution exits through
 /// an error path. It holds only a raw pointer to the currently borrowed CPU;
 /// the guard itself never aliases CPU state and cannot outlive the call.
-struct CpuMemoryWiringGuard<'c, T: crate::cpu::instrumentation::Instrumentation> {
-    cpu: *mut BxCpuC<'c, T>,
+struct CpuMemoryWiringGuard<T: crate::cpu::instrumentation::Instrumentation> {
+    cpu: *mut BxCpuC<T>,
 }
 
-impl<'c, T: crate::cpu::instrumentation::Instrumentation>
-    CpuMemoryWiringGuard<'c, T>
-{
+impl<T: crate::cpu::instrumentation::Instrumentation> CpuMemoryWiringGuard<T> {
     #[inline]
-    fn new(cpu: &mut BxCpuC<'c, T>) -> Self {
+    fn new(cpu: &mut BxCpuC<T>) -> Self {
         Self { cpu }
     }
 }
 
-impl<'c, T: crate::cpu::instrumentation::Instrumentation> Drop
-    for CpuMemoryWiringGuard<'c, T>
-{
+impl<T: crate::cpu::instrumentation::Instrumentation> Drop for CpuMemoryWiringGuard<T> {
     fn drop(&mut self) {
         // SAFETY: `new` receives the live CPU borrowed by its enclosing
         // cpu-loop call. The guard is local to that call and drops first.
@@ -868,7 +875,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> Drop
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
     /// Persistent sleep sentinel set by enter_sleep_state (HLT/MWAIT).
     /// Matches Bochs proc_ctrl.cc `async_event = 1` — survives the
@@ -1053,7 +1060,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
 }
 
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     #[inline]
     pub(crate) fn active_tlb_pins(&self) -> &[crate::memory::CpuTlbPin] {
         if self.active_tlb_pins.is_null() {
@@ -1089,10 +1096,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// The SVM VMCB backing pin, as an allocation offset.
     #[inline]
     fn vmcb_pin_offset(&self) -> Option<usize> {
-        // A null `vmcbhostptr` means no direct backing rather than "offset
-        // zero"; publishing its difference from the base would pin a wild range.
-        if self.in_svm_guest && self.vmcbhostptr != 0 {
-            Some(self.alloc_offset_of(self.vmcbhostptr as usize))
+        if self.in_svm_guest {
+            self.vmcb_host_offset
         } else {
             None
         }
@@ -1101,8 +1106,27 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// The bounded instruction-fetch window pin, as (allocation offset, length).
     #[inline]
     fn fetch_window_pin(&self) -> Option<(usize, usize)> {
-        self.eip_fetch_ptr
-            .map(|slice| (self.alloc_offset_of(slice.as_ptr() as usize), slice.len()))
+        self.eip_fetch_window.map(|w| (w.start, w.len))
+    }
+
+    /// The instruction-fetch window as bytes.
+    ///
+    /// The returned lifetime is deliberately not tied to `&self`. The bytes
+    /// live in the memory allocation, not in the CPU, and their validity rests
+    /// on the window being set and pinned against eviction — not on any borrow
+    /// of this struct. Tying it to `&self` would forbid the fetch paths from
+    /// touching `self.i_cache` while holding the window, which is exactly what
+    /// they must do. This is the same reach the previous raw `&'c [u8]` field
+    /// had, now stated in one place instead of stored.
+    #[inline(always)]
+    pub(super) fn fetch_window_bytes<'w>(&self) -> Option<&'w [u8]> {
+        self.eip_fetch_window.map(|w| {
+            // SAFETY: the window is only ever set from a live directly-mapped
+            // span, and stays pinned against eviction for as long as it is set.
+            unsafe {
+                core::slice::from_raw_parts(self.mem_alloc_base.wrapping_add(w.start), w.len)
+            }
+        })
     }
 
     /// Copy every currently valid mapping into an external pin sidecar.
@@ -1279,14 +1303,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// memory, then immediately publish the removal to the eviction sidecar.
     #[inline]
     pub(crate) fn invalidate_itlb_pin_slot(&mut self, laddr: BxAddress, len: u32) {
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.itlb.invalidate_slot(laddr, len);
         self.sync_itlb_pin_slot(laddr, len);
         self.sync_fetch_window_pin();
     }
 
     /// Publish the current bounded instruction-fetch window to the eviction
-    /// sidecar. `eip_fetch_ptr` (Bochs cpu.cc `eipFetchPtr`) may reference a
+    /// sidecar. `eip_fetch_window` (Bochs cpu.cc `eipFetchPtr`) may reference a
     /// sub-page resident block that no ITLB slot pins; without this interval
     /// a data access could evict the backing block and leave the retained
     /// fetch pointer dangling.
@@ -1511,7 +1535,7 @@ pub struct BxRegsMsr {
     pub(crate) ia32_spec_ctrl: u32, // SCA
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /* CPL == 3 */
     #[inline]
     pub(super) fn user_pl(&self) -> bool {
@@ -1662,9 +1686,9 @@ impl Uintr {
 }
 
 /// Type alias for instruction handler function pointer
-pub(super) type InstructionHandler<T> = fn(&mut BxCpuC<'_, T>, &Instruction) -> Result<()>;
+pub(super) type InstructionHandler<T> = fn(&mut BxCpuC<T>, &Instruction) -> Result<()>;
 
-impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
+impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Bochs `signal_event()`: set event bit and force async check.
     /// Called by PIC (via raw pointer) when master int_pin asserts.
     #[inline]
@@ -3117,7 +3141,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
                 let cs_base = self.sregs[BxSegregs::Cs as usize].cache.u.segment_base();
                 let laddr = cs_base + rip;
                 let cs_value = self.cs_selector_value();
-                let instr_bytes: [u8; 16] = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
+                let instr_bytes: [u8; 16] = if let Some(fetch_ptr) = &self.fetch_window_bytes() {
                     let page_base = cs_base + self.eip_page_bias;
                     let offset = (rip.wrapping_sub(page_base)) as usize;
                     let ilen = instr.ilen() as usize;
@@ -3269,7 +3293,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
                 let mem_reborrowed: &'c mut BxMemC = unsafe { &mut *mem_ptr };
                 self.prefetch(mem_reborrowed, cpus)?;
 
-                if self.eip_page_window_size == 0 || self.eip_fetch_ptr.is_none() {
+                if self.eip_page_window_size == 0 || self.eip_fetch_window.is_none() {
                     retry_count += 1;
                     if retry_count > 10 {
                         tracing::error!("prefetch retry limit exceeded, RIP={:#x}", self.rip());
@@ -3287,7 +3311,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
                 if eip_biased_64 >= u64::from(self.eip_page_window_size) {
                     tracing::trace!("eip_biased ({}) >= eip_page_window_size ({}) after prefetch, RIP={:#x}, retrying",
                         eip_biased_64, self.eip_page_window_size, self.rip());
-                    self.eip_fetch_ptr = None;
+                    self.eip_fetch_window = None;
                     self.eip_page_window_size = 0;
                     retry_count += 1;
                     if retry_count > 10 {
@@ -3736,17 +3760,27 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
 
         let mut direct_page_mapping = false;
         if let Some(fetch_ptr) = fetch_ptr_option {
-            let fetch_ptr_as_ptr =
-                // SAFETY: an ITLB entry is installed only for a complete
-                // contiguous host page (see below).
-                unsafe {
-                    super::access::host_slice_u8(
-                        super::tlb::host_page_ptr(self.mem_alloc_base, fetch_ptr),
-                        4096,
-                    )
-                };
-            self.eip_fetch_ptr = Some(fetch_ptr_as_ptr);
-            direct_page_mapping = true;
+            // Two levels: the outer says the ITLB hit, the inner whether that
+            // entry carries a direct mapping. The fill below only ever installs
+            // an entry together with its page, so a hit always carries one —
+            // but the previous code unwrapped only the outer level and would
+            // have built a 4096-byte slice from a null pointer had that ever
+            // stopped holding. Treating the absent page as "no direct mapping"
+            // is what it means.
+            //
+            // The entry already names the page by allocation offset, so the
+            // window is that offset verbatim and no pointer is formed at all.
+            // An ITLB entry covers a complete contiguous page, hence 4096.
+            match fetch_ptr {
+                Some(page) => {
+                    self.eip_fetch_window = Some(super::tlb::FetchWindow {
+                        start: page.alloc_offset(),
+                        len: 4096,
+                    });
+                    direct_page_mapping = true;
+                }
+                None => self.eip_fetch_window = None,
+            }
         } else {
             let mem_len = mem.get_memory_len();
             let page_base = self.p_addr_fetch_page;
@@ -3768,11 +3802,9 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             match page_mapping {
                 Ok(Some(ref range)) if range.len() >= 4096 => {
                     // An ITLB host page is necessarily a full contiguous page.
-                    self.eip_fetch_ptr = Some(unsafe {
-                        super::access::host_slice_u8(
-                            self.mem_alloc_base.wrapping_add(range.start) as *const u8,
-                            4096,
-                        )
+                    self.eip_fetch_window = Some(super::tlb::FetchWindow {
+                        start: range.start,
+                        len: 4096,
                     });
                     direct_page_offset = Some(range.start);
                     direct_page_mapping = true;
@@ -3804,28 +3836,25 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
                                 self.eip_page_window_size = fetch_len
                                     .try_into()
                                     .expect("resident block length exceeds u32");
-                                self.eip_fetch_ptr = Some(unsafe {
-                                    super::access::host_slice_u8(
-                                        self.mem_alloc_base.wrapping_add(range.start)
-                                            as *const u8,
-                                        fetch_len,
-                                    )
+                                self.eip_fetch_window = Some(super::tlb::FetchWindow {
+                                    start: range.start,
+                                    len: fetch_len,
                                 });
                             } else {
-                                self.eip_fetch_ptr = None;
+                                self.eip_fetch_window = None;
                             }
                         }
                         Ok(None) | Err(_) => {
-                            self.eip_fetch_ptr = None;
+                            self.eip_fetch_window = None;
                         }
                     }
                 }
                 Ok(None) => {
-                    self.eip_fetch_ptr = None;
+                    self.eip_fetch_window = None;
                 }
                 Err(error) => {
                     tracing::trace!("Failed to get host mem addr for fetch: {error:?}");
-                    self.eip_fetch_ptr = None;
+                    self.eip_fetch_window = None;
                 }
             }
             // Only complete page mappings can be placed in the ITLB.  In
@@ -3858,10 +3887,10 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
             let eip_biased =
                 (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
             let p_addr = self.p_addr_fetch_page.wrapping_add(u64::from(eip_biased));
-            if self.eip_fetch_ptr.is_none() && p_addr >= mem_len.try_into()? {
+            if self.eip_fetch_window.is_none() && p_addr >= mem_len.try_into()? {
                 // Address is beyond available memory - set to no direct access
                 tracing::trace!("prefetch: address {p_addr:#x} beyond memory limit {mem_len:#x} and no ROM mapping");
-                self.eip_fetch_ptr = None;
+                self.eip_fetch_window = None;
             }
         }
 
@@ -4376,26 +4405,26 @@ mod tests {
         cpu.install_memory_bases(&mut mem);
         cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
 
-        // The window has to lie inside the allocation. It is published as an
-        // offset into it, so pointing this at an unrelated static — as this
-        // test once did — would name a meaningless offset that happens to
-        // compare equal only because nothing else is pinned.
-        // SAFETY: WINDOW + WINDOW_LEN is well inside the 1 MiB allocation.
-        let code: &[u8] =
-            unsafe { core::slice::from_raw_parts(cpu.mem_alloc_base.add(WINDOW), WINDOW_LEN) };
+        // The window is stated as a location in the allocation, which is also
+        // how it is published. This test once pointed at an unrelated static
+        // and could only ever have named a meaningless offset.
+        let code = crate::cpu::tlb::FetchWindow {
+            start: WINDOW,
+            len: WINDOW_LEN,
+        };
 
-        cpu.eip_fetch_ptr = Some(code);
+        cpu.eip_fetch_window = Some(code);
         cpu.sync_fetch_window_pin();
         assert!(pin.is_alloc_range_pinned(WINDOW, WINDOW + WINDOW_LEN));
         // Only the exact window is pinned, not neighbouring ranges.
         assert!(!pin.is_alloc_range_pinned(WINDOW + WINDOW_LEN, WINDOW + 2 * WINDOW_LEN));
 
         cpu.invalidate_itlb_pin_slot(0, 0);
-        assert!(cpu.eip_fetch_ptr.is_none());
+        assert!(cpu.eip_fetch_window.is_none());
         assert!(!pin.is_alloc_range_pinned(WINDOW, WINDOW + WINDOW_LEN));
 
         // The full-rescan recovery path republishes a live window.
-        cpu.eip_fetch_ptr = Some(code);
+        cpu.eip_fetch_window = Some(code);
         cpu.refresh_tlb_pin(&pin);
         assert!(pin.is_alloc_range_pinned(WINDOW, WINDOW + WINDOW_LEN));
 
@@ -4969,14 +4998,11 @@ mod tests {
             false,
         );
         let pin = CpuTlbPin::new(&cpu);
-        let vmcb_host = mem.identity_guest_base().0 as usize + 0x1_0000;
         cpu.in_svm_guest = true;
-        cpu.vmcbhostptr = vmcb_host as _;
-        // The VMCB pointer is published as an offset, so the CPU needs the base
-        // it is measured against. Without this the test would still pass, but
-        // only because a null base leaves the raw address unchanged.
         cpu.install_memory_bases(&mut mem);
-        let vmcb_pinned = vmcb_host - cpu.mem_alloc_base as usize;
+        let vmcb_pinned = (mem.identity_guest_base().0 as usize + 0x1_0000)
+            - cpu.mem_alloc_base as usize;
+        cpu.vmcb_host_offset = Some(vmcb_pinned);
 
         cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
         cpu.sync_vmcb_pin();
@@ -5023,7 +5049,8 @@ mod tests {
 
             if svm {
                 cpu.in_svm_guest = true;
-                cpu.vmcbhostptr = (host_base + 0x2_0000) as _;
+                cpu.vmcb_host_offset =
+                    Some((host_base + 0x2_0000) - cpu.mem_alloc_base as usize);
             }
 
             let pin = CpuTlbPin::new(&cpu);
@@ -5189,16 +5216,17 @@ mod tests {
         // and has no meaningful offset into it at all.)
         let window_offset = cpu.mem_alloc_len - 8;
         assert!(window_offset >= offset + MIB, "window must clear the block");
-        // SAFETY: the last eight bytes of the live allocation.
-        cpu.eip_fetch_ptr =
-            Some(unsafe { core::slice::from_raw_parts(cpu.mem_alloc_base.add(window_offset), 8) });
+        cpu.eip_fetch_window = Some(crate::cpu::tlb::FetchWindow {
+            start: window_offset,
+            len: 8,
+        });
         cpu.sync_itlb_pin_slot(TARGET, 0);
         cpu.sync_fetch_window_pin();
         assert!(pin.is_alloc_range_pinned(offset, offset + MIB));
 
         cpu.invalidate_itlb_pin_slot(TARGET, 0);
 
-        assert!(cpu.eip_fetch_ptr.is_none());
+        assert!(cpu.eip_fetch_window.is_none());
         assert!(!pin.is_alloc_range_pinned(offset, offset + MIB));
         mem.write_ram(pins, TARGET, &[0xa5]).unwrap();
         let mut replaced = [0];
@@ -5222,7 +5250,7 @@ mod tests {
         );
 
         cpu.in_svm_guest = true;
-        cpu.vmcbhostptr = 0x6000;
+        cpu.vmcb_host_offset = Some(0x6000);
         cpu.sync_vmcb_pin();
         assert!(pin.is_alloc_range_pinned(0x6000, 0x7000));
 

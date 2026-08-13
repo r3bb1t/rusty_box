@@ -73,7 +73,7 @@ pub(super) enum VexGatherForm {
     QIndexQword,
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ========================================================================
     // VSIB resolver helpers — mirror Bochs `BxResolveGatherD` /
     // `BxResolveGatherQ` (cpu/avx/gather.cc).

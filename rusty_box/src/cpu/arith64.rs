@@ -17,7 +17,7 @@
 use super::BxCpuC;
 use crate::cpu::decoder::{BxSegregs, Instruction};
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =========================================================================
     // Flag update helpers for 64-bit arithmetic
     // =========================================================================

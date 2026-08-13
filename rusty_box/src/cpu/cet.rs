@@ -58,7 +58,7 @@ pub(super) fn is_invalid_cet_control(val: u64) -> bool {
     false
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =========================================================================
     // CET query helpers — Bochs cet.cc
     // =========================================================================
@@ -874,7 +874,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
     /// Build a fresh CPU and switch it into protected mode with CET enabled in CR4.
     /// Caller fills in the IA32_S_CET / IA32_U_CET MSR for the specific test.
-    fn make_cet_cpu() -> alloc::boxed::Box<BxCpuC<'static>> {
+    fn make_cet_cpu() -> alloc::boxed::Box<BxCpuC> {
         let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.cpu_mode = CpuMode::Ia32Protected;
         cpu.cr4 = BxCr4::CET;

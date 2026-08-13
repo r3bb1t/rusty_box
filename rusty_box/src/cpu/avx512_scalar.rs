@@ -46,7 +46,7 @@ use super::{
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
 fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, T>,
+    cpu: &BxCpuC<T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -61,7 +61,7 @@ fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
 /// Read ZMM register as a ZMM-width value.
 #[inline]
 fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, T>,
+    cpu: &BxCpuC<T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
@@ -73,7 +73,7 @@ fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
 /// Elements [1..3] come from src1. Elements [4..15] are zeroed (EVEX clears
 /// upper bits).
 fn write_scalar_ss<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
     result_elem0: Float32,
@@ -105,7 +105,7 @@ fn write_scalar_ss<T: crate::cpu::instrumentation::Instrumentation>(
 /// Element [0] is the result, subject to opmask bit 0 merge/zero masking.
 /// Element [1] comes from src1. Elements [2..7] are zeroed.
 fn write_scalar_sd<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
     result_elem0: Float64,
@@ -130,7 +130,7 @@ fn write_scalar_sd<T: crate::cpu::instrumentation::Instrumentation>(
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ========================================================================
     // Helper: read scalar f32 source operand (register or memory)
     // ========================================================================

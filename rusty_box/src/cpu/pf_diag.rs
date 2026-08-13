@@ -26,7 +26,7 @@ use std::io::Write as _;
 /// Matches icache.rs `BX_ICACHE_INVALID_PHY_ADDRESS` (`BxPhyAddress::MAX`).
 const INVALID_PHY: u64 = u64::MAX;
 
-impl<T: Instrumentation> BxCpuC<'_, T> {
+impl<T: Instrumentation> BxCpuC<T> {
     /// Capture a full diagnostic report for an imminent null-page write #PF.
     ///
     /// Called from `page_fault` (paging.rs) before the exception is raised;

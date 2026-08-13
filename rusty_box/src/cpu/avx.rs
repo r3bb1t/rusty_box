@@ -185,7 +185,7 @@ impl AMX {
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ========================================================================
     // VZEROUPPER / VZEROALL (VEX.0F 77)
     // ========================================================================

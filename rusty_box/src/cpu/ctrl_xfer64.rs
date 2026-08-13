@@ -8,7 +8,7 @@ use super::{
     error::{CpuError, Result},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =========================================================================
     // Helper functions for branching
     // =========================================================================
@@ -113,7 +113,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Matching C++ ctrl_xfer64.cc CALL64_Ep
     pub fn call64_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 173)
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // Resolve effective address
@@ -195,7 +195,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Matching C++ ctrl_xfer64.cc JMP64_Ep
     pub fn jmp64_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 432)
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // Resolve effective address
@@ -332,7 +332,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Note: return_protected is RSP safe
     pub fn retfar64_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 80)
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // BX_ASSERT(protected_mode()) — in 64-bit mode we are always in protected mode
@@ -367,7 +367,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
             return self.svm_vmexit(super::svm::SvmVmexit::Iret as i32, 0, 0);
         }
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // VMX: nmi_unblocking_iret = true (matching C++ line 471)

@@ -23,7 +23,7 @@ pub(super) const BX_TASK_FROM_JUMP: u32 = 2;
 pub(super) const BX_TASK_FROM_INT: u32 = 3;
 
 impl<T: crate::cpu::instrumentation::Instrumentation>
-    super::cpu::BxCpuC<'_, T>
+    super::cpu::BxCpuC<T>
 {
     /// Perform task switch
     /// Based on BX_CPU_C::task_switch in tasking.cc
@@ -41,7 +41,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation>
         tracing::trace!("task_switch(): ENTER, source={}", source);
 
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // Discard any traps and inhibits for new context; traps will

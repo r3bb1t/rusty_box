@@ -405,7 +405,7 @@ fn run_go_runtime_cases() {
             .expect("write park jump");
     }
     fn run(
-        emu: &mut Emulator<'static>,
+        emu: &mut Emulator,
         programs: &[(&str, &[u8], u64)],
         idx: usize,
     ) {
@@ -527,7 +527,7 @@ fn run_split_load_cases() {
             .expect("write park jump");
     }
     fn run(
-        emu: &mut Emulator<'static>,
+        emu: &mut Emulator,
         programs: &[(&str, &[u8], u64)],
         idx: usize,
     ) {
@@ -621,7 +621,7 @@ fn run_split_load_cases() {
 /// still zero — a configuration in which every VEX encoding would #UD, and in
 /// which `maxvl` leaves the upper half of the register file architecturally
 /// invisible, so a VEX write does not clear it.
-fn enable_guest_avx_state(emu: &mut Emulator<'static>) {
+fn enable_guest_avx_state(emu: &mut Emulator) {
     const XSETBV_SETUP_BASE: u64 = CASE_BASE + 0x800;
     emu.reg_write(X86Reg::Rax, 0x7);
     emu.reg_write(X86Reg::Rcx, 0);
@@ -895,7 +895,7 @@ fn ymm_from_u64(v: [u64; 4]) -> [u8; 32] {
 
 /// Boot an emulator with guest AVX state enabled, run `code` at CASE_BASE
 /// after `setup`, and hand the parked emulator back for assertions.
-fn with_avx_emu(f: impl FnOnce(&mut Emulator<'static>) + Send + 'static) {
+fn with_avx_emu(f: impl FnOnce(&mut Emulator) + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
@@ -921,7 +921,7 @@ fn with_avx_emu(f: impl FnOnce(&mut Emulator<'static>) + Send + 'static) {
         .expect("join test thread");
 }
 
-fn run_one(emu: &mut Emulator<'static>, name: &str, code: &[u8]) {
+fn run_one(emu: &mut Emulator, name: &str, code: &[u8]) {
     let mut prog = code.to_vec();
     prog.extend_from_slice(&[0xEB, 0xFE]); // park
     emu.mem_write(CASE_BASE, &prog).expect("write code");
@@ -1806,7 +1806,7 @@ fn run_aeshash_cases() {
     let seed0 = 0x243F_6A88_85A3_08D3_1319_8A2E_0370_7344_u128; // arbitrary
     let seed1 = 0xA409_3822_299F_31D0_082E_FA98_EC4E_6C89_u128;
 
-    let hash_at = |emu: &mut Emulator<'static>, addr: u64| -> [u8; 16] {
+    let hash_at = |emu: &mut Emulator, addr: u64| -> [u8; 16] {
         emu.mem_write(addr, key).expect("write key");
         emu.reg_write(X86Reg::Rax, addr);
         emu.reg_write(X86Reg::Rcx, key.len() as u64);
@@ -1928,7 +1928,7 @@ fn run_packed_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(emu: &mut Emulator<'static>, programs: &[(&str, &[u8])], idx: usize) {
+    fn run(emu: &mut Emulator, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -2221,7 +2221,7 @@ fn run_hadd_blend_dpp_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(emu: &mut Emulator<'static>, programs: &[(&str, &[u8])], idx: usize) {
+    fn run(emu: &mut Emulator, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -2439,7 +2439,7 @@ fn run_vex_integer_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(emu: &mut Emulator<'static>, programs: &[(&str, &[u8])], idx: usize) {
+    fn run(emu: &mut Emulator, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -2729,7 +2729,7 @@ fn run_cvt_boundary_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(emu: &mut Emulator<'static>, programs: &[(&str, &[u8])], idx: usize) {
+    fn run(emu: &mut Emulator, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -2865,7 +2865,7 @@ fn run_remap_gap_cases() {
             .expect("write park");
     }
     fn run(
-        emu: &mut Emulator<'static>,
+        emu: &mut Emulator,
         programs: &[(&str, &[u8], u64)],
         idx: usize,
     ) {
@@ -3533,7 +3533,7 @@ fn evex_unsigned_int_to_float_conversions() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
-            fn mk(emu: &mut Emulator<'static>) {
+            fn mk(emu: &mut Emulator) {
                 emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
                 emu.reg_write(X86Reg::Rax, 0xE7);
                 emu.reg_write(X86Reg::Rcx, 0);

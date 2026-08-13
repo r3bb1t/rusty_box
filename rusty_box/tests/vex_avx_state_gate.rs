@@ -36,7 +36,7 @@ const UD_VECTOR: usize = 6;
 /// CR4.OSFXSR and CR4.OSXSAVE are set, but no XSETBV runs, so XCR0 keeps its
 /// reset value of 1 (x87 only). `prepare_sse` is satisfied here; `prepare_avx`
 /// — and Bochs's `BxNoAVX` — are not.
-fn avx_state_disabled_emulator() -> Box<Emulator<'static>> {
+fn avx_state_disabled_emulator() -> Box<Emulator> {
     let cfg = EmulatorConfig::default();
     let mut emu =
         Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");
@@ -48,7 +48,7 @@ fn avx_state_disabled_emulator() -> Box<Emulator<'static>> {
 }
 
 /// Run one encoding and return how many #UDs it raised.
-fn ud_raised_by(emu: &mut Emulator<'static>, code: &[u8]) -> u64 {
+fn ud_raised_by(emu: &mut Emulator, code: &[u8]) -> u64 {
     let before = emu.cpu().get_exception_diag()[UD_VECTOR];
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]); // jmp $

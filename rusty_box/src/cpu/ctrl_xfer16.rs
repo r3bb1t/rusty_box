@@ -8,7 +8,7 @@ use super::{
     error::{CpuError, Result},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =========================================================================
     // Helper functions for branching
     // =========================================================================
@@ -619,7 +619,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         disp16: u16,
     ) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         if self.protected_mode() {
@@ -653,7 +653,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Called by CALL16_Ap and CALL16_Ep
     fn call_far16(&mut self, _instr: &Instruction, cs_raw: u16, disp16: u16) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         if self.protected_mode() {
@@ -758,7 +758,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Matching C++ ctrl_xfer16.cc (similar to RETfar16_Iw but without imm16)
     pub fn retfar16(&mut self, _instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         if self.protected_mode() {
@@ -792,7 +792,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Matching C++ ctrl_xfer16.cc
     pub fn retfar16_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         let imm16 = instr.iw();

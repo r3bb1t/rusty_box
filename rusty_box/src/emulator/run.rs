@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use super::Emulator;
 
-impl<'a, T: Instrumentation> Emulator<'a, T> {
+impl<'a, T: Instrumentation> Emulator<T> {
     #[cfg(feature = "alloc")]
     /// Update GUI with VGA text mode changes
     ///

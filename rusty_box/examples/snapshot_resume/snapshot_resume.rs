@@ -87,7 +87,7 @@ fn run(mode: &str) {
     }
 }
 
-fn build_machine(config: &HarnessConfig) -> Box<Emulator<'static>> {
+fn build_machine(config: &HarnessConfig) -> Box<Emulator> {
     let workspace_root = workspace_root();
     let bios = std::fs::read(
         workspace_root.join("cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
@@ -136,7 +136,7 @@ fn workspace_root() -> std::path::PathBuf {
     }
 }
 
-fn run_instructions(emu: &mut Emulator<'static>, budget: u64) -> u64 {
+fn run_instructions(emu: &mut Emulator, budget: u64) -> u64 {
     let mut executed_total = 0u64;
     while executed_total < budget {
         let chunk = (budget - executed_total).min(50_000_000);

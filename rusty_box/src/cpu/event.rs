@@ -7,7 +7,7 @@ use super::{
     BxCpuC,
 };
 
-impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
+impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Handle async events - matches Bochs event.cc handleAsyncEvent()
     /// Returns true if should return from cpu_loop
     pub(super) fn handle_async_event(
@@ -792,7 +792,7 @@ mod tests {
             .cpu_topology()
     }
 
-    fn make_cpu(cpu_id: u32) -> alloc::boxed::Box<BxCpuC<'static>> {
+    fn make_cpu(cpu_id: u32) -> alloc::boxed::Box<BxCpuC> {
         let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.configure_smp(cpu_id, smp_topology());
         cpu

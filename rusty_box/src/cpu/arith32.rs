@@ -875,7 +875,7 @@ pub fn CMPXCHG_EdGd_R<T: crate::cpu::instrumentation::Instrumentation>(
 /// CMPXCHG r/m32, r32 — memory form
 /// Bochs arith32.cc (CMPXCHG_EdGdM)
 pub fn CMPXCHG_EdGd_M<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -900,7 +900,7 @@ pub fn CMPXCHG_EdGd_M<T: crate::cpu::instrumentation::Instrumentation>(
 /// Compares EDX:EAX with m64. If equal, sets ZF and stores ECX:EBX into m64.
 /// Otherwise, clears ZF and loads m64 into EDX:EAX.
 pub fn CMPXCHG8B<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -963,7 +963,7 @@ pub fn XADD_EdGd_R<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// CMPXCHG r/m32, r32 — unified dispatch
 pub fn CMPXCHG_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -980,7 +980,7 @@ pub fn CMPXCHG_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// XADD r/m32, r32 — unified dispatch
 pub fn XADD_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -994,7 +994,7 @@ pub fn XADD_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
 /// XADD r/m32, r32 — memory form
 /// Bochs arith32.cc
 pub fn XADD_EdGd_M<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);

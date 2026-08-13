@@ -5,7 +5,7 @@ use super::{
     decoder::{BxSegregs, Instruction},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =========================================================================
     // SETcc Eb — Set byte on condition (0F 90..9F)
     // =========================================================================

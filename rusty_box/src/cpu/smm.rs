@@ -132,7 +132,7 @@ pub(super) enum SMMRAM_Fields {
 
 use SMMRAM_Fields::*;
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn init_smram() -> Result<[u32; SMRAM_FIELD_LAST as _]> {
         let mut smram_map = [0; SMRAM_FIELD_LAST as _];
         smram_map[SMRAM_FIELD_SMBASE_OFFSET as usize] = smram_translate(0x7f00);
@@ -940,7 +940,7 @@ mod tests {
     /// BSP with 4 MiB of real backing memory attached — enough to cover the
     /// default SMBASE 0x30000 save area at 0x3fe00..0x40000.
     fn cpu_with_memory() -> (
-        alloc::boxed::Box<BxCpuC<'static>>,
+        alloc::boxed::Box<BxCpuC>,
         alloc::boxed::Box<BxMemC>,
     ) {
         let mut mem = alloc::boxed::Box::new(BxMemC::new(

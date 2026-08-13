@@ -173,7 +173,7 @@ const PRIV_CHECK: [u8; 32] = [
     0, 0, 0, 0, 1, 0, 1, 1, // user access
 ];
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
 
     /// Read a physical dword for a page-table walk without going through the
@@ -463,7 +463,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Translate a linear address to a physical address
     /// Based on BX_CPU_C::translate_linear in paging.cc
     /// Returns Ok(paddr) on success, or Err with page fault info that caller should handle
@@ -587,7 +587,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// PAE paging translation (slow path, used by translate_linear for prefetch).
     /// Based on Bochs translate_linear_PAE in paging.cc.
     fn translate_linear_pae_slow(
@@ -1066,7 +1066,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Page table walk for system writes (CPL=0).
     /// Updates Accessed/Dirty bits on PDE/PTE as required by x86 paging.
     /// Used by system_write_byte/word/dword for TSS, descriptor table writes.

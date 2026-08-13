@@ -134,7 +134,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     /// offsets, so a test that sets only `mem_host_base` publishes a wild
     /// offset, and the pin silently stops covering the block it names — which
     /// is exactly what these eviction tests exist to prove it does cover.
-    fn resident_block(emu: &mut Emulator<'_>) -> (usize, *mut u8) {
+    fn resident_block(emu: &mut Emulator) -> (usize, *mut u8) {
         let pins_ptr = emu.tlb_pins().as_ptr();
         let pins_len = emu.tlb_pins().len();
         // Stable CPU pin storage outlives the exclusive memory borrow.
@@ -158,7 +158,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const ICR_LEVEL_ASSERT: u32 = 1 << 14;
     const ICR_TRIGGER_LEVEL: u32 = 1 << 15;
 
-    fn send_bsp_icr_init(emu: &mut Emulator<'_, ()>) {
+    fn send_bsp_icr_init(emu: &mut Emulator<()>) {
         let bsp = emu.cpu_mut_at(BSP_INDEX);
         bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24, 0);
         bsp.lapic.write_aligned(ICR_LOW, ((crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8)
@@ -168,7 +168,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emu.refresh_cpu_masks(BSP_INDEX);
     }
 
-    fn send_bsp_icr_sipi(emu: &mut Emulator<'_, ()>, vector: u8) {
+    fn send_bsp_icr_sipi(emu: &mut Emulator<()>, vector: u8) {
         let bsp = emu.cpu_mut_at(BSP_INDEX);
         bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24, 0);
         bsp.lapic.write_aligned(ICR_LOW, vector as u32
@@ -2761,7 +2761,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         // of megabytes), so the production associated fn is exercised at the
         // mask level across every word boundary the full machine would hit;
         // the 2-CPU transition matrix covers the live plumbing.
-        type TestEmu<'a> = Emulator<'a>;
+        type TestEmu<'a> = Emulator;
         const MAX: usize = 254;
         assert!(!TestEmu::ap_fast_forward_allowed(runnable, MAX), "bit 32+253");
         assert!(TestEmu::ap_fast_forward_allowed(CpuMask::default(), MAX));
@@ -3461,7 +3461,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // an APIC-timer calibration loop.
                 emu.service_scheduler_boundary(0).unwrap();
 
-                let read_tmcct = |emu: &mut Emulator<'_>| {
+                let read_tmcct = |emu: &mut Emulator| {
                     let ap = emu.cpu_mut_at(AP_INDEX);
                     let icount = ap.icount;
                     ap.lapic.read_aligned(0x390, icount)
@@ -4404,7 +4404,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
 
-    fn phase6_flat32() -> Box<Emulator<'static>> {
+    fn phase6_flat32() -> Box<Emulator> {
         Emulator::new_with_mode(
             EmulatorConfig::default(),
             CpuSetupMode::FlatProtected32,
@@ -4413,7 +4413,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     fn phase6_prepare_fw_cfg<T: crate::cpu::instrumentation::Instrumentation>(
-        emu: &mut Emulator<'_, T>,
+        emu: &mut Emulator<T>,
         stream: &[u8],
     ) {
         emu.devices.init(&mut emu.memory).unwrap();
@@ -4431,7 +4431,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     fn phase6_next_fw_cfg_byte<T: crate::cpu::instrumentation::Instrumentation>(
-        emu: &mut Emulator<'_, T>,
+        emu: &mut Emulator<T>,
     ) -> u8 {
         emu.device_manager
             .fw_cfg
@@ -4439,7 +4439,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     fn phase6_run<T: crate::cpu::instrumentation::Instrumentation>(
-        emu: &mut Emulator<'_, T>,
+        emu: &mut Emulator<T>,
     ) {
         unsafe { emu.run_cpu_batch(1) }.unwrap();
     }

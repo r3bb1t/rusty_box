@@ -3,7 +3,7 @@
 
 use crate::cpu::{BxCpuC};
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn handle_cpu_context_change(&mut self) {
         self.tlb_flush();
 
@@ -4420,7 +4420,7 @@ mod avx_mode_tests {
     const XCR0_YMM: u32 = 1 << 2;
     const XCR0_AVX512: u32 = (1 << 5) | (1 << 6) | (1 << 7);
 
-    fn cpu_with(xcr0: u32) -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC<'static>> {
+    fn cpu_with(xcr0: u32) -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC> {
         let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         c.cr0.insert(BxCr0::PE);
         // protected_mode() reads cpu_mode, which CR0.PE alone does not update.

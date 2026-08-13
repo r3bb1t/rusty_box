@@ -27,7 +27,7 @@ pub(in crate::cpu) fn mxcsr_to_softfloat_status_word(mxcsr: BxMxcsr) -> SoftFloa
     }
 }
 
-impl<T: Instrumentation> BxCpuC<'_, T> {
+impl<T: Instrumentation> BxCpuC<T> {
     /// Update MXCSR status bits from a SoftFloat exception-flags word and,
     /// if any unmasked exception occurred, raise #XM (or #UD when
     /// CR4.OSXMMEXCPT is clear). Bochs sse_pfp.cc `check_exceptionsSSE`.

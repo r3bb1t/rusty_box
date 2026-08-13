@@ -24,7 +24,7 @@ impl BxCpuBuilder {
     }
 
     #[cfg(feature = "alloc")]
-    pub fn build(self) -> Result<alloc::boxed::Box<BxCpuC<'static, ()>>> {
+    pub fn build(self) -> Result<alloc::boxed::Box<BxCpuC<()>>> {
         self.build_with_tracer(())
     }
 
@@ -32,11 +32,11 @@ impl BxCpuBuilder {
     pub fn build_with_tracer<T: super::instrumentation::Instrumentation>(
         self,
         tracer: T,
-    ) -> Result<alloc::boxed::Box<BxCpuC<'static, T>>> {
+    ) -> Result<alloc::boxed::Box<BxCpuC<T>>> {
         // BxCpuC is ~50MB (BxICache alone is ~19MB of fixed arrays).
         // Cannot construct on the stack. Allocate zeroed heap memory and
         // initialize field-by-field via raw pointer.
-        let layout = alloc::alloc::Layout::new::<BxCpuC<'static, T>>();
+        let layout = alloc::alloc::Layout::new::<BxCpuC<T>>();
         // Host allocator internals — no Bochs counterpart, and the address
         // below is a HOST pointer, so neither belongs in a guest boot log.
         tracing::debug!(
@@ -44,7 +44,7 @@ impl BxCpuBuilder {
             layout.size(),
             layout.align()
         );
-        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut BxCpuC<'static, T>;
+        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut BxCpuC<T>;
         if ptr.is_null() {
             return Err(
                 crate::memory::MemoryError::UnableToAllocateGuestMemory(layout.size()).into(),
@@ -69,9 +69,9 @@ impl BxCpuBuilder {
     /// - The allocation must outlive the returned reference.
     pub unsafe fn init_cpu_at<'a, T: super::instrumentation::Instrumentation>(
         self,
-        ptr: *mut BxCpuC<'a, T>,
+        ptr: *mut BxCpuC<T>,
         tracer: T,
-    ) -> Result<&'a mut BxCpuC<'a, T>> {
+    ) -> Result<&'a mut BxCpuC<T>> {
         Self::init_cpu_fields(ptr, self.model, tracer);
         let cpu = &mut *ptr;
         cpu.initialize(Default::default())?;
@@ -83,7 +83,7 @@ impl BxCpuBuilder {
     /// # Safety
     /// `ptr` must be valid, zeroed, aligned for BxCpuC.
     unsafe fn init_cpu_fields<T: super::instrumentation::Instrumentation>(
-        ptr: *mut BxCpuC<'_, T>,
+        ptr: *mut BxCpuC<T>,
         cpuid: CpuModel,
         tracer: T,
     ) {

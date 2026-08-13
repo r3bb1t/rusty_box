@@ -8,7 +8,7 @@ use super::{
     error::Result,
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =========================================================================
     // 32-bit Multiplication and Division
     // =========================================================================

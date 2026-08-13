@@ -13,7 +13,7 @@ use super::decoder::BxSegregs;
 use super::instrumentation::X86Reg;
 use super::{BxCpuC};
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ── RFLAGS / EFLAGS ────────────────────────────────────────────────
 
     #[inline]
@@ -941,7 +941,7 @@ fn trunc_u32(v: u64) -> u32 {
 use crate::cpu::instrumentation::CpuAccess;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
-    for BxCpuC<'_, T>
+    for BxCpuC<T>
 {
     fn reg_read(&self, reg: X86Reg) -> u64 {
         self.api_reg_read(reg)
@@ -1034,7 +1034,7 @@ where
 #[cfg(feature = "instrumentation")]
 use crate::cpu::instrumentation::{HookCtx, InstrAction};
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Fire the `pre_syscall` trait hook. Called from `syscall()` /
     /// `sysenter()` BEFORE the architectural CS/RIP transition. The hook
     /// returns an `InstrAction` which the caller inspects to decide whether

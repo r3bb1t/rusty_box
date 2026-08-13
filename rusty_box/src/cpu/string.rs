@@ -25,7 +25,7 @@ use crate::{
     memory::memory_rusty_box::bx_guest_ram_span,
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =========================================================================
     // Helper: Get direction flag (DF)
     // =========================================================================

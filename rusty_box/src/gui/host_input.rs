@@ -115,7 +115,7 @@ impl HostInputSink for super::shared_display::SharedDisplay {
 }
 
 impl<'a, T: crate::cpu::instrumentation::Instrumentation> HostInputSink
-    for crate::emulator::Emulator<'a, T>
+    for crate::emulator::Emulator<T>
 {
     fn push(&mut self, event: HostInputEvent) {
         match event {

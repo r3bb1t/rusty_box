@@ -37,7 +37,7 @@ fn topology_level_ecx(subleaf: u32, level_type: u32) -> u32 {
     subleaf | (level_type << CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT)
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =========================================================================
     // Unified interrupt dispatch — matches Bochs interrupt() in exception.cc
     // =========================================================================
@@ -83,7 +83,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         self.inhibit_mask = 0;
 
         // Invalidate prefetch queue (matches Bochs line 777)
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // RSP_SPECULATIVE — mark speculative RSP so exceptions during delivery
@@ -1038,7 +1038,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         self.handle_interrupt_mask_change();
 
         // Invalidate prefetch
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // Only log non-exception interrupts to reduce spam (exceptions are logged in exception.rs)

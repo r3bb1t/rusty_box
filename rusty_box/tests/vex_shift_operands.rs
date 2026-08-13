@@ -23,7 +23,7 @@ use rusty_box::emulator::{Emulator, EmulatorConfig};
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 const CODE: u64 = 0x0020_0000;
 
-fn avx_emulator() -> Box<Emulator<'static>> {
+fn avx_emulator() -> Box<Emulator> {
     let cfg = EmulatorConfig::default();
     let mut emu =
         Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");
@@ -40,7 +40,7 @@ fn avx_emulator() -> Box<Emulator<'static>> {
     emu
 }
 
-fn run(emu: &mut Emulator<'static>, code: &[u8], steps: u64) {
+fn run(emu: &mut Emulator, code: &[u8], steps: u64) {
     let park = CODE + code.len() as u64;
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]);

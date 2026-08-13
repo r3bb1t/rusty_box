@@ -55,7 +55,7 @@ const ANDROID_STORAGE_PERMISSION_REQUEST_THROTTLE: Duration = Duration::from_mil
 const ANDROID_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION: &str =
     "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION";
 type AndroidEmulator =
-    Box<rusty_box::emulator::Emulator<'static, rusty_box::cpu::core_i7_skylake::Corei7SkylakeX>>;
+    Box<rusty_box::emulator::Emulator<rusty_box::cpu::core_i7_skylake::Corei7SkylakeX>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AndroidIsoSource {

@@ -16,7 +16,7 @@ use super::{
     Result,
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn execute_instruction(&mut self, instr: &Instruction) -> Result<()> {
         use crate::cpu::arith16;
         use crate::cpu::arith32;
@@ -5521,7 +5521,7 @@ mod tests {
     }
 
     fn enable_sse<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<'_, T>,
+        cpu: &mut BxCpuC<T>,
     ) {
         cpu.cr4.insert(BxCr4::OSFXSR);
         // `BxCpuBuilder::build()` only runs `initialize()`, not a hardware

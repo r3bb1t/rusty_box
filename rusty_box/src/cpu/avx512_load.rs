@@ -92,7 +92,7 @@ pub(super) fn cut_opmask_to(nelements: usize) -> u64 {
     (1u64 << nelements) - 1
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ========================================================================
     // Opmask reads — Bochs cpu.h BX_READ_*_OPMASK plus the `k0 means
     // unmasked` convention every LOAD_MASK_* function open-codes.

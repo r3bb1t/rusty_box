@@ -248,7 +248,7 @@ const EXCEPTIONS_INFO: [BxExceptionInfo; BX_CPU_HANDLED_EXCEPTIONS as _] = [
     },
 ];
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Bochs `BX_CPU_C::get_exception_type` — returns the exception-type
     /// classification (BENIGN/CONTRIBUTORY/PAGE_FAULT/DOUBLE_FAULT) for
     /// the given vector. Out-of-range vectors return BENIGN. #CP and
@@ -488,7 +488,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         self.inhibit_mask = 0;
 
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         if self.real_mode() {

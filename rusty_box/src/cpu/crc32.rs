@@ -67,7 +67,7 @@ fn mod2_64bit(divisor: u64, dividend: u64) -> u32 {
 // Instruction handlers
 // ============================================================================
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// CRC32 r32, r/m64 — Bochs CRC32_GdEqR (64-bit mode only)
     ///
     /// F2 REX.W 0F 38 F1 — CRC32C accumulate qword.

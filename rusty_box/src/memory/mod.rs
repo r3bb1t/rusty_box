@@ -52,7 +52,7 @@ struct CpuTlbPinState {
     dtlb_offsets: [usize; CPU_TLB_PIN_DTLB_SLOTS],
     itlb_offsets: [usize; CPU_TLB_PIN_ITLB_SLOTS],
     vmcb_offset: usize,
-    /// Bounded non-ITLB instruction-fetch window (`eip_fetch_ptr`) interval;
+    /// Bounded non-ITLB instruction-fetch window (`eip_fetch_window`) interval;
     /// `fetch_window_end == 0` means no window. Bochs cpu.cc `prefetch`:
     /// `eipFetchPtr` stays valid until the next refill, so its backing block
     /// must never be evicted while retained.
@@ -89,7 +89,7 @@ pub(crate) struct CpuTlbPin {
 
 impl CpuTlbPin {
     pub(crate) fn new<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &BxCpuC<'_, T>,
+        cpu: &BxCpuC<T>,
     ) -> Self {
         let pin = Self {
             state: UnsafeCell::new(CpuTlbPinState::empty()),
@@ -140,7 +140,7 @@ impl CpuTlbPin {
     }
 
     /// Publish (or clear, with `None`) the bounded instruction-fetch window so
-    /// eviction never steals the block backing `eip_fetch_ptr`.
+    /// eviction never steals the block backing `eip_fetch_window`.
     #[inline]
     pub(crate) fn set_fetch_window(&self, window: Option<(usize, usize)>) {
         // SAFETY: see `clear_tlb_hosts`.

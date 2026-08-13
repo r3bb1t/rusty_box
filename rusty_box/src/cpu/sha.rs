@@ -106,7 +106,7 @@ fn sha256_transformation_rrs(val_32: u32, rotate1: u32, rotate2: u32, shr: u32) 
 // Instruction handlers
 // ============================================================================
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// SHA1NEXTE Vdq, Wdq — 0F 38 C8
     ///
     /// Calculates SHA1 state variable E after four rounds:

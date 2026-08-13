@@ -3,7 +3,7 @@
 macro_rules! impl_eflag {
     ($name:ident, $bit:literal) => {
         paste::paste! {
-            impl<'c, T: $crate::cpu::instrumentation::Instrumentation> $crate::cpu::BxCpuC<'c, T> {
+            impl<'c, T: $crate::cpu::instrumentation::Instrumentation> $crate::cpu::BxCpuC<T> {
                 #[inline]
                 pub(crate) fn [<get_ $name>](&self) -> u32 {
                     self.eflags.bits() & (1 << $bit)

@@ -190,7 +190,7 @@ fn fpu_handle_nan_f64(a: ExtFloat80, b: u64, status: &mut SoftFloatStatus) -> Op
     None
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ================================================================
     // FADD variants
     // ================================================================

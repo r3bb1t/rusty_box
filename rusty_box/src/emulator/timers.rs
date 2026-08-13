@@ -12,7 +12,7 @@ use super::Emulator;
 #[cfg(feature = "std")]
 use super::SLOWDOWN_QUANTUM_USEC;
 
-impl<'a, T: Instrumentation> Emulator<'a, T> {
+impl<'a, T: Instrumentation> Emulator<T> {
     /// Initialize the emulator
     ///
     /// This runs the full initialization sequence from Bochs main.cc (bx_init_hardware):

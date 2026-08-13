@@ -58,7 +58,7 @@ enum BootMode {
 /// The eframe application — owns the emulator and display directly.
 pub struct WasmEmulatorApp {
     boot_mode: BootMode,
-    emulator: Option<Box<Emulator<'static>>>,
+    emulator: Option<Box<Emulator>>,
     display: SharedDisplay,
     texture: Option<egui::TextureHandle>,
     initialized: bool,
@@ -111,7 +111,7 @@ impl WasmEmulatorApp {
             ..Default::default()
         };
 
-        let result = (|| -> rusty_box::Result<Box<Emulator<'static>>> {
+        let result = (|| -> rusty_box::Result<Box<Emulator>> {
             let mut emu = Emulator::new(config)?;
             emu.init_memory_and_pc_system()?;
 
@@ -155,7 +155,7 @@ impl WasmEmulatorApp {
             ..Default::default()
         };
 
-        let result = (|| -> rusty_box::Result<Box<Emulator<'static>>> {
+        let result = (|| -> rusty_box::Result<Box<Emulator>> {
             let mut emu = Emulator::new(config)?;
             emu.init_memory_and_pc_system()?;
 
@@ -190,7 +190,7 @@ impl WasmEmulatorApp {
         self.finish_init(result);
     }
 
-    fn finish_init(&mut self, result: rusty_box::Result<Box<Emulator<'static>>>) {
+    fn finish_init(&mut self, result: rusty_box::Result<Box<Emulator>>) {
         match result {
             Ok(emu) => {
                 self.emulator = Some(emu);

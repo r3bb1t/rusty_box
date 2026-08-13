@@ -16,7 +16,7 @@ use super::Emulator;
 #[cfg(feature = "std")]
 use super::status_ips_from_retired_instructions;
 
-impl<'a, T: Instrumentation> Emulator<'a, T> {
+impl<'a, T: Instrumentation> Emulator<T> {
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
     fn total_cpu_icount(&self) -> u64 {
         (0..self.cpu_count()).fold(0u64, |total, cpu_index| {
@@ -25,7 +25,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     }
 }
 
-impl<'a, T: Instrumentation> Emulator<'a, T> {
+impl<'a, T: Instrumentation> Emulator<T> {
     #[cfg(feature = "alloc")]
     /// Run emulator interactively with GUI event handling
     ///

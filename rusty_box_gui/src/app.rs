@@ -2420,7 +2420,7 @@ impl DiskCreatorPanel {
 
 #[cfg(target_arch = "wasm32")]
 type WebEmulator =
-    Box<rusty_box::emulator::Emulator<'static>>;
+    Box<rusty_box::emulator::Emulator>;
 
 #[cfg(target_arch = "wasm32")]
 pub struct WebShellApp {

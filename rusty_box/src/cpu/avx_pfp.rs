@@ -46,7 +46,7 @@ use super::{
     xmm::{BxPackedXmmRegister, BxPackedYmmRegister},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ════════════════════════════════════════════════════════════════════
     // VEX FP templates — Bochs cpu_templates_pfp.h HANDLE_AVX_PFP_2OP /
     // HANDLE_AVX_PFP_1OP and avx_pfp.cc AVX_SCALAR_SINGLE_FP /

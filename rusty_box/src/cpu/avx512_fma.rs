@@ -54,7 +54,7 @@ fn qword_elements(vl: u8) -> usize {
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
 fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, T>,
+    cpu: &BxCpuC<T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -69,7 +69,7 @@ fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
 /// Read ZMM register as a ZMM-width value
 #[inline]
 fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, T>,
+    cpu: &BxCpuC<T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
@@ -77,7 +77,7 @@ fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register with dword-granularity masking, zeroing upper bits beyond VL
 fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -102,7 +102,7 @@ fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register with qword-granularity masking
 fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -128,7 +128,7 @@ fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
 /// Register form: reads src1() (rm register = W).
 /// Memory form: reads from memory at resolved address.
 fn read_rm_ps<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -143,7 +143,7 @@ fn read_rm_ps<T: crate::cpu::instrumentation::Instrumentation>(
 /// Register form: reads src1() (rm register = W).
 /// Memory form: reads from memory at resolved address.
 fn read_rm_pd<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -154,7 +154,7 @@ fn read_rm_pd<T: crate::cpu::instrumentation::Instrumentation>(
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// The shared body of all twelve packed single-precision EVEX FMA
     /// handlers. Bochs avx512_fma.cc `EVEX_FMA_PACKED_SINGLE`.
     fn evex_fma_packed_ps(
@@ -474,7 +474,7 @@ mod tests {
     /// H=2.0, V=3.0, W=1.0 in every element, so H*V = 6.0 and the two
     /// possible results are 6+1=7 and 6-1=5 — far apart and exact.
     fn seed(
-        cpu: &mut crate::cpu::cpu::BxCpuC<'_, ()>,
+        cpu: &mut crate::cpu::cpu::BxCpuC<()>,
     ) {
         cpu.mxcsr.mxcsr = MXCSR_RESET;
         for n in 0..4 {

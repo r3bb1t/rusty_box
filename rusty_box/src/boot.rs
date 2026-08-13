@@ -47,7 +47,7 @@ const MADT_MAX_LEN: usize = MADT_HEADER_LEN
 /// * `ram_size` - Total guest RAM in bytes
 /// * `cpu_count` - Logical CPU count to advertise in the no-alloc MADT
 pub fn setup_direct_linux_boot<T: Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     memory: &mut BxMemC,
     bzimage: &[u8],
     initramfs: Option<&[u8]>,
@@ -65,7 +65,7 @@ pub fn setup_direct_linux_boot<T: Instrumentation>(
 }
 
 pub(crate) fn setup_direct_linux_boot_with_pins<T: Instrumentation>(
-    cpu: &mut BxCpuC<'_, T>,
+    cpu: &mut BxCpuC<T>,
     memory: &mut BxMemC,
     pins: &[CpuTlbPin],
     bzimage: &[u8],

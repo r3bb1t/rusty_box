@@ -313,33 +313,33 @@ fn restore_memory<R: Read>(memory: &mut BxMemC, reader: &mut SnapshotReader<R>) 
 }
 
 #[cfg(feature = "std")]
-fn cpu_len<T: crate::cpu::instrumentation::Instrumentation>(emu: &Emulator<'_, T>) -> io::Result<u64> {
+fn cpu_len<T: crate::cpu::instrumentation::Instrumentation>(emu: &Emulator<T>) -> io::Result<u64> {
     let count = u32::try_from(emu.cpu_count()).map_err(|_| invalid_snapshot("CPU count does not fit snapshot"))?;
     let mut len = 8u64;
     for index in 0..count as usize { len = checked_snapshot_len_add(len, checked_snapshot_len_add(12, emu.cpu_ref(index).snapshot_v3_body_len()?)?)?; }
     Ok(len)
 }
 #[cfg(feature = "std")]
-fn save_cpus<T: crate::cpu::instrumentation::Instrumentation, W: Write>(emu: &Emulator<'_, T>, writer: &mut W) -> io::Result<()> {
+fn save_cpus<T: crate::cpu::instrumentation::Instrumentation, W: Write>(emu: &Emulator<T>, writer: &mut W) -> io::Result<()> {
     writer.write_u32(SNAPSHOT_SECTION_VERSION)?; writer.write_u32(u32::try_from(emu.cpu_count()).map_err(|_| invalid_snapshot("CPU count does not fit snapshot"))?)?;
     for index in 0..emu.cpu_count() { let cpu = emu.cpu_ref(index); writer.write_u32(cpu.snapshot_cpu_id())?; writer.write_u64(cpu.snapshot_v3_body_len()?)?; cpu.save_snapshot_v3_body(writer)?; }
     Ok(())
 }
 #[cfg(feature = "std")]
-fn lapic_len<T: crate::cpu::instrumentation::Instrumentation>(emu: &Emulator<'_, T>) -> io::Result<u64> {
+fn lapic_len<T: crate::cpu::instrumentation::Instrumentation>(emu: &Emulator<T>) -> io::Result<u64> {
     let mut len = 8u64;
     for index in 0..emu.cpu_count() { len = checked_snapshot_len_add(len, checked_snapshot_len_add(12, emu.cpu_ref(index).lapic.snapshot_v3_body_len()?)?)?; }
     Ok(len)
 }
 #[cfg(feature = "std")]
-fn save_lapics<T: crate::cpu::instrumentation::Instrumentation, W: Write>(emu: &Emulator<'_, T>, writer: &mut W) -> io::Result<()> {
+fn save_lapics<T: crate::cpu::instrumentation::Instrumentation, W: Write>(emu: &Emulator<T>, writer: &mut W) -> io::Result<()> {
     writer.write_u32(SNAPSHOT_SECTION_VERSION)?; writer.write_u32(u32::try_from(emu.cpu_count()).map_err(|_| invalid_snapshot("CPU count does not fit snapshot"))?)?;
     for index in 0..emu.cpu_count() { let cpu = emu.cpu_ref(index); writer.write_u32(cpu.snapshot_cpu_id())?; writer.write_u64(cpu.lapic.snapshot_v3_body_len()?)?; cpu.lapic.save_snapshot_v3_body(writer)?; }
     Ok(())
 }
 
 #[cfg(feature = "std")]
-impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     pub fn save_snapshot<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
         writer.write_all(SNAPSHOT_MAGIC)?; writer.write_u32(SNAPSHOT_V3_VERSION)?; writer.write_u32(SNAPSHOT_V3_SECTION_ORDER.len() as u32)?;
         let memory_len = memory_payload_len(&self.memory)?;
@@ -613,7 +613,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
-    fn machine() -> Box<Emulator<'static>> {
+    fn machine() -> Box<Emulator> {
         let config = EmulatorConfig {
             guest_memory_size: 4 * 1024 * 1024,
             host_memory_size: 4 * 1024 * 1024,
@@ -626,7 +626,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emu
     }
 
-    fn smp_machine() -> Box<Emulator<'static>> {
+    fn smp_machine() -> Box<Emulator> {
         let config = EmulatorConfig {
             guest_memory_size: 4 * 1024 * 1024,
             host_memory_size: 4 * 1024 * 1024,
@@ -639,7 +639,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emu
     }
 
-    fn relocation_machine() -> Box<Emulator<'static>> {
+    fn relocation_machine() -> Box<Emulator> {
         let config = EmulatorConfig {
             guest_memory_size: 4 * 1024 * 1024,
             host_memory_size: 4 * 1024 * 1024,
@@ -654,8 +654,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     fn round_trip_smp(
-        source: &mut Emulator<'static>,
-    ) -> (Box<Emulator<'static>>, Vec<u8>) {
+        source: &mut Emulator,
+    ) -> (Box<Emulator>, Vec<u8>) {
         source.service_scheduler_boundary(0).unwrap();
         let mut saved = Vec::new();
         source.save_snapshot(&mut saved).unwrap();

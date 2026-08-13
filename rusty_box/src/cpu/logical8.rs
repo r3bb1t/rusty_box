@@ -7,7 +7,7 @@ use super::{
     decoder::{BxSegregs, Instruction, BX_64BIT_REG_RIP},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =========================================================================
     // Flag update helpers
     // =========================================================================

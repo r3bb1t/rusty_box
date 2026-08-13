@@ -1121,7 +1121,7 @@ pub type BxVmxCap = VmxCap;
 #[derive(Debug, Default)]
 pub struct VmxCap {}
 
-impl<T: Instrumentation> BxCpuC<'_, T> {
+impl<T: Instrumentation> BxCpuC<T> {
     // =========================================================================
     // VMX flag-based result helpers — Bochs cpu.h VMsucceed / VMfailInvalid
     // and vmx.cc BX_CPU_C::VMfail.

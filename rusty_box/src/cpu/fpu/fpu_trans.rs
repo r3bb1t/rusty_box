@@ -40,7 +40,7 @@ const FLOATX80_ONE: ExtFloat80 = ExtFloat80 {
 // CPU methods: FPU transcendental instructions
 // ---------------------------------------------------------------------------
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ================================================================
     // FSCALE (D9 FD) -- ST(0) = ST(0) * 2^trunc(ST(1))
     // ================================================================

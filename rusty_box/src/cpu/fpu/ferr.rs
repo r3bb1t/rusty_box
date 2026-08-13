@@ -55,7 +55,7 @@ pub(in crate::cpu) fn i387cw_to_softfloat_status_word(control_word: u16) -> Soft
 // Methods on BxCpuC
 // ---------------------------------------------------------------------------
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // -----------------------------------------------------------------------
     // FPU_check_pending_exceptions  (from fpu.cc)
     // -----------------------------------------------------------------------

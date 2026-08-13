@@ -222,7 +222,7 @@ fn addr_write_u64(addr: BxPtrEquiv, val: u64) {
     unsafe { (addr as *mut u64).write_unaligned(val) }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ===== Canonical address check (Bochs access.cc IsCanonicalAccess) =====
 
     pub(super) fn is_canonical_access(

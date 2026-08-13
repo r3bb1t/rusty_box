@@ -324,21 +324,63 @@ impl Default for SlowdownTimerState {
 /// let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
 /// let _ = &mut emu.memory;
 /// ```
-pub struct Emulator<'a, T: Instrumentation = ()> {
+/// Caller-provided BSP storage for no-alloc builds.
+///
+/// The alloc build keeps its BSP in a `Box`, which owns the CPU and needs no
+/// lifetime. No-alloc callers place theirs in a static, on the stack, or in
+/// firmware-provided memory, and previously handed it over as `&'a mut` — which
+/// forced a lifetime parameter onto `Emulator` that the alloc build had nothing
+/// to fill. Holding it as a pointer removes that asymmetry, and matches
+/// `ap_cpu_ptrs`, which has always stored the other CPUs this way.
+///
+/// The dereference lives here and nowhere else, so every use site reads
+/// `self.cpu.field` exactly as it does under alloc.
+#[cfg(not(feature = "alloc"))]
+pub(crate) struct BspCpu<T: Instrumentation>(*mut BxCpuC<T>);
+
+#[cfg(not(feature = "alloc"))]
+impl<T: Instrumentation> BspCpu<T> {
+    #[inline(always)]
+    pub(crate) fn new(cpu: &mut BxCpuC<T>) -> Self {
+        Self(cpu)
+    }
+}
+
+#[cfg(not(feature = "alloc"))]
+impl<T: Instrumentation> core::ops::Deref for BspCpu<T> {
+    type Target = BxCpuC<T>;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: the caller of `init_at` guarantees this CPU outlives the
+        // emulator — the same contract `ap_cpu_ptrs` already rests on.
+        unsafe { &*self.0 }
+    }
+}
+
+#[cfg(not(feature = "alloc"))]
+impl<T: Instrumentation> core::ops::DerefMut for BspCpu<T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: see `Deref`; `&mut self` excludes every other borrow.
+        unsafe { &mut *self.0 }
+    }
+}
+
+pub struct Emulator<T: Instrumentation = ()> {
     /// BSP CPU storage. This stays at a stable address for its own cached
     /// host mappings; eviction-visible state instead lives in `cpu_tlb_pins`.
     #[cfg(feature = "alloc")]
-    cpu: alloc::boxed::Box<BxCpuC<'a, T>>,
+    cpu: alloc::boxed::Box<BxCpuC<T>>,
     /// Application processors (CPU IDs/APIC IDs 1..N-1).
     #[cfg(feature = "alloc")]
-    pub(crate) ap_cpus: Vec<alloc::boxed::Box<BxCpuC<'a, T>>>,
+    pub(crate) ap_cpus: Vec<alloc::boxed::Box<BxCpuC<T>>>,
     /// Stable descriptors for every CPU's direct host-memory references.
     #[cfg(feature = "alloc")]
     cpu_tlb_pins: Vec<CpuTlbPin>,
     /// BSP CPU storage supplied by no-alloc callers. Its external pin sidecar
     /// is stored separately in the fixed descriptor array below.
     #[cfg(not(feature = "alloc"))]
-    cpu: &'a mut BxCpuC<'a, T>,
+    cpu: BspCpu<T>,
     /// Application processor pointers supplied by no-alloc callers.
     ///
     /// no_std/no-alloc targets can place `BxCpuC` objects in a static, stack,
@@ -346,7 +388,7 @@ pub struct Emulator<'a, T: Instrumentation = ()> {
     /// `init_at_with_ap_cpus()`. The emulator stores raw pointers so it does not
     /// need `alloc` or `std` to support SMP scheduling.
     #[cfg(not(feature = "alloc"))]
-    ap_cpu_ptrs: [*mut BxCpuC<'a, T>; NO_ALLOC_MAX_AP_CPUS],
+    ap_cpu_ptrs: [*mut BxCpuC<T>; NO_ALLOC_MAX_AP_CPUS],
     #[cfg(not(feature = "alloc"))]
     ap_cpu_count: usize,
     #[cfg(not(feature = "alloc"))]
@@ -403,7 +445,7 @@ pub struct Emulator<'a, T: Instrumentation = ()> {
     pub stop_flag: AtomicBool,
 }
 
-impl<'a, T: Instrumentation> Emulator<'a, T> {
+impl<'a, T: Instrumentation> Emulator<T> {
     #[cfg(feature = "alloc")]
     pub(crate) fn cpu_count(&self) -> usize {
         1 + self.ap_cpus.len()
@@ -415,7 +457,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     }
 
     #[cfg(feature = "alloc")]
-    pub(crate) fn cpu_ref(&self, index: usize) -> &BxCpuC<'a, T> {
+    pub(crate) fn cpu_ref(&self, index: usize) -> &BxCpuC<T> {
         if index == 0 {
             &self.cpu
         } else {
@@ -424,7 +466,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     }
 
     #[cfg(not(feature = "alloc"))]
-    pub(crate) fn cpu_ref(&self, index: usize) -> &BxCpuC<'a, T> {
+    pub(crate) fn cpu_ref(&self, index: usize) -> &BxCpuC<T> {
         if index == 0 {
             &*self.cpu
         } else {
@@ -437,7 +479,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
 
 
     #[cfg(feature = "alloc")]
-    pub(crate) fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<'a, T> {
+    pub(crate) fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<T> {
         if index == 0 {
             &mut self.cpu
         } else {
@@ -446,9 +488,9 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     }
 
     #[cfg(not(feature = "alloc"))]
-    pub(crate) fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<'a, T> {
+    pub(crate) fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<T> {
         if index == 0 {
-            self.cpu
+            &mut self.cpu
         } else {
             assert!(index <= self.ap_cpu_count);
             // SAFETY: &mut self guarantees no other emulator method can
@@ -632,7 +674,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a> Emulator<'a, ()> {
+impl<'a> Emulator<()> {
     /// Create a new emulator with no instrumentation (`T = ()`).
     ///
     /// Returns `Box<Self>` because Emulator is ~1.4 MB.
@@ -642,7 +684,7 @@ impl<'a> Emulator<'a, ()> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, T: Instrumentation> Emulator<'a, T> {
+impl<'a, T: Instrumentation> Emulator<T> {
     /// Create a new emulator with a monomorphized tracer.
     ///
     /// The tracer type `T` is baked in at construction and cannot be changed.
@@ -665,7 +707,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
 
     fn new_inner<F>(config: EmulatorConfig, mut build_cpu: F) -> Result<Box<Self>>
     where
-        F: FnMut() -> Result<alloc::boxed::Box<BxCpuC<'static, T>>>,
+        F: FnMut() -> Result<alloc::boxed::Box<BxCpuC<T>>>,
     {
         let topology = config.cpu_params.cpu_topology();
         let cpu_count = config.cpu_params.cpu_count();
@@ -687,8 +729,8 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
 
     fn new_from_parts(
         config: EmulatorConfig,
-        cpu: alloc::boxed::Box<BxCpuC<'static, T>>,
-        ap_cpus: Vec<alloc::boxed::Box<BxCpuC<'static, T>>>,
+        cpu: alloc::boxed::Box<BxCpuC<T>>,
+        ap_cpus: Vec<alloc::boxed::Box<BxCpuC<T>>>,
     ) -> Result<Box<Self>> {
         let mut cpu_tlb_pins = Vec::new();
         cpu_tlb_pins
@@ -745,7 +787,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     }
 }
 
-impl<'a, T: Instrumentation> Emulator<'a, T> {
+impl<'a, T: Instrumentation> Emulator<T> {
     #[cfg(not(feature = "alloc"))]
     /// Initialize an Emulator at a caller-provided memory location.
     ///
@@ -759,7 +801,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     /// - All allocations must outlive the returned reference
     pub unsafe fn init_at(
         ptr: *mut Self,
-        cpu: &'a mut BxCpuC<'a, T>,
+        cpu: &'a mut BxCpuC<T>,
         mem_stub: BxMemoryStubC,
         config: EmulatorConfig,
     ) -> Result<&'a mut Self> {
@@ -782,8 +824,8 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     /// - All allocations must outlive the returned emulator reference
     pub unsafe fn init_at_with_ap_cpus(
         ptr: *mut Self,
-        cpu: &'a mut BxCpuC<'a, T>,
-        ap_cpus: &mut [&'a mut BxCpuC<'a, T>],
+        cpu: &'a mut BxCpuC<T>,
+        ap_cpus: &mut [&'a mut BxCpuC<T>],
         mem_stub: BxMemoryStubC,
         config: EmulatorConfig,
     ) -> Result<&'a mut Self> {
@@ -806,19 +848,19 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         cpu.set_smp_quantum(config.smp_quantum);
         cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
         for (index, ap_cpu_slot) in ap_cpus.iter_mut().take(required_ap_count).enumerate() {
-            let ap_cpu: &mut BxCpuC<'a, T> = &mut **ap_cpu_slot;
+            let ap_cpu: &mut BxCpuC<T> = &mut **ap_cpu_slot;
             ap_cpu.configure_smp((index + 1) as u32, topology);
             ap_cpu.set_smp_quantum(config.smp_quantum);
             ap_cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
-            ap_cpu_ptrs[index] = ap_cpu as *mut BxCpuC<'a, T>;
+            ap_cpu_ptrs[index] = ap_cpu as *mut BxCpuC<T>;
         }
         // The descriptor sidecars are 40 KiB each. Initialize only the used
         // prefix directly in the caller-provided Emulator storage so no-alloc
         // construction neither allocates nor builds/moves a 254-entry stack
         // temporary. Sidecar addresses become stable before any CPU scope
         // wires one into `active_tlb_pin_sidecar`.
-        let bsp_ptr = cpu as *mut BxCpuC<'a, T>;
-        core::ptr::addr_of_mut!((*ptr).cpu).write(cpu);
+        let bsp_ptr = cpu as *mut BxCpuC<T>;
+        core::ptr::addr_of_mut!((*ptr).cpu).write(BspCpu::new(cpu));
         core::ptr::addr_of_mut!((*ptr).ap_cpu_ptrs).write(ap_cpu_ptrs);
         core::ptr::addr_of_mut!((*ptr).ap_cpu_count).write(required_ap_count);
         let pin_slots = core::ptr::addr_of_mut!((*ptr).cpu_tlb_pins)
@@ -1167,7 +1209,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
 
     /// Get an immutable reference to the stable BSP CPU allocation.
     #[inline]
-    pub fn cpu(&self) -> &BxCpuC<'a, T> {
+    pub fn cpu(&self) -> &BxCpuC<T> {
         self.cpu_ref(0)
     }
 
@@ -1182,7 +1224,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     /// This is crate-visible so the public API can expose targeted operations
     /// without allowing safe replacement of the pinned CPU storage.
     #[inline]
-    pub(crate) fn cpu_mut(&mut self) -> &mut BxCpuC<'a, T> {
+    pub(crate) fn cpu_mut(&mut self) -> &mut BxCpuC<T> {
         self.cpu_mut_at(0)
     }
 
@@ -1209,7 +1251,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     /// core::mem::swap(first.cpu_mut(), second.cpu_mut());
     /// ```
     #[inline]
-    pub unsafe fn cpu_mut_unchecked(&mut self) -> &mut BxCpuC<'a, T> {
+    pub unsafe fn cpu_mut_unchecked(&mut self) -> &mut BxCpuC<T> {
         self.cpu_mut_at(0)
     }
 
@@ -1867,7 +1909,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     }
 }
 
-impl<T: Instrumentation> Emulator<'_, T> {
+impl<T: Instrumentation> Emulator<T> {
     /// Dump comprehensive diagnostic state (for Alpine debugging).
     #[cfg(all(feature = "std", debug_assertions))]
     pub fn dump_alpine_diag(&mut self) {
@@ -2152,7 +2194,7 @@ fn status_ips_from_retired_instructions(
 
 // Ensure Emulator is Send (can be moved between threads)
 // Each instance is fully independent with no shared state
-unsafe impl<T: Instrumentation + Send> Send for Emulator<'_, T> {}
+unsafe impl<T: Instrumentation + Send> Send for Emulator<T> {}
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests;

@@ -92,7 +92,7 @@ pub(super) fn approximate_rsqrt(op: Float32) -> Float32 {
     pack_to_f32(false, exp, (table[(fraction >> 13) as usize] as u32) << 8)
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Shared source read for the packed forms.
     #[inline]
     fn sse_rcp_read_op(&mut self, instr: &Instruction) -> super::Result<BxPackedXmmRegister> {

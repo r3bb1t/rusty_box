@@ -643,7 +643,7 @@ fn is_trace_end_opcode(opcode: Opcode) -> bool {
     )
 }
 
-impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
+impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     fn bx_end_trace(&mut self) {
         self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
     }
@@ -676,7 +676,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
 
         let remaining_in_page = self.eip_page_window_size - eip_biased;
         let fetch_ptr_slice = self
-            .eip_fetch_ptr
+            .fetch_window_bytes()
             .ok_or(crate::cpu::CpuError::CpuNotInitialized)?;
         if eip_biased as usize >= fetch_ptr_slice.len() {
             tracing::error!(
@@ -1092,7 +1092,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
 
         // We can fetch straight from the 0th byte, which is eipFetchPtr
         let next_page_fetch_ptr = self
-            .eip_fetch_ptr
+            .fetch_window_bytes()
             .ok_or(crate::cpu::CpuError::CpuNotInitialized)?;
 
         // Read leftover bytes in next page (matching C++ line 287-289)

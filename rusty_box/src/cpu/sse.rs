@@ -210,7 +210,7 @@ pub(super) fn insertps_core(op1: &mut BxPackedXmmRegister, op2: u32, control: u8
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ========================================================================
     // SSE helper: read op2 (register or memory)
     // ========================================================================

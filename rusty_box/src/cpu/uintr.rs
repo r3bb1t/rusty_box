@@ -13,7 +13,7 @@ use super::decoder::BxSegregs;
 use super::instrumentation::Instrumentation;
 use super::{BxCpuC, Result};
 
-impl<T: Instrumentation> BxCpuC<'_, T> {
+impl<T: Instrumentation> BxCpuC<T> {
     /// Bochs uintr.cc uintr_masked — the user-level interrupt can be delivered
     /// only when running long-64 mode + UIF=1 + CPL=3.
     #[inline]

@@ -18,7 +18,7 @@ use super::{
 // V3 streaming CPU record
 // ============================================================================
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Exact byte count for one CPU body in the v3 CPU section. The enclosing
     /// CPU section owns its version and per-record `{ cpu_id, state_len }`
     /// framing, so this method deliberately has neither.
@@ -506,9 +506,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         self.update_fetch_mode_mask();
         self.handle_alignment_check();
 
-        // vmcbhostptr is a host mapping and remains deliberately invalid until
+        // The VMCB backing is a host mapping and stays deliberately absent until
         // the parent restores memory and runs its post-restore cache hook.
-        self.vmcbhostptr = 0;
+        self.vmcb_host_offset = None;
         Ok(())
     }
 }
@@ -1319,7 +1319,7 @@ mod tests {
         cpu.vmcsptr = 0x0012_3000;
         cpu.vmxonptr = 0x0056_7000;
         cpu.vmcbptr = 0x009A_B000;
-        cpu.vmcbhostptr = 0xDEAD_BEEF; // must NOT survive a restore
+        cpu.vmcb_host_offset = Some(0xDEAD_BEEF); // must NOT survive a restore
         cpu.msr.svm_hsave_pa = 0x00DE_F000;
         cpu.msr.svm_vm_cr = 0x2;
 
@@ -1366,7 +1366,7 @@ mod tests {
         assert_eq!(restored.vmxonptr, 0x0056_7000);
         assert_eq!(restored.vmcbptr, 0x009A_B000);
         assert_eq!(
-            restored.vmcbhostptr, 0,
+            restored.vmcb_host_offset, None,
             "cached host pointer must be re-resolved after restore"
         );
         assert_eq!(restored.msr.svm_hsave_pa, 0x00DE_F000);

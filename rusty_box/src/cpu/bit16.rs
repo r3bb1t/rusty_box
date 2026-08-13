@@ -5,7 +5,7 @@ use super::{
     decoder::{BxSegregs, Instruction},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =========================================================================
     // BSF / BSR — Bit Scan Forward / Reverse 16-bit (0F BC / 0F BD with 66h)
     // =========================================================================
