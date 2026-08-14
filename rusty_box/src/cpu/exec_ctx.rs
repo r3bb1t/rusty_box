@@ -18,7 +18,7 @@
 use core::ops::{Deref, DerefMut};
 
 use super::{cpu::BxCpuC, instrumentation::Instrumentation};
-use crate::{iodev::BxDevicesC, memory::BxMemC, memory::CpuTlbPin, pc_system::BxPcSystemC};
+use crate::{iodev::BxDevicesC, memory::BxMemC, pc_system::BxPcSystemC};
 
 /// One CPU plus the machine it is executing against.
 pub(crate) struct ExecCtx<'a, T: Instrumentation> {
@@ -28,11 +28,6 @@ pub(crate) struct ExecCtx<'a, T: Instrumentation> {
     pub(crate) memory: &'a mut BxMemC,
     pub(crate) devices: &'a mut BxDevicesC,
     pub(crate) pc_system: &'a mut BxPcSystemC,
-    /// Every CPU's eviction sidecar, including this one's. Shared, because the
-    /// allocator only ever reads them.
-    pub(crate) pins: &'a [CpuTlbPin],
-    /// Index of this CPU's own sidecar within `pins`.
-    pub(crate) pin_index: usize,
 }
 
 impl<'a, T: Instrumentation> ExecCtx<'a, T> {
@@ -42,17 +37,12 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         memory: &'a mut BxMemC,
         devices: &'a mut BxDevicesC,
         pc_system: &'a mut BxPcSystemC,
-        pins: &'a [CpuTlbPin],
-        pin_index: usize,
     ) -> Self {
-        debug_assert!(pin_index < pins.len(), "cpu has no sidecar in the pin set");
         Self {
             cpu,
             memory,
             devices,
             pc_system,
-            pins,
-            pin_index,
         }
     }
 
@@ -62,9 +52,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
     /// translates an address and then touches the bytes needs the CPU and
     /// memory live at once, and here they are, from disjoint machine fields.
     ///
-    /// The pin set is shared while the CPU and memory are mutable, which the
-    /// borrow checker accepts only because all three are distinct fields of the
-    /// machine. The scheduler previously rebuilt these from a raw pointer and a
+    /// The scheduler previously rebuilt these from a raw pointer and a
     /// `from_raw_parts` because it could not name that split.
     #[inline]
     pub(crate) fn slice_parts(
@@ -74,17 +62,8 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         &mut BxMemC,
         &mut BxDevicesC,
         &mut BxPcSystemC,
-        &'a [CpuTlbPin],
-        &'a CpuTlbPin,
     ) {
-        (
-            self.cpu,
-            self.memory,
-            self.devices,
-            self.pc_system,
-            self.pins,
-            &self.pins[self.pin_index],
-        )
+        (self.cpu, self.memory, self.devices, self.pc_system)
     }
 
 }
@@ -105,7 +84,6 @@ pub(crate) struct TestMachine {
     memory: BxMemC,
     devices: BxDevicesC,
     pc_system: BxPcSystemC,
-    pins: alloc::vec::Vec<CpuTlbPin>,
 }
 
 #[cfg(test)]
@@ -130,13 +108,11 @@ impl TestMachine {
             crate::memory::BxMemoryStubC::create_and_init(MIB, MIB, 4096).unwrap(),
             false,
         );
-        let pins = alloc::vec![CpuTlbPin::new(&*cpu)];
         Self {
             cpu,
             memory,
             devices: BxDevicesC::new(),
             pc_system: BxPcSystemC::new(),
-            pins,
         }
     }
 
@@ -147,8 +123,6 @@ impl TestMachine {
             &mut self.memory,
             &mut self.devices,
             &mut self.pc_system,
-            &self.pins,
-            0,
         )
     }
 }
@@ -163,12 +137,11 @@ impl TestMachine {
 pub(crate) fn exec_with<T: Instrumentation, R>(
     cpu: &mut BxCpuC<T>,
     memory: &mut BxMemC,
-    pins: &[CpuTlbPin],
     f: impl FnOnce(&mut ExecCtx<'_, T>) -> R,
 ) -> R {
     let mut devices = BxDevicesC::new();
     let mut pc_system = BxPcSystemC::new();
-    let mut ctx = ExecCtx::new(cpu, memory, &mut devices, &mut pc_system, pins, 0);
+    let mut ctx = ExecCtx::new(cpu, memory, &mut devices, &mut pc_system);
     f(&mut ctx)
 }
 
@@ -201,19 +174,14 @@ mod tests {
                 ctx.memory.set_a20_mask(u64::MAX);
                 let _ = ctx.pc_system.get_enable_a20();
 
-                // All four at once — the CPU and memory mutable, the pin set
-                // shared. A handler that translates an address and then touches
-                // the bytes needs exactly this, and it is the combination the
-                // raw wiring existed to fake.
-                let (cpu, memory, _devices, _pc_system, pins, current_pin) = ctx.slice_parts();
+                // All four at once, the CPU and memory both mutable. A handler
+                // that translates an address and then touches the bytes needs
+                // exactly this, and it is the combination the raw wiring
+                // existed to fake.
+                let (cpu, memory, _devices, _pc_system) = ctx.slice_parts();
                 cpu.install_memory_bases(memory);
                 assert!(!cpu.mem_alloc_base.is_null());
                 assert_eq!(cpu.rip(), rip, "deref must reach the same cpu");
-                assert!(!pins.is_empty());
-                assert!(
-                    core::ptr::eq(current_pin, &pins[0]),
-                    "cpu 0's sidecar is the first in the set"
-                );
             })
             .unwrap()
             .join()

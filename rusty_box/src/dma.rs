@@ -25,7 +25,7 @@
 //!    - Updates address/count; at terminal count sets TC status, re-masks
 //!      non-autoinit channels, and files the HRQ deassert (Bochs
 //!      dma.cc raise_HLDA: `bx_pc_system.set_HRQ(0)`)
-use crate::memory::{BxMemC, CpuTlbPin};
+use crate::memory::BxMemC;
 #[cfg(feature = "std")]
 use std::io::{Error, ErrorKind, Read, Write};
 
@@ -443,7 +443,7 @@ impl BxDmaC {
     ///
     /// The caller supplies memory only while the exclusive CPU batch owns it.
     /// Without that context, HRQ remains asserted and no DMA state advances.
-    pub(crate) fn raise_hlda(&mut self, mem: Option<&mut BxMemC>, pins: &[CpuTlbPin]) {
+    pub(crate) fn raise_hlda(&mut self, mem: Option<&mut BxMemC>) {
         let Some(mem) = mem else {
             return;
         };
@@ -529,7 +529,7 @@ impl BxDmaC {
 
                 // Short writes intentionally commit only the guest-RAM prefix.
                 // `write_ram` emits the matching SMC stamps for that prefix.
-                if let Err(error) = mem.write_ram(pins, phy_addr as u64, &buffer[..len as usize]) {
+                if let Err(error) = mem.write_ram(phy_addr as u64, &buffer[..len as usize]) {
                     tracing::error!("DMA: physical write at {phy_addr:#x} failed: {error:?}");
                 }
             }
@@ -538,7 +538,7 @@ impl BxDmaC {
                 // (Bochs dma.cc)
 
                 // Preserve the 0xff fill for an unavailable guest-RAM tail.
-                if let Err(error) = mem.read_ram(pins, phy_addr as u64, &mut buffer[..maxlen as usize]) {
+                if let Err(error) = mem.read_ram(phy_addr as u64, &mut buffer[..maxlen as usize]) {
                     tracing::error!("DMA: physical read at {phy_addr:#x} failed: {error:?}");
                 }
 
@@ -1373,10 +1373,10 @@ mod tests {
         dma.s[0].chan[2].mode.transfer_type = 1;
         dma.set_drq(2, true);
 
-        dma.raise_hlda(Some(&mut memory), &[]);
+        dma.raise_hlda(Some(&mut memory));
 
         let mut received = [0; 4];
-        assert_eq!(memory.read_ram(&[], 2 * MIB as u64, &mut received).unwrap(), 4);
+        assert_eq!(memory.read_ram(2 * MIB as u64, &mut received).unwrap(), 4);
         assert_eq!(received, [0xd1, 0xa5, 0x5e, 0x33]);
         assert!(
             memory.smc_seq_next() > before_smc,

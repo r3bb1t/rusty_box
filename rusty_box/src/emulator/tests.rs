@@ -135,13 +135,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     /// offset, and the pin silently stops covering the block it names — which
     /// is exactly what these eviction tests exist to prove it does cover.
     fn resident_block(emu: &mut Emulator) -> (usize, *mut u8) {
-        let pins_ptr = emu.tlb_pins().as_ptr();
-        let pins_len = emu.tlb_pins().len();
         // Stable CPU pin storage outlives the exclusive memory borrow.
-        let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
         let start = emu
             .memory
-            .host_mem_range_pinned(0, MemoryAccessType::RW, pins, CpuMemoryPolicy::default())
+            .host_mem_range_pinned(0, MemoryAccessType::RW, CpuMemoryPolicy::default())
             .unwrap()
             .expect("resident block must have a pinned direct span")
             .start;
@@ -183,7 +180,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             key as u32,
             FW_CFG_SELECTOR_WRITE_BYTES,
             None,
-            &[],
         );
         let lo = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, FW_CFG_DATA_READ_BYTES) as u16;
         let hi = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, FW_CFG_DATA_READ_BYTES) as u16;
@@ -1046,43 +1042,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .join()
             .unwrap();
     }
-    #[test]
-    fn memory_reinitialization_invalidates_every_cpu_host_pin() {
-        std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
-            .spawn(|| {
-                const MIB: usize = 1024 * 1024;
-                let mut config = EmulatorConfig::default();
-                config.guest_memory_size = 2 * MIB;
-                config.host_memory_size = 2 * MIB;
-                config.memory_block_size = MIB;
-                config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
-                let mut emu = Emulator::new(config).unwrap();
-                let (block, alloc_base) = resident_block(&mut emu);
-
-                for cpu_index in 0..emu.cpu_count() {
-                    let cpu = emu.cpu_mut_at(cpu_index);
-                    cpu.mem_host_base = alloc_base.wrapping_add(block);
-                    cpu.mem_alloc_base = alloc_base;
-                    let entry = &mut cpu.dtlb.entries[0];
-                    entry.lpf = 0;
-                    entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
-                }
-                emu.refresh_tlb_pins();
-                for pin in emu.tlb_pins() {
-                    assert!(pin.is_alloc_range_pinned(block, block + MIB));
-                }
-
-                emu.init_memory_and_pc_system().unwrap();
-
-                for pin in emu.tlb_pins() {
-                    assert!(!pin.is_alloc_range_pinned(block, block + MIB));
-                }
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
 
     #[test]
@@ -1110,159 +1069,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .join()
             .unwrap();
     }
-    #[test]
-    fn phase1_tests_emulator_loader_respects_sibling_tlb_pins() {
-        std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
-            .spawn(|| {
-                const MIB: usize = 1024 * 1024;
-                let mut config = EmulatorConfig::default();
-                config.guest_memory_size = 2 * MIB;
-                config.host_memory_size = MIB;
-
-                config.memory_block_size = MIB;
-                config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
-                let mut emu = Emulator::new(config).unwrap();
-                emu.memory.set_a20_mask(u64::MAX);
-
-                emu.load_ram(&[0x5a], 0).unwrap();
-                let (block, alloc_base) = resident_block(&mut emu);
-                let cpu = emu.cpu_mut_at(AP_INDEX);
-                cpu.mem_host_base = alloc_base.wrapping_add(block);
-                cpu.mem_alloc_base = alloc_base;
-                let entry = &mut cpu.dtlb.entries[0];
-                entry.lpf = 0;
-                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
-                assert!(!emu.tlb_pins()[AP_INDEX]
-                    .is_alloc_range_pinned(block, block + MIB));
-                emu.refresh_tlb_pins();
-                assert!(emu.tlb_pins()[AP_INDEX]
-                    .is_alloc_range_pinned(block, block + MIB));
-
-                assert!(matches!(
-                    emu.load_ram(&[0xa5], MIB as u64),
-                    Err(Error::Memory(MemoryError::InsufficientRam))
-                ));
-                let mut retained = [0];
-                emu.mem_read(0, &mut retained).unwrap();
-                assert_eq!(retained, [0x5a]);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
 
-    #[test]
-    fn run_cpu_batch_passes_all_cpu_tlb_pins_to_eviction() {
-        std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
-            .spawn(|| {
-                const MIB: usize = 1024 * 1024;
-                let mut config = EmulatorConfig::default();
-                config.guest_memory_size = 3 * MIB;
-                config.host_memory_size = 2 * MIB;
-                config.memory_block_size = MIB;
-                config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
-                let mut emu = Emulator::new_with_mode(
-                    config,
-                    CpuSetupMode::FlatProtected32,
-                )
-                .unwrap();
-                emu.memory.set_a20_mask(u64::MAX);
-                emu.cpu_mut_at(AP_INDEX).activity_state = CpuActivityState::WaitForSipi;
-                emu.service_scheduler_boundary(0).unwrap();
 
-                // Block 0 is pinned only by the non-running AP.  BSP code
-                // occupies the second resident slot; its fetch pin protects
-                // that slot.  The store targets swapped block 2, so a
-                // current-BSP-only pin set would evict the AP's block 0.
-                emu.load_ram(&[0x5a], 0).unwrap();
-                emu.load_ram(&[0xC6, 0x07, 0xA5, 0xEB, 0xFE], MIB as u64 + 0x1000)
-                    .unwrap();
-                let (block, alloc_base) = resident_block(&mut emu);
-                let cpu = emu.cpu_mut_at(AP_INDEX);
-                cpu.mem_host_base = alloc_base.wrapping_add(block);
-                cpu.mem_alloc_base = alloc_base;
-                let entry = &mut cpu.dtlb.entries[0];
-                entry.lpf = 0;
-                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
-                assert!(!emu.tlb_pins()[AP_INDEX]
-                    .is_alloc_range_pinned(block, block + MIB));
-                emu.refresh_tlb_pins();
-                assert!(emu.tlb_pins()[AP_INDEX]
-                    .is_alloc_range_pinned(block, block + MIB));
-
-
-                emu.reg_write(X86Reg::Rip, MIB as u64 + 0x1000);
-                emu.reg_write(X86Reg::Rdi, (2 * MIB) as u64);
-                let executed = unsafe { emu.run_cpu_batch(1) }.unwrap();
-                assert!(executed >= 1);
-                assert!(
-                    emu.tlb_pins()[AP_INDEX]
-                        .is_alloc_range_pinned(block, block + MIB),
-                    "a non-running sibling's direct mapping must survive a BSP slice"
-                );
-
-                // Both resident slots are pinned: AP owns block 0 and the
-                // running BSP owns its code block.  The target remains
-                // unavailable; omitting the AP descriptor makes this read
-                // succeed after block 0 is incorrectly evicted.
-                let mut target = [0];
-                assert!(matches!(
-                    emu.mem_read((2 * MIB) as u64, &mut target),
-                    Err(Error::Memory(MemoryError::InsufficientRam))
-                ));
-                let mut retained = [0];
-                emu.mem_read(0, &mut retained).unwrap();
-                assert_eq!(retained, [0x5a]);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[test]
-    fn phase1_tests_unsafe_cpu_mutation_keeps_cached_pin_valid() {
-        std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
-            .spawn(|| {
-                const MIB: usize = 1024 * 1024;
-                let mut config = EmulatorConfig::default();
-                config.guest_memory_size = 2 * MIB;
-                config.host_memory_size = MIB;
-                config.memory_block_size = MIB;
-                let mut emu = Emulator::new(config).unwrap();
-                emu.memory.set_a20_mask(u64::MAX);
-
-                emu.load_ram(&[0x5a], 0).unwrap();
-                let (block, alloc_base) = resident_block(&mut emu);
-                let cpu_address = emu.cpu() as *const BxCpuC;
-                let cpu = unsafe { emu.cpu_mut_unchecked() };
-                cpu.mem_host_base = alloc_base.wrapping_add(block);
-                cpu.mem_alloc_base = alloc_base;
-                let entry = &mut cpu.dtlb.entries[0];
-                entry.lpf = 0;
-                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
-
-                assert_eq!(cpu_address, emu.cpu() as *const BxCpuC);
-                assert!(!emu.tlb_pins()[BSP_INDEX]
-                    .is_alloc_range_pinned(block, block + MIB));
-                emu.refresh_tlb_pins();
-                assert!(emu.tlb_pins()[BSP_INDEX]
-                    .is_alloc_range_pinned(block, block + MIB));
-                assert!(matches!(
-                    emu.load_ram(&[0xa5], MIB as u64),
-                    Err(Error::Memory(MemoryError::InsufficientRam))
-                ));
-                let mut retained = [0];
-                emu.mem_read(0, &mut retained).unwrap();
-                assert_eq!(retained, [0x5a]);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
     #[test]
     fn rep_insw32_fast_path_retires_exact_iteration_count() {
@@ -1697,9 +1506,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // Let the CPU cache and spin the loop trace.
                 unsafe { emu.run_cpu_batch(4096) }.unwrap();
                 // A real DMA controller write patches the jmp to hlt;hlt.
-                let pins_ptr = emu.tlb_pins().as_ptr();
-                let pins_len = emu.tlb_pins().len();
-                let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
                 let dma = &mut emu.device_manager.dma;
                 assert!(dma.register_dma8_channel(2, dma_read, dma_write, "SMC test"));
                 dma.s[0].mask[2] = false;
@@ -1709,7 +1515,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 dma.s[0].chan[2].current_address = 0x1008;
                 dma.s[0].chan[2].current_count = 1;
                 dma.s[0].chan[2].mode.transfer_type = 1;
-                dma.raise_hlda(Some(&mut emu.memory), pins);
+                dma.raise_hlda(Some(&mut emu.memory));
 
                 for _ in 0..50 {
                     unsafe { emu.run_cpu_batch(4096) }.unwrap();
@@ -2121,21 +1927,20 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     entry.lpf = 0;
                     entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 }
-                emu.refresh_tlb_pins();
-                assert!(emu
-                    .tlb_pins()
-                    .iter()
-                    .all(|pin| pin.is_alloc_range_pinned(block, block + MIB)));
+                // The mapping is cached on the CPU itself now that no sidecar
+                // mirrors it, so the flush is asserted where it happens.
+                let _ = block;
+                assert!(emu.cpu_ref(0).dtlb.entries[0].valid());
 
                 emu.device_manager.pci_conf_addr = 0x8000_0058;
                 emu.device_manager.pci_write(0x0CFD, 0x30, 1);
                 assert!(emu.device_manager.pam_needs_update);
                 emu.service_scheduler_boundary(0).unwrap();
 
-                assert!(emu
-                    .tlb_pins()
-                    .iter()
-                    .all(|pin| !pin.is_alloc_range_pinned(block, block + MIB)));
+                assert!(
+                    !emu.cpu_ref(0).dtlb.entries[0].valid(),
+                    "a PAM boundary must invalidate every cached mapping"
+                );
                 assert!(emu.memory.memory_type(12, 1));
             })
             .unwrap()
@@ -2166,13 +1971,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     entry.lpf = 0;
                     entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 }
-                emu.refresh_tlb_pins();
                 emu.write_port_92h(0x00);
                 assert!(!emu.pc_system.get_enable_a20());
-                assert!(emu
-                    .tlb_pins()
-                    .iter()
-                    .all(|pin| !pin.is_alloc_range_pinned(block, block + MIB)));
+                assert!(
+                    !emu.cpu_ref(0).dtlb.entries[0].valid(),
+                    "an A20 change must invalidate every cached mapping"
+                );
 
                 for cpu_index in 0..emu.cpu_count() {
                     let cpu = emu.cpu_mut_at(cpu_index);
@@ -2182,7 +1986,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     entry.lpf = 0;
                     entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 }
-                emu.refresh_tlb_pins();
                 emu.device_manager.keyboard.write(
                     crate::iodev::keyboard::KBD_COMMAND_PORT,
                     0xDF,
@@ -2191,10 +1994,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert!(emu.device_manager.keyboard.a20_change_pending);
                 emu.service_scheduler_boundary(0).unwrap();
                 assert!(emu.pc_system.get_enable_a20());
-                assert!(emu
-                    .tlb_pins()
-                    .iter()
-                    .all(|pin| !pin.is_alloc_range_pinned(block, block + MIB)));
+                assert!(
+                    !emu.cpu_ref(0).dtlb.entries[0].valid(),
+                    "the keyboard-controller A20 path must flush mappings too"
+                );
 
                 // Regression for independent controller mirrors. Before the
                 // boundary synchronization, each second write matched its own
@@ -2417,7 +2220,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let mut received = [0u8; 4];
                 assert_eq!(
                     emu.memory
-                        .read_ram(&[], 0x20_0000, &mut received)
+                        .read_ram(0x20_0000, &mut received)
                         .unwrap(),
                     4
                 );
@@ -4426,7 +4229,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             PHASE6_FW_CFG_KEY as u32,
             FW_CFG_SELECTOR_WRITE_BYTES,
             None,
-            &[],
         );
     }
 

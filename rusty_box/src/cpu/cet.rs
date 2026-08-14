@@ -869,7 +869,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
-    use crate::memory::{BxMemC, BxMemoryStubC, CpuTlbPin};
+    use crate::memory::{BxMemC, BxMemoryStubC};
     use core::ptr::NonNull;
 
     /// Build a fresh CPU and switch it into protected mode with CET enabled in CR4.
@@ -1032,12 +1032,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 cpu.a20_mask = mem.a20_mask();
                 cpu.install_memory_bases(&mut mem);
                 assert!(!cpu.mem_host_base.is_null());
-                let pin = CpuTlbPin::new(&cpu);
-                cpu.wire_memory_access(
-                    NonNull::from(&mut mem),
-                    core::slice::from_ref(&pin),
-                    &pin,
-                );
+                cpu.wire_memory_access(NonNull::from(&mut mem));
 
                 // Place SSP somewhere inside the 1 MiB RAM region, 16-byte aligned,
                 // away from the BIOS shadow region (0xA0000+) and low IVT.

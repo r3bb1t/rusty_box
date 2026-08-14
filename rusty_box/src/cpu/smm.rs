@@ -1054,7 +1054,7 @@ mod tests {
     /// SMBASE 0x30000, which is plain DRAM with no routing involved.
     #[test]
     fn relocated_smbase_save_area_is_routed_under_the_vga_window() {
-        use crate::memory::{CpuMemoryPolicy, CpuTlbPin};
+        use crate::memory::CpuMemoryPolicy;
 
         let (mut cpu, mut mem) = cpu_with_memory();
 
@@ -1084,15 +1084,14 @@ mod tests {
 
         // The save state must be in DRAM, not in the VGA planes: read the
         // backing RAM directly, bypassing every routing decision.
-        let pins = [CpuTlbPin::new(&*cpu)];
         let mut raw = [0u8; 4];
-        assert_eq!(mem.read_ram(&pins, 0xafefc, &mut raw).unwrap(), 4);
+        assert_eq!(mem.read_ram(0xafefc, &mut raw).unwrap(), 4);
         assert_eq!(
             u32::from_le_bytes(raw),
             SMM_REVISION_ID,
             "SMM entry must write the save state to DRAM under the VGA window"
         );
-        assert_eq!(mem.read_ram(&pins, 0xaffe0, &mut raw).unwrap(), 4);
+        assert_eq!(mem.read_ram(0xaffe0, &mut raw).unwrap(), 4);
         assert_eq!(
             u32::from_le_bytes(raw),
             0xdead_1234,
@@ -1103,9 +1102,7 @@ mod tests {
         // the VGA handler while DOPEN is clear.
         let mut via_vga = [0xffu8; 4];
         assert_eq!(
-            mem.read_physical_page(
-                &pins,
-                CpuMemoryPolicy::default(),
+            mem.read_physical_page(CpuMemoryPolicy::default(),
                 0xafefc,
                 4,
                 &mut via_vga,
@@ -1128,7 +1125,7 @@ mod tests {
         mem.enable_smram(true, false);
         let mut via_cpu = [0xffu8; 4];
         assert_eq!(
-            mem.read_physical_page(&pins, CpuMemoryPolicy::default(), 0xafefc, 4, &mut via_cpu)
+            mem.read_physical_page(CpuMemoryPolicy::default(), 0xafefc, 4, &mut via_cpu)
                 .expect("CPU read with SMRAM open"),
             crate::memory::PhysAccess::Done,
             "with SMRAM open a CPU access is served by memory, not a device"
@@ -1140,7 +1137,7 @@ mod tests {
         );
         let mut via_device = [0xffu8; 4];
         assert_eq!(
-            mem.read_physical_page(&pins, CpuMemoryPolicy::device(), 0xafefc, 4, &mut via_device)
+            mem.read_physical_page(CpuMemoryPolicy::device(), 0xafefc, 4, &mut via_device)
                 .expect("device read with SMRAM open"),
             crate::memory::PhysAccess::Mmio(crate::iodev::DevSlot::VGA.mmio_token()),
             "a device access must never see SMRAM (Bochs memory.cc cpu != NULL)"
@@ -1156,7 +1153,6 @@ mod tests {
             mem.get_host_mem_addr_pinned(
                 0xa8000,
                 crate::cpu::rusty_box::MemoryAccessType::Execute,
-                &pins,
                 policy,
             )
             .unwrap()
@@ -1167,7 +1163,6 @@ mod tests {
             mem.get_host_mem_addr_pinned(
                 0xa8000,
                 crate::cpu::rusty_box::MemoryAccessType::RW,
-                &pins,
                 policy,
             )
             .unwrap()

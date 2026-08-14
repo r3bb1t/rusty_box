@@ -290,20 +290,14 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 }
                 TimerOwner::PciIdeCh0 => {
                     for _ in 0..counts[entry] {
-                        let pins_ptr = self.tlb_pins().as_ptr();
-                        let pins_len = self.tlb_pins().len();
-                        let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
                         self.device_manager
-                            .pci_ide_timer(0, &mut self.pc_system, &mut self.memory, pins);
+                            .pci_ide_timer(0, &mut self.pc_system, &mut self.memory);
                     }
                 }
                 TimerOwner::PciIdeCh1 => {
                     for _ in 0..counts[entry] {
-                        let pins_ptr = self.tlb_pins().as_ptr();
-                        let pins_len = self.tlb_pins().len();
-                        let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
                         self.device_manager
-                            .pci_ide_timer(1, &mut self.pc_system, &mut self.memory, pins);
+                            .pci_ide_timer(1, &mut self.pc_system, &mut self.memory);
                     }
                 }
                 TimerOwner::HdSeek(param) => {
@@ -680,9 +674,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             // 32-bit message. Bochs never advertises the FSB capability bit,
             // so guests do not normally reach this.
             let mut bytes = value.to_le_bytes();
-            match self.memory.write_physical_page(
-                &[],
-                // DEV_MEM_WRITE_PHYSICAL — a device access, so it must not see
+            match self.memory.write_physical_page(// DEV_MEM_WRITE_PHYSICAL — a device access, so it must not see
                 // SMRAM (Bochs memory.cc `cpu == NULL`).
                 crate::memory::CpuMemoryPolicy::device(),
                 address,

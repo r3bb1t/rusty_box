@@ -242,7 +242,7 @@ impl<P> TLBEntry<P> {
         memtype: MemType::UC,
     };
 
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         self.lpf != BX_INVALID_TLB_ENTRY
     }
 

@@ -653,7 +653,6 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         eip_biased: u32,
         p_addr: BxPhyAddress,
         mem: &'c mut BxMemC,
-        cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<BxICacheEntry> {
         // Raw pointer for stamp-table marking after `mem` is moved into
         // boundary_fetch below (same reborrow discipline as cpu_loop's
@@ -966,7 +965,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     // Call boundary_fetch (matching C++ line 150)
                     // Pass the current remaining bytes to page boundary
                     let boundary_instr =
-                        self.boundary_fetch(current_fetch_ptr, current_remaining, mem, cpus)?;
+                        self.boundary_fetch(current_fetch_ptr, current_remaining, mem)?;
 
                     // Store instruction in mpool (check bounds first)
                     if current_mpindex >= BX_ICACHE_MEM_POOL {
@@ -1047,7 +1046,6 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         fetch_ptr: &[u8],
         remaining_in_page: usize,
         mem: &'c mut BxMemC,
-        cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<Instruction> {
         let mut fetch_buffer = [0u8; 32];
 
@@ -1086,7 +1084,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // (matching C++ line 274-275)
         self.set_rip(self.rip() + remaining_in_page as u64);
         // Call prefetch directly - same lifetime as serve_icache_miss
-        self.prefetch(mem, cpus)?;
+        self.prefetch(mem)?;
 
         let fetch_buffer_limit = (self.eip_page_window_size as usize).min(15);
 

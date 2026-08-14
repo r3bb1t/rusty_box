@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use tempfile::tempfile;
 
-use super::{Block, BxMemoryStubC, CpuTlbPin, MemoryError, Result};
+use super::{Block, BxMemoryStubC, MemoryError, Result};
 #[cfg(feature = "std")]
 use super::{MemorySnapshotGeometry, MemorySnapshotResidency};
 use crate::config::BxPhyAddress as A20Mask;
@@ -875,14 +875,13 @@ impl BxMemoryStubC {
     pub(super) fn resident_slot_range(
         &mut self,
         addr: usize,
-        pins: &[CpuTlbPin],
     ) -> Result<core::ops::Range<usize>> {
         if addr >= self.len {
             return Err(MemoryError::Internal("translated RAM offset out of range").into());
         }
         let guest_block = addr / self.block_size;
         if matches!(self.blocks_offsets()[guest_block], Block::SwappedOut) {
-            self.allocate_block(guest_block, pins)?;
+            self.allocate_block(guest_block)?;
         }
         let Block::Block { offset } = self.blocks_offsets()[guest_block] else {
             return Err(MemoryError::Internal("allocated block is not resident").into());
@@ -901,9 +900,8 @@ impl BxMemoryStubC {
     pub(super) fn get_vector_offset<'a>(
         &'a mut self,
         addr: usize,
-        pins: &[CpuTlbPin],
     ) -> Result<&'a mut [u8]> {
-        let range = self.resident_slot_range(addr, pins)?;
+        let range = self.resident_slot_range(addr)?;
         Ok(&mut self.actual_vector_mut()[range])
     }
 
@@ -962,7 +960,7 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub(crate) fn allocate_block(&mut self, block: usize, pins: &[CpuTlbPin]) -> Result<()> {
+    pub(crate) fn allocate_block(&mut self, block: usize) -> Result<()> {
         if block >= self.num_blocks {
             return Err(MemoryError::Internal("guest block out of range").into());
         }
@@ -971,7 +969,6 @@ impl BxMemoryStubC {
         }
         #[cfg(not(feature = "std"))]
         {
-            let _ = pins;
             return Err(MemoryError::InsufficientRam.into());
         }
         #[cfg(feature = "std")]
@@ -984,6 +981,16 @@ impl BxMemoryStubC {
             let (slot_offset, victim, uses_new_slot) = if used_blocks < capacity {
                 (used_blocks * self.block_size, None, true)
             } else {
+                // Round-robin victim selection, with no veto.
+                //
+                // This loop used to ask a per-CPU sidecar whether any CPU still
+                // held a direct reference into the candidate block, and skip it
+                // if so — which meant a machine whose live references covered
+                // every slot could not make progress at all and returned
+                // `InsufficientRam`. Staleness is now announced instead of
+                // prevented: the swap bumps the residency epoch and the holder
+                // of a cached offset discards it at its next instruction fetch.
+                // Any resident block is therefore a legal victim.
                 let mut selected = None;
                 for _ in 0..self.num_blocks {
                     let guest = self.next_swapout_idx;
@@ -991,17 +998,8 @@ impl BxMemoryStubC {
                     let Block::Block { offset } = self.blocks_offsets()[guest] else {
                         continue;
                     };
-                    // The sidecar speaks allocation offsets, which is the unit
-                    // this loop already has — no pointer needs materialising
-                    // just to ask whether a block is still referenced.
-                    let start = self.vector_offset + offset;
-                    if !pins
-                        .iter()
-                        .any(|pin| pin.is_alloc_range_pinned(start, start + self.block_size))
-                    {
-                        selected = Some((guest, offset));
-                        break;
-                    }
+                    selected = Some((guest, offset));
+                    break;
                 }
                 let (guest, offset) = selected.ok_or(MemoryError::InsufficientRam)?;
                 (offset, Some(guest), false)
@@ -1056,7 +1054,6 @@ impl BxMemoryStubC {
 
     pub(crate) fn write_physical_page(
         &mut self,
-        pins: &[CpuTlbPin],
         addr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
@@ -1087,7 +1084,7 @@ impl BxMemoryStubC {
                 self.smc_dec_write_stamp(byte_addr, 1);
                 let span = bx_guest_ram_span(byte_addr, 1, self.len)
                     .ok_or(MemoryError::Internal("physical address is not guest RAM"))?;
-                self.get_vector_offset(span.start, pins)?[0] = byte;
+                self.get_vector_offset(span.start)?[0] = byte;
             }
             return Ok(());
         }
@@ -1096,7 +1093,6 @@ impl BxMemoryStubC {
 
     pub(crate) fn read_physical_page(
         &mut self,
-        pins: &[CpuTlbPin],
         addr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
@@ -1127,7 +1123,7 @@ impl BxMemoryStubC {
                 let byte_addr = a20_addr + offset as u64;
                 let span = bx_guest_ram_span(byte_addr, 1, self.len)
                     .ok_or(MemoryError::Internal("physical address is not guest RAM"))?;
-                *byte = self.get_vector_offset(span.start, pins)?[0];
+                *byte = self.get_vector_offset(span.start)?[0];
             }
             Ok(())
         } else {

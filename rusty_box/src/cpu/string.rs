@@ -2107,7 +2107,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             if let Ok(Some(slice)) = mem.get_host_mem_addr_pinned(
                 paddr,
                 MemoryAccessType::Read,
-                self.active_tlb_pins(),
                 policy,
             ) {
                 let val = slice.first().copied().unwrap_or(0);
@@ -2178,7 +2177,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             if let Ok(Some(slice)) = mem.get_host_mem_addr_pinned(
                 paddr,
                 MemoryAccessType::Write,
-                self.active_tlb_pins(),
                 policy,
             ) {
                 if let Some(b) = slice.get_mut(0) {

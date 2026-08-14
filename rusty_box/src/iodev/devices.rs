@@ -18,7 +18,7 @@ use alloc::string::String;
 
 use crate::{
     cpu::ResetReason,
-    memory::{BxMemC, CpuTlbPin},
+    memory::BxMemC,
     pc_system::BxPcSystemC,
     Result,
 };
@@ -76,11 +76,10 @@ pub struct Port92State {
 /// RAM. Reads past a hole or the configured guest length are zero-filled.
 fn read_bmdma_prd(
     mem: &mut BxMemC,
-    pins: &[CpuTlbPin],
     prd_addr: u32,
 ) -> (u32, u32) {
     let mut raw = [0u8; 8];
-    match mem.read_ram(pins, prd_addr as u64, &mut raw) {
+    match mem.read_ram(prd_addr as u64, &mut raw) {
         Ok(_) => {}
         Err(error) => tracing::error!("BM-DMA PRD read at {prd_addr:#x} failed: {error:?}"),
     }
@@ -251,9 +250,6 @@ pub struct DeviceManager {
     pub diag_vector_hist: [u32; 256],
     /// Pointer to BxMemC for fw_cfg DMA. Set temporarily during CPU execution.
     pub(crate) mem_ptr: Option<core::ptr::NonNull<BxMemC>>,
-    /// Complete stable TLB-pin slice for fw_cfg DMA allocation/eviction.
-    pub(crate) active_tlb_pins: Option<core::ptr::NonNull<CpuTlbPin>>,
-    pub(crate) active_tlb_pin_count: usize,
     /// I/O base the BM-DMA ports are currently registered at (0 = none).
     /// Lets a BAR4 move unregister the old range first, matching Bochs
     /// devices.cc pci_write_handler_common BAR remapping.
@@ -364,8 +360,6 @@ impl DeviceManager {
             diag_iac_count: 0,
             diag_vector_hist: [0; 256],
             mem_ptr: None,
-            active_tlb_pins: None,
-            active_tlb_pin_count: 0,
             bmdma_ports_base: 0,
             pm_ports_base: 0,
             sm_ports_base: 0,
@@ -1021,7 +1015,6 @@ impl DeviceManager {
         channel: usize,
         pcs: &mut crate::pc_system::BxPcSystemC,
         mem: &mut crate::memory::BxMemC,
-        pins: &[CpuTlbPin],
     ) {
         if channel >= 2 {
             return;
@@ -1056,7 +1049,7 @@ impl DeviceManager {
         // Fetch the current PRD entry (8 bytes: physical addr, size) from
         // guest RAM. Bochs pci_ide.cc timer: DEV_MEM_READ_PHYSICAL.
         let (prd_addr, prd_size_raw) =
-            read_bmdma_prd(mem, pins, pci_ide.bmdma[channel].prd_current);
+            read_bmdma_prd(mem, pci_ide.bmdma[channel].prd_current);
         let mut size = (prd_size_raw & 0xfffe) as usize;
         if size == 0 {
             size = 0x10000;
@@ -1095,7 +1088,7 @@ impl DeviceManager {
             let idx = pci_ide.bmdma[channel].buffer_idx;
             let end = (idx + size).min(pci_ide.bmdma[channel].buffer.len());
             let payload = &pci_ide.bmdma[channel].buffer[idx..end];
-            match mem.write_ram(pins, prd_addr as u64, payload) {
+            match mem.write_ram(prd_addr as u64, payload) {
                 Ok(copied) if copied == payload.len() => {
                     pci_ide.bmdma[channel].buffer_idx = end;
                 }
@@ -1120,7 +1113,7 @@ impl DeviceManager {
             let end = (top + size).min(pci_ide.bmdma[channel].buffer.len());
             let guest_buffer = &mut pci_ide.bmdma[channel].buffer[top..end];
             guest_buffer.fill(0);
-            let copied = match mem.read_ram(pins, prd_addr as u64, guest_buffer) {
+            let copied = match mem.read_ram(prd_addr as u64, guest_buffer) {
                 Ok(copied) => copied,
                 Err(error) => {
                     tracing::error!("BM-DMA write ch={channel}: guest read failed: {error:?}");
@@ -1170,7 +1163,7 @@ impl DeviceManager {
             pci_ide.bmdma[channel].buffer_idx = 0;
             pci_ide.bmdma[channel].prd_current += 8;
             let (_, next_size_raw) =
-                read_bmdma_prd(mem, pins, pci_ide.bmdma[channel].prd_current);
+                read_bmdma_prd(mem, pci_ide.bmdma[channel].prd_current);
             let mut next_size = next_size_raw & 0xfffe;
             if next_size == 0 {
                 next_size = 0x10000;
@@ -1561,18 +1554,10 @@ impl DeviceManager {
         }
     }
 
-    /// fw_cfg I/O write dispatch — reconstructs the stable active pin slice.
+    /// fw_cfg I/O write dispatch.
     pub(crate) fn fw_cfg_write(&mut self, address: u16, value: u32, io_len: u8) {
         let mem = self.mem_ptr.map(|mut p| unsafe { p.as_mut() });
-        let pins = match (self.active_tlb_pins, self.active_tlb_pin_count) {
-            (Some(ptr), count) => unsafe { core::slice::from_raw_parts(ptr.as_ptr(), count) },
-            (None, 0) => &[],
-            (None, count) => {
-                tracing::error!("fw_cfg DMA: missing pin storage for {count} active CPUs");
-                &[]
-            }
-        };
-        self.fw_cfg.write_port(address, value, io_len, mem, pins);
+        self.fw_cfg.write_port(address, value, io_len, mem);
     }
 }
 
@@ -2467,7 +2452,7 @@ mod tests {
             let mut prd = [0u8; 8];
             prd[0..4].copy_from_slice(&0x0030_0000u32.to_le_bytes());
             prd[4..8].copy_from_slice(&(1024u32 | 0x8000_0000).to_le_bytes());
-            assert_eq!(mem.write_ram(&[], 0x0020_0000, &prd).unwrap(), prd.len());
+            assert_eq!(mem.write_ram(0x0020_0000, &prd).unwrap(), prd.len());
             mem.smc_mark_icache_mask(0x0030_0000, u32::MAX);
             let before_smc = mem.smc_seq_next();
 
@@ -2512,11 +2497,11 @@ mod tests {
             pcs.activate_timer_usec(handle, 1, false).unwrap();
 
             // Timer fires: single PRD with EOT completes the transfer.
-            dm.pci_ide_timer(0, &mut pcs, &mut mem, &[]);
+            dm.pci_ide_timer(0, &mut pcs, &mut mem);
 
             let mut guest_payload = [0; 1024];
             assert_eq!(
-                mem.read_ram(&[], 0x0030_0000, &mut guest_payload).unwrap(),
+                mem.read_ram(0x0030_0000, &mut guest_payload).unwrap(),
                 guest_payload.len()
             );
             assert_eq!(

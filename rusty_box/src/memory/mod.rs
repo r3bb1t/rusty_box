@@ -12,189 +12,11 @@ pub mod permissions;
 mod tests;
 
 pub use super::error::Result;
-use crate::{
-    config::{BxPhyAddress, MAX_MEM_BLOCKS},
-    cpu::{BxCpuC},
-};
+use crate::config::{BxPhyAddress, MAX_MEM_BLOCKS};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 pub use error::*;
 
-use core::cell::UnsafeCell;
-
-/// The fixed TLB host-pointer capacities are architectural CPU cache sizes.
-///
-/// They deliberately live with the descriptor rather than the CPU: eviction
-/// checks may run while a CPU is mutably borrowed for instruction execution.
-/// These mirror `BX_DTLB_SIZE` / `BX_ITLB_SIZE` (cpu.rs, Bochs cpu.h) and must
-/// stay `>=` them — each pin array is indexed by TLB slot, so under-sizing
-/// would let a slot index run past the end.
-pub(crate) const CPU_TLB_PIN_DTLB_SLOTS: usize = 2048;
-pub(crate) const CPU_TLB_PIN_ITLB_SLOTS: usize = 1024;
-
-/// Pin-visible memory references copied out of one CPU.
-///
-/// The emulator is single-threaded. It refreshes this state before wiring a
-/// CPU memory scope and each CPU synchronously updates it after changing a
-/// TLB/VMCB mapping or invalidating a TLB entry. `UnsafeCell` permits those
-/// updates through a stable descriptor without touching the mutably borrowed
-/// CPU during an allocator eviction check.
-///
-/// Every field is a **byte offset into the memory allocation, biased by one**:
-/// zero means "nothing published", and offset `n` is stored as `n + 1`.
-///
-/// The bias exists because offset 0 is a perfectly legitimate first byte of the
-/// allocation, so it cannot double as the absence marker the way a null pointer
-/// could. Keeping absence at all-zero is what lets `clear_tlb_hosts` stay a
-/// memset, and it makes the absence test disappear into the bounds comparison
-/// in `is_alloc_range_pinned` — see there.
-struct CpuTlbPinState {
-    dtlb_offsets: [usize; CPU_TLB_PIN_DTLB_SLOTS],
-    itlb_offsets: [usize; CPU_TLB_PIN_ITLB_SLOTS],
-    vmcb_offset: usize,
-    /// Bounded non-ITLB instruction-fetch window (`eip_fetch_window`) interval;
-    /// `fetch_window_end == 0` means no window. Bochs cpu.cc `prefetch`:
-    /// `eipFetchPtr` stays valid until the next refill, so its backing block
-    /// must never be evicted while retained.
-    fetch_window_start: usize,
-    fetch_window_end: usize,
-}
-
-impl CpuTlbPinState {
-    const fn empty() -> Self {
-        Self {
-            dtlb_offsets: [0; CPU_TLB_PIN_DTLB_SLOTS],
-            itlb_offsets: [0; CPU_TLB_PIN_ITLB_SLOTS],
-            vmcb_offset: 0,
-            fetch_window_start: 0,
-            fetch_window_end: 0,
-        }
-    }
-}
-
-/// A stable, external view of one CPU's direct memory references.
-///
-/// This descriptor never retains a CPU pointer. Its interior state is updated
-/// only by the owning CPU while the emulator has exclusive machine access, and
-/// it remains separately addressable while that CPU has an active `&mut`
-/// borrow. Allocator checks therefore inspect only this sidecar.
-///
-/// Everything published here is an **allocation offset**, never a host address.
-/// The allocator asks its questions in offsets — it is deciding which block of
-/// its own allocation to evict — so this side is where the units belong, and
-/// the publisher, not the checker, is the one that has a base in hand.
-pub(crate) struct CpuTlbPin {
-    state: UnsafeCell<CpuTlbPinState>,
-}
-
-impl CpuTlbPin {
-    pub(crate) fn new<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &BxCpuC<T>,
-    ) -> Self {
-        let pin = Self {
-            state: UnsafeCell::new(CpuTlbPinState::empty()),
-        };
-        cpu.refresh_tlb_pin(&pin);
-        pin
-    }
-
-    #[inline]
-    pub(crate) fn clear_tlb_hosts(&self) {
-        // SAFETY: sidecar mutation is serialized by the emulator's
-        // single-threaded CPU/memory scope contract.
-        let state = unsafe { &mut *self.state.get() };
-        state.dtlb_offsets.fill(0);
-        state.itlb_offsets.fill(0);
-        state.vmcb_offset = 0;
-        state.fetch_window_start = 0;
-        state.fetch_window_end = 0;
-    }
-
-    /// Apply the absent-is-zero bias. `None` is 0; offset `n` is `n + 1`.
-    #[inline(always)]
-    fn biased(offset: Option<usize>) -> usize {
-        match offset {
-            Some(o) => o.wrapping_add(1),
-            None => 0,
-        }
-    }
-
-    #[inline]
-    pub(crate) fn set_dtlb_offset(&self, slot: usize, offset: Option<usize>) {
-        debug_assert!(slot < CPU_TLB_PIN_DTLB_SLOTS);
-        // SAFETY: see `clear_tlb_hosts`.
-        unsafe { (*self.state.get()).dtlb_offsets[slot] = Self::biased(offset) };
-    }
-
-    #[inline]
-    pub(crate) fn set_itlb_offset(&self, slot: usize, offset: Option<usize>) {
-        debug_assert!(slot < CPU_TLB_PIN_ITLB_SLOTS);
-        // SAFETY: see `clear_tlb_hosts`.
-        unsafe { (*self.state.get()).itlb_offsets[slot] = Self::biased(offset) };
-    }
-
-    #[inline]
-    pub(crate) fn set_vmcb_offset(&self, offset: Option<usize>) {
-        // SAFETY: see `clear_tlb_hosts`.
-        unsafe { (*self.state.get()).vmcb_offset = Self::biased(offset) };
-    }
-
-    /// Publish (or clear, with `None`) the bounded instruction-fetch window so
-    /// eviction never steals the block backing `eip_fetch_window`.
-    #[inline]
-    pub(crate) fn set_fetch_window(&self, window: Option<(usize, usize)>) {
-        // SAFETY: see `clear_tlb_hosts`.
-        let state = unsafe { &mut *self.state.get() };
-        match window {
-            // Biased like every other field, so a window starting at offset 0
-            // is distinguishable from no window at all.
-            Some((start, len)) => {
-                state.fetch_window_start = start.wrapping_add(1);
-                state.fetch_window_end = start.wrapping_add(len).wrapping_add(1);
-            }
-            None => {
-                state.fetch_window_start = 0;
-                state.fetch_window_end = 0;
-            }
-        }
-    }
-
-    /// Does this CPU hold a direct reference into `[start, end)` of the
-    /// allocation? Both bounds are allocation offsets, matching what the
-    /// allocator already computes for the block it wants to evict.
-    #[inline]
-    pub(crate) fn is_alloc_range_pinned(&self, start: usize, end: usize) -> bool {
-        // SAFETY: eviction checks only read this separately addressable state;
-        // mutation is serialized before/after each CPU instruction operation.
-        let state = unsafe { &*self.state.get() };
-        // Compare in biased space: shifting both bounds up by one costs two
-        // adds here instead of a subtract per slot, and it makes the absence
-        // check free — an unpublished slot holds 0, and `lo` is always >= 1,
-        // so zero can never fall inside the range.
-        let lo = start.wrapping_add(1);
-        let hi = end.wrapping_add(1);
-        let contains = |biased: usize| biased >= lo && biased < hi;
-        contains(state.vmcb_offset)
-            || (state.fetch_window_start < hi && state.fetch_window_end > lo)
-            || state.dtlb_offsets.iter().copied().any(contains)
-            || state.itlb_offsets.iter().copied().any(contains)
-    }
-
-    /// Exact equality of every published pin. Used by the Track B property
-    /// test to assert that incrementally maintained sidecars stay byte-identical
-    /// to a fresh `refresh_tlb_pin` rescan after each TLB operation.
-    #[cfg(test)]
-    pub(crate) fn state_matches(&self, other: &CpuTlbPin) -> bool {
-        // SAFETY: single-threaded test access; no concurrent sidecar mutation.
-        let a = unsafe { &*self.state.get() };
-        let b = unsafe { &*other.state.get() };
-        a.dtlb_offsets == b.dtlb_offsets
-            && a.itlb_offsets == b.itlb_offsets
-            && a.vmcb_offset == b.vmcb_offset
-            && a.fetch_window_start == b.fetch_window_start
-            && a.fetch_window_end == b.fetch_window_end
-    }
-}
 /// The only CPU state consumed by handler-aware physical-memory operations.
 ///
 /// It is computed while the CPU is ordinarily reborrowed, before memory is
@@ -355,11 +177,15 @@ pub struct BxMemoryStubC {
     ///
     /// Bumped whenever a guest block's slot assignment changes, which is
     /// exactly when a cached RAM offset may have started pointing at different
-    /// guest bytes. Consumers that cache offsets (TLB entries, the instruction
-    /// fetch window, the VMCB pointer) record the epoch they were filled at and
-    /// discard the cache when it moves. That is the swap-staleness answer the
-    /// `CpuTlbPin` sidecar currently gives by *preventing* eviction; an epoch
-    /// lets eviction proceed and invalidates instead.
+    /// guest bytes. Consumers that cache offsets — the instruction TLB, the
+    /// bounded fetch window and the VMCB backing — record the epoch they were
+    /// filled at and discard the cache when it moves
+    /// (`BxCpuC::revalidate_allocation_caches`, at fetch-window refill).
+    ///
+    /// This replaced a per-CPU pin sidecar that answered the same question by
+    /// *preventing* eviction of any block a CPU still referenced. Announcing
+    /// costs one compare per refill and always makes progress; vetoing cost a
+    /// scan per eviction and could refuse to evict at all.
     ///
     /// Cost is nil where it matters: under full residency — the default, and
     /// the only regime `no_alloc` has — no block is ever swapped out, so
@@ -687,7 +513,6 @@ impl BxMemC {
     /// device handlers just like Bochs's physical DMA RAM path.
     pub(crate) fn read_ram(
         &mut self,
-        pins: &[CpuTlbPin],
         addr: BxPhyAddress,
         out: &mut [u8],
     ) -> Result<usize> {
@@ -715,7 +540,7 @@ impl BxMemC {
                 usize::MAX
             };
             let chunk = {
-                let vector = match self.inherited_memory_stub.get_vector_offset(span.start, pins) {
+                let vector = match self.inherited_memory_stub.get_vector_offset(span.start) {
                     Ok(vector) => vector,
                     Err(_) if copied != 0 => return Ok(copied),
                     Err(error) => return Err(error),
@@ -740,7 +565,6 @@ impl BxMemC {
     /// precisely the A20-adjusted guest bytes actually committed.
     pub(crate) fn write_ram(
         &mut self,
-        pins: &[CpuTlbPin],
         addr: BxPhyAddress,
         data: &[u8],
     ) -> Result<usize> {
@@ -767,7 +591,7 @@ impl BxMemC {
                 usize::MAX
             };
             let chunk = {
-                let vector = match self.inherited_memory_stub.get_vector_offset(span.start, pins) {
+                let vector = match self.inherited_memory_stub.get_vector_offset(span.start) {
                     Ok(vector) => vector,
                     Err(_) if copied != 0 => return Ok(copied),
                     Err(error) => return Err(error),
@@ -949,7 +773,7 @@ mod phase1_tests {
 /// the process and failed unrelated tests with STATUS_STACK_OVERFLOW.
 const TEST_STACK_SIZE: usize = 64 * MIB;
     use super::{
-        memory_rusty_box::*, BxMemC, BxMemoryStubC, CpuMemoryPolicy, CpuTlbPin, MemoryError,
+        memory_rusty_box::*, BxMemC, BxMemoryStubC, CpuMemoryPolicy, MemoryError,
         MemorySnapshotGeometry, MemorySnapshotResidency,
     };
     use std::io::{self, Read, Seek, SeekFrom};
@@ -1017,11 +841,11 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         assert_eq!(mem.identity_guest_base(), (core::ptr::null_mut(), 0));
         for block in 0..4usize {
             let value = [0x40 + block as u8];
-            assert_eq!(mem.write_ram(&[], (block * MIB) as u64, &value).unwrap(), 1);
+            assert_eq!(mem.write_ram((block * MIB) as u64, &value).unwrap(), 1);
         }
         for block in 0..4usize {
             let mut value = [0];
-            assert_eq!(mem.read_ram(&[], (block * MIB) as u64, &mut value).unwrap(), 1);
+            assert_eq!(mem.read_ram((block * MIB) as u64, &mut value).unwrap(), 1);
             assert_eq!(value, [0x40 + block as u8], "guest block {block}");
         }
     }
@@ -1037,14 +861,14 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         assert_eq!(geometry.resident_capacity, 1);
         assert_eq!(geometry.used_blocks, 0);
 
-        assert_eq!(mem.write_ram(&[], 0, &[0x11]).unwrap(), 1);
-        assert_eq!(mem.write_ram(&[], (2 * MIB) as u64, &[0x22]).unwrap(), 1);
+        assert_eq!(mem.write_ram(0, &[0x11]).unwrap(), 1);
+        assert_eq!(mem.write_ram((2 * MIB) as u64, &[0x22]).unwrap(), 1);
 
         let mut first = [0];
         let mut second = [0];
-        assert_eq!(mem.read_ram(&[], 0, &mut first).unwrap(), 1);
+        assert_eq!(mem.read_ram(0, &mut first).unwrap(), 1);
         assert_eq!(
-            mem.read_ram(&[], (2 * MIB) as u64, &mut second).unwrap(),
+            mem.read_ram((2 * MIB) as u64, &mut second).unwrap(),
             1
         );
         assert_eq!((first, second), ([0x11], [0x22]));
@@ -1054,7 +878,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     fn undersized_host_first_touch_reads_zero_without_eof() {
         let mut mem = swapped_memory();
         let mut bytes = [0xff; 32];
-        assert_eq!(mem.read_ram(&[], (3 * MIB) as u64, &mut bytes).unwrap(), bytes.len());
+        assert_eq!(mem.read_ram((3 * MIB) as u64, &mut bytes).unwrap(), bytes.len());
         assert_eq!(bytes, [0; 32]);
     }
 
@@ -1063,12 +887,12 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         let mut mem = swapped_memory();
         let source = [0x11, 0x22, 0x33, 0x44];
         assert_eq!(
-            mem.write_ram(&[], (MIB - 2) as u64, &source).unwrap(),
+            mem.write_ram((MIB - 2) as u64, &source).unwrap(),
             source.len()
         );
         let mut output = [0; 4];
         assert_eq!(
-            mem.read_ram(&[], (MIB - 2) as u64, &mut output).unwrap(),
+            mem.read_ram((MIB - 2) as u64, &mut output).unwrap(),
             output.len()
         );
         assert_eq!(output, source);
@@ -1078,9 +902,9 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     fn ram_copy_reports_out_of_range_without_partial_overflow() {
         let mut mem = swapped_memory();
         let data = [0xaa, 0xbb];
-        assert_eq!(mem.write_ram(&[], (4 * MIB - 1) as u64, &data).unwrap(), 1);
+        assert_eq!(mem.write_ram((4 * MIB - 1) as u64, &data).unwrap(), 1);
         let mut last = [0];
-        assert_eq!(mem.read_ram(&[], (4 * MIB - 1) as u64, &mut last).unwrap(), 1);
+        assert_eq!(mem.read_ram((4 * MIB - 1) as u64, &mut last).unwrap(), 1);
         assert_eq!(last, [0xaa]);
     }
 
@@ -1088,11 +912,11 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     fn block_aware_ram_copy_reapplies_a20_across_one_megabyte() {
         let mut mem = swapped_memory();
         mem.set_a20_mask(0xFFFF_FFFF_FFEF_FFFF);
-        assert_eq!(mem.write_ram(&[], 0x000f_fffe, &[1, 2, 3, 4]).unwrap(), 4);
+        assert_eq!(mem.write_ram(0x000f_fffe, &[1, 2, 3, 4]).unwrap(), 4);
         let mut low = [0; 2];
         let mut high = [0; 2];
-        assert_eq!(mem.read_ram(&[], 0, &mut low).unwrap(), 2);
-        assert_eq!(mem.read_ram(&[], 0x000f_fffe, &mut high).unwrap(), 2);
+        assert_eq!(mem.read_ram(0, &mut low).unwrap(), 2);
+        assert_eq!(mem.read_ram(0x000f_fffe, &mut high).unwrap(), 2);
         assert_eq!(low, [3, 4]);
         assert_eq!(high, [1, 2]);
     }
@@ -1101,12 +925,12 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     fn load_ram_above_host_backing_is_complete() {
         let mut mem = swapped_memory();
         let data = [7, 8, 9];
-        mem.load_RAM(&[], &data, (3 * MIB) as u64).unwrap();
+        mem.load_RAM(&data, (3 * MIB) as u64).unwrap();
         let mut output = [0; 3];
-        assert_eq!(mem.read_ram(&[], (3 * MIB) as u64, &mut output).unwrap(), 3);
+        assert_eq!(mem.read_ram((3 * MIB) as u64, &mut output).unwrap(), 3);
         assert_eq!(output, data);
         assert!(matches!(
-            mem.load_RAM(&[], &[1, 2], (4 * MIB - 1) as u64),
+            mem.load_RAM(&[1, 2], (4 * MIB - 1) as u64),
             Err(crate::Error::Memory(MemoryError::RamImageOutOfRange))
         ));
     }
@@ -1117,11 +941,11 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             false,
         );
         source.set_a20_mask(u64::MAX);
-        source.write_ram(&[], 0, &[0x31]).unwrap();
-        source.write_ram(&[], (2 * MIB) as u64, &[0x42]).unwrap();
-        source.write_ram(&[], (4 * MIB - 1) as u64, &[0x43]).unwrap();
-        source.write_ram(&[], (4 * MIB) as u64, &[0x51]).unwrap();
-        source.write_ram(&[], (5 * MIB - 1) as u64, &[0x52]).unwrap();
+        source.write_ram(0, &[0x31]).unwrap();
+        source.write_ram((2 * MIB) as u64, &[0x42]).unwrap();
+        source.write_ram((4 * MIB - 1) as u64, &[0x43]).unwrap();
+        source.write_ram((4 * MIB) as u64, &[0x51]).unwrap();
+        source.write_ram((5 * MIB - 1) as u64, &[0x52]).unwrap();
 
         let (geometry, residency) = snapshot_map(&source);
         assert_eq!(geometry.guest_len, (5 * MIB) as u64);
@@ -1176,28 +1000,28 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .all(|&byte| byte == 0));
 
         let mut value = [0];
-        assert_eq!(restored.read_ram(&[], 0, &mut value).unwrap(), 1);
+        assert_eq!(restored.read_ram(0, &mut value).unwrap(), 1);
         assert_eq!(value, [0x31]);
         assert_eq!(
-            restored.read_ram(&[], (2 * MIB) as u64, &mut value).unwrap(),
+            restored.read_ram((2 * MIB) as u64, &mut value).unwrap(),
             1
         );
         assert_eq!(value, [0x42]);
         assert_eq!(
             restored
-                .read_ram(&[], (4 * MIB - 1) as u64, &mut value)
+                .read_ram((4 * MIB - 1) as u64, &mut value)
                 .unwrap(),
             1
         );
         assert_eq!(value, [0]);
         assert_eq!(
-            restored.read_ram(&[], (4 * MIB) as u64, &mut value).unwrap(),
+            restored.read_ram((4 * MIB) as u64, &mut value).unwrap(),
             1
         );
         assert_eq!(value, [0x51]);
         assert_eq!(
             restored
-                .read_ram(&[], (5 * MIB - 1) as u64, &mut value)
+                .read_ram((5 * MIB - 1) as u64, &mut value)
                 .unwrap(),
             1
         );
@@ -1313,11 +1137,8 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 );
                 mem.set_a20_mask(u64::MAX);
                 let cpu = BxCpuBuilder::new().build().unwrap();
-                let pins = [CpuTlbPin::new(&*cpu)];
                 let mut written = [0x11, 0x22, 0x33, 0x44];
-                let wrote = mem.write_physical_page(
-                    &pins,
-                    CpuMemoryPolicy::default(),
+                let wrote = mem.write_physical_page(CpuMemoryPolicy::default(),
                     1022,
                     written.len(),
                     &mut written,
@@ -1326,9 +1147,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 assert_eq!(wrote, super::PhysAccess::Done, "plain RAM reaches no device");
 
                 let mut read = [0; 4];
-                let got = mem.read_physical_page(
-                    &pins,
-                    CpuMemoryPolicy::default(),
+                let got = mem.read_physical_page(CpuMemoryPolicy::default(),
                     1022,
                     read.len(),
                     &mut read,
@@ -1342,208 +1161,9 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .unwrap();
     }
 
-    #[test]
-    fn cpu_tlb_pin_sidecar_refreshes_and_clears_without_cpu_probe() {
-        std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
-            .spawn(|| {
-                let mut cpu = BxCpuBuilder::new().build().unwrap();
-                let mut mem = BxMemC::new(
-                    BxMemoryStubC::create_and_init(MIB, MIB, MIB).unwrap(),
-                    false,
-                );
-                let pin = CpuTlbPin::new(&*cpu);
-                let pins = core::slice::from_ref(&pin);
 
-                cpu.wire_memory_access(core::ptr::NonNull::from(&mut mem), pins, &pin);
-                assert!(!pin.is_alloc_range_pinned(0x4000, 0x5000));
 
-                // A batch refresh publishes a mapping installed before the
-                // execution scope; no allocator check dereferences `cpu`.
-                cpu.mem_host_base = 0x4000 as *mut u8;
-                let entry = &mut cpu.dtlb.entries[0];
-                entry.lpf = 0;
-                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
-                cpu.refresh_tlb_pin(&pin);
-                assert!(pin.is_alloc_range_pinned(0x4000, 0x5000));
 
-                // The CPU's real invalidation path synchronously removes the
-                // slot, so stale over-pinning does not survive the scope.
-                cpu.tlb_flush();
-                assert!(!pin.is_alloc_range_pinned(0x4000, 0x5000));
-
-                cpu.clear_memory_access();
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[test]
-    fn sibling_tlb_pin_blocks_loader_eviction() {
-        std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
-            .spawn(|| {
-                let mut mem = BxMemC::new(
-                    BxMemoryStubC::create_and_init(2 * MIB, MIB, MIB).unwrap(),
-                    false,
-                );
-                mem.set_a20_mask(u64::MAX);
-                let mut sibling = BxCpuBuilder::new().build().unwrap();
-                mem.write_ram(&[], 0, &[0x5a]).unwrap();
-                let pins = [CpuTlbPin::new(&*sibling)];
-                let resident = mem
-                    .host_mem_range_pinned(
-                        0,
-                        MemoryAccessType::Read,
-                        &pins,
-                        CpuMemoryPolicy::default(),
-                    )
-                    .unwrap()
-                    .unwrap();
-                // Both bases — the published pin is an allocation offset, so
-                // leaving `mem_alloc_base` null would measure the data TLB's
-                // offset from nothing and quietly stop blocking eviction.
-                let alloc_base = mem.allocation_span().0;
-                sibling.mem_host_base = alloc_base.wrapping_add(resident.start);
-                sibling.mem_alloc_base = alloc_base;
-                let entry = &mut sibling.dtlb.entries[0];
-                entry.lpf = 0;
-                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
-                sibling.refresh_tlb_pin(&pins[0]);
-
-                assert!(matches!(
-                    mem.load_RAM(&pins, &[0xa5], MIB as u64),
-                    Err(Error::Memory(MemoryError::InsufficientRam))
-                ));
-                let mut retained = [0];
-                assert_eq!(mem.read_ram(&pins, 0, &mut retained).unwrap(), 1);
-                assert_eq!(retained, [0x5a]);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[test]
-    fn fetch_window_pin_blocks_data_evicting_code_block() {
-        // Bochs cpu.cc prefetch: `eipFetchPtr` stays valid until the next
-        // refill. A sub-block fetch window has no ITLB slot, so the pin's
-        // dedicated window interval is the only thing preventing a data
-        // access from evicting the code block under a full swap cap.
-        std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
-            .spawn(|| {
-                let mut mem = BxMemC::new(
-                    BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).unwrap(),
-                    false,
-                );
-                mem.set_a20_mask(u64::MAX);
-                let cpu = BxCpuBuilder::new().build().unwrap();
-                let pins = [CpuTlbPin::new(&*cpu)];
-
-                // Make guest block 0 resident and locate its span. Asking for
-                // the range rather than a pointer yields the allocation offset
-                // the sidecar and the evictor both speak in.
-                mem.write_ram(&[], 0, &[0x5a]).unwrap();
-                let block = mem
-                    .host_mem_range_pinned(
-                        0,
-                        MemoryAccessType::Execute,
-                        &pins,
-                        CpuMemoryPolicy::default(),
-                    )
-                    .unwrap()
-                    .unwrap();
-
-                // Publish a bounded sub-block fetch window inside block 0,
-                // exactly as `sync_fetch_window_pin` would.
-                pins[0].set_fetch_window(Some((block.start + 0x100, 0x80)));
-                assert!(pins[0].is_alloc_range_pinned(block.start, block.start + MIB));
-
-                // A data access to a swapped block must NOT evict the pinned
-                // code block — the sole victim candidate is protected.
-                let mut buf = [0u8; 1];
-                assert!(matches!(
-                    mem.read_ram(&pins, 2 * MIB as u64, &mut buf),
-                    Err(Error::Memory(MemoryError::InsufficientRam))
-                ));
-                // The code block is untouched: the stale-pointer scenario is
-                // prevented at its root.
-                let mut retained = [0];
-                assert_eq!(mem.read_ram(&pins, 0, &mut retained).unwrap(), 1);
-                assert_eq!(retained, [0x5a]);
-
-                // Clearing the window releases the block for eviction.
-                pins[0].set_fetch_window(None);
-                assert_eq!(mem.read_ram(&pins, 2 * MIB as u64, &mut buf).unwrap(), 1);
-                assert_eq!(buf, [0]);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[test]
-    fn pinned_cross_block_failure_returns_committed_copy_prefix() {
-        std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
-            .spawn(|| {
-                let mut mem = BxMemC::new(
-                    BxMemoryStubC::create_and_init(2 * MIB, MIB, MIB).unwrap(),
-                    false,
-                );
-                mem.set_a20_mask(u64::MAX);
-                let start = MIB as u64 - 2;
-                assert_eq!(mem.write_ram(&[], start, &[0x11, 0x22]).unwrap(), 2);
-
-                let mut sibling = BxCpuBuilder::new().build().unwrap();
-                let pins = [CpuTlbPin::new(&*sibling)];
-                let resident = mem
-                    .host_mem_range_pinned(
-                        0,
-                        MemoryAccessType::Read,
-                        &pins,
-                        CpuMemoryPolicy::default(),
-                    )
-                    .unwrap()
-                    .unwrap();
-                let alloc_base = mem.allocation_span().0;
-                // Both bases, because the data TLB's offsets are measured from
-                // guest RAM but published against the allocation. Setting only
-                // `mem_host_base` would publish a wild offset and silently stop
-                // blocking eviction, which is the very thing under test.
-                sibling.mem_host_base = alloc_base.wrapping_add(resident.start);
-                sibling.mem_alloc_base = alloc_base;
-                let entry = &mut sibling.dtlb.entries[0];
-                entry.lpf = 0;
-                entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
-                sibling.refresh_tlb_pin(&pins[0]);
-                assert!(pins[0].is_alloc_range_pinned(resident.start, resident.start + MIB));
-
-                let mut read = [0xcc; 4];
-                assert_eq!(mem.read_ram(&pins, start, &mut read).unwrap(), 2);
-                assert_eq!(read, [0x11, 0x22, 0xcc, 0xcc]);
-
-                assert_eq!(
-                    mem.write_ram(&pins, start, &[0x33, 0x44, 0x55, 0x66])
-                        .unwrap(),
-                    2
-                );
-                let mut committed = [0; 2];
-                assert_eq!(mem.read_ram(&pins, start, &mut committed).unwrap(), 2);
-                assert_eq!(committed, [0x33, 0x44]);
-
-                let mut unavailable = [0; 1];
-                assert!(matches!(
-                    mem.read_ram(&pins, MIB as u64, &mut unavailable),
-                    Err(Error::Memory(MemoryError::InsufficientRam))
-                ));
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
 
     /// The residency epoch advances exactly when a guest block changes slots.
@@ -1553,6 +1173,40 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     /// eviction happen and tells the holder its offset died. If a relocation
     /// could ever go unannounced, a stale offset would silently read another
     /// block's bytes.
+    /// A block may be evicted even while a CPU still references it.
+    ///
+    /// The pin sidecar used to veto exactly this: if any CPU held a direct
+    /// reference into the candidate block, the allocator skipped it, and a
+    /// machine whose live references covered every slot could not make progress
+    /// at all — it returned `InsufficientRam` instead. The epoch replaces the
+    /// veto with an announcement, so eviction always succeeds and the holder
+    /// discards its cached offset at the next instruction fetch.
+    ///
+    /// Asserted as a guest-visible property (doctrine R9): the access that
+    /// forces the eviction must SUCCEED and return the right bytes.
+    #[test]
+    fn a_referenced_block_can_still_be_evicted() {
+        // One resident slot, three guest blocks: serving block 1 has no choice
+        // but to evict block 0, which the previous read just referenced.
+        let mut mem = swapped_memory();
+        mem.write_ram(0, &[0xAA]).unwrap();
+        mem.write_ram(MIB as u64, &[0xBB]).unwrap();
+
+        let mut buf = [0u8; 1];
+        mem.read_ram(0, &mut buf).unwrap();
+        assert_eq!(buf, [0xAA]);
+        let epoch_holding_block_0 = mem.swap_epoch();
+
+        // Under the pin regime this could fail with InsufficientRam.
+        mem.read_ram(MIB as u64, &mut buf)
+            .expect("eviction must not be vetoed by an outstanding reference");
+        assert_eq!(buf, [0xBB]);
+        assert!(
+            mem.swap_epoch() > epoch_holding_block_0,
+            "the eviction must be announced so the stale offset is discarded"
+        );
+    }
+
     #[test]
     fn swap_epoch_advances_when_a_block_changes_slots() {
         // 4 MiB guest over 1 MiB host: one resident slot, so each access to a
@@ -1560,17 +1214,17 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         let mut mem = swapped_memory();
         let mut buf = [0u8; 1];
 
-        mem.read_ram(&[], 0, &mut buf).unwrap();
+        mem.read_ram(0, &mut buf).unwrap();
         let after_first = mem.swap_epoch();
 
-        mem.read_ram(&[], MIB as u64, &mut buf).unwrap();
+        mem.read_ram(MIB as u64, &mut buf).unwrap();
         let after_swap = mem.swap_epoch();
         assert!(
             after_swap > after_first,
             "relocating a block must announce itself: {after_first} -> {after_swap}"
         );
 
-        mem.read_ram(&[], 2 * MIB as u64, &mut buf).unwrap();
+        mem.read_ram(2 * MIB as u64, &mut buf).unwrap();
         assert!(
             mem.swap_epoch() > after_swap,
             "every relocation advances the epoch, not just the first"
@@ -1596,13 +1250,13 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         let mut buf = [0u8; 4];
         for block in 0..4u64 {
             let base = block * MIB as u64;
-            mem.write_ram(&[], base, &[1, 2, 3, 4]).unwrap();
-            mem.read_ram(&[], base, &mut buf).unwrap();
+            mem.write_ram(base, &[1, 2, 3, 4]).unwrap();
+            mem.read_ram(base, &mut buf).unwrap();
             assert_eq!(buf, [1, 2, 3, 4]);
             // Straddle the block boundary too — the split path is a separate
             // walk through the block table.
             if block + 1 < 4 {
-                mem.write_ram(&[], base + MIB as u64 - 2, &[9, 9, 9, 9])
+                mem.write_ram(base + MIB as u64 - 2, &[9, 9, 9, 9])
                     .unwrap();
             }
         }
@@ -1631,33 +1285,33 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         const B1: u64 = MIB as u64;
         const B2: u64 = 2 * MIB as u64;
 
-        mem.write_ram(&[], B0, &[0x11, 0x22]).unwrap();
-        mem.write_ram(&[], B1, &[0x33, 0x44]).unwrap();
-        mem.write_ram(&[], B2, &[0x55, 0x66]).unwrap();
+        mem.write_ram(B0, &[0x11, 0x22]).unwrap();
+        mem.write_ram(B1, &[0x33, 0x44]).unwrap();
+        mem.write_ram(B2, &[0x55, 0x66]).unwrap();
 
         // Each read below forces the block back in, evicting the previous one.
         let mut buf = [0u8; 2];
-        mem.read_ram(&[], B0, &mut buf).unwrap();
+        mem.read_ram(B0, &mut buf).unwrap();
         assert_eq!(buf, [0x11, 0x22], "block 0 lost its bytes across eviction");
-        mem.read_ram(&[], B1, &mut buf).unwrap();
+        mem.read_ram(B1, &mut buf).unwrap();
         assert_eq!(buf, [0x33, 0x44], "block 1 lost its bytes across eviction");
-        mem.read_ram(&[], B2, &mut buf).unwrap();
+        mem.read_ram(B2, &mut buf).unwrap();
         assert_eq!(buf, [0x55, 0x66], "block 2 lost its bytes across eviction");
 
         // And a second full pass, proving the round-trip is repeatable rather
         // than surviving only the first write-out.
-        mem.read_ram(&[], B0, &mut buf).unwrap();
+        mem.read_ram(B0, &mut buf).unwrap();
         assert_eq!(buf, [0x11, 0x22]);
     }
 
     #[test]
     fn failed_reload_leaves_target_block_swapped_until_retry() {
         let mut mem = swapped_memory();
-        mem.write_ram(&[], 0, &[0x5a]).unwrap();
+        mem.write_ram(0, &[0x5a]).unwrap();
         mem.inherited_memory_stub.overflow_file.set_len(0).unwrap();
 
         let mut byte = [0];
-        assert!(mem.read_ram(&[], MIB as u64, &mut byte).is_err());
+        assert!(mem.read_ram(MIB as u64, &mut byte).is_err());
         let blocks = &mem.inherited_memory_stub.blocks_offsets;
         assert!(matches!(blocks[1], super::Block::SwappedOut));
 
@@ -1665,7 +1319,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .overflow_file
             .set_len((2 * MIB) as u64)
             .unwrap();
-        assert_eq!(mem.read_ram(&[], MIB as u64, &mut byte).unwrap(), 1);
+        assert_eq!(mem.read_ram(MIB as u64, &mut byte).unwrap(), 1);
         assert_eq!(byte, [0]);
     }
 }

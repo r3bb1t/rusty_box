@@ -1636,7 +1636,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         {
             self.perf_tlb_miss += 1;
         }
-        self.invalidate_dtlb_pin_slot(laddr, 0);
+        self.invalidate_dtlb_slot(laddr, 0);
         let (paddr, combined_access, lpf_mask, pkey) =
             self.page_walk_for_dtlb(laddr, user, is_write, is_shadow_stack)?;
         let paddr = self.apply_a20(paddr);
@@ -1733,7 +1733,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             tlb_entry.host_page = host_page;
             tlb_entry.pkey = pkey;
         }
-        self.sync_dtlb_pin_slot(laddr, 0);
 
         if is_large_page {
             self.dtlb.split_large = true;
@@ -2724,7 +2723,7 @@ mod tests {
             crregs::{BxCr0, BxCr4},
             rusty_box::MemoryAccessType,
         },
-        memory::{BxMemC, BxMemoryStubC, CpuTlbPin},
+        memory::{BxMemC, BxMemoryStubC},
     };
     use core::ptr::NonNull;
 
@@ -2746,9 +2745,7 @@ mod tests {
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
         );
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem));
 
         cpu.pdptrcache.entry[0] = PAGE_DIRECTORY | 0x1;
         cpu.cr0 = BxCr0::PE | BxCr0::PG;
@@ -2799,18 +2796,16 @@ mod tests {
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
         );
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
         let (host_base, host_len) = mem.identity_guest_base();
         assert!(!host_base.is_null(), "full residency must be an identity map");
         cpu.install_memory_bases(&mut mem);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem));
 
-        mem.write_ram(pins, PAGE_DIRECTORY, &(PAGE_TABLE | 0x3).to_le_bytes())
+        mem.write_ram(PAGE_DIRECTORY, &(PAGE_TABLE | 0x3).to_le_bytes())
             .unwrap();
-        mem.write_ram(pins, PAGE_TABLE, &(RAM_FRAME | 0x3).to_le_bytes())
+        mem.write_ram(PAGE_TABLE, &(RAM_FRAME | 0x3).to_le_bytes())
             .unwrap();
-        mem.write_ram(pins, PAGE_TABLE + 8, &(LEGACY_FRAME | 0x3).to_le_bytes())
+        mem.write_ram(PAGE_TABLE + 8, &(LEGACY_FRAME | 0x3).to_le_bytes())
             .unwrap();
         cpu.pdptrcache.entry[0] = PAGE_DIRECTORY | 0x1;
         cpu.cr0 = BxCr0::PE | BxCr0::PG;
@@ -2853,16 +2848,14 @@ mod tests {
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
         );
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem));
 
         // Legacy PAE keeps the PDPTE in the CPU cache.  The actual slow
         // translator reads the PDE/PTE from physical memory and therefore
         // exercises the handler-aware qword A/D writers.
-        mem.write_ram(pins, PAGE_DIRECTORY, &PAGE_ENTRY.to_le_bytes())
+        mem.write_ram(PAGE_DIRECTORY, &PAGE_ENTRY.to_le_bytes())
             .unwrap();
-        mem.write_ram(pins, PAGE_TABLE, &PAGE_ENTRY.to_le_bytes())
+        mem.write_ram(PAGE_TABLE, &PAGE_ENTRY.to_le_bytes())
             .unwrap();
         cpu.pdptrcache.entry[0] = PAGE_DIRECTORY | 0x1;
         cpu.cr0 = BxCr0::PE | BxCr0::PG;

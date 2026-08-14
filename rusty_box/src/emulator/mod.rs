@@ -23,7 +23,7 @@ use crate::{
         devices::{DeviceManager, SystemControlPort},
         BxDevicesC,
     },
-    memory::{BxMemC, BxMemoryStubC, CpuTlbPin},
+    memory::{BxMemC, BxMemoryStubC},
     params::BxParams,
     pc_system::BxPcSystemC,
     Error, Result,
@@ -33,8 +33,6 @@ use crate::pc_system::TimerOwner;
 
 #[cfg(feature = "alloc")]
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
-#[cfg(not(feature = "alloc"))]
-use core::mem::MaybeUninit;
 use core::sync::atomic::AtomicBool;
 
 mod interactive;
@@ -368,17 +366,13 @@ impl<T: Instrumentation> core::ops::DerefMut for BspCpu<T> {
 
 pub struct Emulator<T: Instrumentation = ()> {
     /// BSP CPU storage. This stays at a stable address for its own cached
-    /// host mappings; eviction-visible state instead lives in `cpu_tlb_pins`.
+    /// host mappings.
     #[cfg(feature = "alloc")]
     cpu: alloc::boxed::Box<BxCpuC<T>>,
     /// Application processors (CPU IDs/APIC IDs 1..N-1).
     #[cfg(feature = "alloc")]
     pub(crate) ap_cpus: Vec<alloc::boxed::Box<BxCpuC<T>>>,
-    /// Stable descriptors for every CPU's direct host-memory references.
-    #[cfg(feature = "alloc")]
-    cpu_tlb_pins: Vec<CpuTlbPin>,
-    /// BSP CPU storage supplied by no-alloc callers. Its external pin sidecar
-    /// is stored separately in the fixed descriptor array below.
+    /// BSP CPU storage supplied by no-alloc callers.
     #[cfg(not(feature = "alloc"))]
     cpu: BspCpu<T>,
     /// Application processor pointers supplied by no-alloc callers.
@@ -391,10 +385,6 @@ pub struct Emulator<T: Instrumentation = ()> {
     ap_cpu_ptrs: [*mut BxCpuC<T>; NO_ALLOC_MAX_AP_CPUS],
     #[cfg(not(feature = "alloc"))]
     ap_cpu_count: usize,
-    #[cfg(not(feature = "alloc"))]
-    cpu_tlb_pins: [MaybeUninit<CpuTlbPin>; NO_ALLOC_MAX_AP_CPUS + 1],
-    #[cfg(not(feature = "alloc"))]
-    cpu_tlb_pin_count: usize,
     /// Memory subsystem
     pub(crate) memory: BxMemC,
     /// Device controller (I/O port handlers). Crate-private (doctrine R3):
@@ -508,7 +498,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
             memory,
             devices,
             pc_system,
-            cpu_tlb_pins,
             ..
         } = self;
         let this_cpu: &mut BxCpuC<T> = if index == 0 {
@@ -516,14 +505,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         } else {
             &mut ap_cpus[index - 1]
         };
-        crate::cpu::exec_ctx::ExecCtx::new(
-            this_cpu,
-            memory,
-            devices,
-            pc_system,
-            &cpu_tlb_pins[..],
-            index,
-        )
+        crate::cpu::exec_ctx::ExecCtx::new(this_cpu, memory, devices, pc_system)
     }
 
     /// No-alloc counterpart. Same split, different storage: the BSP is
@@ -537,8 +519,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
             memory,
             devices,
             pc_system,
-            cpu_tlb_pins,
-            cpu_tlb_pin_count,
             ..
         } = self;
         let this_cpu: &mut BxCpuC<T> = if index == 0 {
@@ -549,15 +529,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             // borrow of this one.
             unsafe { &mut *ap_cpu_ptrs[index - 1] }
         };
-        // SAFETY: exactly this prefix is initialised before the emulator is
-        // exposed — the same contract `raw_tlb_pins` relies on.
-        let pins = unsafe {
-            core::slice::from_raw_parts(
-                cpu_tlb_pins.as_ptr().cast::<crate::memory::CpuTlbPin>(),
-                *cpu_tlb_pin_count,
-            )
-        };
-        crate::cpu::exec_ctx::ExecCtx::new(this_cpu, memory, devices, pc_system, pins, index)
+        crate::cpu::exec_ctx::ExecCtx::new(this_cpu, memory, devices, pc_system)
     }
 
     #[cfg(not(feature = "alloc"))]
@@ -805,17 +777,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
         cpu: alloc::boxed::Box<BxCpuC<T>>,
         ap_cpus: Vec<alloc::boxed::Box<BxCpuC<T>>>,
     ) -> Result<Box<Self>> {
-        let mut cpu_tlb_pins = Vec::new();
-        cpu_tlb_pins
-            .try_reserve_exact(1 + ap_cpus.len())
-            .map_err(|_| MemoryError::UnableToAllocateGuestMemory(core::mem::size_of::<CpuTlbPin>()))?;
-        // This is the descriptor's final backing allocation. No CPU scope
-        // receives a sidecar pointer until every element is populated, and
-        // this Vec is never grown afterwards.
-        cpu_tlb_pins.push(CpuTlbPin::new(&cpu));
-        for ap_cpu in &ap_cpus {
-            cpu_tlb_pins.push(CpuTlbPin::new(ap_cpu));
-        }
         let pc_system = BxPcSystemC::new();
         let mem_stub = BxMemoryStubC::create_and_init(
             config.guest_memory_size,
@@ -836,7 +797,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
         unsafe {
             core::ptr::addr_of_mut!((*ptr).cpu).write(cpu);
             core::ptr::addr_of_mut!((*ptr).ap_cpus).write(ap_cpus);
-            core::ptr::addr_of_mut!((*ptr).cpu_tlb_pins).write(cpu_tlb_pins);
             core::ptr::addr_of_mut!((*ptr).memory).write(memory);
             core::ptr::addr_of_mut!((*ptr).devices).write(devices);
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
@@ -930,21 +890,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // The descriptor sidecars are 40 KiB each. Initialize only the used
         // prefix directly in the caller-provided Emulator storage so no-alloc
         // construction neither allocates nor builds/moves a 254-entry stack
-        // temporary. Sidecar addresses become stable before any CPU scope
-        // wires one into `active_tlb_pin_sidecar`.
-        let bsp_ptr = cpu as *mut BxCpuC<T>;
+        // temporary.
         core::ptr::addr_of_mut!((*ptr).cpu).write(BspCpu::new(cpu));
         core::ptr::addr_of_mut!((*ptr).ap_cpu_ptrs).write(ap_cpu_ptrs);
         core::ptr::addr_of_mut!((*ptr).ap_cpu_count).write(required_ap_count);
-        let pin_slots = core::ptr::addr_of_mut!((*ptr).cpu_tlb_pins)
-            .cast::<MaybeUninit<CpuTlbPin>>();
-        pin_slots.write(MaybeUninit::new(CpuTlbPin::new(&*bsp_ptr)));
-        for index in 0..required_ap_count {
-            pin_slots
-                .add(index + 1)
-                .write(MaybeUninit::new(CpuTlbPin::new(&*ap_cpu_ptrs[index])));
-        }
-        core::ptr::addr_of_mut!((*ptr).cpu_tlb_pin_count).write(required_ap_count + 1);
         core::ptr::addr_of_mut!((*ptr).memory).write(memory);
         core::ptr::addr_of_mut!((*ptr).devices).write(devices);
         core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
@@ -1362,11 +1311,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// * `ram_data` - Raw RAM image data
     /// * `address` - Load address in physical memory
     pub fn load_ram(&mut self, ram_data: &[u8], address: u64) -> Result<()> {
-        let pins_ptr = self.tlb_pins().as_ptr();
-        let pins_len = self.tlb_pins().len();
         // Stable CPU pin storage outlives this exclusive memory borrow.
-        let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
-        self.memory.load_RAM(pins, ram_data, address)?;
+        self.memory.load_RAM(ram_data, address)?;
         tracing::debug!(
             "Loaded RAM image ({} bytes) at {:#x}",
             ram_data.len(),
@@ -1581,13 +1527,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// block-backed and swapped, so it is never exposed as a borrowed slice.
     pub fn peek_ram_at(&mut self, addr: usize, len: usize) -> alloc::vec::Vec<u8> {
         let mut bytes = alloc::vec![0; len];
-        let pins_ptr = self.tlb_pins().as_ptr();
-        let pins_len = self.tlb_pins().len();
         // Stable emulator pin storage outlives the exclusive memory borrow.
-        let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
         let copied = self
             .memory
-            .read_ram(pins, addr as u64, &mut bytes)
+            .read_ram(addr as u64, &mut bytes)
             .unwrap_or(0);
         bytes.truncate(copied);
         bytes

@@ -147,7 +147,7 @@ impl<T: Instrumentation> BxCpuC<T> {
         // Current guest memory around the fault RIP, and a fresh decode at it.
         let dump_start = rip_phys.saturating_sub(32).max(page);
         let mut window = [0u8; 64];
-        let got = match mem.read_ram(&[], dump_start, &mut window) {
+        let got = match mem.read_ram(dump_start, &mut window) {
             Ok(n) => n,
             Err(_) => 0,
         };
@@ -161,7 +161,7 @@ impl<T: Instrumentation> BxCpuC<T> {
         out!("memory @ [{:#x}..+{}] (>> marks RIP):\n{}", dump_start, got, hex);
 
         let mut rip_bytes = [0u8; 16];
-        let rip_got = match mem.read_ram(&[], rip_phys, &mut rip_bytes) {
+        let rip_got = match mem.read_ram(rip_phys, &mut rip_bytes) {
             Ok(n) => n,
             Err(_) => 0,
         };
@@ -204,7 +204,7 @@ impl<T: Instrumentation> BxCpuC<T> {
                     break;
                 }
                 let mut bytes = [0u8; 16];
-                let n = match mem.read_ram(&[], addr, &mut bytes) {
+                let n = match mem.read_ram(addr, &mut bytes) {
                     Ok(n) => n,
                     Err(_) => 0,
                 };

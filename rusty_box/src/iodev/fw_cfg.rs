@@ -8,7 +8,7 @@
 //!
 //! Reference: `cpp_orig/bochs/iodev/fw_cfg.cc` (700 lines)
 
-use crate::memory::{BxMemC, CpuTlbPin};
+use crate::memory::BxMemC;
 #[cfg(feature = "std")]
 use std::io::{self, Error, ErrorKind, Read, Write};
 
@@ -535,7 +535,6 @@ impl BxFwCfg {
         value: u32,
         io_len: u8,
         mem: Option<&mut BxMemC>,
-        pins: &[CpuTlbPin],
     ) {
         match address {
             FW_CFG_IO_BASE => {
@@ -564,7 +563,7 @@ impl BxFwCfg {
                     } else if offset == 4 {
                         // Low 32 bits → port 0x518 — triggers DMA
                         self.dma_addr = (self.dma_addr & 0xFFFF_FFFF_0000_0000) | swapped as u64;
-                        self.trigger_dma(mem, pins);
+                        self.trigger_dma(mem);
                     }
                 } else if io_len == 1 {
                     // Byte-by-byte write (big-endian)
@@ -574,7 +573,7 @@ impl BxFwCfg {
 
                     // Trigger when last byte (offset 7) is written
                     if offset == 7 {
-                        self.trigger_dma(mem, pins);
+                        self.trigger_dma(mem);
                     }
                 }
             }
@@ -583,10 +582,10 @@ impl BxFwCfg {
     }
 
     /// Trigger DMA processing if memory is available, then clear dma_addr.
-    fn trigger_dma(&mut self, mem: Option<&mut BxMemC>, pins: &[CpuTlbPin]) {
+    fn trigger_dma(&mut self, mem: Option<&mut BxMemC>) {
         let addr = self.dma_addr;
         if let Some(m) = mem {
-            self.process_dma(addr, m, pins);
+            self.process_dma(addr, m);
         } else {
             tracing::error!(
                 "fw_cfg DMA: triggered at {:#x} but no memory available",
@@ -604,11 +603,11 @@ impl BxFwCfg {
     /// - control (4 bytes): SELECT/READ/SKIP/WRITE flags + key in upper 16 bits
     /// - length (4 bytes)
     /// - address (8 bytes): guest physical address for data transfer
-    fn process_dma(&mut self, dma_addr: u64, mem: &mut BxMemC, pins: &[CpuTlbPin]) {
+    fn process_dma(&mut self, dma_addr: u64, mem: &mut BxMemC) {
         // A DMA descriptor is indivisible: do not interpret a short/hole
         // prefix, because its control word may not belong to this request.
         let mut desc = [0u8; 16];
-        match mem.read_ram(pins, dma_addr, &mut desc) {
+        match mem.read_ram(dma_addr, &mut desc) {
             Ok(16) => {}
             Ok(copied) => {
                 tracing::error!(
@@ -650,7 +649,7 @@ impl BxFwCfg {
             if let Some(data) = self.get_entry_data(key) {
                 let available = data.len().saturating_sub(entry_offset);
                 let requested = available.min(length as usize);
-                let committed = match mem.write_ram(pins, address, &data[entry_offset..entry_offset + requested]) {
+                let committed = match mem.write_ram(address, &data[entry_offset..entry_offset + requested]) {
                     Ok(copied) => copied,
                     Err(error) => {
                         tracing::error!("fw_cfg DMA READ: write to {address:#x} failed: {error:?}");
@@ -687,7 +686,7 @@ impl BxFwCfg {
 
         control &= !FW_CFG_DMA_CTL_SELECT;
         let ctrl_be = control.to_be_bytes();
-        match mem.write_ram(pins, dma_addr, &ctrl_be) {
+        match mem.write_ram(dma_addr, &ctrl_be) {
             Ok(4) => {}
             Ok(copied) => tracing::error!(
                 "fw_cfg DMA: completion at {dma_addr:#x} is short ({copied}/4 bytes)"
@@ -1115,7 +1114,7 @@ mod tests {
     use super::*;
 
     fn read_u16_entry(fw_cfg: &mut BxFwCfg, key: u16) -> u16 {
-        fw_cfg.write_port(FW_CFG_IO_BASE, key as u32, SELECTOR_WRITE_BYTES, None, &[]);
+        fw_cfg.write_port(FW_CFG_IO_BASE, key as u32, SELECTOR_WRITE_BYTES, None);
         let lo = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES) as u16;
         let hi = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES) as u16;
         lo | (hi << 8)
@@ -1143,25 +1142,25 @@ mod tests {
         descriptor[..4].copy_from_slice(&control.to_be_bytes());
         descriptor[4..8].copy_from_slice(&(5u32).to_be_bytes());
         descriptor[8..].copy_from_slice(&DESTINATION.to_be_bytes());
-        assert_eq!(mem.write_ram(&[], DESCRIPTOR, &descriptor).unwrap(), 16);
+        assert_eq!(mem.write_ram(DESCRIPTOR, &descriptor).unwrap(), 16);
         mem.smc_mark_icache_mask(DESCRIPTOR, u32::MAX);
         mem.smc_mark_icache_mask(DESTINATION, u32::MAX);
         let before_smc = mem.smc_seq_next();
 
-        fw_cfg.process_dma(DESCRIPTOR, &mut mem, &[]);
+        fw_cfg.process_dma(DESCRIPTOR, &mut mem);
 
         let mut payload = [0; 5];
-        assert_eq!(mem.read_ram(&[], DESTINATION, &mut payload).unwrap(), payload.len());
+        assert_eq!(mem.read_ram(DESTINATION, &mut payload).unwrap(), payload.len());
         assert_eq!(payload, [0x61, 0x62, 0x63, 0x64, 0x65]);
         let mut completion = [0; 4];
-        assert_eq!(mem.read_ram(&[], DESCRIPTOR, &mut completion).unwrap(), 4);
+        assert_eq!(mem.read_ram(DESCRIPTOR, &mut completion).unwrap(), 4);
         assert_eq!(u32::from_be_bytes(completion), (KEY as u32) << 16);
         assert!(mem.smc_seq_next() > before_smc);
 
         descriptor[..4].copy_from_slice(&FW_CFG_DMA_CTL_WRITE.to_be_bytes());
-        assert_eq!(mem.write_ram(&[], DESCRIPTOR, &descriptor).unwrap(), 16);
-        fw_cfg.process_dma(DESCRIPTOR, &mut mem, &[]);
-        assert_eq!(mem.read_ram(&[], DESCRIPTOR, &mut completion).unwrap(), 4);
+        assert_eq!(mem.write_ram(DESCRIPTOR, &descriptor).unwrap(), 16);
+        fw_cfg.process_dma(DESCRIPTOR, &mut mem);
+        assert_eq!(mem.read_ram(DESCRIPTOR, &mut completion).unwrap(), 4);
         assert_eq!(u32::from_be_bytes(completion), FW_CFG_DMA_CTL_ERROR);
     }
 
@@ -1206,7 +1205,6 @@ mod tests {
             payload_key as u32,
             SELECTOR_WRITE_BYTES,
             None,
-            &[],
         );
         assert_eq!(
             source.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES),
@@ -1219,13 +1217,13 @@ mod tests {
         descriptor[..4].copy_from_slice(&control.to_be_bytes());
         descriptor[4..8].copy_from_slice(&(PAYLOAD.len() as u32).to_be_bytes());
         descriptor[8..].copy_from_slice(&DESTINATION.to_be_bytes());
-        assert_eq!(mem.write_ram(&[], DESCRIPTOR, &descriptor).unwrap(), descriptor.len());
+        assert_eq!(mem.write_ram(DESCRIPTOR, &descriptor).unwrap(), descriptor.len());
 
         // Write all but the triggering byte of a bytewise DMA address.  The
         // final byte must resume the descriptor after restoration.
-        source.write_port(0x518, 0, 1, None, &[]);
-        source.write_port(0x519, 0x20, 1, None, &[]);
-        source.write_port(0x51A, 0, 1, None, &[]);
+        source.write_port(0x518, 0, 1, None);
+        source.write_port(0x519, 0x20, 1, None);
+        source.write_port(0x51A, 0, 1, None);
         assert_eq!(source.dma_addr, DESCRIPTOR);
 
         let mut saved = Vec::new();
@@ -1242,11 +1240,11 @@ mod tests {
             "the restored selector and PIO offset must resume at the next byte"
         );
         assert_eq!(restored.dma_addr, DESCRIPTOR);
-        restored.write_port(0x51B, 0, 1, Some(&mut mem), &[]);
+        restored.write_port(0x51B, 0, 1, Some(&mut mem));
 
         let mut payload = [0u8; PAYLOAD.len()];
         assert_eq!(
-            mem.read_ram(&[], DESTINATION, &mut payload).unwrap(),
+            mem.read_ram(DESTINATION, &mut payload).unwrap(),
             payload.len()
         );
         assert_eq!(payload, PAYLOAD);

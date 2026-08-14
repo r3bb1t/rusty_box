@@ -8,7 +8,7 @@ mod tests {
 /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use crate::cpu::{builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX};
-    use crate::memory::{BxMemC, BxMemoryStubC, CpuTlbPin};
+    use crate::memory::{BxMemC, BxMemoryStubC};
 
     #[test]
     fn test_short_unconditional_jump() {
@@ -22,8 +22,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 let bytes: [u8; 4] = [0xEB, 0x02, 0x90, 0x90];
 
-                let pins = [CpuTlbPin::new(&cpu)];
-                assert_eq!(mem.write_ram(&pins, 0, &bytes).unwrap(), bytes.len());
+                assert_eq!(mem.write_ram(0, &bytes).unwrap(), bytes.len());
 
                 cpu.set_rip(0);
                 cpu.cpu_loop(&mut mem, &pins, &pins[0]).ok();
@@ -46,8 +45,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 let bytes: [u8; 7] = [0x2B, 0xC0, 0x74, 0x02, 0x90, 0x90, 0x90];
 
-                let pins = [CpuTlbPin::new(&cpu)];
-                assert_eq!(mem.write_ram(&pins, 0, &bytes).unwrap(), bytes.len());
+                assert_eq!(mem.write_ram(0, &bytes).unwrap(), bytes.len());
 
                 cpu.set_rip(0);
                 cpu.cpu_loop(&mut mem, &pins, &pins[0]).ok();

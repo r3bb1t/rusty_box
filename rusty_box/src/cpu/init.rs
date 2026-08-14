@@ -469,7 +469,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // Every entry is now invalid, so the pin sidecar's per-slot host
         // pointers are all zero: memset instead of the full pinned_host_page
         // rescan (Track B — full-flush pin publication).
-        self.clear_active_tlb_pin_hosts();
     }
 
     /// Flush all TLB entries (both DTLB and ITLB) and invalidate prefetch/stack caches.
@@ -497,7 +496,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.tlb_flush_hosts();
         self.i_cache.break_links();
         self.i_cache.flush_all();
-        self.sync_vmcb_pin();
         // Forget where RAM was, in the same breath as the mappings that named
         // pages within it. Data TLB entries hold page numbers, so an entry and
         // the base it was filled against are only meaningful together — this
@@ -515,9 +513,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn tlb_flush_non_global(&mut self) {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
-        // Track B: fuse pin publication into the invalidation walk instead of
-        // the full 5120-slot refresh_tlb_pin rescan (sync_active_tlb_pin).
-        self.flush_non_global_and_publish_pin();
+        self.flush_non_global_tlbs();
         // Bochs paging.cc TLB_flushNonGlobal — disarm the monitor / wake MWAIT.
         self.wakeup_monitor();
         // Bochs paging.cc — iCache.breakLinks()
@@ -533,7 +529,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn tlb_invlpg(&mut self, laddr: u64) {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
-        self.invlpg_and_publish_pin(laddr);
+        self.invlpg_tlbs(laddr);
         // Bochs paging.cc TLB_invlpg — a remapped monitored page must not leave
         // a subsequent MWAIT waiting forever.
         self.wakeup_monitor();
@@ -715,6 +711,5 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     fn set_VMCBPTR(&mut self, vmcb_ptr: u64) {
         self.vmcbptr = vmcb_ptr;
         self.vmcb_host_offset = None;
-        self.sync_vmcb_pin();
     }
 }

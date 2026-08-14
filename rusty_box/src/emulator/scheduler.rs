@@ -5,7 +5,7 @@ use crate::{
         instrumentation::Instrumentation,
         BxCpuC, CpuError, Result as CpuResult,
     },
-    memory::{BxMemC, CpuTlbPin}, Result,
+    memory::BxMemC, Result,
 };
 
 
@@ -36,53 +36,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
         core::mem::transmute(core::ptr::NonNull::from(&mut self.memory))
     }
 
-    #[cfg(feature = "alloc")]
-    #[inline]
-    fn raw_tlb_pins(&self) -> &[CpuTlbPin] {
-        &self.cpu_tlb_pins
-    }
-
-    #[cfg(not(feature = "alloc"))]
-    #[inline]
-    fn raw_tlb_pins(&self) -> &[CpuTlbPin] {
-        // SAFETY: `init_at_with_ap_cpus` initializes precisely this prefix
-        // before exposing the emulator, and CPU storage outlives it.
-        unsafe {
-            core::slice::from_raw_parts(
-                self.cpu_tlb_pins.as_ptr().cast::<CpuTlbPin>(),
-                self.cpu_tlb_pin_count,
-            )
-        }
-    }
-
-    /// Return the stable all-CPU pin slice after synchronizing any CPU state
-    /// changed outside a wired scope.
-    #[inline]
-    pub(crate) fn tlb_pins(&self) -> &[CpuTlbPin] {
-        self.refresh_dirty_tlb_pins();
-        self.raw_tlb_pins()
-    }
-    /// Refresh every stable external pin sidecar before a CPU/device memory
-    /// scope. This happens while CPUs are only shared-borrowed; afterwards the
-    /// running CPU updates its own sidecar synchronously on every mapping
-    /// install or invalidation.
-    pub(super) fn refresh_tlb_pins(&self) {
-        let pins = self.raw_tlb_pins();
-        debug_assert_eq!(pins.len(), self.cpu_count());
-        for (index, pin) in pins.iter().enumerate() {
-            self.cpu_ref(index).refresh_tlb_pin(pin);
-        }
-    }
-
-    /// Refresh only sidecars dirtied while their CPU was not wired.
-    #[inline]
-    fn refresh_dirty_tlb_pins(&self) {
-        let pins = self.raw_tlb_pins();
-        debug_assert_eq!(pins.len(), self.cpu_count());
-        for (index, pin) in pins.iter().enumerate() {
-            self.cpu_ref(index).refresh_tlb_pin_if_dirty(pin);
-        }
-    }
     /// Invalidate every host pointer and decoded trace before memory backing
     /// can be replaced or restored.
     pub(crate) fn invalidate_all_cpu_host_mappings(&mut self) {
@@ -95,7 +48,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
             // including a snapshot restore that restarted the sequence.
             cpu.smc_seq_seen = smc_seq;
         }
-        self.refresh_tlb_pins();
     }
 
     pub(super) fn cpu_runnable_for_batch(&self, index: usize) -> bool {
@@ -182,8 +134,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
     pub(super) fn clear_scheduler_raw_wiring(&mut self) {
         self.devices.clear_device_manager();
         self.device_manager.mem_ptr = None;
-        self.device_manager.active_tlb_pins = None;
-        self.device_manager.active_tlb_pin_count = 0;
     }
 
     /// Per-AP HLT fast-forward eligibility from the maintained runnable mask.
@@ -261,12 +211,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // A reset applied at batch entry needs no special handling: the batch
         // below simply starts executing at the reset vector.
         self.service_scheduler_boundary(0)?;
-        self.refresh_dirty_tlb_pins();
 
         let cpu_count = self.cpu_count();
         let smp = cpu_count > 1;
-        let pins_ptr = self.tlb_pins().as_ptr();
-        let pins_len = self.tlb_pins().len();
         let mem_ptr: *mut BxMemC = &mut self.memory;
         let io_ptr = core::ptr::NonNull::from(&mut self.devices);
         let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
@@ -350,9 +297,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 let mem_static = self.mem_nonnull_static();
                 (*io_ptr.as_ptr()).set_device_manager(dm_ptr);
                 (*dm_ptr.as_ptr()).mem_ptr = Some(mem_static);
-                (*dm_ptr.as_ptr()).active_tlb_pins =
-                    core::ptr::NonNull::new(pins_ptr as *mut CpuTlbPin);
-                (*dm_ptr.as_ptr()).active_tlb_pin_count = pins_len;
 
                 let ticks_before = self.cpu_ref(cpu_index).cpu_ticks();
                 // The CPU, memory and pin set now come from one borrow of the
@@ -557,15 +501,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// # Safety
     /// Same invariants as `borrow_memory_for_cpu`.
     pub unsafe fn inject_interrupt(&mut self, vector: u8) -> CpuResult<()> {
-        self.refresh_tlb_pins();
-        let pins_ptr = self.tlb_pins().as_ptr();
-        let pins_len = self.tlb_pins().len();
-        let pins = core::slice::from_raw_parts(pins_ptr, pins_len);
         // Destructured: the CPU and memory are disjoint fields, so this needs
         // no lifetime extension — the transmute it replaces existed only to
         // hand the CPU a borrow that outlived the statement.
         let Self { cpu, memory, .. } = self;
-        cpu.wire_memory_access(core::ptr::NonNull::from(&mut *memory), pins, &*pins_ptr);
+        cpu.wire_memory_access(core::ptr::NonNull::from(&mut *memory));
         let result = self.cpu.inject_external_interrupt(vector);
         self.cpu.clear_memory_access();
         self.refresh_cpu_masks(0);
@@ -1246,15 +1186,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 // operation, and the exit can walk the VMEXIT MSR store/load
                 // lists. Wire the memory bus for the call so those guest-memory
                 // accesses resolve, then clear it (mirrors inject_interrupt).
-                self.refresh_tlb_pins();
-                let pins_ptr = self.tlb_pins().as_ptr();
-                let pins_len = self.tlb_pins().len();
                 let mem_ptr =
                     core::ptr::NonNull::from(&mut *unsafe { self.borrow_memory_for_cpu() });
-                let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
-                let current_pin = unsafe { &*pins_ptr.add(target) };
                 let cpu = self.cpu_mut_at(target);
-                cpu.wire_memory_access(mem_ptr, pins, current_pin);
+                cpu.wire_memory_access(mem_ptr);
                 cpu.deliver_sipi(vector);
                 cpu.clear_memory_access();
             }

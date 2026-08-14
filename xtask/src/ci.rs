@@ -40,7 +40,10 @@ const DLX_BOOT_BUDGET: &str = "450000000";
 const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // 254 -> 249: the memory stub's swap-file `UnsafeCell` is gone, and with it
     // the four `&self`-to-`&mut File` launderings plus the three test pokes.
-    ("rusty_box/src", 249),
+    // 249 -> 222: the `CpuTlbPin` sidecar is gone — its `UnsafeCell` state, the
+    // publication paths that wrote through it, and the `from_raw_parts`
+    // reconstructions that rebuilt the pin slice at every scheduler slice.
+    ("rusty_box/src", 222),
     ("rusty_box_decoder/src", 0),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. The survivor is

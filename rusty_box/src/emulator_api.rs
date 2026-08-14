@@ -675,10 +675,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Returns the number of bytes read (always `buf.len()` on success).
     /// Bypasses MMIO handlers — matches Unicorn `uc_mem_read` semantics.
     pub fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> Result<()> {
-        let pins_ptr = self.tlb_pins().as_ptr();
-        let pins_len = self.tlb_pins().len();
         let copied = self.memory.read_ram(
-            unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) },
             addr,
             buf,
         )?;
@@ -700,10 +697,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
 
     /// Write bytes to guest physical RAM, including swapped blocks.
     pub fn mem_write(&mut self, addr: u64, data: &[u8]) -> Result<()> {
-        let pins_ptr = self.tlb_pins().as_ptr();
-        let pins_len = self.tlb_pins().len();
         let copied = self.memory.write_ram(
-            unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) },
             addr,
             data,
         )?;

@@ -587,7 +587,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 match mem.host_mem_range_pinned(
                     vmcbptr,
                     MemoryAccessType::RW,
-                    self.active_tlb_pins(),
                     policy,
                 ) {
                     // VMCB accessors directly offset this base through PAT.
@@ -602,7 +601,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         } else {
             self.vmcb_host_offset = None;
         }
-        self.sync_vmcb_pin();
     }
 
     // =====================================================================
@@ -1056,7 +1054,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.clear_event(BX_EVENT_SVM_VIRQ_PENDING);
         self.in_svm_guest = false;
         self.svm_gif = false;
-        self.sync_vmcb_pin();
 
         // Write exit reason and info to VMCB
         self.vmcb_write64(SVM_CONTROL64_EXITCODE, reason as i64 as u64);
@@ -1622,7 +1619,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         self.in_svm_guest = true;
         self.svm_gif = true;
-        self.sync_vmcb_pin();
         self.async_event = 1;
 
         // Step 4: Inject events

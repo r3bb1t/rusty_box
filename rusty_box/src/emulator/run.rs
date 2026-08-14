@@ -219,7 +219,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
         crate::boot::setup_direct_linux_boot_with_pins(
             &mut *self.cpu,
             &mut self.memory,
-            &self.cpu_tlb_pins,
             bzimage,
             initramfs,
             cmdline.as_bytes(),

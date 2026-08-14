@@ -1,7 +1,7 @@
 #![allow(non_snake_case, unused_variables, unused_assignments, dead_code)]
 #![allow(unused_unsafe)]
 
-use core::{cell::Cell, ptr::NonNull};
+use core::ptr::NonNull;
 
 use crate::{
     config::{BxAddress, BxPhyAddress, BxPtrEquiv},
@@ -795,18 +795,17 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     /// Byte length of that allocation.
     pub(crate) mem_alloc_len: usize,
 
-    /// Stable all-CPU pin slice wired for one execution batch. It is a raw
-    /// descriptor slice so the currently running CPU is never shared-borrowed.
-    active_tlb_pins: *const crate::memory::CpuTlbPin,
-    active_tlb_pin_count: usize,
-    /// The externally-owned sidecar for this active memory scope. It never
-    /// points at CPU storage, so allocator checks do not alias this CPU's
-    /// mutable instruction-execution borrow.
-    active_tlb_pin_sidecar: Option<NonNull<crate::memory::CpuTlbPin>>,
-    /// True when TLB/VMCB state changed without an active external sidecar.
-    /// Clean sidecars are maintained slot-by-slot and need no full rescan at
-    /// the next bounded CPU memory scope.
-    tlb_pin_dirty: Cell<bool>,
+    /// Residency epoch this CPU's allocation-based caches were filled at —
+    /// the instruction TLB, the bounded fetch window and the VMCB backing.
+    ///
+    /// Those three measure from the allocation base, so unlike data-TLB
+    /// mappings they stay populated when residency is partial and can be
+    /// stranded by a block swap. Instruction fetch compares this against
+    /// `BxMemC::swap_epoch()` and discards them when it moves. The data TLB
+    /// needs no such check: it measures from the identity guest-RAM base,
+    /// which does not exist under partial residency, so it holds no direct
+    /// mapping in exactly the regime where blocks move.
+    pub(crate) fetch_epoch: u64,
 
     /// Optional memory system pointer (MMIO/ROM handler access), wired during execution.
     ///
@@ -1061,31 +1060,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
-    #[inline]
-    pub(crate) fn active_tlb_pins(&self) -> &[crate::memory::CpuTlbPin] {
-        if self.active_tlb_pins.is_null() {
-            &[]
-        } else {
-            // SAFETY: cpu_loop wires this stable slice for its duration.
-            unsafe {
-                core::slice::from_raw_parts(self.active_tlb_pins, self.active_tlb_pin_count)
-            }
-        }
-    }
-    /// Where identity guest RAM begins within the whole allocation.
-    ///
-    /// The data TLB numbers its pages from here while the instruction TLB
-    /// numbers them from the allocation start, so this delta is what lets both
-    /// publish into one sidecar that speaks a single unit.
-    ///
-    /// Meaningful only while an identity base exists. When residency is partial
-    /// there is none, and the data TLB then holds no direct mapping at all —
-    /// `pinned_alloc_offset` yields `None` for every slot, so this is never
-    /// combined with anything.
-    #[inline(always)]
-    fn ram_region_offset(&self) -> usize {
-        (self.mem_host_base as usize).wrapping_sub(self.mem_alloc_base as usize)
-    }
 
     /// Offset of a host address within the memory allocation.
     #[inline(always)]
@@ -1093,21 +1067,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         addr.wrapping_sub(self.mem_alloc_base as usize)
     }
 
-    /// The SVM VMCB backing pin, as an allocation offset.
-    #[inline]
-    fn vmcb_pin_offset(&self) -> Option<usize> {
-        if self.in_svm_guest {
-            self.vmcb_host_offset
-        } else {
-            None
-        }
-    }
 
-    /// The bounded instruction-fetch window pin, as (allocation offset, length).
-    #[inline]
-    fn fetch_window_pin(&self) -> Option<(usize, usize)> {
-        self.eip_fetch_window.map(|w| (w.start, w.len))
-    }
 
     /// The instruction-fetch window as bytes.
     ///
@@ -1129,210 +1089,42 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         })
     }
 
-    /// Copy every currently valid mapping into an external pin sidecar.
-    ///
-    /// Full rescans are needed only when the sidecar is created or CPU state
-    /// changed outside a wired scope. Wired execution publishes each mapping
-    /// install or invalidation synchronously.
+
+
+
+    /// Non-global TLB flush (Bochs paging.cc `TLB_flushNonGlobal`).
     #[inline]
-    pub(crate) fn refresh_tlb_pin(&self, pin: &crate::memory::CpuTlbPin) {
-        pin.clear_tlb_hosts();
-        let ram_region = self.ram_region_offset();
-        for slot in 0..BX_DTLB_SIZE {
-            pin.set_dtlb_offset(slot, self.dtlb.pinned_alloc_offset(ram_region, slot));
-        }
-        for slot in 0..BX_ITLB_SIZE {
-            pin.set_itlb_offset(slot, self.itlb.pinned_alloc_offset(0, slot));
-        }
-        pin.set_vmcb_offset(self.vmcb_pin_offset());
-        pin.set_fetch_window(self.fetch_window_pin());
-        self.tlb_pin_dirty.set(false);
+    pub(crate) fn flush_non_global_tlbs(&mut self) {
+        self.dtlb.flush_non_global();
+        self.itlb.flush_non_global();
     }
 
-    /// Refresh a sidecar only when CPU state changed outside a wired scope.
+    /// Single-page INVLPG (Bochs paging.cc `TLB_invlpg`).
     #[inline]
-    pub(crate) fn refresh_tlb_pin_if_dirty(&self, pin: &crate::memory::CpuTlbPin) {
-        if self.tlb_pin_dirty.get() {
-            self.refresh_tlb_pin(pin);
-        }
-    }
-    /// Returns the sidecar owned by the current wired CPU memory scope.
-    #[inline]
-    fn active_tlb_pin_sidecar(&self) -> Option<&crate::memory::CpuTlbPin> {
-        self.active_tlb_pin_sidecar.map(|pin| {
-            // SAFETY: `wire_memory_access` stores a descriptor belonging to
-            // the stable caller-provided pin slice and `clear_memory_access`
-            // clears it before that scope ends.
-            unsafe { pin.as_ref() }
-        })
+    pub(crate) fn invlpg_tlbs(&mut self, laddr: BxAddress) {
+        self.dtlb.invlpg(laddr);
+        self.itlb.invlpg(laddr);
     }
 
-    /// Publish the pin sidecar after a FULL TLB flush (`dtlb.flush()` +
-    /// `itlb.flush()`), where every entry is now invalid.
-    ///
-    /// After a full flush `refresh_tlb_pin`'s per-slot rescan would write zero
-    /// to all `BX_DTLB_SIZE + BX_ITLB_SIZE` slots (every `pinned_host_page`
-    /// returns 0 for an invalid entry), so a single `clear_tlb_hosts` memset
-    /// reproduces it far more cheaply. The caller must have already invalidated
-    /// the prefetch queue, so the (now-empty) fetch window is correctly zeroed
-    /// too. `clear_tlb_hosts` also zeros `vmcb_host`; the flush does not change
-    /// SVM state, so an active guest's VMCB backing must be re-pinned — omitting
-    /// this would UNDER-pin it (use-after-free). Over-pinning is always safe;
-    /// under-pinning is the bug this guards against.
-    #[inline]
-    pub(crate) fn clear_active_tlb_pin_hosts(&self) {
-        if let Some(pin) = self.active_tlb_pin_sidecar() {
-            pin.clear_tlb_hosts();
-            if let Some(offset) = self.vmcb_pin_offset() {
-                pin.set_vmcb_offset(Some(offset));
-            }
-            self.tlb_pin_dirty.set(false);
-        } else {
-            self.tlb_pin_dirty.set(true);
-        }
-    }
 
-    /// Non-global TLB flush (Bochs paging.cc `TLB_flushNonGlobal`) with pin
-    /// publication fused into the invalidation walk (Track B). Clears only the
-    /// pin slots the walk actually invalidates, then republishes the O(1) VMCB
-    /// and fetch-window pins — producing exactly the sidecar state a full
-    /// `refresh_tlb_pin` rescan would, at O(entries invalidated) instead of
-    /// O(`BX_DTLB_SIZE` + `BX_ITLB_SIZE`).
-    ///
-    /// Correctness rests on the pin invariant: a kept (global) entry's slot
-    /// already equals its live host pointer because every install publishes via
-    /// `sync_dtlb_pin_slot` / `sync_itlb_pin_slot`, so leaving it untouched
-    /// matches the fresh rescan. This never under-pins: every slot cleared here
-    /// belongs to an entry the same call just invalidated. Over-pinning is safe.
-    #[inline]
-    pub(crate) fn flush_non_global_and_publish_pin(&mut self) {
-        match self.active_tlb_pin_sidecar {
-            Some(pin_ptr) => {
-                // SAFETY: the sidecar lives in the caller-owned pin slice, not
-                // inside the CPU, so it is separately addressable from
-                // self.dtlb/itlb. `as_ref` yields a reference decoupled from the
-                // `&mut self` borrow, which is what lets the mutable TLB walks
-                // below publish into it. The single-threaded CPU/memory scope
-                // serializes all sidecar mutation.
-                let pin: &crate::memory::CpuTlbPin = unsafe { pin_ptr.as_ref() };
-                self.dtlb
-                    .flush_non_global_publishing(|slot| pin.set_dtlb_offset(slot, None));
-                self.itlb
-                    .flush_non_global_publishing(|slot| pin.set_itlb_offset(slot, None));
-                self.republish_scalar_pins(pin);
-                self.tlb_pin_dirty.set(false);
-            }
-            None => {
-                self.dtlb.flush_non_global();
-                self.itlb.flush_non_global();
-                self.tlb_pin_dirty.set(true);
-            }
-        }
-    }
-
-    /// Single-page INVLPG (Bochs paging.cc `TLB_invlpg`) with pin publication
-    /// fused into the invalidation (Track B). The non-split path touches at most
-    /// one DTLB and one ITLB slot; the split-large path publishes every slot its
-    /// scan clears. See `flush_non_global_and_publish_pin` for the invariant.
-    #[inline]
-    pub(crate) fn invlpg_and_publish_pin(&mut self, laddr: BxAddress) {
-        match self.active_tlb_pin_sidecar {
-            Some(pin_ptr) => {
-                // SAFETY: see `flush_non_global_and_publish_pin`.
-                let pin: &crate::memory::CpuTlbPin = unsafe { pin_ptr.as_ref() };
-                self.dtlb
-                    .invlpg_publishing(laddr, |slot| pin.set_dtlb_offset(slot, None));
-                self.itlb
-                    .invlpg_publishing(laddr, |slot| pin.set_itlb_offset(slot, None));
-                self.republish_scalar_pins(pin);
-                self.tlb_pin_dirty.set(false);
-            }
-            None => {
-                self.dtlb.invlpg(laddr);
-                self.itlb.invlpg(laddr);
-                self.tlb_pin_dirty.set(true);
-            }
-        }
-    }
-
-    /// Republish the O(1) non-TLB host pins (VMCB backing + bounded fetch
-    /// window) exactly as `refresh_tlb_pin` does, so a fused flush leaves the
-    /// sidecar byte-identical to a full rescan for those fields. A TLB flush
-    /// does not change SVM state, but rewriting them is O(1) and removes any
-    /// dependence on a pre-existing VMCB/fetch-window invariant.
-    #[inline]
-    fn republish_scalar_pins(&self, pin: &crate::memory::CpuTlbPin) {
-        pin.set_vmcb_offset(self.vmcb_pin_offset());
-        pin.set_fetch_window(self.fetch_window_pin());
-    }
-
-    /// Publish one freshly installed DTLB host pointer without re-copying the
-    /// full 5120-entry sidecar on each page walk.
-    #[inline]
-    pub(crate) fn sync_dtlb_pin_slot(&self, laddr: BxAddress, len: u32) {
-        if let Some(pin) = self.active_tlb_pin_sidecar() {
-            let slot = self.dtlb.get_index_of(laddr, len);
-            pin.set_dtlb_offset(
-                slot,
-                self.dtlb.pinned_alloc_offset(self.ram_region_offset(), slot),
-            );
-        } else {
-            self.tlb_pin_dirty.set(true);
-        }
-    }
 
     /// Discard a colliding DTLB mapping before a page walk can allocate
-    /// backing, then immediately publish the removal to the eviction sidecar.
+    /// backing.
     #[inline]
-    pub(crate) fn invalidate_dtlb_pin_slot(&mut self, laddr: BxAddress, len: u32) {
+    pub(crate) fn invalidate_dtlb_slot(&mut self, laddr: BxAddress, len: u32) {
         self.dtlb.invalidate_slot(laddr, len);
-        self.sync_dtlb_pin_slot(laddr, len);
     }
 
-    /// Publish one freshly installed ITLB host pointer.
+    /// Discard a colliding ITLB mapping, and the fetch window with it, before a
+    /// miss can allocate backing memory.
     #[inline]
-    pub(crate) fn sync_itlb_pin_slot(&self, laddr: BxAddress, len: u32) {
-        if let Some(pin) = self.active_tlb_pin_sidecar() {
-            let slot = self.itlb.get_index_of(laddr, len);
-            pin.set_itlb_offset(slot, self.itlb.pinned_alloc_offset(0, slot));
-        } else {
-            self.tlb_pin_dirty.set(true);
-        }
-    }
-    /// Discard a colliding ITLB mapping before a miss can allocate backing
-    /// memory, then immediately publish the removal to the eviction sidecar.
-    #[inline]
-    pub(crate) fn invalidate_itlb_pin_slot(&mut self, laddr: BxAddress, len: u32) {
+    pub(crate) fn invalidate_itlb_slot(&mut self, laddr: BxAddress, len: u32) {
         self.eip_fetch_window = None;
         self.itlb.invalidate_slot(laddr, len);
-        self.sync_itlb_pin_slot(laddr, len);
-        self.sync_fetch_window_pin();
-    }
-
-    /// Publish the current bounded instruction-fetch window to the eviction
-    /// sidecar. `eip_fetch_window` (Bochs cpu.cc `eipFetchPtr`) may reference a
-    /// sub-page resident block that no ITLB slot pins; without this interval
-    /// a data access could evict the backing block and leave the retained
-    /// fetch pointer dangling.
-    #[inline]
-    pub(crate) fn sync_fetch_window_pin(&self) {
-        if let Some(pin) = self.active_tlb_pin_sidecar() {
-            pin.set_fetch_window(self.fetch_window_pin());
-        } else {
-            self.tlb_pin_dirty.set(true);
-        }
     }
 
 
-    /// Publish an SVM guest/VMCB host-pointer transition.
-    #[inline]
-    pub(crate) fn sync_vmcb_pin(&self) {
-        if let Some(pin) = self.active_tlb_pin_sidecar() {
-            pin.set_vmcb_offset(self.vmcb_pin_offset());
-        } else {
-            self.tlb_pin_dirty.set(true);
-        }
-    }
+
     pub fn is_canonical(&self, addr: BxAddress) -> bool {
         Self::is_canonical_to_width(addr, self.linaddr_width.into())
     }
@@ -2090,7 +1882,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         len: usize,
         data: &mut [u8],
     ) -> crate::Result<()> {
-        match mem.read_physical_page(self.active_tlb_pins(), policy, paddr, len, data)? {
+        match mem.read_physical_page(policy, paddr, len, data)? {
             crate::memory::PhysAccess::Done => Ok(()),
             crate::memory::PhysAccess::Mmio(token) => {
                 let clock = self.device_clock();
@@ -2120,7 +1912,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         len: usize,
         data: &mut [u8],
     ) -> crate::Result<()> {
-        match mem.write_physical_page(self.active_tlb_pins(), policy, paddr, len, data)? {
+        match mem.write_physical_page(policy, paddr, len, data)? {
             crate::memory::PhysAccess::Done => Ok(()),
             crate::memory::PhysAccess::Mmio(token) => {
                 let clock = self.device_clock();
@@ -2238,18 +2030,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// for this CPU; it is refreshed before CPU execution can mutate TLB/VMCB
     /// state and remains valid through the scope.
     #[inline]
-    pub(crate) fn wire_memory_access(
-        &mut self,
-        mem: NonNull<crate::memory::BxMemC>,
-        pins: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
-    ) {
-        debug_assert!(pins.iter().any(|pin| core::ptr::eq(pin, current_pin)));
-        self.refresh_tlb_pin_if_dirty(current_pin);
-        self.active_tlb_pin_sidecar = Some(NonNull::from(current_pin));
+    pub(crate) fn wire_memory_access(&mut self, mem: NonNull<crate::memory::BxMemC>) {
         self.set_mem_bus_ptr(mem);
-        self.active_tlb_pins = pins.as_ptr();
-        self.active_tlb_pin_count = pins.len();
     }
 
     /// Tell this CPU where its memory lives.
@@ -2281,9 +2063,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// with the mappings when the RAM itself changes.
     #[inline]
     pub(crate) fn clear_memory_access(&mut self) {
-        self.active_tlb_pins = core::ptr::null();
-        self.active_tlb_pin_count = 0;
-        self.active_tlb_pin_sidecar = None;
         self.clear_mem_bus();
     }
 
@@ -2553,7 +2332,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// handlers read the bus from the context directly.
     #[inline]
     fn install_bus_wiring(&mut self, pc_tick_denominator: u64) {
-        let (cpu, _mem, devices, pc_system, _pins, _current) = self.slice_parts();
+        let (cpu, _mem, devices, pc_system) = self.slice_parts();
         cpu.set_io_bus_ptr(NonNull::from(devices));
         cpu.set_pc_system_ptr_with_tick_denominator(NonNull::from(pc_system), pc_tick_denominator);
     }
@@ -2648,7 +2427,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // dispatcher is an `ExecCtx` method, so it cannot run while these
         // borrows are alive.
         {
-            let (cpu, mem, _devices, _pc_system, cpus, current_pin) = self.slice_parts();
+            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
             cpu.a20_mask = mem.a20_mask();
 
             // Direct pointers are available only for a complete, identity-backed
@@ -2658,7 +2437,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // to the host address a pin holds needs this base.
             cpu.install_memory_bases(mem);
 
-            cpu.wire_memory_access(NonNull::from(&mut *mem), cpus, current_pin);
+            cpu.wire_memory_access(NonNull::from(&mut *mem));
         }
         let _memory_wiring = CpuMemoryWiringGuard::new(&mut **self);
 
@@ -2767,8 +2546,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 {
                     self.async_event = 0;
                 } else if {
-                    let (cpu, mem, _d, _p, cpus, _c) = self.slice_parts();
-                    cpu.handle_async_event(pic.as_deref_mut(), dma.as_deref_mut(), Some(mem), cpus)
+                    let (cpu, mem, _d, _p) = self.slice_parts();
+                    cpu.handle_async_event(pic.as_deref_mut(), dma.as_deref_mut(), Some(mem))
                 } {
                     // Slow path: real async event (interrupt, HLT, shutdown, etc.)
                     break Ok(iteration);
@@ -2781,8 +2560,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 // The borrow ends with the scrutinee, so the arms below are
                 // free to go back through `self`.
                 let entry = {
-                    let (cpu, mem, _d, _p, cpus, _c) = self.slice_parts();
-                    cpu.get_icache_entry(mem, cpus)
+                    let (cpu, mem, _d, _p) = self.slice_parts();
+                    cpu.get_icache_entry(mem)
                 };
                 match entry {
                     Ok((start, tlen)) => (start, start + tlen),
@@ -3036,8 +2815,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     // (matching C++ line 218-220: entry=getICacheEntry; i=entry->i; last=...)
                     let (start, tlen) = {
                         let chained = {
-                            let (cpu, mem, _d, _p, cpus, _c) = self.slice_parts();
-                            cpu.get_icache_entry(mem, cpus)
+                            let (cpu, mem, _d, _p) = self.slice_parts();
+                            cpu.get_icache_entry(mem)
                         };
                         match chained {
                             Ok(v) => v,
@@ -3161,12 +2940,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     fn fetch_next_instruction(
         &mut self,
         mem: &mut BxMemC,
-        cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<Instruction> {
         // A plain reborrow: the raw pointer here existed only to manufacture a
         // borrow with the impl's `'c` lifetime, which a reborrow cannot produce.
         // With `'c` gone there is nothing to work around.
-        let (mpool_start_idx, _tlen) = self.get_icache_entry(mem, cpus)?;
+        let (mpool_start_idx, _tlen) = self.get_icache_entry(mem)?;
         Ok(self.i_cache.mpool[mpool_start_idx])
     }
 
@@ -3226,7 +3004,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     fn get_icache_entry(
         &mut self,
         mem: &mut BxMemC,
-        cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<(usize, usize)> {
         // Apply machine-wide SMC invalidations this cpu has not seen before
         // consulting the icache — device DMA (Bochs memory.cc
@@ -3261,7 +3038,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             let mut retry_count = 0;
             loop {
-                self.prefetch(&mut *mem, cpus)?;
+                self.prefetch(&mut *mem)?;
 
                 if self.eip_page_window_size == 0 || self.eip_fetch_window.is_none() {
                     retry_count += 1;
@@ -3323,7 +3100,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         // The prefetch borrow above ends before this call, so an ordinary
         // reborrow is all this ever needed.
-        let miss_entry = self.serve_icache_miss(eip_biased, p_addr, &mut *mem, cpus)?;
+        let miss_entry = self.serve_icache_miss(eip_biased, p_addr, &mut *mem)?;
         Ok((miss_entry.mpool_start_idx, miss_entry.tlen as usize))
     }
 
@@ -3531,11 +3308,40 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     //  * page boundary:            4k
     //  * ROM boundary:             2k (dont care since we are only reading)
     //  * segment boundary:         any
+    /// Discard allocation-based caches if guest blocks moved since they were
+    /// filled (doctrine R5 — the single consumer of the residency epoch).
+    ///
+    /// The instruction TLB, the bounded fetch window and the VMCB backing all
+    /// address the whole allocation rather than the identity guest-RAM base,
+    /// because instruction fetch also runs out of ROM and out of relocated
+    /// blocks. That is exactly what makes them survivable across a swap and
+    /// therefore stale-able by one — the case the per-CPU pin sidecar used to
+    /// prevent by vetoing eviction.
+    ///
+    /// Called at fetch-window refill, which is the first moment any of the
+    /// three can be consumed after a swap: a swap can only be triggered by a
+    /// memory access, and the very next instruction byte comes through here.
+    ///
+    /// Free in every configuration that does not swap: with full residency the
+    /// epoch is a constant, so this is one compare against an unchanging value
+    /// and never the branch that is taken.
+    #[inline(always)]
+    fn revalidate_allocation_caches(&mut self, mem: &BxMemC) {
+        let epoch = mem.swap_epoch();
+        if epoch == self.fetch_epoch {
+            return;
+        }
+        self.itlb.flush();
+        self.eip_fetch_window = None;
+        self.vmcb_host_offset = None;
+        self.fetch_epoch = epoch;
+    }
+
     pub(super) fn prefetch(
         &mut self,
         mem: &mut BxMemC,
-        pins: &[crate::memory::CpuTlbPin],
     ) -> Result<()> {
+        self.revalidate_allocation_caches(mem);
         let laddr: BxAddress;
         let page_offset;
 
@@ -3683,7 +3489,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             // page.  Its mapping and prefetch slice must be gone before the
             // page walk or direct mapping can ask the block allocator to
             // replace it.
-            self.invalidate_itlb_pin_slot(laddr, 0);
+            self.invalidate_itlb_slot(laddr, 0);
             // TLB miss - need to walk page tables
             // Get a20_mask before borrowing mem mutably
             let a20_mask = mem.a20_mask();
@@ -3764,7 +3570,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             let page_mapping = mem.host_mem_range_pinned(
                 page_base,
                 MemoryAccessType::Execute,
-                pins,
                 page_policy,
             );
             match page_mapping {
@@ -3788,7 +3593,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     let current_mapping = mem.host_mem_range_pinned(
                         current_p_addr,
                         MemoryAccessType::Execute,
-                        pins,
                         current_policy,
                     );
                     match current_mapping {
@@ -3850,7 +3654,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     // — routes INVLPG through the mask-aware scan path.
                     self.itlb.split_large = true;
                 }
-                self.sync_itlb_pin_slot(lpf, 0);
             }
             let eip_biased =
                 (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
@@ -3864,7 +3667,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         // Publish the final fetch window from every arm above, including
         // full-page windows installed without a matching ITLB slot.
-        self.sync_fetch_window_pin();
 
         Ok(())
     }
@@ -4350,54 +4152,11 @@ mod tests {
             decoder::BxSegregs,
             crregs::{BxCr0, BxCr4},
         },
-        memory::{BxMemC, BxMemoryStubC, CpuTlbPin},
+        memory::{BxMemC, BxMemoryStubC},
         params::BxParams,
         pc_system::{BxPcSystemC, TimerOwner},
     };
 
-    #[test]
-    fn fetch_window_pin_cleared_by_itlb_invalidation() {
-        // Bochs cpu.cc prefetch: `eipFetchPtr` remains valid until the next
-        // refill. The publisher must pin its exact span and the ITLB
-        // invalidation path must clear both the pointer and the pin.
-        const WINDOW: usize = 0x2000;
-        const WINDOW_LEN: usize = 0x80;
-
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.install_memory_bases(&mut mem);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
-
-        // The window is stated as a location in the allocation, which is also
-        // how it is published. This test once pointed at an unrelated static
-        // and could only ever have named a meaningless offset.
-        let code = crate::cpu::tlb::FetchWindow {
-            start: WINDOW,
-            len: WINDOW_LEN,
-        };
-
-        cpu.eip_fetch_window = Some(code);
-        cpu.sync_fetch_window_pin();
-        assert!(pin.is_alloc_range_pinned(WINDOW, WINDOW + WINDOW_LEN));
-        // Only the exact window is pinned, not neighbouring ranges.
-        assert!(!pin.is_alloc_range_pinned(WINDOW + WINDOW_LEN, WINDOW + 2 * WINDOW_LEN));
-
-        cpu.invalidate_itlb_pin_slot(0, 0);
-        assert!(cpu.eip_fetch_window.is_none());
-        assert!(!pin.is_alloc_range_pinned(WINDOW, WINDOW + WINDOW_LEN));
-
-        // The full-rescan recovery path republishes a live window.
-        cpu.eip_fetch_window = Some(code);
-        cpu.refresh_tlb_pin(&pin);
-        assert!(pin.is_alloc_range_pinned(WINDOW, WINDOW + WINDOW_LEN));
-
-        cpu.clear_memory_access();
-    }
 
     #[test]
     fn page_walk_direct_ad_writes_invalidate_dword_and_qword_cached_code() {
@@ -4415,29 +4174,25 @@ mod tests {
             false,
         );
         let mem_ptr: *mut BxMemC = &mut mem;
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem));
         let (host_base, host_len) = mem.identity_guest_base();
         cpu.install_memory_bases(&mut mem);
 
         // The leaf PTE itself starts as executable code.  Cache it through the
         // normal prefetch/decode path while paging is off, then make a real
         // legacy system write walk update that physical cache line.
-        mem.write_ram(
-            pins,
-            LEGACY_DIRECTORY,
+        mem.write_ram(LEGACY_DIRECTORY,
             &(LEGACY_TABLE | 0x3).to_le_bytes(),
         )
         .unwrap();
-        mem.write_ram(pins, LEGACY_TABLE, &PAGE_ENTRY.to_le_bytes())
+        mem.write_ram(LEGACY_TABLE, &PAGE_ENTRY.to_le_bytes())
             .unwrap();
         cpu.cpu_mode = CpuMode::Long64;
         cpu.cr0 = BxCr0::empty();
         cpu.cr4 = BxCr4::empty();
         cpu.set_rip(LEGACY_TABLE);
         cpu.prev_rip = LEGACY_TABLE;
-        let (legacy_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+        let (legacy_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
         let legacy_mode = cpu.fetch_mode_mask.bits().into();
         assert!(cpu.i_cache.find_entry(LEGACY_TABLE, legacy_mode).is_some());
         assert!(mem.smc_range_has_stamps(LEGACY_TABLE, 4));
@@ -4453,7 +4208,7 @@ mod tests {
             "the legacy direct system-write walk must resolve the leaf"
         );
         let mut legacy_pte = [0; 4];
-        mem.read_ram(pins, LEGACY_TABLE, &mut legacy_pte).unwrap();
+        mem.read_ram(LEGACY_TABLE, &mut legacy_pte).unwrap();
         assert_eq!(
             u32::from_le_bytes(legacy_pte) & 0x60,
             0x60,
@@ -4475,24 +4230,24 @@ mod tests {
         cpu.set_rip(LEGACY_TABLE);
         cpu.prev_rip = LEGACY_TABLE;
         let (legacy_reloaded, _) =
-            unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+            unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
         assert_ne!(legacy_reloaded, legacy_mpool);
         let legacy_instr = cpu.i_cache.mpool[legacy_reloaded];
-        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, pins, |ctx| {
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, |ctx| {
             ctx.execute_instruction(&legacy_instr)
         })
         .unwrap();
 
         // Repeat with the PAE direct qword walker.  Its PTE line is likewise
         // decoded into a live trace before the architectural A/D write.
-        mem.write_ram(pins, PAE_DIRECTORY, &(PAE_TABLE | 0x3).to_le_bytes())
+        mem.write_ram(PAE_DIRECTORY, &(PAE_TABLE | 0x3).to_le_bytes())
             .unwrap();
-        mem.write_ram(pins, PAE_TABLE, &PAGE_ENTRY.to_le_bytes())
+        mem.write_ram(PAE_TABLE, &PAGE_ENTRY.to_le_bytes())
             .unwrap();
         cpu.invalidate_prefetch_q();
         cpu.set_rip(PAE_TABLE);
         cpu.prev_rip = PAE_TABLE;
-        let (pae_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+        let (pae_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
         let pae_mode = cpu.fetch_mode_mask.bits().into();
         assert!(cpu.i_cache.find_entry(PAE_TABLE, pae_mode).is_some());
         assert!(mem.smc_range_has_stamps(PAE_TABLE, 8));
@@ -4509,7 +4264,7 @@ mod tests {
             "the PAE direct system-write walk must resolve the leaf"
         );
         let mut pae_pte = [0; 8];
-        mem.read_ram(pins, PAE_TABLE, &mut pae_pte).unwrap();
+        mem.read_ram(PAE_TABLE, &mut pae_pte).unwrap();
         assert_eq!(
             u64::from_le_bytes(pae_pte) & 0x60,
             0x60,
@@ -4529,10 +4284,10 @@ mod tests {
         cpu.set_rip(PAE_TABLE);
         cpu.prev_rip = PAE_TABLE;
         let (pae_reloaded, _) =
-            unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+            unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
         assert_ne!(pae_reloaded, pae_mpool);
         let pae_instr = cpu.i_cache.mpool[pae_reloaded];
-        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, pins, |ctx| {
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, |ctx| {
             ctx.execute_instruction(&pae_instr)
         })
         .unwrap();
@@ -4557,9 +4312,7 @@ mod tests {
             false,
         );
         let mem_ptr: *mut BxMemC = &mut mem;
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem));
         let (host_base, host_len) = mem.identity_guest_base();
         cpu.install_memory_bases(&mut mem);
 
@@ -4578,33 +4331,31 @@ mod tests {
         cpu.cr3 = PAGE_DIRECTORY;
         cpu.update_fetch_mode_mask();
 
-        mem.write_ram(pins, PAGE_DIRECTORY, &(PAGE_TABLE | 0x3).to_le_bytes())
+        mem.write_ram(PAGE_DIRECTORY, &(PAGE_TABLE | 0x3).to_le_bytes())
             .unwrap();
-        mem.write_ram(pins, PAGE_TABLE, &(FIRST_CODE_PAGE | 0x3).to_le_bytes())
+        mem.write_ram(PAGE_TABLE, &(FIRST_CODE_PAGE | 0x3).to_le_bytes())
             .unwrap();
-        mem.write_ram(
-            pins,
-            PAGE_TABLE + 4,
+        mem.write_ram(PAGE_TABLE + 4,
             &(OLD_SECOND_CODE_PAGE | 0x3).to_le_bytes(),
         )
         .unwrap();
-        mem.write_ram(pins, FIRST_CODE_PAGE + 0x0ffe, &[0xb8, 0x78])
+        mem.write_ram(FIRST_CODE_PAGE + 0x0ffe, &[0xb8, 0x78])
             .unwrap();
-        mem.write_ram(pins, OLD_SECOND_CODE_PAGE, &[0x56, 0x34, 0x12])
+        mem.write_ram(OLD_SECOND_CODE_PAGE, &[0x56, 0x34, 0x12])
             .unwrap();
-        mem.write_ram(pins, NEW_SECOND_CODE_PAGE, &[0x99, 0x88, 0x77])
+        mem.write_ram(NEW_SECOND_CODE_PAGE, &[0x99, 0x88, 0x77])
             .unwrap();
 
         cpu.set_rip(SPLIT_RIP);
         cpu.prev_rip = SPLIT_RIP;
-        let (old_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+        let (old_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
         let fetch_mode = cpu.fetch_mode_mask.bits().into();
         assert!(
             cpu.i_cache.find_entry(FIRST_CODE_PAGE + 0x0ffe, fetch_mode).is_some(),
             "normal lookup must commit the primary page-split trace"
         );
         let old_instr = cpu.i_cache.mpool[old_mpool];
-        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, pins, |ctx| {
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, |ctx| {
             ctx.execute_instruction(&old_instr)
         })
         .unwrap();
@@ -4617,9 +4368,7 @@ mod tests {
         // Remap only the second virtual page and perform the architectural TLB
         // link break.  No write touches the first-page code line: correctness
         // depends specifically on invalidating the primary live split entry.
-        mem.write_ram(
-            pins,
-            PAGE_TABLE + 4,
+        mem.write_ram(PAGE_TABLE + 4,
             &(NEW_SECOND_CODE_PAGE | 0x3).to_le_bytes(),
         )
         .unwrap();
@@ -4634,13 +4383,13 @@ mod tests {
         cpu.async_event = 0;
         cpu.set_rip(SPLIT_RIP);
         cpu.prev_rip = SPLIT_RIP;
-        let (new_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+        let (new_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
         assert_ne!(
             new_mpool, old_mpool,
             "a primary cache hit after remapping would reuse stale split code"
         );
         let new_instr = cpu.i_cache.mpool[new_mpool];
-        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, pins, |ctx| {
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, |ctx| {
             ctx.execute_instruction(&new_instr)
         })
         .unwrap();
@@ -4700,12 +4449,7 @@ mod tests {
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
         );
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(
-            NonNull::from(&mut mem),
-            core::slice::from_ref(&pin),
-            &pin,
-        );
+        cpu.wire_memory_access(NonNull::from(&mut mem));
         let (host_base, host_len) = mem.identity_guest_base();
         cpu.install_memory_bases(&mut mem);
 
@@ -4717,8 +4461,6 @@ mod tests {
 
         assert!(matches!(result, Err(CpuError::CpuNotInitialized)));
         assert!(cpu.mem_bus.is_none());
-        assert!(cpu.active_tlb_pins().is_empty());
-        assert!(cpu.active_tlb_pin_sidecar.is_none());
         // The RAM base deliberately SURVIVES the teardown: it says where the
         // machine's RAM is, not whether this CPU is wired to it, and the data
         // TLB entries that name pages within that RAM outlive the scope too.
@@ -4764,7 +4506,6 @@ mod tests {
             .host_mem_range_pinned(
                 0xFFFF_0000,
                 MemoryAccessType::Execute,
-                &[],
                 crate::memory::CpuMemoryPolicy::default(),
             )
             .unwrap()
@@ -4802,10 +4543,9 @@ mod tests {
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
         );
-        let pin = CpuTlbPin::new(&cpu);
         let (host_base, host_len) = mem.identity_guest_base();
         cpu.install_memory_bases(&mut mem);
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem));
 
         let slot = cpu.dtlb.get_index_of(TARGET, 0);
         {
@@ -4814,13 +4554,7 @@ mod tests {
             entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(TARGET as usize);
             entry.access_bits = 1;
         }
-        cpu.sync_dtlb_pin_slot(TARGET, 0);
         let expected = host_base.wrapping_add(TARGET as usize);
-        // Captured before the base is retired below; the sidecar publishes
-        // allocation offsets, so this is the unit the assertions ask in.
-        let alloc_base = cpu.mem_alloc_base as usize;
-        let pinned = expected as usize - alloc_base;
-        assert!(pin.is_alloc_range_pinned(pinned, pinned + 0x1000));
 
         // Exactly what `CpuMemoryWiringGuard` does when a batch ends.
         cpu.clear_memory_access();
@@ -4830,282 +4564,16 @@ mod tests {
             expected,
             "the cached page must still resolve to the same host address"
         );
-        cpu.refresh_tlb_pin(&pin);
-        assert!(
-            pin.is_alloc_range_pinned(pinned, pinned + 0x1000),
-            "a between-scope sidecar refresh must still publish the real host page"
-        );
 
         cpu.invalidate_host_memory_mappings();
         assert!(cpu.mem_host_base.is_null());
         assert_eq!(cpu.mem_host_len, 0);
-        // Unwired, so the flush could only mark the sidecar dirty; the refresh
-        // that `invalidate_all_cpu_host_mappings` runs next is what publishes
-        // the removal. Nothing survives to be resolved against the gone base.
-        cpu.refresh_tlb_pin(&pin);
-        assert!(
-            !pin.is_alloc_range_pinned(pinned, pinned + 0x1000),
-            "retiring the base must retire the mappings named against it"
-        );
     }
 
-    #[test]
-    fn unwired_tlb_mutation_refreshes_pin_before_next_memory_scope() {
-        const TARGET: u64 = 0x4000;
 
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        let (host_base, host_len) = mem.identity_guest_base();
-        cpu.install_memory_bases(&mut mem);
-        let pinned = (host_base as usize + TARGET as usize) - cpu.mem_alloc_base as usize;
-        let slot = cpu.dtlb.get_index_of(TARGET, 0);
-        let entry = &mut cpu.dtlb.entries[slot];
-        entry.lpf = TARGET;
-        entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(TARGET as usize);
-        entry.access_bits = 1;
 
-        cpu.sync_dtlb_pin_slot(TARGET, 0);
-        assert!(!pin.is_alloc_range_pinned(pinned, pinned + 0x1000));
 
-        cpu.wire_memory_access(
-            NonNull::from(&mut mem),
-            core::slice::from_ref(&pin),
-            &pin,
-        );
 
-        assert!(pin.is_alloc_range_pinned(pinned, pinned + 0x1000));
-        cpu.clear_memory_access();
-    }
-
-    #[test]
-    fn dtlb_miss_releases_colliding_pin_before_page_walk() {
-        const TARGET: u64 = 0x4000;
-        const OLD_LPF: u64 = 0x8000;
-
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
-        let (host_base, host_len) = mem.identity_guest_base();
-        cpu.install_memory_bases(&mut mem);
-        cpu.cpu_mode = CpuMode::Ia32Protected;
-        cpu.cr0 = BxCr0::PE | BxCr0::PG;
-        cpu.cr4 = BxCr4::empty();
-        cpu.cr3 = 0;
-
-        let pinned = host_base as usize - cpu.mem_alloc_base as usize;
-        let slot = cpu.dtlb.get_index_of(TARGET, 0);
-        let entry = &mut cpu.dtlb.entries[slot];
-        entry.lpf = OLD_LPF;
-        entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
-        entry.access_bits = 1;
-        cpu.sync_dtlb_pin_slot(TARGET, 0);
-        assert!(pin.is_alloc_range_pinned(pinned, pinned + 0x1000));
-
-        assert!(cpu.translate_data_read(TARGET).is_err());
-        assert!(!pin.is_alloc_range_pinned(pinned, pinned + 0x1000));
-        cpu.clear_memory_access();
-    }
-
-    #[test]
-    fn full_tlb_flush_clears_pin_hosts_like_a_full_rescan() {
-        // Track B: `tlb_flush` publishes the pin sidecar via a memset
-        // (`clear_active_tlb_pin_hosts`) instead of the per-slot rescan. Every
-        // pinned DTLB and ITLB host pointer must be gone afterward — exactly
-        // what `refresh_tlb_pin` produces once every entry is invalid.
-        const DTLB_TARGET: u64 = 0x4000;
-        const ITLB_TARGET: u64 = 0x8000;
-
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.install_memory_bases(&mut mem);
-        let alloc_base = cpu.mem_alloc_base as usize;
-        // Both sides are asked in allocation offsets, but they are *derived*
-        // from their own bases — the data side from identity RAM, the
-        // instruction side from the allocation. Those coincide only because
-        // residency here is full.
-        let dtlb_pinned = (cpu.mem_host_base as usize + DTLB_TARGET as usize) - alloc_base;
-        let itlb_pinned = ITLB_TARGET as usize;
-
-        let dslot = cpu.dtlb.get_index_of(DTLB_TARGET, 0);
-        {
-            let e = &mut cpu.dtlb.entries[dslot];
-            e.lpf = DTLB_TARGET;
-            e.host_page = crate::cpu::tlb::RamPage::from_ram_offset(DTLB_TARGET as usize);
-            e.access_bits = 1;
-        }
-        let islot = cpu.itlb.get_index_of(ITLB_TARGET, 0);
-        {
-            let e = &mut cpu.itlb.entries[islot];
-            e.lpf = ITLB_TARGET;
-            e.host_page = crate::cpu::tlb::AllocPage::from_alloc_offset(ITLB_TARGET as usize);
-            e.access_bits = 1;
-        }
-
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
-        cpu.sync_dtlb_pin_slot(DTLB_TARGET, 0);
-        cpu.sync_itlb_pin_slot(ITLB_TARGET, 0);
-        assert!(pin.is_alloc_range_pinned(dtlb_pinned, dtlb_pinned + 0x1000));
-        assert!(pin.is_alloc_range_pinned(itlb_pinned, itlb_pinned + 0x1000));
-
-        cpu.tlb_flush();
-        assert!(!pin.is_alloc_range_pinned(dtlb_pinned, dtlb_pinned + 0x1000));
-        assert!(!pin.is_alloc_range_pinned(itlb_pinned, itlb_pinned + 0x1000));
-
-        cpu.clear_memory_access();
-    }
-
-    #[test]
-    fn full_tlb_flush_keeps_the_vmcb_pin_in_an_svm_guest() {
-        // The full-flush memset zeros `vmcb_host`, but the flush does not change
-        // SVM state — under-pinning the VMCB backing would be a use-after-free.
-        // `clear_active_tlb_pin_hosts` re-publishes it while in an SVM guest.
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.in_svm_guest = true;
-        cpu.install_memory_bases(&mut mem);
-        let vmcb_pinned = (mem.identity_guest_base().0 as usize + 0x1_0000)
-            - cpu.mem_alloc_base as usize;
-        cpu.vmcb_host_offset = Some(vmcb_pinned);
-
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
-        cpu.sync_vmcb_pin();
-        assert!(pin.is_alloc_range_pinned(vmcb_pinned, vmcb_pinned + 0x1000));
-
-        cpu.tlb_flush();
-        assert!(
-            pin.is_alloc_range_pinned(vmcb_pinned, vmcb_pinned + 0x1000),
-            "a full flush must not drop the active SVM guest's VMCB pin"
-        );
-
-        cpu.clear_memory_access();
-    }
-
-    #[test]
-    fn incremental_tlb_pins_match_a_fresh_rescan_after_every_op() {
-        // Track B property test. The pin sidecar is maintained incrementally:
-        // installs publish one slot, `flush_non_global_and_publish_pin` and
-        // `invlpg_and_publish_pin` fuse pin removal into the invalidation walk,
-        // and `tlb_flush` memsets. After every operation the sidecar must be
-        // byte-identical to a fresh `refresh_tlb_pin` full rescan — the oracle —
-        // for both an SVM-off and an SVM-on host, or the fused walks would
-        // under-pin (use-after-free) or over-pin (a stale eviction block).
-        const MIB: usize = 1024 * 1024;
-
-        for &svm in &[false, true] {
-            let mut cpu = BxCpuBuilder::new().build().unwrap();
-            let mut mem = BxMemC::new(
-                BxMemoryStubC::create_and_init(4 * MIB, 4 * MIB, MIB).unwrap(),
-                false,
-            );
-            // Fully resident, so there is a real identity base. The data TLB
-            // only ever caches pages of identity-backed RAM, so a base is the
-            // state its entries are filled in — with none, a fill stores no
-            // page at all and this property has nothing to check.
-            cpu.install_memory_bases(&mut mem);
-            assert!(!cpu.mem_host_base.is_null());
-            assert_eq!(
-                cpu.mem_host_base, cpu.mem_alloc_base,
-                "under full residency guest RAM starts the allocation, which is \
-                 what lets one `host_base` stand for both sides here"
-            );
-            let host_base = cpu.mem_host_base as usize;
-
-            if svm {
-                cpu.in_svm_guest = true;
-                cpu.vmcb_host_offset =
-                    Some((host_base + 0x2_0000) - cpu.mem_alloc_base as usize);
-            }
-
-            let pin = CpuTlbPin::new(&cpu);
-            let oracle = CpuTlbPin::new(&cpu);
-            cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
-            if svm {
-                cpu.sync_vmcb_pin();
-            }
-
-            // Deterministic xorshift64 — Date/rand are unavailable in tests.
-            let mut state: u64 = 0x9E37_79B9_7F4A_7C15 ^ (svm as u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
-            let mut next = || {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state
-            };
-            // Page-aligned linear address spanning 8192 pages, forcing slot
-            // collisions in both the 1024-entry ITLB and the larger DTLB.
-            let laddr_of = |n: u64| ((n & 0x1FFF) << 12) as u64;
-
-            for _ in 0..2000 {
-                match next() % 6 {
-                    0 | 1 => {
-                        let laddr = laddr_of(next());
-                        let global = (next() & 1) != 0;
-                        let large = (next() & 7) == 0;
-                        let slot = cpu.dtlb.get_index_of(laddr, 0);
-                        {
-                            let e = &mut cpu.dtlb.entries[slot];
-                            e.lpf = laddr;
-                            e.host_page = crate::cpu::tlb::RamPage::from_ram_offset(laddr as usize);
-                            // bit31 == TLB_GLOBAL_PAGE (tlb.rs); low bit is a
-                            // normal access-permission bit marking the entry live.
-                            e.access_bits = 1 | if global { 0x8000_0000 } else { 0 };
-                            e.lpf_mask = if large { 0x1F_FFFF } else { 0xFFF };
-                        }
-                        if large {
-                            cpu.dtlb.split_large = true;
-                        }
-                        cpu.sync_dtlb_pin_slot(laddr, 0);
-                    }
-                    2 => {
-                        let laddr = laddr_of(next());
-                        let host = host_base + laddr as usize;
-                        let global = (next() & 1) != 0;
-                        let slot = cpu.itlb.get_index_of(laddr, 0);
-                        {
-                            let e = &mut cpu.itlb.entries[slot];
-                            e.lpf = laddr;
-                            e.host_page =
-                                crate::cpu::tlb::AllocPage::from_alloc_offset(laddr as usize);
-                            e.access_bits = 1 | if global { 0x8000_0000 } else { 0 };
-                            e.lpf_mask = 0xFFF;
-                        }
-                        cpu.sync_itlb_pin_slot(laddr, 0);
-                    }
-                    3 => {
-                        let laddr = laddr_of(next());
-                        cpu.invlpg_and_publish_pin(laddr);
-                    }
-                    4 => cpu.flush_non_global_and_publish_pin(),
-                    _ => cpu.tlb_flush(),
-                }
-
-                cpu.refresh_tlb_pin(&oracle);
-                assert!(
-                    pin.state_matches(&oracle),
-                    "incremental pin diverged from a fresh rescan (svm={svm})"
-                );
-            }
-
-            cpu.clear_memory_access();
-        }
-    }
 
     #[test]
     fn tlb_flushes_disarm_the_monitor_like_bochs() {
@@ -5151,92 +4619,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn itlb_miss_releases_colliding_pin_before_block_replacement() {
-        const MIB: usize = 1024 * 1024;
-        const TARGET: u64 = 4 * MIB as u64;
 
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(5 * MIB, MIB, MIB).unwrap(),
-            false,
-        );
-        mem.set_a20_mask(u64::MAX);
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
-
-        mem.write_ram(&[], 0, &[0x5a]).unwrap();
-        // Host memory is a fifth of guest memory here, so residency is partial
-        // and there is NO identity base — `mem_host_base` stays null. This is
-        // the regime the instruction side must survive, and the only thing it
-        // can be measured from is the allocation.
-        cpu.install_memory_bases(&mut mem);
-        assert!(cpu.mem_host_base.is_null());
-        assert!(!cpu.mem_alloc_base.is_null());
-        let offset = mem
-            .host_mem_range_pinned(
-                0,
-                MemoryAccessType::Read,
-                &[],
-                crate::memory::CpuMemoryPolicy::default(),
-            )
-            .unwrap()
-            .unwrap()
-            .start;
-        let slot = cpu.itlb.get_index_of(TARGET, 0);
-        let entry = &mut cpu.itlb.entries[slot];
-        entry.lpf = TARGET;
-        entry.host_page = crate::cpu::tlb::AllocPage::from_alloc_offset(offset);
-        entry.access_bits = 1;
-        // A live fetch window, placed in the tail of the allocation so it does
-        // NOT overlap the block under test — otherwise the pin assertion below
-        // would pass on the window alone and prove nothing about the ITLB slot.
-        // (It used to point at a `&[0]` static, which is outside the allocation
-        // and has no meaningful offset into it at all.)
-        let window_offset = cpu.mem_alloc_len - 8;
-        assert!(window_offset >= offset + MIB, "window must clear the block");
-        cpu.eip_fetch_window = Some(crate::cpu::tlb::FetchWindow {
-            start: window_offset,
-            len: 8,
-        });
-        cpu.sync_itlb_pin_slot(TARGET, 0);
-        cpu.sync_fetch_window_pin();
-        assert!(pin.is_alloc_range_pinned(offset, offset + MIB));
-
-        cpu.invalidate_itlb_pin_slot(TARGET, 0);
-
-        assert!(cpu.eip_fetch_window.is_none());
-        assert!(!pin.is_alloc_range_pinned(offset, offset + MIB));
-        mem.write_ram(pins, TARGET, &[0xa5]).unwrap();
-        let mut replaced = [0];
-        assert_eq!(mem.read_ram(pins, TARGET, &mut replaced).unwrap(), 1);
-        assert_eq!(replaced, [0xa5]);
-        cpu.clear_memory_access();
-    }
-
-    #[test]
-    fn svm_pin_sidecar_tracks_guest_state_transitions() {
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(
-            NonNull::from(&mut mem),
-            core::slice::from_ref(&pin),
-            &pin,
-        );
-
-        cpu.in_svm_guest = true;
-        cpu.vmcb_host_offset = Some(0x6000);
-        cpu.sync_vmcb_pin();
-        assert!(pin.is_alloc_range_pinned(0x6000, 0x7000));
-
-        cpu.in_svm_guest = false;
-        cpu.sync_vmcb_pin();
-        assert!(!pin.is_alloc_range_pinned(0x6000, 0x7000));
-        cpu.clear_memory_access();
-    }
 }

@@ -5253,7 +5253,7 @@ mod tests {
     use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
-    use crate::memory::{BxMemC, BxMemoryStubC, CpuTlbPin};
+    use crate::memory::{BxMemC, BxMemoryStubC};
     use std::ptr::NonNull;
 
     /// Every opcode a CPU model admits must have somewhere to go.
@@ -5741,8 +5741,7 @@ mod tests {
         cpu.a20_mask = mem.a20_mask();
         cpu.install_memory_bases(&mut mem);
         assert!(!cpu.mem_host_base.is_null());
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem));
 
         let mut instr = Instruction::default();
         instr.set_ia_opcode(Opcode::V256VpsadbwVdqHdqWdq);
@@ -5799,8 +5798,7 @@ mod tests {
         cpu.a20_mask = mem.a20_mask();
         cpu.install_memory_bases(&mut mem);
         assert!(!cpu.mem_host_base.is_null());
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem));
         cpu.cpu_mode = CpuMode::Long64;
 
         cpu.linaddr_width = 48;
@@ -5843,8 +5841,7 @@ mod tests {
         cpu.a20_mask = mem.a20_mask();
         cpu.install_memory_bases(&mut mem);
         assert!(!cpu.mem_host_base.is_null());
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem));
         cpu.cpu_mode = CpuMode::Long64;
         cpu.linaddr_width = 48;
 
@@ -5960,8 +5957,7 @@ mod tests {
         cpu.a20_mask = mem.a20_mask();
         cpu.install_memory_bases(&mut mem);
         assert!(!cpu.mem_host_base.is_null());
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem));
 
         let mut instr = Instruction::default();
         instr.set_ia_opcode(Opcode::VxorpsVpsHpsWps);
@@ -6439,8 +6435,7 @@ mod tests {
             cpu.a20_mask = mem.a20_mask();
             cpu.install_memory_bases(&mut mem);
             assert!(!cpu.mem_host_base.is_null());
-            let pin = CpuTlbPin::new(&cpu);
-            cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+            cpu.wire_memory_access(NonNull::from(&mut mem));
 
             let mut instr = Instruction::default();
             instr.set_ia_opcode(opcode);
