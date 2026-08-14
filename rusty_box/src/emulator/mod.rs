@@ -397,12 +397,14 @@ pub struct Emulator<T: Instrumentation = ()> {
     cpu_tlb_pin_count: usize,
     /// Memory subsystem
     pub(crate) memory: BxMemC,
-    /// Device controller (I/O port handlers)
-    pub devices: BxDevicesC,
-    /// Device manager (actual hardware devices)
-    pub device_manager: DeviceManager,
-    /// PC system (timers, A20, etc.)
-    pub pc_system: BxPcSystemC,
+    /// Device controller (I/O port handlers). Crate-private (doctrine R3):
+    /// consumers reach device state through named machine methods, never by
+    /// walking machine internals.
+    pub(crate) devices: BxDevicesC,
+    /// Device manager (actual hardware devices). Crate-private — see `devices`.
+    pub(crate) device_manager: DeviceManager,
+    /// PC system (timers, A20, etc.). Crate-private — see `devices`.
+    pub(crate) pc_system: BxPcSystemC,
     /// Derived scheduler membership. These masks deliberately remain advisory
     /// until Phase 8's scan oracle makes them authoritative.
     runnable_mask: CpuMask,
@@ -438,11 +440,15 @@ pub struct Emulator<T: Instrumentation = ()> {
     /// Vertical period currently programmed into that timer, so it is only
     /// re-armed when the guest actually changes the display timing.
     pub(crate) vga_vertical_period_usec: u32,
-    /// Shared stop flag: when set to true by the GUI thread, run_interactive exits the loop
+    /// Shared stop flag: when set to true by another thread (typically a GUI
+    /// thread), `run_interactive`/`step_batch` loops exit. Crate-private
+    /// (doctrine R3): external consumers share it through
+    /// [`Emulator::set_stop_flag`] and read it through [`Emulator::stop_flag`],
+    /// which present the same shape under both `alloc` settings (R0).
     #[cfg(feature = "alloc")]
-    pub stop_flag: Arc<AtomicBool>,
+    pub(crate) stop_flag: Arc<AtomicBool>,
     #[cfg(not(feature = "alloc"))]
-    pub stop_flag: AtomicBool,
+    pub(crate) stop_flag: AtomicBool,
 }
 
 impl<'a, T: Instrumentation> Emulator<T> {
@@ -889,7 +895,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// - `cpu` and every entry in `ap_cpus` must point to valid, initialized BxCpuC instances
     /// - `mem_stub` must be a fully initialized memory stub
     /// - All allocations must outlive the returned emulator reference
-    pub unsafe fn init_at_with_ap_cpus(
+    pub(crate) unsafe fn init_at_with_ap_cpus(
         ptr: *mut Self,
         cpu: &'a mut BxCpuC<T>,
         ap_cpus: &mut [&'a mut BxCpuC<T>],

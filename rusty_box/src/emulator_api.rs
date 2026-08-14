@@ -8,9 +8,7 @@
 
 #[cfg(feature = "alloc")]
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-#[cfg(feature = "alloc")]
-use core::sync::atomic::AtomicBool;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "instrumentation")]
 use core::ops::RangeBounds;
@@ -30,6 +28,9 @@ use crate::cpu::ResetReason;
 use crate::emulator::Emulator;
 #[cfg(feature = "alloc")]
 use crate::emulator::EmulatorConfig;
+use crate::iodev::devices::DeviceManager;
+use crate::iodev::serial::{SerialTxDrain, SERIAL_PORT_COUNT};
+use crate::iodev::{BxDevicesC, DebugconDrain};
 use crate::{Error, Result};
 
 // ─────────────────────────── StopHandle ───────────────────────────
@@ -65,6 +66,104 @@ impl StopHandle {
     #[inline]
     pub fn is_stopping(&self) -> bool {
         self.0.load(Ordering::Relaxed)
+    }
+}
+
+// ─────────────────────────── Role handles ───────────────────────────
+//
+// Transient `&mut` borrows of one device role, obtained from the machine and
+// dropped at the end of the expression. Machine internals stay crate-private
+// (doctrine R3) — this is the supported path to device state. Handles are
+// deliberately minimal in this first cut; the automation phase grows them
+// (input injection, display readback, serial `send`) without renaming.
+
+/// Transient borrow of one UART, from [`Emulator::serial`].
+pub struct Serial<'m> {
+    devices: &'m mut DeviceManager,
+    port: usize,
+}
+
+impl Serial<'_> {
+    /// Drain the bytes the guest has transmitted on this port, in write order.
+    ///
+    /// The buffer is bounded, so a host that never drains loses the oldest
+    /// bytes rather than growing without limit.
+    #[inline]
+    pub fn take_output(&mut self) -> SerialTxDrain<'_> {
+        self.devices.drain_serial_tx(self.port)
+    }
+}
+
+/// Transient borrow of the port-0xE9 debug console, from
+/// [`Emulator::debug_port`].
+///
+/// Bochs `unmapped.cc` `port_e9_hack` — optional upstream, always present
+/// here. BIOS/VGABIOS message ports (0x400-0x403, 0x500-0x503) are a separate
+/// stream and never appear on this one, matching `biosdev.cc`.
+pub struct DebugPort<'m> {
+    devices: &'m mut BxDevicesC,
+}
+
+impl DebugPort<'_> {
+    /// Drain the bytes the guest has written to port 0xE9, in write order.
+    #[inline]
+    pub fn take_output(&mut self) -> DebugconDrain<'_> {
+        self.devices.drain_port_e9_output()
+    }
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
+    /// Borrow UART `port` (0-based; COM1 is 0). `None` when the index is
+    /// outside the modelled set.
+    #[inline]
+    pub fn serial(&mut self, port: usize) -> Option<Serial<'_>> {
+        (port < SERIAL_PORT_COUNT).then(|| Serial {
+            devices: &mut self.device_manager,
+            port,
+        })
+    }
+
+    /// Borrow the port-0xE9 debug console. Present on every profile — it is a
+    /// chipset facility, not a device that can be left unattached.
+    #[inline]
+    pub fn debug_port(&mut self) -> DebugPort<'_> {
+        DebugPort {
+            devices: &mut self.devices,
+        }
+    }
+
+    /// Share this machine's stop flag with another thread, replacing the one
+    /// it was built with. The GUI path uses this so its own reset/close
+    /// controls break the run loop.
+    ///
+    /// Prefer [`Emulator::stop_handle`] when a fresh handle is all that is
+    /// needed; this exists for the case where the *caller* already owns the
+    /// flag that other code watches.
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub fn set_stop_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.stop_flag = flag;
+    }
+
+    /// Read access to the stop flag. Same shape under every feature setting
+    /// (doctrine R0): `alloc` shares an `Arc`, no-alloc owns the atomic, and
+    /// both hand out `&AtomicBool`.
+    #[inline]
+    pub fn stop_flag(&self) -> &AtomicBool {
+        &self.stop_flag
+    }
+
+    /// A20 gate state (Bochs `pc_system.cc` `get_enable_a20`).
+    #[inline]
+    pub fn get_enable_a20(&self) -> bool {
+        self.pc_system.get_enable_a20()
+    }
+
+    /// Preferred display mode reported to the guest's video BIOS.
+    #[inline]
+    pub fn set_vga_preferred_mode(&mut self, width: u16, height: u16, bpp: u16) {
+        self.device_manager
+            .set_vga_preferred_mode(width, height, bpp);
     }
 }
 
@@ -1451,6 +1550,69 @@ mod tests {
         assert!(pp.check(0x1000, MemPerms::READ));
         assert!(!pp.check(0x1000, MemPerms::WRITE));
         assert!(!pp.check(0x1000, MemPerms::EXEC));
+    }
+
+    /// Every modelled UART is reachable and nothing past the set is.
+    ///
+    /// The index bound is the only real logic in `serial()` — everything else
+    /// delegates — so this is where an off-by-one would land, and an
+    /// out-of-range index used to panic on a slice index instead of answering
+    /// `None`.
+    #[test]
+    fn serial_handle_covers_exactly_the_modelled_ports() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                for port in 0..SERIAL_PORT_COUNT {
+                    assert!(
+                        emu.serial(port).is_some(),
+                        "COM{} is modelled and must be reachable",
+                        port + 1
+                    );
+                }
+                assert!(emu.serial(SERIAL_PORT_COUNT).is_none());
+                assert!(emu.serial(usize::MAX).is_none());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Bytes the guest writes to port 0xE9 come back out of the debug-port
+    /// handle, in write order.
+    ///
+    /// Asserts the guest-visible property (doctrine R9) rather than the
+    /// buffer that currently carries it: the guest executes real `OUT`
+    /// instructions and the host reads them through the public role handle,
+    /// so a mis-wired handle or a lost byte fails here.
+    #[test]
+    fn debug_port_handle_returns_guest_written_bytes() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu =
+                    Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+                        .unwrap();
+                let code_addr = 0x20_0000;
+
+                // mov al,'O'; out 0xe9,al; mov al,'K'; out 0xe9,al
+                emu.mem_write(
+                    code_addr,
+                    &[0xB0, b'O', 0xE6, 0xE9, 0xB0, b'K', 0xE6, 0xE9],
+                )
+                .unwrap();
+                emu.emu_start(code_addr, None, None, Some(4)).unwrap();
+
+                let out: Vec<u8> = emu.debug_port().take_output().collect();
+                assert_eq!(out, b"OK", "port-0xE9 writes must survive in order");
+
+                // Draining is destructive — a second read sees nothing new.
+                assert!(emu.debug_port().take_output().next().is_none());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// MMIO registry map/unmap.

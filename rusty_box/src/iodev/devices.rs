@@ -41,7 +41,7 @@ use super::pic::{BxPicC, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLA
 use super::pit::{
     BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_SYSTEM_CONTROL_B,
 };
-use super::serial::BxSerialC;
+use super::serial::{BxSerialC, SerialTxDrain};
 use super::BxDevicesC;
 use super::device_api::{ChipsetEffect, MmioDevice, PioDevice, SmramControl};
 use super::vga::BxVgaC;
@@ -1248,11 +1248,6 @@ impl DeviceManager {
         self.keyboard.get_a20_enabled()
     }
 
-    /// Get ATA I/O counts for diagnostics
-    pub fn ata_io_counts(&self) -> (u64, u64) {
-        (0, 0)
-    }
-
     #[cfg(feature = "alloc")]
     /// Get PIC diagnostic string
     pub fn pic_diag(&self) -> String {
@@ -1273,7 +1268,7 @@ impl DeviceManager {
     }
 
     /// Drain serial port TX output for diagnostics
-    pub fn drain_serial_tx(&mut self, port_index: usize) -> impl Iterator<Item = u8> + '_ {
+    pub fn drain_serial_tx(&mut self, port_index: usize) -> SerialTxDrain<'_> {
         self.serial.drain_tx_output(port_index)
     }
 

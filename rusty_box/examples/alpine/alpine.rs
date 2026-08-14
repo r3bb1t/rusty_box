@@ -370,7 +370,7 @@ fn run_alpine() -> Result<()> {
     );
     println!(
         "║  A20    = {}                                         ║",
-        if emu.pc_system.get_enable_a20() {
+        if emu.get_enable_a20() {
             "enabled "
         } else {
             "disabled"
@@ -506,14 +506,12 @@ fn run_alpine() -> Result<()> {
             let rip = emu.cpu().rip();
             let mode = emu.get_cpu_mode_str();
             let cs = emu.cpu().get_cs_selector();
-            let (ata_reads, _) = emu.device_manager.ata_io_counts();
             println!(
-                "[{:>4}M] RIP={:#010x} CS={:04x} mode={:<11} ATA_rd={} EAX={:08x} ECX={:08x}",
+                "[{:>4}M] RIP={:#010x} CS={:04x} mode={:<11} EAX={:08x} ECX={:08x}",
                 total_executed / 1_000_000,
                 rip,
                 cs,
                 mode,
-                ata_reads,
                 emu.cpu().eax(),
                 emu.cpu().ecx()
             );
@@ -579,7 +577,7 @@ fn run_alpine() -> Result<()> {
 
             // Dump debug port output periodically to see ISOLINUX messages
             if phase_num % 10 == 0 {
-                let e9 = emu.devices.take_port_e9_output();
+                let e9: Vec<u8> = emu.debug_port().take_output().collect();
                 if !e9.is_empty() {
                     let text = String::from_utf8_lossy(&e9);
                     for line in text.lines().take(5) {
@@ -666,7 +664,7 @@ fn run_alpine() -> Result<()> {
     }
 
     // Debug port output
-    let e9 = emu.devices.take_port_e9_output();
+    let e9: Vec<u8> = emu.debug_port().take_output().collect();
     if !e9.is_empty() {
         println!();
         println!("===== BOCHS DEBUG PORT OUTPUT (0xE9) =====");
@@ -734,7 +732,11 @@ fn run_alpine() -> Result<()> {
         );
 
         println!("\n===== SERIAL (COM1) OUTPUT =====");
-        let serial_bytes: Vec<u8> = emu.device_manager.drain_serial_tx(0).collect();
+        let serial_bytes: Vec<u8> = emu
+            .serial(0)
+            .expect("COM1 is always modelled")
+            .take_output()
+            .collect();
         if serial_bytes.is_empty() {
             println!("  (no serial output)");
         } else {

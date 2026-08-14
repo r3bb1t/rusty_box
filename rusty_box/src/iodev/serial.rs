@@ -27,16 +27,49 @@ use crate::snapshot::{
 /// UART crystal oscillator frequency (Hz) — Bochs BX_PC_CLOCK_XTL
 const UART_CLOCK_HZ: u32 = 1_843_200;
 
+/// UARTs this device models — Bochs `serial.h` `BX_SERIAL_MAXDEV`.
+///
+/// Every per-port array below is sized by this, and it is the bound the
+/// machine's serial role handle checks, so the modelled set has exactly one
+/// definition (doctrine R5) — shrinking the array can never leave the handle
+/// indexing past its end.
+pub(crate) const SERIAL_PORT_COUNT: usize = 4;
+
 /// COM port base addresses
-const COM_BASES: [u16; 4] = [0x03F8, 0x02F8, 0x03E8, 0x02E8];
+const COM_BASES: [u16; SERIAL_PORT_COUNT] = [0x03F8, 0x02F8, 0x03E8, 0x02E8];
 /// COM port IRQ assignments — COM1=IRQ4, COM2=IRQ3, COM3=IRQ4, COM4=IRQ3
-const COM_IRQS: [u8; 4] = [4, 3, 4, 3];
+const COM_IRQS: [u8; SERIAL_PORT_COUNT] = [4, 3, 4, 3];
 
 /// FIFO size (16550A standard)
 const FIFO_SIZE: usize = 16;
 
 /// Bounded host-visible output retained when no consumer has drained it yet.
 const TX_OUTPUT_CAPACITY: usize = 4096;
+
+/// Draining iterator over one UART's transmitted bytes.
+///
+/// A named type rather than `impl Iterator` (doctrine R0): the machine's
+/// serial role handle forwards this return, and an anonymous type cannot be
+/// forwarded, stored, or documented. Wrapping also keeps
+/// [`TX_OUTPUT_CAPACITY`] out of the public signature, so the buffer can be
+/// resized without a breaking change.
+pub struct SerialTxDrain<'a>(crate::ring_buffer::Drain<'a, u8, TX_OUTPUT_CAPACITY>);
+
+impl Iterator for SerialTxDrain<'_> {
+    type Item = u8;
+
+    #[inline]
+    fn next(&mut self) -> Option<u8> {
+        self.0.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl ExactSizeIterator for SerialTxDrain<'_> {}
 
 /// RX FIFO trigger levels indexed by 2-bit rxtrigger field
 const RX_FIFO_TRIGGERS: [u8; 4] = [1, 4, 8, 14];
@@ -926,11 +959,11 @@ impl ExactSizeIterator for PendingIrqs {}
 /// 16550 UART Serial Controller — supports up to 4 COM ports
 #[derive(Debug)]
 pub struct BxSerialC {
-    ports: [SerialPort; 4],
+    ports: [SerialPort; SERIAL_PORT_COUNT],
     num_ports: usize,
     /// Pending IRQ raise/lower actions — processed by the PIC after handler returns
-    pending_irq_raise: [bool; 4],
-    pending_irq_lower: [bool; 4],
+    pending_irq_raise: [bool; SERIAL_PORT_COUNT],
+    pending_irq_lower: [bool; SERIAL_PORT_COUNT],
 }
 
 impl Default for BxSerialC {
@@ -941,7 +974,7 @@ impl Default for BxSerialC {
 
 impl BxSerialC {
     pub fn new(num_ports: usize) -> Self {
-        let num_ports = num_ports.min(4);
+        let num_ports = num_ports.min(SERIAL_PORT_COUNT);
         Self {
             ports: [
                 SerialPort::new(0),
@@ -950,8 +983,8 @@ impl BxSerialC {
                 SerialPort::new(3),
             ],
             num_ports,
-            pending_irq_raise: [false; 4],
-            pending_irq_lower: [false; 4],
+            pending_irq_raise: [false; SERIAL_PORT_COUNT],
+            pending_irq_lower: [false; SERIAL_PORT_COUNT],
         }
     }
 
@@ -959,14 +992,14 @@ impl BxSerialC {
         for port in &mut self.ports {
             port.reset();
         }
-        self.pending_irq_raise = [false; 4];
-        self.pending_irq_lower = [false; 4];
+        self.pending_irq_raise = [false; SERIAL_PORT_COUNT];
+        self.pending_irq_lower = [false; SERIAL_PORT_COUNT];
     }
 
     /// Drain transmitted bytes from a port (for host-side consumption)
     #[allow(dead_code)]
-    pub fn drain_tx_output(&mut self, port_index: usize) -> impl Iterator<Item = u8> + '_ {
-        self.ports[port_index].tx_output.drain()
+    pub fn drain_tx_output(&mut self, port_index: usize) -> SerialTxDrain<'_> {
+        SerialTxDrain(self.ports[port_index].tx_output.drain())
     }
 
     pub fn tx_output_len(&self, port_index: usize) -> usize {

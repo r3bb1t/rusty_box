@@ -208,10 +208,10 @@ fn run_emulator(
 
     let mut emu = Emulator::new(config)?;
 
-    emu.stop_flag = {
+    emu.set_stop_flag({
         let d = shared.lock().unwrap();
         Arc::clone(&d.stop_flag)
-    };
+    });
 
     let bridge = BridgeGui::new(Arc::clone(&shared));
     emu.set_gui(bridge);

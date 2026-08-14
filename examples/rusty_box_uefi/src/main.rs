@@ -267,7 +267,7 @@ fn run() -> Status {
         // Drain and print BIOS/serial output (no Vec allocation)
         {
             let mut had_output = false;
-            for b in emu.devices.drain_port_e9_output() {
+            for b in emu.debug_port().take_output() {
                 if !had_output {
                     had_output = true;
                 }
@@ -275,7 +275,7 @@ fn run() -> Status {
                 print_bytes(&[b]);
             }
         }
-        drain_and_print(emu.device_manager.drain_serial_tx(0));
+        drain_and_print(emu.serial(0).expect("COM1 is always modelled").take_output());
 
         if shutdown {
             info!(

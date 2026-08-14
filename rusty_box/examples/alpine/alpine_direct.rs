@@ -435,7 +435,11 @@ fn run_alpine() -> Result<()> {
 
         // Drain serial port output periodically
         if last_serial_drain.elapsed().as_millis() >= 100 {
-            let output: Vec<u8> = emu.device_manager.drain_serial_tx(0).collect();
+            let output: Vec<u8> = emu
+                .serial(0)
+                .expect("COM1 is always modelled")
+                .take_output()
+                .collect();
             if !output.is_empty() {
                 use std::io::Write;
                 let mut stdout = std::io::stdout();
@@ -468,7 +472,11 @@ fn run_alpine() -> Result<()> {
     }
 
     // Final serial drain
-    let output: Vec<u8> = emu.device_manager.drain_serial_tx(0).collect();
+    let output: Vec<u8> = emu
+        .serial(0)
+        .expect("COM1 is always modelled")
+        .take_output()
+        .collect();
     if !output.is_empty() {
         use std::io::Write;
         std::io::stdout().write_all(&output).ok();
@@ -476,7 +484,7 @@ fn run_alpine() -> Result<()> {
     }
 
     // Drain port 0xE9 output (Bochs debug port — used by kernel decompressor __putstr)
-    let e9 = emu.devices.take_port_e9_output();
+    let e9: Vec<u8> = emu.debug_port().take_output().collect();
     if !e9.is_empty() {
         println!("\n--- Port 0xE9 (kernel decompressor) ---");
         let s = String::from_utf8_lossy(&e9);

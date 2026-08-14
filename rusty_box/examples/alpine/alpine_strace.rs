@@ -362,7 +362,7 @@ fn run_emulator(boot: &BootConfig, shared: Arc<Mutex<SharedDisplay>>) -> Result<
     )?;
 
     // Wire the GUI stop flag so closing the window stops execution.
-    emu.stop_flag = Arc::clone(&shared.lock().unwrap().stop_flag);
+    emu.set_stop_flag(Arc::clone(&shared.lock().unwrap().stop_flag));
     emu.set_gui(BridgeGui::new(Arc::clone(&shared)));
     emu.init_memory_and_pc_system()?;
 

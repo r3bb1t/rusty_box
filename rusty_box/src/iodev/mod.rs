@@ -26,6 +26,56 @@ use std::io::{self, Error, ErrorKind, Read, Write};
 use crate::snapshot::{checked_snapshot_len_add, SnapshotReader, SnapshotWriteExt};
 
 
+/// Bounded retention for the port-0xE9 debug console when no host consumer
+/// has drained it yet.
+const DEBUGCON_CAPACITY: usize = 65536;
+
+/// Bounded retention for BIOS POST codes (ports 0x80/0x84).
+const PORT80_CAPACITY: usize = 4096;
+
+/// Draining iterator over the port-0xE9 debug console.
+///
+/// Named rather than `impl Iterator` (doctrine R0) so the machine's debug-port
+/// role handle can forward it, and so the capacity constant stays out of the
+/// public signature. Yields bytes in write order and empties the buffer.
+pub struct DebugconDrain<'a>(crate::ring_buffer::Drain<'a, u8, DEBUGCON_CAPACITY>);
+
+impl Iterator for DebugconDrain<'_> {
+    type Item = u8;
+
+    #[inline]
+    fn next(&mut self) -> Option<u8> {
+        self.0.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl ExactSizeIterator for DebugconDrain<'_> {}
+
+/// Draining iterator over BIOS POST codes (ports 0x80/0x84). Same R0 rationale
+/// as [`DebugconDrain`].
+pub struct Port80Drain<'a>(crate::ring_buffer::Drain<'a, u8, PORT80_CAPACITY>);
+
+impl Iterator for Port80Drain<'_> {
+    type Item = u8;
+
+    #[inline]
+    fn next(&mut self) -> Option<u8> {
+        self.0.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl ExactSizeIterator for Port80Drain<'_> {}
+
 pub mod acpi;
 #[cfg(feature = "alloc")]
 pub mod acpi_tables;
@@ -340,12 +390,12 @@ pub struct BxDevicesC {
     /// drain and print it. BIOS/VGABIOS message ports (0x400-0x403,
     /// 0x500-0x503) do NOT land here — Bochs biosdev.cc routes those to the
     /// log, never the guest-visible console (see `bios_message_byte`).
-    port_e9_output: RingBuffer<u8, 65536>,
+    port_e9_output: RingBuffer<u8, DEBUGCON_CAPACITY>,
 
     /// Bochs BIOS POST codes (port 0x80, sometimes 0x84).
     ///
     /// These are not ASCII; they are diagnostic progress codes used by many BIOSes.
-    port80_output: RingBuffer<u8, 4096>,
+    port80_output: RingBuffer<u8, PORT80_CAPACITY>,
 
     /// Bochs biosdev.cc rombios message accumulator ("biosdev" logger).
     bios_message: [u8; BX_BIOS_MESSAGE_SIZE],
@@ -1087,13 +1137,13 @@ impl BxDevicesC {
     }
 
     /// Drain port 0xE9 output as an iterator (no-alloc).
-    pub fn drain_port_e9_output(&mut self) -> impl Iterator<Item = u8> + '_ {
-        self.port_e9_output.drain()
+    pub fn drain_port_e9_output(&mut self) -> DebugconDrain<'_> {
+        DebugconDrain(self.port_e9_output.drain())
     }
 
     /// Drain BIOS POST codes (port 0x80/0x84) as an iterator (no-alloc).
-    pub fn drain_port80_output(&mut self) -> impl Iterator<Item = u8> + '_ {
-        self.port80_output.drain()
+    pub fn drain_port80_output(&mut self) -> Port80Drain<'_> {
+        Port80Drain(self.port80_output.drain())
     }
 
     /// Set device_manager pointer for enum-based I/O dispatch.

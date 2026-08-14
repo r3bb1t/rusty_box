@@ -181,10 +181,10 @@ fn run_emulator(
     let mut emu = Emulator::new(config)?;
 
     // Wire the shared stop_flag so the GUI reset button can interrupt run_interactive
-    emu.stop_flag = {
+    emu.set_stop_flag({
         let d = shared.lock().unwrap();
         Arc::clone(&d.stop_flag)
-    };
+    });
 
     // Set BridgeGui as the GUI
     let bridge = BridgeGui::new(Arc::clone(&shared));

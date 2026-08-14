@@ -158,7 +158,7 @@ where
         )?
     };
     if let Some(stop_flag) = stop_flag {
-        emu.stop_flag = stop_flag;
+        emu.set_stop_flag(stop_flag);
     }
     emu.set_gui(gui);
 
@@ -215,8 +215,7 @@ where
     // BxVgaC::set_preferred_mode persists it across any later guest-triggered
     // reset). Raises the DISPI caps so the guest may select this resolution.
     if let Some(mode) = config.vga_mode {
-        emu.device_manager
-            .set_vga_preferred_mode(mode.width, mode.height, mode.bpp);
+        emu.set_vga_preferred_mode(mode.width, mode.height, mode.bpp);
     }
     emu.init_gui_signal_handlers();
     emu.start();

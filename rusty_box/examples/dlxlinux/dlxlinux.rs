@@ -356,7 +356,7 @@ fn run_dlxlinux() -> Result<()> {
     );
     println!(
         "║  A20    = {}                                          ║",
-        if emu.pc_system.get_enable_a20() {
+        if emu.get_enable_a20() {
             "enabled "
         } else {
             "disabled"
@@ -587,7 +587,7 @@ fn run_dlxlinux() -> Result<()> {
 
     // In headless mode (and even with GUI), also print any remaining Bochs-style
     // debug-port output that might not have been drained during execution.
-    let e9 = emu.devices.take_port_e9_output();
+    let e9: Vec<u8> = emu.debug_port().take_output().collect();
     if !e9.is_empty() {
         println!();
         println!("===== BOCHS DEBUG PORT OUTPUT (0xE9) =====");

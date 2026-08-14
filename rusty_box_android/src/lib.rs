@@ -1056,7 +1056,7 @@ fn run_alpine_emulator_worker(
 
     let mut emu: AndroidEmulator =
         Emulator::<Corei7SkylakeX>::new(config).map_err(|error| format!("{error:?}"))?;
-    emu.stop_flag = stop_flag;
+    emu.set_stop_flag(stop_flag);
     emu.set_gui(AndroidBridgeGui::new(Arc::clone(&shared)));
     emu.init_memory_and_pc_system()
         .map_err(|error| format!("{error:?}"))?;
@@ -1091,7 +1091,7 @@ fn run_alpine_emulator_worker(
     let interactive_budget = FRAME_BUDGET.max(BATCH_SIZE);
 
     let run_result = loop {
-        if emu.stop_flag.load(Ordering::Relaxed) {
+        if emu.stop_flag().load(Ordering::Relaxed) {
             break Ok(());
         }
 

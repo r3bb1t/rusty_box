@@ -85,6 +85,10 @@ pub mod emulator;
 pub mod emulator_api;
 #[cfg(feature = "alloc")]
 pub use emulator_api::StopHandle;
+/// Device role handles. Transient `&mut` borrows of one role, obtained from
+/// the machine — the supported path to device state now that machine parts are
+/// crate-private (doctrine R3).
+pub use emulator_api::{DebugPort, Serial};
 #[cfg(feature = "alloc")]
 pub mod gui;
 pub mod iodev;
