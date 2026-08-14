@@ -93,6 +93,10 @@ libc = { version = "0.2", default-features = false }
 [dev-dependencies]
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
+# Doctrine fixture registry (docs/safety-doctrine.md) — R2/R3 compile-fail pins.
+# Deliberately NOT in the xtask ci matrix: goldens track the local toolchain
+# (regenerate with TRYBUILD=overwrite after a toolchain bump).
+trybuild = "1.0"
 
 [[bench]]
 name = "cpu_bench"

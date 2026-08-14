@@ -34,6 +34,117 @@ const DLX_LOGIN_MARKER: &str = "*** LOGIN DETECTED ***";
 /// (LILO Enter injected ~130M, `dlx login:` appears ~364M, margin on top).
 const DLX_BOOT_BUDGET: &str = "450000000";
 
+/// Doctrine R1/R6 ratchet baselines (docs/safety-doctrine.md). Counts may only
+/// DECREASE; a commit that removes unsafe tightens the matching constant in the
+/// same commit. An increase fails ci.
+const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
+    ("rusty_box/src", 254),
+    ("rusty_box_decoder/src", 0),
+];
+/// `unsafe impl … Send/Sync` lines in rusty_box/src. The survivor is
+/// `Emulator` (emulator/mod.rs); it dies in campaign Phase H, when this
+/// baseline goes to 0 and stays there.
+const UNSAFE_IMPL_SEND_BASELINE: usize = 1;
+
+/// Count occurrences of a bare `unsafe` token per crate, comment lines
+/// stripped, against the ratchet baselines.
+fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
+    let started = Instant::now();
+    println!("==> doctrine ratchets");
+
+    fn is_ident(b: u8) -> bool {
+        b == b'_' || b.is_ascii_alphanumeric()
+    }
+    /// Occurrences of `needle` as a whole word in `line`, ignoring anything
+    /// after `//`. Good enough for a monotone ratchet; not a parser.
+    fn word_count(line: &str, needle: &str) -> usize {
+        let code = line.split("//").next().unwrap_or("");
+        let bytes = code.as_bytes();
+        let mut n = 0;
+        let mut at = 0;
+        while let Some(pos) = code[at..].find(needle) {
+            let start = at + pos;
+            let end = start + needle.len();
+            let left_ok = start == 0 || !is_ident(bytes[start - 1]);
+            let right_ok = end >= bytes.len() || !is_ident(bytes[end]);
+            if left_ok && right_ok {
+                n += 1;
+            }
+            at = end;
+        }
+        n
+    }
+    fn scan_dir(
+        dir: &std::path::Path,
+        unsafe_tokens: &mut usize,
+        unsafe_impl_send: &mut usize,
+    ) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|err| format!("doctrine ratchets: read_dir {}: {err}", dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|err| format!("doctrine ratchets: dir entry: {err}"))?;
+            let path = entry.path();
+            if path.is_dir() {
+                scan_dir(&path, unsafe_tokens, unsafe_impl_send)?;
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).map_err(|err| {
+                    format!("doctrine ratchets: read {}: {err}", path.display())
+                })?;
+                for line in text.lines() {
+                    let trimmed = line.trim_start();
+                    if trimmed.starts_with("//") {
+                        continue;
+                    }
+                    *unsafe_tokens += word_count(line, "unsafe");
+                    let code = line.split("//").next().unwrap_or("");
+                    if code.contains("unsafe impl")
+                        && (code.contains("Send") || code.contains("Sync"))
+                    {
+                        *unsafe_impl_send += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut total_impl_send = 0usize;
+    for (rel, baseline) in UNSAFE_TOKEN_BASELINES {
+        let mut tokens = 0usize;
+        let mut impl_send = 0usize;
+        scan_dir(&root.join(rel), &mut tokens, &mut impl_send)?;
+        if *rel == "rusty_box/src" {
+            total_impl_send = impl_send;
+        }
+        if tokens > *baseline {
+            return Err(format!(
+                "doctrine ratchets: {rel} has {tokens} `unsafe` tokens, baseline is {baseline} \
+                 (R1: unsafe only ratchets down — remove the new unsafe or justify + re-baseline \
+                 in this commit)"
+            ));
+        }
+        if tokens < *baseline {
+            println!(
+                "    {rel}: {tokens} unsafe tokens (< baseline {baseline} — tighten \
+                 UNSAFE_TOKEN_BASELINES in this commit)"
+            );
+        }
+    }
+    if total_impl_send > UNSAFE_IMPL_SEND_BASELINE {
+        return Err(format!(
+            "doctrine ratchets: {total_impl_send} `unsafe impl Send/Sync` lines, baseline is \
+             {UNSAFE_IMPL_SEND_BASELINE} (R6: Send derives, never promised)"
+        ));
+    }
+
+    println!(
+        "<== doctrine ratchets ok ({:.1}s)",
+        started.elapsed().as_secs_f32()
+    );
+    Ok(())
+}
+
 fn repo_root() -> Result<PathBuf, String> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -224,6 +335,9 @@ pub fn execute_ci(command: CiCommand) -> Result<(), String> {
     let root = repo_root()?;
     let started = Instant::now();
     let mut ran = 0usize;
+
+    doctrine_ratchets(&root)?;
+    ran += 1;
 
     for step in MATRIX {
         run_step(&root, step)?;
