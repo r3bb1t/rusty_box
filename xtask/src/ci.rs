@@ -38,7 +38,9 @@ const DLX_BOOT_BUDGET: &str = "450000000";
 /// DECREASE; a commit that removes unsafe tightens the matching constant in the
 /// same commit. An increase fails ci.
 const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
-    ("rusty_box/src", 254),
+    // 254 -> 249: the memory stub's swap-file `UnsafeCell` is gone, and with it
+    // the four `&self`-to-`&mut File` launderings plus the three test pokes.
+    ("rusty_box/src", 249),
     ("rusty_box_decoder/src", 0),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. The survivor is

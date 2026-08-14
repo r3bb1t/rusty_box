@@ -13,11 +13,6 @@ use crate::memory::memory_rusty_box::{
     bx_guest_ram_span, bx_is_pci_hole_addr, BIOSROMSZ, EXROMSIZE,
 };
 
-// Only the swap-overflow file is still behind interior mutability, and that
-// field is std-only.
-#[cfg(feature = "std")]
-use core::cell::UnsafeCell;
-
 #[cfg(feature = "std")]
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -258,7 +253,7 @@ impl BxMemoryStubC {
             // Full residency lays blocks out as an identity map above.
             core::ptr::addr_of_mut!((*ptr).identity_map).write(allocated >= len);
             #[cfg(feature = "std")]
-            core::ptr::addr_of_mut!((*ptr).overflow_file).write(UnsafeCell::new(overflow_file));
+            core::ptr::addr_of_mut!((*ptr).overflow_file).write(overflow_file);
             // Machine-wide SMC write-stamp table (Bochs icache.h
             // bxPageWriteStampTable ctor allocates + resetWriteStamps).
             core::ptr::addr_of_mut!((*ptr).smc_stamps).write(smc_stamps);
@@ -394,7 +389,7 @@ impl BxMemoryStubC {
             // Full residency lays blocks out as an identity map above.
             identity_map: host >= guest,
             #[cfg(feature = "std")]
-            overflow_file: UnsafeCell::new(overflow_file),
+            overflow_file,
         })
     }
 
@@ -638,7 +633,7 @@ impl BxMemoryStubC {
     /// Stream one logical guest block in GPA order without changing residency.
     #[cfg(feature = "std")]
     pub(super) fn write_snapshot_block<W: Write>(
-        &self,
+        &mut self,
         guest_block: u32,
         out: &mut W,
     ) -> std::io::Result<()> {
@@ -670,7 +665,7 @@ impl BxMemoryStubC {
                         .checked_add(logical_len - remaining)
                         .ok_or_else(|| snapshot_invalid("snapshot overflow offset overflow"))?;
                     {
-                        let file = self.overflow_file_mut();
+                        let file = &mut self.overflow_file;
                         file.seek(SeekFrom::Start(
                             u64::try_from(chunk_offset).map_err(|_| {
                                 snapshot_invalid("snapshot overflow offset conversion failed")
@@ -727,7 +722,7 @@ impl BxMemoryStubC {
                         .checked_add(logical_len - remaining)
                         .ok_or_else(|| snapshot_invalid("snapshot overflow offset overflow"))?;
                     {
-                        let file = self.overflow_file_mut();
+                        let file = &mut self.overflow_file;
                         file.seek(SeekFrom::Start(
                             u64::try_from(chunk_offset).map_err(|_| {
                                 snapshot_invalid("snapshot overflow offset conversion failed")
@@ -813,7 +808,7 @@ impl BxMemoryStubC {
         }
 
         // Flush all transferred swapped bytes before changing ownership.
-        self.overflow_file_mut().flush()?;
+        self.overflow_file.flush()?;
 
         // A partial final guest block never makes physical tail bytes
         // architectural. Fully backed RAM can have no tail at all, so clear
@@ -955,9 +950,7 @@ impl BxMemoryStubC {
         } = self;
         let chosen = &mut backing.as_mut_slice()[chosen_start..chosen_end];
         chosen.fill(0);
-        // SAFETY: pre-existing interior mutability on the swap file; `&mut self`
-        // above means no other borrow of it is live.
-        let file = unsafe { &mut *overflow_file.get() };
+        let file = overflow_file;
         file.seek(SeekFrom::Start(u64::try_from(offset)?))
             .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(offset, e))?;
         file.read_exact(&mut chosen[..logical_len])?;
@@ -1016,7 +1009,7 @@ impl BxMemoryStubC {
                 let victim_start = self.vector_offset + slot_offset;
                 let victim_bytes =
                     &self.backing.as_slice()[victim_start..victim_start + logical_len];
-                let file = self.overflow_file_mut();
+                let file = &mut self.overflow_file;
                 file.seek(SeekFrom::Start(u64::try_from(file_offset)?))
                     .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(file_offset, e))?;
                 file.write_all(victim_bytes)

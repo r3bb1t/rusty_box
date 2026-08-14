@@ -263,7 +263,7 @@ fn memory_payload_len(memory: &BxMemC) -> io::Result<u64> {
     memory_payload_len_for_geometry(memory.snapshot_geometry())
 }
 #[cfg(feature = "std")]
-fn save_memory<W: Write>(memory: &BxMemC, writer: &mut W) -> io::Result<()> {
+fn save_memory<W: Write>(memory: &mut BxMemC, writer: &mut W) -> io::Result<()> {
     let g = memory.snapshot_geometry();
     writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
     writer.write_u64(g.guest_len)?; writer.write_u64(g.host_ram_len)?; writer.write_u64(g.block_size)?;
@@ -343,7 +343,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     pub fn save_snapshot<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
         writer.write_all(SNAPSHOT_MAGIC)?; writer.write_u32(SNAPSHOT_V3_VERSION)?; writer.write_u32(SNAPSHOT_V3_SECTION_ORDER.len() as u32)?;
         let memory_len = memory_payload_len(&self.memory)?;
-        write_section_with_limit(writer, SEC_MEMORY, memory_len, memory_len, |s| save_memory(&self.memory, s))?;
+        write_section_with_limit(writer, SEC_MEMORY, memory_len, memory_len, |s| save_memory(&mut self.memory, s))?;
         write_section(writer, SEC_PC_SYSTEM, self.pc_system.snapshot_v3_len()?, |s| self.pc_system.save_snapshot_v3(s))?;
         let platform_len = checked_snapshot_len_add(4, checked_snapshot_len_add(self.device_manager.fw_cfg.snapshot_v3_body_len()?, checked_snapshot_len_add(self.devices.snapshot_v3_body_len()?, self.device_manager.snapshot_v3_body_len()?)?)?)?;
         write_section(writer, SEC_PLATFORM, platform_len, |s| { s.write_u32(SNAPSHOT_SECTION_VERSION)?; self.device_manager.fw_cfg.save_snapshot_v3_body(s)?; self.devices.save_snapshot_v3_body(s)?; self.device_manager.save_snapshot_v3_body(s) })?;

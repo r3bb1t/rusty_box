@@ -357,10 +357,13 @@ pub struct BxMemoryStubC {
     /// Maintained at every block-table mutation: construction, block
     /// allocation/eviction, and snapshot restore.
     identity_map: bool,
+    /// Backing store for blocks that are not resident. A plain field: every
+    /// path that touches it holds `&mut self` and reaches it as a field
+    /// disjoint from `backing`, so the interior mutability that used to
+    /// launder `&self` into `&mut File` is gone (doctrine R1 — the borrow the
+    /// `UnsafeCell` dodged is one the compiler can check).
     #[cfg(feature = "std")]
-    //overflow_file: Option<Arc<Mutex<std::fs::File>>>,
-    overflow_file: UnsafeCell<File>,
-    //swapped_out: *const u8,
+    overflow_file: File,
 }
 
 // `Send` is derived, not promised: every field is owned or borrowed data. The
@@ -640,11 +643,6 @@ impl BxMemoryStubC {
         &mut self.apic_scratch
     }
 
-    #[cfg(feature = "std")]
-    #[allow(clippy::mut_from_ref)]
-    fn overflow_file_mut(&self) -> &mut File {
-        unsafe { &mut *self.overflow_file.get() }
-    }
 }
 impl BxMemC {
 
@@ -812,7 +810,7 @@ impl BxMemC {
 
     #[cfg(feature = "std")]
     pub(crate) fn write_snapshot_block<W: std::io::Write>(
-        &self,
+        &mut self,
         guest_block: u32,
         out: &mut W,
     ) -> std::io::Result<()> {
@@ -1093,11 +1091,11 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
 
         // Preserve block zero, then expose a sparse EOF in swapped block one.
         // Snapshot output must include the logical zero tail, not short-read.
-        unsafe {
-            (&mut *source.inherited_memory_stub.overflow_file.get())
-                .set_len((2 * MIB + 1) as u64)
-                .unwrap();
-        }
+        source
+            .inherited_memory_stub
+            .overflow_file
+            .set_len((2 * MIB + 1) as u64)
+            .unwrap();
         let mut image = tempfile::tempfile().unwrap();
         for guest_block in 0..geometry.num_blocks {
             source
@@ -1502,26 +1500,57 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     }
 
 
+    /// Guest bytes survive a full eviction round-trip through the swap file.
+    ///
+    /// The swap file used to be reached through an `UnsafeCell`, so the paths
+    /// that write a victim out and read a block back in aliased it rather than
+    /// borrowing it. This asserts the guest-visible consequence (doctrine R9) —
+    /// what a block holds after being swapped out and back — instead of how the
+    /// file happens to be borrowed, so it stays meaningful as that seam moves
+    /// into `Residency`.
+    #[test]
+    fn evicted_blocks_keep_their_bytes_across_the_swap_file() {
+        // Guest 4 MiB over 1 MiB of host RAM: one resident block, so touching a
+        // second guest block must evict the first.
+        let mut mem = swapped_memory();
+        const B0: u64 = 0;
+        const B1: u64 = MIB as u64;
+        const B2: u64 = 2 * MIB as u64;
+
+        mem.write_ram(&[], B0, &[0x11, 0x22]).unwrap();
+        mem.write_ram(&[], B1, &[0x33, 0x44]).unwrap();
+        mem.write_ram(&[], B2, &[0x55, 0x66]).unwrap();
+
+        // Each read below forces the block back in, evicting the previous one.
+        let mut buf = [0u8; 2];
+        mem.read_ram(&[], B0, &mut buf).unwrap();
+        assert_eq!(buf, [0x11, 0x22], "block 0 lost its bytes across eviction");
+        mem.read_ram(&[], B1, &mut buf).unwrap();
+        assert_eq!(buf, [0x33, 0x44], "block 1 lost its bytes across eviction");
+        mem.read_ram(&[], B2, &mut buf).unwrap();
+        assert_eq!(buf, [0x55, 0x66], "block 2 lost its bytes across eviction");
+
+        // And a second full pass, proving the round-trip is repeatable rather
+        // than surviving only the first write-out.
+        mem.read_ram(&[], B0, &mut buf).unwrap();
+        assert_eq!(buf, [0x11, 0x22]);
+    }
+
     #[test]
     fn failed_reload_leaves_target_block_swapped_until_retry() {
         let mut mem = swapped_memory();
         mem.write_ram(&[], 0, &[0x5a]).unwrap();
-        unsafe {
-            (&mut *mem.inherited_memory_stub.overflow_file.get())
-                .set_len(0)
-                .unwrap();
-        }
+        mem.inherited_memory_stub.overflow_file.set_len(0).unwrap();
 
         let mut byte = [0];
         assert!(mem.read_ram(&[], MIB as u64, &mut byte).is_err());
         let blocks = &mem.inherited_memory_stub.blocks_offsets;
         assert!(matches!(blocks[1], super::Block::SwappedOut));
 
-        unsafe {
-            (&mut *mem.inherited_memory_stub.overflow_file.get())
-                .set_len((2 * MIB) as u64)
-                .unwrap();
-        }
+        mem.inherited_memory_stub
+            .overflow_file
+            .set_len((2 * MIB) as u64)
+            .unwrap();
         assert_eq!(mem.read_ram(&[], MIB as u64, &mut byte).unwrap(), 1);
         assert_eq!(byte, [0]);
     }
