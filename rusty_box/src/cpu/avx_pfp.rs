@@ -41,12 +41,11 @@ use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::sse_pfp::{dppd_lane, dpps_lane, mxcsr_to_softfloat_status_word_imm_override};
 use super::sse_rcp::{approximate_rcp, approximate_rsqrt};
 use super::{
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
     xmm::{BxPackedXmmRegister, BxPackedYmmRegister},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ════════════════════════════════════════════════════════════════════
     // VEX FP templates — Bochs cpu_templates_pfp.h HANDLE_AVX_PFP_2OP /
     // HANDLE_AVX_PFP_1OP and avx_pfp.cc AVX_SCALAR_SINGLE_FP /

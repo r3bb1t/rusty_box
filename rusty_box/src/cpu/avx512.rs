@@ -119,7 +119,7 @@ fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register, zeroing upper bits beyond VL
 fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -144,7 +144,7 @@ fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register for qword operations
 fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -166,7 +166,7 @@ fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VMOVDQU32/64 — Unaligned move (EVEX-encoded)
     // ========================================================================

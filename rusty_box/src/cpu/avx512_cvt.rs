@@ -90,7 +90,7 @@ fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register with dword-granularity masking, zeroing upper bits beyond VL
 fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -111,7 +111,7 @@ fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
 /// under merge masking with those bits clear the destination must not keep its
 /// old contents.
 fn write_zmm_masked_n<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -136,7 +136,7 @@ fn write_zmm_masked_n<T: crate::cpu::instrumentation::Instrumentation>(
 /// Write `nelements` *words* with masking and clear everything above. Used by
 /// VCVTPS2PH, whose n singles become n words — half a vector.
 fn write_zmm_masked_w_half<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -158,7 +158,7 @@ fn write_zmm_masked_w_half<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register with qword-granularity masking
 fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -182,7 +182,7 @@ fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Read source as dword vector from register or memory
 fn read_src_dword<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -198,7 +198,7 @@ fn read_src_dword<T: crate::cpu::instrumentation::Instrumentation>(
 /// `LOAD_BROADCAST_Half_VectorD` with `LOAD_BROADCAST_MASK_Half_VectorD`
 /// because the source holds half as many elements as the destination.
 fn read_src_half_dword<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
@@ -212,7 +212,7 @@ fn read_src_half_dword<T: crate::cpu::instrumentation::Instrumentation>(
 /// VCVTTPD2DQ, VCVTPD2PS) pair `LOAD_BROADCAST_VectorQ` with
 /// `LOAD_BROADCAST_MASK_VectorQ`.
 fn read_src_qword<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -225,7 +225,7 @@ fn read_src_qword<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Round an f32 to nearest integer as i32, matching MXCSR rounding mode.
 /// MXCSR RC: 0=nearest, 1=down, 2=up, 3=truncate
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VCVTDQ2PS — Convert packed signed dwords to SP FP
     // EVEX.0F.W0 5B /r

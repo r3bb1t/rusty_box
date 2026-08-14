@@ -73,7 +73,7 @@ fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
 /// Elements [1..3] come from src1. Elements [4..15] are zeroed (EVEX clears
 /// upper bits).
 fn write_scalar_ss<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
     result_elem0: Float32,
@@ -105,7 +105,7 @@ fn write_scalar_ss<T: crate::cpu::instrumentation::Instrumentation>(
 /// Element [0] is the result, subject to opmask bit 0 merge/zero masking.
 /// Element [1] comes from src1. Elements [2..7] are zeroed.
 fn write_scalar_sd<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
     result_elem0: Float64,
@@ -130,7 +130,7 @@ fn write_scalar_sd<T: crate::cpu::instrumentation::Instrumentation>(
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // Helper: read scalar f32 source operand (register or memory)
     // ========================================================================

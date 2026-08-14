@@ -92,7 +92,7 @@ pub(super) fn cut_opmask_to(nelements: usize) -> u64 {
     (1u64 << nelements) - 1
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // Opmask reads — Bochs cpu.h BX_READ_*_OPMASK plus the `k0 means
     // unmasked` convention every LOAD_MASK_* function open-codes.
@@ -183,7 +183,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
                 if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(n as u64)) {
-                    return self.exception(Self::seg_exception(seg), 0);
+                    return self.exception(BxCpuC::<T>::seg_exception(seg), 0);
                 }
             }
         }
@@ -215,7 +215,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 if (mask & (1u64 << n)) != 0
                     && !self.is_canonical(laddr.wrapping_add(2 * n as u64))
                 {
-                    return self.exception(Self::seg_exception(seg), 0);
+                    return self.exception(BxCpuC::<T>::seg_exception(seg), 0);
                 }
             }
         }
@@ -250,7 +250,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 if (mask & (1u64 << n)) != 0
                     && !self.is_canonical(laddr.wrapping_add(4 * n as u64))
                 {
-                    return self.exception(Self::seg_exception(seg), 0);
+                    return self.exception(BxCpuC::<T>::seg_exception(seg), 0);
                 }
             }
         }
@@ -285,7 +285,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 if (mask & (1u64 << n)) != 0
                     && !self.is_canonical(laddr.wrapping_add(8 * n as u64))
                 {
-                    return self.exception(Self::seg_exception(seg), 0);
+                    return self.exception(BxCpuC::<T>::seg_exception(seg), 0);
                 }
             }
         }
@@ -331,7 +331,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 if (mask & (1u64 << n)) != 0
                     && !self.is_canonical(laddr.wrapping_add(4 * n as u64))
                 {
-                    return self.exception(Self::seg_exception(seg), 0);
+                    return self.exception(BxCpuC::<T>::seg_exception(seg), 0);
                 }
             }
         }
@@ -369,7 +369,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 if (mask & (1u64 << n)) != 0
                     && !self.is_canonical(laddr.wrapping_add(8 * n as u64))
                 {
-                    return self.exception(Self::seg_exception(seg), 0);
+                    return self.exception(BxCpuC::<T>::seg_exception(seg), 0);
                 }
             }
         }
@@ -1040,7 +1040,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
                 if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(n as u64)) {
-                    return self.exception(Self::seg_exception(seg), 0);
+                    return self.exception(BxCpuC::<T>::seg_exception(seg), 0);
                 }
             }
         }
@@ -1076,7 +1076,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 if (mask & (1u64 << n)) != 0
                     && !self.is_canonical(laddr.wrapping_add(2 * n as u64))
                 {
-                    return self.exception(Self::seg_exception(seg), 0);
+                    return self.exception(BxCpuC::<T>::seg_exception(seg), 0);
                 }
             }
         }

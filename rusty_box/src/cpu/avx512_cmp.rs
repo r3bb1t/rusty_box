@@ -99,7 +99,7 @@ fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register, zeroing upper bits beyond VL (dword masking granularity)
 fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -123,7 +123,7 @@ fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register for qword operations
 fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -146,7 +146,7 @@ fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Read src2 dword elements from register or memory
 fn read_rm_dwords<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -159,7 +159,7 @@ fn read_rm_dwords<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Read src2 qword elements from register or memory
 fn read_rm_qwords<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -174,7 +174,7 @@ fn read_rm_qwords<T: crate::cpu::instrumentation::Instrumentation>(
 // Floating-point comparison predicates (32 predicates, imm8[4:0])
 // ============================================================================
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VCMPPS / VCMPPD — Compare packed FP, producing an opmask
     // EVEX.NDS.W0.0F C2 /r ib and EVEX.NDS.W1.0F C2 /r ib
@@ -955,7 +955,7 @@ fn cmp_predicate(imm3: u8, ord: core::cmp::Ordering) -> bool {
 /// instructions that produce a full vector regardless of the opmask
 /// (VPMOVM2B, VPBLENDMB) — the mask has already been consumed as data.
 fn write_zmm_masked_b_all<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     vl: u8,
@@ -972,7 +972,7 @@ fn write_zmm_masked_b_all<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Word-granular counterpart of [`write_zmm_masked_b_all`].
 fn write_zmm_masked_w_all<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     vl: u8,

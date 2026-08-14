@@ -59,7 +59,7 @@ fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register with per-byte masking, zeroing upper bytes beyond VL
 pub(super) fn write_zmm_masked_b<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -84,7 +84,7 @@ pub(super) fn write_zmm_masked_b<T: crate::cpu::instrumentation::Instrumentation
 
 /// Write ZMM register with per-word masking, zeroing upper words beyond VL
 pub(super) fn write_zmm_masked_w<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -115,7 +115,7 @@ pub(super) fn write_zmm_masked_w<T: crate::cpu::instrumentation::Instrumentation
 /// Read src2 as bytes — callers (VPADDB, VPSUBB, VPAVGB, VPMAXUB, VPMINUB)
 /// pair `LOAD_Vector` with `LOAD_MASK_VectorB`.
 fn read_rm_bytes<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -129,7 +129,7 @@ fn read_rm_bytes<T: crate::cpu::instrumentation::Instrumentation>(
 /// Read src2 as words — callers (VPADDW, VPSUBW, VPMULLW, VPAVGW, VPMAXSW,
 /// VPMINSW) pair `LOAD_Vector` with `LOAD_MASK_VectorW`.
 fn read_rm_words<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -143,7 +143,7 @@ fn read_rm_words<T: crate::cpu::instrumentation::Instrumentation>(
 /// Read src2 as dwords — callers (VPACKSSDW, VPACKUSDW) use
 /// `LOAD_BROADCAST_VectorD` for both entries, so there is no masked variant.
 fn read_rm_dwords<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -157,7 +157,7 @@ fn read_rm_dwords<T: crate::cpu::instrumentation::Instrumentation>(
 /// Read src2 with `LOAD_Vector` regardless of masking — for the UNPCK opcodes,
 /// whose base and `_Kmask` def entries both name `LOAD_Vector`.
 fn read_rm_unmasked_vector<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
@@ -167,7 +167,7 @@ fn read_rm_unmasked_vector<T: crate::cpu::instrumentation::Instrumentation>(
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VPADDB/W — Packed byte/word add (EVEX-encoded)
     // ========================================================================

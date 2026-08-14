@@ -81,7 +81,7 @@ fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register with dword masking granularity, zeroing upper bits beyond VL
 fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -106,7 +106,7 @@ fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register with qword masking granularity
 fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -130,7 +130,7 @@ fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register with word masking granularity
 fn write_zmm_masked_w<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -154,7 +154,7 @@ fn write_zmm_masked_w<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Write ZMM register with byte masking granularity
 fn write_zmm_masked_b<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -178,7 +178,7 @@ fn write_zmm_masked_b<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Read 128-bit (16-byte) block from memory into a raw byte array.
 fn read_mem_128<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     seg: BxSegregs,
     laddr: u64,
 ) -> super::Result<[u8; 16]> {
@@ -193,7 +193,7 @@ fn read_mem_128<T: crate::cpu::instrumentation::Instrumentation>(
 
 /// Read 256-bit (32-byte) block from memory into a raw byte array.
 fn read_mem_256<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     seg: BxSegregs,
     laddr: u64,
 ) -> super::Result<[u8; 32]> {
@@ -206,7 +206,7 @@ fn read_mem_256<T: crate::cpu::instrumentation::Instrumentation>(
     Ok(buf)
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VBROADCASTSS — Broadcast single-precision float
     // ========================================================================

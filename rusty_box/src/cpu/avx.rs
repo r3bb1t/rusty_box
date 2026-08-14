@@ -7,7 +7,7 @@
 //! This file handles VEX.L=1 (256-bit) and EVEX-specific instructions.
 
 use super::{
-    cpu::{BxCpuC, Exception},
+    cpu::Exception,
     decoder::{features::X86Feature, BxSegregs, Instruction},
     softfloat3e::{
         f128::{SOFTFLOAT_MULADD_SUB_C, SOFTFLOAT_MULADD_SUB_PROD},
@@ -208,7 +208,7 @@ impl AMX {
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VZEROUPPER / VZEROALL (VEX.0F 77)
     // ========================================================================

@@ -32,7 +32,6 @@
 //! for VSIB without further changes.
 
 use super::{
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
 };
 use rusty_box_decoder::BX_NIL_REGISTER;
@@ -73,7 +72,7 @@ pub(super) enum VexGatherForm {
     QIndexQword,
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VSIB resolver helpers — mirror Bochs `BxResolveGatherD` /
     // `BxResolveGatherQ` (cpu/avx/gather.cc).
@@ -622,7 +621,7 @@ mod tests {
         for n in 0..16u8 {
             let i = make_vsib_instr(Opcode::EvexVgatherddVdqVsib, 0, n, 0, 0, 0, 1);
             assert_eq!(
-                super::BxCpuC::<()>::vsib_index_reg(&i),
+                crate::cpu::exec_ctx::ExecCtx::<'_, ()>::vsib_index_reg(&i),
                 n,
                 "V'=0 must pass sib_index unchanged"
             );
@@ -630,7 +629,7 @@ mod tests {
         for n in 0..16u8 {
             let i = make_vsib_instr(Opcode::EvexVgatherddVdqVsib, 0, n + 16, 0, 0, 0, 1);
             assert_eq!(
-                super::BxCpuC::<()>::vsib_index_reg(&i),
+                crate::cpu::exec_ctx::ExecCtx::<'_, ()>::vsib_index_reg(&i),
                 n + 16,
                 "V'=1 must extend sib_index into vmm16..31"
             );
@@ -770,7 +769,7 @@ mod tests {
         assert_eq!(i.get_evex_v_prime(), 1, "~V'=0 → V'=1");
         assert_eq!(i.sib_index(), 5);
         assert_eq!(
-            super::BxCpuC::<()>::vsib_index_reg(&i),
+            crate::cpu::exec_ctx::ExecCtx::<'_, ()>::vsib_index_reg(&i),
             21,
             "combined V' || sib.idx must address zmm21"
         );
