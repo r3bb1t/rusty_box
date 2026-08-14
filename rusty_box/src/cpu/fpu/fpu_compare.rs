@@ -14,7 +14,6 @@
 //! - FTST: compare ST(0) with +0.0
 //! - FXAM: examine ST(0) and set C3/C2/C1/C0 based on class
 
-use super::super::cpu::BxCpuC;
 use super::super::decoder::{BxSegregs, Instruction, Opcode};
 use super::super::i387::*;
 use super::super::softfloat3e::extf80_class::extf80_class;
@@ -52,7 +51,7 @@ fn status_word_flags_fpu_compare(float_relation: i32) -> u16 {
 // Instruction handlers
 // ---------------------------------------------------------------------------
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =======================================================================
     // FCOM ST(i) / FCOMP ST(i)
     // =======================================================================

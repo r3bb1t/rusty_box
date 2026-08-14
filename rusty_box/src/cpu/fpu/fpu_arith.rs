@@ -2,7 +2,6 @@
 //! FPU arithmetic instructions: FADD, FMUL, FSUB, FSUBR, FDIV, FDIVR, FSQRT, FRNDINT
 //! Ported from Bochs cpu/fpu/fpu_arith.cc
 
-use super::super::cpu::BxCpuC;
 use super::super::decoder::{BxSegregs, Instruction};
 use super::super::softfloat3e::extf80_addsub::{extf80_add, extf80_sub};
 use super::super::softfloat3e::extf80_div::extf80_div;
@@ -190,7 +189,7 @@ fn fpu_handle_nan_f64(a: ExtFloat80, b: u64, status: &mut SoftFloatStatus) -> Op
     None
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ================================================================
     // FADD variants
     // ================================================================

@@ -12,7 +12,6 @@
 //! - FISTTP (SSE3 truncation store: word, dword, qword)
 //! - FBSTP (packed BCD store)
 
-use super::super::cpu::BxCpuC;
 use super::super::decoder::{BxSegregs, Instruction, Opcode};
 use super::super::i387::{FPU_CW_INVALID, FPU_EX_STACK_UNDERFLOW};
 use super::super::softfloat3e::extf80_to_f32::extf80_to_f32;
@@ -29,7 +28,7 @@ use super::super::softfloat3e::softfloat_types::ExtFloat80;
 use super::super::softfloat3e::specialize::*;
 use super::ferr::i387cw_to_softfloat_status_word;
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // read_virtual_qword and write_virtual_qword are defined in access.rs
 
     // =========================================================================

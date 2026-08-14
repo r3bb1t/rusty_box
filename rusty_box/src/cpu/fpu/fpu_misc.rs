@@ -2,13 +2,12 @@
 //! FPU miscellaneous instructions: FXCH, FCHS, FABS, FDECSTP, FINCSTP, FFREE, FFREEP
 //! Ported from Bochs cpu/fpu/fpu_misc.cc
 
-use super::super::cpu::BxCpuC;
 use super::super::decoder::Instruction;
 use super::super::i387::{FPU_EX_STACK_UNDERFLOW, FPU_TAG_EMPTY};
 use super::super::softfloat3e::softfloat::{floatx80_abs, floatx80_chs};
 use super::super::softfloat3e::specialize::FLOATX80_DEFAULT_NAN;
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// FXCH ST(i) — Exchange ST(0) and ST(i)
     pub fn fxch_sti(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;

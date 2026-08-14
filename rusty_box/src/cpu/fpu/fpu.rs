@@ -3,12 +3,12 @@
 //! FLDENV, FNSTENV, FRSTOR, FNSAVE
 //! Ported from Bochs cpu/fpu/fpu.cc
 
-use super::super::cpu::{BxCpuC, CpuMode};
+use super::super::cpu::CpuMode;
 use super::super::decoder::{BxSegregs, Instruction};
 use super::super::i387::*;
 use super::super::softfloat3e::softfloat_types::ExtFloat80;
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// FNINIT — Initialize FPU state
     pub fn fninit(&mut self, _instr: &Instruction) -> super::super::Result<()> {
         self.the_i387.init();
@@ -89,7 +89,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// FNSTSW AX — Store status word to AX register
     pub fn fnstsw_ax(&mut self, _instr: &Instruction) -> super::super::Result<()> {
         let swd = self.the_i387.get_status_word();
-        self.set_rax((self.rax() & !0xFFFF) | swd as u64);
+        let rax = self.rax();
+        self.set_rax((rax & !0xFFFF) | swd as u64);
         Ok(())
     }
 
@@ -236,37 +237,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 offset = 0x1c;
             } else {
                 // Protected mode - 16 bit
-                self.v_write_word(seg, eaddr, self.the_i387.get_control_word())?;
-                self.v_write_word(
-                    seg,
-                    eaddr.wrapping_add(0x02) & asize_mask,
-                    self.the_i387.get_status_word(),
-                )?;
-                self.v_write_word(
-                    seg,
-                    eaddr.wrapping_add(0x04) & asize_mask,
-                    self.the_i387.get_tag_word(),
-                )?;
-                self.v_write_word(
-                    seg,
-                    eaddr.wrapping_add(0x06) & asize_mask,
-                    (self.the_i387.fip & 0xFFFF) as u16,
-                )?;
-                self.v_write_word(
-                    seg,
-                    eaddr.wrapping_add(0x08) & asize_mask,
-                    self.the_i387.fcs,
-                )?;
-                self.v_write_word(
-                    seg,
-                    eaddr.wrapping_add(0x0a) & asize_mask,
-                    (self.the_i387.fdp & 0xFFFF) as u16,
-                )?;
-                self.v_write_word(
-                    seg,
-                    eaddr.wrapping_add(0x0c) & asize_mask,
-                    self.the_i387.fds,
-                )?;
+                let tmp = self.the_i387.get_control_word();
+                self.v_write_word(seg, eaddr, tmp)?;
+                let tmp = self.the_i387.get_status_word();
+                self.v_write_word(seg, eaddr.wrapping_add(0x02) & asize_mask, tmp)?;
+                let tmp = self.the_i387.get_tag_word();
+                self.v_write_word(seg, eaddr.wrapping_add(0x04) & asize_mask, tmp)?;
+                let tmp = (self.the_i387.fip & 0xFFFF) as u16;
+                self.v_write_word(seg, eaddr.wrapping_add(0x06) & asize_mask, tmp)?;
+                let tmp = self.the_i387.fcs;
+                self.v_write_word(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
+                let tmp = (self.the_i387.fdp & 0xFFFF) as u16;
+                self.v_write_word(seg, eaddr.wrapping_add(0x0a) & asize_mask, tmp)?;
+                let tmp = self.the_i387.fds;
+                self.v_write_word(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
                 offset = 0x0e;
             }
         } else {
@@ -292,17 +276,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 offset = 0x1c;
             } else {
                 // Real mode - 16 bit
-                self.v_write_word(seg, eaddr, self.the_i387.get_control_word())?;
-                self.v_write_word(
-                    seg,
-                    eaddr.wrapping_add(0x02) & asize_mask,
-                    self.the_i387.get_status_word(),
-                )?;
-                self.v_write_word(
-                    seg,
-                    eaddr.wrapping_add(0x04) & asize_mask,
-                    self.the_i387.get_tag_word(),
-                )?;
+                let tmp = self.the_i387.get_control_word();
+                self.v_write_word(seg, eaddr, tmp)?;
+                let tmp = self.the_i387.get_status_word();
+                self.v_write_word(seg, eaddr.wrapping_add(0x02) & asize_mask, tmp)?;
+                let tmp = self.the_i387.get_tag_word();
+                self.v_write_word(seg, eaddr.wrapping_add(0x04) & asize_mask, tmp)?;
                 self.v_write_word(
                     seg,
                     eaddr.wrapping_add(0x06) & asize_mask,
