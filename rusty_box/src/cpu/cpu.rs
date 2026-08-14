@@ -3015,6 +3015,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if mem.smc_seq_next() > self.smc_seq_seen {
             self.smc_apply_pending(mem, false);
         }
+        // Discard allocation-based caches if guest blocks moved since they were
+        // filled. This belongs HERE, where the fetch window is consumed, and
+        // not in `prefetch`, where it is merely refilled: `prefetch` runs only
+        // when `needs_prefetch` below is true, so an instruction whose data
+        // access evicted its own code block would otherwise have the next
+        // instruction fetched straight out of the still-"valid" window — which
+        // by then names another guest block's bytes.
+        self.revalidate_allocation_caches(mem);
         // Check if we need to prefetch a new page. Bochs cpu.cc getICacheEntry:
         // `bx_address eipBiased = RIP + eipPageBias; if (eipBiased >=
         // eipPageWindowSize) prefetch();` — the compare runs at full bx_address
@@ -3318,9 +3326,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// therefore stale-able by one — the case the per-CPU pin sidecar used to
     /// prevent by vetoing eviction.
     ///
-    /// Called at fetch-window refill, which is the first moment any of the
-    /// three can be consumed after a swap: a swap can only be triggered by a
-    /// memory access, and the very next instruction byte comes through here.
+    /// Called from `get_icache_entry`, once per instruction fetch — the point
+    /// where the fetch window is CONSUMED. Checking at refill instead would
+    /// miss the case that matters: `prefetch` runs only when the window is
+    /// exhausted, so an instruction that evicts its own code block leaves the
+    /// window nominally valid and the next fetch would read another block's
+    /// bytes out of the reused slot.
     ///
     /// Free in every configuration that does not swap: with full residency the
     /// epoch is a constant, so this is one compare against an unchanging value
@@ -3341,7 +3352,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         &mut self,
         mem: &mut BxMemC,
     ) -> Result<()> {
-        self.revalidate_allocation_caches(mem);
         let laddr: BxAddress;
         let page_offset;
 
