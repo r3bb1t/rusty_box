@@ -16,7 +16,6 @@
 //! - Misc (PMOVMSKB, PSADBW, MASKMOVDQU)
 
 use super::{
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedXmmRegister,
 };
@@ -210,7 +209,7 @@ pub(super) fn insertps_core(op1: &mut BxPackedXmmRegister, op2: u32, control: u8
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // SSE helper: read op2 (register or memory)
     // ========================================================================

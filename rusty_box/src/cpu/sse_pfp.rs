@@ -46,7 +46,6 @@ use super::softfloat3e::softfloat::{
 };
 use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
     sse_fp::mxcsr_to_softfloat_status_word,
     xmm::BxPackedXmmRegister,
@@ -116,7 +115,7 @@ pub(super) fn dppd_lane(
     a
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // SSE FP helpers: status word and source-operand reads
     // ========================================================================

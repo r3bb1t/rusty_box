@@ -20,7 +20,6 @@ use super::softfloat3e::softfloat::{f32_sign, SoftFloatClass};
 use super::softfloat3e::softfloat_types::Float32;
 use super::softfloat3e::specialize::{FLOAT32_DEFAULT_NAN, FLOAT32_EXP_BIAS};
 use super::{
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedXmmRegister,
 };
@@ -92,7 +91,7 @@ pub(super) fn approximate_rsqrt(op: Float32) -> Float32 {
     pack_to_f32(false, exp, (table[(fraction >> 13) as usize] as u32) << 8)
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Shared source read for the packed forms.
     #[inline]
     fn sse_rcp_read_op(&mut self, instr: &Instruction) -> super::Result<BxPackedXmmRegister> {
