@@ -206,7 +206,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let predicate = instr.ib() & 0x1F;
         let write_mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
             if (write_mask >> i) & 1 == 0 {
@@ -870,7 +870,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 self.evex_load_wss_pair(instr)?.zmm32u(0)
             };
             let mut status = self.sse_status();
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             if f32_compare_predicate(instr.ib() & 0x1F, op1, op2, &mut status) {
                 result = 1;
             }
@@ -891,7 +891,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 self.evex_load_wsd_pair(instr)?.zmm64u(0)
             };
             let mut status = self.sse_status();
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             if f64_compare_predicate(instr.ib() & 0x1F, op1, op2, &mut status) {
                 result = 1;
             }

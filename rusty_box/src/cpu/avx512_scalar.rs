@@ -190,7 +190,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let mut result = 0;
         if (mask & 1) != 0 {
             let mut status = self.sse_status();
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             result = func(src1.zmm32u(0), src2_val, &mut status);
             self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         }
@@ -211,7 +211,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let mut result = 0;
         if (mask & 1) != 0 {
             let mut status = self.sse_status();
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             result = func(src1.zmm64u(0), src2_val, &mut status);
             self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         }
@@ -416,7 +416,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     ) -> super::Result<()> {
         let op = self.evex_read_rm_ss(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         if wide {
             let r = if truncate {
@@ -447,7 +447,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     ) -> super::Result<()> {
         let op = self.evex_read_rm_sd(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         if wide {
             let r = if truncate {
@@ -507,7 +507,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let op = self.cvtsi_read_src32(instr)?;
         let src1 = read_zmm(self, instr.src2()); // vvvv supplies the upper elements
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let value = i32_to_f32(op, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         write_scalar_ss(self, instr.dst(), &src1, value, u64::MAX, false);
@@ -519,7 +519,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let op = self.cvtsi_read_src64(instr)?;
         let src1 = read_zmm(self, instr.src2());
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let value = i64_to_f32(op, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         write_scalar_ss(self, instr.dst(), &src1, value, u64::MAX, false);
@@ -540,7 +540,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let op = self.cvtsi_read_src64(instr)?;
         let src1 = read_zmm(self, instr.src2());
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let value = i64_to_f64(op, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         write_scalar_sd(self, instr.dst(), &src1, value, u64::MAX, false);
@@ -552,7 +552,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let op = self.cvtsi_read_src32(instr)? as u32;
         let src1 = read_zmm(self, instr.src2());
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let value = ui32_to_f32(op, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         write_scalar_ss(self, instr.dst(), &src1, value, u64::MAX, false);
@@ -564,7 +564,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let op = self.cvtsi_read_src64(instr)? as u64;
         let src1 = read_zmm(self, instr.src2());
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let value = ui64_to_f32(op, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         write_scalar_ss(self, instr.dst(), &src1, value, u64::MAX, false);
@@ -584,7 +584,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let op = self.cvtsi_read_src64(instr)? as u64;
         let src1 = read_zmm(self, instr.src2());
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let value = ui64_to_f64(op, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         write_scalar_sd(self, instr.dst(), &src1, value, u64::MAX, false);
@@ -602,7 +602,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if (mask & 1) != 0 {
             let op2 = self.evex_read_rm_sd(instr)?;
             let mut status = self.sse_status();
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             result = f64_to_f32(op2, &mut status);
             self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         }
@@ -619,7 +619,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if (mask & 1) != 0 {
             let op2 = self.evex_read_rm_ss(instr)?;
             let mut status = self.sse_status();
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             result = f32_to_f64(op2, &mut status);
             self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         }
@@ -772,7 +772,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if (mask & 1) != 0 {
             let op2 = self.evex_read_rm_ss(instr)?;
             let mut status = self.sse_status();
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             result = f32_fixupimm(dst_elem, src1.zmm32u(0), op2, instr.ib(), &mut status);
             self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         }
@@ -790,7 +790,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if (mask & 1) != 0 {
             let op2 = self.evex_read_rm_sd(instr)?;
             let mut status = self.sse_status();
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             result = f64_fixupimm(
                 dst_elem,
                 src1.zmm64u(0),
