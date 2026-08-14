@@ -351,6 +351,21 @@ pub struct BxMemoryStubC {
 
     next_swapout_idx: usize,
 
+    /// Monotonic count of guest-block relocations — the residency epoch.
+    ///
+    /// Bumped whenever a guest block's slot assignment changes, which is
+    /// exactly when a cached RAM offset may have started pointing at different
+    /// guest bytes. Consumers that cache offsets (TLB entries, the instruction
+    /// fetch window, the VMCB pointer) record the epoch they were filled at and
+    /// discard the cache when it moves. That is the swap-staleness answer the
+    /// `CpuTlbPin` sidecar currently gives by *preventing* eviction; an epoch
+    /// lets eviction proceed and invalidates instead.
+    ///
+    /// Cost is nil where it matters: under full residency — the default, and
+    /// the only regime `no_alloc` has — no block is ever swapped out, so
+    /// `allocate_block` is never entered and this never advances.
+    swap_epoch: u64,
+
     /// Cached "host backing is a full identity map" verdict consumed by
     /// `identity_guest_base` on every cpu-loop entry (per SMP slice — the
     /// O(num_blocks) table walk this replaces dominated the SMP hot path).
@@ -607,6 +622,28 @@ impl BxMemoryStubC {
         &mut self.blocks_offsets[..num_blocks]
     }
 
+    /// The current residency epoch. See the `swap_epoch` field.
+    ///
+    /// A consumer caching a RAM offset records this alongside it and discards
+    /// the cache when the value changes. Reading is a plain load; under full
+    /// residency the value is a constant zero.
+    #[inline(always)]
+    pub(crate) fn swap_epoch(&self) -> u64 {
+        self.swap_epoch
+    }
+
+    /// Announce that guest blocks moved. The single writer of `swap_epoch`
+    /// (doctrine R5) — every block-table mutation goes through here, so there
+    /// is one place to audit for "did this invalidate cached offsets?".
+    ///
+    /// Saturating rather than wrapping: at one bump per swap, `u64` cannot
+    /// realistically be exhausted, but a wrap would silently re-validate every
+    /// stale cache, so the arithmetic should not be the thing that decides it.
+    #[inline]
+    fn bump_swap_epoch(&mut self) {
+        self.swap_epoch = self.swap_epoch.saturating_add(1);
+    }
+
     /// Full O(num_blocks) identity-map scan — the ground truth behind the
     /// cached `identity_map` flag. Used to (re)compute the cache at block
     /// table rewrites and as the debug oracle in `identity_guest_base`.
@@ -654,6 +691,7 @@ impl BxMemC {
         addr: BxPhyAddress,
         out: &mut [u8],
     ) -> Result<usize> {
+
         let mut copied = 0usize;
         while copied < out.len() {
             let logical = addr
@@ -753,6 +791,14 @@ impl BxMemC {
 
     pub(crate) fn get_memory_len(&self) -> usize {
         self.inherited_memory_stub.len
+    }
+
+    /// The residency epoch — bumped whenever a guest block changes slots, so a
+    /// consumer holding cached RAM offsets can tell whether they still name the
+    /// bytes they were filled from. See `BxMemoryStubC::swap_epoch`.
+    #[inline(always)]
+    pub(crate) fn swap_epoch(&self) -> u64 {
+        self.inherited_memory_stub.swap_epoch()
     }
 
     /// Return the guest RAM base only when host backing is a full identity map.
@@ -1499,6 +1545,74 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .unwrap();
     }
 
+
+    /// The residency epoch advances exactly when a guest block changes slots.
+    ///
+    /// This is the contract 4c relies on to retire the pin sidecar: pins stop
+    /// eviction from stranding a cached RAM offset, an epoch instead lets
+    /// eviction happen and tells the holder its offset died. If a relocation
+    /// could ever go unannounced, a stale offset would silently read another
+    /// block's bytes.
+    #[test]
+    fn swap_epoch_advances_when_a_block_changes_slots() {
+        // 4 MiB guest over 1 MiB host: one resident slot, so each access to a
+        // different guest block must relocate.
+        let mut mem = swapped_memory();
+        let mut buf = [0u8; 1];
+
+        mem.read_ram(&[], 0, &mut buf).unwrap();
+        let after_first = mem.swap_epoch();
+
+        mem.read_ram(&[], MIB as u64, &mut buf).unwrap();
+        let after_swap = mem.swap_epoch();
+        assert!(
+            after_swap > after_first,
+            "relocating a block must announce itself: {after_first} -> {after_swap}"
+        );
+
+        mem.read_ram(&[], 2 * MIB as u64, &mut buf).unwrap();
+        assert!(
+            mem.swap_epoch() > after_swap,
+            "every relocation advances the epoch, not just the first"
+        );
+    }
+
+    /// Under full residency the epoch never moves, however much RAM is touched.
+    ///
+    /// The whole point of an epoch check on the hot path is that it compares
+    /// against a value that never changes when nothing is swapping — which is
+    /// every default configuration, and the only regime `no_alloc` has. A bump
+    /// on some non-relocating path would be invisible to correctness tests and
+    /// would quietly flush caches forever, so it is asserted here directly.
+    #[test]
+    fn swap_epoch_never_moves_under_full_residency() {
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(4 * MIB, 4 * MIB, MIB).expect("memory allocation"),
+            false,
+        );
+        mem.set_a20_mask(u64::MAX);
+        let start = mem.swap_epoch();
+
+        let mut buf = [0u8; 4];
+        for block in 0..4u64 {
+            let base = block * MIB as u64;
+            mem.write_ram(&[], base, &[1, 2, 3, 4]).unwrap();
+            mem.read_ram(&[], base, &mut buf).unwrap();
+            assert_eq!(buf, [1, 2, 3, 4]);
+            // Straddle the block boundary too — the split path is a separate
+            // walk through the block table.
+            if block + 1 < 4 {
+                mem.write_ram(&[], base + MIB as u64 - 2, &[9, 9, 9, 9])
+                    .unwrap();
+            }
+        }
+
+        assert_eq!(
+            mem.swap_epoch(),
+            start,
+            "no block relocated, so nothing may invalidate cached offsets"
+        );
+    }
 
     /// Guest bytes survive a full eviction round-trip through the swap file.
     ///

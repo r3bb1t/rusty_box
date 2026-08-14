@@ -250,6 +250,7 @@ impl BxMemoryStubC {
                 core::ptr::addr_of_mut!((*ptr).used_blocks).write(0);
             }
             core::ptr::addr_of_mut!((*ptr).next_swapout_idx).write(0);
+            core::ptr::addr_of_mut!((*ptr).swap_epoch).write(0);
             // Full residency lays blocks out as an identity map above.
             core::ptr::addr_of_mut!((*ptr).identity_map).write(allocated >= len);
             #[cfg(feature = "std")]
@@ -386,6 +387,7 @@ impl BxMemoryStubC {
             smc_overflow_seq: 0,
             apic_scratch: [0u8; 4096],
             next_swapout_idx: 0,
+            swap_epoch: 0,
             // Full residency lays blocks out as an identity map above.
             identity_map: host >= guest,
             #[cfg(feature = "std")]
@@ -851,6 +853,9 @@ impl BxMemoryStubC {
         }
         self.used_blocks = used_blocks;
         self.next_swapout_idx = next_swapout;
+        // The whole block table was just rewritten from the snapshot, so any
+        // offset cached against the pre-restore layout is stale.
+        self.bump_swap_epoch();
         self.recompute_identity_map();
         self.smc_stamps.fill(0);
         self.smc_pending.fill(crate::cpu::icache::PendingSmc::default());
@@ -1032,6 +1037,13 @@ impl BxMemoryStubC {
             if uses_new_slot {
                 self.used_blocks = used_blocks + 1;
             }
+            // A block changed slots, so every cached RAM offset is suspect.
+            // Bumped unconditionally rather than only when a victim was
+            // evicted: filling a fresh slot cannot strand a live offset (a
+            // swapped-out block has none), but keeping one rule for "the block
+            // table moved" leaves no case to get wrong later, and this path is
+            // unreachable under full residency anyway.
+            self.bump_swap_epoch();
             // Swapping regime: blocks land at arbitrary slots (and this path
             // is only reachable when residency is partial), so the identity
             // map is broken. Exact by construction — under full residency no
