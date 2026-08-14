@@ -922,15 +922,18 @@ mod tests {
         i
     }
 
-    fn cpu() -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC> {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
-        c.mxcsr.mxcsr = MXCSR_RESET;
-        c
+    /// Returns the machine, not the context — see the note in avx512_round.
+    fn cpu() -> crate::cpu::exec_ctx::TestMachine {
+        let mut m =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        m.ctx().mxcsr.mxcsr = MXCSR_RESET;
+        m
     }
 
     #[test]
     fn qword_to_double_and_back_round_trips_both_signednesses() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         // -3 as signed is 3 below zero; as unsigned it is 2^64-3, which is
         // not representable exactly and rounds to 2^64.
         c.vmm[1].set_zmm64u(0, (-3i64) as u64);
@@ -966,7 +969,8 @@ mod tests {
 
     #[test]
     fn pd2qq_rounds_by_mxcsr_while_tpd2qq_truncates() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm64u(0, 2.5f64.to_bits());
         c.vmm[1].set_zmm64u(1, 3.5f64.to_bits());
 
@@ -992,7 +996,8 @@ mod tests {
 
     #[test]
     fn single_to_qword_reads_only_the_low_half_of_the_source() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         // VL256 produces 4 qwords from 4 dwords, so the source dwords sit in
         // the low 128 bits even though the destination spans 256.
         for (i, v) in [1.5f32, -2.5, 3.75, 4.0].into_iter().enumerate() {
@@ -1016,7 +1021,8 @@ mod tests {
 
     #[test]
     fn qword_to_single_writes_half_a_vector() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm64u(0, 3);
         c.vmm[1].set_zmm64u(1, u64::MAX); // 2^64-1: not exact in f32
         c.vmm[1].set_zmm64u(2, 7);
@@ -1044,7 +1050,8 @@ mod tests {
         // outright, not left to the opmask. Deriving the count from an output
         // VL of 128 instead would treat them as maskable and, under merge
         // masking with those bits clear, leave the destination's old contents.
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.opmask[1].set_rrx(0b0011); // elements 0,1 active; 2,3 clear
         for i in 0..4 {
             c.vmm[0].set_zmm32u(i, 0xDEAD_BEEF);

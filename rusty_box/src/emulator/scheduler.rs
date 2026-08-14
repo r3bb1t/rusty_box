@@ -359,37 +359,24 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 // machine rather than three raw pointers and a lifetime
                 // transmute. Scoped to the call, so the bookkeeping below can
                 // use `self` again.
+                // The slice entry points live on `ExecCtx` now, so memory, the
+                // pin set and both buses come from the context itself. The
+                // scheduler no longer names any of them.
                 let slice_result = {
                     let mut ctx = self.exec_ctx(cpu_index);
-                    let (cpu, memory, devices, pc_system, pins, current_pin) = ctx.slice_parts();
-                    // The bus pointers are derived from live borrows rather
-                    // than captured from `self` before the loop. They stay
-                    // `NonNull` only until the CPU stops storing them.
-                    let io = core::ptr::NonNull::from(devices);
-                    let ps = core::ptr::NonNull::from(pc_system);
                     if smp {
-                        cpu.cpu_run_trace_with_io(
-                            memory,
-                            pins,
-                            current_pin,
+                        ctx.cpu_run_trace_with_io(
                             per_cpu_batch,
                             strict_smp_deadline,
                             cpu_count as u64,
-                            io,
-                            ps,
                             Some(&mut *pic_ref),
                             Some(&mut *dma_ref),
                         )
                     } else {
-                        cpu.cpu_loop_n_with_io(
-                            memory,
-                            pins,
-                            current_pin,
+                        ctx.cpu_loop_n_with_io(
                             per_cpu_batch,
                             strict_up_deadline,
                             1,
-                            io,
-                            ps,
                             Some(&mut *pic_ref),
                             Some(&mut *dma_ref),
                         )

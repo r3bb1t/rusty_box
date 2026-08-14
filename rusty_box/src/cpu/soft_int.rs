@@ -187,7 +187,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     /// INTO - Interrupt on overflow (vector 4, only if OF=1)
     /// Based on Bochs INTO in soft_int.cc
-    pub fn into(&mut self, _instr: &Instruction) -> super::Result<()> {
+    ///
+    /// Named `into_overflow` rather than `into`: the mnemonic collides with
+    /// `Into::into`, which every type implements. As an inherent method on the
+    /// CPU it still won resolution, but reached through a `Deref` — as the
+    /// dispatcher now does — the blanket trait method wins instead, and the
+    /// call silently stops being this handler.
+    pub fn into_overflow(&mut self, _instr: &Instruction) -> super::Result<()> {
         if self.get_of() {
             tracing::trace!("INTO: overflow detected, calling INT 4");
             // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code

@@ -58,7 +58,7 @@ fn snapshot_other(message: &'static str) -> std::io::Error {
 #[cfg(feature = "alloc")]
 #[repr(C, align(4096))]
 #[derive(Clone, Copy)]
-struct GuestPage([u8; BX_MEM_VECTOR_ALIGN]);
+pub(super) struct GuestPage([u8; BX_MEM_VECTOR_ALIGN]);
 
 #[cfg(feature = "alloc")]
 const _: () = assert!(core::mem::size_of::<GuestPage>() == BX_MEM_VECTOR_ALIGN);

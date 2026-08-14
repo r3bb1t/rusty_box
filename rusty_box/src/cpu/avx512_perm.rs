@@ -753,7 +753,9 @@ mod tests {
 
     #[test]
     fn vpermt2d_indexes_from_vvvv_across_the_destination_and_rm() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         for n in 0..4 {
             c.vmm[0].set_zmm32u(n, 100 + n as u32); // dst  = table 0
             c.vmm[1].set_zmm32u(n, 200 + n as u32); // rm   = table 1
@@ -772,7 +774,9 @@ mod tests {
 
     #[test]
     fn vpermi2d_indexes_from_the_destination_across_vvvv_and_rm() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         for n in 0..4 {
             c.vmm[2].set_zmm32u(n, 100 + n as u32); // vvvv = table 0
             c.vmm[1].set_zmm32u(n, 200 + n as u32); // rm   = table 1
@@ -790,7 +794,9 @@ mod tests {
 
     #[test]
     fn vpermilpd_selects_on_bit_one_within_each_128_bit_lane() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.vmm[2].set_zmm64u(0, 0xAAAA); // vvvv — the data
         c.vmm[2].set_zmm64u(1, 0xBBBB);
         // Bit 0 is ignored; only bit 1 selects.
@@ -804,7 +810,9 @@ mod tests {
 
     #[test]
     fn vpmullq_keeps_the_low_64_bits_of_the_product() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.vmm[2].set_zmm64u(0, 0x1_0000_0001);
         c.vmm[1].set_zmm64u(0, 0x1_0000_0001);
         c.vmm[2].set_zmm64u(1, 7);

@@ -725,7 +725,9 @@ mod tests {
 
     #[test]
     fn opmask_broadcasts_read_the_mask_as_data() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.bx_write_opmask(1, 0xFFFF_00AB);
 
         c.execute_instruction(&evex_misc(Opcode::EvexVpbroadcastmb2qVdqKeb, 1))
@@ -743,7 +745,9 @@ mod tests {
 
     #[test]
     fn vpconflictq_marks_only_earlier_matching_elements() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm64u(0, 7);
         c.vmm[1].set_zmm64u(1, 9);
         c.vmm[1].set_zmm64u(2, 7);
@@ -762,7 +766,9 @@ mod tests {
 
     #[test]
     fn expand_and_compress_are_inverses_over_the_opmask() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         // Source holds 10,11,12,13 contiguously.
         for (n, v) in [10u32, 11, 12, 13].into_iter().enumerate() {
             c.vmm[1].set_zmm32u(n, v);

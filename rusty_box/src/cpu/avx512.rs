@@ -2610,7 +2610,9 @@ mod tests {
             (Opcode::EvexVandpdVpdHpdWpd, 0x0000_0000_0000_0022u64),
             (Opcode::EvexVxorpdVpdHpdWpd, 0x1111_1111_2222_22DDu64),
         ] {
-            let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+            let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
             cpu.vmm[1].set_zmm64u(0, 0x1111_1111_2222_2222);
             cpu.vmm[1].set_zmm64u(1, 0x3333_3333_4444_4444);
             cpu.vmm[2].set_zmm64u(0, 0x0000_0000_0000_00FF);
@@ -2642,7 +2644,9 @@ mod tests {
 
     #[test]
     fn vpandnq_negates_src1_at_qword_granularity() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmm64u(0, 0x0000_0000_0000_00F0);
         cpu.vmm[1].set_zmm64u(0, 0xFFFF_FFFF_FFFF_FFFF);
         cpu.vmm[0].set_zmm64u(0, 0xDEAD_BEEF_DEAD_BEEF);
@@ -2688,7 +2692,9 @@ mod tests {
 
     #[test]
     fn operand_order_vpsub_subtracts_rm_from_vvvv() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmm32u(0, 10); // vvvv
         cpu.vmm[1].set_zmm32u(0, 3); // rm
         cpu.execute_instruction(&evex_unmasked(Opcode::EvexVpsubdVdqHdqWdq))
@@ -2704,7 +2710,9 @@ mod tests {
 
     #[test]
     fn operand_order_vpandn_negates_vvvv() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmm32u(0, 0x0000_00F0); // vvvv — the negated side
         cpu.vmm[1].set_zmm32u(0, 0xFFFF_FFFF); // rm
         cpu.execute_instruction(&evex_unmasked(Opcode::EvexVpandndVdqHdqWdq))
@@ -2714,7 +2722,9 @@ mod tests {
 
     #[test]
     fn operand_order_vpcmpgtd_compares_vvvv_against_rm() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmm32u(0, 5); // vvvv
         cpu.vmm[1].set_zmm32u(0, 3); // rm
         cpu.vmm[2].set_zmm32u(1, 3);
@@ -2730,7 +2740,9 @@ mod tests {
 
     #[test]
     fn operand_order_vpshufb_takes_its_control_bytes_from_rm() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         // vvvv is the data, rm is the shuffle control.
         for i in 0..16 {
             cpu.vmm[2].set_zmmubyte(i, (0xA0 + i) as u8);
@@ -2749,7 +2761,9 @@ mod tests {
 
     #[test]
     fn operand_order_vpblendm_takes_vvvv_where_the_mask_is_clear() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for i in 0..4 {
             cpu.vmm[2].set_zmm32u(i, 0x1111_1111); // vvvv
             cpu.vmm[1].set_zmm32u(i, 0x2222_2222); // rm
@@ -2766,7 +2780,9 @@ mod tests {
 
     #[test]
     fn operand_order_variable_shift_counts_come_from_rm() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmm32u(0, 0x0000_0100); // vvvv: the value
         cpu.vmm[2].set_zmm32u(1, 0x0000_0100);
         cpu.vmm[1].set_zmm32u(0, 4); // rm: per-element counts
@@ -2779,7 +2795,9 @@ mod tests {
 
     #[test]
     fn operand_order_vinserti32x4_inserts_rm_into_vvvv() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for i in 0..8 {
             cpu.vmm[2].set_zmm32u(i, 0x1111_1111); // vvvv: the base vector
         }
@@ -2799,7 +2817,9 @@ mod tests {
 
     #[test]
     fn operand_order_kandnw_negates_vvvv() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.bx_write_opmask(2, 0x00F0); // vvvv
         cpu.bx_write_opmask(1, 0xFFFF); // rm
         let mut i = evex_unmasked(Opcode::KandnwKgwKhwKew);
@@ -2813,7 +2833,9 @@ mod tests {
 
     #[test]
     fn duplication_moves_copy_in_the_direction_the_opcode_names() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for (n, v) in [10u32, 11, 12, 13].into_iter().enumerate() {
             cpu.vmm[1].set_zmm32u(n, v); // one-operand form reads src() = src1()
         }
@@ -2843,7 +2865,9 @@ mod tests {
 
     #[test]
     fn valignd_concatenates_vvvv_above_rm_and_windows_from_the_bottom() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for (n, v) in [20u32, 21, 22, 23].into_iter().enumerate() {
             cpu.vmm[2].set_zmm32u(n, v); // vvvv — the high half
         }

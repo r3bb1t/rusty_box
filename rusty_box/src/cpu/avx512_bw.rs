@@ -1311,7 +1311,9 @@ mod tests {
 
     #[test]
     fn saturating_byte_and_word_adds_clamp_instead_of_wrapping() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
 
         // Signed byte: 100 + 100 saturates to +127, -100 + -100 to -128.
         cpu.vmm[2].set_zmmubyte(0, 100);
@@ -1348,7 +1350,9 @@ mod tests {
 
     #[test]
     fn vpabsb_maps_int_min_to_its_unsigned_magnitude() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         // abs(-128) is not representable as i8; x86 yields 0x80.
         cpu.vmm[2].set_zmmubyte(0, 0x80);
         cpu.vmm[2].set_zmmubyte(1, (-5i8) as u8);
@@ -1363,7 +1367,9 @@ mod tests {
 
     #[test]
     fn vpacksswb_interleaves_per_128_bit_lane_at_vl256() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
 
         // Tag every source word with its lane so a whole-register pack is
         // distinguishable from a per-lane one. src1 words -> 0x0n, src2 -> 0x1n.
@@ -1400,7 +1406,9 @@ mod tests {
         // A count of 16 or more zeroes the logical shifts, but the
         // arithmetic right shift fills with the sign bit instead — the one
         // case where "shift everything out" is not the same as "produce 0".
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmm16u(0, 0x8000); // negative
         cpu.vmm[2].set_zmm16u(1, 0x4000); // positive
         cpu.vmm[1].set_zmm64u(0, 20); // count, low qword of the 128-bit operand
@@ -1421,7 +1429,9 @@ mod tests {
 
     #[test]
     fn word_shift_by_imm_and_by_element_use_their_own_counts() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
 
         // imm8 form: the count is the immediate and there is only one source,
         // so it is read through src() = src1() — no vvvv operand is involved
@@ -1449,7 +1459,9 @@ mod tests {
 
     #[test]
     fn pack_saturation_differs_between_signed_and_unsigned_forms() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         // 0x0140 = 320: signed-byte saturation gives 127, unsigned gives 255.
         // -1 stays -1 signed but clamps to 0 unsigned.
         cpu.vmm[2].set_zmm16u(0, 320);
@@ -1468,7 +1480,9 @@ mod tests {
 
     #[test]
     fn pshuflw_and_pshufhw_each_touch_only_their_own_half_of_every_lane() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         // Two 128-bit lanes, words numbered 0..15 so any misplacement shows.
         for n in 0..16 {
             cpu.vmm[1].set_zmm16u(n, n as u16);
@@ -1502,7 +1516,9 @@ mod tests {
 
     #[test]
     fn vmovdqu8_masks_at_byte_granularity_across_all_64_lanes() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for n in 0..64 {
             cpu.vmm[1].set_zmmubyte(n, 0x11);
             cpu.vmm[0].set_zmmubyte(n, 0x22);
@@ -1536,7 +1552,9 @@ mod tests {
 
     #[test]
     fn vmovdqu16_masks_at_word_granularity() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for n in 0..8 {
             cpu.vmm[1].set_zmm16u(n, 0x1111);
             cpu.vmm[0].set_zmm16u(n, 0x2222);
@@ -1555,7 +1573,9 @@ mod tests {
 
     #[test]
     fn vdbpsadbw_sums_absolute_differences_over_sliding_quadruples() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         // Bytes 0..15 in both operands, and imm8 0xE4 = the identity dword
         // shuffle, so the r/m operand passes through unchanged.
         for n in 0..16 {

@@ -89,6 +89,89 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
 
 }
 
+/// Machine parts for tests that drive instructions directly.
+///
+/// The dispatcher lives on [`ExecCtx`], so a test can no longer execute an
+/// instruction against a bare `BxCpuC`. This owns the smallest machine that
+/// satisfies the context and hands one out on demand — `ctx()` borrows from
+/// `self`, which is why the parts must live in the caller's frame rather than
+/// being returned alongside the context.
+///
+/// The CPU is still built exactly as these tests built it, so per-test model
+/// selection and reset state are unchanged; only the surrounding bus is new.
+#[cfg(test)]
+pub(crate) struct TestMachine {
+    cpu: alloc::boxed::Box<BxCpuC<()>>,
+    memory: BxMemC,
+    devices: BxDevicesC,
+    pc_system: BxPcSystemC,
+    pins: alloc::vec::Vec<CpuTlbPin>,
+}
+
+#[cfg(test)]
+impl TestMachine {
+    /// A machine whose CPU uses the default model.
+    pub(crate) fn new() -> Self {
+        Self::from_cpu(super::builder::BxCpuBuilder::new().build().unwrap())
+    }
+
+    /// A machine whose CPU uses `model`, matching `BxCpuBuilder::new_with_model`.
+    pub(crate) fn with_model(model: super::CpuModel) -> Self {
+        Self::from_cpu(
+            super::builder::BxCpuBuilder::new_with_model(model)
+                .build()
+                .unwrap(),
+        )
+    }
+
+    fn from_cpu(cpu: alloc::boxed::Box<BxCpuC<()>>) -> Self {
+        const MIB: usize = 1024 * 1024;
+        let memory = BxMemC::new(
+            crate::memory::BxMemoryStubC::create_and_init(MIB, MIB, 4096).unwrap(),
+            false,
+        );
+        let pins = alloc::vec![CpuTlbPin::new(&*cpu)];
+        Self {
+            cpu,
+            memory,
+            devices: BxDevicesC::new(),
+            pc_system: BxPcSystemC::new(),
+            pins,
+        }
+    }
+
+    /// Borrow the machine as an execution context.
+    pub(crate) fn ctx(&mut self) -> ExecCtx<'_, ()> {
+        ExecCtx::new(
+            &mut self.cpu,
+            &mut self.memory,
+            &mut self.devices,
+            &mut self.pc_system,
+            &self.pins,
+            0,
+        )
+    }
+}
+
+/// Run `f` against a context built over a caller-supplied CPU and memory.
+///
+/// For tests that prepare their own guest memory — page tables, specific
+/// contents — and so cannot use [`TestMachine`]'s. The device bus and PC system
+/// are supplied here because the context requires them, not because these tests
+/// use them.
+#[cfg(test)]
+pub(crate) fn exec_with<T: Instrumentation, R>(
+    cpu: &mut BxCpuC<T>,
+    memory: &mut BxMemC,
+    pins: &[CpuTlbPin],
+    f: impl FnOnce(&mut ExecCtx<'_, T>) -> R,
+) -> R {
+    let mut devices = BxDevicesC::new();
+    let mut pc_system = BxPcSystemC::new();
+    let mut ctx = ExecCtx::new(cpu, memory, &mut devices, &mut pc_system, pins, 0);
+    f(&mut ctx)
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use crate::emulator::{Emulator, EmulatorConfig};

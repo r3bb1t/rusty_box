@@ -4171,7 +4171,9 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+                let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
                 // Make SVME a supported bit so the reserved-bits gate doesn't
                 // shadow the SVMDIS check (AmdRyzen advertises IsaSvm so this
                 // is already set, but force it for clarity).
@@ -4205,7 +4207,9 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+                let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
                 cpu.efer_suppmask |= BxEfer::SVME.bits();
                 cpu.msr.svm_vm_cr = 0;
 
@@ -4223,7 +4227,9 @@ mod tests {
 
     #[test]
     fn wired_system_ticks_include_live_icount_delta() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         let mut pc_system = BxPcSystemC::new();
         pc_system.initialize(1_000_000);
         pc_system.tickn(1_234);
@@ -4239,7 +4245,9 @@ mod tests {
 
     #[test]
     fn wired_smp_system_ticks_remain_at_round_epoch() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         let mut pc_system = BxPcSystemC::new();
         pc_system.initialize(1_000_000);
         pc_system.tickn(1_234);
@@ -4291,9 +4299,14 @@ mod tests {
 
     #[test]
     fn guest_tsc_paths_use_virtual_offset_but_aperf_mperf_stay_physical() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.icount = 77;
-        cpu.set_tsc(1_000, cpu.system_ticks());
+        // Bound first: through `Deref` the receiver and the argument would be
+        // two separate borrows of the context.
+        let ticks = cpu.system_ticks();
+        cpu.set_tsc(1_000, ticks);
         cpu.tsc_offset = 55;
         cpu.msr.tsc_aux = 0xCAFE_BABE;
 

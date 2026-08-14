@@ -961,15 +961,20 @@ mod tests {
         i
     }
 
-    fn cpu() -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC> {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
-        c.mxcsr.mxcsr = MXCSR_RESET;
-        c
+    /// Returns the machine, not the context: an `ExecCtx` borrows the parts it
+    /// is built from, so it cannot outlive a helper that owns them. Callers
+    /// keep the machine in their own frame and take a context from it.
+    fn cpu() -> crate::cpu::exec_ctx::TestMachine {
+        let mut m =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        m.ctx().mxcsr.mxcsr = MXCSR_RESET;
+        m
     }
 
     #[test]
     fn vreduce_subtracts_the_scaled_rounding_of_its_operand() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm32u(0, 1.75f32.to_bits());
 
         // scale 0, round-to-nearest-even: 1.75 rounds to 2, remainder -0.25.
@@ -1000,7 +1005,8 @@ mod tests {
 
     #[test]
     fn vreducepd_matches_the_single_precision_behaviour() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm64u(0, 1.75f64.to_bits());
         c.execute_instruction(&evex(Opcode::EvexVreducepdVpdWpdIbKmask, 0, 0x00))
             .unwrap();
@@ -1012,7 +1018,8 @@ mod tests {
 
     #[test]
     fn vrange_sign_control_can_override_the_comparison_result() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         // src1 (vvvv) = -3.0, src2 (rm) = 2.0.
         c.vmm[2].set_zmm32u(0, (-3.0f32).to_bits());
         c.vmm[1].set_zmm32u(0, 2.0f32.to_bits());
@@ -1044,7 +1051,8 @@ mod tests {
 
     #[test]
     fn vrange_magnitude_mode_ignores_the_operand_signs() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[2].set_zmm64u(0, (-3.0f64).to_bits());
         c.vmm[1].set_zmm64u(0, 2.0f64.to_bits());
 
@@ -1062,7 +1070,8 @@ mod tests {
 
     #[test]
     fn vrange_and_vreduce_scalar_forms_touch_only_element_zero() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         // vvvv supplies the upper elements of the destination.
         c.vmm[2].set_zmm32u(0, (-3.0f32).to_bits());
         c.vmm[2].set_zmm32u(1, 0x1111_1111);
@@ -1093,7 +1102,8 @@ mod tests {
         // src1(), so a handler that reads them positionally computes
         // rm * 2^floor(vvvv) instead. scalef is not commutative, so the two
         // give different answers for every asymmetric pair.
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[2].set_zmm32u(0, 3.0f32.to_bits()); // vvvv: the value
         c.vmm[1].set_zmm32u(0, 2.0f32.to_bits()); // rm:   the exponent
         c.execute_instruction(&evex(Opcode::EvexVscalefpsVpsHpsWps, 0, 0))

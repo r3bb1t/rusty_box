@@ -839,7 +839,9 @@ mod tests {
 
     #[test]
     fn vgetexp_returns_the_unbiased_exponent() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.mxcsr.mxcsr = MXCSR_RESET;
         for (v, want) in [(8.0f32, 3.0f32), (1.0, 0.0), (0.5, -1.0), (12.0, 3.0)] {
             cpu.vmm[1].set_zmm32u(0, v.to_bits());
@@ -860,7 +862,9 @@ mod tests {
 
     #[test]
     fn vscalef_multiplies_by_two_to_the_truncated_exponent() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.mxcsr.mxcsr = MXCSR_RESET;
         // vvvv holds the value, rm the exponent: 3.0 * 2^2 = 12.0.
         cpu.vmm[2].set_zmm32u(0, 3.0f32.to_bits());
@@ -886,7 +890,9 @@ mod tests {
 
     #[test]
     fn vgetmant_normalises_into_the_interval_the_immediate_selects() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.mxcsr.mxcsr = MXCSR_RESET;
         // 12.0 = 1.5 * 2^3, so the significand is 1.5.
         cpu.vmm[1].set_zmm32u(0, 12.0f32.to_bits());
@@ -913,7 +919,9 @@ mod tests {
 
     #[test]
     fn unsigned_destination_conversions_differ_from_the_signed_ones() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.mxcsr.mxcsr = MXCSR_RESET;
         // The signed float -> GPR forms route to the legacy handlers, which
         // begin with prepare_sse(); a builder-made CPU has CR4.OSFXSR clear,
@@ -945,7 +953,9 @@ mod tests {
 
     #[test]
     fn scalar_float_to_gpr_rounds_or_truncates_by_opcode() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.mxcsr.mxcsr = MXCSR_RESET;
         c.vmm[1].set_zmm64u(0, 2.5f64.to_bits());
         c.execute_instruction(&evex_scalar(Opcode::EvexVcvtsd2usiGdWsd))
@@ -972,7 +982,9 @@ mod tests {
 
     #[test]
     fn gpr_to_scalar_float_takes_its_upper_elements_from_vvvv() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.mxcsr.mxcsr = MXCSR_RESET;
         // vvvv (= vmm[2]) supplies dwords 1..3; the destination's own previous
         // contents must not survive.
@@ -993,7 +1005,9 @@ mod tests {
 
     #[test]
     fn usi_to_scalar_float_reads_the_gpr_as_unsigned() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.mxcsr.mxcsr = MXCSR_RESET;
         c.set_gpr32(1, 0xFFFF_FFFF);
 
@@ -1014,7 +1028,9 @@ mod tests {
 
     #[test]
     fn scalar_float_width_conversions_keep_the_vvvv_upper_elements() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.mxcsr.mxcsr = MXCSR_RESET;
         c.vmm[1].set_zmm64u(0, 1.5f64.to_bits()); // rm
         c.vmm[2].set_zmm32u(1, 0xAAAA_AAAA); // vvvv

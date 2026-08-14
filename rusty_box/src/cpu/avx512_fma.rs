@@ -489,7 +489,9 @@ mod tests {
         let add = 7.0f32.to_bits();
         let sub = 5.0f32.to_bits();
 
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         seed(&mut cpu);
         cpu.execute_instruction(&evex_reg(Opcode::EvexVfmaddsub213psVpsHpsWps))
             .unwrap();
@@ -498,7 +500,9 @@ mod tests {
         assert_eq!(cpu.vmm[0].zmm32u(2), sub);
         assert_eq!(cpu.vmm[0].zmm32u(3), add);
 
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         seed(&mut cpu);
         cpu.execute_instruction(&evex_reg(Opcode::EvexVfmsubadd213psVpsHpsWps))
             .unwrap();
@@ -510,7 +514,9 @@ mod tests {
 
     #[test]
     fn fmaddsub_double_precision_keeps_the_same_parity() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.mxcsr.mxcsr = MXCSR_RESET;
         for n in 0..2 {
             cpu.vmm[0].set_zmm64u(n, 3.0f64.to_bits()); // V

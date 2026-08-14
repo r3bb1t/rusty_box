@@ -1022,7 +1022,9 @@ mod tests {
 
     #[test]
     fn byte_compare_fills_all_64_opmask_bits_at_vl512() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         // Equal everywhere: every one of the 64 byte lanes must set its bit.
         for i in 0..64 {
             cpu.vmm[1].set_zmmubyte(i, 0x5A);
@@ -1041,7 +1043,9 @@ mod tests {
 
     #[test]
     fn the_writemask_gates_which_bits_a_compare_may_set() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for i in 0..16 {
             cpu.vmm[1].set_zmmubyte(i, 1);
             cpu.vmm[2].set_zmmubyte(i, 1);
@@ -1059,7 +1063,9 @@ mod tests {
 
     #[test]
     fn vptestm_and_vptestnm_are_complementary() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[1].set_zmmubyte(0, 0b1100);
         cpu.vmm[2].set_zmmubyte(0, 0b0011); // AND == 0
         cpu.vmm[1].set_zmmubyte(1, 0b1100);
@@ -1078,7 +1084,9 @@ mod tests {
     fn vpcmpb_predicates_cover_signed_and_unsigned_orderings() {
         // 0xFF is -1 signed but 255 unsigned, so the signed and unsigned
         // forms of the same predicate must disagree on it.
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmmubyte(0, 0xFF);
         cpu.vmm[1].set_zmmubyte(0, 0x01);
 
@@ -1105,7 +1113,9 @@ mod tests {
 
     #[test]
     fn vpmovb2m_and_vpmovm2b_round_trip_through_the_sign_bits() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[1].set_zmmubyte(0, 0x80); // sign set
         cpu.vmm[1].set_zmmubyte(1, 0x7F); // sign clear
         cpu.vmm[1].set_zmmubyte(2, 0xFF); // sign set
@@ -1126,7 +1136,9 @@ mod tests {
 
     #[test]
     fn vpblendmb_takes_src1_where_the_mask_is_clear_rather_than_merging() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for i in 0..16 {
             cpu.vmm[0].set_zmmubyte(i, 0xAA); // poison: must not survive
             cpu.vmm[2].set_zmmubyte(i, 0x11); // src1
@@ -1162,7 +1174,9 @@ mod tests {
 
     #[test]
     fn vfpclassps_matches_exactly_the_selected_category() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         for (bits, sel, name) in CLASS_CASES {
             for i in 0..4 {
                 c.vmm[1].set_zmm32u(i, bits);
@@ -1187,7 +1201,9 @@ mod tests {
 
     #[test]
     fn vfpclass_classification_raises_nothing_and_respects_the_writemask() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
         // A signalling NaN is classified, not signalled: with every SSE
         // exception unmasked this must still complete.
@@ -1212,7 +1228,9 @@ mod tests {
 
     #[test]
     fn vfpclassss_writes_a_single_bit_gated_on_opmask_bit_zero() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm32u(0, 0x7F80_0000); // +inf
         c.opmask[0].set_rrx(0xFFFF); // must be overwritten, not merged
 
@@ -1241,7 +1259,9 @@ mod tests {
 
     #[test]
     fn vcmpss_writes_one_opmask_bit_and_honours_the_predicate() {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
         c.vmm[2].set_zmm32u(0, 1.5f32.to_bits()); // vvvv
         c.vmm[1].set_zmm32u(0, 1.5f32.to_bits()); // rm

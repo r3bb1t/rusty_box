@@ -639,7 +639,9 @@ mod tests {
 
     #[test]
     fn resolve_gather_d_signed_index_as64() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.set_gpr64(
             rusty_box_decoder::instruction::GprIndex::Rbx as usize,
             0x4000,
@@ -661,7 +663,9 @@ mod tests {
 
     #[test]
     fn resolve_gather_q_uses_qword_index() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.set_gpr64(
             rusty_box_decoder::instruction::GprIndex::Rax as usize,
             0x10000,
@@ -683,7 +687,9 @@ mod tests {
 
     #[test]
     fn vpgather_dst_index_alias_raises_ud() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for op in [
             Opcode::EvexVgatherddVdqVsib,
             Opcode::EvexVgatherdqVdqVsib,
@@ -705,7 +711,9 @@ mod tests {
 
     #[test]
     fn vpgatherdd_zero_opmask_skips_loads_and_clears_opmask() {
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for n in 0..16 {
             cpu.vmm[10].set_zmm32u(n, 0xDEAD_BEEF);
         }
@@ -829,7 +837,9 @@ mod tests {
     fn scatter_with_zero_opmask_writes_nothing() {
         // No opmask bit set means no store and no address computation, so this
         // runs to completion on a CPU with no memory bus wired up at all.
-        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for n in 0..16 {
             cpu.vmm[10].set_zmm32u(n, 0xDEAD_BEEF);
         }

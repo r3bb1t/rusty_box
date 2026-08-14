@@ -2510,6 +2510,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         matches!(self.activity_state, CpuActivityState::Shutdown)
     }
 
+}
+
+/// The execution loop, which needs the machine and not just the CPU.
+///
+/// These live on `ExecCtx` because the dispatcher does: an opcode handler that
+/// touches memory cannot be reached from a bare `&mut BxCpuC`. Everything the
+/// loop does to CPU state alone still reads `self.…` through `Deref`; only the
+/// calls that need memory alongside the CPU destructure first.
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
     /// Execute CPU loop with an attached I/O bus (port handlers).
     ///
     /// This sets the bus, pc_system, pic, and dma pointers for the duration of the call
@@ -2518,41 +2527,35 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     #[inline]
     pub(crate) fn cpu_loop_n_with_io(
         &mut self,
-        mem: &mut BxMemC,
-        cpus: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
         strict_instruction_budget: bool,
         pc_tick_denominator: u64,
-        io: NonNull<crate::iodev::BxDevicesC>,
-        pc_system: NonNull<crate::pc_system::BxPcSystemC>,
         pic: Option<&mut crate::pic::BxPicC>,
         dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
-        self.set_io_bus_ptr(io);
-        self.set_pc_system_ptr_with_tick_denominator(pc_system, pc_tick_denominator);
+        self.install_bus_wiring(pc_tick_denominator);
         let result = if strict_instruction_budget {
-            self.cpu_loop_n_impl::<false, true>(
-                mem,
-                cpus,
-                current_pin,
-                max_instructions,
-                pic,
-                dma,
-            )
+            self.cpu_loop_n_impl::<false, true>(max_instructions, pic, dma)
         } else {
-            self.cpu_loop_n_impl::<false, false>(
-                mem,
-                cpus,
-                current_pin,
-                max_instructions,
-                pic,
-                dma,
-            )
+            self.cpu_loop_n_impl::<false, false>(max_instructions, pic, dma)
         };
         self.clear_io_bus();
         self.clear_pc_system();
         result
+    }
+
+    /// Point the CPU's still-stored bus pointers at this context's borrows.
+    ///
+    /// A staging step: the dispatcher and handlers below still reach the device
+    /// bus through `BxCpuC`'s fields, so those fields must be populated. They
+    /// are now derived from `ExecCtx`'s own borrows rather than passed in from
+    /// the scheduler, which is what lets the fields be deleted once the
+    /// handlers read the bus from the context directly.
+    #[inline]
+    fn install_bus_wiring(&mut self, pc_tick_denominator: u64) {
+        let (cpu, _mem, devices, pc_system, _pins, _current) = self.slice_parts();
+        cpu.set_io_bus_ptr(NonNull::from(devices));
+        cpu.set_pc_system_ptr_with_tick_denominator(NonNull::from(pc_system), pc_tick_denominator);
     }
 
     /// Execute exactly one icache trace with an attached I/O bus, then return.
@@ -2566,49 +2569,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     #[inline]
     pub(crate) fn cpu_run_trace_with_io(
         &mut self,
-        mem: &mut BxMemC,
-        cpus: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
         strict_instruction_budget: bool,
         pc_tick_denominator: u64,
-        io: NonNull<crate::iodev::BxDevicesC>,
-        pc_system: NonNull<crate::pc_system::BxPcSystemC>,
         pic: Option<&mut crate::pic::BxPicC>,
         dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
-        self.set_io_bus_ptr(io);
-        self.set_pc_system_ptr_with_tick_denominator(pc_system, pc_tick_denominator);
+        self.install_bus_wiring(pc_tick_denominator);
         let result = if strict_instruction_budget {
-            self.cpu_loop_n_impl::<true, true>(
-                mem,
-                cpus,
-                current_pin,
-                max_instructions,
-                pic,
-                dma,
-            )
+            self.cpu_loop_n_impl::<true, true>(max_instructions, pic, dma)
         } else {
-            self.cpu_loop_n_impl::<true, false>(
-                mem,
-                cpus,
-                current_pin,
-                max_instructions,
-                pic,
-                dma,
-            )
+            self.cpu_loop_n_impl::<true, false>(max_instructions, pic, dma)
         };
         self.clear_io_bus();
         self.clear_pc_system();
         result
     }
 
-    pub(crate) fn cpu_loop(
-        &mut self,
-        mem: &mut BxMemC,
-        cpus: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
-    ) -> super::Result<()> {
+    pub(crate) fn cpu_loop(&mut self) -> super::Result<()> {
         // Bochs uses setjmp here; we use CpuLoopRestart via Rust error propagation.
         // We get here either by a normal function call, or by a CpuLoopRestart
         // back from an exception() call.  In either case, commit the
@@ -2627,14 +2605,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             vm.shadow_stack_prematurely_busy = false; // for safety
         }
 
-        // Execute instructions in a loop. Use unsafe to work around lifetime issues with
-        // the mem borrow across loop iterations (each call is independent but compiler
-        // doesn't see it due to the 'c lifetime binding).
-        //
-        // SAFETY: We cast mem to a shorter-lived reference for each loop iteration.
-        // Each call to get_icache_entry is independent and completes before the next iteration.
-
-        self.cpu_loop_n(mem, cpus, current_pin, 1_000_000, None, None)?;
+        self.cpu_loop_n(1_000_000, None, None)?;
         Ok(())
     }
 
@@ -2643,17 +2614,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Returns Ok(instructions_executed) when limit is reached or async event occurs.
     pub(crate) fn cpu_loop_n(
         &mut self,
-        mem: &mut BxMemC,
-        cpus: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
         pic: Option<&mut crate::pic::BxPicC>,
         dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
         self.cpu_loop_n_impl::<false, false>(
-            mem,
-            cpus,
-            current_pin,
             max_instructions,
             pic,
             dma,
@@ -2671,9 +2636,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         const STRICT_INSTRUCTION_BUDGET: bool,
     >(
         &mut self,
-        mem: &mut BxMemC,
-        cpus: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
         mut pic: Option<&mut crate::pic::BxPicC>,
         mut dma: Option<&mut crate::dma::BxDmaC>,
@@ -2681,17 +2643,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // Wire the memory system pointer for the duration of this execution call.
         // This enables Bochs-style "host-pointer-or-fallback" access in mem_read/mem_write.
         // Reborrow `mem` so we don't move the `&mut` binding.
-        self.a20_mask = mem.a20_mask();
+        // Destructured so the CPU and memory are held together for the wiring.
+        // Scoped, because the loop below calls back through `self` — the
+        // dispatcher is an `ExecCtx` method, so it cannot run while these
+        // borrows are alive.
+        {
+            let (cpu, mem, _devices, _pc_system, cpus, current_pin) = self.slice_parts();
+            cpu.a20_mask = mem.a20_mask();
 
-        // Direct pointers are available only for a complete, identity-backed
-        // guest RAM mapping. All other accesses use the wired memory bus.
-        // Installed BEFORE the wiring, because `wire_memory_access` republishes
-        // any dirty pin sidecar, and resolving a data TLB entry's page number
-        // to the host address a pin holds needs this base.
-        self.install_memory_bases(mem);
+            // Direct pointers are available only for a complete, identity-backed
+            // guest RAM mapping. All other accesses use the wired memory bus.
+            // Installed BEFORE the wiring, because `wire_memory_access` republishes
+            // any dirty pin sidecar, and resolving a data TLB entry's page number
+            // to the host address a pin holds needs this base.
+            cpu.install_memory_bases(mem);
 
-        self.wire_memory_access(NonNull::from(&mut *mem), cpus, current_pin);
-        let _memory_wiring = CpuMemoryWiringGuard::new(self);
+            cpu.wire_memory_access(NonNull::from(&mut *mem), cpus, current_pin);
+        }
+        let _memory_wiring = CpuMemoryWiringGuard::new(&mut **self);
 
         let mut iteration = 0u64;
         // `iteration` is the batch budget counter (one per handler dispatch).
@@ -2797,27 +2766,25 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     && matches!(self.activity_state, CpuActivityState::Active)
                 {
                     self.async_event = 0;
-                } else if self.handle_async_event(
-                    pic.as_deref_mut(),
-                    dma.as_deref_mut(),
-                    Some(mem),
-                    cpus,
-                ) {
+                } else if {
+                    let (cpu, mem, _d, _p, cpus, _c) = self.slice_parts();
+                    cpu.handle_async_event(pic.as_deref_mut(), dma.as_deref_mut(), Some(mem), cpus)
+                } {
                     // Slow path: real async event (interrupt, HLT, shutdown, etc.)
                     break Ok(iteration);
                 }
             }
 
-            // Get raw pointer to mem before the loop to work around borrow checker
-            // SAFETY: We'll use this raw pointer to create new references after borrows are released
-            let mem_ptr: *mut BxMemC = mem;
-
-            // SAFETY: We extend the lifetime of mem temporarily for this call only.
-            // The borrow is released at the end of the expression.
             #[cfg(feature = "profiling")]
             let _t0 = std::time::Instant::now();
             let (mut instr_idx, mut trace_end) = {
-                match self.get_icache_entry(&mut *mem, cpus) {
+                // The borrow ends with the scrutinee, so the arms below are
+                // free to go back through `self`.
+                let entry = {
+                    let (cpu, mem, _d, _p, cpus, _c) = self.slice_parts();
+                    cpu.get_icache_entry(mem, cpus)
+                };
+                match entry {
                     Ok((start, tlen)) => (start, start + tlen),
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
                         // Bochs setjmp handler (cpu.cc): icount++, then
@@ -2903,11 +2870,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                         self.gen_reg[BX_64BIT_REG_RIP].rrx()
                     );
                 }
-                self.gen_reg[BX_64BIT_REG_RIP]
-                    .set_rrx(self.gen_reg[BX_64BIT_REG_RIP].rrx() + ilen_val as u64);
+                // Read then write, rather than nesting the two. Reaching the
+                // register file through `Deref` makes each `self.gen_reg`
+                // a separate deref call, so the inner read and the outer write
+                // overlap where direct field access did not.
+                let advanced = self.gen_reg[BX_64BIT_REG_RIP].rrx() + ilen_val as u64;
+                self.gen_reg[BX_64BIT_REG_RIP].set_rrx(advanced);
                 if is_real {
-                    self.gen_reg[BX_64BIT_REG_RIP]
-                        .set_rrx(self.gen_reg[BX_64BIT_REG_RIP].rrx() & 0xFFFF);
+                    let wrapped = self.gen_reg[BX_64BIT_REG_RIP].rrx() & 0xFFFF;
+                    self.gen_reg[BX_64BIT_REG_RIP].set_rrx(wrapped);
                 }
 
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
@@ -3064,7 +3035,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     // Chain to new trace without breaking to outer loop
                     // (matching C++ line 218-220: entry=getICacheEntry; i=entry->i; last=...)
                     let (start, tlen) = {
-                        match self.get_icache_entry(&mut *mem, cpus) {
+                        let chained = {
+                            let (cpu, mem, _d, _p, cpus, _c) = self.slice_parts();
+                            cpu.get_icache_entry(mem, cpus)
+                        };
+                        match chained {
                             Ok(v) => v,
                             Err(crate::cpu::CpuError::CpuLoopRestart) => {
                                 // Bochs setjmp handler: icount++, prev_rip = RIP
@@ -3117,6 +3092,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         result.map(|_| self.icount.wrapping_sub(icount_start))
     }
 
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Cold path: handle fatal errors from instruction execution.
     /// Separated from the hot inner loop to keep the hot path small for better
     /// instruction cache utilization.
@@ -4500,7 +4478,10 @@ mod tests {
             unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
         assert_ne!(legacy_reloaded, legacy_mpool);
         let legacy_instr = cpu.i_cache.mpool[legacy_reloaded];
-        cpu.execute_instruction(&legacy_instr).unwrap();
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, pins, |ctx| {
+            ctx.execute_instruction(&legacy_instr)
+        })
+        .unwrap();
 
         // Repeat with the PAE direct qword walker.  Its PTE line is likewise
         // decoded into a live trace before the architectural A/D write.
@@ -4551,7 +4532,10 @@ mod tests {
             unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
         assert_ne!(pae_reloaded, pae_mpool);
         let pae_instr = cpu.i_cache.mpool[pae_reloaded];
-        cpu.execute_instruction(&pae_instr).unwrap();
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, pins, |ctx| {
+            ctx.execute_instruction(&pae_instr)
+        })
+        .unwrap();
 
 
         cpu.clear_memory_access();
@@ -4620,7 +4604,10 @@ mod tests {
             "normal lookup must commit the primary page-split trace"
         );
         let old_instr = cpu.i_cache.mpool[old_mpool];
-        cpu.execute_instruction(&old_instr).unwrap();
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, pins, |ctx| {
+            ctx.execute_instruction(&old_instr)
+        })
+        .unwrap();
         assert_eq!(
             cpu.get_gpr32(0),
             0x1234_5678,
@@ -4653,7 +4640,10 @@ mod tests {
             "a primary cache hit after remapping would reuse stale split code"
         );
         let new_instr = cpu.i_cache.mpool[new_mpool];
-        cpu.execute_instruction(&new_instr).unwrap();
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, pins, |ctx| {
+            ctx.execute_instruction(&new_instr)
+        })
+        .unwrap();
         assert_eq!(
             cpu.get_gpr32(0),
             0x7788_9978,
