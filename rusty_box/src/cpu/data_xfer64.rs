@@ -805,38 +805,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // Helper functions for 64-bit memory operations
     // =========================================================================
 
-    /// Resolve effective address (64-bit addressing mode)
-    /// Matching BX_CPU_RESOLVE_ADDR_64
-    /// Made pub(crate) so it can be accessed from ctrl_xfer64.rs
-    pub(crate) fn resolve_addr64(&self, instr: &Instruction) -> u64 {
-        // Calculate: base + (index << scale) + displacement
-        // base_reg: 0-15 = GPR, 16 = RIP (for RIP-relative), 19 = NIL (no base)
-        // gen_reg[16] holds RIP (already advanced by ilen before execution),
-        // gen_reg[19] = NIL register (always 0).
-        // Matching Bochs: ResolveModrm reads gen_reg[base] directly.
-        let base_reg = instr.sib_base() as usize;
-        let mut eaddr = if base_reg < self.gen_reg.len() {
-            self.get_gpr64(base_reg)
-        } else {
-            0
-        };
 
-        eaddr = eaddr.wrapping_add(instr.displ32s() as u64);
-
-        let index_reg = instr.sib_index();
-        if index_reg != 4 {
-            // 4 means no index
-            let index_val = if index_reg < 16 {
-                self.get_gpr64(index_reg as usize)
-            } else {
-                0
-            };
-            let scale = instr.sib_scale();
-            eaddr = eaddr.wrapping_add(index_val << scale);
-        }
-
-        eaddr
-    }
 
     // read_8bit_regx is defined in logical8.rs to avoid duplicate definitions
 }

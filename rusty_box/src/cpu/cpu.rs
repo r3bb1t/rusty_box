@@ -875,6 +875,118 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Drop for CpuMemoryWiringGu
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Mode-dispatching address resolver (matches BX_CPU_RESOLVE_ADDR).
+    /// Returns 64-bit effective address in long mode, zero-extended 32-bit otherwise.
+    #[inline]
+    pub fn resolve_addr(&self, instr: &Instruction) -> u64 {
+        // Bochs BX_CPU_RESOLVE_ADDR: (i)->as64L() ? BxResolve64 : BxResolve32
+        // Must use per-instruction address-size attribute, NOT CPU mode.
+        // In 64-bit mode with 67h prefix, as64_l()==0 → use 32-bit resolution.
+        if instr.as64_l() != 0 {
+            self.resolve_addr64(instr)
+        } else {
+            u64::from(self.resolve_addr32(instr))
+        }
+    }
+    /// Resolve effective address (matches BX_CPU_RESOLVE_ADDR)
+    #[inline]
+    pub fn resolve_addr32(&self, instr: &Instruction) -> u32 {
+        let base_reg = instr.sib_base() as usize;
+        let mut eaddr = if base_reg < 16 {
+            self.get_gpr32(base_reg)
+        } else if base_reg == BX_64BIT_REG_RIP {
+            // RIP-relative addressing (64-bit mode only, mod=0 rm=5).
+            // gen_reg[RIP] already advanced by ilen before execution.
+            // Truncate to u32 — works for addresses below 4GB.
+            self.gen_reg[BX_64BIT_REG_RIP].rrx() as u32
+        } else {
+            0
+        };
+
+        eaddr = eaddr.wrapping_add(instr.displ32s() as u32);
+
+        let index_reg = instr.sib_index();
+        if index_reg != 4 {
+            let index_val = if index_reg < 16 {
+                self.get_gpr32(index_reg as usize)
+            } else {
+                0
+            };
+            let scale = instr.sib_scale();
+            eaddr = eaddr.wrapping_add(index_val << scale);
+        }
+
+        if instr.as32_l() == 0 {
+            eaddr & 0xFFFF
+        } else {
+            eaddr
+        }
+    }
+    /// Resolve effective address (64-bit addressing mode)
+    /// Matching BX_CPU_RESOLVE_ADDR_64
+    /// Made pub(crate) so it can be accessed from ctrl_xfer64.rs
+    pub(crate) fn resolve_addr64(&self, instr: &Instruction) -> u64 {
+        // Calculate: base + (index << scale) + displacement
+        // base_reg: 0-15 = GPR, 16 = RIP (for RIP-relative), 19 = NIL (no base)
+        // gen_reg[16] holds RIP (already advanced by ilen before execution),
+        // gen_reg[19] = NIL register (always 0).
+        // Matching Bochs: ResolveModrm reads gen_reg[base] directly.
+        let base_reg = instr.sib_base() as usize;
+        let mut eaddr = if base_reg < self.gen_reg.len() {
+            self.get_gpr64(base_reg)
+        } else {
+            0
+        };
+
+        eaddr = eaddr.wrapping_add(instr.displ32s() as u64);
+
+        let index_reg = instr.sib_index();
+        if index_reg != 4 {
+            // 4 means no index
+            let index_val = if index_reg < 16 {
+                self.get_gpr64(index_reg as usize)
+            } else {
+                0
+            };
+            let scale = instr.sib_scale();
+            eaddr = eaddr.wrapping_add(index_val << scale);
+        }
+
+        eaddr
+    }
+    /// Read 8-bit register with extend8bitL support (matches BX_READ_8BIT_REGx)
+    ///
+    /// Bochs macro: ext ? gen_reg[index].rl : (index<4 ? gen_reg[index].rl : gen_reg[index-4].rh)
+    /// When REX present (extend8bit_l != 0): indices 4-7 = SPL/BPL/SIL/DIL (low byte of RSP-RDI)
+    /// Without REX: indices 4-7 = AH/CH/DH/BH (high byte of RAX-RBX)
+    pub fn read_8bit_regx(&self, reg_idx: usize, extend8bit_l: u8) -> u8 {
+        if extend8bit_l != 0 || (reg_idx & 4) == 0 {
+            // REX present OR index 0-3: low byte of gen_reg[index]
+            self.gen_reg[reg_idx].rl()
+        } else {
+            // No REX, index 4-7: high byte of gen_reg[index-4] (AH/CH/DH/BH)
+            let reg16_idx = reg_idx & 0x3;
+            (self.get_gpr16(reg16_idx) >> 8) as u8
+        }
+    }
+    /// Write 8-bit register with extend8bitL support (matches BX_WRITE_8BIT_REGx)
+    pub fn write_8bit_regx(&mut self, reg_idx: usize, extend8bit_l: u8, val: u8) {
+        if extend8bit_l != 0 || (reg_idx & 4) == 0 {
+            // REX present OR index 0-3: low byte of gen_reg[index]
+            self.gen_reg[reg_idx].set_rl(val);
+        } else {
+            // No REX, index 4-7: high byte of gen_reg[index-4] (AH/CH/DH/BH)
+            let reg16_idx = reg_idx & 0x3;
+            let current = self.get_gpr16(reg16_idx);
+            let new_val = (current & 0x00FF) | ((val as u16) << 8);
+            self.set_gpr16(reg16_idx, new_val);
+        }
+    }
+    /// Returns true if direction flag is set (decrement mode)
+    #[inline]
+    pub(super) fn get_df(&self) -> bool {
+        self.eflags.contains(EFlags::DF)
+    }
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
     /// Persistent sleep sentinel set by enter_sleep_state (HLT/MWAIT).
     /// Matches Bochs proc_ctrl.cc `async_event = 1` — survives the
@@ -1115,8 +1227,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.dtlb.invalidate_slot(laddr, len);
     }
 
-    /// Discard a colliding ITLB mapping, and the fetch window with it, before a
-    /// miss can allocate backing memory.
+    /// Discard a colliding ITLB mapping, and the direct fetch slice with it,
+    /// before a miss can allocate backing memory.
+    ///
+    /// Only the window is dropped, never the page geometry: this runs inside
+    /// `prefetch`, after `eip_page_bias` and `eip_page_window_size` already
+    /// describe the page being fetched, and the arms below re-establish the
+    /// window against that geometry. Retiring the whole prefetch queue here
+    /// would erase the size the in-flight refill is still measured against.
     #[inline]
     pub(crate) fn invalidate_itlb_slot(&mut self, laddr: BxAddress, len: u32) {
         self.eip_fetch_window = None;
@@ -2572,6 +2690,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         iteration += 1;
                         self.prev_rip = self.rip();
                         self.speculative_rsp = false;
+                        // Bochs cpu.cc: the longjmp landing commits RIP and
+                        // falls into the loop, whose top runs `handleAsyncEvent`
+                        // for a fault raised while fetching exactly as for one
+                        // raised while executing. A sleep state survives this
+                        // clear on the SLEEP bit `enter_sleep_state` raises.
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                         if STOP_AFTER_ONE_TRACE {
                             // Bochs main.cc: the SMP-loop setjmp ends this
@@ -2694,11 +2817,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         iteration += 1;
                         self.prev_rip = self.rip();
                         self.speculative_rsp = false;
-                        // If triple fault set Shutdown, exit cleanly instead of restarting.
-                        if matches!(self.activity_state, CpuActivityState::Shutdown) {
-                            tracing::trace!("CPU shutdown — exiting cpu_loop");
-                            break 'cpu_loop Ok(iteration);
-                        }
+                        // Bochs cpu.cc: the loop top's `handleAsyncEvent` ->
+                        // `handleWaitForEvent` is where a non-ACTIVE state is
+                        // read, and where a pending INIT/NMI/SMI gets its
+                        // chance to wake a CPU that triple-faulted.
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                         if STOP_AFTER_ONE_TRACE {
                             // Bochs main.cc: the SMP-loop setjmp ends this
@@ -3343,7 +3465,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             return;
         }
         self.itlb.flush();
-        self.eip_fetch_window = None;
+        // The whole prefetch queue, not the window alone: `get_icache_entry`
+        // decides whether to refill from `eip_page_window_size`, so a window
+        // retired while the size still describes the page RIP sits in yields a
+        // fetch that neither holds bytes nor asks for any. Bias, size and
+        // window move together at every site that drops them.
+        self.invalidate_prefetch_q();
         self.vmcb_host_offset = None;
         self.fetch_epoch = epoch;
     }

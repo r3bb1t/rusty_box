@@ -223,6 +223,344 @@ fn addr_write_u64(addr: BxPtrEquiv, val: u64) {
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    #[inline(always)]
+    fn direct_ram_offset(&self, addr: u64, len: usize) -> Option<(BxPhyAddress, usize)> {
+        let a20 = addr & self.a20_mask;
+        let end = a20.checked_add(u64::try_from(len).ok()?)?;
+        let plain = (a20 < 0xA0000 && end <= 0xA0000) || a20 >= 0x100000;
+        if !plain || self.mem_host_base.is_null() {
+            return None;
+        }
+        bx_guest_ram_span(a20, len, self.mem_host_len).map(|span| (a20, span.start))
+    }
+    /// Slow path for mem_read_byte: MMIO/VGA/ROM through memory system handlers.
+    /// Separated to keep the inlined fast path small for better icache utilization.
+    #[cold]
+    #[inline(never)]
+    fn mem_read_byte_slow(&self, addr: u64) -> u8 {
+        // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
+        {
+            let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
+            if self.lapic.is_selected(a20_addr) {
+                // Read aligned dword, extract requested byte
+                let aligned = a20_addr & !0x3;
+                let dword = self.lapic.read(aligned, 4, self.cpu_ticks());
+                let byte_offset = (a20_addr & 0x3) as u32;
+                return (dword >> (byte_offset * 8)) as u8;
+            }
+        }
+        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+            if let Ok(Some(slice)) = mem.get_host_mem_addr_pinned(
+                paddr,
+                MemoryAccessType::Read,
+                policy,
+            ) {
+                let val = slice.first().copied().unwrap_or(0);
+                return val;
+            }
+
+            let mut data = [0u8; 1];
+            if self
+                .read_physical_routed(mem, policy, paddr, 1, &mut data)
+                .is_ok()
+            {
+                return data[0];
+            }
+
+            return 0;
+        }
+
+
+        0
+    }
+    /// Slow path for mem_write_byte: MMIO/VGA/ROM through memory system handlers.
+    /// Separated to keep the inlined fast path small for better icache utilization.
+    #[cold]
+    #[inline(never)]
+    fn mem_write_byte_slow(&mut self, addr: u64, value: u8) {
+        // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
+        {
+            let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
+            if self.lapic.is_selected(a20_addr) {
+                // Byte-level write to LAPIC: read-modify-write the aligned dword.
+                // In practice, LAPIC is always accessed as dword — this is a safety net.
+                let aligned = a20_addr & !0x3;
+                // The two halves of this RMW take DIFFERENT time domains:
+                // - LAPIC reads convert through `live_ticks(cpu_ticks)` (apic.cc
+                //   get_current_timer_count path), which subtracts the LAPIC's
+                //   `cpu_ticks_at_sync` — the CPU tick clock, like the sibling
+                //   read paths.
+                // - LAPIC writes store the argument directly into tick-domain
+                //   state (apic.cc set_initial_timer_count: `ticksInitial =
+                //   bx_pc_system.time_ticks()`; activation deadlines feed
+                //   pc_system ticks) — `system_ticks()`, like the sibling
+                //   word/dword write paths.
+                let old = self.lapic.read(aligned, 4, self.cpu_ticks());
+                let byte_offset = (a20_addr & 0x3) as u32;
+                let mask = !(0xFFu32 << (byte_offset * 8));
+                let new_val = (old & mask) | ((value as u32) << (byte_offset * 8));
+                let current_ticks = self.system_ticks();
+                self.lapic.write(aligned, new_val, 4, current_ticks);
+                self.sync_lapic_events();
+                return;
+            }
+        }
+        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+            if let Ok(Some(slice)) = mem.get_host_mem_addr_pinned(
+                paddr,
+                MemoryAccessType::Write,
+                policy,
+            ) {
+                if let Some(b) = slice.get_mut(0) {
+                    *b = value;
+                }
+                self.smc_write_check(paddr, 1);
+                return;
+            }
+
+            // Vetoed: go through handler-aware physical write.
+            let mut data = [value];
+            if let Err(e) =
+                self.write_physical_routed(mem, policy, paddr, 1, &mut data)
+            {
+                tracing::warn!("physical write failed at paddr={:#x}: {e}", paddr);
+            }
+            self.smc_write_check(paddr, 1);
+            return;
+        }
+
+    }
+    /// Write-back phase of a read-modify-write byte access.
+    /// Uses address_xlation populated by read_rmw_virtual_byte.
+    /// Bochs: write_RMW_linear_byte (access2.cc)
+    #[inline]
+    pub fn write_rmw_linear_byte(&mut self, val: u8) {
+        if self.address_xlation.pages > 2 {
+            // Host pointer cached from TLB hit — direct write (fastest path)
+            self.address_xlation.write_pages_u8(val);
+        } else {
+            let paddr = self.address_xlation.paddress1;
+            if !self.mmio_write(paddr, 1, val as u64) {
+                self.mem_write_byte(paddr, val);
+            }
+        }
+    }
+    /// Write-back phase of a read-modify-write word access.
+    /// Uses address_xlation populated by read_rmw_virtual_word.
+    /// Bochs: write_RMW_linear_word (access2.cc)
+    #[inline]
+    pub fn write_rmw_linear_word(&mut self, val: u16) {
+        if self.address_xlation.pages > 2 {
+            // Host pointer cached from TLB hit — direct write.
+            self.address_xlation.write_pages_u16(val);
+        } else if self.address_xlation.pages == 1 {
+            // Preserve the prepared physical translation and dispatch the
+            // original access width to CPU-local MMIO before ordinary memory.
+            let paddr = self.address_xlation.paddress1;
+            if !self.mmio_write(paddr, 2, val as u64) {
+                self.mem_write_word(paddr, val);
+            }
+        } else {
+            // Cross-page RMW commits each prepared byte independently.
+            let bytes = val.to_le_bytes();
+            let paddr1 = self.address_xlation.paddress1;
+            if !self.mmio_write(paddr1, 1, bytes[0] as u64) {
+                self.mem_write_byte(paddr1, bytes[0]);
+            }
+            let paddr2 = self.address_xlation.paddress2;
+            if !self.mmio_write(paddr2, 1, bytes[1] as u64) {
+                self.mem_write_byte(paddr2, bytes[1]);
+            }
+        }
+    }
+    /// Write-back phase of a read-modify-write dword access.
+    /// Uses address_xlation populated by read_rmw_virtual_dword.
+    /// Bochs: write_RMW_linear_dword (access2.cc)
+    #[inline]
+    pub fn write_rmw_linear_dword(&mut self, val: u32) {
+        if self.address_xlation.pages > 2 {
+            // Host pointer cached from TLB hit — direct write
+            self.address_xlation.write_pages_u32(val);
+        } else if self.address_xlation.pages == 1 {
+            let paddr = self.address_xlation.paddress1;
+            if !self.mmio_write(paddr, 4, val as u64) {
+                self.mem_write_dword(paddr, val);
+            }
+        } else {
+            let bytes = val.to_le_bytes();
+            let len1 = self.address_xlation.len1 as usize;
+            let len2 = self.address_xlation.len2 as usize;
+            let p0 = self.address_xlation.paddress1;
+            let p1 = self.address_xlation.paddress2;
+            let first_value = (val as u64) & ((1u64 << (len1 * 8)) - 1);
+            if !self.mmio_write(p0, len1, first_value) {
+                for (index, &byte) in bytes[..len1].iter().enumerate() {
+                    self.mem_write_byte(p0 + index as u64, byte);
+                }
+            }
+            let second_value = (val >> (len1 * 8)) as u64;
+            if !self.mmio_write(p1, len2, second_value) {
+                for (index, &byte) in bytes[len1..].iter().enumerate() {
+                    self.mem_write_byte(p1 + index as u64, byte);
+                }
+            }
+        }
+    }
+    #[inline(always)]
+    pub(super) fn mem_read_byte(&self, addr: u64) -> u8 {
+        // Fast path: direct host pointer for plain RAM.
+        // This matches what Bochs does via hostPageAddr in TLB entries — the vast
+        // majority of physical accesses hit RAM and can be served with a single
+        // pointer dereference.  We apply A20 masking and check the address is in
+        // the plain-RAM range (below VGA at 0xA0000, or above BIOS shadow at 0x100000).
+        if let Some((_a20_addr, linear)) = self.direct_ram_offset(addr, 1) {
+            return read_host_byte(self.mem_host_base, linear);
+        }
+
+        self.mem_read_byte_slow(addr)
+    }
+    #[inline(always)]
+    pub(super) fn mem_read_word(&self, addr: u64) -> u16 {
+        let a20_addr = addr & self.a20_mask;
+        let crosses_physical_page = (a20_addr & 0x0fff) == 0x0fff;
+        if !crosses_physical_page {
+            // Fast path: direct host pointer for plain RAM.
+            if let Some((_a20_addr, linear)) = self.direct_ram_offset(addr, 2) {
+                return read_unaligned_u16(host_offset(self.mem_host_base, linear));
+            }
+            if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+                return self.lapic.read(a20_addr as BxPhyAddress, 2, self.cpu_ticks()) as u16;
+            }
+            let paddr = addr as BxPhyAddress;
+            if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+                let mut data = [0u8; 2];
+                if self
+                    .read_physical_routed(mem, policy, paddr, 2, &mut data)
+                    .is_ok()
+                {
+                    return u16::from_le_bytes(data);
+                }
+            }
+        }
+
+        // A physical page split has no single width-two transaction. Preserve
+        // byte fallback behavior only for that case or after handler failure.
+        let lo = self.mem_read_byte(addr) as u16;
+        let hi = self.mem_read_byte(addr.wrapping_add(1)) as u16;
+        lo | (hi << 8)
+    }
+    #[inline(always)]
+    pub(super) fn mem_read_dword(&self, addr: u64) -> u32 {
+        let a20_addr = addr & self.a20_mask;
+        // Fast path: direct host pointer for plain RAM
+        if let Some((_a20_addr, linear)) = self.direct_ram_offset(addr, 4) {
+            return read_unaligned_u32(host_offset(self.mem_host_base, linear));
+        }
+        // LAPIC MMIO intercept: 32-bit aligned register access
+        // Bochs apic.cc read() — LAPIC registers are always dword-accessed.
+        if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+            return self.lapic.read(a20_addr as BxPhyAddress, 4, self.cpu_ticks());
+        }
+        // Slow path: route through read_physical_page to hit registered MMIO handlers
+        // (IOAPIC, VGA, etc.) with proper dword access width.
+        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+            let mut data = [0u8; 4];
+            if self
+                .read_physical_routed(mem, policy, paddr, 4, &mut data)
+                .is_ok()
+            {
+                return u32::from_le_bytes(data);
+            }
+        }
+        // Fallback: per-word reads
+        let lo = self.mem_read_word(addr) as u32;
+        let hi = self.mem_read_word(addr + 2) as u32;
+        lo | (hi << 16)
+    }
+    #[inline(always)]
+    pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
+        // Fast path: direct host pointer for plain RAM.
+        if let Some((a20_addr, linear)) = self.direct_ram_offset(addr, 1) {
+            write_host_byte(self.mem_host_base, linear, value);
+            self.smc_write_check(a20_addr, 1);
+            return;
+        }
+
+        self.mem_write_byte_slow(addr, value);
+    }
+    #[inline(always)]
+    pub(super) fn mem_write_word(&mut self, addr: u64, value: u16) {
+        let a20_addr = addr & self.a20_mask;
+        let crosses_physical_page = (a20_addr & 0x0fff) == 0x0fff;
+        if !crosses_physical_page {
+            // Fast path: direct host pointer for plain RAM.
+            if let Some((a20_addr, linear)) = self.direct_ram_offset(addr, 2) {
+                write_unaligned_u16(host_offset_mut(self.mem_host_base, linear), value);
+                self.smc_write_check(a20_addr, 2);
+                return;
+            }
+            if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+                let current_ticks = self.system_ticks();
+                self.lapic
+                    .write(a20_addr as BxPhyAddress, u32::from(value), 2, current_ticks);
+                self.sync_lapic_events();
+                return;
+            }
+            let paddr = addr as BxPhyAddress;
+            if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+                let mut data = value.to_le_bytes();
+                if self
+                    .write_physical_routed(mem, policy, paddr, 2, &mut data)
+                    .is_ok()
+                {
+                    self.smc_write_check(paddr, 2);
+                    return;
+                }
+            }
+        }
+
+        // A physical page split has no single width-two transaction. Preserve
+        // byte fallback behavior only for that case or after handler failure.
+        self.mem_write_byte(addr, value as u8);
+        self.mem_write_byte(addr.wrapping_add(1), (value >> 8) as u8);
+    }
+    pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
+        let a20_addr = addr & self.a20_mask;
+        // Fast path: direct host pointer for plain RAM
+        if let Some((a20_addr, linear)) = self.direct_ram_offset(addr, 4) {
+            write_unaligned_u32(host_offset_mut(self.mem_host_base, linear), value);
+            self.smc_write_check(a20_addr, 4);
+            return;
+        }
+        // LAPIC MMIO intercept: 32-bit aligned register access
+        // Bochs apic.cc write() — LAPIC registers are always dword-accessed.
+        if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+            let current_ticks = self.system_ticks();
+            self.lapic
+                .write(a20_addr as BxPhyAddress, value, 4, current_ticks);
+            self.sync_lapic_events();
+            return;
+        }
+        // Slow path: route through write_physical_page to hit registered MMIO handlers
+        // (IOAPIC, VGA, etc.) with proper dword access width.
+        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+            let mut data = value.to_le_bytes();
+            if self
+                .write_physical_routed(mem, policy, paddr, 4, &mut data)
+                .is_ok()
+            {
+                self.smc_write_check(paddr, 4);
+                return;
+            }
+        }
+        // Fallback: per-word writes
+        self.mem_write_word(addr, value as u16);
+        self.mem_write_word(addr + 2, (value >> 16) as u16);
+    }
     // ===== Canonical address check (Bochs access.cc IsCanonicalAccess) =====
 
     pub(super) fn is_canonical_access(

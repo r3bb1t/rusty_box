@@ -285,34 +285,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     // get_laddr32_seg is defined in logical8.rs to avoid duplicate definitions
 
-    /// Write-back phase of a read-modify-write word access.
-    /// Uses address_xlation populated by read_rmw_virtual_word.
-    /// Bochs: write_RMW_linear_word (access2.cc)
-    #[inline]
-    pub fn write_rmw_linear_word(&mut self, val: u16) {
-        if self.address_xlation.pages > 2 {
-            // Host pointer cached from TLB hit — direct write.
-            self.address_xlation.write_pages_u16(val);
-        } else if self.address_xlation.pages == 1 {
-            // Preserve the prepared physical translation and dispatch the
-            // original access width to CPU-local MMIO before ordinary memory.
-            let paddr = self.address_xlation.paddress1;
-            if !self.mmio_write(paddr, 2, val as u64) {
-                self.mem_write_word(paddr, val);
-            }
-        } else {
-            // Cross-page RMW commits each prepared byte independently.
-            let bytes = val.to_le_bytes();
-            let paddr1 = self.address_xlation.paddress1;
-            if !self.mmio_write(paddr1, 1, bytes[0] as u64) {
-                self.mem_write_byte(paddr1, bytes[0]);
-            }
-            let paddr2 = self.address_xlation.paddress2;
-            if !self.mmio_write(paddr2, 1, bytes[1] as u64) {
-                self.mem_write_byte(paddr2, bytes[1]);
-            }
-        }
-    }
+
 
     // =========================================================================
     // Memory-form instructions

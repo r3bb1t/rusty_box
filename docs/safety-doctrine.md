@@ -139,6 +139,11 @@ explicitly: ported from a named source (86Box/PCem, license noted) or declared n
 Automation readers are adapters over parity-faithful state, never parallel paths (`TextView`
 reads exactly what `get_text_snapshot` reads).
 
+Divergences that are deliberate rather than idiomatic-restructuring live in
+`docs/bochs-parity-divergences.md`, one entry each, carrying the measurement or platform
+constraint that justifies them. Declaring one there is what makes it a decision instead of a
+defect; a code comment alone does not.
+
 *Enforcement:* social — this is review discipline, and no checker exists; that is stated here
 so nobody mistakes convention for guarantee. (llvmkit's D11 has the same honest gap.)
 

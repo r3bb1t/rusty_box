@@ -546,6 +546,15 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Advance a fully halted machine directly to its earliest exact timer
     /// deadline. Host input is pumped before each halted step.
+    ///
+    /// Bochs event.cc `handleWaitForEvent` idles a single CPU by spinning on
+    /// `BX_TICKN(10)` and returns to `cpu_loop` only for `BX_SMP_PROCESSORS > 1`;
+    /// this returns on every configuration, and the scheduler advances time in
+    /// its place. Timers fire at their exact deadlines inside `tickn` either
+    /// way, and a fully idle machine has no other event source, so the guest
+    /// cannot observe which loop moved the clock. Declared divergence D1 in
+    /// `docs/bochs-parity-divergences.md`, which records the measurement that
+    /// rules out adopting the tick granularity here.
     #[inline]
     pub(super) fn hlt_wait_step_ticks(&self) -> u32 {
         self.pc_system.get_num_cpu_ticks_left_next_event().max(1)

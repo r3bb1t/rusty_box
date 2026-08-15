@@ -318,10 +318,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             // processor and halts in WAIT_FOR_SIPI after RESET/INIT. Do not
             // gate this on the current topology value; no-alloc callers may
             // provide fixed AP storage before deciding how many APs to expose.
-            self.mask_event(Self::BX_EVENT_INIT | Self::BX_EVENT_SMI | Self::BX_EVENT_NMI);
-            self.eflags.remove(EFlags::IF_);
-            self.activity_state = CpuActivityState::WaitForSipi;
-            self.async_event |= Self::BX_ASYNC_EVENT_SLEEP;
+            // Bochs init.cc: enter_sleep_state(BX_ACTIVITY_STATE_WAIT_FOR_SIPI),
+            // which masks INIT/SMI/NMI and clears IF on the way in.
+            self.enter_sleep_state(CpuActivityState::WaitForSipi);
         }
 
         self.efer.set32(0);

@@ -1642,19 +1642,31 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
+    /// The step lands on a pending deadline exactly, never past it — the
+    /// property that keeps timer delivery identical to Bochs while the halted
+    /// machine skips the idle ticks between deadlines (divergence D1,
+    /// `docs/bochs-parity-divergences.md`).
     #[test]
     fn hlt_wait_step_respects_near_pc_system_timer() {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let config = EmulatorConfig::default();
-                let mut emu = Emulator::new(config).unwrap();
-                emu.pc_system.initialize(emu.config.ips);
-                emu.pc_system
-                    .register_timer(TimerOwner::Lapic(0), 37, false, true, "near_timer")
-                    .unwrap();
+                for deadline in [7u32, 37] {
+                    let config = EmulatorConfig::default();
+                    let mut emu = Emulator::new(config).unwrap();
+                    emu.pc_system.initialize(emu.config.ips);
+                    emu.pc_system
+                        .register_timer(
+                            TimerOwner::Lapic(0),
+                            u64::from(deadline),
+                            false,
+                            true,
+                            "near_timer",
+                        )
+                        .unwrap();
 
-                assert_eq!(emu.hlt_wait_step_ticks(), 37);
+                    assert_eq!(emu.hlt_wait_step_ticks(), deadline);
+                }
             })
             .unwrap()
             .join()

@@ -1628,4 +1628,277 @@ mod tests {
         reg.unmap(0xFEC0_0000, 0x1000);
         assert!(reg.is_empty());
     }
+
+    /// Guest RAM larger than host RAM, with code and data in different guest
+    /// blocks: every data access relocates a block, and the code block itself
+    /// is a legal eviction victim. Forward progress here rests on the residency
+    /// epoch (memory/mod.rs `swap_epoch`) retiring the stale fetch window.
+    ///
+    /// `setup_flat_long64` owns 0x1000..0x6000 for the page tables, so guest
+    /// code goes above them — code written over the PML4 unmaps the address it
+    /// is executing from and triple-faults before any of this is exercised.
+    #[test]
+    fn swap_regime_executes_across_blocks() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                // 4 MiB guest over 2 MiB host = two resident 1 MiB slots.
+                let cfg = EmulatorConfig {
+                    guest_memory_size: 4 * MIB,
+                    host_memory_size: 2 * MIB,
+                    memory_block_size: MIB,
+                    ..Default::default()
+                };
+                let mut emu =
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                let code = 0x10000u64;
+                let resident_epoch = emu.memory.swap_epoch();
+                emu.mem_write(
+                    code,
+                    &[
+                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x10, 0x00, // mov al,[0x100000] (block 1)
+                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x20, 0x00, // mov al,[0x200000] (block 2)
+                        0xBB, 0xED, 0x5E, 0x00, 0x00, // mov ebx,0x5EED
+                        0xF4, // hlt
+                    ],
+                )
+                .unwrap();
+                assert_eq!(
+                    emu.emu_start(code, None, None, Some(8)).unwrap(),
+                    EmuStopReason::Halted
+                );
+                assert_eq!(emu.reg_read(X86Reg::Ebx), 0x5EED);
+                assert!(
+                    emu.memory.swap_epoch() > resident_epoch,
+                    "the run must actually have relocated blocks, else this \
+                     configuration is not testing the swap regime at all"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// The same regime driven hard: four times as many guest blocks as resident
+    /// slots, in a loop, so the code block is evicted and reloaded repeatedly
+    /// and every data byte makes a round trip through the overflow file.
+    #[test]
+    fn swap_regime_survives_repeated_code_block_eviction() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                // 8 MiB guest over 2 MiB host = eight blocks, two slots.
+                let cfg = EmulatorConfig {
+                    guest_memory_size: 8 * MIB,
+                    host_memory_size: 2 * MIB,
+                    memory_block_size: MIB,
+                    ..Default::default()
+                };
+                let mut emu =
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+
+                // One marker per non-code block, so a byte that survives an
+                // eviction round trip is the only way to read it back.
+                for block in 1..8u64 {
+                    emu.mem_write_u8(block * MIB as u64, 0x10 * block as u8 + block as u8)
+                        .unwrap();
+                }
+
+                let code = 0x10000u64;
+                let mut program = vec![0xB9, 0x03, 0x00, 0x00, 0x00]; // mov ecx,3
+                for block in 1..8u64 {
+                    // mov al,[block * 1 MiB]
+                    program.extend_from_slice(&[0x8A, 0x04, 0x25]);
+                    program.extend_from_slice(&((block * MIB as u64) as u32).to_le_bytes());
+                }
+                program.extend_from_slice(&[0xFF, 0xC9]); // dec ecx
+                let back = -((program.len() + 2 - 5) as i64) as i8; // to the loop top
+                program.extend_from_slice(&[0x75, back as u8]); // jnz top
+                program.extend_from_slice(&[0xBB, 0xED, 0x5E, 0x00, 0x00]); // mov ebx,0x5EED
+                program.push(0xF4); // hlt
+                emu.mem_write(code, &program).unwrap();
+
+                assert_eq!(
+                    emu.emu_start(code, None, None, Some(200)).unwrap(),
+                    EmuStopReason::Halted
+                );
+                assert_eq!(emu.reg_read(X86Reg::Ebx), 0x5EED);
+                assert_eq!(emu.reg_read(X86Reg::Ecx), 0, "the loop must have run to zero");
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rax) & 0xFF,
+                    0x77,
+                    "the last load must read the marker its block was swapped out with"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// The two residency topologies the tests above do not reach: a single
+    /// resident slot, where code, page tables and operands all take turns in
+    /// the same 1 MiB of host RAM; and code living in a guest block that is
+    /// neither block 0 nor the block holding the page tables, so one fetch
+    /// needs the page-table block and the code block resident in sequence.
+    ///
+    /// Capacity 1 is the interesting bound: every fetch is guaranteed to evict
+    /// what the previous access just paged in, so nothing but the epoch
+    /// handshake keeps the loop moving forward.
+    #[test]
+    fn swap_regime_converges_at_minimum_residency() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                // (guest MiB, host MiB, code address, marker address, marker)
+                let cases = [
+                    (4usize, 1usize, 0x10000u64, 3 * MIB as u64, 0x33u8),
+                    (8, 2, 5 * MIB as u64 + 0x10000, 7 * MIB as u64, 0x77),
+                ];
+                for (guest_mib, host_mib, code, marker_addr, marker) in cases {
+                    let cfg = EmulatorConfig {
+                        guest_memory_size: guest_mib * MIB,
+                        host_memory_size: host_mib * MIB,
+                        memory_block_size: MIB,
+                        ..Default::default()
+                    };
+                    let mut emu =
+                        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                    emu.mem_write_u8(marker_addr, marker).unwrap();
+                    let far = (marker_addr as u32).to_le_bytes();
+                    let mut program = vec![
+                        0xB9, 0x02, 0x00, 0x00, 0x00, // mov ecx,2
+                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x10, 0x00, // mov al,[0x100000]
+                        0x8A, 0x04, 0x25, // mov al,[marker]
+                    ];
+                    program.extend_from_slice(&far);
+                    program.extend_from_slice(&[
+                        0xFF, 0xC9, // dec ecx
+                        0x75, 0xF3, // jnz back to the first load
+                        0xBB, 0xED, 0x5E, 0x00, 0x00, // mov ebx,0x5EED
+                        0xF4, // hlt
+                    ]);
+                    emu.mem_write(code, &program).unwrap();
+
+                    assert_eq!(
+                        emu.emu_start(code, None, None, Some(100)).unwrap(),
+                        EmuStopReason::Halted,
+                        "{guest_mib} MiB guest over {host_mib} MiB host must still retire"
+                    );
+                    assert_eq!(emu.reg_read(X86Reg::Ebx), 0x5EED);
+                    assert_eq!(
+                        emu.reg_read(X86Reg::Rax) & 0xFF,
+                        u64::from(marker),
+                        "the marker must survive its block's eviction round trip"
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// An instruction whose own bytes straddle a guest-block boundary, at every
+    /// residency from one slot to full. This is the `boundary_fetch` path: it
+    /// copies the head of the instruction out of the current window, then calls
+    /// `prefetch` again for the tail — a call that may itself relocate blocks
+    /// while the instruction is half-fetched.
+    ///
+    /// The 2 MiB mark is the boundary to use: it crosses a 4 KiB page, a 2 MiB
+    /// large page and a 1 MiB guest block at once. The 1 MiB mark would not —
+    /// it is the top of the legacy 0xA0000..0xFFFFF VGA/BIOS window, which is
+    /// not plain RAM, so code placed there never lands.
+    #[test]
+    fn swap_regime_fetches_instruction_across_a_block_boundary() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                for host_mib in [1usize, 2, 4] {
+                    let cfg = EmulatorConfig {
+                        guest_memory_size: 4 * MIB,
+                        host_memory_size: host_mib * MIB,
+                        memory_block_size: MIB,
+                        ..Default::default()
+                    };
+                    let mut emu =
+                        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                    emu.mem_write_u8(3 * MIB as u64, 0x33).unwrap();
+                    // The load ends at 2 MiB - 2, so `mov ebx,imm32` straddles
+                    // the block 1 / block 2 boundary and the HLT lands past it.
+                    let code = 2 * MIB as u64 - 9;
+                    emu.mem_write(
+                        code,
+                        &[
+                            0x8A, 0x04, 0x25, 0x00, 0x00, 0x30, 0x00, // mov al,[0x300000]
+                            0xBB, 0xED, 0x5E, 0x00, 0x00, // mov ebx,0x5EED (straddles)
+                            0xF4, // hlt
+                        ],
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        emu.emu_start(code, None, None, Some(20)).unwrap(),
+                        EmuStopReason::Halted,
+                        "{host_mib} MiB host: the split instruction must retire"
+                    );
+                    assert_eq!(
+                        emu.reg_read(X86Reg::Ebx),
+                        0x5EED,
+                        "{host_mib} MiB host: the immediate comes from the second block"
+                    );
+                    assert_eq!(emu.reg_read(X86Reg::Rax) & 0xFF, 0x33);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A triple fault raised while FETCHING (not while executing) still stops
+    /// the CPU. Writing code over the PML4 unmaps the very page RIP points at,
+    /// so the fetch page walk faults, delivering #PF faults again on the IDT
+    /// read, and the resulting #DF faults once more: shutdown before a single
+    /// instruction retires.
+    ///
+    /// Bochs signals this through `enter_sleep_state` (proc_ctrl.cc), which
+    /// raises the generic `async_event` flag so the top of `cpu_loop` observes
+    /// the non-ACTIVE activity state no matter which longjmp arrived there.
+    #[test]
+    fn triple_fault_during_fetch_reports_shutdown() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                let cfg = EmulatorConfig {
+                    guest_memory_size: 4 * MIB,
+                    host_memory_size: 4 * MIB,
+                    memory_block_size: MIB,
+                    ..Default::default()
+                };
+                let mut emu =
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                // 0x1000 is the PML4 root: this write makes PML4[0] non-present.
+                let code = 0x1000u64;
+                emu.mem_write(code, &[0xBB, 0xED, 0x5E, 0x00, 0x00, 0xF4])
+                    .unwrap();
+                assert_eq!(
+                    emu.emu_start(code, None, None, Some(8)).unwrap(),
+                    EmuStopReason::Shutdown,
+                    "a triple fault during instruction fetch must stop the CPU"
+                );
+                assert!(emu.cpu().is_in_shutdown());
+                // Bochs `enter_sleep_state` clears IF for SHUTDOWN, so nothing
+                // but NMI/SMI/INIT can wake the CPU again.
+                assert_eq!(
+                    emu.reg_read(X86Reg::Eflags) & 0x200,
+                    0,
+                    "shutdown must mask interrupts"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

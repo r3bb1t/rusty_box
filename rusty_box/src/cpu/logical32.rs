@@ -331,39 +331,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     // get_laddr32_seg is defined in logical8.rs to avoid duplicate definitions
 
-    /// Write-back phase of a read-modify-write dword access.
-    /// Uses address_xlation populated by read_rmw_virtual_dword.
-    /// Bochs: write_RMW_linear_dword (access2.cc)
-    #[inline]
-    pub fn write_rmw_linear_dword(&mut self, val: u32) {
-        if self.address_xlation.pages > 2 {
-            // Host pointer cached from TLB hit — direct write
-            self.address_xlation.write_pages_u32(val);
-        } else if self.address_xlation.pages == 1 {
-            let paddr = self.address_xlation.paddress1;
-            if !self.mmio_write(paddr, 4, val as u64) {
-                self.mem_write_dword(paddr, val);
-            }
-        } else {
-            let bytes = val.to_le_bytes();
-            let len1 = self.address_xlation.len1 as usize;
-            let len2 = self.address_xlation.len2 as usize;
-            let p0 = self.address_xlation.paddress1;
-            let p1 = self.address_xlation.paddress2;
-            let first_value = (val as u64) & ((1u64 << (len1 * 8)) - 1);
-            if !self.mmio_write(p0, len1, first_value) {
-                for (index, &byte) in bytes[..len1].iter().enumerate() {
-                    self.mem_write_byte(p0 + index as u64, byte);
-                }
-            }
-            let second_value = (val >> (len1 * 8)) as u64;
-            if !self.mmio_write(p1, len2, second_value) {
-                for (index, &byte) in bytes[len1..].iter().enumerate() {
-                    self.mem_write_byte(p1 + index as u64, byte);
-                }
-            }
-        }
-    }
+
 
     // =========================================================================
     // Memory-form instructions

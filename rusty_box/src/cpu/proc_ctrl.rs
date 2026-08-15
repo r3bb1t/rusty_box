@@ -4,6 +4,59 @@
 use crate::cpu::{BxCpuC};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Leave the ACTIVE activity state. Bochs proc_ctrl.cc `enter_sleep_state`.
+    ///
+    /// The single entry point for every sleep state, which is what makes the
+    /// async-event indication impossible to forget: Bochs comments its
+    /// `async_event = 1` with "so processor knows to check", and that flag is
+    /// the only reason `cpu_loop`'s top calls `handleAsyncEvent` on the next
+    /// pass and notices the CPU is no longer running. A state entered without
+    /// it keeps fetching.
+    ///
+    /// The SLEEP bit is Bochs's `1`, written as an assignment like Bochs's so
+    /// STOP_TRACE is dropped here too. `BX_ASYNC_EVENT_SCHEDULER_BOUNDARY` is
+    /// carried across because it latches a machine boundary that Bochs, having
+    /// no analogue, cannot lose in the first place.
+    pub(super) fn enter_sleep_state(&mut self, state: super::cpu::CpuActivityState) {
+        use super::cpu::CpuActivityState;
+        match state {
+            // Bochs: BX_ASSERT(0) — not a target for entering the active state.
+            CpuActivityState::Active | CpuActivityState::VmxLastActivityState => {
+                tracing::error!("enter_sleep_state: invalid target state {state:?}");
+                return;
+            }
+            CpuActivityState::Hlt | CpuActivityState::Mwait | CpuActivityState::MwaitIf => {}
+            CpuActivityState::WaitForSipi => {
+                // Bochs masks these, then falls through to mask interrupts.
+                self.mask_event(Self::BX_EVENT_INIT | Self::BX_EVENT_SMI | Self::BX_EVENT_NMI);
+                self.clear_if_for_sleep();
+            }
+            // Shutdown masks interrupts, so only NMI/SMI/INIT can wake a CPU
+            // that triple-faulted — the architectural behaviour, and what
+            // `handle_wait_for_event` tests once the flag above gets it there.
+            CpuActivityState::Shutdown => self.clear_if_for_sleep(),
+        }
+        self.activity_state = state;
+        self.async_event = (self.async_event & super::cpu::BX_ASYNC_EVENT_SCHEDULER_BOUNDARY)
+            | Self::BX_ASYNC_EVENT_SLEEP;
+        // Bochs ends `enter_sleep_state` with BX_INSTR_HLT, so the hook reports
+        // every sleep entry, not just the HLT instruction: MWAIT fires it after
+        // BX_INSTR_MWAIT (mwait.cc) rather than instead of it, and an AP parking
+        // in WAIT_FOR_SIPI (init.cc) reports too.
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_hlt_mwait() {
+            self.instrumentation.fire_hlt();
+        }
+    }
+
+    /// Bochs `clear_IF()` (cpu.h `IMPLEMENT_EFLAG_SET_ACCESSOR_IF`): clearing
+    /// the flag re-gates the pending external-interrupt events, so the two
+    /// always move together.
+    fn clear_if_for_sleep(&mut self) {
+        self.eflags.remove(super::eflags::EFlags::IF_);
+        self.handle_interrupt_mask_change();
+    }
+
     pub(super) fn handle_cpu_context_change(&mut self) {
         self.tlb_flush();
 
@@ -558,15 +611,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let mwait_if = self.ecx() & 0x1 != 0;
 
         // Bochs mwait.cc: enter_sleep_state(new_state)
-        // Matches the pattern in hlt() — set activity state and async event
         if mwait_if {
-            self.activity_state = super::cpu::CpuActivityState::MwaitIf;
             tracing::trace!("MWAIT: entering sleep state MwaitIf (wake on interrupt even if IF=0)");
+            self.enter_sleep_state(super::cpu::CpuActivityState::MwaitIf);
         } else {
-            self.activity_state = super::cpu::CpuActivityState::Mwait;
             tracing::trace!("MWAIT: entering sleep state Mwait");
+            self.enter_sleep_state(super::cpu::CpuActivityState::Mwait);
         }
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE | Self::BX_ASYNC_EVENT_SLEEP;
 
         Ok(())
     }

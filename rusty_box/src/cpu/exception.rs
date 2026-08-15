@@ -371,8 +371,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 tracing::error!("TRIPLE FAULT: RIP={:#x} CS={:#06x} vector={:?} error_code={:#x} icount={} CR2={:#x}",
                     rip, cs, vector, error_code, self.icount, self.cr2);
                 self.debug_puts(b"[TRIPLE_FAULT]\n");
-                self.activity_state = super::cpu::CpuActivityState::Shutdown;
-                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                // Bochs exception.cc reaches shutdown through proc_ctrl.cc
+                // `shutdown()` -> `enter_sleep_state`.
+                self.enter_sleep_state(super::cpu::CpuActivityState::Shutdown);
                 return Err(super::error::CpuError::CpuLoopRestart);
             }
         }

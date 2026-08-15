@@ -1122,22 +1122,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
         }
 
-        // BOCHS BX_INSTR_HLT(cpu_id)
-        #[cfg(feature = "instrumentation")]
-        if self.instrumentation.active.has_hlt_mwait() {
-            self.instrumentation.fire_hlt();
-        }
-
-        // Set activity state to halted (matches Bochs enter_sleep_state)
-        self.activity_state = CpuActivityState::Hlt;
-
-        // Bochs proc_ctrl.cc enter_sleep_state: sets `async_event = 1` (not |= STOP_TRACE).
-        // The value 1 (BX_ASYNC_EVENT_SLEEP bit) survives the `&= ~STOP_TRACE` clearing
-        // at line 226 of Bochs cpu.cc, ensuring the outer cpu_loop calls handle_async_event
-        // on the next iteration to wait for a wake event (interrupt/NMI/SIPI).
-        // Without this persistent bit, the CPU would skip the sleep check and execute
-        // the instruction after HLT instead of sleeping.
-        self.async_event |= BX_ASYNC_EVENT_STOP_TRACE | Self::BX_ASYNC_EVENT_SLEEP;
+        // Bochs proc_ctrl.cc HLT: enter_sleep_state(BX_ACTIVITY_STATE_HLT).
+        self.enter_sleep_state(CpuActivityState::Hlt);
         Ok(())
     }
 
