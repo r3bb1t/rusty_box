@@ -4,12 +4,12 @@
 //! This module defines the opcodes table structure matching the original C++ `BxOpcodesTable`
 //! from `fetchdecode32.cc`. It stores handler function pointers and opflags for each opcode.
 
-use super::{cpu::BxCpuC, decoder::Instruction, Result};
+use super::{decoder::Instruction, Result};
 use bitflags::bitflags;
 
 /// Error handler wrapper — lives at module level so cpu.rs can import it.
 pub(super) fn bx_error_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_error(instr)
@@ -159,12 +159,12 @@ pub(crate) enum BxAvxVectorLength {
 pub(super) struct BxOpcodeEntry<T: crate::cpu::instrumentation::Instrumentation> {
     /// Handler function for memory form or primary handler
     /// This is a function pointer that will be called with `&mut BxCpuC<T>` and `&Instruction`
-    pub(super) execute1: fn(&mut BxCpuC<T>, &Instruction) -> Result<()>,
+    pub(super) execute1: fn(&mut crate::cpu::exec_ctx::ExecCtx<'_, T>, &Instruction) -> Result<()>,
 
     /// Handler function for register form or secondary handler
     /// None if instruction doesn't have a register form
     #[allow(clippy::type_complexity)]
-    pub(super) execute2: Option<fn(&mut BxCpuC<T>, &Instruction) -> Result<()>>,
+    pub(super) execute2: Option<fn(&mut crate::cpu::exec_ctx::ExecCtx<'_, T>, &Instruction) -> Result<()>>,
 
     /// Feature requirements and special handling flags
     pub(super) opflags: OpFlags,
@@ -196,7 +196,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
     // Wrapper functions to convert handlers to the correct signature
     fn mov_gd_ed_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer32::MOV_GdEd_R(cpu, instr);
@@ -204,7 +204,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_gd_ed_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer32::MOV_GdEd_M(cpu, instr)?;
@@ -212,7 +212,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_ed_gd_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer32::MOV_EdGd_R(cpu, instr);
@@ -220,7 +220,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_ed_gd_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer32::MOV_EdGd_M(cpu, instr)?;
@@ -228,7 +228,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_ed_id_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer32::MOV_EdId_R(cpu, instr);
@@ -236,7 +236,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_ed_id_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer32::MOV_EdId_M(cpu, instr)?;
@@ -244,21 +244,21 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn add_eb_gb_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith8::ADD_EbGb(cpu, instr)
     }
 
     fn add_gb_eb_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith8::ADD_GbEb(cpu, instr)
     }
 
     fn add_gd_ed_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::ADD_GdEd_R(cpu, instr);
@@ -266,7 +266,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn add_gd_ed_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::ADD_GdEd_M(cpu, instr)?;
@@ -274,7 +274,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn add_ed_gd_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::ADD_EdGd_R(cpu, instr);
@@ -282,7 +282,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn add_ed_gd_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::ADD_EdGd_M(cpu, instr)?;
@@ -290,7 +290,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn add_eax_id_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::ADD_EAX_Id(cpu, instr);
@@ -298,21 +298,21 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn add_eb_ib_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith8::ADD_EbIb(cpu, instr)
     }
 
     fn add_ew_ib_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith16::ADD_EwIbR(cpu, instr)
     }
 
     fn add_ew_ib_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith16::ADD_EwIbM(cpu, instr)?;
@@ -320,7 +320,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn sub_gd_ed_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::SUB_GdEd_R(cpu, instr);
@@ -328,7 +328,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn sub_gd_ed_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::SUB_GdEd_M(cpu, instr)?;
@@ -336,7 +336,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn sub_ed_gd_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::SUB_EdGd_R(cpu, instr);
@@ -344,7 +344,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn sub_ed_gd_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::SUB_EdGd_M(cpu, instr)?;
@@ -352,7 +352,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn sub_eax_id_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::SUB_EAX_Id(cpu, instr);
@@ -361,7 +361,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
     // Wrapper functions for CMP instructions
     fn cmp_gb_eb_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_gb_eb_r(instr);
@@ -369,7 +369,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_gb_eb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_gb_eb_m(instr)?;
@@ -377,7 +377,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_eb_gb_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_eb_gb_r(instr);
@@ -385,7 +385,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_eb_gb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_eb_gb_m(instr)?;
@@ -393,7 +393,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_gw_ew_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_gw_ew_r(instr);
@@ -401,7 +401,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_gw_ew_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_gw_ew_m(instr)?;
@@ -409,7 +409,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_gd_ed_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_gd_ed_r(instr);
@@ -417,7 +417,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_gd_ed_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_gd_ed_m(instr)?;
@@ -425,7 +425,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_al_ib_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_al_ib(instr);
@@ -433,7 +433,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_ax_iw_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_ax_iw(instr);
@@ -441,7 +441,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_eax_id_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_eax_id(instr);
@@ -449,7 +449,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_ew_iw_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_ew_iw_r(instr);
@@ -457,7 +457,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_ew_iw_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_ew_iw_m(instr)?;
@@ -465,7 +465,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_ed_id_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_ed_id_r(instr);
@@ -473,7 +473,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_ed_id_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cmp_ed_id_m(instr)?;
@@ -481,7 +481,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn cmp_eb_ib_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         // CMP r/m8, imm8 - implemented inline in execute_instruction
@@ -497,14 +497,14 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     pub(super) fn bx_error_wrapper<
         T: crate::cpu::instrumentation::Instrumentation,
     >(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.bx_error(instr)
     }
 
     fn bx_end_trace_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         _instr: &Instruction,
     ) -> Result<()> {
         // Matching C++ genDummyICacheEntry: sets execute1 = &BX_CPU_C::BxEndTrace
@@ -515,28 +515,28 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn adc_eb_gb_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith8::ADC_EbGb(cpu, instr)
     }
 
     fn adc_gw_ew_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith16::ADC_GwEw(cpu, instr)
     }
 
     fn adc_ew_gw_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith16::ADC_EwGw(cpu, instr)
     }
 
     fn adc_ed_gd_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::ADC_EdGd_R(cpu, instr);
@@ -544,7 +544,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn adc_gd_ed_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::arith32::ADC_GdEd_R(cpu, instr);
@@ -552,28 +552,28 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_al_od_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer8::MOV_ALOd(cpu, instr)
     }
 
     fn mov_ax_od_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer16::MOV_AXOd(cpu, instr)
     }
 
     fn mov_od_al_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer8::MOV_OdAL(cpu, instr)
     }
 
     fn mov_od_ax_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer16::MOV_OdAX(cpu, instr)
@@ -581,35 +581,35 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
     // Wrapper functions for 8-bit MOV instructions (following Bochs data_xfer8.rs)
     fn mov_gb_eb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer8::MOV_GbEbM(cpu, instr)
     }
 
     fn mov_gb_eb_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer8::MOV_GbEbR(cpu, instr)
     }
 
     fn mov_eb_gb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer8::MOV_EbGbM(cpu, instr)
     }
 
     fn mov_eb_gb_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         crate::cpu::data_xfer8::MOV_EbGbR(cpu, instr)
     }
 
     fn mov_rb_ib_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_rb_ib(instr);
@@ -617,7 +617,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_eb_ib_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_eb_ib_m(instr)?;
@@ -625,7 +625,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_gw_ew_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_gw_ew_r(instr);
@@ -633,7 +633,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_gw_ew_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_gw_ew_m(instr)?;
@@ -641,7 +641,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_ew_gw_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_ew_gw_r(instr);
@@ -649,7 +649,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_ew_gw_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_ew_gw_m(instr)?;
@@ -657,7 +657,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_rw_iw_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_rw_iw(instr);
@@ -665,7 +665,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_ew_iw_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_ew_iw_m(instr)?;
@@ -673,7 +673,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_ew_sw_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_ew_sw(instr)?;
@@ -681,7 +681,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_sw_ew_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_sw_ew(instr)?;
@@ -690,7 +690,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
     // Wrapper functions for logical instructions (8-bit)
     fn and_eb_gb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.and_eb_gb_m(instr)?;
@@ -698,7 +698,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn and_gb_eb_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.and_gb_eb_r(instr);
@@ -706,7 +706,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn and_gb_eb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.and_gb_eb_m(instr)?;
@@ -714,7 +714,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn and_eb_ib_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.and_eb_ib_m(instr)?;
@@ -722,7 +722,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn or_eb_gb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.or_eb_gb_m(instr)?;
@@ -730,7 +730,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn or_gb_eb_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.or_gb_eb_r(instr);
@@ -738,7 +738,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn or_gb_eb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.or_gb_eb_m(instr)?;
@@ -746,7 +746,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn or_eb_ib_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.or_eb_ib_m(instr)?;
@@ -754,7 +754,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn xor_eb_gb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_eb_gb_m(instr)?;
@@ -762,7 +762,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn xor_gb_eb_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_gb_eb_r(instr);
@@ -770,7 +770,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn xor_gb_eb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_gb_eb_m(instr)?;
@@ -778,7 +778,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn xor_eb_ib_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_eb_ib_m(instr)?;
@@ -786,7 +786,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn xor_eb_ib_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_eb_ib_r(instr);
@@ -794,7 +794,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn not_eb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.not_eb_m(instr)?;
@@ -802,7 +802,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn test_eb_gb_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.test_eb_gb_m(instr)?;
@@ -810,7 +810,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn test_eb_ib_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.test_eb_ib_m(instr)?;
@@ -819,7 +819,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
     // Wrapper functions for 32-bit XOR instructions
     fn xor_ed_gd_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_ed_gd_m(instr)?;
@@ -827,7 +827,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn xor_gd_ed_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_gd_ed_r(instr);
@@ -835,7 +835,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn xor_gd_ed_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_gd_ed_m(instr)?;
@@ -843,7 +843,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn zero_idiom_gd_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.zero_idiom_gd_r(instr);
@@ -852,7 +852,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
     // Wrapper functions for 16-bit XOR instructions
     fn xor_ew_gw_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_ew_gw_m(instr)?;
@@ -860,7 +860,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn xor_gw_ew_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_gw_ew_r(instr);
@@ -868,7 +868,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn xor_gw_ew_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_gw_ew_m(instr)?;
@@ -876,7 +876,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn zero_idiom_gw_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.zero_idiom_gw_r(instr);
@@ -885,21 +885,21 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
     // Wrapper functions for flag manipulation
     fn cli_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.cli(instr)
     }
 
     fn sti_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.sti(instr)
     }
 
     fn cld_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         _instr: &Instruction,
     ) -> Result<()> {
         cpu.eflags.remove(super::eflags::EFlags::DF);
@@ -907,7 +907,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn std_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         _instr: &Instruction,
     ) -> Result<()> {
         cpu.eflags.insert(super::eflags::EFlags::DF);
@@ -916,63 +916,63 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
     // Wrapper functions for I/O instructions
     fn in_al_ib_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.in_al_ib(instr)
     }
 
     fn in_ax_ib_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.in_ax_ib(instr)
     }
 
     fn in_eax_ib_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.in_eax_ib(instr)
     }
 
     fn out_ib_al_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.out_ib_al(instr)
     }
 
     fn out_ib_ax_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.out_ib_ax(instr)
     }
 
     fn out_ib_eax_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.out_ib_eax(instr)
     }
 
     fn in_al_dx_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.in_al_dx(instr)
     }
 
     fn in_ax_dx_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.in_ax_dx(instr)
     }
 
     fn in_eax_dx_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.in_eax_dx(instr)
@@ -981,21 +981,21 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     // Wrapper functions for MOV32S handlers are now at module level (after get_opcode_entry)
 
     fn out_dx_al_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.out_dx_al(instr)
     }
 
     fn out_dx_ax_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.out_dx_ax(instr)
     }
 
     fn out_dx_eax_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.out_dx_eax(instr)
@@ -1003,7 +1003,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
     // Wrapper functions for PUSH/POP segment registers
     fn push_op16_sw_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         let seg = instr.dst() as usize;
@@ -1013,7 +1013,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn pop_op16_sw_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         use crate::cpu::decoder::BxSegregs;
@@ -1030,7 +1030,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
     // Wrapper function for PUSH immediate 32-bit
     fn push_id_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.push_id(instr)?;
@@ -1039,7 +1039,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
     // Wrapper function for FAR JMP (needs TRACE_END flag)
     fn jmpf_ap_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         // Check if this is 16-bit or 32-bit far jump by examining instruction length
@@ -1077,14 +1077,14 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov64_gd_ed_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov64_gd_ed_m(instr)
     }
 
     fn mov64_gd_ed_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov64_gd_ed_r(instr);
@@ -1092,14 +1092,14 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov64_ed_gd_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov64_ed_gd_m(instr)
     }
 
     fn mov64_ed_gd_r_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov64_ed_gd_r(instr);
@@ -1107,21 +1107,21 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn mov_eq_gq_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_eq_gq(instr)
     }
 
     fn mov_gq_eq_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.mov_gq_eq(instr)
     }
 
     fn lea_gq_m_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.lea_gq_m(instr);
@@ -1129,49 +1129,49 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
     }
 
     fn and_gd_ed_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.and_gd_ed(instr)
     }
 
     fn add_gq_eq_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.add_gq_eq(instr)
     }
 
     fn ror_ed_ib_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.ror_ed_ib(instr)
     }
 
     fn xor_eq_gq_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_eq_gq(instr)
     }
 
     fn xor_gq_eq_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.xor_gq_eq(instr)
     }
 
     fn dec_eq_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.dec_eq(instr)
     }
 
     fn jnz_jq_wrapper<T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<T>,
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
         instr: &Instruction,
     ) -> Result<()> {
         cpu.jnz_jq(instr)
@@ -1626,7 +1626,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 
         // NOP
         Opcode::Nop => Some(BxOpcodeEntry {
-            execute1: |_cpu: &mut BxCpuC<T>, _instr: &Instruction| -> Result<()> { Ok(()) },
+            execute1: |_cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>, _instr: &Instruction| -> Result<()> { Ok(()) },
             execute2: None,
             opflags: OpFlags::empty(),
         }),
@@ -1706,7 +1706,7 @@ pub(super) fn get_opcode_entry<T: crate::cpu::instrumentation::Instrumentation>(
 pub(super) fn bx_no_fpu_wrapper<
     T: crate::cpu::instrumentation::Instrumentation,
 >(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_fpu(instr)
@@ -1715,7 +1715,7 @@ pub(super) fn bx_no_fpu_wrapper<
 pub(super) fn bx_no_mmx_wrapper<
     T: crate::cpu::instrumentation::Instrumentation,
 >(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_mmx(instr)
@@ -1724,7 +1724,7 @@ pub(super) fn bx_no_mmx_wrapper<
 pub(super) fn bx_no_sse_wrapper<
     T: crate::cpu::instrumentation::Instrumentation,
 >(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_sse(instr)
@@ -1733,7 +1733,7 @@ pub(super) fn bx_no_sse_wrapper<
 pub(super) fn bx_no_avx_wrapper<
     T: crate::cpu::instrumentation::Instrumentation,
 >(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_avx(instr)
@@ -1742,7 +1742,7 @@ pub(super) fn bx_no_avx_wrapper<
 pub(super) fn bx_no_opmask_wrapper<
     T: crate::cpu::instrumentation::Instrumentation,
 >(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_opmask(instr)
@@ -1751,7 +1751,7 @@ pub(super) fn bx_no_opmask_wrapper<
 pub(super) fn bx_no_evex_wrapper<
     T: crate::cpu::instrumentation::Instrumentation,
 >(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_evex(instr)
@@ -1760,7 +1760,7 @@ pub(super) fn bx_no_evex_wrapper<
 pub(super) fn bx_no_amx_wrapper<
     T: crate::cpu::instrumentation::Instrumentation,
 >(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_amx(instr)
@@ -1770,7 +1770,7 @@ pub(super) fn bx_no_amx_wrapper<
 pub(super) fn mov32s_gd_ed_m_wrapper<
     T: crate::cpu::instrumentation::Instrumentation,
 >(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.mov32s_gd_ed_m(instr)?;
@@ -1780,7 +1780,7 @@ pub(super) fn mov32s_gd_ed_m_wrapper<
 pub(super) fn mov32s_ed_gd_m_wrapper<
     T: crate::cpu::instrumentation::Instrumentation,
 >(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.mov32s_ed_gd_m(instr)?;

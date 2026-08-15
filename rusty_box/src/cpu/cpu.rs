@@ -1596,7 +1596,8 @@ impl Uintr {
 }
 
 /// Type alias for instruction handler function pointer
-pub(super) type InstructionHandler<T> = fn(&mut BxCpuC<T>, &Instruction) -> Result<()>;
+pub(super) type InstructionHandler<T> =
+    fn(&mut super::exec_ctx::ExecCtx<'_, T>, &Instruction) -> Result<()>;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Bochs `signal_event()`: set event bit and force async check.
