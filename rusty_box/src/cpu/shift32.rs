@@ -5,11 +5,10 @@
 //! Implements SHL, SHR, SAR, ROL, ROR, SHLD, SHRD for 32-bit operands
 
 use super::{
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Bochs BX_CLEAR_64BIT_HIGH — called on count==0 for register form.
     /// In 64-bit mode, 32-bit register writes zero-extend. Even a no-op shift
     /// with count=0 still "writes" the register, clearing upper 32 bits.

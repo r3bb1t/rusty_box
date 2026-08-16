@@ -4,7 +4,6 @@
 // Mirrors Bochs cpp/cpu/arith8.cc
 
 use crate::cpu::decoder::{BxSegregs, Instruction};
-use crate::cpu::BxCpuC;
 
 // Helper methods are defined in logical8.rs and data_xfer_ext.rs
 // Free functions below use cpu.resolve_addr(), cpu.read_8bit_regx(), etc.
@@ -14,7 +13,7 @@ use crate::cpu::BxCpuC;
 /// Opcode: 0x00, ModRM: r/m8, r8 (memory)
 /// Matches BX_CPU_C::ADD_EbGbM
 pub fn ADD_EbGbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -33,7 +32,7 @@ pub fn ADD_EbGbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Opcode: 0x02, ModRM: r8, r/m8 (register)
 /// Matches BX_CPU_C::ADD_GbEbR
 pub fn ADD_GbEbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
@@ -50,7 +49,7 @@ pub fn ADD_GbEbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Opcode: 0x02, ModRM: r8, r/m8 (memory)
 /// Matches BX_CPU_C::ADD_GbEbM
 pub fn ADD_GbEbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -68,7 +67,7 @@ pub fn ADD_GbEbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// ADD_EbGb: ADD r/m8, r8
 /// Dispatches to memory or register form based on ModRM
 pub fn ADD_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -91,7 +90,7 @@ pub fn ADD_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// ADD_GbEb: ADD r8, r/m8
 /// Dispatches to memory or register form based on ModRM
 pub fn ADD_GbEb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -107,7 +106,7 @@ pub fn ADD_GbEb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Opcode: 0x28, ModRM: r/m8, r8 (memory)
 /// Matches BX_CPU_C::SUB_EbGbM
 pub fn SUB_EbGbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -126,7 +125,7 @@ pub fn SUB_EbGbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Opcode: 0x2A, ModRM: r8, r/m8 (register)
 /// Matches BX_CPU_C::SUB_GbEbR
 pub fn SUB_GbEbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
@@ -143,7 +142,7 @@ pub fn SUB_GbEbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Opcode: 0x2A, ModRM: r8, r/m8 (memory)
 /// Matches BX_CPU_C::SUB_GbEbM
 pub fn SUB_GbEbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -161,7 +160,7 @@ pub fn SUB_GbEbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// SUB_EbGb: SUB r/m8, r8
 /// Dispatches to memory or register form based on ModRM
 pub fn SUB_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -184,7 +183,7 @@ pub fn SUB_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// SUB_GbEb: SUB r8, r/m8
 /// Dispatches to memory or register form based on ModRM
 pub fn SUB_GbEb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -200,7 +199,7 @@ pub fn SUB_GbEb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Opcode: 0x20, ModRM: r/m8, r8 (memory)
 /// Matches BX_CPU_C::AND_EbGbM
 pub fn AND_EbGbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -219,7 +218,7 @@ pub fn AND_EbGbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Opcode: 0x20, ModRM: r8, r/m8 (register)
 /// Matches BX_CPU_C::AND_GbEbR
 pub fn AND_GbEbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
@@ -235,7 +234,7 @@ pub fn AND_GbEbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// AND_EbGb: AND r/m8, r8
 /// Dispatches to memory or register form based on ModRM
 pub fn AND_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -259,7 +258,7 @@ pub fn AND_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Opcode: 0x10, ModRM: r/m8, r8 (memory)
 /// Matches BX_CPU_C::ADC_EbGbM
 pub fn ADC_EbGbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -279,7 +278,7 @@ pub fn ADC_EbGbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Opcode: 0x10, ModRM: r8, r/m8 (register)
 /// Matches BX_CPU_C::ADC_GbEbR
 pub fn ADC_GbEbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
@@ -296,7 +295,7 @@ pub fn ADC_GbEbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// ADC_EbGb: ADC r/m8, r8
 /// Dispatches to memory or register form based on ModRM
 pub fn ADC_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -321,7 +320,7 @@ pub fn ADC_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Opcode: 0x12, ModRM: r8, r/m8 (memory)
 /// Matches BX_CPU_C::ADC_GbEbM
 pub fn ADC_GbEbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -340,7 +339,7 @@ pub fn ADC_GbEbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// ADC_GbEb: ADC r8, r/m8
 /// Dispatches to memory or register form based on ModRM
 pub fn ADC_GbEb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -354,7 +353,7 @@ pub fn ADC_GbEb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Opcode: 0x80/0 or 0x83/0 (8-bit)
 /// Matches BX_CPU_C::ADD_EbIbR
 pub fn ADD_EbIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
@@ -369,7 +368,7 @@ pub fn ADD_EbIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// ADD_EbIbM: ADD r/m8, imm8 (memory form)
 pub fn ADD_EbIbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -384,7 +383,7 @@ pub fn ADD_EbIbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// ADD_EbIb: ADD r/m8, imm8 - unified dispatch
 pub fn ADD_EbIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -399,7 +398,7 @@ pub fn ADD_EbIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Must hardcode AL (register 0) because the decoder sets dst from opcode
 /// low bits (b1 & 7 = 4 for opcode 0x04), which would be AH, not AL.
 pub fn ADD_ALIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.al();
@@ -414,7 +413,7 @@ pub fn ADD_ALIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// SUB_EbIbR: SUB r/m8, imm8 (register form)
 pub fn SUB_EbIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
@@ -427,7 +426,7 @@ pub fn SUB_EbIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// SUB_EbIbM: SUB r/m8, imm8 (memory form)
 pub fn SUB_EbIbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -442,7 +441,7 @@ pub fn SUB_EbIbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// SUB_EbIb: SUB r/m8, imm8 - unified dispatch
 pub fn SUB_EbIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -454,7 +453,7 @@ pub fn SUB_EbIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// ADC_EbIbR: ADC r/m8, imm8 (register form)
 pub fn ADC_EbIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
@@ -468,7 +467,7 @@ pub fn ADC_EbIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// ADC_EbIbM: ADC r/m8, imm8 (memory form)
 pub fn ADC_EbIbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -484,7 +483,7 @@ pub fn ADC_EbIbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// ADC_EbIb: ADC r/m8, imm8 - unified dispatch
 pub fn ADC_EbIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -496,7 +495,7 @@ pub fn ADC_EbIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// SBB_EbIbR: SBB r/m8, imm8 (register form)
 pub fn SBB_EbIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
@@ -510,7 +509,7 @@ pub fn SBB_EbIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// SBB_EbIbM: SBB r/m8, imm8 (memory form)
 pub fn SBB_EbIbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -526,7 +525,7 @@ pub fn SBB_EbIbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// SBB_EbIb: SBB r/m8, imm8 - unified dispatch
 pub fn SBB_EbIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -541,7 +540,7 @@ pub fn SBB_EbIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Must hardcode AL (register 0) because the decoder sets dst from opcode
 /// low bits (b1 & 7 = 4 for opcode 0x14), which would be AH, not AL.
 pub fn ADC_ALIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.al();
@@ -558,7 +557,7 @@ pub fn ADC_ALIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Must hardcode AL (register 0) because the decoder sets dst from opcode
 /// low bits (b1 & 7 = 4 for opcode 0x1C), which would be AH, not AL.
 pub fn SBB_ALIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.al();
@@ -572,7 +571,7 @@ pub fn SBB_ALIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// SBB_EbGbM: SBB r/m8, r8 (memory form)
 pub fn SBB_EbGbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -588,7 +587,7 @@ pub fn SBB_EbGbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// SBB_EbGb: SBB r/m8, r8 - unified dispatch
 pub fn SBB_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -606,7 +605,7 @@ pub fn SBB_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// SBB_GbEbR: SBB r8, r8 (register form)
 pub fn SBB_GbEbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
@@ -620,7 +619,7 @@ pub fn SBB_GbEbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// SBB_GbEbM: SBB r8, r/m8 (memory form)
 pub fn SBB_GbEbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -636,7 +635,7 @@ pub fn SBB_GbEbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// SBB_GbEb: SBB r8, r/m8 - unified dispatch
 pub fn SBB_GbEb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -651,7 +650,7 @@ pub fn SBB_GbEb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Original: bochs/cpu/arith8.cc INC_EbR
 /// Increment 8-bit register by 1
 pub fn INC_Eb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
@@ -668,7 +667,7 @@ pub fn INC_Eb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Original: bochs/cpu/arith8.cc DEC_EbR
 /// Decrement 8-bit register by 1
 pub fn DEC_Eb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
@@ -682,7 +681,7 @@ pub fn DEC_Eb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// INC_EbM: INC r/m8 (memory form) — matches Bochs INC_EbM
 pub fn INC_EbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -697,7 +696,7 @@ pub fn INC_EbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// DEC_EbM: DEC r/m8 (memory form) — matches Bochs DEC_EbM
 pub fn DEC_EbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -712,7 +711,7 @@ pub fn DEC_EbM<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// INC r/m8 - Unified dispatch based on mod_c0()
 pub fn inc_eb_dispatch<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -724,7 +723,7 @@ pub fn inc_eb_dispatch<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// DEC r/m8 - Unified dispatch based on mod_c0()
 pub fn dec_eb_dispatch<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -742,7 +741,7 @@ pub fn dec_eb_dispatch<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// Optimized form for accumulator
 /// Opcode: 0x2C
 pub fn SUB_AL_Ib<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let al = cpu.al();
@@ -763,7 +762,7 @@ pub fn SUB_AL_Ib<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// CMPXCHG r/m8, r8 — register form
 /// Bochs arith8.cc (CMPXCHG_EbGbR)
 pub fn CMPXCHG_EbGb_R<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let ext = instr.extend8bit_l();
@@ -783,7 +782,7 @@ pub fn CMPXCHG_EbGb_R<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// CMPXCHG r/m8, r8 — memory form
 /// Bochs arith8.cc (CMPXCHG_EbGbM)
 pub fn CMPXCHG_EbGb_M<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -811,7 +810,7 @@ pub fn CMPXCHG_EbGb_M<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// XADD r/m8, r8 — register form
 /// Bochs arith8.cc
 pub fn XADD_EbGb_R<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let ext = instr.extend8bit_l();
@@ -828,7 +827,7 @@ pub fn XADD_EbGb_R<'c, T: crate::cpu::instrumentation::Instrumentation>(
 /// XADD r/m8, r8 — memory form
 /// Bochs arith8.cc
 pub fn XADD_EbGb_M<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -849,7 +848,7 @@ pub fn XADD_EbGb_M<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// CMPXCHG r/m8, r8 — unified dispatch
 pub fn CMPXCHG_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -866,7 +865,7 @@ pub fn CMPXCHG_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// XADD r/m8, r8 — unified dispatch
 pub fn XADD_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -884,7 +883,7 @@ pub fn XADD_EbGb<'c, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// NEG r/m8 - unified dispatch
 pub fn NEG_Eb<'c, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {

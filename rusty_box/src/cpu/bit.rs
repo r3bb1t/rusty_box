@@ -1,11 +1,10 @@
 //! Bit manipulation instructions: SETcc
 //! Matching Bochs bit.cc
 use super::{
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // SETcc Eb — Set byte on condition (0F 90..9F)
     // =========================================================================

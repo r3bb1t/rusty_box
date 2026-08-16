@@ -1,11 +1,10 @@
 //! 32-bit bit scan instructions: BSF, BSR
 //! Matching Bochs bit32.cc
 use super::{
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // BSF / BSR — Bit Scan Forward / Reverse (0F BC / 0F BD)
     // =========================================================================

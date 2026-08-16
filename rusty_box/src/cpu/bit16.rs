@@ -1,11 +1,10 @@
 //! 16-bit bit scan and bit test instructions
 //! Matching Bochs bit16.cc
 use super::{
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // BSF / BSR — Bit Scan Forward / Reverse 16-bit (0F BC / 0F BD with 66h)
     // =========================================================================

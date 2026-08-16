@@ -4,14 +4,13 @@
 // Mirrors Bochs cpp/cpu/data_xfer16.cc
 
 use crate::cpu::decoder::{BxSegregs, Instruction};
-use crate::cpu::BxCpuC;
 
 /// MOV_AXOd: MOV AX, moffs16 - Load AX from memory
 /// Opcode: 0xA1 (16-bit operand size)
 /// Segment: DS (default) or override prefix
 /// Offset: 16-bit or 32-bit immediate offset (i.Id())
 pub fn MOV_AXOd<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());
@@ -26,11 +25,12 @@ pub fn MOV_AXOd<T: crate::cpu::instrumentation::Instrumentation>(
 /// Segment: DS (default) or override prefix
 /// Offset: 16-bit or 32-bit immediate offset (i.Id())
 pub fn MOV_OdAX<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<T>,
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());
     let offset = instr.id();
-    cpu.v_write_word(seg, offset, cpu.ax())?;
+    let ax = cpu.ax();
+    cpu.v_write_word(seg, offset, ax)?;
     Ok(())
 }

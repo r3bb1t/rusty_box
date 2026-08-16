@@ -3,9 +3,9 @@
 //! Based on Bochs data_xfer64.cc
 
 use crate::cpu::decoder::{BxSegregs, Instruction};
-use crate::cpu::{BxCpuC, Result};
+use crate::cpu::{Result};
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // 64-bit MOV instructions
     // =========================================================================
@@ -594,7 +594,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if instr.mod_c0() {
             let src = instr.src() as usize;
             let dst = instr.dst() as usize;
-            self.set_gpr64(dst, self.get_gpr64(src));
+            let value = self.get_gpr64(src);
+            self.set_gpr64(dst, value);
             Ok(())
         } else {
             self.mov_eq_gq_m(instr)

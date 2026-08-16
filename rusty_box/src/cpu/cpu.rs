@@ -3257,6 +3257,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.oszapc.set_oszapc_add_32(op1, op2, res);
     }
 
+    /// SET_FLAGS_OSZAPC_SUB_64: update all six arithmetic flags after a 64-bit sub.
+    pub(super) fn update_flags_sub64(&mut self, op1: u64, op2: u64, res: u64) {
+        self.oszapc.set_oszapc_sub_64(op1, op2, res);
+    }
+
     pub(super) fn update_flags_sub32(&mut self, op1: u32, op2: u32, res: u32) {
         // Bochs SET_FLAGS_OSZAPC_SUB_32: works for SUB and SBB
         // (result already includes the borrow-in from SBB).
