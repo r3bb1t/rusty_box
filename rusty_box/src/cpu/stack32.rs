@@ -4,7 +4,7 @@
 
 use super::{cpu::BxCpuC, decoder::Instruction, eflags::EFlags};
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // 32-bit PUSH instructions
     // Based on Bochs stack32.cc
@@ -77,7 +77,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // POP SS inhibits interrupts until next instruction boundary
         // (Bochs stack32.cc)
         if seg == BxSegregs::Ss {
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
+            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
 
         Ok(())
@@ -309,7 +309,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let imm16 = instr.iw() as u32;
         let mut level = instr.ib2() & 0x1F;
 
-        self.push_32(self.ebp())?;
+        let ebp = self.ebp();
+        self.push_32(ebp)?;
         let frame_ptr32 = self.esp();
 
         if self.is_stack_32bit() {
@@ -331,7 +332,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 self.push_32(frame_ptr32)?;
             }
 
-            self.set_esp(self.esp().wrapping_sub(imm16));
+            let esp = self.esp();
+            self.set_esp(esp.wrapping_sub(imm16));
 
             // ENTER finishes with memory write check on the final stack pointer
             // the memory is touched but no write actually occurs
@@ -357,7 +359,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 self.push_32(frame_ptr32)?;
             }
 
-            self.set_sp(self.sp().wrapping_sub(imm16 as u16));
+            let sp = self.sp();
+            self.set_sp(sp.wrapping_sub(imm16 as u16));
 
             // ENTER finishes with memory write check on the final stack pointer
             // the memory is touched but no write actually occurs

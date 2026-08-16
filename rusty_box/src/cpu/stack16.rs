@@ -4,7 +4,7 @@
 
 use super::{cpu::BxCpuC, decoder::Instruction, eflags::EFlags};
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // 16-bit PUSH instructions
     // Based on Bochs stack16.cc
@@ -90,7 +90,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         // SS interrupt inhibition: Bochs stack16.cc
         if seg == super::decoder::BxSegregs::Ss {
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
+            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
 
         Ok(())
@@ -311,7 +311,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.load_seg_reg(seg, selector_value)?;
 
         if seg == super::decoder::BxSegregs::Ss {
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
+            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
 
         Ok(())
@@ -350,7 +350,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let imm16 = instr.iw();
         let mut level = instr.ib2() & 0x1F;
 
-        self.push_16(self.bp())?;
+        let bp = self.bp();
+        self.push_16(bp)?;
         let frame_ptr16 = self.sp();
 
         if self.is_stack_32bit() {
@@ -372,7 +373,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 self.push_16(frame_ptr16)?;
             }
 
-            self.set_esp(self.esp().wrapping_sub(imm16 as u32));
+            let esp = self.esp();
+            self.set_esp(esp.wrapping_sub(imm16 as u32));
 
             // ENTER finishes with memory write check on the final stack pointer
             // the memory is touched but no write actually occurs
@@ -400,7 +402,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 self.push_16(frame_ptr16)?;
             }
 
-            self.set_sp(self.sp().wrapping_sub(imm16));
+            let sp = self.sp();
+            self.set_sp(sp.wrapping_sub(imm16));
 
             // ENTER finishes with memory write check on the final stack pointer
             // the memory is touched but no write actually occurs
