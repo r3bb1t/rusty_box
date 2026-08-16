@@ -10,7 +10,7 @@ use super::{
     error::Result,
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // LEA - Load Effective Address
     // =========================================================================
@@ -198,7 +198,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // MOV SS inhibits interrupts until next instruction boundary
         // (same as POP SS - Bochs data_xfer16.cc)
         if dst_seg == BxSegregs::Ss as usize {
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
+            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
 
         Ok(())
@@ -1176,7 +1176,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // =========================================================================
 
     pub fn cmovo_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1184,7 +1185,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovno_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1192,7 +1194,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovb_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_cf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1200,7 +1203,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovnb_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_cf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1208,7 +1212,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovz_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_zf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1216,7 +1221,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovnz_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_zf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1224,7 +1230,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovbe_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_cf() || self.get_zf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1232,7 +1239,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovnbe_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_cf() && !self.get_zf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1240,7 +1248,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovs_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_sf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1248,7 +1257,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovns_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_sf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1256,7 +1266,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovp_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_pf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1264,7 +1275,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovnp_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_pf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1272,7 +1284,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovl_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_sf() != self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1280,7 +1293,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovnl_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_sf() == self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1288,7 +1302,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovle_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_zf() || self.get_sf() != self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1296,7 +1311,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Ok(())
     }
     pub fn cmovnle_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_zf() && self.get_sf() == self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1441,112 +1457,128 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // Memory operand is ALWAYS read per x86 spec.
     // =========================================================================
     pub fn cmovo_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovno_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovb_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_cf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovnb_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_cf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovz_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_zf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovnz_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_zf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovbe_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_cf() || self.get_zf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovnbe_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_cf() && !self.get_zf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovs_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_sf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovns_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_sf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovp_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_pf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovnp_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_pf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovl_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_sf() != self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovnl_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_sf() == self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovle_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if self.get_zf() || self.get_sf() != self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
         Ok(())
     }
     pub fn cmovnle_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
         if !self.get_zf() && self.get_sf() == self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }

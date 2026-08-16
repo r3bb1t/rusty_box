@@ -10,13 +10,12 @@
 
 use super::{
     access::{forward_byte_copy, host_fill_bytes},
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
 };
 
 use crate::{config::BxPhyAddress, cpu::rusty_box::MemoryAccessType};
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Helper: Get direction flag (DF)
     // =========================================================================
@@ -240,11 +239,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.write_virtual_byte(BxSegregs::Es, di, byte)?;
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(1));
-            self.set_di(self.di().wrapping_sub(1));
+            let si = self.si().wrapping_sub(1);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(1);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(1));
-            self.set_di(self.di().wrapping_add(1));
+            let si = self.si().wrapping_add(1);
+        self.set_si(si);
+            let di = self.di().wrapping_add(1);
+        self.set_di(di);
         }
 
         Ok(())
@@ -275,11 +278,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.write_virtual_word(BxSegregs::Es, di, word)?;
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(2));
-            self.set_di(self.di().wrapping_sub(2));
+            let si = self.si().wrapping_sub(2);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(2);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(2));
-            self.set_di(self.di().wrapping_add(2));
+            let si = self.si().wrapping_add(2);
+        self.set_si(si);
+            let di = self.di().wrapping_add(2);
+        self.set_di(di);
         }
 
         Ok(())
@@ -309,11 +316,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.write_virtual_dword(BxSegregs::Es, di, dword)?;
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(4));
-            self.set_di(self.di().wrapping_sub(4));
+            let si = self.si().wrapping_sub(4);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(4);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(4));
-            self.set_di(self.di().wrapping_add(4));
+            let si = self.si().wrapping_add(4);
+        self.set_si(si);
+            let di = self.di().wrapping_add(4);
+        self.set_di(di);
         }
 
         Ok(())
@@ -346,9 +357,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.write_virtual_byte(BxSegregs::Es, di, al)?;
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(1));
+            let di = self.di().wrapping_sub(1);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(1));
+            let di = self.di().wrapping_add(1);
+        self.set_di(di);
         }
 
         Ok(())
@@ -375,9 +388,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.write_virtual_word(BxSegregs::Es, di, ax)?;
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(2));
+            let di = self.di().wrapping_sub(2);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(2));
+            let di = self.di().wrapping_add(2);
+        self.set_di(di);
         }
 
         Ok(())
@@ -404,9 +419,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.write_virtual_dword(BxSegregs::Es, di, eax)?;
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(4));
+            let di = self.di().wrapping_sub(4);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(4));
+            let di = self.di().wrapping_add(4);
+        self.set_di(di);
         }
 
         Ok(())
@@ -438,9 +455,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.set_al(byte);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(1));
+            let si = self.si().wrapping_sub(1);
+        self.set_si(si);
         } else {
-            self.set_si(self.si().wrapping_add(1));
+            let si = self.si().wrapping_add(1);
+        self.set_si(si);
         }
 
         Ok(())
@@ -468,9 +487,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.set_ax(word);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(2));
+            let si = self.si().wrapping_sub(2);
+        self.set_si(si);
         } else {
-            self.set_si(self.si().wrapping_add(2));
+            let si = self.si().wrapping_add(2);
+        self.set_si(si);
         }
 
         Ok(())
@@ -498,9 +519,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.set_eax(dword);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(4));
+            let si = self.si().wrapping_sub(4);
+        self.set_si(si);
         } else {
-            self.set_si(self.si().wrapping_add(4));
+            let si = self.si().wrapping_add(4);
+        self.set_si(si);
         }
 
         Ok(())
@@ -535,11 +558,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.update_flags_sub8(op1, op2, result);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(1));
-            self.set_di(self.di().wrapping_sub(1));
+            let si = self.si().wrapping_sub(1);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(1);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(1));
-            self.set_di(self.di().wrapping_add(1));
+            let si = self.si().wrapping_add(1);
+        self.set_si(si);
+            let di = self.di().wrapping_add(1);
+        self.set_di(di);
         }
 
         Ok(())
@@ -575,11 +602,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.update_flags_sub16(op1, op2, result);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(2));
-            self.set_di(self.di().wrapping_sub(2));
+            let si = self.si().wrapping_sub(2);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(2);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(2));
-            self.set_di(self.di().wrapping_add(2));
+            let si = self.si().wrapping_add(2);
+        self.set_si(si);
+            let di = self.di().wrapping_add(2);
+        self.set_di(di);
         }
 
         Ok(())
@@ -615,11 +646,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.update_flags_sub32(op1, op2, result);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(4));
-            self.set_di(self.di().wrapping_sub(4));
+            let si = self.si().wrapping_sub(4);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(4);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(4));
-            self.set_di(self.di().wrapping_add(4));
+            let si = self.si().wrapping_add(4);
+        self.set_si(si);
+            let di = self.di().wrapping_add(4);
+        self.set_di(di);
         }
 
         Ok(())
@@ -658,9 +693,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.update_flags_sub8(al, op2, result);
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(1));
+            let di = self.di().wrapping_sub(1);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(1));
+            let di = self.di().wrapping_add(1);
+        self.set_di(di);
         }
 
         Ok(())
@@ -693,9 +730,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.update_flags_sub16(ax, op2, result);
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(2));
+            let di = self.di().wrapping_sub(2);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(2));
+            let di = self.di().wrapping_add(2);
+        self.set_di(di);
         }
 
         Ok(())
@@ -728,9 +767,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.update_flags_sub32(eax, op2, result);
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(4));
+            let di = self.di().wrapping_sub(4);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(4));
+            let di = self.di().wrapping_add(4);
+        self.set_di(di);
         }
 
         Ok(())
@@ -777,7 +818,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -803,7 +845,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -829,7 +872,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -855,7 +899,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -881,7 +926,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -907,7 +953,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -933,7 +980,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -959,7 +1007,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -985,7 +1034,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1010,7 +1060,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1035,7 +1086,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1060,7 +1112,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1085,7 +1138,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1110,7 +1164,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1135,7 +1190,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1160,7 +1216,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1185,7 +1242,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1210,7 +1268,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1235,7 +1294,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1260,7 +1320,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1285,7 +1346,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1323,7 +1385,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1348,7 +1411,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1386,7 +1450,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1411,7 +1476,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1449,7 +1515,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1474,7 +1541,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1506,7 +1574,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1531,7 +1600,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1571,7 +1641,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1596,7 +1667,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1636,7 +1708,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1661,7 +1734,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1687,7 +1761,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1713,7 +1788,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1739,7 +1815,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1764,7 +1841,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1789,7 +1867,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1814,7 +1893,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1839,7 +1919,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1864,7 +1945,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1889,7 +1971,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1914,7 +1997,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1939,7 +2023,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1964,7 +2049,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1989,7 +2075,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2014,7 +2101,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2039,7 +2127,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2588,7 +2677,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2613,7 +2703,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2662,7 +2753,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2687,7 +2779,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2736,7 +2829,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2761,7 +2855,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2804,7 +2899,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2829,7 +2925,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2878,7 +2975,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2903,7 +3001,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2952,7 +3051,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2977,7 +3077,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3014,7 +3115,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3049,7 +3151,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3085,7 +3188,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3125,7 +3229,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3149,7 +3254,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3187,7 +3293,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3211,7 +3318,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3249,7 +3357,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3273,7 +3382,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3311,7 +3421,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3335,7 +3446,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3371,7 +3483,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3395,7 +3508,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3431,7 +3545,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3455,7 +3570,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3510,7 +3626,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -3535,7 +3652,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3585,7 +3703,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -3610,7 +3729,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3646,7 +3766,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3685,7 +3806,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3710,7 +3832,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3747,7 +3870,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3772,7 +3896,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
