@@ -43,7 +43,10 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // 249 -> 222: the `CpuTlbPin` sidecar is gone — its `UnsafeCell` state, the
     // publication paths that wrote through it, and the `from_raw_parts`
     // reconstructions that rebuilt the pin slice at every scheduler slice.
-    ("rusty_box/src", 222),
+    // 222 -> 212: the fetch and async-event entry points hold memory as a
+    // borrow, so the raw `*mut BxMemC` re-borrows that fed `prefetch`,
+    // `serve_icache_miss` and the icache tests are gone.
+    ("rusty_box/src", 212),
     ("rusty_box_decoder/src", 0),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. The survivor is

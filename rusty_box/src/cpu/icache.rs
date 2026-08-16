@@ -5,10 +5,10 @@ use crate::{
     cpu::{
         cpu::BX_ASYNC_EVENT_STOP_TRACE,
         decoder::{decode32, decode64, DecodeError, Instruction, Opcode},
+        exec_ctx::ExecCtx,
         tlb::{lpf_of, page_offset, ppf_of},
         BxCpuC, Result,
     },
-    memory::BxMemC,
 };
 
 /// Number of entries in the machine-wide SMC page-write-stamp table.
@@ -643,21 +643,22 @@ fn is_trace_end_opcode(opcode: Opcode) -> bool {
     )
 }
 
-impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     fn bx_end_trace(&mut self) {
         self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
     }
+}
 
+/// Trace construction runs on the execution context: filling a trace decodes
+/// guest bytes and stamps the machine-wide SMC write table, so it needs the CPU
+/// and memory live at once (Bochs `BX_CPU_C::serveICacheMiss`, icache.cc, which
+/// reaches the same state through `BX_MEM(0)`).
+impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
     pub(super) fn serve_icache_miss(
         &mut self,
         eip_biased: u32,
         p_addr: BxPhyAddress,
-        mem: &'c mut BxMemC,
     ) -> Result<BxICacheEntry> {
-        // Raw pointer for stamp-table marking after `mem` is moved into
-        // boundary_fetch below (same reborrow discipline as cpu_loop's
-        // mem_ptr; the borrows never overlap).
-        let mem_raw: *mut BxMemC = mem;
         // Get entry index first to avoid borrow conflicts
         let entry_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
 
@@ -816,13 +817,19 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                         } else {
                             super::instrumentation::CodeSize::Bits16
                         };
+                        // Disjoint fields of the CPU: the event borrows the
+                        // decoded instruction out of `i_cache` while the tracer
+                        // is called through `instrumentation`. Naming the CPU
+                        // is what makes that disjointness visible — reaching
+                        // both through `Deref` would borrow the whole context.
+                        let cpu: &mut BxCpuC<T> = self;
                         let ev = super::instrumentation::OpcodeEvent {
                             rip,
-                            instr: &self.i_cache.mpool[current_mpindex],
+                            instr: &cpu.i_cache.mpool[current_mpindex],
                             bytes,
                             size,
                         };
-                        self.instrumentation.fire_opcode(&ev);
+                        cpu.instrumentation.fire_opcode(&ev);
                     }
 
                     // Update trace mask
@@ -874,11 +881,10 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                                 entry.trace_mask |= trace_mask;
                                 entry.trace_mask
                             };
-                            // SAFETY: no live borrow of mem at this point (see mem_raw above).
-                            unsafe { (*mem_raw).smc_mark_icache_mask(current_p_addr, full_mask) };
+                            self.memory.smc_mark_icache_mask(current_p_addr, full_mask);
                             self.i_cache.mpindex = current_mpindex + merged;
-                            self.i_cache
-                                .commit_trace(self.i_cache.entry[entry_idx].tlen as usize);
+                            let merged_tlen = self.i_cache.entry[entry_idx].tlen as usize;
+                            self.i_cache.commit_trace(merged_tlen);
                             let entry = self.i_cache.entry[entry_idx].clone();
                             return Ok(entry);
                         }
@@ -965,7 +971,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     // Call boundary_fetch (matching C++ line 150)
                     // Pass the current remaining bytes to page boundary
                     let boundary_instr =
-                        self.boundary_fetch(current_fetch_ptr, current_remaining, mem)?;
+                        self.boundary_fetch(current_fetch_ptr, current_remaining)?;
 
                     // Store instruction in mpool (check bounds first)
                     if current_mpindex >= BX_ICACHE_MEM_POOL {
@@ -983,11 +989,9 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                         // tlen is already set to 1 above; mpool_start_idx was already set above.
                     }
 
-                    // SAFETY: boundary_fetch's borrow of mem ended above (see mem_raw).
-                    unsafe {
-                        (*mem_raw).smc_mark_icache_mask(p_addr, 0x80000000);
-                        (*mem_raw).smc_mark_icache_mask(self.p_addr_fetch_page, 0x1);
-                    }
+                    let fetch_page = self.p_addr_fetch_page;
+                    self.memory.smc_mark_icache_mask(p_addr, 0x80000000);
+                    self.memory.smc_mark_icache_mask(fetch_page, 0x1);
 
                     // Add end-of-trace opcode if not in debugger (matching C++ line 158-163)
                     // TODO: Check debugger active state
@@ -1002,8 +1006,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
                     self.i_cache.mpindex = current_mpindex;
                     let entry = self.i_cache.entry[entry_idx].clone();
-                    self.i_cache
-                        .commit_page_split_trace(self.p_addr_fetch_page, entry_idx);
+                    self.i_cache.commit_page_split_trace(fetch_page, entry_idx);
                     return Ok(entry);
                 }
             }
@@ -1014,8 +1017,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             let entry = &mut self.i_cache.entry[entry_idx];
             entry.trace_mask |= trace_mask;
         }
-        // SAFETY: no live borrow of mem at this point (see mem_raw above).
-        unsafe { (*mem_raw).smc_mark_icache_mask(current_p_addr, trace_mask) };
+        self.memory.smc_mark_icache_mask(current_p_addr, trace_mask);
 
         // Add end-of-trace opcode if not in debugger (matching C++ line 210-214)
         // TODO: Check debugger active state
@@ -1045,7 +1047,6 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         &mut self,
         fetch_ptr: &[u8],
         remaining_in_page: usize,
-        mem: &'c mut BxMemC,
     ) -> Result<Instruction> {
         let mut fetch_buffer = [0u8; 32];
 
@@ -1082,9 +1083,9 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // The 2nd chunk of the instruction is on the next page.
         // Set RIP to the 0th byte of the 2nd page, and force a prefetch
         // (matching C++ line 274-275)
-        self.set_rip(self.rip() + remaining_in_page as u64);
-        // Call prefetch directly - same lifetime as serve_icache_miss
-        self.prefetch(mem)?;
+        let split_rip = self.rip();
+        self.set_rip(split_rip + remaining_in_page as u64);
+        self.prefetch()?;
 
         let fetch_buffer_limit = (self.eip_page_window_size as usize).min(15);
 
@@ -1146,7 +1147,8 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         // Restore EIP since we fudged it to start at the 2nd page boundary.
         // (matching C++ line 306: RIP = BX_CPU_THIS_PTR prev_rip)
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
 
         // BX_INSTR_OPCODE (matching C++ icache.cc)
         #[cfg(feature = "instrumentation")]
@@ -1171,7 +1173,9 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         Ok(instr)
     }
+}
 
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     fn merge_traces_internal(
         &mut self,
         current_entry_idx: usize,

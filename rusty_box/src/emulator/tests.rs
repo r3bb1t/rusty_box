@@ -1454,7 +1454,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 bsp_code.push(0xF4); // hlt
                 emu.virt_write(0x1000, &bsp_code).unwrap();
                 emu.reg_write(X86Reg::Rip, 0x1000);
-                emu.cpu_mut_at(AP_INDEX).deliver_sipi(0x09);
+                emu.exec_ctx(AP_INDEX).deliver_sipi(0x09);
                 emu.rebuild_cpu_masks_from_scan();
 
                 for _ in 0..100 {
@@ -2797,7 +2797,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .unwrap();
 
                 emu.cpu_mut().activity_state = CpuActivityState::WaitForSipi;
-                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                emu.exec_ctx(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
                 emu.rebuild_cpu_masks_from_scan();
                 let before = emu.cpu_ref(AP_INDEX).icount;
 
@@ -2896,7 +2896,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.load_ram(&[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN], SECOND_TRAMPOLINE_ADDR)
                     .unwrap();
 
-                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                emu.exec_ctx(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
                 assert_eq!(
                     emu.cpu_ref(AP_INDEX).activity_state,
                     CpuActivityState::Active
@@ -2955,7 +2955,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 )
                 .unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                emu.exec_ctx(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
 
                 {
                     let ap = emu.cpu_mut_at(AP_INDEX);
@@ -3012,7 +3012,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 )
                 .unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                emu.exec_ctx(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
 
                 send_bsp_icr_init(&mut emu);
                 emu.drain_lapic_bus();
@@ -3054,7 +3054,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 )
                 .unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                emu.exec_ctx(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
 
                 {
                     let bsp = emu.cpu_mut_at(BSP_INDEX);
@@ -3106,7 +3106,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.cpu_mut().async_event = 0;
                 emu.cpu_mut().lapic.intr = false;
                 emu.cpu_mut().lapic.intr_pending = false;
-                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                emu.exec_ctx(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
                 emu.rebuild_cpu_masks_from_scan();
 
                 assert!(
@@ -3158,7 +3158,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.cpu_mut().async_event = 0;
                 emu.cpu_mut().lapic.intr = false;
                 emu.cpu_mut().lapic.intr_pending = false;
-                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                emu.exec_ctx(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
                 emu.rebuild_cpu_masks_from_scan();
 
                 let quantum = emu.smp_quantum_ticks();
@@ -3209,8 +3209,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     ap.lapic.write_aligned(0xF0, 0x1FF, 0);
                     ap.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR, 0);
                     ap.lapic.set_initial_timer_count(1, 0);
-                    ap.deliver_sipi(AP_TRAMPOLINE_VECTOR);
                 }
+                emu.exec_ctx(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
                 emu.rebuild_cpu_masks_from_scan();
                 emu.service_lapic_local_events();
 
@@ -3268,8 +3268,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     ap.lapic.write_aligned(0xF0, 0x1FF, 0);
                     ap.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR, 0);
                     ap.lapic.set_initial_timer_count(HUGE_TMICT, 0);
-                    ap.deliver_sipi(AP_TRAMPOLINE_VECTOR);
                 }
+                emu.exec_ctx(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
                 emu.rebuild_cpu_masks_from_scan();
                 // Apply the deferred timer activation; afterwards the AP LAPIC
                 // has no scheduler work left, exactly like a guest spinning in
@@ -3318,7 +3318,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     "APs waiting for SIPI must not disable the BSP HLT real-time pacing path"
                 );
 
-                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                emu.exec_ctx(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
                 // Direct state poke: production SIPI delivery refreshes the
                 // masks itself (refresh_cpu_masks contract); mirror it here.
                 emu.refresh_cpu_masks(AP_INDEX);
@@ -3418,9 +3418,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 // SIPI-start the AP (unmasks NMI per Bochs deliver_SIPI), then
                 // put it into the triple-fault SHUTDOWN state.
+                emu.exec_ctx(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
                 {
                     let ap = emu.cpu_mut_at(AP_INDEX);
-                    ap.deliver_sipi(AP_TRAMPOLINE_VECTOR);
                     ap.activity_state = CpuActivityState::Shutdown;
                     ap.pending_event = 0;
                     ap.async_event = 0;

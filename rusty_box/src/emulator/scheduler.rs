@@ -506,7 +506,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // hand the CPU a borrow that outlived the statement.
         let Self { cpu, memory, .. } = self;
         cpu.wire_memory_access(core::ptr::NonNull::from(&mut *memory));
-        let result = self.cpu.inject_external_interrupt(vector);
+        let result = self.exec_ctx(0).inject_external_interrupt(vector);
         self.cpu.clear_memory_access();
         self.refresh_cpu_masks(0);
         result
@@ -1197,10 +1197,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 // accesses resolve, then clear it (mirrors inject_interrupt).
                 let mem_ptr =
                     core::ptr::NonNull::from(&mut *unsafe { self.borrow_memory_for_cpu() });
-                let cpu = self.cpu_mut_at(target);
-                cpu.wire_memory_access(mem_ptr);
-                cpu.deliver_sipi(vector);
-                cpu.clear_memory_access();
+                self.cpu_mut_at(target).wire_memory_access(mem_ptr);
+                self.exec_ctx(target).deliver_sipi(vector);
+                self.cpu_mut_at(target).clear_memory_access();
             }
         }
     }

@@ -2305,13 +2305,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.debug_put_hex_u8(v as u8);
     }
 
+}
+
+/// Machine-driven interrupt injection: delivery reads the IDT/IVT and pushes a
+/// stack frame, so it needs memory alongside the CPU (Bochs event.cc
+/// `HandleExtInterrupt`).
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
     /// Inject an external (hardware) interrupt vector into the CPU.
     ///
     /// This is used by the outer emulator loop to deliver PIC interrupts and
     /// wake the CPU from `HLT`, mirroring Bochs' event/timer driven flow.
     ///
-    /// Note: callers must ensure the memory bus is wired (`mem_bus` set) so that
-    /// stack pushes and IVT/IDT reads work correctly.
+    /// `interrupt` reads the IDT/IVT and pushes the frame through the CPU's
+    /// wired bus rather than this context's `memory`, so a caller outside a
+    /// scheduler slice wires that bus for the call.
+    ///
     /// Inject an external interrupt via the unified interrupt() dispatch.
     /// Based on Bochs event.cc HandleExtInterrupt (lines 133-184).
     ///
@@ -2338,7 +2346,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // Diagnostic ring for the pf_diag tripwire (see field docs).
         #[cfg(feature = "std")]
         {
-            self.irq_diag_ring[self.irq_diag_idx % 32] = (self.icount, vector, self.rip());
+            let slot = self.irq_diag_idx % 32;
+            let sample = (self.icount, vector, self.rip());
+            self.irq_diag_ring[slot] = sample;
             self.irq_diag_idx = self.irq_diag_idx.wrapping_add(1);
         }
 
@@ -2347,7 +2357,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // Clear stop-trace and sleep sentinel so execution can resume.
         // BX_ASYNC_EVENT_SLEEP (bit 0) must be cleared here because this path
         // bypasses handle_async_event's tail which normally clears async_event.
-        self.async_event &= !(BX_ASYNC_EVENT_STOP_TRACE | Self::BX_ASYNC_EVENT_SLEEP);
+        self.async_event &= !(BX_ASYNC_EVENT_STOP_TRACE | BxCpuC::<T>::BX_ASYNC_EVENT_SLEEP);
 
         // Mark as external interrupt (EXT=1) — affects error codes pushed
         // during any exception that occurs during interrupt delivery.
@@ -2392,7 +2402,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             other => other,
         }
     }
+}
 
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// True if the CPU is halted or waiting for an event.
     ///
     /// We use this to decide when the outer emulator loop should inject
@@ -2664,10 +2676,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     && matches!(self.activity_state, CpuActivityState::Active)
                 {
                     self.async_event = 0;
-                } else if {
-                    let (cpu, mem, _d, _p) = self.slice_parts();
-                    cpu.handle_async_event(pic.as_deref_mut(), dma.as_deref_mut(), Some(mem))
-                } {
+                } else if self.handle_async_event(pic.as_deref_mut(), dma.as_deref_mut()) {
                     // Slow path: real async event (interrupt, HLT, shutdown, etc.)
                     break Ok(iteration);
                 }
@@ -2676,12 +2685,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             #[cfg(feature = "profiling")]
             let _t0 = std::time::Instant::now();
             let (mut instr_idx, mut trace_end) = {
-                // The borrow ends with the scrutinee, so the arms below are
-                // free to go back through `self`.
-                let entry = {
-                    let (cpu, mem, _d, _p) = self.slice_parts();
-                    cpu.get_icache_entry(mem)
-                };
+                let entry = self.get_icache_entry();
                 match entry {
                     Ok((start, tlen)) => (start, start + tlen),
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
@@ -2937,10 +2941,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     // Chain to new trace without breaking to outer loop
                     // (matching C++ line 218-220: entry=getICacheEntry; i=entry->i; last=...)
                     let (start, tlen) = {
-                        let chained = {
-                            let (cpu, mem, _d, _p) = self.slice_parts();
-                            cpu.get_icache_entry(mem)
-                        };
+                        let chained = self.get_icache_entry();
                         match chained {
                             Ok(v) => v,
                             Err(crate::cpu::CpuError::CpuLoopRestart) => {
@@ -3060,17 +3061,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Err(e)
     }
 
-    fn fetch_next_instruction(
-        &mut self,
-        mem: &mut BxMemC,
-    ) -> Result<Instruction> {
-        // A plain reborrow: the raw pointer here existed only to manufacture a
-        // borrow with the impl's `'c` lifetime, which a reborrow cannot produce.
-        // With `'c` gone there is nothing to work around.
-        let (mpool_start_idx, _tlen) = self.get_icache_entry(mem)?;
-        Ok(self.i_cache.mpool[mpool_start_idx])
-    }
-
     /// Bochs cpu.cc `linkTrace`, loop-continuation form: after a taken direct
     /// near branch, try to continue at the branch target's cached trace
     /// without returning to the outer loop or re-hashing per branch.
@@ -3119,15 +3109,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             super::icache::TraceLink::store(stamp, start, tlen, rip);
         Some((start, tlen))
     }
+}
+
+/// Instruction fetch runs on the execution context: a lookup can walk page
+/// tables, refill the fetch window and decode guest bytes, all of which need
+/// memory alongside the CPU (Bochs reaches it through `BX_MEM(0)`).
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
+    fn fetch_next_instruction(&mut self) -> Result<Instruction> {
+        let (mpool_start_idx, _tlen) = self.get_icache_entry()?;
+        Ok(self.i_cache.mpool[mpool_start_idx])
+    }
 
     /// Look up the instruction cache for the current RIP.
     /// Returns (mpool_start_idx, tlen) to avoid cloning BxICacheEntry on the hot path.
     /// Matching Bochs cpu.cc getICacheEntry().
     #[inline]
-    fn get_icache_entry(
-        &mut self,
-        mem: &mut BxMemC,
-    ) -> Result<(usize, usize)> {
+    fn get_icache_entry(&mut self) -> Result<(usize, usize)> {
         // Apply machine-wide SMC invalidations this cpu has not seen before
         // consulting the icache — device DMA (Bochs memory.cc
         // dmaWritePhysicalPage) and non-store cpu write paths queue events
@@ -3135,8 +3132,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // synchronously in icache.cc handleSMC; the watermark makes this a
         // single compare per trace lookup. No STOP_TRACE: there is no
         // running trace at a lookup boundary.
-        if mem.smc_seq_next() > self.smc_seq_seen {
-            self.smc_apply_pending(mem, false);
+        if self.memory.smc_seq_next() > self.smc_seq_seen {
+            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
+            cpu.smc_apply_pending(mem, false);
         }
         // Discard allocation-based caches if guest blocks moved since they were
         // filled. This belongs HERE, where the fetch window is consumed, and
@@ -3145,7 +3143,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // access evicted its own code block would otherwise have the next
         // instruction fetched straight out of the still-"valid" window — which
         // by then names another guest block's bytes.
-        self.revalidate_allocation_caches(mem);
+        {
+            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
+            cpu.revalidate_allocation_caches(mem);
+        }
         // Check if we need to prefetch a new page. Bochs cpu.cc getICacheEntry:
         // `bx_address eipBiased = RIP + eipPageBias; if (eipBiased >=
         // eipPageWindowSize) prefetch();` — the compare runs at full bx_address
@@ -3158,10 +3159,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let mut eip_biased_64 = self.rip().wrapping_add(self.eip_page_bias);
         let needs_prefetch = self.eip_page_window_size == 0
             || eip_biased_64 >= u64::from(self.eip_page_window_size);
-        // Get raw pointer to mem before calling prefetch() to work around borrow checker
-        // SAFETY: addr_of_mut avoids creating intermediate reference; pointer valid for fn scope
-        let mem_ptr: *mut BxMemC = unsafe { core::ptr::addr_of_mut!(*mem) };
-
         if needs_prefetch {
             #[cfg(feature = "profiling")]
             {
@@ -3169,7 +3166,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             let mut retry_count = 0;
             loop {
-                self.prefetch(&mut *mem)?;
+                self.prefetch()?;
 
                 if self.eip_page_window_size == 0 || self.eip_fetch_window.is_none() {
                     retry_count += 1;
@@ -3229,12 +3226,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.perf_icache_miss += 1;
         }
 
-        // The prefetch borrow above ends before this call, so an ordinary
-        // reborrow is all this ever needed.
-        let miss_entry = self.serve_icache_miss(eip_biased, p_addr, &mut *mem)?;
+        let miss_entry = self.serve_icache_miss(eip_biased, p_addr)?;
         Ok((miss_entry.mpool_start_idx, miss_entry.tlen as usize))
     }
+}
 
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn get_gpr32(&self, idx: usize) -> u32 {
         // Must handle indices 0-15 (R8D-R15D via REX in 64-bit mode)
         // Matches set_gpr32() which uses direct array access
@@ -3480,11 +3477,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.vmcb_host_offset = None;
         self.fetch_epoch = epoch;
     }
+}
 
-    pub(super) fn prefetch(
-        &mut self,
-        mem: &mut BxMemC,
-    ) -> Result<()> {
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
+    pub(super) fn prefetch(&mut self) -> Result<()> {
         let laddr: BxAddress;
         let page_offset;
 
@@ -3602,10 +3598,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let lpf = lpf_of(laddr);
 
         // Check TLB entry - extract values to avoid holding mutable borrow
+        let user_pl = self.user_pl;
         let (tlb_hit, tlb_ppf, tlb_host_addr) = {
             let tlb_entry = self.itlb.get_entry_of(laddr, 0);
             let hit = (tlb_entry.lpf == lpf)
-                && (tlb_entry.access_bits & (1 << u32::from(self.user_pl))) != 0;
+                && (tlb_entry.access_bits & (1 << u32::from(user_pl))) != 0;
             (hit, tlb_entry.ppf, tlb_entry.host_page)
         };
 
@@ -3634,15 +3631,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             // replace it.
             self.invalidate_itlb_slot(laddr, 0);
             // TLB miss - need to walk page tables
-            // Get a20_mask before borrowing mem mutably
-            let a20_mask = mem.a20_mask();
-            match self.translate_linear(
-                laddr,
-                self.user_pl,
-                MemoryAccessType::Execute,
-                a20_mask,
-                mem,
-            ) {
+            let a20_mask = self.memory.a20_mask();
+            let walk = {
+                let (cpu, mem, _devices, _pc_system) = self.slice_parts();
+                cpu.translate_linear(laddr, user_pl, MemoryAccessType::Execute, a20_mask, mem)
+            };
+            match walk {
                 Ok((p_addr, walk_lpf_mask)) => {
                     self.p_addr_fetch_page = ppf_of(p_addr);
                     itlb_should_update = true;
@@ -3699,18 +3693,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 None => self.eip_fetch_window = None,
             }
         } else {
-            let mem_len = mem.get_memory_len();
+            let mem_len = self.memory.get_memory_len();
             let page_base = self.p_addr_fetch_page;
             let current_p_addr = page_base.wrapping_add(u64::from(page_offset));
-            let page_policy = self.memory_access_policy(mem.a20_addr(page_base));
+            let page_policy = self.memory_access_policy(self.memory.a20_addr(page_base));
 
-            // Asking where the page lives, rather than for the bytes, is what
-            // lets `mem` stay borrowed normally here: the answer is a range,
-            // so nothing outlives the call and the arms below can still use
-            // `mem`. This used to require laundering `mem` through a raw
-            // pointer purely to escape the returned slice's borrow.
+            // The answer is a range, not the bytes, so the borrow of `memory`
+            // ends with the call and the arms below can borrow it again.
             let mut direct_page_offset: Option<usize> = None;
-            let page_mapping = mem.host_mem_range_pinned(
+            let page_mapping = self.memory.host_mem_range_pinned(
                 page_base,
                 MemoryAccessType::Execute,
                 page_policy,
@@ -3732,8 +3723,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     // the next lookup refill at its boundary.  It must never
                     // create an ITLB page mapping from this short slice.
                     let current_policy =
-                        self.memory_access_policy(mem.a20_addr(current_p_addr));
-                    let current_mapping = mem.host_mem_range_pinned(
+                        self.memory_access_policy(self.memory.a20_addr(current_p_addr));
+                    let current_mapping = self.memory.host_mem_range_pinned(
                         current_p_addr,
                         MemoryAccessType::Execute,
                         current_policy,
@@ -3813,7 +3804,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         Ok(())
     }
+}
 
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn long64_mode(&self) -> bool {
         self.cpu_mode == CpuMode::Long64
     }
@@ -4294,6 +4287,7 @@ mod tests {
             cpudb::intel::core_i7_skylake::Corei7SkylakeX,
             decoder::BxSegregs,
             crregs::{BxCr0, BxCr4},
+            exec_ctx::exec_with,
         },
         memory::{BxMemC, BxMemoryStubC},
         params::BxParams,
@@ -4316,7 +4310,6 @@ mod tests {
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
         );
-        let mem_ptr: *mut BxMemC = &mut mem;
         cpu.wire_memory_access(NonNull::from(&mut mem));
         let (host_base, host_len) = mem.identity_guest_base();
         cpu.install_memory_bases(&mut mem);
@@ -4335,7 +4328,8 @@ mod tests {
         cpu.cr4 = BxCr4::empty();
         cpu.set_rip(LEGACY_TABLE);
         cpu.prev_rip = LEGACY_TABLE;
-        let (legacy_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
+        let (legacy_mpool, _) =
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         let legacy_mode = cpu.fetch_mode_mask.bits().into();
         assert!(cpu.i_cache.find_entry(LEGACY_TABLE, legacy_mode).is_some());
         assert!(mem.smc_range_has_stamps(LEGACY_TABLE, 4));
@@ -4373,7 +4367,7 @@ mod tests {
         cpu.set_rip(LEGACY_TABLE);
         cpu.prev_rip = LEGACY_TABLE;
         let (legacy_reloaded, _) =
-            unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         assert_ne!(legacy_reloaded, legacy_mpool);
         let legacy_instr = cpu.i_cache.mpool[legacy_reloaded];
         crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, |ctx| {
@@ -4390,7 +4384,8 @@ mod tests {
         cpu.invalidate_prefetch_q();
         cpu.set_rip(PAE_TABLE);
         cpu.prev_rip = PAE_TABLE;
-        let (pae_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
+        let (pae_mpool, _) =
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         let pae_mode = cpu.fetch_mode_mask.bits().into();
         assert!(cpu.i_cache.find_entry(PAE_TABLE, pae_mode).is_some());
         assert!(mem.smc_range_has_stamps(PAE_TABLE, 8));
@@ -4427,7 +4422,7 @@ mod tests {
         cpu.set_rip(PAE_TABLE);
         cpu.prev_rip = PAE_TABLE;
         let (pae_reloaded, _) =
-            unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         assert_ne!(pae_reloaded, pae_mpool);
         let pae_instr = cpu.i_cache.mpool[pae_reloaded];
         crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, |ctx| {
@@ -4454,7 +4449,6 @@ mod tests {
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
         );
-        let mem_ptr: *mut BxMemC = &mut mem;
         cpu.wire_memory_access(NonNull::from(&mut mem));
         let (host_base, host_len) = mem.identity_guest_base();
         cpu.install_memory_bases(&mut mem);
@@ -4491,7 +4485,8 @@ mod tests {
 
         cpu.set_rip(SPLIT_RIP);
         cpu.prev_rip = SPLIT_RIP;
-        let (old_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
+        let (old_mpool, _) =
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         let fetch_mode = cpu.fetch_mode_mask.bits().into();
         assert!(
             cpu.i_cache.find_entry(FIRST_CODE_PAGE + 0x0ffe, fetch_mode).is_some(),
@@ -4526,7 +4521,8 @@ mod tests {
         cpu.async_event = 0;
         cpu.set_rip(SPLIT_RIP);
         cpu.prev_rip = SPLIT_RIP;
-        let (new_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr) }.unwrap();
+        let (new_mpool, _) =
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         assert_ne!(
             new_mpool, old_mpool,
             "a primary cache hit after remapping would reuse stale split code"
