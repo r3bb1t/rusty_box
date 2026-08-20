@@ -421,22 +421,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
     }
 
-    /// MOVZX r32, r/m8 - Move with zero-extend
-    pub fn movzx_gd_eb(&mut self, instr: &Instruction) {
-        let dst = instr.dst() as usize;
-        let src = instr.src1() as usize;
-        let val = self.read_8bit_regx(src, instr.extend8bit_l()) as u32;
-        self.set_gpr32(dst, val);
-    }
-
-    /// MOVZX r32, r/m16 - Move with zero-extend
-    pub fn movzx_gd_ew(&mut self, instr: &Instruction) {
-        let dst = instr.dst() as usize;
-        let src = instr.src1() as usize;
-        let val = self.get_gpr16(src) as u32;
-        self.set_gpr32(dst, val);
-    }
-
     /// MOVSX r16, r/m8 — unified dispatch (register or memory form)
     pub fn movsx_gw_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
@@ -445,14 +429,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             self.movsx_gw_eb_m(instr)
         }
-    }
-
-    /// MOVSX r32, r/m8 - Move with sign-extend (legacy operands form, superseded by _r/_m variants)
-    pub fn movsx_gd_eb_legacy(&mut self, instr: &Instruction) {
-        let dst = instr.dst() as usize;
-        let src = instr.src1() as usize;
-        let val = self.read_8bit_regx(src, instr.extend8bit_l()) as i8 as i32 as u32;
-        self.set_gpr32(dst, val);
     }
 
     // =========================================================================
@@ -467,14 +443,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         self.v_write_word(seg, eaddr, instr.iw())?;
         Ok(())
-    }
-
-    /// MOV r16, imm16 (register form)
-    /// Matching C++ data_xfer16.cc MOV_EwIwR
-    pub fn mov_ew_iw_r(&mut self, instr: &Instruction) {
-        let dst = instr.dst() as usize;
-
-        self.set_gpr16(dst, instr.iw());
     }
 
     /// MOV r/m16, r16 (memory form)
@@ -756,54 +724,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // 32-bit MOV memory forms (matching C++ data_xfer32.cc)
     // =========================================================================
 
-    /// MOV r/m32, imm32 (memory form)
-    /// Matching C++ data_xfer32.cc MOV_EdIdM
-    pub fn mov_ed_id_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-
-        self.v_write_dword(seg, eaddr, instr.id())?;
-        Ok(())
-    }
-
-    /// MOV r32, imm32 (register form)
-    /// Matching C++ data_xfer32.cc MOV_EdIdR
-    /// Note: BX_CLEAR_64BIT_HIGH is handled in set_gpr32
-    pub fn mov_ed_id_r(&mut self, instr: &Instruction) {
-        let dst = instr.dst() as usize;
-
-        self.set_gpr32(dst, instr.id());
-    }
-
-    /// MOV r/m32, r32 (memory form)
-    ///
-    /// Writes a 32-bit value from the source register to memory.
-    /// The memory address is computed from the ModRM byte and segment register.
-    ///
-    /// Matching C++ data_xfer32.cc BX_CPU_C::MOV32_EdGdM
-    pub fn mov32_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let src_reg = instr.src() as usize;
-        let val32 = self.get_gpr32(src_reg);
-
-        self.v_write_dword(seg, eaddr, val32)?;
-        Ok(())
-    }
-
-    /// MOV r32, r/m32 (memory form)
-    /// Matching C++ data_xfer32.cc MOV32_GdEdM
-    /// Note: BX_CLEAR_64BIT_HIGH is handled in set_gpr32
-    pub fn mov32_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let val32 = self.v_read_dword(seg, eaddr)?;
-        let dst_reg = instr.dst() as usize;
-
-        self.set_gpr32(dst_reg, val32);
-        Ok(())
-    }
-
     /// MOV r32, r/m32 (memory form with SS segment override)
     /// Matching C++ data_xfer32.cc MOV32S_GdEdM
     /// Uses stack_read_dword instead of read_virtual_dword
@@ -849,55 +769,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.write_rmw_linear_dword(op2);
         self.set_gpr32(src_reg, op1);
         Ok(())
-    }
-
-    /// MOVZX r32, r/m8 (memory form)
-    /// Matching C++ data_xfer32.cc MOVZX_GdEbM
-    /// Zero extend byte op2 into dword op1
-    pub fn movzx_gd_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let op2_8 = self.v_read_byte(seg, eaddr)?;
-        let dst_reg = instr.dst() as usize;
-
-        self.set_gpr32(dst_reg, op2_8 as u32);
-        Ok(())
-    }
-
-    /// MOVZX r32, r8 (register form)
-    /// Matching C++ data_xfer32.cc MOVZX_GdEbR
-    /// Zero extend byte op2 into dword op1
-    pub fn movzx_gd_eb_r(&mut self, instr: &Instruction) {
-        let src_reg = instr.src() as usize;
-        let extend8bit_l = instr.extend8bit_l();
-        let op2_8 = self.read_8bit_regx(src_reg, extend8bit_l);
-        let dst_reg = instr.dst() as usize;
-
-        self.set_gpr32(dst_reg, op2_8 as u32);
-    }
-
-    /// MOVZX r32, r/m16 (memory form)
-    /// Matching C++ data_xfer32.cc MOVZX_GdEwM
-    /// Zero extend word op2 into dword op1
-    pub fn movzx_gd_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let op2_16 = self.v_read_word(seg, eaddr)?;
-        let dst_reg = instr.dst() as usize;
-
-        self.set_gpr32(dst_reg, op2_16 as u32);
-        Ok(())
-    }
-
-    /// MOVZX r32, r16 (register form)
-    /// Matching C++ data_xfer32.cc MOVZX_GdEwR
-    /// Zero extend word op2 into dword op1
-    pub fn movzx_gd_ew_r(&mut self, instr: &Instruction) {
-        let src_reg = instr.src() as usize;
-        let op2_16 = self.get_gpr16(src_reg);
-        let dst_reg = instr.dst() as usize;
-
-        self.set_gpr32(dst_reg, op2_16 as u32);
     }
 
     /// MOVSX r32, r/m8 (memory form)

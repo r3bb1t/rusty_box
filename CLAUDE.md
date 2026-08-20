@@ -101,7 +101,7 @@ through Deref — bind the inner value first.
 - **No global state** -- each `Emulator` is fully self-contained
 - **Bochs parity** -- all logic must match Bochs C++ source exactly; deviations are bugs
 - **no_std + no_alloc core** -- CPU, memory, decoder, I/O devices, emulator all compile without alloc. Fixed-size arrays and RingBuffer replace Vec/VecDeque. Alloc-dependent features (GUI, diagnostic String returns, StopHandle, hook closures) are behind `#[cfg(feature = "alloc")]`.
-- **Send by derivation** -- `BxMemoryStubC` already derives (pinned by `const` assert); the last `unsafe impl Send` (`Emulator`) dies with the remaining CPU pointer fields (campaign Phase E–H). The doctrine-ratchets ci step enforces both directions.
+- **Send by derivation** -- no `unsafe impl Send` in the tree. `BxMemoryStubC` and the alloc-build `Emulator` are pinned by `const` asserts in their own modules; the no-alloc `Emulator` is deliberately `!Send` (caller-supplied AP CPU pointers). The doctrine-ratchets ci step enforces both directions.
 
 ### no_alloc Construction (UEFI path)
 

@@ -26,7 +26,7 @@ const SNAPSHOT_MAGIC: &[u8; 8] = b"RBXSNAP1";
 /// the `SerialTx` timer owner plus each port's `tx_timer_handle` /
 /// `tx_timer_delay_usec` / `tx_timer_request_pending` in the SERIAL section.
 #[cfg(feature = "std")]
-pub(crate) const SNAPSHOT_V3_VERSION: u32 = 7;
+pub(crate) const SNAPSHOT_V3_VERSION: u32 = 8;
 #[cfg(feature = "std")]
 pub(crate) const SNAPSHOT_SECTION_VERSION: u32 = 1;
 

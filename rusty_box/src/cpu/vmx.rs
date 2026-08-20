@@ -2,6 +2,7 @@
 
 #![allow(dead_code, non_camel_case_types)]
 
+use super::apic::LapicRegister;
 use super::cpu::Exception;
 use super::decoder::{BxSegregs, Instruction};
 use super::instrumentation::Instrumentation;
@@ -72,6 +73,11 @@ const VMCS_16BIT_CONTROL_VPID: u32 = 0x0000;
 // Posted-interrupt notification vector — Bochs vmx.h
 // VMCS_16BIT_CONTROL_POSTED_INTERRUPT_VECTOR.
 const VMCS_16BIT_CONTROL_POSTED_INTERRUPT_NOTIFICATION_VECTOR: u32 = 0x0002;
+/// Guest interrupt status — Bochs vmx.h `VMCS_16BIT_GUEST_INTERRUPT_STATUS`.
+/// Low byte is RVI (requesting virtual interrupt), high byte SVI (servicing
+/// virtual interrupt). Loaded at VMENTRY and stored back at VMEXIT, but only
+/// while virtual-interrupt delivery is enabled.
+const VMCS_16BIT_GUEST_INTERRUPT_STATUS: u32 = 0x0810;
 const VMCS_16BIT_GUEST_ES_SELECTOR: u32 = 0x0800;
 const VMCS_16BIT_GUEST_CS_SELECTOR: u32 = 0x0802;
 const VMCS_16BIT_GUEST_SS_SELECTOR: u32 = 0x0804;
@@ -113,7 +119,27 @@ const VMCS_64BIT_CONTROL_EPTPTR: u32 = 0x201A;
 // Posted-interrupt descriptor address — Bochs vmx.h
 // VMCS_64BIT_CONTROL_POSTED_INTERRUPT_DESC_ADDR.
 const VMCS_64BIT_CONTROL_POSTED_INTERRUPT_DESC_ADDR: u32 = 0x2016;
+/// EOI-exit bitmaps 0..3 — Bochs vmx.h `VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP0`
+/// and its three successors, each 64 bits, together one bit per vector.
+/// Encodings step by 2 because each 64-bit field has a `_HI` half.
+const VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP0: u32 = 0x201C;
+const VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP1: u32 = 0x201E;
+const VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP2: u32 = 0x2020;
+const VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP3: u32 = 0x2022;
 const VMCS_64BIT_GUEST_PHYSICAL_ADDR: u32 = 0x2400;
+
+/// One 64-bit EOI-exit bitmap field as a qword, from the two `u32` halves the
+/// cache keeps it in. Bochs stores `eoi_exit_bitmap[8]` and VMREADs the pair
+/// (`VMread32(BITMAP0 + reg)`); the guest sees four 64-bit fields.
+fn eoi_exit_bitmap_qword(v: &BxVmcs, index: usize) -> u64 {
+    u64::from(v.eoi_exit_bitmap[index * 2]) | (u64::from(v.eoi_exit_bitmap[index * 2 + 1]) << 32)
+}
+
+/// Counterpart of [`eoi_exit_bitmap_qword`] for VMWRITE.
+fn set_eoi_exit_bitmap_qword(v: &mut BxVmcs, index: usize, value: u64) {
+    v.eoi_exit_bitmap[index * 2] = value as u32;
+    v.eoi_exit_bitmap[index * 2 + 1] = (value >> 32) as u32;
+}
 
 // Bochs vmx.h VMCS_FIELD_WIDTH(encoding) bits [14:13].
 const VMCS_FIELD_WIDTH_16BIT: u32 = 0;
@@ -607,6 +633,9 @@ pub(super) const VMX_VM_EXEC_CTRL2_MBE_CTRL: u32 = 1 << 22;
 // rather than silently accepting them (see vmenter check_vm_controls).
 pub(super) const VMX_VM_EXEC_CTRL2_VIRTUALIZE_APIC_ACCESSES: u32 = 1 << 0;
 pub(super) const VMX_VM_EXEC_CTRL2_VIRTUALIZE_APIC_REGISTERS: u32 = 1 << 8;
+/// Bochs vmx_ctrls.h `VMX_VM_EXEC_CTRL2_VIRTUALIZE_X2APIC_MODE`. Routes the
+/// guest's x2APIC MSR accesses to the virtual-APIC page.
+pub(super) const VMX_VM_EXEC_CTRL2_VIRTUALIZE_X2APIC_MODE: u32 = 1 << 4;
 pub(super) const VMX_VM_EXEC_CTRL2_VIRTUAL_INT_DELIVERY: u32 = 1 << 9;
 
 // VM-exit control bits — Bochs vmx_ctrls.h.
@@ -753,16 +782,28 @@ const BX_SEG_TYPE_BUSY_386_TSS: u32 = 0xB;
 // in lock-step with the values rdmsr_value returns for those MSRs in
 // proc_ctrl.rs.
 pub(super) const VMX_PINBASED_CTLS_ALLOWED_0: u32 = 0x0000_003F;
-pub(super) const VMX_PINBASED_CTLS_ALLOWED_1: u32 = 0x0000_003F;
+/// Allowed-1 adds PROCESS_POSTED_INTERRUPTS (bit 7) to the required set.
+pub(super) const VMX_PINBASED_CTLS_ALLOWED_1: u32 =
+    VMX_PINBASED_CTLS_ALLOWED_0 | VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS;
 pub(super) const VMX_PROCBASED_CTLS_ALLOWED_0: u32 = 0x0401_E172;
-pub(super) const VMX_PROCBASED_CTLS_ALLOWED_1: u32 = 0x0401_E172;
+/// Allowed-1 adds the TPR shadow (bit 21) and the gate to the secondary
+/// controls (bit 31). Until bit 31 may be set, `proc_based_ctls2()` reads as
+/// zero no matter what the guest wrote, so the whole secondary control set —
+/// EPT, VPID, INVPCID and now virtual-interrupt delivery — is unreachable.
+pub(super) const VMX_PROCBASED_CTLS_ALLOWED_1: u32 = VMX_PROCBASED_CTLS_ALLOWED_0
+    | VMX_VM_EXEC_CTRL1_TPR_SHADOW
+    | VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS;
 pub(super) const VMX_EXIT_CTLS_ALLOWED_0: u32 = 0;
-pub(super) const VMX_EXIT_CTLS_ALLOWED_1: u32 = 0x0003_6FFF;
+/// Allowed-1 adds INTA_ON_VMEXIT (bit 15), which posted interrupts require.
+pub(super) const VMX_EXIT_CTLS_ALLOWED_1: u32 = 0x0003_6FFF | VMX_VMEXIT_CTRL1_INTA_ON_VMEXIT;
 pub(super) const VMX_ENTRY_CTLS_ALLOWED_0: u32 = 0x0000_0011;
 pub(super) const VMX_ENTRY_CTLS_ALLOWED_1: u32 = 0x0000_FFFF;
 pub(super) const VMX_PROCBASED_CTLS2_ALLOWED_0: u32 = 0;
-pub(super) const VMX_PROCBASED_CTLS2_ALLOWED_1: u32 =
-    VMX_VM_EXEC_CTRL2_EPT_ENABLE | VMX_VM_EXEC_CTRL2_VPID_ENABLE | VMX_VM_EXEC_CTRL2_INVPCID;
+pub(super) const VMX_PROCBASED_CTLS2_ALLOWED_1: u32 = VMX_VM_EXEC_CTRL2_EPT_ENABLE
+    | VMX_VM_EXEC_CTRL2_VPID_ENABLE
+    | VMX_VM_EXEC_CTRL2_INVPCID
+    | VMX_VM_EXEC_CTRL2_VIRTUAL_INT_DELIVERY
+    | VMX_VM_EXEC_CTRL2_VIRTUALIZE_X2APIC_MODE;
 
 /// INVEPT type field — Bochs vmx.cc INVEPT decodes this from the GPR
 /// dereferenced by `i->dst()`. Numeric values are part of the SDM ABI.
@@ -1087,9 +1128,24 @@ pub struct BxVmcs {
     /// when `VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS` is set.
     pub pi_desc_addr: u64,
     /// Posted-interrupt notification vector — Bochs
-    /// `posted_intr_notification_vector`. Bochs validates < 256 at VMENTRY,
-    /// so the value fits in u8.
-    pub pi_notification_vector: u8,
+    /// `posted_intr_notification_vector`. Held at the VMCS field's full 16-bit
+    /// width so VMENTRY can reject a value above 255, which is what Bochs
+    /// checks; truncating on VMWRITE would make the illegal value
+    /// unobservable and let the entry succeed.
+    pub pi_notification_vector: u16,
+    /// Requesting virtual interrupt — Bochs `rvi`. The highest-priority vector
+    /// pending in the virtual IRR.
+    pub rvi: u8,
+    /// Servicing virtual interrupt — Bochs `svi`. The highest-priority vector
+    /// currently in the virtual ISR.
+    pub svi: u8,
+    /// Virtual processor priority — Bochs `vppr`, mirrored into the
+    /// virtual-APIC page's PPR register by `VMX_PPR_Virtualization`.
+    pub vppr: u8,
+    /// EOI-exit bitmap — Bochs `eoi_exit_bitmap[8]`, one bit per vector. A set
+    /// bit turns the guest's EOI for that vector into a trap-like
+    /// virtualised-EOI VMEXIT instead of a silent virtual EOI.
+    pub eoi_exit_bitmap: [u32; 8],
     /// Virtual Processor Identifier — Bochs `vpid`. VMCS_16BIT_CONTROL_VPID
     /// (encoding 0x0). When `VPID_ENABLE` is set the guest's TLB entries
     /// are tagged with this value; must be non-zero per VMENTRY check.
@@ -1661,6 +1717,18 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         Some(match encoding {
             // 16-bit guest selectors.
             VMCS_16BIT_CONTROL_VPID => u64::from(v.vpid),
+            VMCS_16BIT_CONTROL_POSTED_INTERRUPT_NOTIFICATION_VECTOR => {
+                u64::from(v.pi_notification_vector)
+            }
+            // Bochs vmx.cc VMexitSaveGuestState packs SVI into the high byte.
+            VMCS_16BIT_GUEST_INTERRUPT_STATUS => {
+                (u64::from(v.svi) << 8) | u64::from(v.rvi)
+            }
+            VMCS_64BIT_CONTROL_POSTED_INTERRUPT_DESC_ADDR => v.pi_desc_addr,
+            VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP0 => eoi_exit_bitmap_qword(v, 0),
+            VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP1 => eoi_exit_bitmap_qword(v, 1),
+            VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP2 => eoi_exit_bitmap_qword(v, 2),
+            VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP3 => eoi_exit_bitmap_qword(v, 3),
             VMCS_16BIT_GUEST_ES_SELECTOR => v.guest_es_selector as u64,
             VMCS_16BIT_GUEST_CS_SELECTOR => v.guest_cs_selector as u64,
             VMCS_16BIT_GUEST_SS_SELECTOR => v.guest_ss_selector as u64,
@@ -1816,6 +1884,18 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let v = &mut self.vmcs;
         match encoding {
             VMCS_16BIT_CONTROL_VPID => v.vpid = value as u16,
+            VMCS_16BIT_CONTROL_POSTED_INTERRUPT_NOTIFICATION_VECTOR => {
+                v.pi_notification_vector = value as u16
+            }
+            VMCS_16BIT_GUEST_INTERRUPT_STATUS => {
+                v.rvi = value as u8;
+                v.svi = (value >> 8) as u8;
+            }
+            VMCS_64BIT_CONTROL_POSTED_INTERRUPT_DESC_ADDR => v.pi_desc_addr = value,
+            VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP0 => set_eoi_exit_bitmap_qword(v, 0, value),
+            VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP1 => set_eoi_exit_bitmap_qword(v, 1, value),
+            VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP2 => set_eoi_exit_bitmap_qword(v, 2, value),
+            VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP3 => set_eoi_exit_bitmap_qword(v, 3, value),
             VMCS_16BIT_GUEST_ES_SELECTOR => v.guest_es_selector = value as u16,
             VMCS_16BIT_GUEST_CS_SELECTOR => v.guest_cs_selector = value as u16,
             VMCS_16BIT_GUEST_SS_SELECTOR => v.guest_ss_selector = value as u16,
@@ -2211,7 +2291,20 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             self.invalidate_prefetch_q();
             return Err(e);
         }
-        self.vmsucceed();
+        // No `vmsucceed()` here. VMENTRY has already loaded the guest's
+        // RFLAGS, and `vmsucceed` writes OSZAPC — reporting success into
+        // registers that now belong to the guest would corrupt the flags the
+        // guest resumes with. Bochs vmx.cc `VMLAUNCH` ends its success path at
+        // `BX_NEXT_TRACE` and calls `VMsucceed` only on the paths that do not
+        // enter the guest.
+        //
+        // Tail of Bochs vmx.cc VMLAUNCH: with a TPR shadow the entry ends in
+        // TPR virtualization, which under virtual-interrupt delivery does PPR
+        // virtualization and evaluates whether a virtual interrupt is already
+        // deliverable, and otherwise performs the TPR-threshold check.
+        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_TPR_SHADOW != 0 {
+            self.vmx_tpr_virtualization()?;
+        }
         // Guest now runs from the loaded RIP — the CPU loop picks up the new
         // prefetch target after this instruction returns.
         self.invalidate_prefetch_q();
@@ -2298,52 +2391,386 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     }
 
     // =========================================================================
-    // TPR-threshold VMEXIT trigger — Bochs vapic.cc VMX_TPR_Threshold_Vmexit.
+    // Virtualised APIC — Bochs cpu/vapic.cc
     //
-    // Wired up: this helper runs from the CR8 write paths (and, when the xAPIC
-    // MMIO TPR write hook acquires a CpuC back-reference, from the LAPIC TPR
-    // write hook). It raises VmxVmexitReason::TprThreshold whenever the upper
-    // nibble of the virtual TPR drops below the 4-bit threshold field.
+    // Ported: the virtual-APIC page accessors, TPR / PPR / EOI / self-IPI
+    // virtualization, virtual-interrupt delivery, and posted-interrupt
+    // processing. The TPR-threshold VMEXIT lives inside
+    // `vmx_tpr_virtualization`, which is where Bochs raises it.
     //
-    // Not yet ported: full Bochs vapic.cc — APIC-access page virtualisation,
-    // APIC register virtualisation, and virtual-interrupt delivery. VMENTRY
-    // validation rejects those controls (see vmenter check_vm_controls)
-    // pending a follow-up port; see cpp_orig/bochs/cpu/vapic.cc.
+    // Deliberately NOT offered: APIC-access page virtualisation and APIC
+    // register virtualisation. Both intercept guest accesses to a physical
+    // page, which Bochs catches in `access_read_physical`; this port reaches
+    // memory through cached host pointers on a path that cannot fault, so the
+    // seam does not exist here. Neither control is advertised in
+    // IA32_VMX_PROCBASED_CTLS2 and VMENTRY refuses both.
     // =========================================================================
 
-    /// Bochs vapic.cc `VMX_TPR_Threshold_Vmexit` -- raises a TPR-threshold
-    /// VMEXIT (trap-like, qualification = 0) when the guest's virtual TPR
-    /// upper nibble drops below the host's 4-bit threshold. Called from the
-    /// CR8 / xAPIC TPR write path. No-op outside VMX guest mode or when the
-    /// TPR_SHADOW execution control is clear.
-    pub(super) fn vmx_tpr_threshold_vmexit(&mut self) -> Result<()> {
-        if !self.in_vmx || !self.in_vmx_guest {
+    /// Read the virtual-APIC TPR byte (offset 0x80) from the guest's
+    /// virtual-APIC page. Bochs vapic.cc `VMX_Read_Virtual_APIC`.
+    fn read_virtual_apic_tpr_byte(&mut self) -> u8 {
+        self.vmx_read_virtual_apic(LapicRegister::Tpr as u32) as u8
+    }
+
+    // =========================================================================
+    // Virtual-APIC page — Bochs cpu/vapic.cc
+    //
+    // The page is ordinary guest memory holding an xAPIC register image. Every
+    // access here goes to it directly rather than through the APIC-access
+    // interception path, because the two pages may be the same page and Bochs
+    // notes the recursion that would cause.
+    // =========================================================================
+
+    /// One 32-bit virtual-APIC register. Bochs vapic.cc
+    /// `VMX_Read_Virtual_APIC`.
+    pub(super) fn vmx_read_virtual_apic(&mut self, offset: u32) -> u32 {
+        // No guard on a zero page address: guest-physical 0 is a page-aligned
+        // address VMENTRY accepts, so treating it as "no page" would silently
+        // ignore a legal configuration. Every caller runs inside a guest whose
+        // entry already validated this field.
+        let paddr = self.vmcs.virtual_apic_page_addr + u64::from(offset);
+        u32::from_le_bytes([
+            self.read_physical_byte(paddr),
+            self.read_physical_byte(paddr + 1),
+            self.read_physical_byte(paddr + 2),
+            self.read_physical_byte(paddr + 3),
+        ])
+    }
+
+    /// One 32-bit virtual-APIC register. Bochs vapic.cc
+    /// `VMX_Write_Virtual_APIC`.
+    pub(super) fn vmx_write_virtual_apic(&mut self, offset: u32, value: u32) {
+        // See `vmx_read_virtual_apic` on why a zero page address is not special.
+        let paddr = self.vmcs.virtual_apic_page_addr + u64::from(offset);
+        for (i, byte) in value.to_le_bytes().into_iter().enumerate() {
+            self.write_physical_byte(paddr + i as u64, byte);
+        }
+    }
+
+    /// Set one bit in a 256-bit virtual-APIC bitmap (VIRR or VISR).
+    ///
+    /// Bochs vapic.cc `vapic_set_vector`. The xAPIC register image gives each
+    /// 32-bit slice a 16-byte slot, so slice *n* lives at `arrbase + 16*n` —
+    /// not at `arrbase + 4*n`.
+    fn vapic_set_vector(&mut self, arrbase: u32, vector: u8) {
+        let reg = u32::from(vector) / 32;
+        let offset = arrbase + 16 * reg;
+        let value = self.vmx_read_virtual_apic(offset) | (1u32 << (vector & 0x1f));
+        self.vmx_write_virtual_apic(offset, value);
+    }
+
+    /// Clear `vector` from a 256-bit virtual-APIC bitmap and return the
+    /// highest-priority vector still set in it (0 when none).
+    ///
+    /// Bochs vapic.cc `vapic_clear_and_find_highest_priority_int`. Deliberately
+    /// NOT built on `BxLocalApic::highest_priority_int`: that one masks each
+    /// slice with the physical LAPIC's IER, which has no counterpart in the
+    /// virtual-APIC page.
+    fn vapic_clear_and_find_highest_priority_int(&mut self, arrbase: u32, vector: u8) -> u8 {
+        let mut arr = [0u32; 8];
+        for (n, slot) in arr.iter_mut().enumerate() {
+            *slot = self.vmx_read_virtual_apic(arrbase + 16 * n as u32);
+        }
+
+        let reg = usize::from(vector) / 32;
+        arr[reg] &= !(1u32 << (vector & 0x1f));
+        self.vmx_write_virtual_apic(arrbase + 16 * reg as u32, arr[reg]);
+
+        for n in (0..8).rev() {
+            if arr[n] != 0 {
+                // Bochs most_significant_bitd: the index of the top set bit.
+                return (n as u8) * 32 + (31 - arr[n].leading_zeros()) as u8;
+            }
+        }
+        0
+    }
+
+    /// True while virtual-interrupt delivery is active for this guest.
+    #[inline]
+    fn virtual_interrupt_delivery(&self) -> bool {
+        self.proc_based_ctls2() & VMX_VM_EXEC_CTRL2_VIRTUAL_INT_DELIVERY != 0
+    }
+
+    /// Recompute the virtual PPR from the virtual TPR and SVI, and publish it
+    /// into the virtual-APIC page. Bochs vapic.cc `VMX_PPR_Virtualization`.
+    fn vmx_ppr_virtualization(&mut self) {
+        let vtpr = self.vmx_read_virtual_apic(LapicRegister::Tpr as u32) as u8;
+        let svi = self.vmcs.svi;
+        let vppr = if (vtpr >> 4) >= (svi >> 4) {
+            vtpr
+        } else {
+            svi & 0xf0
+        };
+        self.vmcs.vppr = vppr;
+        self.vmx_write_virtual_apic(LapicRegister::Ppr as u32, u32::from(vppr));
+    }
+
+    /// Decide whether a virtual interrupt is deliverable and arm or disarm the
+    /// pending-virtual-interrupt event accordingly. Bochs vapic.cc
+    /// `VMX_Evaluate_Pending_Virtual_Interrupts`.
+    ///
+    /// The interrupt-window control suppresses the evaluation entirely: with
+    /// it set the host wants the window VMEXIT instead of a virtual delivery.
+    fn vmx_evaluate_pending_virtual_interrupts(&mut self) {
+        let window = self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_INTERRUPT_WINDOW_VMEXIT != 0;
+        let deliverable = !window && (self.vmcs.rvi >> 4) > (self.vmcs.vppr >> 4);
+        if deliverable {
+            self.signal_event(BxCpuC::<T>::BX_EVENT_PENDING_VMX_VIRTUAL_INTR);
+        } else {
+            self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_VMX_VIRTUAL_INTR);
+        }
+    }
+
+    /// TPR virtualization — Bochs vapic.cc `VMX_TPR_Virtualization`. Runs
+    /// trap-like from the async-event drain, and directly from a CR8 write or
+    /// an x2APIC TPR WRMSR.
+    ///
+    /// With virtual-interrupt delivery the new TPR feeds PPR virtualization and
+    /// a fresh interrupt evaluation; without it the TPR shadow is compared
+    /// against the threshold and may raise a trap-like VMEXIT.
+    pub(super) fn vmx_tpr_virtualization(&mut self) -> Result<()> {
+        self.clear_event(BxCpuC::<T>::BX_EVENT_VMX_VTPR_UPDATE);
+
+        if self.virtual_interrupt_delivery() {
+            self.vmx_ppr_virtualization();
+            self.vmx_evaluate_pending_virtual_interrupts();
             return Ok(());
         }
-        if self.vmcs.proc_based_ctls & VMX_VM_EXEC_CTRL1_TPR_SHADOW == 0 {
-            return Ok(());
-        }
-        // VMENTRY check_vm_controls already rejected `tpr_threshold > 15`,
-        // but mask defensively in case the field is later extended.
-        let threshold = (self.vmcs.tpr_threshold & 0xF) as u8;
-        let virt_tpr_high = self.read_virtual_apic_tpr_byte() >> 4;
-        if virt_tpr_high < threshold {
+
+        let tpr_shadow = self.read_virtual_apic_tpr_byte() >> 4;
+        if tpr_shadow < (self.vmcs.tpr_threshold & 0xF) as u8 {
             return self.vmx_vmexit(VmxVmexitReason::TprThreshold, 0);
         }
         Ok(())
     }
 
-    /// Read the virtual-APIC TPR byte (offset 0x80) from the guest's
-    /// virtual-APIC page. Bochs vapic.cc `VMX_Read_Virtual_APIC`.
-    fn read_virtual_apic_tpr_byte(&mut self) -> u8 {
-        let virt_apic = self.vmcs.virtual_apic_page_addr;
-        if virt_apic == 0 {
-            // Bochs requires a valid virtual-APIC page when TPR_SHADOW is
-            // set; if rusty_box hasn't loaded one yet, return 0 so the
-            // threshold check never spuriously fires.
-            return 0;
+    /// EOI virtualization — Bochs vapic.cc `VMX_EOI_Virtualization`. Runs
+    /// trap-like from the async-event drain and directly from an x2APIC EOI
+    /// WRMSR.
+    ///
+    /// Retires the vector the guest is servicing from the virtual ISR, then
+    /// either reports it to the host (when its EOI-exit bit is set) or
+    /// re-evaluates for the next virtual interrupt.
+    pub(super) fn vmx_eoi_virtualization(&mut self) -> Result<()> {
+        self.clear_event(BxCpuC::<T>::BX_EVENT_VMX_VEOI_UPDATE);
+
+        if !self.virtual_interrupt_delivery() {
+            return self
+                .vmx_vmexit(VmxVmexitReason::ApicWrite, LapicRegister::Eoi as u64);
         }
-        self.read_physical_byte(virt_apic + 0x80)
+
+        self.vmx_write_virtual_apic(LapicRegister::Eoi as u32, 0);
+
+        let vector = self.vmcs.svi;
+        self.vmcs.svi =
+            self.vapic_clear_and_find_highest_priority_int(LapicRegister::Isr1 as u32, vector);
+        self.vmx_ppr_virtualization();
+
+        if self.eoi_exit_bitmap_bit(vector) {
+            // Trap-like: the guest's EOI completed, the host is only told.
+            return self.vmx_vmexit(VmxVmexitReason::VirtualizedEoi, u64::from(vector));
+        }
+        self.vmx_evaluate_pending_virtual_interrupts();
+        Ok(())
+    }
+
+    /// One bit of the EOI-exit bitmap. Bochs vapic.cc reads it through
+    /// `bx_local_apic_c::get_vector(vm->eoi_exit_bitmap, vector)`.
+    fn eoi_exit_bitmap_bit(&self, vector: u8) -> bool {
+        let reg = usize::from(vector) / 32;
+        self.vmcs.eoi_exit_bitmap[reg] & (1u32 << (vector & 0x1f)) != 0
+    }
+
+    /// Self-IPI virtualization — Bochs vapic.cc `VMX_Self_IPI_Virtualization`.
+    /// Posts the vector into the virtual IRR and re-evaluates.
+    pub(super) fn vmx_self_ipi_virtualization(&mut self, vector: u8) {
+        self.vapic_set_vector(LapicRegister::Irr1 as u32, vector);
+        if vector >= self.vmcs.rvi {
+            self.vmcs.rvi = vector;
+        }
+        self.vmx_evaluate_pending_virtual_interrupts();
+    }
+
+    /// Write one qword into the virtual-APIC page. Bochs cpu.h
+    /// `VMX_Write_Virtual_X2APIC` — the x2APIC form is a full 8-byte store at
+    /// the same xAPIC offset, so it also clears the register's upper half.
+    fn vmx_write_virtual_x2apic(&mut self, offset: u32, value: u64) {
+        self.vmx_write_virtual_apic(offset, value as u32);
+        self.vmx_write_virtual_apic(offset + 4, (value >> 32) as u32);
+    }
+
+    /// Virtualise an x2APIC register write from a VMX guest.
+    /// Bochs vapic.cc `Virtualize_X2APIC_Write`, reached from WRMSR when the
+    /// `VIRTUALIZE_X2APIC_MODE` control is set.
+    ///
+    /// `offset` is the register's xAPIC byte offset — Bochs derives the same
+    /// value as `(msr & 0xff) << 4`.
+    ///
+    /// Returns `None` when the write is not virtualised, which leaves it to
+    /// the physical LAPIC exactly as upstream's `false` return does.
+    pub(super) fn vmx_virtualize_x2apic_write(
+        &mut self,
+        offset: u32,
+        value: u64,
+    ) -> Option<Result<()>> {
+        if !self.in_vmx_guest
+            || self.proc_based_ctls2() & VMX_VM_EXEC_CTRL2_VIRTUALIZE_X2APIC_MODE == 0
+        {
+            return None;
+        }
+
+        const TPR: u32 = LapicRegister::Tpr as u32;
+        const EOI: u32 = LapicRegister::Eoi as u32;
+        const SELF_IPI: u32 = LapicRegister::SelfIpi as u32;
+
+        // Each register rejects the values it cannot hold with #GP(0) before
+        // anything is written — Bochs raises the exception first in all three.
+        match offset {
+            TPR => {
+                if value >> 8 != 0 {
+                    return Some(self.exception(Exception::Gp, 0));
+                }
+                self.vmx_write_virtual_x2apic(TPR, value & 0xff);
+                Some(self.vmx_tpr_virtualization())
+            }
+            EOI if self.virtual_interrupt_delivery() => {
+                if value != 0 {
+                    return Some(self.exception(Exception::Gp, 0));
+                }
+                Some(self.vmx_eoi_virtualization())
+            }
+            SELF_IPI if self.virtual_interrupt_delivery() => {
+                if value >> 8 != 0 {
+                    return Some(self.exception(Exception::Gp, 0));
+                }
+                let vector = value as u8;
+                if vector < 16 {
+                    // An illegal vector is still published where the host can
+                    // read what the guest attempted, then reported.
+                    self.vmx_write_virtual_x2apic(SELF_IPI, u64::from(vector));
+                    return Some(
+                        self.vmx_vmexit(VmxVmexitReason::ApicWrite, u64::from(SELF_IPI)),
+                    );
+                }
+                self.vmx_self_ipi_virtualization(vector);
+                Some(Ok(()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Virtualise an x2APIC register read from a VMX guest. Bochs msr.cc
+    /// RDMSR: under `VIRTUALIZE_X2APIC_MODE` the virtual TPR is served from
+    /// the virtual-APIC page, and every other x2APIC register would need APIC
+    /// register virtualisation, which this port does not offer.
+    pub(super) fn vmx_virtualize_x2apic_read(&mut self, offset: u32) -> Option<u64> {
+        if !self.in_vmx_guest
+            || self.proc_based_ctls2() & VMX_VM_EXEC_CTRL2_VIRTUALIZE_X2APIC_MODE == 0
+            || offset != LapicRegister::Tpr as u32
+        {
+            return None;
+        }
+        let lo = u64::from(self.vmx_read_virtual_apic(offset));
+        let hi = u64::from(self.vmx_read_virtual_apic(offset + 4));
+        Some((hi << 32) | lo)
+    }
+
+    /// Deliver the pending virtual interrupt into the guest's own IDT, with no
+    /// VMEXIT. Bochs vapic.cc `VMX_Deliver_Virtual_Interrupt`.
+    ///
+    /// RVI moves into the virtual ISR and becomes SVI, PPR follows it, and the
+    /// next-highest virtual IRR vector becomes the new RVI. The caller returns
+    /// to the decode loop afterwards either way — Bochs ends this function with
+    /// a `longjmp`, so nothing after the delivery runs in the same pass.
+    pub(super) fn vmx_deliver_virtual_interrupt(&mut self) -> Result<()> {
+        let vector = self.vmcs.rvi;
+
+        self.vapic_set_vector(LapicRegister::Isr1 as u32, vector);
+        self.vmcs.svi = vector;
+        let vppr = vector & 0xf0;
+        self.vmcs.vppr = vppr;
+        self.vmx_write_virtual_apic(LapicRegister::Ppr as u32, u32::from(vppr));
+        self.vmcs.rvi =
+            self.vapic_clear_and_find_highest_priority_int(LapicRegister::Irr1 as u32, vector);
+        self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_VMX_VIRTUAL_INTR);
+
+        self.ext = true;
+        let result = self.interrupt(
+            vector,
+            super::exception::InterruptType::ExternalInterrupt,
+            false,
+            false,
+            0,
+        );
+        self.ext = false;
+        self.prev_rip = self.rip();
+        result
+    }
+
+    /// Posted-interrupt processing — Bochs vapic.cc
+    /// `VMX_Posted_Interrupt_Processing`. Called with the vector the local APIC
+    /// just acknowledged; answers whether that vector was the notification and
+    /// has therefore been consumed here instead of delivered to the guest.
+    ///
+    /// Folds the posted-interrupt requests into the virtual IRR, raises RVI to
+    /// the highest of them, and re-evaluates.
+    pub(super) fn vmx_posted_interrupt_processing(&mut self, vector: u8) -> bool {
+        if !self.in_vmx_guest
+            || self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS == 0
+            || u16::from(vector) != self.vmcs.pi_notification_vector
+        {
+            return false;
+        }
+
+        // Bochs clears PID.ON with an atomic bit-clear and drains PIR with a
+        // locked exchange, because on real hardware another agent can post
+        // between the read and the write. Plain read-modify-write is sufficient
+        // here: a machine's CPUs are scheduled cooperatively, one slice at a
+        // time against an exclusively-borrowed memory, so no second agent runs
+        // while this does.
+        let pid = self.vmcs.pi_desc_addr;
+        let on = self.read_physical_byte(pid + 32);
+        self.write_physical_byte(pid + 32, on & !0x1);
+
+        // Bochs writes 0 to the local APIC's EOI register here, dismissing the
+        // notification interrupt it just acknowledged. The EOI can make a
+        // lower-priority interrupt deliverable, so the CPU-side event bits have
+        // to be refreshed from the LAPIC exactly as they are after any other
+        // EOI in this port.
+        self.lapic.receive_eoi(0);
+        self.sync_lapic_events();
+
+        let mut virr = [0u32; 8];
+        for (n, slot) in virr.iter_mut().enumerate() {
+            let pir_addr = pid + 4 * n as u64;
+            let pir = u32::from_le_bytes([
+                self.read_physical_byte(pir_addr),
+                self.read_physical_byte(pir_addr + 1),
+                self.read_physical_byte(pir_addr + 2),
+                self.read_physical_byte(pir_addr + 3),
+            ]);
+            for byte in 0..4u64 {
+                self.write_physical_byte(pir_addr + byte, 0);
+            }
+            let offset = LapicRegister::Irr1 as u32 + 16 * n as u32;
+            let merged = self.vmx_read_virtual_apic(offset) | pir;
+            self.vmx_write_virtual_apic(offset, merged);
+            *slot = merged;
+        }
+
+        let highest = virr
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, w)| **w != 0)
+            .map(|(n, w)| (n as u8) * 32 + (31 - w.leading_zeros()) as u8)
+            .unwrap_or(0);
+        if highest >= self.vmcs.rvi {
+            self.vmcs.rvi = highest;
+        }
+
+        self.vmx_evaluate_pending_virtual_interrupts();
+        true
     }
 
     // =========================================================================
@@ -3006,32 +3433,103 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
 
-        // Bochs vmx.cc TPR-shadow checks. The threshold's high-4-bit
-        // bound (0..=15) is enforced here; the TPR-threshold VMEXIT itself is
-        // raised by vmx_tpr_threshold_vmexit() from the CR8 write path.
-        if ctls1 & VMX_VM_EXEC_CTRL1_TPR_SHADOW != 0 && self.vmcs.tpr_threshold > 15 {
+        // Bochs vmx.cc VMenterLoadCheckVmControls — the TPR-shadow block. The
+        // virtual-APIC page must be a valid 4 KiB-aligned guest-physical page,
+        // and then the checks fork on virtual-interrupt delivery: with it, RVI
+        // and SVI plus the EOI-exit bitmaps are loaded from the VMCS; without
+        // it, the TPR threshold is bounded and compared against the shadow.
+        if ctls1 & VMX_VM_EXEC_CTRL1_TPR_SHADOW != 0 {
+            if !is_valid_page_aligned_phy_addr(self.vmcs.virtual_apic_page_addr) {
+                tracing::warn!("VMENTRY check_vm_controls: virtual apic phy addr malformed");
+                return Some(VmxErr::VmentryInvalidVmControlField);
+            }
+
+            if ctls2 & VMX_VM_EXEC_CTRL2_VIRTUAL_INT_DELIVERY != 0 {
+                if pin & VMX_PIN_BASED_VMEXEC_CTRL_EXTERNAL_INTERRUPT_VMEXIT == 0 {
+                    tracing::warn!(
+                        "VMENTRY check_vm_controls: virtual interrupt delivery needs external interrupt exiting"
+                    );
+                    return Some(VmxErr::VmentryInvalidVmControlField);
+                }
+            } else {
+                if self.vmcs.tpr_threshold & 0xFFFF_FFF0 != 0 {
+                    tracing::warn!(
+                        "VMENTRY check_vm_controls: TPR_THRESHOLD={} > 15",
+                        self.vmcs.tpr_threshold
+                    );
+                    return Some(VmxErr::VmentryInvalidVmControlField);
+                }
+                // Without APIC-access virtualisation the shadow is readable
+                // now, so the threshold can be bounded against it.
+                if ctls2 & VMX_VM_EXEC_CTRL2_VIRTUALIZE_APIC_ACCESSES == 0 {
+                    let tpr_shadow = (self.read_virtual_apic_tpr_byte() >> 4) & 0xF;
+                    if self.vmcs.tpr_threshold > u32::from(tpr_shadow) {
+                        tracing::warn!("VMENTRY check_vm_controls: TPR threshold > TPR shadow");
+                        return Some(VmxErr::VmentryInvalidVmControlField);
+                    }
+                }
+            }
+        } else if ctls2
+            & (VMX_VM_EXEC_CTRL2_VIRTUALIZE_APIC_REGISTERS
+                | VMX_VM_EXEC_CTRL2_VIRTUAL_INT_DELIVERY
+                | VMX_VM_EXEC_CTRL2_VIRTUALIZE_X2APIC_MODE)
+            != 0
+        {
+            // Bochs vmx.cc: every form of APIC virtualisation is meaningless
+            // without the virtual-APIC page a TPR shadow provides.
+            tracing::warn!("VMENTRY check_vm_controls: APIC virtualisation needs TPR shadow");
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+
+        // APIC-access-page virtualisation is deliberately NOT offered: its
+        // interception seam is the memory fast path, which this port reaches
+        // through cached host pointers rather than Bochs's
+        // `access_read_physical`. The capability is withheld in
+        // IA32_VMX_PROCBASED_CTLS2 so no correct hypervisor sets it, and
+        // VMENTRY refuses it here for one that does — the same answer real
+        // hardware gives for a control it does not implement.
+        if ctls2 & VMX_VM_EXEC_CTRL2_VIRTUALIZE_APIC_ACCESSES != 0 {
             tracing::warn!(
-                "VMENTRY check_vm_controls: TPR_THRESHOLD={} > 15",
-                self.vmcs.tpr_threshold
+                "VMENTRY check_vm_controls: APIC-access page virtualisation is not offered"
             );
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
 
-        // Bochs vapic.cc enables three secondary processor-based controls that
-        // rusty_box has not ported: APIC-access page virtualisation, APIC
-        // register virtualisation, and virtual-interrupt delivery. VMENTRY
-        // rejects them rather than silently letting the guest run with
-        // degraded semantics. The TPR-threshold VMEXIT path is wired (see
-        // vmx_tpr_threshold_vmexit).
-        const UNSUPPORTED_VAPIC_SECONDARY: u32 = VMX_VM_EXEC_CTRL2_VIRTUALIZE_APIC_ACCESSES
-            | VMX_VM_EXEC_CTRL2_VIRTUALIZE_APIC_REGISTERS
-            | VMX_VM_EXEC_CTRL2_VIRTUAL_INT_DELIVERY;
-        if ctls2 & UNSUPPORTED_VAPIC_SECONDARY != 0 {
-            tracing::error!(
-                "VMENTRY check_vm_controls: unsupported virtualised-APIC secondary control(s) {:#x}",
-                ctls2 & UNSUPPORTED_VAPIC_SECONDARY
-            );
-            return Some(VmxErr::VmentryInvalidVmControlField);
+        // Bochs vmx.cc — posted interrupts ride on virtual-interrupt delivery
+        // and on acknowledging the interrupt at exit, and their descriptor is
+        // 64-byte aligned.
+        if pin & VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS != 0 {
+            if ctls2 & VMX_VM_EXEC_CTRL2_VIRTUAL_INT_DELIVERY == 0 {
+                tracing::warn!(
+                    "VMENTRY check_vm_controls: posted interrupts need virtual interrupt delivery"
+                );
+                return Some(VmxErr::VmentryInvalidVmControlField);
+            }
+            if self.vmcs.vm_exit_ctls & VMX_VMEXIT_CTRL1_INTA_ON_VMEXIT == 0 {
+                tracing::warn!(
+                    "VMENTRY check_vm_controls: posted interrupts need 'ack interrupt on exit'"
+                );
+                return Some(VmxErr::VmentryInvalidVmControlField);
+            }
+            if self.vmcs.pi_notification_vector >= 256 {
+                tracing::warn!(
+                    "VMENTRY check_vm_controls: posted-interrupt notification vector {} > 255",
+                    self.vmcs.pi_notification_vector
+                );
+                return Some(VmxErr::VmentryInvalidVmControlField);
+            }
+            if !is_valid_phy_addr(self.vmcs.pi_desc_addr) {
+                tracing::warn!(
+                    "VMENTRY check_vm_controls: posted-interrupt descriptor phy addr malformed"
+                );
+                return Some(VmxErr::VmentryInvalidVmControlField);
+            }
+            if self.vmcs.pi_desc_addr & 0x3F != 0 {
+                tracing::warn!(
+                    "VMENTRY check_vm_controls: posted-interrupt descriptor not 64-byte aligned"
+                );
+                return Some(VmxErr::VmentryInvalidVmControlField);
+            }
         }
 
         // VM-entry event injection field. Bochs validates the type/vector
@@ -4399,7 +4897,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
 
     #[inline]
-    fn proc_based_ctls1(&self) -> u32 {
+    pub(super) fn proc_based_ctls1(&self) -> u32 {
         self.vmcs.proc_based_ctls
     }
 
@@ -4456,24 +4954,6 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         Ok(true)
     }
 
-    /// Read the 64-byte posted-interrupt descriptor at
-    /// `self.vmcs.pi_desc_addr`. Bochs vapic.cc `VMX_Posted_Interrupt_Processing`
-    /// reads the descriptor in two pieces (PIR + ON byte); we read the full
-    /// 64-byte block in one shot for simplicity.
-    ///
-    /// Layout (Bochs vapic.cc comment):
-    ///   bytes [0..32]   = Posted Interrupt Requests (PIR), one bit per vector
-    ///   byte  [32]      = bit 0 = Outstanding Notification (PID.ON)
-    ///   bytes [33..64]  = reserved / user available
-    fn read_posted_interrupt_descriptor(&mut self) -> [u8; 64] {
-        let mut buf = [0u8; 64];
-        let paddr = self.vmcs.pi_desc_addr;
-        for (i, slot) in buf.iter_mut().enumerate() {
-            *slot = self.read_physical_byte(paddr + i as u64);
-        }
-        buf
-    }
-
     /// Write a single byte to guest-physical memory. Mirrors Bochs
     /// `BX_CPU_C::write_physical_byte` used by vapic.cc to clear PID.ON via
     /// atomic RMW. Logs and continues on failure to match the lenient
@@ -4490,59 +4970,6 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
         // Bochs handleSMC flushes the writer synchronously at the store.
         self.smc_sync_after_phys_write();
-    }
-
-    /// Bochs vapic.cc `VMX_Posted_Interrupt_Processing` — fast probe that
-    /// answers whether a posted interrupt is waiting. Returns true when
-    /// PROCESS_POSTED_INTERRUPTS is enabled, PID.ON is set, and at least
-    /// one PIR bit is set.
-    pub(super) fn posted_interrupt_pending(&mut self) -> bool {
-        if !self.in_vmx_guest {
-            return false;
-        }
-        if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS == 0 {
-            return false;
-        }
-        let desc = self.read_posted_interrupt_descriptor();
-        if desc[32] & 1 == 0 {
-            return false;
-        }
-        desc[..32].iter().any(|&b| b != 0)
-    }
-
-    /// Bochs vapic.cc `VMX_Posted_Interrupt_Processing` — clear PID.ON
-    /// and signal a pending virtual interrupt. Bochs additionally folds PIR
-    /// into the virtual-APIC IRR and recomputes RVI; without a fully
-    /// virtualised LAPIC we still must clear ON so the host can re-arm and
-    /// raise `BX_EVENT_PENDING_VMX_VIRTUAL_INTR` so the deferred vector is
-    /// delivered at the next instruction boundary.
-    pub(super) fn process_posted_interrupts(&mut self) -> Result<()> {
-        if !self.in_vmx_guest {
-            return Ok(());
-        }
-        if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS == 0 {
-            return Ok(());
-        }
-        let desc = self.read_posted_interrupt_descriptor();
-        if desc[32] & 1 == 0 {
-            return Ok(());
-        }
-        let any_pir = desc[..32].iter().any(|&b| b != 0);
-
-        // RMW on the ON byte mirrors Bochs vapic.cc:
-        //   pid_ON = read_physical_byte(pid_addr + 32);
-        //   pid_ON &= ~0x1;
-        //   write_physical_byte(pid_addr + 32, pid_ON);
-        // The full PIR -> VIRR fold and RVI update require a virtualised LAPIC
-        // (Bochs vapic.cc handles them inline) — not ported.
-        let paddr = self.vmcs.pi_desc_addr;
-        let on_byte = self.read_physical_byte(paddr + 32);
-        self.write_physical_byte(paddr + 32, on_byte & !0x1);
-
-        if any_pir {
-            self.signal_event(BxCpuC::<T>::BX_EVENT_PENDING_VMX_VIRTUAL_INTR);
-        }
-        Ok(())
     }
 
     /// VM-entry / VM-exit MSR load helper — Bochs vmx.cc LoadMSRs.
@@ -5928,5 +6355,261 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.vmcs.exit_instruction_info = info;
         self.vmx_vmexit(VmxVmexitReason::IoInstruction, qual)?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::exec_ctx::{ExecCtx, TestMachine};
+
+    /// Guest-physical page standing in for the virtual-APIC page.
+    const VAPIC_PAGE: u64 = 0x2_0000;
+    /// Guest-physical, 64-byte-aligned posted-interrupt descriptor.
+    const PID: u64 = 0x3_0000;
+
+    /// A machine in the state a VMX guest running with a TPR shadow and
+    /// virtual-interrupt delivery would be in. These tests exercise the vAPIC
+    /// datapath, not VMENTRY, so the controls are placed directly.
+    fn vapic_guest(machine: &mut TestMachine) -> ExecCtx<'_, ()> {
+        let mut ctx = machine.ctx();
+        ctx.memory.set_a20_mask(u64::MAX);
+        ctx.in_vmx = true;
+        ctx.in_vmx_guest = true;
+        ctx.vmcs.virtual_apic_page_addr = VAPIC_PAGE;
+        ctx.vmcs.pi_desc_addr = PID;
+        ctx.vmcs.proc_based_ctls =
+            VMX_VM_EXEC_CTRL1_TPR_SHADOW | VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS;
+        ctx.vmcs.secondary_proc_based_ctls = VMX_VM_EXEC_CTRL2_VIRTUAL_INT_DELIVERY;
+        ctx
+    }
+
+    /// Bochs vapic.cc stores each 32-bit slice of the 256-bit virtual IRR/ISR
+    /// 16 bytes apart, matching the xAPIC register layout rather than packing
+    /// them 4 bytes apart. A packed implementation still round-trips a single
+    /// vector, so this pins two vectors in different slices at real offsets.
+    #[test]
+    fn virtual_apic_bitmaps_use_the_xapic_sixteen_byte_stride() {
+        let mut machine = TestMachine::new();
+        let mut ctx = vapic_guest(&mut machine);
+
+        ctx.vapic_set_vector(LapicRegister::Irr1 as u32, 5);
+        ctx.vapic_set_vector(LapicRegister::Irr1 as u32, 200);
+
+        let slice0 = ctx.vmx_read_virtual_apic(LapicRegister::Irr1 as u32);
+        let slice6 = ctx.vmx_read_virtual_apic(LapicRegister::Irr1 as u32 + 16 * 6);
+        assert_eq!(slice0, 1 << 5);
+        assert_eq!(slice6, 1 << (200 % 32));
+    }
+
+    /// Retiring a vector reports the next-highest one still set.
+    #[test]
+    fn clearing_a_virtual_vector_reports_the_next_highest() {
+        let mut machine = TestMachine::new();
+        let mut ctx = vapic_guest(&mut machine);
+
+        for vector in [0x30u8, 0x51, 0x92] {
+            ctx.vapic_set_vector(LapicRegister::Irr1 as u32, vector);
+        }
+
+        let irr = LapicRegister::Irr1 as u32;
+        assert_eq!(ctx.vapic_clear_and_find_highest_priority_int(irr, 0x92), 0x51);
+        assert_eq!(ctx.vapic_clear_and_find_highest_priority_int(irr, 0x51), 0x30);
+        assert_eq!(
+            ctx.vapic_clear_and_find_highest_priority_int(irr, 0x30),
+            0,
+            "an empty bitmap reports vector 0"
+        );
+    }
+
+    /// Delivering a virtual interrupt moves RVI into the virtual ISR, makes it
+    /// SVI, republishes PPR where the guest reads it, and drops RVI to the next
+    /// pending vector.
+    #[test]
+    fn delivering_a_virtual_interrupt_advances_the_virtual_apic_state() {
+        let mut machine = TestMachine::new();
+        let mut ctx = vapic_guest(&mut machine);
+
+        ctx.vapic_set_vector(LapicRegister::Irr1 as u32, 0x40);
+        ctx.vapic_set_vector(LapicRegister::Irr1 as u32, 0x80);
+        ctx.vmcs.rvi = 0x80;
+        ctx.vmcs.vppr = 0;
+
+        // Delivery re-enters the guest IDT, which this bare machine has not
+        // built; the vAPIC bookkeeping ahead of that is what is pinned here.
+        let _ = ctx.vmx_deliver_virtual_interrupt();
+
+        assert_eq!(ctx.vmcs.svi, 0x80, "the delivered vector is now in service");
+        assert_eq!(ctx.vmcs.rvi, 0x40, "RVI falls to the next pending vector");
+        assert_eq!(ctx.vmcs.vppr, 0x80, "PPR takes the delivered vector's class");
+        assert_eq!(
+            ctx.vmx_read_virtual_apic(LapicRegister::Ppr as u32) & 0xff,
+            0x80,
+            "PPR is published where the guest reads it"
+        );
+        let isr_slice4 = ctx.vmx_read_virtual_apic(LapicRegister::Isr1 as u32 + 16 * 4);
+        assert_eq!(isr_slice4, 1, "vector 0x80 is ISR slice 4, bit 0");
+    }
+
+    /// Deliverability compares priority CLASSES (the high nibble), so a vector
+    /// in the same class as PPR must not preempt.
+    #[test]
+    fn only_a_higher_class_virtual_interrupt_is_signalled() {
+        let mut machine = TestMachine::new();
+        let mut ctx = vapic_guest(&mut machine);
+
+        ctx.vmcs.vppr = 0x80;
+        ctx.vmcs.rvi = 0x85;
+        ctx.vmx_evaluate_pending_virtual_interrupts();
+        assert_eq!(
+            ctx.pending_event & BxCpuC::<()>::BX_EVENT_PENDING_VMX_VIRTUAL_INTR,
+            0,
+            "same priority class as PPR must not preempt"
+        );
+
+        ctx.vmcs.rvi = 0x90;
+        ctx.vmx_evaluate_pending_virtual_interrupts();
+        assert_ne!(
+            ctx.pending_event & BxCpuC::<()>::BX_EVENT_PENDING_VMX_VIRTUAL_INTR,
+            0,
+            "a higher class must be signalled"
+        );
+    }
+
+    /// EOI virtualization retires the serviced vector and recomputes PPR, so
+    /// the next-lower interrupt can become deliverable.
+    #[test]
+    fn virtual_eoi_retires_the_serviced_vector() {
+        let mut machine = TestMachine::new();
+        let mut ctx = vapic_guest(&mut machine);
+
+        ctx.vapic_set_vector(LapicRegister::Isr1 as u32, 0x80);
+        ctx.vapic_set_vector(LapicRegister::Isr1 as u32, 0x40);
+        ctx.vmcs.svi = 0x80;
+        ctx.vmcs.vppr = 0x80;
+
+        ctx.vmx_eoi_virtualization().expect("no EOI-exit bit set");
+
+        assert_eq!(ctx.vmcs.svi, 0x40, "the next in-service vector takes over");
+        assert_eq!(
+            ctx.vmx_read_virtual_apic(LapicRegister::Ppr as u32) & 0xff,
+            0x40,
+            "PPR drops to the new in-service class"
+        );
+    }
+
+    /// A vector whose EOI-exit bit is set reports to the host instead of being
+    /// retired silently.
+    #[test]
+    fn an_eoi_exit_bitmap_hit_leaves_for_the_host() {
+        let mut machine = TestMachine::new();
+        let mut ctx = vapic_guest(&mut machine);
+
+        ctx.vapic_set_vector(LapicRegister::Isr1 as u32, 0x80);
+        ctx.vmcs.svi = 0x80;
+        ctx.vmcs.eoi_exit_bitmap[0x80 / 32] = 1 << (0x80 % 32);
+
+        let _ = ctx.vmx_eoi_virtualization();
+        assert_eq!(
+            ctx.vmcs.exit_reason,
+            VmxVmexitReason::VirtualizedEoi as u32,
+            "the host is told which EOI it asked to see"
+        );
+        assert_eq!(ctx.vmcs.exit_qualification, 0x80, "and for which vector");
+    }
+
+    /// Posted-interrupt processing folds PIR into the virtual IRR, drains the
+    /// descriptor, and raises RVI to the highest posted vector.
+    #[test]
+    fn posted_interrupts_fold_into_the_virtual_irr() {
+        let mut machine = TestMachine::new();
+        let mut ctx = vapic_guest(&mut machine);
+        ctx.vmcs.pin_based_ctls = VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS;
+        ctx.vmcs.pi_notification_vector = 0xF2;
+
+        ctx.write_physical_byte(PID + (0x30 / 8), 1 << (0x30 % 8));
+        ctx.write_physical_byte(PID + (0x71 / 8), 1 << (0x71 % 8));
+        ctx.write_physical_byte(PID + 32, 1);
+
+        assert!(
+            ctx.vmx_posted_interrupt_processing(0xF2),
+            "the notification vector is consumed here"
+        );
+
+        assert_eq!(ctx.vmcs.rvi, 0x71, "RVI rises to the highest posted vector");
+        let slice1 = ctx.vmx_read_virtual_apic(LapicRegister::Irr1 as u32 + 16);
+        assert_eq!(slice1, 1 << (0x30 % 32), "0x30 landed in virtual IRR slice 1");
+        let slice3 = ctx.vmx_read_virtual_apic(LapicRegister::Irr1 as u32 + 16 * 3);
+        assert_eq!(slice3, 1 << (0x71 % 32), "0x71 landed in slice 3");
+        assert_eq!(ctx.read_physical_byte(PID + 32) & 1, 0, "PID.ON is cleared");
+        assert_eq!(ctx.read_physical_byte(PID + (0x71 / 8)), 0, "PIR is drained");
+    }
+
+    /// An ordinary interrupt that merely arrived while posted interrupts were
+    /// armed must not be swallowed.
+    #[test]
+    fn a_non_notification_vector_is_not_consumed() {
+        let mut machine = TestMachine::new();
+        let mut ctx = vapic_guest(&mut machine);
+        ctx.vmcs.pin_based_ctls = VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS;
+        ctx.vmcs.pi_notification_vector = 0xF2;
+        ctx.write_physical_byte(PID + 32, 1);
+
+        assert!(!ctx.vmx_posted_interrupt_processing(0x40));
+        assert_eq!(
+            ctx.read_physical_byte(PID + 32) & 1,
+            1,
+            "the descriptor is untouched for a different vector"
+        );
+    }
+
+    /// The capability MSRs a guest reads must agree with what VMENTRY accepts.
+    /// A guest sets exactly what allowed-1 advertises, so a mask that drifted
+    /// from its MSR either rejects a legal configuration or accepts one nothing
+    /// implements.
+    #[test]
+    fn vmx_capability_msrs_match_the_vmentry_masks() {
+        let mut machine = TestMachine::new();
+        let mut ctx = machine.ctx();
+        for (msr, allowed_0, allowed_1) in [
+            (0x481u32, VMX_PINBASED_CTLS_ALLOWED_0, VMX_PINBASED_CTLS_ALLOWED_1),
+            (0x482, VMX_PROCBASED_CTLS_ALLOWED_0, VMX_PROCBASED_CTLS_ALLOWED_1),
+            (0x483, VMX_EXIT_CTLS_ALLOWED_0, VMX_EXIT_CTLS_ALLOWED_1),
+            // The TRUE-controls block starts at 0x48D: 0x48C is
+            // IA32_VMX_EPT_VPID_CAP (Bochs msr.h `BX_MSR_VMX_EPT_VPID_CAP`).
+            (0x48D, VMX_PINBASED_CTLS_ALLOWED_0, VMX_PINBASED_CTLS_ALLOWED_1),
+            (0x48E, VMX_PROCBASED_CTLS_ALLOWED_0, VMX_PROCBASED_CTLS_ALLOWED_1),
+            (0x48F, VMX_EXIT_CTLS_ALLOWED_0, VMX_EXIT_CTLS_ALLOWED_1),
+        ] {
+            let value = ctx.rdmsr_value(msr).expect("VMX capability MSR readable");
+            assert_eq!(value as u32, allowed_0, "MSR {msr:#x} allowed-0 half");
+            assert_eq!((value >> 32) as u32, allowed_1, "MSR {msr:#x} allowed-1 half");
+        }
+    }
+
+    /// Virtual-interrupt delivery is a secondary control, reachable only if the
+    /// primary gate to the secondary controls may be set at all.
+    #[test]
+    fn the_advertised_controls_can_actually_be_requested() {
+        assert_ne!(
+            VMX_PROCBASED_CTLS_ALLOWED_1 & VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS,
+            0,
+            "without this bit every secondary control is unreachable"
+        );
+        assert_ne!(VMX_PROCBASED_CTLS_ALLOWED_1 & VMX_VM_EXEC_CTRL1_TPR_SHADOW, 0);
+        assert_ne!(
+            VMX_PROCBASED_CTLS2_ALLOWED_1 & VMX_VM_EXEC_CTRL2_VIRTUAL_INT_DELIVERY,
+            0
+        );
+        assert_ne!(
+            VMX_PINBASED_CTLS_ALLOWED_1 & VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS,
+            0
+        );
+        assert_ne!(VMX_EXIT_CTLS_ALLOWED_1 & VMX_VMEXIT_CTRL1_INTA_ON_VMEXIT, 0);
+        // APIC-access-page virtualisation is deliberately not offered.
+        assert_eq!(
+            VMX_PROCBASED_CTLS2_ALLOWED_1 & VMX_VM_EXEC_CTRL2_VIRTUALIZE_APIC_ACCESSES,
+            0
+        );
     }
 }

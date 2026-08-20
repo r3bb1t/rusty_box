@@ -825,9 +825,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PAUSE handler. Checks VMX/SVM intercepts before executing as no-op hint.
     /// Bochs proc_ctrl.cc
     pub(super) fn pause(&mut self, _instr: &Instruction) -> Result<()> {
-        // Bochs proc_ctrl.cc — VMX PAUSE exit
-        if self.in_vmx_guest {
-            self.vmexit_pause()?;
+        // Bochs proc_ctrl.cc — VMX PAUSE exit. Bochs longjmps out of
+        // `VMexit_PAUSE`, so nothing after it runs; returning here is the same
+        // end. PAUSE Loop Exiting (PLE) timing is not modelled — it needs the
+        // TSC gap tracker.
+        if self.in_vmx_guest && self.vmexit_check_pause()? {
+            return Ok(());
         }
 
         // Bochs proc_ctrl.cc — SVM PAUSE intercept
@@ -839,13 +842,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    /// VMX PAUSE exit handler.
-    /// Bochs vmexit.cc VMexit_PAUSE() — checks PAUSE Exiting control. PAUSE
-    /// Loop Exiting (PLE) timing is not modelled (PLE needs the TSC gap tracker).
-    fn vmexit_pause(&mut self) -> Result<()> {
-        let _ = self.vmexit_check_pause()?;
-        Ok(())
-    }
 }
 
 // ============================================================================

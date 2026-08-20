@@ -217,6 +217,19 @@ const _: () = {
     assert_send::<BxMemoryStubC>();
 };
 
+/// Fully-resident guest RAM for tests that need somewhere for a device to move
+/// bytes. Nothing swaps, so a test observes only what it wrote.
+#[cfg(test)]
+pub(crate) fn test_ram() -> BxMemC {
+    const BYTES: usize = 4 * 1024 * 1024;
+    let mut memory = BxMemC::new(
+        BxMemoryStubC::create_and_init(BYTES, BYTES, 1024 * 1024).expect("test guest RAM"),
+        false,
+    );
+    memory.set_a20_mask(u64::MAX);
+    memory
+}
+
 type Unsigned = u32;
 
 /// What a physical access still needs from its caller.

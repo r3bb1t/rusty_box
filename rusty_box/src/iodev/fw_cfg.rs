@@ -534,7 +534,7 @@ impl BxFwCfg {
         address: u16,
         value: u32,
         io_len: u8,
-        mem: Option<&mut BxMemC>,
+        mem: &mut BxMemC,
     ) {
         match address {
             FW_CFG_IO_BASE => {
@@ -563,7 +563,7 @@ impl BxFwCfg {
                     } else if offset == 4 {
                         // Low 32 bits → port 0x518 — triggers DMA
                         self.dma_addr = (self.dma_addr & 0xFFFF_FFFF_0000_0000) | swapped as u64;
-                        self.trigger_dma(mem);
+                        self.trigger_dma(&mut *mem);
                     }
                 } else if io_len == 1 {
                     // Byte-by-byte write (big-endian)
@@ -573,7 +573,7 @@ impl BxFwCfg {
 
                     // Trigger when last byte (offset 7) is written
                     if offset == 7 {
-                        self.trigger_dma(mem);
+                        self.trigger_dma(&mut *mem);
                     }
                 }
             }
@@ -581,17 +581,11 @@ impl BxFwCfg {
         }
     }
 
-    /// Trigger DMA processing if memory is available, then clear dma_addr.
-    fn trigger_dma(&mut self, mem: Option<&mut BxMemC>) {
+    /// Process the descriptor the guest just finished addressing, then clear
+    /// `dma_addr` so a partial re-write cannot replay it.
+    fn trigger_dma(&mut self, mem: &mut BxMemC) {
         let addr = self.dma_addr;
-        if let Some(m) = mem {
-            self.process_dma(addr, m);
-        } else {
-            tracing::error!(
-                "fw_cfg DMA: triggered at {:#x} but no memory available",
-                addr
-            );
-        }
+        self.process_dma(addr, mem);
         self.dma_addr = 0;
     }
 
@@ -1113,8 +1107,8 @@ mod tests {
 
     use super::*;
 
-    fn read_u16_entry(fw_cfg: &mut BxFwCfg, key: u16) -> u16 {
-        fw_cfg.write_port(FW_CFG_IO_BASE, key as u32, SELECTOR_WRITE_BYTES, None);
+    fn read_u16_entry(fw_cfg: &mut BxFwCfg, key: u16, mem: &mut BxMemC) -> u16 {
+        fw_cfg.write_port(FW_CFG_IO_BASE, key as u32, SELECTOR_WRITE_BYTES, mem);
         let lo = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES) as u16;
         let hi = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES) as u16;
         lo | (hi << 8)
@@ -1167,14 +1161,15 @@ mod tests {
     #[test]
     fn init_exposes_configured_cpu_count() {
         let mut fw_cfg = BxFwCfg::new();
+        let mut mem = crate::memory::test_ram();
         fw_cfg.init(TEST_RAM_SIZE, TEST_CPU_COUNT);
 
         assert_eq!(
-            read_u16_entry(&mut fw_cfg, FW_CFG_NB_CPUS),
+            read_u16_entry(&mut fw_cfg, FW_CFG_NB_CPUS, &mut mem),
             TEST_CPU_COUNT as u16
         );
         assert_eq!(
-            read_u16_entry(&mut fw_cfg, FW_CFG_MAX_CPUS),
+            read_u16_entry(&mut fw_cfg, FW_CFG_MAX_CPUS, &mut mem),
             TEST_CPU_COUNT as u16
         );
     }
@@ -1204,7 +1199,7 @@ mod tests {
             FW_CFG_IO_BASE,
             payload_key as u32,
             SELECTOR_WRITE_BYTES,
-            None,
+            &mut mem,
         );
         assert_eq!(
             source.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES),
@@ -1221,9 +1216,9 @@ mod tests {
 
         // Write all but the triggering byte of a bytewise DMA address.  The
         // final byte must resume the descriptor after restoration.
-        source.write_port(0x518, 0, 1, None);
-        source.write_port(0x519, 0x20, 1, None);
-        source.write_port(0x51A, 0, 1, None);
+        source.write_port(0x518, 0, 1, &mut mem);
+        source.write_port(0x519, 0x20, 1, &mut mem);
+        source.write_port(0x51A, 0, 1, &mut mem);
         assert_eq!(source.dma_addr, DESCRIPTOR);
 
         let mut saved = Vec::new();
@@ -1240,7 +1235,7 @@ mod tests {
             "the restored selector and PIO offset must resume at the next byte"
         );
         assert_eq!(restored.dma_addr, DESCRIPTOR);
-        restored.write_port(0x51B, 0, 1, Some(&mut mem));
+        restored.write_port(0x51B, 0, 1, &mut mem);
 
         let mut payload = [0u8; PAYLOAD.len()];
         assert_eq!(

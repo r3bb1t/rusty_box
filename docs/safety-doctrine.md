@@ -118,16 +118,16 @@ the choke points themselves.
 ## R6 — `Send` derives, never promised
 
 `unsafe impl Send`/`Sync` is banned. Thread safety is proven by construction — no raw-pointer
-fields, no globals — and pinned by `const` assertions (`assert_send::<BxMemoryStubC>()`
-already; `assert_send::<Emulator<()>>()` when the last pointer fields die). A `Send` assertion
-on a type that was accidentally `Send` proves nothing, so the assertions are paired with
-non-vacuity fixtures where applicable (llvmkit `module_ownership.rs` pattern). The no-alloc
-`Emulator` is deliberately `!Send` (`ap_cpu_ptrs` is caller-contract storage) and documents
-it.
+fields, no globals — and pinned by `const` assertions: `assert_send::<BxMemoryStubC>()` and
+`assert_send::<Emulator<()>>()`. A `Send` assertion on a type that was accidentally `Send`
+proves nothing, so each is paired with a non-vacuity check — for the machine, a generic
+`assert_send::<Emulator<T>>()` over any `Send` tracer, so the property cannot rest on the
+`()` default. The no-alloc `Emulator` is deliberately `!Send` (`ap_cpu_ptrs` is
+caller-contract storage) and documents it.
 
 *Enforcement (mechanical):* the `doctrine ratchets` ci step counts `unsafe impl … Send/Sync`
-lines (baseline 1, target 0); `cargo-semver-checks`' `auto_trait_impl_removed` lint guards
-regressions once adopted; the const asserts are compile-time.
+lines (baseline 0); `cargo-semver-checks`' `auto_trait_impl_removed` lint guards regressions
+once adopted; the const asserts are compile-time.
 
 ## R7 — Bochs parity provenance
 

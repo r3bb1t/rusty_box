@@ -1207,14 +1207,12 @@ impl BxCmosC {
 
     /// Configure memory size in CMOS (legacy interface, kept for compatibility)
     ///
-    /// `base_kb`: conventional memory (typically 640 KB, within the first 1 MB)
-    /// `extended_kb`: extended memory above 1 MB
-    ///
-    /// Total physical = 1 MB + extended_kb (base_kb is within the first 1 MB,
-    /// not added separately — it was previously double-counted causing the kernel
-    /// to allocate pages beyond physical RAM).
-    pub fn set_memory_size(&mut self, base_kb: u16, extended_kb: u16) {
-        let _ = base_kb; // base_kb is within first 1 MB, always reported as 640k
+    /// `_base_kb`: conventional memory. It lies inside the first megabyte, which
+    /// the total below already counts in full, so adding it would report more
+    /// physical RAM than exists and the guest kernel would map pages past the
+    /// end of it. The CMOS base-memory register is a fixed 640 KB regardless.
+    /// `extended_kb`: extended memory above 1 MB.
+    pub fn set_memory_size(&mut self, _base_kb: u16, extended_kb: u16) {
         let total_bytes = (1024u64 + extended_kb as u64) * 1024;
         self.set_memory_size_from_bytes(total_bytes);
     }
@@ -1439,7 +1437,14 @@ impl BxCmosC {
     /// Rebuild values derived from the restored CMOS register image without
     /// changing PC-system deadlines or generating an IRQ edge.
     pub(crate) fn post_restore_snapshot_v3(&mut self) -> CmosSnapshotRestoreState {
-        let _ = self.cra_change();
+        // Wanted for its side effect: `cra_change` recomputes the periodic
+        // interval from the restored register image. The timer action it
+        // proposes is superseded here — the caller re-arms from the deadlines
+        // in the state below, which is what keeps a restore from moving a
+        // PC-system deadline or generating an IRQ edge.
+        match self.cra_change() {
+            CmosTimerAction::Unchanged | CmosTimerAction::Restart(_) | CmosTimerAction::Deactivate => {}
+        }
         CmosSnapshotRestoreState {
             periodic_timer_handle: self.periodic_timer_handle,
             one_second_timer_handle: self.one_second_timer_handle,

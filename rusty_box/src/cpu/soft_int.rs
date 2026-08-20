@@ -23,14 +23,11 @@ const CPUID_LEAF1_APIC_ID_SHIFT: u32 = 24;
 const CPUID_APIC_ID_BYTE_MASK: u32 = 0xFF;
 const CPUID_TOPOLOGY_SUBLEAF_SMT: u32 = 0;
 const CPUID_TOPOLOGY_SUBLEAF_CORE: u32 = 1;
-// Leaf 0x0B exposes only SMT (0) and Core (1) levels; subleaf >= 2 is the
-// invalid level handled by the default arm. This named index is used only by
-// the test that asserts subleaf 2 returns all zeros.
-#[cfg(test)]
 const CPUID_TOPOLOGY_SUBLEAF_PACKAGE: u32 = 2;
 const CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT: u32 = 8;
 const CPUID_TOPOLOGY_LEVEL_TYPE_SMT: u32 = 1;
 const CPUID_TOPOLOGY_LEVEL_TYPE_CORE: u32 = 2;
+const CPUID_TOPOLOGY_LEVEL_TYPE_PACKAGE: u32 = 3;
 
 #[inline]
 fn topology_level_ecx(subleaf: u32, level_type: u32) -> u32 {
@@ -1254,6 +1251,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             CPUID_LEAF_EXTENDED_TOPOLOGY => {
                 let topology = self.cpu_topology();
+                // Bochs cpuid.cc `get_std_cpuid_extended_topology_leaf` seeds
+                // every subfunction — valid level or not — with the x2APIC id
+                // in EDX and the subfunction echoed in ECX, then fills in the
+                // level only when one exists. Software enumerates the leaf by
+                // walking ECX until EBX reads zero, so an invalid level still
+                // has to identify its logical processor.
+                eax = 0;
+                ebx = 0;
+                ecx = sub_function;
                 edx = self.bx_cpuid;
                 match sub_function {
                     CPUID_TOPOLOGY_SUBLEAF_SMT => {
@@ -1272,12 +1278,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                             CPUID_TOPOLOGY_LEVEL_TYPE_CORE,
                         );
                     }
-                    _ => {
-                        eax = 0;
-                        ebx = 0;
-                        ecx = 0;
-                        edx = 0;
+                    CPUID_TOPOLOGY_SUBLEAF_PACKAGE => {
+                        // Bochs reports the package level only on a
+                        // multi-socket topology; one socket leaves the level
+                        // invalid, which is how software stops enumerating.
+                        if topology.n_processors() > 1 {
+                            eax = bochs_topology_shift(topology.n_processors());
+                            ebx = topology.cpu_count();
+                            ecx = topology_level_ecx(
+                                CPUID_TOPOLOGY_SUBLEAF_PACKAGE,
+                                CPUID_TOPOLOGY_LEVEL_TYPE_PACKAGE,
+                            );
+                        }
                     }
+                    _ => {}
                 }
             }
             0x00000007 if sub_function == 0 => {}
@@ -1387,13 +1401,103 @@ mod tests {
         );
         assert_eq!(cpu.edx(), CONFIGURED_APIC_ID);
 
+        // Two sockets, so the package level exists: shifting the x2APIC id by
+        // 1 leaves the socket id, and 2 x 4 x 2 = 16 logical processors sit
+        // below it. Literals, for the reason given above.
+        cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+        cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_PACKAGE);
+        cpu.cpuid(&instr).unwrap();
+        assert_eq!(cpu.eax(), 1);
+        assert_eq!(cpu.ebx(), 16);
+        assert_eq!(
+            cpu.ecx(),
+            topology_level_ecx(
+                CPUID_TOPOLOGY_SUBLEAF_PACKAGE,
+                CPUID_TOPOLOGY_LEVEL_TYPE_PACKAGE
+            )
+        );
+        assert_eq!(cpu.edx(), CONFIGURED_APIC_ID);
+
+        // An invalid level still echoes the subfunction and the x2APIC id, and
+        // reports EBX = 0 — the terminator software enumerates on.
+        const INVALID_SUBLEAF: u32 = 3;
+        cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+        cpu.set_ecx(INVALID_SUBLEAF);
+        cpu.cpuid(&instr).unwrap();
+        assert_eq!(cpu.eax(), 0);
+        assert_eq!(cpu.ebx(), 0);
+        assert_eq!(cpu.ecx(), INVALID_SUBLEAF);
+        assert_eq!(cpu.edx(), CONFIGURED_APIC_ID);
+    }
+
+    /// Leaf 0xB's core-level EAX, checked the way software actually consumes
+    /// it rather than against either implementation's arithmetic.
+    ///
+    /// SDM Vol 2, CPUID leaf 0BH: EAX[4:0] at sub-leaf *m* is the shift that
+    /// extracts the id of the *next higher* level — so at the core level it
+    /// must cover the SMT bits as well as the core bits. Linux
+    /// `detect_extended_topology` names that value `core_plus_mask_width`
+    /// ("core PLUS") and derives `phys_proc_id = initial_apicid >> it`.
+    ///
+    /// Bochs cpuid.cc `get_std_cpuid_extended_topology_leaf` reports
+    /// `ilog2(ncores-1)+1`, which counts the core bits alone. APIC ids are
+    /// assigned densely from the CPU index (Bochs apic.cc
+    /// `bx_local_apic_c::bx_local_apic_c`), so on 2 x 4 x 2 they pack thread
+    /// into bit 0, core into bits 1-2 and socket into bit 3 — and shifting by
+    /// the core width alone strands the top core bit inside the package id,
+    /// splitting each socket in two. This test therefore fails against the
+    /// upstream formula; see docs/bochs-parity-divergences.md.
+    #[test]
+    fn cpuid_leaf_b_core_shift_separates_sockets_as_software_reads_it() {
+        const PACKAGES: u32 = 2;
+        const CORES: u32 = 4;
+        const THREADS: u32 = 2;
+        const LOGICAL: u32 = PACKAGES * CORES * THREADS;
+        let topology = BxParams::default()
+            .with_topology(PACKAGES, CORES, THREADS)
+            .unwrap()
+            .cpu_topology();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let instr = Instruction::default();
+
+        let mut package_of = Vec::new();
+        for apic_id in 0..LOGICAL {
+            let mut cpu = machine.ctx();
+            cpu.configure_smp(apic_id, topology);
+            cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+            cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_CORE);
+            cpu.cpuid(&instr).unwrap();
+            let core_plus_mask_width = cpu.eax() & 0x1F;
+            package_of.push(apic_id >> core_plus_mask_width);
+        }
+
+        let expected: Vec<u32> = (0..LOGICAL).map(|id| id / (CORES * THREADS)).collect();
+        assert_eq!(
+            package_of, expected,
+            "all 8 logical processors of a socket must derive the same package id"
+        );
+    }
+
+    /// One socket leaves the package level invalid, exactly as Bochs
+    /// cpuid.cc guards `case 2` with `nprocessors > 1`.
+    #[test]
+    fn cpuid_leaf_b_package_level_is_invalid_on_a_single_socket() {
+        let topology = BxParams::default()
+            .with_topology(1, 4, 2)
+            .unwrap()
+            .cpu_topology();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.configure_smp(CONFIGURED_APIC_ID, topology);
+        let instr = Instruction::default();
+
         cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
         cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_PACKAGE);
         cpu.cpuid(&instr).unwrap();
         assert_eq!(cpu.eax(), 0);
-        assert_eq!(cpu.ebx(), 0);
-        assert_eq!(cpu.ecx(), 0);
-        assert_eq!(cpu.edx(), 0);
+        assert_eq!(cpu.ebx(), 0, "no package level to enumerate");
+        assert_eq!(cpu.ecx(), CPUID_TOPOLOGY_SUBLEAF_PACKAGE);
+        assert_eq!(cpu.edx(), CONFIGURED_APIC_ID);
     }
 
     /// Bochs cpuid.cc computes leaf 0xB EAX as `ilog2(n-1)+1` with no guard for

@@ -126,12 +126,11 @@ pub use geforce::BxGeForceC;
 const _: () = assert!(core::mem::size_of::<IoHandlerEntry>() == 2);
 /// Number of I/O ports (0x0000 - 0xFFFF)
 pub const IO_PORTS: usize = 0x10000;
-/// Number of serial timer-owner slots reserved by the no-allocation I/O
-/// scheduler transport. The current machine wires one UART; the remaining
-/// slots make the transport independent of a later topology expansion.
 /// Maximum number of UARTs the machine can carry (Bochs serial.h
-/// BX_N_SERIAL_PORTS). Bounds the scheduler's `TimerOwner::Serial*` port
-/// index when validating a restored snapshot.
+/// `BX_N_SERIAL_PORTS`). Bounds the scheduler's `TimerOwner::Serial*` port
+/// index when validating a restored snapshot, which is the only thing that
+/// reads it — hence the `std` gate that matches the snapshot format's own.
+#[cfg(feature = "std")]
 pub(crate) const BX_FIXED_SERIAL_TIMER_OWNERS: usize = 4;
 
 /// Number of fixed device timer owners carried across the raw I/O boundary.
@@ -700,8 +699,6 @@ impl BxDevicesC {
         let handler_width = device_api::IoLen::from_bytes(io_len)
             .filter(|_| !slot.is_none() && (entry.mask & len_mask) != 0);
 
-        let mut pic_intr_level = None;
-        let mut hrq_level = None;
         let value = if let Some(width) = handler_width {
             {
                 // Devices on the device API route through one context; the
@@ -723,7 +720,9 @@ impl BxDevicesC {
                     None => Self::dispatch_read(dm, slot, port, io_len, current_ticks),
                 };
                 let (fwds, count) = dm.pic.take_ioapic_forwards();
-                hrq_level = dm.dma.take_hrq_request();
+                if let Some(level) = dm.dma.take_hrq_request() {
+                    self.hrq_level = Some(level);
+                }
                 let devices::DeviceManager {
                     ref mut pic,
                     ref mut ioapic,
@@ -732,18 +731,14 @@ impl BxDevicesC {
                 for &(irq, level) in &fwds[..count] {
                     ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
                 }
-                pic_intr_level = Self::take_pic_level_after_dispatch(dm);
+                if let Some(level) = Self::take_pic_level_after_dispatch(dm) {
+                    self.pic_intr_level = Some(level);
+                }
                 result
             }
         } else {
             self.default_read_handler(port, io_len)
         };
-        if let Some(level) = pic_intr_level {
-            self.pic_intr_level = Some(level);
-        }
-        if let Some(level) = hrq_level {
-            self.hrq_level = Some(level);
-        }
         self.last_io_read_port = port;
         self.last_io_read_value = value;
         value
@@ -751,6 +746,7 @@ impl BxDevicesC {
 
     /// Write to an I/O port.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     pub fn outp(
         &mut self,
         port: u16,
@@ -759,6 +755,7 @@ impl BxDevicesC {
         current_ticks: u64,
         pc_system: &mut crate::pc_system::BxPcSystemC,
         dm: &mut devices::DeviceManager,
+        mem: &mut crate::memory::BxMemC,
     ) {
         self.diag_io_writes += 1;
         let entry = &self.write_handlers[port as usize];
@@ -769,10 +766,7 @@ impl BxDevicesC {
             .filter(|_| !slot.is_none() && (entry.mask & len_mask) != 0);
 
         if let Some(width) = handler_width {
-            let mut pic_intr_level = None;
-            let mut hrq_level = None;
-            let mut machine_boundary_pending = false;
-            let dispatched = {
+            {
                 // See `inp` on why the two paths cannot overlap.
                 let mut routed = false;
                 if let Some(bound) = dm.bind_pio(slot, port) {
@@ -786,35 +780,28 @@ impl BxDevicesC {
                     routed = true;
                 }
                 if !routed {
-                    Self::dispatch_write(dm, slot, port, value, io_len);
+                    Self::dispatch_write(dm, slot, port, value, io_len, mem);
                 }
                 dm.apply_dispatch_effects();
                 // The IDE controller arms its own seek and bus-master
                 // deadlines, still anchored to this OUT.
                 Self::drain_ide_timers(dm, pc_system, current_ticks);
                 let (fwds, count) = dm.pic.take_ioapic_forwards();
-                hrq_level = dm.dma.take_hrq_request();
+                if let Some(level) = dm.dma.take_hrq_request() {
+                    self.hrq_level = Some(level);
+                }
                 let devices::DeviceManager { pic, ioapic, .. } = dm;
                 for &(irq, level) in &fwds[..count] {
                     ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
                 }
-                pic_intr_level = Self::take_pic_level_after_dispatch(dm);
-                machine_boundary_pending = dm.has_pending_machine_boundary();
-                true
-            };
-
-            if machine_boundary_pending {
-                self.scheduler_boundary_requested = true;
+                if let Some(level) = Self::take_pic_level_after_dispatch(dm) {
+                    self.pic_intr_level = Some(level);
+                }
+                if dm.has_pending_machine_boundary() {
+                    self.scheduler_boundary_requested = true;
+                }
             }
-            if let Some(level) = pic_intr_level {
-                self.pic_intr_level = Some(level);
-            }
-            if let Some(level) = hrq_level {
-                self.hrq_level = Some(level);
-            }
-            if dispatched {
-                return;
-            }
+            return;
         }
 
         self.default_write_handler(port, value, io_len);
@@ -881,12 +868,18 @@ impl BxDevicesC {
     /// directly from the ATA controller buffer in one call, avoiding per-word
     /// handler dispatch overhead. Returns the number of bytes actually read.
     /// For other ports, returns 0 (caller should fall back to per-word I/O).
+    ///
+    /// `_current_ticks` is the issuing instruction's epoch. The bulk IDE path
+    /// has no clocked register transition beyond the transfer itself, so
+    /// nothing here consumes it; it stays in the signature because a
+    /// device-owned timer producer on this path would have to anchor to the
+    /// same boundary the other dispatch entry points use.
     pub fn inp_bulk(
         &mut self,
         port: u16,
         io_len: u8,
         buf: &mut [u8],
-        current_ticks: u64,
+        _current_ticks: u64,
         dm: &mut devices::DeviceManager,
     ) -> usize {
         // Only optimize IDE data ports (base + 0 = data register).
@@ -898,11 +891,6 @@ impl BxDevicesC {
             return 0;
         }
 
-        // The current bulk IDE path has no clocked register transition beyond
-        // the operation itself. Keep the captured issuing epoch in its API so
-        // future device-owned timer producers preserve the same boundary.
-        let _ = current_ticks;
-        let mut pic_intr_level = None;
         let bytes_read = {
             let result = {
                 let devices::DeviceManager {
@@ -923,12 +911,11 @@ impl BxDevicesC {
                     ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
                 }
             }
-            pic_intr_level = Self::take_pic_level_after_dispatch(dm);
+            if let Some(level) = Self::take_pic_level_after_dispatch(dm) {
+                self.pic_intr_level = Some(level);
+            }
             result
         };
-        if let Some(level) = pic_intr_level {
-            self.pic_intr_level = Some(level);
-        }
         bytes_read
     }
 
@@ -1214,6 +1201,7 @@ impl BxDevicesC {
         port: u16,
         value: u32,
         io_len: u8,
+        mem: &mut crate::memory::BxMemC,
     ) {
         match slot {
             DevSlot::PIC => dm.pic.write(port, value, io_len),
@@ -1225,7 +1213,7 @@ impl BxDevicesC {
             DevSlot::VGA => dm.vga.write_port(port, value, io_len),
             DevSlot::PORT92 => dm.port92_write(port, value, io_len),
             DevSlot::PCI => dm.pci_write(port, value, io_len),
-            DevSlot::FW_CFG => dm.fw_cfg_write(port, value, io_len),
+            DevSlot::FW_CFG => dm.fw_cfg_write(port, value, io_len, mem),
             // See `dispatch_read`.
             _ => tracing::warn!(
                 "I/O write of port {port:#06x} routed to {slot:?}, which has no write handler"
@@ -1702,15 +1690,16 @@ mod tests {
         let mut devices = boxed_devices();
         let mut pc_system = crate::pc_system::BxPcSystemC::new();
         let mut dm = devices::DeviceManager::new();
+        let mut mem = crate::memory::test_ram();
 
         // Bochs biosdev.cc: rombios/vgabios message ports flush to the log on
         // newline and must never reach the guest-visible 0xE9 console stream
         // (this leaked BIOS text onto the COM1 stdout mirror).
         for byte in b"PIIX3/PIIX4 init: elcr=60 70\n" {
-            devices.outp(0x0402, u32::from(*byte), 1, 0, &mut pc_system, &mut dm);
+            devices.outp(0x0402, u32::from(*byte), 1, 0, &mut pc_system, &mut dm, &mut mem);
         }
         for byte in b"VBE present\n" {
-            devices.outp(0x0500, u32::from(*byte), 1, 0, &mut pc_system, &mut dm);
+            devices.outp(0x0500, u32::from(*byte), 1, 0, &mut pc_system, &mut dm, &mut mem);
         }
         assert!(devices.port_e9_output.is_empty());
         assert_eq!(devices.bios_message_i, 0, "newline must flush the rombios buffer");
@@ -1719,13 +1708,13 @@ mod tests {
         // A line longer than the Bochs 80-byte buffer flushes on overflow and
         // keeps accumulating the remainder.
         for _ in 0..BX_BIOS_MESSAGE_SIZE + 5 {
-            devices.outp(0x0403, u32::from(b'x'), 1, 0, &mut pc_system, &mut dm);
+            devices.outp(0x0403, u32::from(b'x'), 1, 0, &mut pc_system, &mut dm, &mut mem);
         }
         assert_eq!(devices.bios_message_i, 5);
         assert!(devices.port_e9_output.is_empty());
 
         // The genuine port-0xE9 debug console still lands in the stream.
-        devices.outp(0x00E9, u32::from(b'X'), 1, 0, &mut pc_system, &mut dm);
+        devices.outp(0x00E9, u32::from(b'X'), 1, 0, &mut pc_system, &mut dm, &mut mem);
         assert_eq!(devices.port_e9_output.len(), 1);
     }
 

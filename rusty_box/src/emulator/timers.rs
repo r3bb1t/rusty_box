@@ -616,7 +616,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Deliver interrupt and timer work the UART latched outside guest I/O —
     /// a host byte pushed into the receive path leaves the same state a
-    /// guest-visible access would.
+    /// guest-visible access would. Only a host frontend delivers such bytes,
+    /// so this follows `pump_gui_input` behind the `alloc` gate.
+    #[cfg(feature = "alloc")]
     pub(super) fn drain_serial_effects(&mut self, port_index: usize, current_ticks: u64) {
         self.with_serial_ctx(port_index, current_ticks, |serial, ctx| {
             serial.drain_pending_effects(ctx, port_index)

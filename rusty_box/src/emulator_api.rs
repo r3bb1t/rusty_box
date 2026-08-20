@@ -1019,8 +1019,11 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         'a: 'static,
     {
         self.stop_flag.store(false, Ordering::Relaxed);
-        // step_batch respects the budget
-        let _ = self.step_batch(1)?;
+        // Both halves of the batch outcome are machine state the caller can
+        // read back at will — the retired count through the CPU's instruction
+        // counter, the shutdown flag through `is_in_shutdown` — so neither is
+        // lost by not being returned from a one-instruction step.
+        let (_retired, _shutdown) = self.step_batch(1)?;
         Ok(())
     }
 }

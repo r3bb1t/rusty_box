@@ -5246,6 +5246,7 @@ fn snapshot_media_hash(bytes: &[u8]) -> u64 {
 }
 
 #[cfg(feature = "std")]
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn snapshot_file_identity(
     metadata: &std::fs::Metadata,
     path: &str,
@@ -5256,9 +5257,10 @@ fn snapshot_file_identity(
         return Ok((1, metadata.dev(), metadata.ino()));
     }
 
+    // Only unix exposes a stable (device, inode) pair; elsewhere the path hash
+    // is the strongest identity available.
     #[cfg(windows)]
     {
-        let _ = metadata;
         Ok((3, snapshot_media_hash(path.as_bytes()), 0))
     }
 

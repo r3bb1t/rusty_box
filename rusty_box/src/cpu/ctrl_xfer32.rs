@@ -634,14 +634,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // Far JMP instructions (32-bit)
     // =========================================================================
 
-    /// JMP32_Ap - Far jump with absolute pointer (32-bit)
-    /// Matching C++ ctrl_xfer32.cc (similar to CALL32_Ap but for jump)
-    pub fn jmp32_ap(&mut self, instr: &Instruction) -> Result<()> {
-        let cs_raw = instr.iw2();
-        let disp32 = instr.id();
-        self.jmp_far32(instr, cs_raw, disp32)
-    }
-
     /// JMP32_Ep - Far jump indirect (32-bit)
     /// Matching C++ ctrl_xfer32.cc (similar to JMP16_Ep but 32-bit)
     pub fn jmp32_ep(&mut self, instr: &Instruction) -> Result<()> {

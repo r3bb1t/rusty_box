@@ -123,8 +123,8 @@ pub trait Instrumentation {
     ///   opcode only.
     /// - [`InstrAction::Stop`]: transition runs, then CPU stops.
     /// - [`InstrAction::SkipAndStop`]: both.
+    #[allow(unused_variables)]
     fn pre_syscall(&mut self, ctx: &mut HookCtx) -> InstrAction {
-        let _ = ctx;
         InstrAction::Continue
     }
 

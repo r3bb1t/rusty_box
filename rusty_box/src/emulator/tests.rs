@@ -123,6 +123,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT: u32 = 8;
     const CPUID_TOPOLOGY_LEVEL_TYPE_SMT: u32 = 1;
     const CPUID_TOPOLOGY_LEVEL_TYPE_CORE: u32 = 2;
+    const CPUID_TOPOLOGY_LEVEL_TYPE_PACKAGE: u32 = 3;
 
     /// Allocation offset of the resident block backing guest address 0, and the
     /// base it is measured from.
@@ -160,13 +161,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emu.refresh_cpu_masks(BSP_INDEX);
     }
 
-    fn read_fw_cfg_u16(fw_cfg: &mut crate::iodev::fw_cfg::BxFwCfg, key: u16) -> u16 {
-        fw_cfg.write_port(
-            FW_CFG_IO_BASE,
-            key as u32,
-            FW_CFG_SELECTOR_WRITE_BYTES,
-            None,
-        );
+    fn read_fw_cfg_u16(
+        fw_cfg: &mut crate::iodev::fw_cfg::BxFwCfg,
+        key: u16,
+        mem: &mut crate::memory::BxMemC,
+    ) -> u16 {
+        fw_cfg.write_port(FW_CFG_IO_BASE, key as u32, FW_CFG_SELECTOR_WRITE_BYTES, mem);
         let lo = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, FW_CFG_DATA_READ_BYTES) as u16;
         let hi = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, FW_CFG_DATA_READ_BYTES) as u16;
         lo | (hi << 8)
@@ -1501,7 +1501,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 dma.s[0].chan[2].current_address = 0x1008;
                 dma.s[0].chan[2].current_count = 1;
                 dma.s[0].chan[2].mode.transfer_type = 1;
-                dma.raise_hlda(Some(&mut emu.memory));
+                dma.raise_hlda(&mut emu.memory);
 
                 for _ in 0..50 {
                     emu.run_cpu_batch(4096).unwrap();
@@ -2395,18 +2395,34 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
                     cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_PACKAGE);
                     cpu.cpuid(&instr).unwrap();
-                    assert_eq!((cpu.eax(), cpu.ebx(), cpu.ecx(), cpu.edx()), (0, 0, 0, 0));
+                    // Two sockets: a 1-bit shift reaches the socket id, and
+                    // all 8 logical processors sit below the package level.
+                    assert_eq!(cpu.eax(), 1);
+                    assert_eq!(cpu.ebx(), 8);
+                    assert_eq!(
+                        cpu.ecx(),
+                        topology_level_ecx(
+                            CPUID_TOPOLOGY_SUBLEAF_PACKAGE,
+                            CPUID_TOPOLOGY_LEVEL_TYPE_PACKAGE
+                        )
+                    );
+                    assert_eq!(cpu.edx(), cpu_index as u32);
                 }
 
                 emu.initialize().unwrap();
 
                 assert_eq!(emu.device_manager.ioapic.apic_id(), NONFLAT_TOPOLOGY_CPUS);
+                let Emulator {
+                    device_manager,
+                    memory,
+                    ..
+                } = &mut *emu;
                 assert_eq!(
-                    read_fw_cfg_u16(&mut emu.device_manager.fw_cfg, FW_CFG_NB_CPUS_KEY),
+                    read_fw_cfg_u16(&mut device_manager.fw_cfg, FW_CFG_NB_CPUS_KEY, memory),
                     NONFLAT_TOPOLOGY_CPUS as u16
                 );
                 assert_eq!(
-                    read_fw_cfg_u16(&mut emu.device_manager.fw_cfg, FW_CFG_MAX_CPUS_KEY),
+                    read_fw_cfg_u16(&mut device_manager.fw_cfg, FW_CFG_MAX_CPUS_KEY, memory),
                     NONFLAT_TOPOLOGY_CPUS as u16
                 );
 
@@ -2495,16 +2511,17 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert_eq!(cpu_count, MAX_SUPPORTED_TEST_CPUS);
 
         let mut fw_cfg = crate::iodev::fw_cfg::BxFwCfg::new();
+        let mut mem = crate::memory::test_ram();
         fw_cfg.init(
             EmulatorConfig::default().guest_memory_size as u64,
             cpu_count,
         );
         assert_eq!(
-            read_fw_cfg_u16(&mut fw_cfg, FW_CFG_NB_CPUS_KEY),
+            read_fw_cfg_u16(&mut fw_cfg, FW_CFG_NB_CPUS_KEY, &mut mem),
             MAX_SUPPORTED_TEST_CPUS as u16
         );
         assert_eq!(
-            read_fw_cfg_u16(&mut fw_cfg, FW_CFG_MAX_CPUS_KEY),
+            read_fw_cfg_u16(&mut fw_cfg, FW_CFG_MAX_CPUS_KEY, &mut mem),
             MAX_SUPPORTED_TEST_CPUS as u16
         );
 
@@ -4216,11 +4233,16 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .init(&mut emu.devices, &mut emu.memory)
             .unwrap();
         emu.device_manager.fw_cfg.add_bytes(PHASE6_FW_CFG_KEY, stream);
-        emu.device_manager.fw_cfg.write_port(
+        let Emulator {
+            device_manager,
+            memory,
+            ..
+        } = emu;
+        device_manager.fw_cfg.write_port(
             FW_CFG_IO_BASE,
             PHASE6_FW_CFG_KEY as u32,
             FW_CFG_SELECTOR_WRITE_BYTES,
-            None,
+            memory,
         );
     }
 
@@ -5109,4 +5131,140 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    // ─── Doctrine R6: thread safety by derivation ───────────────────────────
+
+    /// Guest code that stamps a run of bytes onto the port-0xE9 debug console
+    /// and halts: `id`, `id + 1`, … `id + count - 1`.
+    fn debugcon_stamp_program(id: u8, count: u8) -> [u8; 17] {
+        [
+            0xBA, 0xE9, 0x00, 0x00, 0x00, // mov edx, 0x00E9
+            0xB0, id,   // mov al, id
+            0xB1, count, // mov cl, count
+            0xEE, // out dx, al
+            0xFE, 0xC0, // inc al
+            0xFE, 0xC9, // dec cl
+            0x75, 0xF9, // jnz back to the `out`
+            0xF4, // hlt
+        ]
+    }
+
+    const STAMP_CODE_ADDRESS: u64 = 0x2000;
+    const STAMP_COUNT: u8 = 16;
+
+    fn stamp_machine(id: u8) -> Box<Emulator> {
+        let mut emu =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+                .unwrap();
+        // `new_with_mode` deliberately skips device registration.
+        emu.devices.init(&mut emu.memory).unwrap();
+        emu.device_manager
+            .init(&mut emu.devices, &mut emu.memory)
+            .unwrap();
+        emu.virt_write(
+            STAMP_CODE_ADDRESS,
+            &debugcon_stamp_program(id, STAMP_COUNT),
+        )
+        .unwrap();
+        emu.reg_write(X86Reg::Rip, STAMP_CODE_ADDRESS);
+        emu
+    }
+
+    /// Prologue, four instructions per stamp, and the HLT that ends the batch.
+    const STAMP_BUDGET: u64 = 8 + 4 * STAMP_COUNT as u64;
+
+    fn stamped_output(emu: &mut Emulator) -> Vec<u8> {
+        // A batch ends at the next device deadline as well as at its budget,
+        // so pump until the guest has stamped everything or its HLT stops it.
+        let mut output = Vec::new();
+        for _ in 0..STAMP_COUNT {
+            let executed = emu.run_cpu_batch(STAMP_BUDGET).unwrap();
+            output.extend(emu.devices.take_port_e9_output());
+            if executed == 0 || output.len() >= STAMP_COUNT as usize {
+                break;
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn a_machine_keeps_running_after_moving_to_another_thread() {
+        const ID: u8 = 0x40;
+        let expected: Vec<u8> = (ID..ID + STAMP_COUNT).collect();
+        assert_eq!(stamped_output(&mut stamp_machine(ID)), expected);
+
+        let mut emu = stamp_machine(ID);
+        // Start the guest here, then hand the whole machine to another thread
+        // and let it finish. A machine that shared anything with its birth
+        // thread could not survive this.
+        emu.run_cpu_batch(5).unwrap();
+        let moved = std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let mut emu = emu;
+                stamped_output(&mut emu)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(
+            moved, expected,
+            "a guest's output must not depend on which thread ran it"
+        );
+    }
+
+    #[test]
+    fn two_machines_run_concurrently_without_sharing_state() {
+        const FIRST: u8 = 0x10;
+        const SECOND: u8 = 0x80;
+        let expected_first: Vec<u8> = (FIRST..FIRST + STAMP_COUNT).collect();
+        let expected_second: Vec<u8> = (SECOND..SECOND + STAMP_COUNT).collect();
+
+        let workers: Vec<_> = [FIRST, SECOND]
+            .into_iter()
+            .map(|id| {
+                std::thread::Builder::new()
+                    .stack_size(TEST_STACK_SIZE)
+                    .spawn(move || stamped_output(&mut stamp_machine(id)))
+                    .unwrap()
+            })
+            .collect();
+        let mut outputs = workers.into_iter().map(|w| w.join().unwrap());
+
+        assert_eq!(outputs.next().unwrap(), expected_first);
+        assert_eq!(outputs.next().unwrap(), expected_second);
+    }
+
+    /// Port I/O is not feature-gated: a guest `OUT` reaches the device and the
+    /// following `IN` reads back what the device now holds. Bochs pic.cc
+    /// write_handler/read_handler for 0x21 (the master IMR).
+    #[test]
+    fn a_guest_out_and_in_round_trip_through_a_real_device() {
+        const IMR: u8 = 0xAB;
+        let code = [
+            0xBA, 0x21, 0x00, 0x00, 0x00, // mov edx, 0x0021
+            0xB0, IMR,  // mov al, IMR
+            0xEE, // out dx, al
+            0xEC, // in al, dx
+            0xF4, // hlt
+        ];
+
+        let mut emu =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+                .unwrap();
+        emu.devices.init(&mut emu.memory).unwrap();
+        emu.device_manager
+            .init(&mut emu.devices, &mut emu.memory)
+            .unwrap();
+        emu.virt_write(STAMP_CODE_ADDRESS, &code).unwrap();
+        emu.reg_write(X86Reg::Rip, STAMP_CODE_ADDRESS);
+        emu.run_cpu_batch(code.len() as u64).unwrap();
+
+        assert_eq!(
+            emu.reg_read(X86Reg::Rax) as u8,
+            IMR,
+            "the guest must read back the mask its own OUT installed"
+        );
     }

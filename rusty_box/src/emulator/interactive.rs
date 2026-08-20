@@ -203,7 +203,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
                                 .append(true)
                                 .open("reset_log.txt")
                             {
-                                let _ = writeln!(f, "{}", msg);
+                                if let Err(error) = writeln!(f, "{}", msg) {
+                                    tracing::warn!("reset_log.txt write failed: {error}");
+                                }
                             }
                         }
                         tracing::warn!("{}", msg);
@@ -326,8 +328,14 @@ impl<'a, T: Instrumentation> Emulator<T> {
                     }
                     #[cfg(not(feature = "std"))]
                     {
-                        // Drain E9 output to prevent buffer growth (output discarded)
-                        let _ = self.devices.take_port_e9_output();
+                        // No host sink exists without `std`, so the debug
+                        // console has nowhere to go — drain it anyway, or its
+                        // ring backs up and starts dropping the oldest bytes
+                        // silently.
+                        let dropped = self.devices.drain_port_e9_output().count();
+                        if dropped > 0 {
+                            tracing::trace!("{dropped} debug-console bytes had no host sink");
+                        }
                     }
 
                     // Advance virtual time (Bochs-like ticking).
@@ -639,8 +647,15 @@ impl<'a, T: Instrumentation> Emulator<T> {
                     #[cfg(feature = "std")]
                     {
                         use std::io::Write;
-                        let _ = std::io::stdout().write_all(serial_bytes.as_slice());
-                        let _ = std::io::stdout().flush();
+                        // A closed or redirected stdout must not stop the
+                        // guest, but it does mean the mirror is now lying —
+                        // say so once per failed write rather than never.
+                        let mirrored = std::io::stdout()
+                            .write_all(serial_bytes.as_slice())
+                            .and_then(|()| std::io::stdout().flush());
+                        if let Err(error) = mirrored {
+                            tracing::warn!("serial stdout mirror failed: {error}");
+                        }
                     }
                 }
             }

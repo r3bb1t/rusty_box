@@ -5,28 +5,16 @@ use crate::{
         instrumentation::Instrumentation,
         BxCpuC, CpuError, Result as CpuResult,
     },
-    memory::BxMemC, Result,
+    Result,
 };
 
 
 use super::{CpuMask, Emulator, BOCHS_APIC_BUS_ID_MASK};
 
 impl<'a, T: Instrumentation> Emulator<T> {
-    /// Transmute a `NonNull<BxMemC>` to `NonNull<BxMemC>` for wiring
-    /// into BxDevicesC during a CPU batch. The pointer remains valid for the
-    /// duration of the batch because memory is owned by Emulator.
-    ///
-    /// # Safety
-    /// Caller must ensure the returned pointer is not used after the batch completes.
-    #[inline]
-    unsafe fn mem_nonnull_static(&mut self) -> core::ptr::NonNull<BxMemC> {
-        core::mem::transmute(core::ptr::NonNull::from(&mut self.memory))
-    }
-
     /// Invalidate every host pointer and decoded trace before memory backing
     /// can be replaced or restored.
     pub(crate) fn invalidate_all_cpu_host_mappings(&mut self) {
-        self.clear_scheduler_raw_wiring();
         let smc_seq = self.memory.smc_seq_next();
         for cpu_index in 0..self.cpu_count() {
             let cpu = self.cpu_mut_at(cpu_index);
@@ -113,15 +101,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
         );
     }
 
-    /// Clear all raw device-side wiring before touching machine-owned state.
-    ///
-    /// CPU wrappers clear their own memory/I/O/pc-system buses. The device
-    /// manager pointers are installed only around an individual CPU slice, so
-    /// every scheduler commit runs with ordinary exclusive borrows.
-    pub(super) fn clear_scheduler_raw_wiring(&mut self) {
-        self.device_manager.mem_ptr = None;
-    }
-
     /// Per-AP HLT fast-forward eligibility from the maintained runnable mask.
     ///
     /// Equivalence with the authoritative per-AP scan
@@ -191,19 +170,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
             return Err(CpuError::CpuNotInitialized);
         }
         self.batch_advanced_pc_system = false;
-        self.clear_scheduler_raw_wiring();
         // A reset applied at batch entry needs no special handling: the batch
         // below simply starts executing at the reset vector.
         self.service_scheduler_boundary(0)?;
 
         let cpu_count = self.cpu_count();
         let smp = cpu_count > 1;
-        let mem_ptr: *mut BxMemC = &mut self.memory;
-        let io_ptr = core::ptr::NonNull::from(&mut self.devices);
-        let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
-        let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
-        let pic_ref: *mut _ = &mut self.device_manager.pic;
-        let dma_ref: *mut _ = &mut self.device_manager.dma;
         let mut total_elapsed_ticks = 0u64;
         let mut total_up_executed = 0u64;
         let mut result: CpuResult<()> = Ok(());
@@ -278,49 +250,23 @@ impl<'a, T: Instrumentation> Emulator<T> {
                     cpu.lapic.cpu_ticks_at_sync = cpu.cpu_ticks();
                 }
 
-                // SAFETY: `fw_cfg` writes guest RAM from inside a port
-                // handler, and reaches it through this pointer. It names
-                // `self.memory`, a field disjoint from every other the
-                // slice borrows, and `clear_scheduler_raw_wiring` clears it
-                // below before anything else touches memory. The last raw
-                // wiring left in the scheduler.
-                unsafe {
-                    let mem_static = self.mem_nonnull_static();
-                    self.device_manager.mem_ptr = Some(mem_static);
-                }
-
                 let ticks_before = self.cpu_ref(cpu_index).cpu_ticks();
-                // The CPU, memory and pin set now come from one borrow of the
-                // machine rather than three raw pointers and a lifetime
-                // transmute. Scoped to the call, so the bookkeeping below can
-                // use `self` again.
-                // The slice entry points live on `ExecCtx` now, so memory, the
-                // pin set and both buses come from the context itself. The
-                // scheduler no longer names any of them.
-                // SAFETY: `pic_ref` and `dma_ref` point at two disjoint
-                // fields of `self.device_manager`, taken before the loop and
-                // never aliased inside it — the slice reaches the rest of
-                // the machine through `ExecCtx`, which borrows different
-                // fields. Also Phase G's to delete.
-                let (pic, dma) = unsafe { (&mut *pic_ref, &mut *dma_ref) };
+                // One borrow of the machine hands the slice its CPU, memory,
+                // devices, device models and PC system at once. Scoped to the
+                // call, so the bookkeeping below can use `self` again.
                 let slice_result = {
                     let mut ctx = self.exec_ctx(cpu_index);
                     if smp {
-                        ctx.cpu_run_trace_with_io(
+                        ctx.cpu_run_trace_slice(
                             per_cpu_batch,
                             strict_smp_deadline,
                             cpu_count as u64,
-                            Some(pic),
-                            Some(dma),
                         )
                     } else {
-                        ctx.cpu_loop_n_with_io(per_cpu_batch, strict_up_deadline, 1, Some(pic), Some(dma))
+                        ctx.cpu_loop_n_slice(per_cpu_batch, strict_up_deadline, 1)
                     }
                 };
 
-                // CPU wrappers clear their own buses. Clear every device-side
-                // raw pointer before consuming any queued machine work.
-                self.clear_scheduler_raw_wiring();
                 let boundary_requested =
                     self.cpu_mut_at(cpu_index).take_scheduler_boundary_request();
                 self.refresh_cpu_masks(cpu_index);
@@ -430,7 +376,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
             }
         }
 
-        self.clear_scheduler_raw_wiring();
         #[cfg(test)]
         self.assert_cpu_masks_match_scan();
         result.map(|_| {
@@ -466,15 +411,13 @@ impl<'a, T: Instrumentation> Emulator<T> {
             return;
         }
         let newest = self.memory.smc_seq_next();
-        let mem_ptr: *const BxMemC = &self.memory;
         for cpu_index in 0..self.cpu_count() {
             if self.cpu_ref(cpu_index).smc_seq_seen < newest {
-                // SAFETY: memory and the cpu array are distinct fields of
-                // self; smc_apply_pending only reads the pending queue.
-                unsafe {
-                    self.cpu_mut_at(cpu_index)
-                        .smc_apply_pending(&*mem_ptr, true)
-                };
+                // The CPU and memory are distinct fields, which an execution
+                // context is exactly the borrow that expresses.
+                let mut ctx = self.exec_ctx(cpu_index);
+                let (cpu, mem, _devices, _pc_system) = ctx.slice_parts();
+                cpu.smc_apply_pending(mem, true);
             }
         }
         self.memory.smc_clear_pending();
@@ -961,7 +904,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
     }
 
     pub fn service_scheduler_boundary(&mut self, elapsed_ticks: u64) -> CpuResult<bool> {
-        self.clear_scheduler_raw_wiring();
         self.sync_vga_vertical_timer();
 
         // Bochs unmapped.cc port 0x8900: a completed "Shutdown" protocol sets

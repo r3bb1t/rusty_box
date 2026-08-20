@@ -1048,13 +1048,20 @@ fn save_v3_vmcs_cache<W: Write + ?Sized>(
         write_u64(vm.vmread_bitmap_addr), write_u64(vm.vmwrite_bitmap_addr),
         write_u32(vm.vmx_preemption_timer_value), write_u32(vm.tpr_threshold),
         write_u64(vm.virtual_apic_page_addr), write_u64(vm.pi_desc_addr),
-        write_u8(vm.pi_notification_vector), write_u16(vm.vpid),
+        write_u16(vm.pi_notification_vector), write_u16(vm.vpid),
         write_u64(vm.eptptr), write_u64(vm.guest_physical_addr),
         write_u64(vm.vmentry_msr_load_addr), write_u64(vm.vmexit_msr_store_addr),
         write_u64(vm.vmexit_msr_load_addr), write_u32(vm.vmentry_msr_load_cnt),
         write_u32(vm.vmexit_msr_store_cnt), write_u32(vm.vmexit_msr_load_cnt),
-        write_bool(vm.shadow_stack_prematurely_busy)
+        write_bool(vm.shadow_stack_prematurely_busy),
+        // Virtualised-APIC state. RVI/SVI/VPPR are the guest's interrupt
+        // position: restoring without them resumes a guest that has forgotten
+        // which virtual interrupt it was servicing.
+        write_u8(vm.rvi), write_u8(vm.svi), write_u8(vm.vppr)
     );
+    for value in &vm.eoi_exit_bitmap {
+        writer.write_u32(*value)?;
+    }
     Ok(())
 }
 
@@ -1158,13 +1165,17 @@ fn restore_v3_vmcs_cache<R: Read>(
         read_u64 => vmread_bitmap_addr, read_u64 => vmwrite_bitmap_addr,
         read_u32 => vmx_preemption_timer_value, read_u32 => tpr_threshold,
         read_u64 => virtual_apic_page_addr, read_u64 => pi_desc_addr,
-        read_u8 => pi_notification_vector, read_u16 => vpid,
+        read_u16 => pi_notification_vector, read_u16 => vpid,
         read_u64 => eptptr, read_u64 => guest_physical_addr,
         read_u64 => vmentry_msr_load_addr, read_u64 => vmexit_msr_store_addr,
         read_u64 => vmexit_msr_load_addr, read_u32 => vmentry_msr_load_cnt,
         read_u32 => vmexit_msr_store_cnt, read_u32 => vmexit_msr_load_cnt,
-        read_bool => shadow_stack_prematurely_busy
+        read_bool => shadow_stack_prematurely_busy,
+        read_u8 => rvi, read_u8 => svi, read_u8 => vppr
     );
+    for value in &mut vm.eoi_exit_bitmap {
+        *value = reader.read_u32()?;
+    }
     if vm.tpr_threshold > 15 {
         return Err(snapshot_invalid("VMCS TPR threshold is invalid"));
     }

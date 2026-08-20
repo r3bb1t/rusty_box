@@ -317,6 +317,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Direct bulk execution must not bypass active instrumentation hooks.
     #[inline]
+    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(super) fn direct_rep_bulk_allowed(&self, includes_io: bool) -> bool {
         #[cfg(feature = "instrumentation")]
         {
@@ -327,7 +328,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         #[cfg(not(feature = "instrumentation"))]
         {
-            let _ = includes_io;
             true
         }
     }
@@ -1592,54 +1592,31 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     /// Bulk-read whole `io_len`-byte port elements into `buf`.
-    /// Returns the number of bytes actually read. If the port doesn't support
-    /// bulk reads (or no IO bus is wired), returns 0.
+    /// Returns the number of bytes actually read; 0 when the port has no bulk
+    /// handler, which leaves the caller to read it one element at a time.
     fn bulk_port_in(&mut self, port: u16, io_len: u8, buf: &mut [u8]) -> usize {
-        #[cfg(not(feature = "alloc"))]
-        let _ = (port, io_len, buf);
-        #[cfg(feature = "alloc")]
         let current_ticks = self.system_ticks();
-        #[cfg(feature = "alloc")]
-        {
-            let bytes_read = self.devices
-                .inp_bulk(port, io_len, buf, current_ticks, self.device_manager);
-            self.sync_io_events();
-            return bytes_read;
-        }
-        #[cfg(not(feature = "alloc"))]
-        0
+        let bytes_read = self
+            .devices
+            .inp_bulk(port, io_len, buf, current_ticks, self.device_manager);
+        self.sync_io_events();
+        bytes_read
     }
 
-    /// Read from I/O port.
-    ///
-    /// When the emulator wires an I/O bus, this dispatches to `BxDevicesC::inp`.
-    /// Otherwise it falls back to conservative defaults (useful for unit tests
-    /// that don't wire devices and never execute real firmware).
+    /// Read from I/O port, dispatching to `BxDevicesC::inp`. An unclaimed port
+    /// reads as all-ones there, matching Bochs iodev unmapped port semantics.
     fn port_in(&mut self, port: u16, len: u8) -> u32 {
-        let _ = &port; // used by alloc/instrumentation paths
-                       // BOCHS BX_INSTR_INP(addr, len) — fires before the port read.
+        // BOCHS BX_INSTR_INP(addr, len) — fires before the port read.
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
             self.instrumentation.fire_inp(port, len);
         }
 
-        #[cfg(feature = "alloc")]
         let current_ticks = self.system_ticks();
-        #[cfg(feature = "alloc")]
-        let value = {
-            let value =
-                self.devices
-                    .inp(port, len, current_ticks, self.pc_system, self.device_manager);
-            self.sync_io_events();
-            value
-        };
-        #[cfg(not(feature = "alloc"))]
-        let value = match len {
-            1 => 0xFF,
-            2 => 0xFFFF,
-            4 => 0xFFFFFFFF,
-            _ => 0xFF,
-        };
+        let value = self
+            .devices
+            .inp(port, len, current_ticks, self.pc_system, self.device_manager);
+        self.sync_io_events();
 
         // BOCHS BX_INSTR_INP2(addr, len, val) — fires after the read with the value.
         #[cfg(feature = "instrumentation")]
@@ -1656,10 +1633,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         value
     }
 
-    /// Write to I/O port.
-    ///
-    /// When the emulator wires an I/O bus, this dispatches to `BxDevicesC::outp`.
-    /// Otherwise it is ignored (useful for unit tests without devices).
+    /// Write to I/O port, dispatching to `BxDevicesC::outp`.
     fn port_out(&mut self, port: u16, value: u32, len: u8) {
         // BOCHS BX_INSTR_OUTP(addr, len, val) — fires at the port write.
         #[cfg(feature = "instrumentation")]
@@ -1685,27 +1659,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.rip()
             );
         }
-        #[cfg(feature = "alloc")]
         let current_ticks = self.system_ticks();
-        #[cfg(feature = "alloc")]
-        let dispatched = {
-            self.devices.outp(
-                port,
-                value,
-                len,
-                current_ticks,
-                self.pc_system,
-                self.device_manager,
-            );
-            true
-        };
-        #[cfg(feature = "alloc")]
-        if dispatched {
-            // fw_cfg and other port handlers may have written guest RAM while
-            // the I/O bus was borrowed. Flush the issuing CPU after that
-            // borrow ends so a cached trace cannot execute a stale tail.
-            self.sync_io_events();
-            self.smc_sync_after_phys_write();
-        }
+        self.devices.outp(
+            port,
+            value,
+            len,
+            current_ticks,
+            self.pc_system,
+            self.device_manager,
+            self.memory,
+        );
+        // fw_cfg and other port handlers may have written guest RAM while the
+        // I/O bus was borrowed. Flush the issuing CPU after that borrow ends so
+        // a cached trace cannot execute a stale tail.
+        self.sync_io_events();
+        self.smc_sync_after_phys_write();
     }
 }

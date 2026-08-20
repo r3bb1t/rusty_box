@@ -520,30 +520,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    /// CMP_EdGdR: CMP r/m32, r32 (register form)
-    /// Matches BX_CPU_C::CMP_EdGdR
-    pub fn cmp_ed_gd_r(&mut self, instr: &Instruction) {
-        let dst = instr.dst() as usize;
-        let src = instr.src() as usize;
-        let op1 = self.get_gpr32(dst);
-        let op2 = self.get_gpr32(src);
-        let result = op1.wrapping_sub(op2);
-        self.set_flags_oszapc_sub_32(op1, op2, result);
-    }
-
-    /// CMP_EdGdM: CMP r/m32, r32 (memory form)
-    /// Matches BX_CPU_C::CMP_EdGdM
-    pub fn cmp_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let op1_32 = self.v_read_rmw_dword(seg, eaddr)?;
-        let src_reg = instr.src() as usize;
-        let op2_32 = self.get_gpr32(src_reg);
-        let result = op1_32.wrapping_sub(op2_32);
-        self.set_flags_oszapc_sub_32(op1_32, op2_32, result);
-        Ok(())
-    }
-
     /// CMP_EdIdM: CMP r/m32, imm32 (memory form)
     /// Matches BX_CPU_C::CMP_EdIdM
     pub fn cmp_ed_id_m(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -677,36 +653,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Ok(())
         } else {
             self.test_ed_id_m(instr)
-        }
-    }
-
-    /// CMP r32, r/m32 - unified (GdEd: register dest compares with reg or memory)
-    pub fn cmp_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() {
-            self.cmp_gd_ed_r(instr);
-            Ok(())
-        } else {
-            self.cmp_gd_ed_m(instr)
-        }
-    }
-
-    /// CMP r/m32, r32 - unified (EdGd: memory or register compared with register)
-    pub fn cmp_ed_gd(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() {
-            self.cmp_ed_gd_r(instr);
-            Ok(())
-        } else {
-            self.cmp_ed_gd_m(instr)
-        }
-    }
-
-    /// CMP r/m32, imm32 - unified (handles both CmpEdId and CmpEdsIb opcodes)
-    pub fn cmp_ed_id(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() {
-            self.cmp_ed_id_r(instr);
-            Ok(())
-        } else {
-            self.cmp_ed_id_m(instr)
         }
     }
 

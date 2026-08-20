@@ -732,14 +732,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // Far JMP instructions (16-bit)
     // =========================================================================
 
-    /// JMP16_Ap - Far jump with absolute pointer (16-bit)
-    /// Matching C++ ctrl_xfer16.cc (similar to CALL16_Ap but for jump)
-    pub fn jmp16_ap(&mut self, instr: &Instruction) -> Result<()> {
-        let disp16 = instr.iw();
-        let cs_raw = instr.iw2();
-        self.jmp_far16(instr, cs_raw, disp16)
-    }
-
     /// JMP16_Ep - Far jump indirect (16-bit)
     /// Matching C++ ctrl_xfer16.cc
     pub fn jmp16_ep(&mut self, instr: &Instruction) -> Result<()> {

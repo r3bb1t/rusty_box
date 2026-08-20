@@ -551,15 +551,37 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // event stays in pending_event but is_unmasked_event_pending()
         // returns false. When IF=1, the event is unmasked, and if it was
         // pending, async_event is set to trigger delivery at next boundary.
+        // A virtual interrupt and an interrupt-window exit are IF-maskable on
+        // exactly the same terms as a real external interrupt, so all four
+        // move together.
+        let if_gated = Self::BX_EVENT_PENDING_INTR
+            | Self::BX_EVENT_PENDING_LAPIC_INTR
+            | Self::BX_EVENT_PENDING_VMX_VIRTUAL_INTR
+            | Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING;
+
         if self.eflags.contains(super::eflags::EFlags::IF_) {
-            // EFLAGS.IF was set — unmask external interrupt events
-            // Bochs flag_ctrl_pro.cc: unmask both PIC and LAPIC events
-            self.unmask_event(Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR);
-        } else {
-            // EFLAGS.IF was cleared — mask external interrupt events
-            // Bochs flag_ctrl_pro.cc: mask both PIC and LAPIC events
-            self.mask_event(Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR);
+            self.unmask_event(if_gated);
+            return;
         }
+
+        // Bochs flag_ctrl_pro.cc: with external-interrupt exiting set, a VMX
+        // guest's EFLAGS.IF does not block interrupts at all — they leave to
+        // the host instead. What IF still gates there is the guest's own
+        // virtual interrupt and its interrupt window.
+        if self.in_vmx_guest
+            && self.vmcs.pin_based_ctls
+                & super::vmx::VMX_PIN_BASED_VMEXEC_CTRL_EXTERNAL_INTERRUPT_VMEXIT
+                != 0
+        {
+            self.mask_event(
+                Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING
+                    | Self::BX_EVENT_PENDING_VMX_VIRTUAL_INTR,
+            );
+            self.unmask_event(Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR);
+            return;
+        }
+
+        self.mask_event(if_gated);
     }
 
     /// Enable VMX in IA32_FEATURE_CONTROL MSR for external firmware.

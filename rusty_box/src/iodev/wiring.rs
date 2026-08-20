@@ -49,14 +49,9 @@ pub(crate) struct PicIrqSink<'a> {
 impl IrqSink for PicIrqSink<'_> {
     #[inline]
     fn set_level(&mut self, line: IrqLine, level: bool) {
-        match self.pic.set_irq_level(line.0, level) {
-            // The PIC has already enqueued this forward for the scheduler
-            // boundary to replay into the I/O APIC (`take_ioapic_forwards`).
-            // The returned copy is a convenience for callers that drive the
-            // APIC themselves; consuming it here would deliver it twice.
-            Some(_queued_ioapic_forward) => {}
-            None => {}
-        }
+        // The PIC enqueues any I/O APIC forward this edge implies; the
+        // scheduler boundary replays it with `take_ioapic_forwards`.
+        self.pic.set_irq_level(line.0, level);
     }
 
     #[inline]

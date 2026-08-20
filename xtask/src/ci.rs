@@ -56,16 +56,19 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // two `'a: 'static` bounds justified by a deleted helper, are gone.
     // 116 -> 115: the device manager reaches port and MMIO dispatch as a
     // borrow on `ExecCtx`, so `BxDevicesC`'s stored pointer, its set/clear
-    // pair and the accessor that laundered each deref are gone. What remains
-    // is `DeviceManager.mem_ptr`, which fw_cfg uses to write guest RAM from
-    // inside a port handler.
-    ("rusty_box/src", 115),
+    // pair and the accessor that laundered each deref are gone.
+    // 115 -> 103: the machine holds no pointer to any of its own parts. A port
+    // write carries the memory borrow fw_cfg's DMA descriptor needs, the PIC
+    // and DMA controllers come off `ExecCtx` instead of aliasing the device
+    // manager the slice already borrows, and the SMC drain reads memory
+    // through a context. `Emulator` derives `Send`.
+    ("rusty_box/src", 103),
     ("rusty_box_decoder/src", 0),
 ];
-/// `unsafe impl … Send/Sync` lines in rusty_box/src. The survivor is
-/// `Emulator` (emulator/mod.rs); it dies in campaign Phase H, when this
-/// baseline goes to 0 and stays there.
-const UNSAFE_IMPL_SEND_BASELINE: usize = 1;
+/// `unsafe impl … Send/Sync` lines in rusty_box/src. Zero, permanently: thread
+/// safety is derived from ownership, and `Emulator`'s `const` assertion in
+/// emulator/mod.rs fails the build if a field ever takes that away (R6).
+const UNSAFE_IMPL_SEND_BASELINE: usize = 0;
 
 /// Count occurrences of a bare `unsafe` token per crate, comment lines
 /// stripped, against the ratchet baselines.

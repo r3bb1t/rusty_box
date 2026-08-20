@@ -40,16 +40,17 @@ pub trait BxGui: Send + Sync {
     /// from `bx_vgacore_c::update_charmap()`. `data` is 256 glyphs x 32 bytes of
     /// raw VGA bitmap, each byte MSB-first (bit 7 = leftmost pixel). Default
     /// no-op so text-only and headless GUIs need not implement it.
-    fn set_text_charmap(&mut self, map: usize, data: &[u8]) {
-        let _ = (map, data);
-    }
+    #[allow(unused_variables)]
+    fn set_text_charmap(&mut self, map: usize, data: &[u8]) {}
 
     /// Update a graphics tile
     fn graphics_tile_update(&mut self, tile: &[u8], x: u32, y: u32);
 
-    /// Update a graphics tile with explicit RGBA dimensions.
+    /// Update a graphics tile with explicit RGBA dimensions. The default
+    /// forwards to the fixed-tile-size path, which reads the dimensions from
+    /// the tile geometry the device declared at init.
+    #[allow(unused_variables)]
     fn graphics_tile_update_rgba(&mut self, tile: &[u8], x: u32, y: u32, width: u32, height: u32) {
-        let _ = (width, height);
         self.graphics_tile_update(tile, x, y);
     }
 

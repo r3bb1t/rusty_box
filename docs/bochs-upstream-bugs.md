@@ -245,3 +245,111 @@ wires them up, regenerating picks them up automatically.
 
 Detection is mechanical — for each `BxOpcodeGroup_EVEX_*` definition, count
 references in the same file; a count of one means the group is orphaned.
+
+---
+
+## CPUID leaf 0xB sub-leaf 1 reports a core-width shift where the SDM wants core+SMT
+
+**Severity**: Correctness bug, guest-visible. A multi-socket guest with
+hyperthreading enumerates more packages than exist.
+
+**Location**: `cpu/cpuid.cc` —
+`bx_cpuid_t::get_std_cpuid_extended_topology_leaf`, `case 1`.
+
+**Requires**: `cpu: count=P:C:T` with `T > 1`. Single-threaded topologies are
+unaffected, which is likely why this has gone unnoticed.
+
+**Root cause**:
+
+```cpp
+case 1:
+   leaf->eax = ilog2(ncores-1)+1;     // <-- core field width only
+   leaf->ebx = ncores * nthreads;
+```
+
+Per Intel SDM Vol 2, CPUID leaf 0BH, EAX[4:0] at sub-leaf *m* is "the number of
+bits to shift right on x2APIC ID to get a unique topology ID of the **next**
+level type". The next level above *core* is the package, so the shift must
+clear the SMT bits as well as the core bits. EBX on the following line already
+uses `ncores * nthreads` — the same quantity the shift should cover.
+
+**Why it is guest-visible**: Linux `detect_extended_topology` stores the core
+sub-leaf's EAX in a variable named `core_plus_mask_width` — "core **plus**" —
+and computes `phys_proc_id = initial_apicid >> core_plus_mask_width`. Bochs
+assigns APIC ids densely from the CPU index (`cpu/apic.cc`
+`bx_local_apic_c::bx_local_apic_c`, `apic_id = id`), so `count=2:4:2` packs them
+as `socket:1 | core:2 | thread:1`. Shifting by 2 instead of 3 leaves the top
+core bit inside the package id:
+
+| APIC id | 0–3 | 4–7 | 8–11 | 12–15 |
+|---|---|---|---|---|
+| package id, current | 0 | 1 | 2 | 3 |
+| package id, expected | 0 | 0 | 1 | 1 |
+
+A 2-socket guest enumerates as 4 packages, so every scheduler and NUMA decision
+derived from `phys_proc_id` is placed against a topology that does not exist.
+
+**Fix**:
+
+```cpp
+case 1:
+   leaf->eax = ilog2(ncores*nthreads-1)+1;
+   leaf->ebx = ncores * nthreads;
+```
+
+Sub-leaf 2's `ilog2(nprocessors-1)+1` is the shift *above* the package, where no
+higher level is enumerated, so nothing depends on it.
+
+**Not reproduced in rusty** — see divergence D2 in
+`docs/bochs-parity-divergences.md`, pinned by
+`cpuid_leaf_b_core_shift_separates_sockets_as_software_reads_it`
+(`cpu/soft_int.rs`), which fails against the upstream formula.
+
+---
+
+## Fast REP string bursts defer timer interrupts by up to a page of elements
+
+**Severity**: Timing divergence from real hardware, guest-visible as interrupt
+latency.
+
+**Location**: `cpu/io.cc` — `FastRepINSW`, `FastRepOUTSW`, and their callers
+`INSW32_YwDX` / `OUTSW32_DXXw`; `cpu/faststring.cc` — `FastRepMOVSB`.
+
+**Requires**: `BX_SUPPORT_REPEAT_SPEEDUPS`.
+
+**Root cause**: the caller runs the whole burst before any clock movement:
+
+```cpp
+wordCount = FastRepINSW(edi, DX, wordCount);
+if (wordCount) {
+  BX_TICKN(wordCount-1);
+  ...
+}
+```
+
+`FastRepINSW` bounds `wordCount` by ECX and by the words remaining in the
+destination page, and no further. Its inner loop does check
+
+```cpp
+if (BX_CPU_THIS_PTR async_event) break;
+```
+
+but virtual time has not advanced at that point, so a timer whose deadline falls
+inside the burst has not fired and `async_event` is not set on its account. The
+check can only observe an event that was already pending on entry.
+
+**Why it diverges from hardware**: x86 REP string instructions are
+architecturally interruptible *between iterations* — RIP stays on the prefix and
+RCX/RSI/RDI carry the progress, so a pending interrupt is taken at the next
+iteration boundary. Real hardware does not defer an interrupt to the end of a
+2048-element REP. Under the current model a `REP INSW` of 2048 words with a PIT
+deadline 300 ticks out delivers that interrupt when the clock lands at 2048 —
+1748 ticks late. The overrun scales with the burst, bounded by the page-fit
+limit rather than by anything the guest chose.
+
+**Fix**: bound the burst additionally by the ticks remaining to the next event,
+and advance the clock as the burst proceeds rather than once at the end, so the
+existing `async_event` check can observe a deadline landing inside the burst.
+
+**Not reproduced in rusty** — see divergence D3 in
+`docs/bochs-parity-divergences.md`. Cost there is one extra `min` per chunk.

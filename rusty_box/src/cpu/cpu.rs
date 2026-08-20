@@ -11,7 +11,6 @@ use crate::{
         rusty_box::MemoryAccessType,
         smm::SMMRAM_Fields,
         tlb::{lpf_of, ppf_of, Tlb},
-        CpuError,
     },
     impl_eflag,
     memory::{BxMemC, CpuMemoryPolicy},
@@ -1657,6 +1656,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Fire an unconditional near branch hook (JMP/CALL/RET/LOOP).
     /// Call AFTER the branch_near* sets the new IP.
     #[inline(always)]
+    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(crate) fn on_ucnear_branch(
         &mut self,
         what: super::instrumentation::BranchType,
@@ -1672,14 +1672,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     dst_rip: new_rip,
                 });
         }
-        #[cfg(not(feature = "instrumentation"))]
-        {
-            let _ = (what, new_rip);
-        }
     }
 
     /// Fire a far branch hook (inter-segment). Call AFTER the new CS:IP is set.
     #[inline(always)]
+    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(crate) fn on_far_branch(
         &mut self,
         what: super::instrumentation::BranchType,
@@ -1699,15 +1696,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     dst_rip: new_rip,
                 });
         }
-        #[cfg(not(feature = "instrumentation"))]
-        {
-            let _ = (what, prev_cs, new_cs, new_rip);
-        }
     }
 
     /// Fire the BOCHS `lin_access` hook. No-op when the feature is disabled
     /// or no memory hooks are registered.
     #[inline(always)]
+    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(crate) fn on_lin_access(
         &mut self,
         laddr: u64,
@@ -1725,10 +1719,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 rw,
             };
             self.instrumentation.fire_lin_access(&ev);
-        }
-        #[cfg(not(feature = "instrumentation"))]
-        {
-            let _ = (laddr, paddr, data, rw);
         }
     }
 
@@ -1938,6 +1928,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             current_ticks,
             self.pc_system,
             self.device_manager,
+            self.memory,
         );
         self.sync_io_events();
     }
@@ -2091,25 +2082,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 /// loop does to CPU state alone still reads `self.…` through `Deref`; only the
 /// calls that need memory alongside the CPU destructure first.
 impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
-    /// Execute CPU loop with an attached I/O bus (port handlers).
-    ///
-    /// This sets the bus, pc_system, pic, and dma pointers for the duration of the call
-    /// and clears them afterwards.
-    #[allow(clippy::too_many_arguments)]
+    /// Execute one scheduler slice: the slice clock is captured on entry, so
+    /// device time advances against machine ticks rather than this CPU's own.
     #[inline]
-    pub(crate) fn cpu_loop_n_with_io(
+    pub(crate) fn cpu_loop_n_slice(
         &mut self,
         max_instructions: u64,
         strict_instruction_budget: bool,
         pc_tick_denominator: u64,
-        pic: Option<&mut crate::pic::BxPicC>,
-        dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
         self.begin_slice_clock(pc_tick_denominator);
         if strict_instruction_budget {
-            self.cpu_loop_n_impl::<false, true>(max_instructions, pic, dma)
+            self.cpu_loop_n_impl::<false, true>(max_instructions)
         } else {
-            self.cpu_loop_n_impl::<false, false>(max_instructions, pic, dma)
+            self.cpu_loop_n_impl::<false, false>(max_instructions)
         }
     }
 
@@ -2120,57 +2106,38 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// Exceptions also end the slice (Bochs main.cc `bx_begin_simulation`
     /// setjmp lands back in the scheduler loop). `max_instructions` remains a
     /// safety cap only — the icache already caps SMP traces at the quantum.
-    #[allow(clippy::too_many_arguments)]
     #[inline]
-    pub(crate) fn cpu_run_trace_with_io(
+    pub(crate) fn cpu_run_trace_slice(
         &mut self,
         max_instructions: u64,
         strict_instruction_budget: bool,
         pc_tick_denominator: u64,
-        pic: Option<&mut crate::pic::BxPicC>,
-        dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
         self.begin_slice_clock(pc_tick_denominator);
         if strict_instruction_budget {
-            self.cpu_loop_n_impl::<true, true>(max_instructions, pic, dma)
+            self.cpu_loop_n_impl::<true, true>(max_instructions)
         } else {
-            self.cpu_loop_n_impl::<true, false>(max_instructions, pic, dma)
+            self.cpu_loop_n_impl::<true, false>(max_instructions)
         }
     }
 
-    pub(crate) fn cpu_loop(&mut self) -> super::Result<()> {
-        // Bochs uses setjmp here; we use CpuLoopRestart via Rust error propagation.
-        // We get here either by a normal function call, or by a CpuLoopRestart
-        // back from an exception() call.  In either case, commit the
-        // new EIP/ESP, and set up other environmental fields.  This code
-        // mirrors similar code below, after the interrupt() call.
-
-        self.prev_rip = self.rip();
-        self.speculative_rsp = false;
-
-        if self.in_vmx_guest {
-            let vm = &mut self.vmcs;
-
-            if vm.shadow_stack_prematurely_busy {
-                return Err(CpuError::ShadowStackPrematurelyBusy);
-            }
-            vm.shadow_stack_prematurely_busy = false; // for safety
-        }
-
-        self.cpu_loop_n(1_000_000, None, None)?;
-        Ok(())
-    }
-
-    /// Execute CPU loop with a maximum instruction count.
+    /// The tail of Bochs cpu.cc `cpu_loop`'s landing preamble, which runs where
+    /// its `setjmp` returns — that is, on the restart paths below, right after
+    /// they commit `prev_rip` and clear `speculative_rsp`.
     ///
-    /// Returns Ok(instructions_executed) when limit is reached or async event occurs.
-    pub(crate) fn cpu_loop_n(
-        &mut self,
-        max_instructions: u64,
-        pic: Option<&mut crate::pic::BxPicC>,
-        dma: Option<&mut crate::dma::BxDmaC>,
-    ) -> super::Result<u64> {
-        self.cpu_loop_n_impl::<false, false>(max_instructions, pic, dma)
+    /// A shadow-stack busy bit must never survive the exception that unwound
+    /// into this point: `call_far.cc` sets it across a far call's shadow-stack
+    /// update and clears it once the update completes, so seeing it here means
+    /// a fault escaped between the two. Bochs `BX_PANIC`s and then clears it
+    /// anyway; clearing is what stops a later `VMexit` reading a stale flag
+    /// (`vmexit.cc` returns early on it), so the recovery matters more than the
+    /// abort.
+    #[inline]
+    fn commit_restart_shadow_stack(&mut self) {
+        if self.in_vmx_guest && self.vmcs.shadow_stack_prematurely_busy {
+            tracing::error!("shadow stack left prematurely busy across an exception");
+            self.vmcs.shadow_stack_prematurely_busy = false;
+        }
     }
 
     /// Shared body of `cpu_loop_n` / `cpu_run_trace_with_io`.
@@ -2182,8 +2149,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     fn cpu_loop_n_impl<const STOP_AFTER_ONE_TRACE: bool, const STRICT_INSTRUCTION_BUDGET: bool>(
         &mut self,
         max_instructions: u64,
-        mut pic: Option<&mut crate::pic::BxPicC>,
-        mut dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
         // The A20 mask is CPU-side state that mirrors a chipset line, so it is
         // taken once per execution call rather than read through memory on
@@ -2299,7 +2264,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     && matches!(self.activity_state, CpuActivityState::Active)
                 {
                     self.async_event = 0;
-                } else if self.handle_async_event(pic.as_deref_mut(), dma.as_deref_mut()) {
+                } else if self.handle_async_event() {
                     // Slow path: real async event (interrupt, HLT, shutdown, etc.)
                     break Ok(iteration);
                 }
@@ -2318,6 +2283,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         iteration += 1;
                         self.prev_rip = self.rip();
                         self.speculative_rsp = false;
+                        self.commit_restart_shadow_stack();
                         // Bochs cpu.cc: the longjmp landing commits RIP and
                         // falls into the loop, whose top runs `handleAsyncEvent`
                         // for a fault raised while fetching exactly as for one
@@ -2445,6 +2411,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         iteration += 1;
                         self.prev_rip = self.rip();
                         self.speculative_rsp = false;
+                        self.commit_restart_shadow_stack();
                         // Bochs cpu.cc: the loop top's `handleAsyncEvent` ->
                         // `handleWaitForEvent` is where a non-ACTIVE state is
                         // read, and where a pending INIT/NMI/SMI gets its

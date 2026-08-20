@@ -1019,10 +1019,25 @@ impl BxMemoryStubC {
                     .map_err(|e| MemoryError::FailedToWriteToOverflowFIle(file_offset, e))?;
             }
             if let Err(error) = self.read_block_into(block, slot_offset) {
-                // The victim remains logically resident until target reload has
-                // completed. Restore its slot from the just-persisted bytes.
+                // The victim stays logically resident until the target reload
+                // completes, so restore its slot from the bytes just persisted
+                // above.
                 if let Some(victim_guest) = victim {
-                    let _ = self.read_block_into(victim_guest, slot_offset);
+                    if let Err(restore_error) = self.read_block_into(victim_guest, slot_offset) {
+                        // The slot now holds neither block's bytes. The victim
+                        // is still recoverable — its contents reached the
+                        // overflow file — but only if it stops claiming to be
+                        // resident here, so demote it rather than leave the
+                        // table pointing at garbage. The slot is left owned by
+                        // nothing: capacity drops by one block until the next
+                        // reset, which is the price of not handing a caller
+                        // memory that silently reads back wrong.
+                        self.blocks_offsets_mut()[victim_guest] = Block::SwappedOut;
+                        tracing::error!(
+                            "guest block {victim_guest} could not be restored after a failed                              swap-in of block {block}; it is now swapped out and its slot is                              unusable: {restore_error:?}"
+                        );
+                        return Err(restore_error);
+                    }
                 }
                 return Err(error);
             }

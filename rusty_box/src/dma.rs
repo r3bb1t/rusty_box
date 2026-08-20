@@ -441,12 +441,9 @@ impl BxDmaC {
     /// Finds the highest-priority channel with active DRQ, performs data transfer
     /// via registered handlers, and updates address/count.
     ///
-    /// The caller supplies memory only while the exclusive CPU batch owns it.
-    /// Without that context, HRQ remains asserted and no DMA state advances.
-    pub(crate) fn raise_hlda(&mut self, mem: Option<&mut BxMemC>) {
-        let Some(mem) = mem else {
-            return;
-        };
+    /// The caller supplies the machine's memory borrow, so every hold
+    /// acknowledge has somewhere to move bytes.
+    pub(crate) fn raise_hlda(&mut self, mem: &mut BxMemC) {
         let mut ma_sl: usize = 0;
 
         self.hlda = true;
@@ -1373,7 +1370,7 @@ mod tests {
         dma.s[0].chan[2].mode.transfer_type = 1;
         dma.set_drq(2, true);
 
-        dma.raise_hlda(Some(&mut memory));
+        dma.raise_hlda(&mut memory);
 
         let mut received = [0; 4];
         assert_eq!(memory.read_ram(2 * MIB as u64, &mut received).unwrap(), 4);

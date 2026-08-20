@@ -497,11 +497,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Borrow one CPU together with the machine it executes against.
     ///
-    /// This is the whole point of `ExecCtx`: the CPU, memory, devices, PC
-    /// system and pin set are separate fields, so a single destructuring hands
-    /// out `&mut` to each simultaneously. The scheduler's raw `mem_ptr` /
-    /// `io_ptr` / `ps_ptr` wiring exists only because it re-borrows `self`
-    /// inside its loop; nothing about the data itself requires a pointer.
+    /// This is the whole point of `ExecCtx`: the CPU, memory, devices, device
+    /// models and PC system are separate fields, so a single destructuring
+    /// hands out `&mut` to each simultaneously. Every path that needs more
+    /// than one of them at once goes through here (doctrine R3), which is why
+    /// the machine holds no pointer to any of its own parts.
     #[cfg(feature = "alloc")]
     pub(crate) fn exec_ctx(&mut self, index: usize) -> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let Self {
@@ -601,7 +601,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
         self.sync_restored_event_levels();
         self.rebuild_cpu_masks_from_scan();
         self.batch_advanced_pc_system = false;
-        self.clear_scheduler_raw_wiring();
         Ok(())
     }
 
@@ -2217,9 +2216,29 @@ fn status_ips_from_retired_instructions(
     ips.clamp(0.0, u32::MAX as f64) as u32
 }
 
-// Ensure Emulator is Send (can be moved between threads)
-// Each instance is fully independent with no shared state
-unsafe impl<T: Instrumentation + Send> Send for Emulator<T> {}
+// `Send` is derived, not promised (doctrine R6). A machine owns every part it
+// runs and reaches each one by field borrow, so there is no pointer left for a
+// hand-written impl to vouch for. A field that reintroduced one would break
+// this line rather than silently un-thread-safe the fleet.
+//
+// Under `alloc` only: the no-alloc machine keeps its application processors as
+// caller-supplied `*mut BxCpuC`, whose validity rests on a contract the caller
+// signs at `init_at_with_ap_cpus`. That machine is legitimately `!Send`, and a
+// no-alloc target has no threads to move it to.
+#[cfg(feature = "alloc")]
+const _: () = {
+    const fn assert_send<M: Send>() {}
+    assert_send::<Emulator<()>>();
+};
+
+/// Non-vacuity for the assertion above: the machine stays `Send` for any
+/// `Send` tracer, not just the `()` default.
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+fn assert_machine_send_for_every_send_tracer<T: Instrumentation + Send>() {
+    const fn assert_send<M: Send>() {}
+    assert_send::<Emulator<T>>();
+}
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests;

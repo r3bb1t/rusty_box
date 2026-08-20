@@ -29,15 +29,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    /// PUSH Sw - Push segment register
-    /// Based on Bochs stack16.cc PUSH16_Sw
-    pub fn push16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src = instr.src() as usize;
-        let value = self.sregs[src].selector.value;
-        self.push_16(value)?;
-        Ok(())
-    }
-
     /// PUSH imm16
     /// Based on Bochs stack16.cc PUSH_Iw
     pub fn push_iw(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -77,22 +68,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         self.v_write_word(seg, eaddr, value)?;
-        Ok(())
-    }
-
-    /// POP Sw - Pop into segment register
-    /// Based on Bochs stack16.cc POP16_Sw
-    pub fn pop16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let selector_value = self.pop_16()?;
-        let seg = super::decoder::BxSegregs::from(instr.dst());
-
-        self.load_seg_reg(seg, selector_value)?;
-
-        // SS interrupt inhibition: Bochs stack16.cc
-        if seg == super::decoder::BxSegregs::Ss {
-            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
-        }
-
         Ok(())
     }
 

@@ -1722,6 +1722,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Apply instrumentation-only write permissions to a prepared RMW
     /// translation before an external side effect.
     #[inline]
+    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(super) fn check_rmw_write_permissions(&mut self, laddr: u64, size: usize) -> Result<()> {
         #[cfg(feature = "instrumentation")]
         {
@@ -1741,8 +1742,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.check_perm_write(laddr, self.address_xlation.paddress1, size)?;
             }
         }
-        #[cfg(not(feature = "instrumentation"))]
-        let _ = (laddr, size);
         Ok(())
     }
 

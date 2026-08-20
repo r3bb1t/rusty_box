@@ -48,7 +48,7 @@ pub enum InstrAction {
 /// future C bindings can cast freely.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[must_use = "HookHandle must be stored to later remove the hook, or explicitly discarded with `let _ = ...`"]
+#[must_use = "a HookHandle is the only way to remove the hook again: store it, or pass it to `drop` to say the hook is permanent"]
 pub struct HookHandle(u64);
 
 #[cfg(feature = "instrumentation")]

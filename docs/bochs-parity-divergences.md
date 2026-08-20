@@ -87,3 +87,100 @@ observe, so neither is worth its price. Revisit only if a guest-visible timing
 difference is ever demonstrated.
 
 **Status:** open and deliberate. Reversing it means paying the table above.
+
+---
+
+## D2 — CPUID leaf 0xB sub-leaf 1 reports the core-level shift over the whole package
+
+**Bochs:** `cpu/cpuid.cc bx_cpuid_t::get_std_cpuid_extended_topology_leaf`,
+`case 1`: `leaf->eax = ilog2(ncores-1)+1` — the width of the core field alone.
+
+**rusty_box:** `cpu/soft_int.rs`, `CPUID_TOPOLOGY_SUBLEAF_CORE`:
+`bochs_topology_shift(package_logical_count())`, i.e. `ilog2(ncores*nthreads-1)+1`
+— the width of the core field *plus* the SMT field. EBX, ECX and EDX match
+upstream exactly; only EAX differs, and only when `nthreads > 1`.
+
+### Why upstream is wrong here
+
+Intel SDM Vol 2, CPUID leaf 0BH: EAX[4:0] at sub-leaf *m* is "the number of bits
+to shift right on x2APIC ID to get a unique topology ID of the **next** level
+type". The next level above *core* is the package, so the shift has to clear
+both the SMT bits and the core bits. Linux consumes it exactly that way —
+`detect_extended_topology` stores the core sub-leaf's EAX in a variable named
+`core_plus_mask_width` ("core **plus**") and computes
+`phys_proc_id = initial_apicid >> core_plus_mask_width`.
+
+Bochs assigns APIC ids densely from the CPU index
+(`cpu/apic.cc bx_local_apic_c::bx_local_apic_c`, `apic_id = id`), so on a
+2 x 4 x 2 machine they pack as `socket:1 | core:2 | thread:1`. Shifting by the
+core width alone leaves the top core bit inside the package id.
+
+### What the guest observes
+
+Measured by `cpuid_leaf_b_core_shift_separates_sockets_as_software_reads_it`
+(`cpu/soft_int.rs`), which derives the package id for all 16 logical processors
+the way Linux does. Upstream's formula yields:
+
+| formula | package id per APIC id 0..15 | sockets seen |
+|---|---|---|
+| Bochs `ilog2(ncores-1)+1` | `0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3` | **4** |
+| ours `ilog2(ncores*nthreads-1)+1` | `0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1` | 2 |
+
+A 2-socket guest enumerating as 4 packages misplaces every scheduler and NUMA
+decision built on `phys_proc_id`. The divergence is therefore also the *less*
+detectable answer: real hardware follows the SDM, so matching Bochs would be the
+fingerprint, not avoiding it.
+
+The test fails against the upstream formula — swap
+`package_logical_count()` for `n_cores()` to reproduce.
+
+**Status:** open and deliberate. Single-threaded topologies (`nthreads == 1`)
+are bit-identical to Bochs, so the divergence is invisible on the default
+uniprocessor configuration and on every current boot gate. Written up for
+upstream in `docs/bochs-upstream-bugs.md`.
+
+---
+
+## D3 — A fast REP string burst stops at the next timer deadline
+
+**Bochs:** `cpu/io.cc FastRepINSW` / `FastRepOUTSW` and
+`cpu/faststring.cc FastRepMOVSB` bound a burst by ECX and by the elements that
+fit in the destination page — nothing else. Virtual time does not move during
+the burst: `cpu/io.cc INSW32_YwDX` calls `BX_TICKN(wordCount-1)` only *after*
+`FastRepINSW` returns. The `if (BX_CPU_THIS_PTR async_event) break;` inside the
+inner loop therefore only catches an event that was already pending on entry —
+a deadline that falls inside the burst cannot be reached, because the clock that
+would reach it is frozen.
+
+**rusty_box:** `cpu/io.rs`, the three fast-REP loops, seed
+`event_words_remaining` from `ticks_left_next_event()` and fold it into the
+per-chunk `min`. `tickn_fastrep` runs inside the loop, so time advances as the
+burst proceeds and the chunk ends exactly on the deadline.
+
+### What the guest observes
+
+Interrupt latency. A `REP INSW` of 2048 words with a timer deadline 300 ticks
+away delivers that interrupt 1748 ticks late under upstream's model and on time
+here.
+
+### Why the divergence is the correct side
+
+x86 REP string instructions are architecturally interruptible *between
+iterations*: RIP stays on the prefix and RCX/RSI/RDI carry the progress, so a
+pending interrupt is taken at the next iteration boundary rather than deferred
+to the end of the instruction. Real hardware therefore behaves as this port
+does. Upstream's atomic burst is a speed shortcut whose cost is guest-visible
+timing, which makes matching it the fingerprint rather than avoiding it — the
+same reasoning as D2.
+
+### Known cost, not yet paid down
+
+The loop guard is `while cx != 0 && event_words_remaining != 0`, so when the
+deadline has already been reached the fast path is skipped entirely and the
+instruction falls back to per-element processing until the boundary is serviced.
+A `.max(1)` floor would keep the fast path alive at a bounded one-element
+overrun. Not applied: it changes boot-path timing and would need its own boot
+gates plus an A/B, and the cliff is a throughput dip, not a correctness problem.
+
+**Status:** open and deliberate. Written up for upstream in
+`docs/bochs-upstream-bugs.md`.

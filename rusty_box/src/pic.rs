@@ -495,12 +495,8 @@ impl BxPicC {
         } else {
             let action = self.slave.service();
             match action {
-                PicServiceAction::RaiseCascade => {
-                    let _ = self.raise_irq(2);
-                }
-                PicServiceAction::LowerCascade => {
-                    let _ = self.lower_irq(2);
-                }
+                PicServiceAction::RaiseCascade => self.raise_irq(2),
+                PicServiceAction::LowerCascade => self.lower_irq(2),
                 _ => {}
             }
         }
@@ -834,11 +830,11 @@ impl BxPicC {
     /// was not already asserted. For edge-triggered IRQs, the device must
     /// call `lower_irq` first to create a new edge.
     ///
-    /// Returns `Some((irq_no, true))` when the caller should forward to IOAPIC
-    /// (Bochs pic.cc synchronous forwarding). The caller is responsible
-    /// for calling `ioapic.set_irq_level(irq, level)` with the returned values.
+    /// An edge that the IOAPIC must also see is queued on the way out (Bochs
+    /// pic.cc forwards synchronously); the machine drains it with
+    /// [`Self::take_ioapic_forwards`] once the PIC borrow ends.
     #[inline]
-    pub fn raise_irq(&mut self, irq_no: u8) -> Option<(u8, bool)> {
+    pub fn raise_irq(&mut self, irq_no: u8) {
         if irq_no < 8 {
             // Master PIC — Bochs pic.cc
             self.master.irq_in[irq_no as usize] = 1;
@@ -848,7 +844,6 @@ impl BxPicC {
                 // Bochs pic.cc: forward to IOAPIC on LOW→HIGH edge
                 if irq_no != 2 {
                     self.enqueue_ioapic_forward(irq_no, true);
-                    return Some((irq_no, true));
                 }
             }
         } else if irq_no < 16 {
@@ -860,12 +855,10 @@ impl BxPicC {
                 self.service_pic_dispatch(false);
                 // Bochs pic.cc: forward to IOAPIC
                 self.enqueue_ioapic_forward(irq_no, true);
-                return Some((irq_no, true));
             } else if irq_no == 15 {
                 // IRQ 15 raise while slave IRR bit 7 already set — IOAPIC skipped!
             }
         }
-        None
     }
 
     /// Read the restored input line level of one IRQ (Bochs pic.h `IRQ_in`).
@@ -886,10 +879,10 @@ impl BxPicC {
 
     /// Lower an IRQ line (Bochs `bx_pic_c::lower_irq`)
     ///
-    /// Clears the IRQ assertion flag and the IRR bit.
-    /// Returns `Some((irq_no, false))` when the caller should forward to IOAPIC.
+    /// Clears the IRQ assertion flag and the IRR bit. The IOAPIC edge is
+    /// queued, exactly as in [`Self::raise_irq`].
     #[inline]
-    pub fn lower_irq(&mut self, irq_no: u8) -> Option<(u8, bool)> {
+    pub fn lower_irq(&mut self, irq_no: u8) {
         if irq_no < 8 {
             if self.master.irq_in[irq_no as usize] != 0 {
                 self.master.irq_in[irq_no as usize] = 0;
@@ -897,7 +890,6 @@ impl BxPicC {
                 // Bochs pic.cc: forward to IOAPIC
                 if irq_no != 2 {
                     self.enqueue_ioapic_forward(irq_no, false);
-                    return Some((irq_no, false));
                 }
             }
         } else if irq_no < 16 {
@@ -907,17 +899,14 @@ impl BxPicC {
                 self.slave.irr &= !(1 << slave_irq);
                 // Bochs pic.cc: forward to IOAPIC
                 self.enqueue_ioapic_forward(irq_no, false);
-                return Some((irq_no, false));
             }
         }
-        None
     }
 
     /// Set IRQ level — raise or lower based on level (Bochs `bx_pic_c::set_irq_level`)
     ///
     /// Convenience wrapper used by devices that track IRQ state as a bool.
-    /// Returns IOAPIC forwarding info, same as raise_irq/lower_irq.
-    pub fn set_irq_level(&mut self, irq_no: u8, level: bool) -> Option<(u8, bool)> {
+    pub fn set_irq_level(&mut self, irq_no: u8, level: bool) {
         if level {
             self.raise_irq(irq_no)
         } else {

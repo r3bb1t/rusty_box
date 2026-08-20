@@ -3,6 +3,14 @@
 
 use crate::cpu::BxCpuC;
 
+/// Pack one `IA32_VMX_*_CTLS` capability MSR: allowed-1 (what a guest MAY set)
+/// in the high half, allowed-0 (what it MUST set) in the low half. Bochs
+/// vmx.cc reads these MSRs back through the same pair when validating VMENTRY.
+#[inline]
+const fn vmx_ctls_msr(allowed_0: u32, allowed_1: u32) -> u64 {
+    ((allowed_1 as u64) << 32) | allowed_0 as u64
+}
+
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Leave the ACTIVE activity state. Bochs proc_ctrl.cc `enter_sleep_state`.
     ///
@@ -810,6 +818,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // CLFLUSH — Cache Line Flush (opcode 0F AE /7)
     // =========================================================================
 
+    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(super) fn clflush(
         &mut self,
         instr: &super::decoder::Instruction,
@@ -830,8 +839,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let paddr = self.translate_data_read(laddr).unwrap_or(0);
             self.instrumentation.fire_clflush(laddr, paddr);
         }
-        #[cfg(not(feature = "instrumentation"))]
-        let _ = instr;
         Ok(())
     }
 
@@ -1033,6 +1040,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 return Ok(0);
             }
             let index = (msr - 0x800) << 4;
+            // Bochs msr.cc RDMSR — the counterpart of the WRMSR redirection
+            // below: a guest with x2APIC virtualisation reads back the virtual
+            // TPR it wrote, not the host's.
+            if let Some(value) = self.vmx_virtualize_x2apic_read(index) {
+                return Ok(value);
+            }
             // LAPIC reads convert through `live_ticks(cpu_ticks)` (apic.cc
             // get_current_timer_count), which subtracts `cpu_ticks_at_sync` —
             // the CPU tick clock, like the MMIO read paths. `system_ticks()`
@@ -1125,9 +1138,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 // Bits 48=1 (true controls supported), bit 55=1 (INS/OUTS exit info)
                 0x0001_0006_0000_0001u64
             }
-            0x481 => 0x0000_003F_0000_003Fu64, // IA32_VMX_PINBASED_CTLS
-            0x482 => 0x0401_E172_0401_E172u64, // IA32_VMX_PROCBASED_CTLS
-            0x483 => 0x0003_6FFF_0000_0000u64, // IA32_VMX_EXIT_CTLS
+            // Each of these packs allowed-1 in the high half and allowed-0
+            // (must-be-1) in the low half, and MUST equal the matching
+            // constants in vmx.rs — a guest reads the MSR to decide what it
+            // may set, and VMENTRY then validates against the constant.
+            0x481 => vmx_ctls_msr(
+                super::vmx::VMX_PINBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PINBASED_CTLS_ALLOWED_1,
+            ), // IA32_VMX_PINBASED_CTLS
+            0x482 => vmx_ctls_msr(
+                super::vmx::VMX_PROCBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PROCBASED_CTLS_ALLOWED_1,
+            ), // IA32_VMX_PROCBASED_CTLS
+            0x483 => vmx_ctls_msr(
+                super::vmx::VMX_EXIT_CTLS_ALLOWED_0,
+                super::vmx::VMX_EXIT_CTLS_ALLOWED_1,
+            ), // IA32_VMX_EXIT_CTLS
             0x484 => 0x0000_FFFF_0000_0011u64, // IA32_VMX_ENTRY_CTLS
             0x485 => 0x0000_0000_0000_0000u64, // IA32_VMX_MISC
             0x486 => 0x0000_0000_8000_0000u64, // IA32_VMX_CR0_FIXED0
@@ -1135,23 +1161,43 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             0x488 => 0x0000_0000_0000_2000u64, // IA32_VMX_CR4_FIXED0
             0x489 => 0x0000_0000_003F_27FFu64, // IA32_VMX_CR4_FIXED1
             0x48A => 0x0000_002C_0000_0000u64, // IA32_VMX_VMCS_ENUM
-            0x48B => {
-                // IA32_VMX_PROCBASED_CTLS2 — high 32 bits advertise the
-                // "allowed-1" set, low 32 bits the "must-be-1" set. We
-                // advertise EPT_ENABLE (1<<1), VPID_ENABLE (1<<5), and
-                // INVPCID (1<<12) — each backed by a real implementation
-                // (EPT walker, INVEPT/INVVPID handlers, INVPCID intercept).
-                const ALLOWED_1: u64 = super::vmx::VMX_VM_EXEC_CTRL2_EPT_ENABLE as u64
-                    | super::vmx::VMX_VM_EXEC_CTRL2_VPID_ENABLE as u64
-                    | super::vmx::VMX_VM_EXEC_CTRL2_INVPCID as u64;
-                ALLOWED_1 << 32
+            // IA32_VMX_PROCBASED_CTLS2 — no secondary control is required, so
+            // allowed-0 is zero and only the allowed-1 half carries anything.
+            // Read from the same constant VMENTRY validates against: a guest
+            // discovers the feature set here and would never set a bit this
+            // MSR does not advertise.
+            0x48B => vmx_ctls_msr(0, super::vmx::VMX_PROCBASED_CTLS2_ALLOWED_1),
+            // IA32_VMX_EPT_VPID_CAP — Bochs vmcs.cc `init_ept_vpid_capabilities`
+            // composes this from what the EPT walker and the invalidation
+            // instructions actually implement:
+            //   [0]     execute-only EPT translations
+            //   [6]     4-level page walk (the only length is_eptptr_valid takes)
+            //   [8]     UC EPT paging structure memory type
+            //   [14]    WB EPT paging structure memory type
+            //   [16]    2 MiB EPT pages
+            //   [20]    INVEPT supported
+            //   [25:24] INVEPT single-context and all-context types
+            //   [32]    INVVPID supported
+            //   [43:40] INVVPID individual/single/all/single-non-global types
+            0x48C => {
+                const EPT_CAPS: u64 = 0x0611_4141;
+                const VPID_CAPS: u64 = 0x0000_0F01 << 32;
+                EPT_CAPS | VPID_CAPS
             }
-            0x48C => 0x0000_003F_0000_003Fu64, // IA32_VMX_TRUE_PINBASED_CTLS
-            0x48D => 0x0401_E172_0401_E172u64, // IA32_VMX_TRUE_PROCBASED_CTLS
-            0x48E => 0x0003_6FFF_0000_0000u64, // IA32_VMX_TRUE_EXIT_CTLS
-            0x48F => 0x0000_FFFF_0000_0011u64, // IA32_VMX_TRUE_ENTRY_CTLS
-            0x490 => 0x0000_0000_0000_0000u64, // IA32_VMX_VMFUNC
-            0x491 => 0x0000_0000_0000_0000u64, // IA32_VMX_PROCBASED_CTLS3
+            0x48D => vmx_ctls_msr(
+                super::vmx::VMX_PINBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PINBASED_CTLS_ALLOWED_1,
+            ), // IA32_VMX_TRUE_PINBASED_CTLS
+            0x48E => vmx_ctls_msr(
+                super::vmx::VMX_PROCBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PROCBASED_CTLS_ALLOWED_1,
+            ), // IA32_VMX_TRUE_PROCBASED_CTLS
+            0x48F => vmx_ctls_msr(
+                super::vmx::VMX_EXIT_CTLS_ALLOWED_0,
+                super::vmx::VMX_EXIT_CTLS_ALLOWED_1,
+            ), // IA32_VMX_TRUE_EXIT_CTLS
+            0x490 => 0x0000_FFFF_0000_0011u64, // IA32_VMX_TRUE_ENTRY_CTLS
+            0x491 => 0x0000_0000_0000_0000u64, // IA32_VMX_VMFUNC
             // SVM MSRs
             super::svm::BX_SVM_VM_CR_MSR => self.msr.svm_vm_cr as u64,
             super::svm::BX_SVM_IGNNE_MSR => 0, // IGNNE not supported
@@ -1213,6 +1259,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
             let index = (msr - 0x800) << 4;
+            // Bochs vapic.cc: a guest running with a TPR shadow virtualises
+            // the three x2APIC registers that drive the interrupt cycle, so
+            // the write lands in the virtual-APIC page and runs the matching
+            // virtualization instead of reaching the physical LAPIC. Without
+            // this the guest could never retire a virtually-delivered
+            // interrupt: its EOI would clear the wrong ISR and SVI would stay
+            // set, holding PPR high and blocking every later virtual interrupt.
+            if let Some(result) = self.vmx_virtualize_x2apic_write(index, val) {
+                return result;
+            }
             let current_ticks = self.system_ticks();
             if self.lapic.write_x2apic(index, val, current_ticks) {
                 self.sync_lapic_events();

@@ -1336,7 +1336,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// caller's responsibility because a VMEXIT must terminate instruction
     /// execution before the destination GPR is written; folding it into the
     /// reader would force a sentinel value.
-    pub(super) fn read_cr8(&self) -> u64 {
+    /// A guest running with a TPR shadow reads back the virtual TPR it wrote,
+    /// not the host's — Bochs crregs.cc ReadCR8 reads the virtual-APIC page
+    /// through `VMX_Read_Virtual_APIC(BX_LAPIC_TPR)` in that case. Without
+    /// this, `MOV CR8, r` followed by `MOV r, CR8` would not round-trip.
+    pub(super) fn read_cr8(&mut self) -> u64 {
+        if self.in_vmx_guest
+            && self.proc_based_ctls1() & super::vmx::VMX_VM_EXEC_CTRL1_TPR_SHADOW != 0
+        {
+            let vtpr = self.vmx_read_virtual_apic(super::apic::LapicRegister::Tpr as u32) as u8;
+            return u64::from((vtpr >> 4) & 0xF);
+        }
         u64::from((self.lapic.get_tpr() >> 4) & 0xF)
     }
 
@@ -1350,6 +1360,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let tpr = ((val as u8) & 0xF) << 4;
+
+        // Bochs crregs.cc WriteCR8: a guest running with a TPR shadow never
+        // touches the physical LAPIC — the write lands in the virtual-APIC
+        // page and drives TPR virtualization, which either re-evaluates the
+        // pending virtual interrupt or raises the trap-like TPR-threshold exit.
+        if self.in_vmx_guest
+            && self.proc_based_ctls1() & super::vmx::VMX_VM_EXEC_CTRL1_TPR_SHADOW != 0
+        {
+            self.vmx_write_virtual_apic(
+                super::apic::LapicRegister::Tpr as u32,
+                u32::from(tpr),
+            );
+            return self.vmx_tpr_virtualization();
+        }
+
         self.lapic.set_tpr(tpr);
         self.sync_lapic_events();
         Ok(())

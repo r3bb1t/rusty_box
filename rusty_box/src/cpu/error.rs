@@ -11,9 +11,6 @@ pub enum CpuError {
     #[error("exception({vector:?}): bad vector, error_code={error_code}")]
     BadVector { vector: Exception, error_code: u16 },
 
-    #[error("Shadow stack prematurely busy is left set !")]
-    ShadowStackPrematurelyBusy,
-
     #[error("CPU/Emulator not initialized - call initialize() first")]
     CpuNotInitialized,
 

@@ -248,8 +248,6 @@ pub struct DeviceManager {
     pub diag_iac_count: u64,
     /// Diagnostic: iac vector histogram [0..256]
     pub diag_vector_hist: [u32; 256],
-    /// Pointer to BxMemC for fw_cfg DMA. Set temporarily during CPU execution.
-    pub(crate) mem_ptr: Option<core::ptr::NonNull<BxMemC>>,
     /// I/O base the BM-DMA ports are currently registered at (0 = none).
     /// Lets a BAR4 move unregister the old range first, matching Bochs
     /// devices.cc pci_write_handler_common BAR remapping.
@@ -359,7 +357,6 @@ impl DeviceManager {
             cmos_reset_timer_sync: None,
             diag_iac_count: 0,
             diag_vector_hist: [0; 256],
-            mem_ptr: None,
             bmdma_ports_base: 0,
             pm_ports_base: 0,
             sm_ports_base: 0,
@@ -1554,9 +1551,9 @@ impl DeviceManager {
         }
     }
 
-    /// fw_cfg I/O write dispatch.
-    pub(crate) fn fw_cfg_write(&mut self, address: u16, value: u32, io_len: u8) {
-        let mem = self.mem_ptr.map(|mut p| unsafe { p.as_mut() });
+    /// fw_cfg I/O write dispatch. The guest DMA descriptor names guest RAM,
+    /// so the port write carries the machine's memory borrow with it.
+    pub(crate) fn fw_cfg_write(&mut self, address: u16, value: u32, io_len: u8, mem: &mut BxMemC) {
         self.fw_cfg.write_port(address, value, io_len, mem);
     }
 }
@@ -2555,6 +2552,7 @@ mod tests {
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
             let mut pc_system = crate::pc_system::BxPcSystemC::new();
+            let mut mem = crate::memory::test_ram();
 
             // BAR4 assigned; BM-DMA ports registered on the I/O bus.
             assert!(dm.ide.bus_master.pci_write(0x20, 0x0000_C001, 4));
@@ -2574,8 +2572,8 @@ mod tests {
 
             // Guest programs DTPR and starts the engine. Bochs arms the
             // one-tick BM-DMA callback at this issuing instruction's epoch.
-            io.outp(0xC004, 0x8000, 4, 41, &mut pc_system, &mut dm);
-            io.outp(0xC000, 0x09, 1, 41, &mut pc_system, &mut dm);
+            io.outp(0xC004, 0x8000, 4, 41, &mut pc_system, &mut dm, &mut mem);
+            io.outp(0xC000, 0x09, 1, 41, &mut pc_system, &mut dm, &mut mem);
 
             assert_eq!(
                 dm.ide.bus_master.take_pending_timer_arm(0),
@@ -2627,6 +2625,7 @@ mod tests {
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
             let mut pc_system = crate::pc_system::BxPcSystemC::new();
+            let mut mem = crate::memory::test_ram();
             dm.register_pci_handlers(&mut io);
 
             assert_eq!(
@@ -2642,8 +2641,8 @@ mod tests {
 
             // Set reset type = hardware (bit1), then trigger (bit1|bit2) —
             // Bochs pci2isa.cc write case 0x0cf9.
-            io.outp(0x0CF9, 0x02, 1, 0, &mut pc_system, &mut dm);
-            io.outp(0x0CF9, 0x06, 1, 0, &mut pc_system, &mut dm);
+            io.outp(0x0CF9, 0x02, 1, 0, &mut pc_system, &mut dm, &mut mem);
+            io.outp(0x0CF9, 0x06, 1, 0, &mut pc_system, &mut dm, &mut mem);
 
             assert_eq!(
                 dm.pci2isa.reset_request,
@@ -2667,11 +2666,12 @@ mod tests {
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
             let mut pc_system = crate::pc_system::BxPcSystemC::new();
+            let mut mem = crate::memory::test_ram();
             dm.register_pci_handlers(&mut io);
 
             // ELCR1 bit5 -> IRQ5 level-triggered (Bochs pci2isa.cc write case
             // 0x04d0: DEV_pic_set_mode(1, elcr1)).
-            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system, &mut dm);
+            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system, &mut dm, &mut mem);
 
             assert_eq!(dm.pci2isa.elcr1, 0x20);
             assert!(
@@ -2685,7 +2685,7 @@ mod tests {
 
             // ELCR2 bit2 -> IRQ10 level-triggered (Bochs pci2isa.cc write case
             // 0x04d1: DEV_pic_set_mode(0, elcr2)).
-            io.outp(0x04D1, 0x04, 1, 0, &mut pc_system, &mut dm);
+            io.outp(0x04D1, 0x04, 1, 0, &mut pc_system, &mut dm, &mut mem);
 
             assert_eq!(dm.pci2isa.elcr2, 0x04);
             assert!(
@@ -2705,10 +2705,11 @@ mod tests {
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
             let mut pc_system = crate::pc_system::BxPcSystemC::new();
+            let mut mem = crate::memory::test_ram();
             dm.register_pci_handlers(&mut io);
 
             // Mark IRQ5 level-triggered via the real ELCR1 port write path.
-            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system, &mut dm);
+            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system, &mut dm, &mut mem);
             assert_eq!(dm.pic.master.edge_level, 0x20);
 
             // Unmask IRQ5 and assert the line (a level-triggered device holds
@@ -2979,12 +2980,12 @@ mod tests {
             let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
             let mut mem = BxMemC::new(stub, false);
 
-            io.outp(0x0CF8, conf_addr(0x00, 0x59), 4, 11, &mut pc_system, &mut dm);
-            io.outp(0x0CFD, 0x30, 1, 11, &mut pc_system, &mut dm);
-            io.outp(0x0CF8, conf_addr(0x00, 0x72), 4, 11, &mut pc_system, &mut dm);
-            io.outp(0x0CFE, 0x48, 1, 11, &mut pc_system, &mut dm);
-            io.outp(0x0CF8, conf_addr(0x08, 0x4E), 4, 11, &mut pc_system, &mut dm);
-            io.outp(0x0CFE, 0x04, 1, 11, &mut pc_system, &mut dm);
+            io.outp(0x0CF8, conf_addr(0x00, 0x59), 4, 11, &mut pc_system, &mut dm, &mut mem);
+            io.outp(0x0CFD, 0x30, 1, 11, &mut pc_system, &mut dm, &mut mem);
+            io.outp(0x0CF8, conf_addr(0x00, 0x72), 4, 11, &mut pc_system, &mut dm, &mut mem);
+            io.outp(0x0CFE, 0x48, 1, 11, &mut pc_system, &mut dm, &mut mem);
+            io.outp(0x0CF8, conf_addr(0x08, 0x4E), 4, 11, &mut pc_system, &mut dm, &mut mem);
+            io.outp(0x0CFE, 0x04, 1, 11, &mut pc_system, &mut dm, &mut mem);
 
             assert!(io.take_scheduler_boundary_requested());
             assert!(dm.pam_needs_update);
