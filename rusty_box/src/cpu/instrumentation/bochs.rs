@@ -68,7 +68,12 @@ use crate::cpu::decoder::Instruction;
 /// cares about, enabling the CPU to skip dispatch for inactive
 /// categories. The default returns `HookMask::all()` (conservative).
 #[allow(unused_variables)]
-pub trait Instrumentation {
+/// `'static` because a machine's CPUs may be lent to it for `'static` — the
+/// no-alloc store borrows caller storage that is never freed — and a tracer
+/// living inside those CPUs cannot then borrow from anything shorter. Every
+/// tracer already qualifies: `()` trivially, and the hook registry's closures
+/// carry `Send + 'static` by their own bounds.
+pub trait Instrumentation: 'static {
     /// Declare which hook categories this implementation uses.
     /// The CPU skips dispatch for categories not in the returned mask.
     fn active_hooks(&self) -> HookMask {

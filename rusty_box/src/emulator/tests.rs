@@ -733,13 +733,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.service_scheduler_boundary(2_000).unwrap();
 
                 assert_ne!(
-                    emu.cpu.pending_event
+                    emu.cpu_ref(0).pending_event
                         & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR,
                     0,
                     "IOAPIC pin-2 timer interrupt never raised LAPIC INTR on CPU 0"
                 );
                 assert_eq!(
-                    emu.cpu.lapic.acknowledge_int(),
+                    emu.cpu_mut().lapic.acknowledge_int(),
                     0x30,
                     "CPU 0 LAPIC did not receive the IOAPIC pin-2 timer vector"
                 );
@@ -1147,7 +1147,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 drive.controller.buffer_size = 512;
                 drive.controller.buffer_index = 0;
                 emu.pc_system.initialize(1_000_000);
-                emu.cpu.mmio = crate::memory::mmio::MmioRegistry::new();
+                emu.cpu_mut().mmio = crate::memory::mmio::MmioRegistry::new();
 
                 // REP INSW crosses from 0x2fff to 0x3000 before the timer
                 // deadline. The initialized IDE data buffer makes both chunks
@@ -2196,7 +2196,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // the CPU (Bochs pc_system.cc set_HRQ).
                 assert!(!emu.service_scheduler_boundary(0).unwrap());
                 assert!(emu.pc_system.get_hrq());
-                assert_ne!(emu.cpu.async_event, 0);
+                assert_ne!(emu.cpu_ref(0).async_event, 0);
 
                 // nop; hlt — handle_async_event services HLDA before the
                 // first instruction completes the batch.
@@ -3953,7 +3953,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     CpuSetupMode::FlatProtected32,
                 )
                 .unwrap();
-                emu.cpu
+                emu.cpu_mut()
                     .clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
                 emu.device_manager.pic.irq_pending = true;
                 emu.device_manager.pic.irq_cleared = true;
@@ -3986,7 +3986,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.device_manager.pic.master.int_pin = true;
                 emu.device_manager.pic.irq_pending = false;
                 emu.device_manager.pic.irq_cleared = false;
-                emu.cpu
+                emu.cpu_mut()
                     .clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
 
                 emu.sync_event_flags();
@@ -5235,6 +5235,40 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
         assert_eq!(outputs.next().unwrap(), expected_first);
         assert_eq!(outputs.next().unwrap(), expected_second);
+    }
+
+    /// A 16-bit register write preserves the upper half of the 32-bit register
+    /// — the partial-write rule that makes `mov ax, imm` a read-modify-write of
+    /// EAX rather than a zeroing store.
+    ///
+    /// This is the BIOS sequence at F000:A124 that a stack-corruption hunt was
+    /// once opened over, and it is executed here rather than simulated: the
+    /// bytes go through the decoder and the dispatcher, so a regression in
+    /// either shows up, not just one in `set_gpr16`.
+    #[test]
+    fn a_sixteen_bit_write_preserves_the_upper_half_of_the_register() {
+        let code = [
+            0xB8, 0x00, 0x00, 0x00, 0xF0, // mov eax, 0xF0000000
+            0x66, 0xB8, 0x53, 0xFF, // mov ax, 0xFF53
+            0xF4, // hlt
+        ];
+
+        let mut emu =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+                .unwrap();
+        emu.devices.init(&mut emu.memory).unwrap();
+        emu.device_manager
+            .init(&mut emu.devices, &mut emu.memory)
+            .unwrap();
+        emu.virt_write(STAMP_CODE_ADDRESS, &code).unwrap();
+        emu.reg_write(X86Reg::Rip, STAMP_CODE_ADDRESS);
+        emu.run_cpu_batch(code.len() as u64).unwrap();
+
+        assert_eq!(
+            emu.reg_read(X86Reg::Rax) as u32,
+            0xF000_FF53,
+            "the 16-bit store must leave EAX's high half alone"
+        );
     }
 
     /// Port I/O is not feature-gated: a guest `OUT` reaches the device and the

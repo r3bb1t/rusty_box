@@ -11,7 +11,7 @@ use log::{error, info};
 use uefi::prelude::*;
 
 use rusty_box::{
-    cpu::{builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX, cpu::BxCpuC, ResetReason},
+    cpu::{builder::BxCpuBuilder, cpu::BxCpuC, ResetReason},
     emulator::{Emulator, EmulatorConfig},
     memory::BxMemoryStubC,
 };
@@ -172,11 +172,21 @@ fn run() -> Status {
         core::mem::size_of::<BxCpuC>()
     );
     let cpu_ptr: *mut BxCpuC = alloc_zeroed_for();
-    let cpu = unsafe {
+    let cpu: &'static mut BxCpuC = unsafe {
         match BxCpuBuilder::new().init_cpu_at(cpu_ptr, ()) {
             Ok(cpu) => cpu,
             Err(e) => bail!("CPU init failed: {:?}", e),
         }
+    };
+
+    // The machine borrows its CPU set as a slice, so the slice itself needs
+    // somewhere to live that outlasts the machine. UEFI pages are never freed
+    // here, which is what makes the `'static` borrow honest — the same reason
+    // the CPU above can be `&'static mut`.
+    let cpu_handles: *mut &'static mut BxCpuC = alloc_zeroed_for();
+    let cpus: &'static mut [&'static mut BxCpuC] = unsafe {
+        cpu_handles.write(cpu);
+        core::slice::from_raw_parts_mut(cpu_handles, 1)
     };
 
     // 2. Guest RAM buffer (~36MB: 32MB guest + 4MB BIOS ROM + 128KB expansion + pad)
@@ -213,7 +223,7 @@ fn run() -> Status {
     );
     let emu_ptr: *mut Emulator = alloc_zeroed_for();
     let emu = unsafe {
-        match Emulator::init_at(emu_ptr, cpu, mem_stub, config) {
+        match Emulator::init_at(emu_ptr, cpus, mem_stub, config) {
             Ok(e) => e,
             Err(e) => bail!("Emulator init failed: {:?}", e),
         }

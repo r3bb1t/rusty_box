@@ -155,11 +155,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         tracing::trace!(
                             "[{}k instr] RIP={:#010x} CS={:#06x} mode={} batch_returned={} activity={:?}",
                             instructions_executed / 1000,
-                            self.cpu.rip(),
-                            self.cpu.get_cs_selector(),
-                            self.cpu.get_cpu_mode(),
+                            self.cpu_ref(0).rip(),
+                            self.cpu_ref(0).get_cs_selector(),
+                            self.cpu_ref(0).get_cpu_mode(),
                             executed,
-                            self.cpu.activity_state,
+                            self.cpu_ref(0).activity_state,
                         );
                     }
                     // Detect zero-return batches (HLT or stuck)
@@ -169,11 +169,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         // zero-batch HLT+IF=0 cycles. This allows transient IF=0 states
                         // (e.g. kernel cli/hlt sequences before init scripts) to recover.
                         if matches!(
-                            self.cpu.activity_state,
+                            self.cpu_ref(0).activity_state,
                             CpuActivityState::Hlt
                                 | CpuActivityState::Mwait
                                 | CpuActivityState::MwaitIf
-                        ) && !self.cpu.interrupts_enabled()
+                        ) && !self.cpu_ref(0).interrupts_enabled()
                         {
                             hlt_if0_count += 1;
                             // Warn once at 1000 but DON'T break — match egui behavior.
@@ -183,7 +183,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                             if hlt_if0_count == 1000 {
                                 tracing::trace!(
                                     "[ZERO-BATCH] HLT/MWAIT with IF=0 for 1000 consecutive batches at RIP={:#x} CS={:#06x} activity={:?} — continuing (egui-match)",
-                                    self.cpu.rip(), self.cpu.get_cs_selector(), self.cpu.activity_state,
+                                    self.cpu_ref(0).rip(), self.cpu_ref(0).get_cs_selector(), self.cpu_ref(0).activity_state,
                                 );
                             }
                         } else {
@@ -211,20 +211,20 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         tracing::warn!("{}", msg);
                     }
 
-                    if self.cpu.is_in_shutdown() {
+                    if self.cpu_ref(0).is_in_shutdown() {
                         #[cfg(feature = "std")]
                         log_reset(&format!(
                             "TRIPLE-FAULT SHUTDOWN at RIP={:#x} CS={:#06x} icount={}",
-                            self.cpu.rip(),
-                            self.cpu.get_cs_selector(),
-                            self.cpu.icount
+                            self.cpu_ref(0).rip(),
+                            self.cpu_ref(0).get_cs_selector(),
+                            self.cpu_ref(0).icount
                         ));
                         break;
                     }
 
 
                     // -- Progress tracking --
-                    let current_rip = self.cpu.rip();
+                    let current_rip = self.cpu_ref(0).rip();
 
                     // Log progress every 10M instructions (countdown-based)
                     next_progress_log -= executed as i64;
@@ -256,9 +256,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         tracing::trace!(
                             "EIP trace: {} instr, CS:IP={:#06x}:{:#06x}, mode={}, IPL_count={}, IPL0_type={}",
                             instructions_executed,
-                            self.cpu.get_cs_selector(),
+                            self.cpu_ref(0).get_cs_selector(),
                             current_rip,
-                            self.cpu.get_cpu_mode(),
+                            self.cpu_ref(0).get_cpu_mode(),
                             ipl_count, ipl0_type,
                         );
                     }
@@ -270,10 +270,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
                             stuck_count += 1;
                             if stuck_count >= 10 && !stuck_reported {
                                 stuck_reported = true;
-                                let bp = self.cpu.bp() as usize;
-                                let ss_base = self.cpu.get_ss_base() as usize;
+                                let bp = self.cpu_ref(0).bp() as usize;
+                                let ss_base = self.cpu_ref(0).get_ss_base() as usize;
                                 let bp_phys = ss_base + bp;
-                                let ax = self.cpu.eax() as u16;
+                                let ax = self.cpu_ref(0).eax() as u16;
                                 let mem_peek = self.peek_ram_at(bp_phys, 8);
                                 let bp2 = mem_peek
                                     .get(2..4)
@@ -296,8 +296,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
                                     instructions_executed / 1000,
                                     self.devices.last_io_read_port,
                                     self.devices.last_io_read_value,
-                                    self.cpu.get_cs_selector(),
-                                    self.cpu.get_cpu_mode(),
+                                    self.cpu_ref(0).get_cs_selector(),
+                                    self.cpu_ref(0).get_cpu_mode(),
                                     bp, ax, bp2, bp4, bp6,
                                 );
                             }
@@ -342,7 +342,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                     // Required so PIT can generate IRQ0 and BIOS can progress past HLT waits.
                     if self.config.ips != 0 {
                         if matches!(
-                            self.cpu.activity_state,
+                            self.cpu_ref(0).activity_state,
                             CpuActivityState::Hlt
                                 | CpuActivityState::Mwait
                                 | CpuActivityState::MwaitIf
@@ -374,7 +374,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                             // No icount inflation — TSC reads pc_system.time_ticks() directly.
                             // MwaitIf: wake on interrupt even when IF=0 (ECX[0]=1).
                             let mwait_if =
-                                matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
+                                matches!(self.cpu_ref(0).activity_state, CpuActivityState::MwaitIf);
                             let mut hlt_budget = 0u64;
                             while hlt_budget < 100_000_000 {
                                 // Service host input while halted so an idle
@@ -382,7 +382,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                                 // instead of stalling for the whole halt budget.
                                 self.pump_gui_input();
                                 if self.has_interrupt()
-                                    && (self.cpu.interrupts_enabled() || mwait_if)
+                                    && (self.cpu_ref(0).interrupts_enabled() || mwait_if)
                                 {
                                     break;
                                 }
@@ -390,10 +390,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
                                     break;
                                 }
                                 self.service_lapic_local_events();
-                                if self.cpu.lapic.intr
-                                    && (self.cpu.interrupts_enabled() || mwait_if)
+                                if self.cpu_ref(0).lapic.intr
+                                    && (self.cpu_ref(0).interrupts_enabled() || mwait_if)
                                 {
-                                    self.cpu
+                                    self.cpu_mut()
                                         .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                                     break;
                                 }
@@ -411,8 +411,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
                             }
 
                             // If LAPIC has a pending interrupt, signal CPU
-                            if self.cpu.lapic_has_intr() {
-                                self.cpu
+                            if self.cpu_ref(0).lapic_has_intr() {
+                                self.cpu_mut()
                                     .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                             }
 
@@ -434,11 +434,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
                                 }
                                 // Deliver PIC interrupt if pending
                                 if self.device_manager.has_interrupt()
-                                    && self.cpu.get_b_if() != 0
-                                    && !self.cpu.interrupts_inhibited(0x01)
+                                    && self.cpu_ref(0).get_b_if() != 0
+                                    && !self.cpu_ref(0).interrupts_inhibited(0x01)
                                     // Priority-4 debug traps come first —
                                     // see the main loop's injection site.
-                                    && !self.cpu.debug_trap_pending()
+                                    && !self.cpu_ref(0).debug_trap_pending()
                                 {
                                     let vec = self.iac();
                                     // SAFETY: see borrow_memory_for_cpu / inject_interrupt
@@ -471,7 +471,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                                 }
                                 // If CPU re-entered MWAIT, advance time again
                                 if !matches!(
-                                    self.cpu.activity_state,
+                                    self.cpu_ref(0).activity_state,
                                     CpuActivityState::Hlt
                                         | CpuActivityState::Mwait
                                         | CpuActivityState::MwaitIf
@@ -480,21 +480,21 @@ impl<'a, T: Instrumentation> Emulator<T> {
                                 }
                                 // HLT loop: Bochs handleWaitForEvent advances BX_TICKN(10).
                                 let mwait_if2 =
-                                    matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
+                                    matches!(self.cpu_ref(0).activity_state, CpuActivityState::MwaitIf);
                                 let mut hlt2 = 0u64;
                                 while hlt2 < 100_000_000 {
                                     // Keep host input responsive during MWAIT idle.
                                     self.pump_gui_input();
                                     if self.has_interrupt()
-                                        && (self.cpu.interrupts_enabled() || mwait_if2)
+                                        && (self.cpu_ref(0).interrupts_enabled() || mwait_if2)
                                     {
                                         break;
                                     }
                                     self.service_lapic_local_events();
-                                    if self.cpu.lapic.intr
-                                        && (self.cpu.interrupts_enabled() || mwait_if2)
+                                    if self.cpu_ref(0).lapic.intr
+                                        && (self.cpu_ref(0).interrupts_enabled() || mwait_if2)
                                     {
-                                        self.cpu
+                                        self.cpu_mut()
                                             .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                                         break;
                                     }
@@ -509,8 +509,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
                                         break;
                                     }
                                 }
-                                if self.cpu.lapic_has_intr() {
-                                    self.cpu
+                                if self.cpu_ref(0).lapic_has_intr() {
+                                    self.cpu_mut()
                                         .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                                 }
                             }
@@ -538,16 +538,16 @@ impl<'a, T: Instrumentation> Emulator<T> {
                             .map(u32::from_le_bytes)
                             .unwrap_or(0);
                         tracing::trace!("BATCH-DIAG: executed={}, total={}k, RIP={:#x}, PIT_count={}, activity={:?}, BDA_ticks={}",
-                            executed, instructions_executed / 1000, self.cpu.rip(), pit_c0_count,
-                            self.cpu.activity_state, bda_ticks);
+                            executed, instructions_executed / 1000, self.cpu_ref(0).rip(), pit_c0_count,
+                            self.cpu_ref(0).activity_state, bda_ticks);
                     }
 
                     // Periodic interrupt-chain diagnostic (every ~1M instructions)
                     #[cfg(debug_assertions)]
                     if instructions_executed % 1_000_000 < INSTRUCTION_BATCH_SIZE {
                         let has_int = self.has_interrupt();
-                        let if_flag = self.cpu.get_b_if();
-                        let rip = self.cpu.rip();
+                        let if_flag = self.cpu_ref(0).get_b_if();
+                        let rip = self.cpu_ref(0).rip();
                         let pit_c0 = &self.device_manager.pit.counters[0];
                         tracing::trace!(
                             "IRQ-DIAG: {}M instr, RIP={:#x}, IF={}, has_int={}, PIC_imr={:#04x}, PIC_irr={:#04x}, PIT_c0: mode={:?} inlatch={} count={} count_written={} gate={} output={}",
@@ -570,8 +570,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
                     // Only use PIC path — LAPIC interrupts are delivered via
                     // handleAsyncEvent() through the CPU event system.
                     if self.device_manager.has_interrupt()
-                        && self.cpu.get_b_if() != 0
-                        && !self.cpu.interrupts_inhibited(0x01)
+                        && self.cpu_ref(0).get_b_if() != 0
+                        && !self.cpu_ref(0).interrupts_inhibited(0x01)
                         // BX_INHIBIT_INTERRUPTS
                         //
                         // Bochs event.cc handleAsyncEvent delivers Priority-4
@@ -583,7 +583,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         // silently destroyed it. Deferring by one boundary
                         // keeps the interrupt latched in the PIC (iac() is not
                         // called) and lets the CPU deliver #DB first.
-                        && !self.cpu.debug_trap_pending()
+                        && !self.cpu_ref(0).debug_trap_pending()
                     {
                         let vector = self.iac();
 
@@ -596,8 +596,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
                             Ok(()) => {
                                 tracing::trace!(
                                     "INT-INJECT: OK! activity_after={:?}, RIP={:#x}",
-                                    self.cpu.activity_state,
-                                    self.cpu.rip()
+                                    self.cpu_ref(0).activity_state,
+                                    self.cpu_ref(0).rip()
                                 );
                             }
                             Err(e) => {
@@ -669,7 +669,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         use std::io::Write;
                         bench_next = retired + bench_interval;
                         let ticks = self.pc_system.time_ticks();
-                        let rip = self.cpu.rip();
+                        let rip = self.cpu_ref(0).rip();
                         writeln!(
                             sink,
                             "{retired},{},{ticks},{rip:x}",
@@ -741,8 +741,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         "[{:>6}M instr] {:>6.2} MIPS  RIP={:#010x}  CS={:#06x}  mode={}",
                         instructions_executed / 1_000_000,
                         mips,
-                        self.cpu.rip(),
-                        self.cpu.get_cs_selector(),
+                        self.cpu_ref(0).rip(),
+                        self.cpu_ref(0).get_cs_selector(),
                         self.get_cpu_mode_str(),
                     );
                 }
@@ -762,12 +762,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
         {
             // Print perf summary to stderr (only for large batches, not sub-batches)
             if instructions_executed >= 1_000_000 {
-                let pi = self.cpu.perf_instructions;
-                let tlb_h = self.cpu.perf_tlb_hit;
-                let tlb_m = self.cpu.perf_tlb_miss;
-                let pw = self.cpu.perf_page_walk;
-                let ic_m = self.cpu.perf_icache_miss;
-                let pf = self.cpu.perf_prefetch;
+                let pi = self.cpu_ref(0).perf_instructions;
+                let tlb_h = self.cpu_ref(0).perf_tlb_hit;
+                let tlb_m = self.cpu_ref(0).perf_tlb_miss;
+                let pw = self.cpu_ref(0).perf_page_walk;
+                let ic_m = self.cpu_ref(0).perf_icache_miss;
+                let pf = self.cpu_ref(0).perf_prefetch;
                 let tlb_total = tlb_h + tlb_m;
                 let tlb_pct = if tlb_total > 0 {
                     tlb_h as f64 / tlb_total as f64 * 100.0
@@ -776,7 +776,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 };
                 // cpu_ticks = instruction count plus the fast-REP tick surplus
                 // (Bochs BX_TICK1-per-instruction + BX_TICKN time domain).
-                let bochs_ticks = self.cpu.cpu_ticks();
+                let bochs_ticks = self.cpu_ref(0).cpu_ticks();
                 tracing::debug!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
             }
         }

@@ -458,7 +458,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             return true;
         }
         // APIC path: check LAPIC for pending interrupts
-        if self.cpu.lapic_has_intr() {
+        if self.cpu_ref(0).lapic_has_intr() {
             return true;
         }
         false
@@ -1128,9 +1128,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
             || self.device_manager.pic.irq_pending
             || self.pc_system.intr_raised;
         if pic_asserted {
-            self.cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+            self.cpu_mut().signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         } else {
-            self.cpu.clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+            self.cpu_mut().clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         }
 
         for cpu_index in 0..self.cpu_count() {
@@ -1153,9 +1153,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
         self.device_manager.pic.irq_pending = false;
         self.device_manager.pic.irq_cleared = false;
         if asserted {
-            self.cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+            self.cpu_mut().signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         } else {
-            self.cpu.clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+            self.cpu_mut().clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         }
 
         // PIC forwarding has already changed IOAPIC levels; now route its
@@ -1188,15 +1188,15 @@ impl<'a, T: Instrumentation> Emulator<T> {
         }
 
         if self.pc_system.intr_raised {
-            self.cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+            self.cpu_mut().signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
             self.pc_system.intr_raised = false;
         }
         if self.pc_system.intr_cleared {
-            self.cpu.clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+            self.cpu_mut().clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
             self.pc_system.intr_cleared = false;
         }
         if self.pc_system.async_event_pending {
-            self.cpu.async_event = 1;
+            self.cpu_mut().async_event = 1;
             self.pc_system.async_event_pending = false;
         }
         if self.cpu_count() != 0 {

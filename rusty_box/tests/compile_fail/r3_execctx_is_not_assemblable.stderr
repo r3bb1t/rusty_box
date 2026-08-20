@@ -24,7 +24,7 @@ error[E0624]: associated function `new` is private
   | |         cpu: &'a mut BxCpuC<T>,
   | |         memory: &'a mut BxMemC,
   | |         devices: &'a mut BxDevicesC,
-... |
-  | |         pin_index: usize,
+  | |         device_manager: &'a mut DeviceManager,
+  | |         pc_system: &'a mut BxPcSystemC,
   | |     ) -> Self {
   | |_____________- private associated function defined here

@@ -62,7 +62,11 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // and DMA controllers come off `ExecCtx` instead of aliasing the device
     // manager the slice already borrows, and the SMC drain reads memory
     // through a context. `Emulator` derives `Send`.
-    ("rusty_box/src", 103),
+    // 103 -> 97: the machine's CPUs live in one store, boot processor at index
+    // 0. `BspCpu`'s pointer newtype and its two `Deref` launderings are gone,
+    // as is the no-alloc `[*mut BxCpuC; 253]` and the three dereferences that
+    // read it. Every build's machine now derives `Send`.
+    ("rusty_box/src", 97),
     ("rusty_box_decoder/src", 0),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. Zero, permanently: thread

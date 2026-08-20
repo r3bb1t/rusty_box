@@ -15,6 +15,10 @@ use crate::{cpu::CpuError, Error};
 use alloc::vec::Vec;
 
 use super::Emulator;
+// Only the direct-Linux-boot path below reaches a CPU through the store, and
+// that path needs an allocator.
+#[cfg(feature = "alloc")]
+use super::cpu_store::CpuStore;
 
 impl<'a, T: Instrumentation> Emulator<T> {
     #[cfg(feature = "alloc")]
@@ -214,11 +218,14 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
         // Shared implementation in `crate::boot` — one boot path serves both
         // the alloc Emulator and the raw (cpu, memory) no-alloc entry point.
-        // The emulator's complete stable pin set protects every CPU's cached
-        // TLB windows while guest RAM is written.
+        //
+        // The boot CPU and memory are needed at once, which no single accessor
+        // can hand out, so they come from one destructuring of disjoint fields —
+        // the same shape `exec_ctx` uses.
+        let Self { cpus, memory, .. } = self;
         crate::boot::setup_direct_linux_boot_with_pins(
-            &mut *self.cpu,
-            &mut self.memory,
+            cpus.get_mut(0),
+            memory,
             bzimage,
             initramfs,
             cmdline.as_bytes(),
@@ -320,21 +327,21 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
             // --- HLT/MWAIT: advance time until interrupt ---
             if matches!(
-                self.cpu.activity_state,
+                self.cpu_ref(0).activity_state,
                 CpuActivityState::Hlt | CpuActivityState::Mwait | CpuActivityState::MwaitIf
             ) && self.can_fast_forward_bsp_hlt()
             {
-                let mwait_if = matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
+                let mwait_if = matches!(self.cpu_ref(0).activity_state, CpuActivityState::MwaitIf);
                 let mut hlt_budget = 0u64;
                 while hlt_budget < 100_000_000 {
                     // Service host input while halted (see run_interactive).
                     self.pump_gui_input();
-                    if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) {
+                    if self.has_interrupt() && (self.cpu_ref(0).interrupts_enabled() || mwait_if) {
                         break;
                     }
                     self.service_lapic_local_events();
-                    if self.cpu.lapic.intr && (self.cpu.interrupts_enabled() || mwait_if) {
-                        self.cpu
+                    if self.cpu_ref(0).lapic.intr && (self.cpu_ref(0).interrupts_enabled() || mwait_if) {
+                        self.cpu_mut()
                             .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                         break;
                     }
@@ -349,21 +356,21 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         break;
                     }
                 }
-                if self.cpu.lapic_has_intr() {
-                    self.cpu
+                if self.cpu_ref(0).lapic_has_intr() {
+                    self.cpu_mut()
                         .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                 }
             }
 
             // --- Deliver PIC interrupt ---
             if self.device_manager.has_interrupt()
-                && self.cpu.get_b_if() != 0
-                && !self.cpu.interrupts_inhibited(0x01)
+                && self.cpu_ref(0).get_b_if() != 0
+                && !self.cpu_ref(0).interrupts_inhibited(0x01)
                 // Bochs event.cc delivers Priority-4 debug traps before
                 // Priority-5 external interrupts; defer one boundary so the
                 // CPU can deliver #DB first. The interrupt stays latched in
                 // the PIC because iac() is not called.
-                && !self.cpu.debug_trap_pending()
+                && !self.cpu_ref(0).debug_trap_pending()
             {
                 let vector = self.iac();
                 // SAFETY: see borrow_memory_for_cpu / inject_interrupt
@@ -378,7 +385,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             // Without std there is no wall clock: yield cooperatively on the
             // instruction budget instead, so an Active CPU cannot spin here
             // forever and starve the caller's event loop.
-            if matches!(self.cpu.activity_state, CpuActivityState::Active) && {
+            if matches!(self.cpu_ref(0).activity_state, CpuActivityState::Active) && {
                 #[cfg(feature = "std")]
                 {
                     wall_start.elapsed() < wall_budget
@@ -398,7 +405,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // Handle keyboard/mouse/serial input from GUI.
         self.pump_gui_input();
 
-        let shutdown = self.cpu.is_in_shutdown();
+        let shutdown = self.cpu_ref(0).is_in_shutdown();
         Ok((total_executed, shutdown))
     }
 

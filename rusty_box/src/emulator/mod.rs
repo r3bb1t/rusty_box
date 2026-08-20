@@ -35,13 +35,13 @@ use crate::{
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::AtomicBool;
 
+pub mod cpu_store;
+use cpu_store::CpuStore;
 mod interactive;
 mod run;
 mod scheduler;
 mod timers;
 
-#[cfg(not(feature = "alloc"))]
-const NO_ALLOC_MAX_AP_CPUS: usize = (crate::params::BX_MAX_SMP_THREADS_SUPPORTED as usize) - 1;
 const BOCHS_APIC_BUS_ID_MASK: u32 = 0xFF;
 
 /// Fixed-width CPU membership bitmap for the accepted 254-CPU topology.
@@ -335,69 +335,22 @@ impl Default for SlowdownTimerState {
 /// let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
 /// let _ = &mut emu.memory;
 /// ```
-/// Caller-provided BSP storage for no-alloc builds.
-///
-/// The alloc build keeps its BSP in a `Box`, which owns the CPU and needs no
-/// lifetime. No-alloc callers place theirs in a static, on the stack, or in
-/// firmware-provided memory, and previously handed it over as `&'a mut` — which
-/// forced a lifetime parameter onto `Emulator` that the alloc build had nothing
-/// to fill. Holding it as a pointer removes that asymmetry, and matches
-/// `ap_cpu_ptrs`, which has always stored the other CPUs this way.
-///
-/// The dereference lives here and nowhere else, so every use site reads
-/// `self.cpu.field` exactly as it does under alloc.
-#[cfg(not(feature = "alloc"))]
-pub(crate) struct BspCpu<T: Instrumentation>(*mut BxCpuC<T>);
-
-#[cfg(not(feature = "alloc"))]
-impl<T: Instrumentation> BspCpu<T> {
-    #[inline(always)]
-    pub(crate) fn new(cpu: &mut BxCpuC<T>) -> Self {
-        Self(cpu)
-    }
-}
-
-#[cfg(not(feature = "alloc"))]
-impl<T: Instrumentation> core::ops::Deref for BspCpu<T> {
-    type Target = BxCpuC<T>;
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: the caller of `init_at` guarantees this CPU outlives the
-        // emulator — the same contract `ap_cpu_ptrs` already rests on.
-        unsafe { &*self.0 }
-    }
-}
-
-#[cfg(not(feature = "alloc"))]
-impl<T: Instrumentation> core::ops::DerefMut for BspCpu<T> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: see `Deref`; `&mut self` excludes every other borrow.
-        unsafe { &mut *self.0 }
-    }
-}
-
 pub struct Emulator<T: Instrumentation = ()> {
-    /// BSP CPU storage. This stays at a stable address for its own cached
-    /// host mappings.
-    #[cfg(feature = "alloc")]
-    cpu: alloc::boxed::Box<BxCpuC<T>>,
-    /// Application processors (CPU IDs/APIC IDs 1..N-1).
-    #[cfg(feature = "alloc")]
-    pub(crate) ap_cpus: Vec<alloc::boxed::Box<BxCpuC<T>>>,
-    /// BSP CPU storage supplied by no-alloc callers.
-    #[cfg(not(feature = "alloc"))]
-    cpu: BspCpu<T>,
-    /// Application processor pointers supplied by no-alloc callers.
+    /// Every CPU this machine has, boot processor at index 0 — Bochs
+    /// `bx_cpu_array`. Each stays at a stable address for its own cached host
+    /// mappings.
     ///
-    /// no_std/no-alloc targets can place `BxCpuC` objects in a static, stack,
-    /// firmware, or bootloader-provided array and pass those references through
-    /// `init_at_with_ap_cpus()`. The emulator stores raw pointers so it does not
-    /// need `alloc` or `std` to support SMP scheduling.
-    #[cfg(not(feature = "alloc"))]
-    ap_cpu_ptrs: [*mut BxCpuC<T>; NO_ALLOC_MAX_AP_CPUS],
-    #[cfg(not(feature = "alloc"))]
-    ap_cpu_count: usize,
+    /// One field, one declaration, no `cfg` (doctrine R0). Which storage the
+    /// alias resolves to is what varies with the build — heap-owned under
+    /// `alloc`, borrowed from the caller without it — and that is a type, not
+    /// a variant that exists in some builds and not others.
+    ///
+    /// A type PARAMETER here would be the more general shape, and is where
+    /// this lands at Phase I when `Profile` picks the store alongside the
+    /// device set. It buys nothing yet: no build needs two stores at once, and
+    /// `T` appears only inside the store, so a parameter would need a
+    /// `PhantomData` to justify itself.
+    cpus: cpu_store::MachineCpus<T>,
     /// Memory subsystem
     pub(crate) memory: BxMemC,
     /// Device controller (I/O port handlers). Crate-private (doctrine R3):
@@ -455,44 +408,16 @@ pub struct Emulator<T: Instrumentation = ()> {
 }
 
 impl<'a, T: Instrumentation> Emulator<T> {
-    #[cfg(feature = "alloc")]
     pub(crate) fn cpu_count(&self) -> usize {
-        1 + self.ap_cpus.len()
+        self.cpus.count()
     }
 
-    #[cfg(not(feature = "alloc"))]
-    pub(crate) fn cpu_count(&self) -> usize {
-        1 + self.ap_cpu_count
-    }
-
-    #[cfg(feature = "alloc")]
     pub(crate) fn cpu_ref(&self, index: usize) -> &BxCpuC<T> {
-        if index == 0 {
-            &self.cpu
-        } else {
-            &self.ap_cpus[index - 1]
-        }
+        self.cpus.get(index)
     }
 
-    #[cfg(not(feature = "alloc"))]
-    pub(crate) fn cpu_ref(&self, index: usize) -> &BxCpuC<T> {
-        if index == 0 {
-            &*self.cpu
-        } else {
-            assert!(index <= self.ap_cpu_count);
-            // SAFETY: init_at_with_ap_cpus copies caller-provided AP pointers
-            // whose allocations must outlive the emulator.
-            unsafe { &*self.ap_cpu_ptrs[index - 1] }
-        }
-    }
-
-    #[cfg(feature = "alloc")]
     pub(crate) fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<T> {
-        if index == 0 {
-            &mut self.cpu
-        } else {
-            &mut self.ap_cpus[index - 1]
-        }
+        self.cpus.get_mut(index)
     }
 
     /// Borrow one CPU together with the machine it executes against.
@@ -502,61 +427,26 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// hands out `&mut` to each simultaneously. Every path that needs more
     /// than one of them at once goes through here (doctrine R3), which is why
     /// the machine holds no pointer to any of its own parts.
-    #[cfg(feature = "alloc")]
     pub(crate) fn exec_ctx(&mut self, index: usize) -> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let Self {
-            cpu,
-            ap_cpus,
+            cpus,
             memory,
             devices,
             device_manager,
             pc_system,
             ..
         } = self;
-        let this_cpu: &mut BxCpuC<T> = if index == 0 {
-            cpu
-        } else {
-            &mut ap_cpus[index - 1]
-        };
-        crate::cpu::exec_ctx::ExecCtx::new(this_cpu, memory, devices, device_manager, pc_system)
-    }
-
-    /// No-alloc counterpart. Same split, different storage: the BSP is
-    /// caller-provided, the APs are pointers, and the pin set is an
-    /// initialised prefix of a fixed array.
-    #[cfg(not(feature = "alloc"))]
-    pub(crate) fn exec_ctx(&mut self, index: usize) -> crate::cpu::exec_ctx::ExecCtx<'_, T> {
-        let Self {
-            cpu,
-            ap_cpu_ptrs,
+        // `get_mut` borrows only the store, so memory, devices and the PC
+        // system stay independently live — the disjointness `ExecCtx` rests on.
+        crate::cpu::exec_ctx::ExecCtx::new(
+            cpus.get_mut(index),
             memory,
             devices,
             device_manager,
             pc_system,
-            ..
-        } = self;
-        let this_cpu: &mut BxCpuC<T> = if index == 0 {
-            cpu
-        } else {
-            // SAFETY: `init_at_with_ap_cpus` stores live CPUs the caller keeps
-            // alive for the emulator's life; `&mut self` excludes any other
-            // borrow of this one.
-            unsafe { &mut *ap_cpu_ptrs[index - 1] }
-        };
-        crate::cpu::exec_ctx::ExecCtx::new(this_cpu, memory, devices, device_manager, pc_system)
+        )
     }
 
-    #[cfg(not(feature = "alloc"))]
-    pub(crate) fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<T> {
-        if index == 0 {
-            &mut self.cpu
-        } else {
-            assert!(index <= self.ap_cpu_count);
-            // SAFETY: &mut self guarantees no other emulator method can
-            // concurrently borrow the AP CPU through this pointer.
-            unsafe { &mut *self.ap_cpu_ptrs[index - 1] }
-        }
-    }
 
     #[cfg(feature = "std")]
     pub(crate) fn finish_snapshot_restore_v3(
@@ -763,7 +653,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         cpu.configure_smp(0, topology);
         cpu.set_smp_quantum(config.smp_quantum);
         cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
-        Self::new_from_parts(config, cpu, Vec::new())
+        Self::new_from_parts(config, cpu_store::OwnedCpus::new(alloc::vec![cpu]))
     }
 
     fn new_inner<F>(config: EmulatorConfig, mut build_cpu: F) -> Result<Box<Self>>
@@ -777,21 +667,21 @@ impl<'a, T: Instrumentation> Emulator<T> {
         cpu.set_smp_quantum(config.smp_quantum);
         cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
 
-        let mut ap_cpus = Vec::with_capacity(cpu_count.saturating_sub(1) as usize);
+        let mut cpus = Vec::with_capacity(cpu_count as usize);
+        cpus.push(cpu);
         for cpu_id in 1..cpu_count {
             let mut ap_cpu = build_cpu()?;
             ap_cpu.configure_smp(cpu_id, topology);
             ap_cpu.set_smp_quantum(config.smp_quantum);
             ap_cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
-            ap_cpus.push(ap_cpu);
+            cpus.push(ap_cpu);
         }
-        Self::new_from_parts(config, cpu, ap_cpus)
+        Self::new_from_parts(config, cpu_store::OwnedCpus::new(cpus))
     }
 
     fn new_from_parts(
         config: EmulatorConfig,
-        cpu: alloc::boxed::Box<BxCpuC<T>>,
-        ap_cpus: Vec<alloc::boxed::Box<BxCpuC<T>>>,
+        cpus: cpu_store::OwnedCpus<T>,
     ) -> Result<Box<Self>> {
         let pc_system = BxPcSystemC::new();
         let mem_stub = BxMemoryStubC::create_and_init(
@@ -811,8 +701,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             return Err(MemoryError::UnableToAllocateGuestMemory(layout.size()).into());
         }
         unsafe {
-            core::ptr::addr_of_mut!((*ptr).cpu).write(cpu);
-            core::ptr::addr_of_mut!((*ptr).ap_cpus).write(ap_cpus);
+            core::ptr::addr_of_mut!((*ptr).cpus).write(cpus);
             core::ptr::addr_of_mut!((*ptr).memory).write(memory);
             core::ptr::addr_of_mut!((*ptr).devices).write(devices);
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
@@ -847,43 +736,23 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// - `ptr` must point to a valid, zeroed, properly aligned allocation of `size_of::<Self>()` bytes
     /// - `cpu` must point to a valid, initialized BxCpuC
     /// - `mem_stub` must be a fully initialized memory stub
-    /// - All allocations must outlive the returned reference
+    /// - Every CPU in `cpus`, and the memory stub, must outlive the machine
+    ///
+    /// `cpus` is the machine's whole CPU set, boot processor at index 0 — the
+    /// same order the `alloc` store uses. It is a slice of exclusive borrows
+    /// rather than a slice of CPUs so a no-alloc host can place each CPU
+    /// wherever it likes; nothing requires them to be contiguous.
     pub unsafe fn init_at(
         ptr: *mut Self,
-        cpu: &'a mut BxCpuC<T>,
-        mem_stub: BxMemoryStubC,
-        config: EmulatorConfig,
-    ) -> Result<&'a mut Self> {
-        Self::init_at_with_ap_cpus(ptr, cpu, &mut [], mem_stub, config)
-    }
-
-    #[cfg(not(feature = "alloc"))]
-    /// Initialize an Emulator at a caller-provided memory location with
-    /// caller-provided application processors.
-    ///
-    /// This keeps SMP available to no_std/no-alloc targets: callers can define
-    /// a fixed array of `BxCpuC` storage, initialize each CPU with
-    /// `BxCpuBuilder::init_cpu_at()`, then pass the AP references here. The
-    /// emulator stores raw pointers to the APs and never allocates.
-    ///
-    /// # Safety
-    /// - `ptr` must point to a valid, zeroed, properly aligned allocation of `size_of::<Self>()` bytes
-    /// - `cpu` and every entry in `ap_cpus` must point to valid, initialized BxCpuC instances
-    /// - `mem_stub` must be a fully initialized memory stub
-    /// - All allocations must outlive the returned emulator reference
-    pub(crate) unsafe fn init_at_with_ap_cpus(
-        ptr: *mut Self,
-        cpu: &'a mut BxCpuC<T>,
-        ap_cpus: &mut [&'a mut BxCpuC<T>],
+        cpus: &'static mut [&'static mut BxCpuC<T>],
         mem_stub: BxMemoryStubC,
         config: EmulatorConfig,
     ) -> Result<&'a mut Self> {
         let topology = config.cpu_params.cpu_topology();
         let configured_cpu_count = config.cpu_params.cpu_count() as usize;
-        let required_ap_count = configured_cpu_count.saturating_sub(1);
-        if ap_cpus.len() < required_ap_count {
+        if cpus.len() < configured_cpu_count {
             return Err(CpuError::UnsupportedCpuOperation {
-                operation: "no-alloc SMP requires caller-provided AP CPU storage",
+                operation: "no-alloc SMP requires caller-provided CPU storage",
             }
             .into());
         }
@@ -892,24 +761,17 @@ impl<'a, T: Instrumentation> Emulator<T> {
         let devices = BxDevicesC::new();
         let device_manager = DeviceManager::new();
         let pc_system = BxPcSystemC::new();
-        let mut ap_cpu_ptrs = [core::ptr::null_mut(); NO_ALLOC_MAX_AP_CPUS];
-        cpu.configure_smp(0, topology);
-        cpu.set_smp_quantum(config.smp_quantum);
-        cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
-        for (index, ap_cpu_slot) in ap_cpus.iter_mut().take(required_ap_count).enumerate() {
-            let ap_cpu: &mut BxCpuC<T> = &mut **ap_cpu_slot;
-            ap_cpu.configure_smp((index + 1) as u32, topology);
-            ap_cpu.set_smp_quantum(config.smp_quantum);
-            ap_cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
-            ap_cpu_ptrs[index] = ap_cpu as *mut BxCpuC<T>;
+        for (index, slot) in cpus.iter_mut().take(configured_cpu_count).enumerate() {
+            slot.configure_smp(index as u32, topology);
+            slot.set_smp_quantum(config.smp_quantum);
+            slot.set_cpuid_freq(config.cpuid_freq, config.ips);
         }
+        let cpus = cpu_store::BorrowedCpus::new(&mut cpus[..configured_cpu_count]);
         // The descriptor sidecars are 40 KiB each. Initialize only the used
         // prefix directly in the caller-provided Emulator storage so no-alloc
         // construction neither allocates nor builds/moves a 254-entry stack
         // temporary.
-        core::ptr::addr_of_mut!((*ptr).cpu).write(BspCpu::new(cpu));
-        core::ptr::addr_of_mut!((*ptr).ap_cpu_ptrs).write(ap_cpu_ptrs);
-        core::ptr::addr_of_mut!((*ptr).ap_cpu_count).write(required_ap_count);
+        core::ptr::addr_of_mut!((*ptr).cpus).write(cpus);
         core::ptr::addr_of_mut!((*ptr).memory).write(memory);
         core::ptr::addr_of_mut!((*ptr).devices).write(devices);
         core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
@@ -1467,7 +1329,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     ///
     /// Call this before entering the CPU loop.
     pub fn prepare_run(&mut self) {
-        tracing::trace!("Starting CPU execution at RIP={:#x}", self.cpu.rip());
+        tracing::trace!("Starting CPU execution at RIP={:#x}", self.cpu_ref(0).rip());
 
         // Initialize PIT icount sync so PIT counter reads advance with CPU time.
         // This is critical for kernel PIT-polling calibration loops (e.g., Alpine Linux).
@@ -1504,7 +1366,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Get current instruction pointer
     pub fn rip(&self) -> u64 {
-        self.cpu.rip()
+        self.cpu_ref(0).rip()
     }
 
     #[cfg(feature = "alloc")]
@@ -1789,12 +1651,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Get current CS:RIP for diagnostics.
     pub fn get_cs_rip(&self) -> (u16, u64) {
-        (self.cpu.get_cs_selector(), self.cpu.rip())
+        (self.cpu_ref(0).get_cs_selector(), self.cpu_ref(0).rip())
     }
 
     /// Get CPU mode string for diagnostics.
     pub fn get_cpu_mode_str(&self) -> &'static str {
-        match self.cpu.get_cpu_mode() {
+        match self.cpu_ref(0).get_cpu_mode() {
             0 => "real",
             1 => "v8086",
             2 => "protected",
@@ -1818,7 +1680,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             self.device_manager.ioapic.redirect_entry_diag(15);
         // Check LAPIC IRR/ISR for the IDE vector
         let (irr_set, isr_set) = if vec15 > 0 {
-            self.cpu.lapic_vector_state(vec15)
+            self.cpu_ref(0).lapic_vector_state(vec15)
         } else {
             (false, false)
         };
@@ -1838,17 +1700,17 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Get CPU activity state and async_event for diagnostics.
     pub fn cpu_diag_state(&self) -> (u32, u32) {
-        (self.cpu.activity_state as u32, self.cpu.async_event)
+        (self.cpu_ref(0).activity_state as u32, self.cpu_ref(0).async_event)
     }
 
     /// Get CR0 for diagnostics (bit 0 = PE).
     pub fn get_cr0(&self) -> u32 {
-        self.cpu.cr0.bits()
+        self.cpu_ref(0).cr0.bits()
     }
 
     /// Get IF flag for diagnostics.
     pub fn get_if_flag(&self) -> bool {
-        self.cpu.get_b_if() != 0
+        self.cpu_ref(0).get_b_if() != 0
     }
 
     /// Read a few bytes from the BIOS ROM array at the given ROM offset.
@@ -1863,21 +1725,21 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Get CR3 (page directory base register) for page table walks.
     pub fn get_cr3(&self) -> u64 {
-        self.cpu.cr3
+        self.cpu_ref(0).cr3
     }
 
     /// Get EIP for diagnostics.
     pub fn get_eip(&self) -> u32 {
-        self.cpu.eip()
+        self.cpu_ref(0).eip()
     }
 
     /// Get segment register info: (selector, base, limit, valid_flags).
     pub fn get_seg_info(&self, seg_idx: usize) -> (u16, u64, u32, u32) {
         if seg_idx < 6 {
-            let selector = self.cpu.sregs[seg_idx].selector.value;
-            let valid = self.cpu.sregs[seg_idx].cache.valid;
-            let base = self.cpu.sregs[seg_idx].cache.u.segment_base();
-            let limit = self.cpu.sregs[seg_idx].cache.u.segment_limit_scaled();
+            let selector = self.cpu_ref(0).sregs[seg_idx].selector.value;
+            let valid = self.cpu_ref(0).sregs[seg_idx].cache.valid;
+            let base = self.cpu_ref(0).sregs[seg_idx].cache.u.segment_base();
+            let limit = self.cpu_ref(0).sregs[seg_idx].cache.u.segment_limit_scaled();
             (selector, base, limit, valid)
         } else {
             (0, 0, 0, 0)
@@ -1887,21 +1749,21 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// Get EAX/EBX/ECX/EDX for diagnostics.
     pub fn get_gpr32(&self, reg: usize) -> u32 {
         match reg {
-            0 => self.cpu.eax(),
-            1 => self.cpu.ecx(),
-            2 => self.cpu.edx(),
-            3 => self.cpu.ebx(),
-            4 => self.cpu.esp(),
-            5 => self.cpu.ebp(),
-            6 => self.cpu.esi(),
-            7 => self.cpu.edi(),
+            0 => self.cpu_ref(0).eax(),
+            1 => self.cpu_ref(0).ecx(),
+            2 => self.cpu_ref(0).edx(),
+            3 => self.cpu_ref(0).ebx(),
+            4 => self.cpu_ref(0).esp(),
+            5 => self.cpu_ref(0).ebp(),
+            6 => self.cpu_ref(0).esi(),
+            7 => self.cpu_ref(0).edi(),
             _ => 0,
         }
     }
 
     /// Get the activity state string.
     pub fn get_activity_str(&self) -> &'static str {
-        match self.cpu.activity_state {
+        match self.cpu_ref(0).activity_state {
             CpuActivityState::Active => "active",
             CpuActivityState::Hlt => "hlt",
             CpuActivityState::Shutdown => "shutdown",
@@ -1917,8 +1779,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// answerable without a live execution context, and is the unit the entry
     /// is actually keyed by (R4).
     pub fn get_dtlb_info(&self, laddr: u64) -> DtlbInfo {
-        let idx = self.cpu.dtlb.get_index_of(laddr, 3);
-        let entry = &self.cpu.dtlb.entries[idx];
+        let idx = self.cpu_ref(0).dtlb.get_index_of(laddr, 3);
+        let entry = &self.cpu_ref(0).dtlb.entries[idx];
         DtlbInfo {
             lpf: entry.lpf,
             ppf: entry.ppf,
@@ -1929,7 +1791,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Get user_pl flag (true = CPL==3).
     pub fn get_user_pl(&self) -> bool {
-        self.cpu.user_pl
+        self.cpu_ref(0).user_pl
     }
 
     /// Read a physical dword through the block-aware RAM interface.
@@ -1948,64 +1810,64 @@ impl<T: Instrumentation> Emulator<T> {
         tracing::trace!("\n=== DIAGNOSTIC DUMP ===");
         tracing::trace!(
             "RIP={:#018x} RSP={:#018x} RBP={:#018x}",
-            self.cpu.rip(),
-            self.cpu.rsp(),
-            self.cpu.rbp()
+            self.cpu_ref(0).rip(),
+            self.cpu_ref(0).rsp(),
+            self.cpu_ref(0).rbp()
         );
         tracing::trace!(
             "RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
-            self.cpu.rax(),
-            self.cpu.rbx(),
-            self.cpu.rcx(),
-            self.cpu.rdx()
+            self.cpu_ref(0).rax(),
+            self.cpu_ref(0).rbx(),
+            self.cpu_ref(0).rcx(),
+            self.cpu_ref(0).rdx()
         );
         tracing::trace!(
             "RSI={:#018x} RDI={:#018x} R8={:#018x}  R9={:#018x}",
-            self.cpu.rsi(),
-            self.cpu.rdi(),
-            self.cpu.r8(),
-            self.cpu.r9()
+            self.cpu_ref(0).rsi(),
+            self.cpu_ref(0).rdi(),
+            self.cpu_ref(0).r8(),
+            self.cpu_ref(0).r9()
         );
         tracing::trace!(
             "CS={:#06x} mode={} IF={}",
-            self.cpu.get_cs_selector(),
+            self.cpu_ref(0).get_cs_selector(),
             self.get_cpu_mode_str(),
-            if self.cpu.get_b_if() != 0 { 1 } else { 0 }
+            if self.cpu_ref(0).get_b_if() != 0 { 1 } else { 0 }
         );
         tracing::trace!(
             "CR0={:#010x} CR3={:#018x}",
-            self.cpu.cr0.bits(),
-            self.cpu.cr3
+            self.cpu_ref(0).cr0.bits(),
+            self.cpu_ref(0).cr3
         );
         tracing::trace!(
             "pending_event={:#010x} event_mask={:#010x} async_event={}",
-            self.cpu.pending_event,
-            self.cpu.event_mask,
-            self.cpu.async_event
+            self.cpu_ref(0).pending_event,
+            self.cpu_ref(0).event_mask,
+            self.cpu_ref(0).async_event
         );
         #[cfg(debug_assertions)]
         {
             tracing::trace!(
                 "diag: intr_delivered={} if_blocked={} pic_empty={}",
-                self.cpu.diag_hae_intr_delivered,
-                self.cpu.diag_hae_intr_if_blocked,
-                self.cpu.diag_hae_intr_pic_empty
+                self.cpu_ref(0).diag_hae_intr_delivered,
+                self.cpu_ref(0).diag_hae_intr_if_blocked,
+                self.cpu_ref(0).diag_hae_intr_pic_empty
             );
             // SYSCALL ring buffer
             tracing::trace!(
                 "--- Last {} SYSCALLs (total={}, sysret={}, blocked={}) ---",
-                self.cpu.diag_syscall_ring_idx.min(32),
-                self.cpu.diag_syscall_count,
-                self.cpu.diag_sysret_count,
-                self.cpu
+                self.cpu_ref(0).diag_syscall_ring_idx.min(32),
+                self.cpu_ref(0).diag_syscall_count,
+                self.cpu_ref(0).diag_sysret_count,
+                self.cpu_ref(0)
                     .diag_syscall_count
-                    .saturating_sub(self.cpu.diag_sysret_count)
+                    .saturating_sub(self.cpu_ref(0).diag_sysret_count)
             );
             {
-                let count = self.cpu.diag_syscall_ring_idx.min(32);
-                let start = self.cpu.diag_syscall_ring_idx.saturating_sub(32);
-                for i in start..self.cpu.diag_syscall_ring_idx {
-                    let (nr, arg0, ic) = self.cpu.diag_syscall_ring[i % 32];
+                let count = self.cpu_ref(0).diag_syscall_ring_idx.min(32);
+                let start = self.cpu_ref(0).diag_syscall_ring_idx.saturating_sub(32);
+                for i in start..self.cpu_ref(0).diag_syscall_ring_idx {
+                    let (nr, arg0, ic) = self.cpu_ref(0).diag_syscall_ring[i % 32];
                     tracing::trace!("  syscall nr={} arg0={:#x} icount={}", nr, arg0, ic);
                 }
             }
@@ -2044,12 +1906,12 @@ impl<T: Instrumentation> Emulator<T> {
         );
         tracing::trace!(
             "  lapic_timer_fires={} set_initial_count={} timer_masked={}",
-            self.cpu.lapic.diag_timer_fires,
-            self.cpu.lapic.diag_set_initial_count,
-            self.cpu.lapic.diag_timer_masked
+            self.cpu_ref(0).lapic.diag_timer_fires,
+            self.cpu_ref(0).lapic.diag_set_initial_count,
+            self.cpu_ref(0).lapic.diag_timer_masked
         );
         // Show pc_system timer state for LAPIC timer
-        if let Some(handle) = self.cpu.lapic.timer_handle {
+        if let Some(handle) = self.cpu_ref(0).lapic.timer_handle {
             let t = &self.pc_system.timers[handle];
             tracing::trace!(
                 "  pc_system_timer[{}]: flags={:?} time_to_fire={} period={} ticks_total={}",
@@ -2060,7 +1922,7 @@ impl<T: Instrumentation> Emulator<T> {
                 self.pc_system.time_ticks()
             );
         }
-        self.cpu.lapic.dump_state();
+        self.cpu_ref(0).lapic.dump_state();
         // ATA channel diagnostics
         tracing::trace!("--- ATA Diag ---");
         tracing::trace!("  cmd_history (last 10):");
@@ -2096,9 +1958,9 @@ impl<T: Instrumentation> Emulator<T> {
         }
         // Dump stack (16 qwords) through a manual page walk that reads only
         // the individual page-table entries and stack words it needs.
-        let rsp = self.cpu.rsp();
+        let rsp = self.cpu_ref(0).rsp();
         if rsp > 0xffffffff80000000 {
-            let cr3 = self.cpu.cr3 & !0xFFF;
+            let cr3 = self.cpu_ref(0).cr3 & !0xFFF;
             let mut read_stack_qword = |addr: u64| -> u64 {
                 let pml4_idx = (addr >> 39) & 0x1FF;
                 let pdpt_idx = (addr >> 30) & 0x1FF;
@@ -2147,9 +2009,9 @@ impl<T: Instrumentation> Emulator<T> {
         }
         // Dump 64 bytes of code at current RIP via the same requested-size
         // physical reads used above.
-        let rip = self.cpu.rip();
+        let rip = self.cpu_ref(0).rip();
         if rip > 0xffffffff80000000 {
-            let cr3 = self.cpu.cr3 & !0xFFF;
+            let cr3 = self.cpu_ref(0).cr3 & !0xFFF;
             let pml4_idx = (rip >> 39) & 0x1FF;
             let pdpt_idx = (rip >> 30) & 0x1FF;
             let pd_idx = (rip >> 21) & 0x1FF;
@@ -2221,11 +2083,10 @@ fn status_ips_from_retired_instructions(
 // hand-written impl to vouch for. A field that reintroduced one would break
 // this line rather than silently un-thread-safe the fleet.
 //
-// Under `alloc` only: the no-alloc machine keeps its application processors as
-// caller-supplied `*mut BxCpuC`, whose validity rests on a contract the caller
-// signs at `init_at_with_ap_cpus`. That machine is legitimately `!Send`, and a
-// no-alloc target has no threads to move it to.
-#[cfg(feature = "alloc")]
+// This holds in EVERY build. The no-alloc machine used to be exempt because it
+// kept its CPUs as `*mut BxCpuC`; it now borrows them exclusively instead, and
+// an exclusive borrow of a `Send` type is itself `Send`. There is no longer a
+// configuration of this emulator that cannot cross a thread boundary.
 const _: () = {
     const fn assert_send<M: Send>() {}
     assert_send::<Emulator<()>>();
@@ -2233,7 +2094,6 @@ const _: () = {
 
 /// Non-vacuity for the assertion above: the machine stays `Send` for any
 /// `Send` tracer, not just the `()` default.
-#[cfg(feature = "alloc")]
 #[allow(dead_code)]
 fn assert_machine_send_for_every_send_tracer<T: Instrumentation + Send>() {
     const fn assert_send<M: Send>() {}
