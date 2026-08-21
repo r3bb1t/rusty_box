@@ -12,6 +12,10 @@ pub use instrumentation::{
 #[cfg(feature = "instrumentation")]
 pub use instrumentation::{HookHandle, InstrumentationError, IoHookType, MemHookType};
 
+/// The decoded instruction every [`Instrumentation`] execution hook is handed.
+/// Re-exported beside the trait so implementing one needs a single import.
+pub use decoder::Instruction;
+
 /// Reason for CPU reset (always available, no alloc needed).
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum ResetReason {

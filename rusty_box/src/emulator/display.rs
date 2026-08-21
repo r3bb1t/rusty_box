@@ -83,10 +83,14 @@ impl<'m, D: DisplaySource> Display<'m, D> {
     }
 
     /// The screen as characters, or `None` in a graphics mode.
-    pub fn text(&self) -> Option<TextView<'_, D>> {
+    ///
+    /// Consumes the handle so the view borrows the machine directly rather
+    /// than the handle: `machine.display().text()` is one expression, not two
+    /// statements with a binding in between.
+    pub fn text(self) -> Option<TextView<'m, D>> {
         let grid = self.source.text_grid()?;
         Some(TextView {
-            source: &*self.source,
+            source: self.source,
             grid,
         })
     }
@@ -345,8 +349,8 @@ mod tests {
         screen.graphics = true;
         let display = Display::new(&mut screen);
 
-        assert!(display.text().is_none());
         assert_eq!(display.resolution(), Resolution::new(18, 16));
+        assert!(display.text().is_none());
     }
 
     #[test]

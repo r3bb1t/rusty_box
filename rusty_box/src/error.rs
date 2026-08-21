@@ -16,6 +16,10 @@ pub enum Error {
     #[error(transparent)]
     Build(#[from] crate::emulator::BuildError),
 
+    #[cfg(feature = "instrumentation")]
+    #[error(transparent)]
+    Instrumentation(#[from] crate::cpu::InstrumentationError),
+
     #[error(transparent)]
     Infallible(#[from] core::convert::Infallible),
 
