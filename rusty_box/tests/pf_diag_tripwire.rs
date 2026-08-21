@@ -11,7 +11,7 @@
 
 #![cfg(feature = "std")]
 
-use rusty_box::cpu::{core_i7_skylake::Corei7SkylakeX, CpuSetupMode};
+use rusty_box::cpu::CpuSetupMode;
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
 /// Same sizing rationale as fp_vex_scalar_ops.rs: the Emulator is ~4 MiB and

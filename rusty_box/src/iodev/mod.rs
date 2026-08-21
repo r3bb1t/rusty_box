@@ -1745,7 +1745,6 @@ mod tests {
     #[test]
     fn timer_request_table_overwrites_only_its_owner_and_latches_boundary() {
         let mut devices = boxed_devices();
-        let mut pc_system = crate::pc_system::BxPcSystemC::new();
 
         devices.request_timer(
             DeviceTimerOwner::PciIdeCh0,
@@ -1791,7 +1790,6 @@ mod tests {
     #[test]
     fn reset_discards_pre_reset_scheduler_transport() {
         let mut devices = boxed_devices();
-        let mut pc_system = crate::pc_system::BxPcSystemC::new();
         devices.pic_intr_level = Some(true);
         devices.request_timer(
             DeviceTimerOwner::PciIdeCh0,

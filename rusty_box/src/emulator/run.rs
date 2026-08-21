@@ -20,6 +20,89 @@ use super::Emulator;
 #[cfg(feature = "alloc")]
 use super::cpu_store::CpuStore;
 
+/// Why a batch of execution ended.
+///
+/// Exhaustive over what `step_batch` can actually determine at the moment it
+/// returns. Every variant here is a condition the loop genuinely distinguishes;
+/// a cause the machine cannot tell apart from another does not get a name,
+/// because a caller matching on it would be matching on a guess.
+///
+/// The order matters where causes coincide — a guest that powers off on the
+/// same batch that exhausts its budget is reported as powering off, because the
+/// budget will still be there next call and the power-off will not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StopReason {
+    /// The guest asked to be powered off: ACPI `PM1_CNT` with `SLP_EN` and
+    /// `SLP_TYP` = S5, or the port-0x8900 shutdown protocol. Bochs treats both
+    /// as `bx_user_quit` and aborts; this machine stops gracefully instead, so
+    /// a caller that keeps stepping is running a guest that asked to be off.
+    GuestPowerOff,
+    /// The host asked, through `StopHandle::stop`, `Emulator::emu_stop`, or a
+    /// shared stop flag installed with `set_stop_flag`.
+    StopRequested,
+    /// The boot CPU is in the architectural shutdown state. A triple fault is
+    /// the usual way in; `RSM` with an inconsistent SMRAM image and a VMX entry
+    /// carrying guest activity state 2 reach the same state, and the CPU
+    /// records no cause, so this variant does not claim to know which.
+    CpuShutdown,
+    /// The boot CPU is halted (`HLT`/`MWAIT`) or waiting for a `SIPI`, and no
+    /// wake event arrived within the idle fast-forward budget. Time still
+    /// advanced; the caller may step again to keep advancing it.
+    Halted,
+    /// The batch ran out of budget with the CPU still executing. Under `std`
+    /// that is the 15 ms wall-clock budget, not `batch_instructions` — see
+    /// `Emulator::step_batch`.
+    BudgetExhausted,
+}
+
+/// What one `step_batch` call did.
+///
+/// A named struct rather than a pair (doctrine R0): the two fields are a count
+/// and a cause, and nothing about `(u64, bool)` said which was which — nor
+/// could a `bool` carry more than one of the five causes above.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BatchOutcome {
+    /// Instructions retired across the whole call. Under `std` this may exceed
+    /// the requested `batch_instructions`, because the call keeps running whole
+    /// batches until its wall-clock budget is spent.
+    pub executed: u64,
+    /// Why the call returned.
+    pub stop: StopReason,
+}
+
+impl BatchOutcome {
+    /// Whether the machine should not be stepped again without host action.
+    ///
+    /// `Halted` and `BudgetExhausted` are ordinary yields — the guest is still
+    /// live and stepping again makes progress. The other three mean the guest
+    /// or the host has asked execution to end, and a caller that keeps stepping
+    /// is spinning.
+    #[inline]
+    pub fn is_terminal(&self) -> bool {
+        match self.stop {
+            StopReason::GuestPowerOff | StopReason::StopRequested | StopReason::CpuShutdown => true,
+            StopReason::Halted | StopReason::BudgetExhausted => false,
+        }
+    }
+}
+
+/// Why the machine's stop flag is raised.
+///
+/// The flag itself is a shared `AtomicBool` a host thread may own, so it cannot
+/// carry this: a host setting it through `StopHandle` writes only the bool.
+/// The machine records the cause beside it when *it* is the one raising the
+/// flag, and reads "host asked" from the absence of a recorded guest cause.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum StopCause {
+    /// Nothing the machine itself raised — so if the flag is up, the host did it.
+    #[default]
+    HostRequested,
+    /// The guest executed an ACPI S5 transition or the port-0x8900 protocol.
+    GuestPowerOff,
+}
+
 impl<'a, T: Instrumentation> Emulator<T> {
     #[cfg(feature = "alloc")]
     /// Update GUI with VGA text mode changes
@@ -294,11 +377,20 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// Execute a batch of instructions cooperatively (no blocking loop).
     ///
     /// Designed for single-threaded environments like WASM or UEFI where the
-    /// caller must yield control back to its event loop regularly. Runs up to
-    /// `max_instructions`, ticks devices, syncs A20, then returns.
+    /// caller must yield control back to its event loop regularly. Runs the
+    /// guest, ticks devices, syncs A20, then returns why it stopped.
     ///
-    /// Returns `(instructions_executed, is_shutdown)`.
-    pub fn step_batch(&mut self, max_instructions: u64) -> Result<(u64, bool)> {
+    /// `batch_instructions` bounds one inner batch, not the call. Under `std` the
+    /// call keeps running batches until a 15 ms wall-clock budget is spent — so
+    /// `BatchOutcome::executed` may come back well above `batch_instructions`.
+    /// Under `no_std` there is no clock, so the instruction count is the budget
+    /// and the figure is a true ceiling.
+    ///
+    /// A caller driving a machine to completion should stop on
+    /// [`BatchOutcome::is_terminal`]; testing the count against
+    /// `batch_instructions` cannot tell "the guest powered off" from "the budget
+    /// ran out", and under `std` cannot even tell the budget ran out.
+    pub fn step_batch(&mut self, batch_instructions: u64) -> Result<BatchOutcome> {
         let ips = self.config.ips as u64;
         let mut total_executed = 0u64;
         // Wall-clock budget: 15ms keeps GUI responsive at 60 fps.
@@ -312,7 +404,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         'batch: loop {
             // --- Run CPU batch ---
             // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
-            let result = self.run_cpu_batch(max_instructions);
+            let result = self.run_cpu_batch(batch_instructions);
 
             let executed = match result {
                 Ok(n) => n,
@@ -385,16 +477,24 @@ impl<'a, T: Instrumentation> Emulator<T> {
             // Without std there is no wall clock: yield cooperatively on the
             // instruction budget instead, so an Active CPU cannot spin here
             // forever and starve the caller's event loop.
-            if matches!(self.cpu_ref(0).activity_state, CpuActivityState::Active) && {
-                #[cfg(feature = "std")]
-                {
-                    wall_start.elapsed() < wall_budget
+            // A raised stop flag ends the call now rather than at the end of
+            // the wall-clock budget. It is raised by a host `StopHandle`, by a
+            // guest power-off drained at a scheduler boundary, and by a hook
+            // whose honoured stop request the batch just drained — none of
+            // which is worth spending another 15 ms of guest time on.
+            if !self.stop_flag.load(core::sync::atomic::Ordering::Relaxed)
+                && matches!(self.cpu_ref(0).activity_state, CpuActivityState::Active)
+                && {
+                    #[cfg(feature = "std")]
+                    {
+                        wall_start.elapsed() < wall_budget
+                    }
+                    #[cfg(not(feature = "std"))]
+                    {
+                        total_executed < batch_instructions
+                    }
                 }
-                #[cfg(not(feature = "std"))]
-                {
-                    total_executed < max_instructions
-                }
-            } {
+            {
                 continue 'batch;
             }
 
@@ -405,8 +505,45 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // Handle keyboard/mouse/serial input from GUI.
         self.pump_gui_input();
 
-        let shutdown = self.cpu_ref(0).is_in_shutdown();
-        Ok((total_executed, shutdown))
+        Ok(BatchOutcome {
+            executed: total_executed,
+            stop: self.classify_batch_stop(),
+        })
+    }
+
+    /// Why the batch loop above just ended.
+    ///
+    /// Asked once, after the loop, from state that is still live — which is
+    /// what makes the answer honest. The order is by precedence, not by
+    /// likelihood: a guest that powers off on the same call that fills its
+    /// budget has to be reported as powering off, because the budget renews on
+    /// the next call and the power-off request does not.
+    fn classify_batch_stop(&mut self) -> StopReason {
+        if self.stop_flag.load(core::sync::atomic::Ordering::Relaxed) {
+            return match self.stop_cause {
+                StopCause::GuestPowerOff => StopReason::GuestPowerOff,
+                StopCause::HostRequested => StopReason::StopRequested,
+            };
+        }
+        // The flag is down, so nothing the machine recorded about a previous
+        // raise still applies. Clearing here is what keeps a stale guest cause
+        // from being read back the next time a HOST holder of the shared flag
+        // raises it — that holder writes the bool and nothing else.
+        self.stop_cause = StopCause::HostRequested;
+
+        if self.cpu_ref(0).is_in_shutdown() {
+            return StopReason::CpuShutdown;
+        }
+        // "Halted" is a property of the MACHINE, not of the boot CPU: on an SMP
+        // guest the boot CPU may sit in `HLT` while an application processor
+        // does the work, and that batch ended on budget with progress still
+        // available. Asked of every CPU rather than read off `runnable_mask`,
+        // which is a cache the scheduler maintains during a batch.
+        let progress_possible = (0..self.cpu_count()).any(|i| self.cpu_runnable_for_batch(i));
+        if !progress_possible {
+            return StopReason::Halted;
+        }
+        StopReason::BudgetExhausted
     }
 
     #[cfg(feature = "alloc")]

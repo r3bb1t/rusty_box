@@ -74,6 +74,24 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
 /// emulator/mod.rs fails the build if a field ever takes that away (R6).
 const UNSAFE_IMPL_SEND_BASELINE: usize = 0;
 
+/// Files carrying a crate-inner `#![allow(… dead_code …)]`, which switches the
+/// lint off for the whole file — and, in a `mod.rs`, for every module beneath
+/// it. Ratcheted for the same reason as unsafe: not because the items it hides
+/// are wrong, but because while it is on, nothing tells you a NEW one appeared.
+///
+/// Measured with `RUSTFLAGS="--force-warn dead_code"`, these hide ~2470 items.
+/// Most are Bochs-parity constants and helpers ported ahead of their callers —
+/// `tables.rs` alone accounts for ~141, and `geforce.rs` ~23 in a file that is
+/// deliberately kept — so the backlog needs per-item judgement and cannot be
+/// swept. The count going down is what makes that judgement happen file by
+/// file; replace a blanket allow with targeted ones that name their provenance.
+// 73 -> 70: `memory/mod.rs` (whose inner attribute covered the whole memory
+// subtree, `residency.rs` included), `memory/memory_stub.rs`, and `cpu/tlb.rs`.
+// Between them they hid a callerless `Tlb::pinned_alloc_offset` left over from
+// the deleted pin sidecar, a 4 KiB never-read `apic_scratch` buffer, and a
+// forwarder with no callers.
+const BLANKET_DEAD_CODE_BASELINE: usize = 70;
+
 /// Count occurrences of a bare `unsafe` token per crate, comment lines
 /// stripped, against the ratchet baselines.
 fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
@@ -102,10 +120,20 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
         }
         n
     }
+    /// Whether `line` is a crate-inner attribute switching `dead_code` off for
+    /// a whole file. Matches the `#![allow(…)]` form only: a targeted
+    /// `#[allow(dead_code)]` on one item is the shape this ratchet is pushing
+    /// the tree towards, so it must not be counted.
+    fn is_blanket_dead_code_allow(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("#![allow") && trimmed.contains("dead_code")
+    }
+
     fn scan_dir(
         dir: &std::path::Path,
         unsafe_tokens: &mut usize,
         unsafe_impl_send: &mut usize,
+        blanket_dead_code: &mut usize,
     ) -> Result<(), String> {
         let entries = std::fs::read_dir(dir)
             .map_err(|err| format!("doctrine ratchets: read_dir {}: {err}", dir.display()))?;
@@ -114,11 +142,17 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
                 entry.map_err(|err| format!("doctrine ratchets: dir entry: {err}"))?;
             let path = entry.path();
             if path.is_dir() {
-                scan_dir(&path, unsafe_tokens, unsafe_impl_send)?;
+                scan_dir(&path, unsafe_tokens, unsafe_impl_send, blanket_dead_code)?;
             } else if path.extension().is_some_and(|e| e == "rs") {
                 let text = std::fs::read_to_string(&path).map_err(|err| {
                     format!("doctrine ratchets: read {}: {err}", path.display())
                 })?;
+                // One per FILE, not per line: a file may carry several inner
+                // attributes, and what is being counted is files whose dead
+                // code is invisible.
+                if text.lines().any(is_blanket_dead_code_allow) {
+                    *blanket_dead_code += 1;
+                }
                 for line in text.lines() {
                     let trimmed = line.trim_start();
                     if trimmed.starts_with("//") {
@@ -138,12 +172,15 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
     }
 
     let mut total_impl_send = 0usize;
+    let mut total_blanket_dead_code = 0usize;
     for (rel, baseline) in UNSAFE_TOKEN_BASELINES {
         let mut tokens = 0usize;
         let mut impl_send = 0usize;
-        scan_dir(&root.join(rel), &mut tokens, &mut impl_send)?;
+        let mut blanket_dead_code = 0usize;
+        scan_dir(&root.join(rel), &mut tokens, &mut impl_send, &mut blanket_dead_code)?;
         if *rel == "rusty_box/src" {
             total_impl_send = impl_send;
+            total_blanket_dead_code = blanket_dead_code;
         }
         if tokens > *baseline {
             return Err(format!(
@@ -164,6 +201,21 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
             "doctrine ratchets: {total_impl_send} `unsafe impl Send/Sync` lines, baseline is \
              {UNSAFE_IMPL_SEND_BASELINE} (R6: Send derives, never promised)"
         ));
+    }
+    if total_blanket_dead_code > BLANKET_DEAD_CODE_BASELINE {
+        return Err(format!(
+            "doctrine ratchets: {total_blanket_dead_code} files carry a blanket \
+             `#![allow(… dead_code …)]`, baseline is {BLANKET_DEAD_CODE_BASELINE} — a new one \
+             hides every unused item in its file (and, from a mod.rs, in every module below it). \
+             Put the allow on the item that needs it and say why."
+        ));
+    }
+    if total_blanket_dead_code < BLANKET_DEAD_CODE_BASELINE {
+        println!(
+            "    rusty_box/src: {total_blanket_dead_code} blanket dead_code allows \
+             (< baseline {BLANKET_DEAD_CODE_BASELINE} — tighten BLANKET_DEAD_CODE_BASELINE \
+             in this commit)"
+        );
     }
 
     println!(

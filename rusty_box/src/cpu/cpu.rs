@@ -2210,8 +2210,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Cooperative stop request (Bochs kill_bochs_request analogue):
             // any hook may set `stop_request` to break out of the batch. Latency
             // is at most one trace (~10-20 instructions).
+            //
+            // Consumed here so it cannot re-break every later slice of this
+            // processor, and reported through `stop_honored` so the machine
+            // driving the loop learns a hook ended the slice rather than a
+            // budget — without which the request dies at this line.
             if self.instrumentation.stop_request {
                 self.instrumentation.stop_request = false;
+                self.instrumentation.stop_honored = true;
                 break Ok(iteration);
             }
 
@@ -3219,7 +3225,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // The answer is a range, not the bytes, so the borrow of `memory`
             // ends with the call and the arms below can borrow it again.
             let mut direct_page_offset: Option<usize> = None;
-            let page_mapping = self.memory.host_mem_range_pinned(
+            let page_mapping = self.memory.host_mem_range(
                 page_base,
                 MemoryAccessType::Execute,
                 page_policy,
@@ -3242,7 +3248,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     // create an ITLB page mapping from this short slice.
                     let current_policy =
                         self.memory_access_policy(self.memory.a20_addr(current_p_addr));
-                    let current_mapping = self.memory.host_mem_range_pinned(
+                    let current_mapping = self.memory.host_mem_range(
                         current_p_addr,
                         MemoryAccessType::Execute,
                         current_policy,
@@ -3811,7 +3817,7 @@ mod tests {
         },
         memory::{BxMemC, BxMemoryStubC},
         params::BxParams,
-        pc_system::{BxPcSystemC, TimerOwner},
+        pc_system::TimerOwner,
     };
 
     #[test]
@@ -4130,7 +4136,7 @@ mod tests {
 
             let offset = ctx
                 .memory
-                .host_mem_range_pinned(
+                .host_mem_range(
                     0xFFFF_0000,
                     MemoryAccessType::Execute,
                     crate::memory::CpuMemoryPolicy::default(),

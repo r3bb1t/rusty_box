@@ -25,7 +25,7 @@
 
 #![cfg(feature = "std")]
 
-use rusty_box::cpu::{core_i7_skylake::Corei7SkylakeX, CpuSetupMode, X86Reg};
+use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;

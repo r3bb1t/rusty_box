@@ -378,6 +378,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
         #[cfg(test)]
         self.assert_cpu_masks_match_scan();
+        self.drain_hook_stop_requests();
         result.map(|_| {
             if smp {
                 total_elapsed_ticks
@@ -385,6 +386,28 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 total_up_executed
             }
         })
+    }
+
+    /// Turn a stop honoured inside the CPU loop into the machine's own stop.
+    ///
+    /// The one place a hook's request crosses from a processor to the machine
+    /// (doctrine R5), and it deliberately raises the same flag a host
+    /// `StopHandle` raises rather than inventing a parallel signal — so every
+    /// run loop that already stops for a host request stops for a hook too,
+    /// and none of them needs to know hooks exist.
+    ///
+    /// The flag is left for the caller to observe and clear; only the per-CPU
+    /// report is consumed here, so one honoured request raises the machine's
+    /// flag exactly once.
+    fn drain_hook_stop_requests(&mut self) {
+        let mut honored = false;
+        for index in 0..self.cpu_count() {
+            honored |= core::mem::take(&mut self.cpu_mut_at(index).instrumentation.stop_honored);
+        }
+        if honored {
+            self.stop_flag
+                .store(true, core::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Bochs `cpu: quantum=N` (BXPN_SMP_QUANTUM), clamped to config.h
@@ -908,12 +931,15 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
         // Bochs unmapped.cc port 0x8900: a completed "Shutdown" protocol sets
         // `bx_user_quit = 1` and BX_FATALs. Translate that guest request into
-        // our run-loop stop flag (checked at the top of every batch) — a
-        // graceful stop at the next boundary in place of Bochs's immediate
-        // abort. Drained unconditionally (the flag lives on `devices`, outside
-        // `scheduler_boundary_work_pending`'s DeviceManager view).
+        // our run-loop stop flag — a graceful stop at the next boundary in
+        // place of Bochs's immediate abort. Drained unconditionally (the flag
+        // lives on `devices`, outside `scheduler_boundary_work_pending`'s
+        // DeviceManager view). The cause is recorded alongside so the batch
+        // boundary can report a guest power-off as such, rather than as a host
+        // stop request; the flag itself is shared and cannot carry it.
         if self.devices.take_shutdown_request() {
             tracing::info!("port 0x8900 shutdown protocol complete — stopping emulation");
+            self.stop_cause = crate::emulator::StopCause::GuestPowerOff;
             self.stop_flag
                 .store(true, core::sync::atomic::Ordering::Relaxed);
         }
@@ -925,6 +951,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // convergence check on has_pending_machine_boundary.
         if core::mem::take(&mut self.device_manager.acpi.soft_off_pending) {
             tracing::info!("ACPI S5 soft power off — stopping emulation");
+            self.stop_cause = crate::emulator::StopCause::GuestPowerOff;
             self.stop_flag
                 .store(true, core::sync::atomic::Ordering::Relaxed);
         }

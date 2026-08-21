@@ -1,4 +1,3 @@
-#![allow(unused_assignments, dead_code)]
 
 mod error;
 pub(crate) mod memory_rusty_box;
@@ -7,12 +6,14 @@ pub mod misc_mem;
 pub mod mmio;
 pub mod mmio_map;
 pub mod permissions;
+mod residency;
 
 #[cfg(test)]
 mod tests;
 
 pub use super::error::Result;
-use crate::config::{BxPhyAddress, MAX_MEM_BLOCKS};
+use crate::config::BxPhyAddress;
+use residency::{Residency, ResidentParts};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 pub use error::*;
@@ -83,8 +84,21 @@ impl CpuMemoryPolicy {
     }
 }
 
-#[cfg(feature = "std")]
-use std::fs::File;
+/// The three SMRAM control bits, read back together.
+///
+/// A named struct rather than the `(bool, bool, bool)` this replaces (doctrine
+/// R0): all three are booleans, so nothing but position told them apart, and
+/// position is exactly what an assertion gets wrong silently.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SmramState {
+    /// SMRAM exists at all (Bochs `smram_available`).
+    pub available: bool,
+    /// SMRAM window open — the chipset's DOPEN bit.
+    pub enabled: bool,
+    /// SMRAM visible only in SMM — the chipset's DCLS bit.
+    pub restricted: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Block {
@@ -117,17 +131,16 @@ pub(crate) enum MemorySnapshotResidency {
 }
 #[derive(Debug)]
 pub struct BxMemoryStubC {
-    /// could be > 4G
-    pub(super) len: usize,
-    /// could be > 4G
-    allocated: usize,
-    /// Complete block slots available for resident guest RAM. This may exceed
-    /// `allocated` by less than one block when swapped backing is active.
-    resident_backing_len: usize,
-    /// individual block size, must be power of 2
-    block_size: usize,
+    /// Which guest block occupies which slot of the resident region, the
+    /// dimensions that map is indexed by, and the overflow file the rest of
+    /// the guest's RAM lives in — see `residency::Residency`.
+    residency: Residency,
     /// The guest's memory bytes. Owned data rather than a raw pointer, so
     /// `Send` derives — see `RamBacking`.
+    ///
+    /// Laid out as the resident region (`Residency::resident_len` bytes from
+    /// `vector_offset`), then the ROM image, then the bogus page. The resident
+    /// region is what `Residency` is handed whenever it has to move bytes.
     backing: memory_stub::RamBacking,
     /// Bytes of `backing` this machine actually uses. The owned case rounds its
     /// allocation up to a whole number of pages, so the backing may be slightly
@@ -135,15 +148,10 @@ pub struct BxMemoryStubC {
     actual_vector_len: usize,
     /// aligned correctly
     vector_offset: usize,
-    /// None if swapped out
-    blocks_offsets: [Block; MAX_MEM_BLOCKS],
-    num_blocks: usize,
     /// 512k BIOS rom space + 128k expansion rom space
     rom_offset: usize,
     /// 4k for unexisting memory
     bogus_offset: usize,
-
-    used_blocks: usize,
 
     /// Machine-wide SMC page-write-stamp table — Bochs icache.h
     /// `bxPageWriteStampTable::fineGranularityMapping`. ONE table for the
@@ -168,43 +176,6 @@ pub struct BxMemoryStubC {
     /// (an event was dropped on pending-queue overflow).
     smc_overflow_seq: u64,
 
-    /// Zero-initialized 4KB scratch buffer for APIC MMIO (0xFEE00000-0xFEEFFFFF)
-    apic_scratch: [u8; 4096],
-
-    next_swapout_idx: usize,
-
-    /// Monotonic count of guest-block relocations — the residency epoch.
-    ///
-    /// Bumped whenever a guest block's slot assignment changes, which is
-    /// exactly when a cached RAM offset may have started pointing at different
-    /// guest bytes. Consumers that cache offsets — the instruction TLB, the
-    /// bounded fetch window and the VMCB backing — record the epoch they were
-    /// filled at and discard the cache when it moves
-    /// (`BxCpuC::revalidate_allocation_caches`, at fetch-window refill).
-    ///
-    /// This replaced a per-CPU pin sidecar that answered the same question by
-    /// *preventing* eviction of any block a CPU still referenced. Announcing
-    /// costs one compare per refill and always makes progress; vetoing cost a
-    /// scan per eviction and could refuse to evict at all.
-    ///
-    /// Cost is nil where it matters: under full residency — the default, and
-    /// the only regime `no_alloc` has — no block is ever swapped out, so
-    /// `allocate_block` is never entered and this never advances.
-    swap_epoch: u64,
-
-    /// Cached "host backing is a full identity map" verdict consumed by
-    /// `identity_guest_base` on every cpu-loop entry (per SMP slice — the
-    /// O(num_blocks) table walk this replaces dominated the SMP hot path).
-    /// Maintained at every block-table mutation: construction, block
-    /// allocation/eviction, and snapshot restore.
-    identity_map: bool,
-    /// Backing store for blocks that are not resident. A plain field: every
-    /// path that touches it holds `&mut self` and reaches it as a field
-    /// disjoint from `backing`, so the interior mutability that used to
-    /// launder `&self` into `&mut File` is gone (doctrine R1 — the borrow the
-    /// `UnsafeCell` dodged is one the compiler can check).
-    #[cfg(feature = "std")]
-    overflow_file: File,
 }
 
 // `Send` is derived, not promised: every field is owned or borrowed data. The
@@ -230,7 +201,6 @@ pub(crate) fn test_ram() -> BxMemC {
     memory
 }
 
-type Unsigned = u32;
 
 /// What a physical access still needs from its caller.
 ///
@@ -375,21 +345,23 @@ impl BxMemC {
         self.smram_restricted = false;
     }
 
-    /// Snapshot of SMRAM control state: (available, enable/DOPEN, restricted/DCLS).
-    /// Test/diagnostic accessor — the actual A0000-BFFFF routing decision is
-    /// made directly against these flags in misc_mem.rs's pin-aware host
+    /// Snapshot of SMRAM control state: available, enable/DOPEN,
+    /// restricted/DCLS. A read-back for tests — the actual A0000-BFFFF routing
+    /// decision is made directly against these flags in misc_mem.rs's host
     /// mapping and physical read/write paths, untouched here.
-    pub(crate) fn smram_state(&self) -> (bool, bool, bool) {
-        (
-            self.smram_available,
-            self.smram_enable,
-            self.smram_restricted,
-        )
+    #[cfg(test)]
+    pub(crate) fn smram_state(&self) -> SmramState {
+        SmramState {
+            available: self.smram_available,
+            enabled: self.smram_enable,
+            restricted: self.smram_restricted,
+        }
     }
 
-    /// Test/diagnostic accessor for the PAM-derived memory type of a shadow
-    /// RAM area. Mirrors `set_memory_type`: `area` is one of the 13 memory
-    /// areas (C0000..F0000), `rw` is 0 = read path, 1 = write path.
+    /// The PAM-derived memory type of a shadow RAM area. Mirrors
+    /// `set_memory_type`: `area` is one of the 13 memory areas (C0000..F0000),
+    /// `rw` is 0 = read path, 1 = write path.
+    #[cfg(test)]
     pub(crate) fn memory_type(&self, area: usize, rw: usize) -> bool {
         self.memory_type[area][rw]
     }
@@ -404,7 +376,8 @@ impl BxMemC {
         self.bios_write_enabled = enabled;
     }
 
-    /// Test/diagnostic accessor for the current BIOS-write-enable state.
+    /// Read back the current BIOS-write-enable state.
+    #[cfg(test)]
     pub(crate) fn bios_write_enabled(&self) -> bool {
         self.bios_write_enabled
     }
@@ -425,10 +398,6 @@ impl BxMemC {
         }
     }
 
-    /// Test/diagnostic accessor for the BIOS ROM access bitmask.
-    pub(crate) fn bios_rom_access(&self) -> u8 {
-        self.bios_rom_access
-    }
 }
 
 // implement getters and setters for memory stub
@@ -446,63 +415,59 @@ impl BxMemoryStubC {
         &mut self.backing.as_mut_slice()[..len]
     }
 
-    #[allow(clippy::mut_from_ref)]
-    fn blocks_offsets(&self) -> &[Block] {
-        &self.blocks_offsets[..self.num_blocks]
+    /// The resident region of the allocation, paired with the map that says
+    /// which guest block occupies which slot of it.
+    ///
+    /// Handed out together because every residency change moves bytes: a
+    /// swap-in reads a block from the overflow file into a slot, and the victim
+    /// it displaces is written out of one. They are disjoint fields, so the
+    /// borrow checker grants both at once — which is what lets `Residency`
+    /// take the RAM as a parameter instead of owning it.
+    ///
+    /// The slice is exactly `Residency::resident_len` bytes. Construction
+    /// establishes that the allocation holds that region plus the ROM image
+    /// and the bogus page, and `vector_offset` is where it begins.
+    fn resident_parts(&mut self) -> ResidentParts<'_> {
+        let Self {
+            residency,
+            backing,
+            vector_offset,
+            ..
+        } = self;
+        let start = *vector_offset;
+        let end = start + residency.resident_len();
+        ResidentParts {
+            ram: &mut backing.as_mut_slice()[start..end],
+            map: residency,
+        }
     }
 
-    /// The block table, for the paths that move a block between residency and
-    /// the swap file. Separate from the shared accessor because those paths now
-    /// hold `&mut self` — the residency swap used to launder `&self` into
-    /// `&mut` through an `UnsafeCell`, which is exactly the borrow-checker
-    /// evasion the decomposition removes.
-    fn blocks_offsets_mut(&mut self) -> &mut [Block] {
-        let num_blocks = self.num_blocks;
-        &mut self.blocks_offsets[..num_blocks]
+    /// Guest RAM size in bytes. Could be > 4G.
+    #[inline]
+    pub(super) fn guest_len(&self) -> usize {
+        self.residency.guest_len()
     }
 
-    /// The current residency epoch. See the `swap_epoch` field.
+    /// The current residency epoch. See `residency::Residency`'s `swap_epoch`.
     ///
     /// A consumer caching a RAM offset records this alongside it and discards
     /// the cache when the value changes. Reading is a plain load; under full
     /// residency the value is a constant zero.
     #[inline(always)]
     pub(crate) fn swap_epoch(&self) -> u64 {
-        self.swap_epoch
-    }
-
-    /// Announce that guest blocks moved. The single writer of `swap_epoch`
-    /// (doctrine R5) — every block-table mutation goes through here, so there
-    /// is one place to audit for "did this invalidate cached offsets?".
-    ///
-    /// Saturating rather than wrapping: at one bump per swap, `u64` cannot
-    /// realistically be exhausted, but a wrap would silently re-validate every
-    /// stale cache, so the arithmetic should not be the thing that decides it.
-    #[inline]
-    fn bump_swap_epoch(&mut self) {
-        self.swap_epoch = self.swap_epoch.saturating_add(1);
+        self.residency.swap_epoch()
     }
 
     /// Full O(num_blocks) identity-map scan — the ground truth behind the
-    /// cached `identity_map` flag. Used to (re)compute the cache at block
-    /// table rewrites and as the debug oracle in `identity_guest_base`.
+    /// cached identity verdict, and the debug oracle in `identity_guest_base`.
     pub(super) fn scan_identity_map(&self) -> bool {
-        self.allocated >= self.len
-            && self
-                .blocks_offsets()
-                .iter()
-                .enumerate()
-                .all(|(guest_block, block)| {
-                    matches!(
-                        block,
-                        Block::Block { offset } if *offset == guest_block * self.block_size
-                    )
-                })
+        self.residency.scan_identity_map()
     }
 
-    /// Re-derive the cached identity verdict after a bulk block-table rewrite.
-    pub(super) fn recompute_identity_map(&mut self) {
-        self.identity_map = self.scan_identity_map();
+    /// The cached "host backing is a full identity map" verdict.
+    #[inline]
+    pub(super) fn is_identity_map(&self) -> bool {
+        self.residency.is_identity_map()
     }
 
     pub(super) fn rom(&mut self) -> &mut [u8] {
@@ -515,9 +480,6 @@ impl BxMemoryStubC {
         &mut self.actual_vector_mut()[bo..]
     }
 
-    pub(super) fn apic_scratch(&mut self) -> &mut [u8] {
-        &mut self.apic_scratch
-    }
 
 }
 impl BxMemC {
@@ -542,7 +504,7 @@ impl BxMemC {
             let Some(span) = memory_rusty_box::bx_guest_ram_span(
                 a20,
                 1,
-                self.inherited_memory_stub.len,
+                self.inherited_memory_stub.guest_len(),
             ) else {
                 break;
             };
@@ -593,7 +555,7 @@ impl BxMemC {
             let Some(span) = memory_rusty_box::bx_guest_ram_span(
                 a20,
                 1,
-                self.inherited_memory_stub.len,
+                self.inherited_memory_stub.guest_len(),
             ) else {
                 break;
             };
@@ -627,7 +589,7 @@ impl BxMemC {
     }
 
     pub(crate) fn get_memory_len(&self) -> usize {
-        self.inherited_memory_stub.len
+        self.inherited_memory_stub.guest_len()
     }
 
     /// The residency epoch — bumped whenever a guest block changes slots, so a
@@ -649,14 +611,14 @@ impl BxMemC {
     pub(crate) fn identity_guest_base(&mut self) -> (*mut u8, usize) {
         let stub = &self.inherited_memory_stub;
         debug_assert_eq!(
-            stub.identity_map,
+            stub.is_identity_map(),
             stub.scan_identity_map(),
             "cached identity-map verdict diverged from the block table"
         );
-        if !stub.identity_map {
+        if !stub.is_identity_map() {
             return (core::ptr::null_mut(), 0);
         }
-        let (guest_len, vector_offset) = (stub.len, stub.vector_offset);
+        let (guest_len, vector_offset) = (stub.guest_len(), stub.vector_offset);
         let stub = &mut self.inherited_memory_stub;
         // A returned pointer is fine — it is a FIELD holding one that would
         // block `Send`, and there is no longer any such field.
@@ -670,7 +632,7 @@ impl BxMemC {
     /// Unlike `identity_guest_base` this stays valid when residency is partial,
     /// which is precisely why instruction fetch needs it: fetch also runs out
     /// of ROM, which is not guest RAM at all, and out of relocated RAM slots.
-    /// A range from `host_mem_range_pinned` is an offset into exactly this.
+    /// A range from `host_mem_range` is an offset into exactly this.
     pub(crate) fn allocation_span(&mut self) -> (*mut u8, usize) {
         let stub = &mut self.inherited_memory_stub;
         let len = stub.actual_vector_len;
@@ -790,10 +752,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         MemorySnapshotGeometry, MemorySnapshotResidency,
     };
     use std::io::{self, Read, Seek, SeekFrom};
-    use crate::{
-        cpu::{builder::BxCpuBuilder, rusty_box::MemoryAccessType},
-        Error,
-    };
+    use crate::Error;
 
     const MIB: usize = 1024 * 1024;
 
@@ -828,6 +787,22 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 self.remaining -= copied;
             }
             Ok(copied)
+        }
+    }
+
+    /// A block size that is not a power of two — zero included — is refused at
+    /// construction. Zero is the case worth naming: it is the one value that
+    /// divides the block count, so a machine configured with it must be turned
+    /// away with an error rather than taken down by the arithmetic.
+    #[test]
+    fn a_block_size_that_is_not_a_power_of_two_is_refused() {
+        for (guest, host, block_size) in [(0, 0, 0), (MIB, MIB, 0), (MIB, MIB, 3 * MIB)] {
+            match BxMemoryStubC::create_and_init(guest, host, block_size) {
+                Err(Error::Memory(MemoryError::BlockSizeIsNotAPowerOfTwo(reported))) => {
+                    assert_eq!(reported, block_size)
+                }
+                other => panic!("{guest}/{host} with block size {block_size}: {other:?}"),
+            }
         }
     }
 
@@ -973,6 +948,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         // Snapshot output must include the logical zero tail, not short-read.
         source
             .inherited_memory_stub
+            .residency
             .overflow_file
             .set_len((2 * MIB + 1) as u64)
             .unwrap();
@@ -1146,7 +1122,6 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                     false,
                 );
                 mem.set_a20_mask(u64::MAX);
-                let cpu = BxCpuBuilder::new().build().unwrap();
                 let mut written = [0x11, 0x22, 0x33, 0x44];
                 let wrote = mem.write_physical_page(CpuMemoryPolicy::default(),
                     1022,
@@ -1318,14 +1293,19 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     fn failed_reload_leaves_target_block_swapped_until_retry() {
         let mut mem = swapped_memory();
         mem.write_ram(0, &[0x5a]).unwrap();
-        mem.inherited_memory_stub.overflow_file.set_len(0).unwrap();
+        mem.inherited_memory_stub
+            .residency
+            .overflow_file
+            .set_len(0)
+            .unwrap();
 
         let mut byte = [0];
         assert!(mem.read_ram(MIB as u64, &mut byte).is_err());
-        let blocks = &mem.inherited_memory_stub.blocks_offsets;
+        let blocks = mem.inherited_memory_stub.residency.blocks();
         assert!(matches!(blocks[1], super::Block::SwappedOut));
 
         mem.inherited_memory_stub
+            .residency
             .overflow_file
             .set_len((2 * MIB) as u64)
             .unwrap();

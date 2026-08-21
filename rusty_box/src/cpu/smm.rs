@@ -1056,7 +1056,7 @@ mod tests {
         let policy = CpuMemoryPolicy::new(true, false);
         assert!(
             cpu.memory
-                .get_host_mem_addr_pinned(
+                .get_host_mem_addr(
                     0xa8000,
                     crate::cpu::rusty_box::MemoryAccessType::Execute,
                     policy,
@@ -1067,7 +1067,7 @@ mod tests {
         );
         assert!(
             cpu.memory
-                .get_host_mem_addr_pinned(
+                .get_host_mem_addr(
                     0xa8000,
                     crate::cpu::rusty_box::MemoryAccessType::RW,
                     policy,

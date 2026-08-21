@@ -253,7 +253,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let policy = self.access_policy(paddr);
         if let Ok(Some(slice)) =
             self.memory
-                .get_host_mem_addr_pinned(paddr, MemoryAccessType::Read, policy)
+                .get_host_mem_addr(paddr, MemoryAccessType::Read, policy)
         {
             return slice.first().copied().unwrap_or(0);
         }
@@ -307,7 +307,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let policy = self.access_policy(paddr);
             if let Ok(Some(slice)) =
                 self.memory
-                    .get_host_mem_addr_pinned(paddr, MemoryAccessType::Write, policy)
+                    .get_host_mem_addr(paddr, MemoryAccessType::Write, policy)
             {
                 if let Some(b) = slice.get_mut(0) {
                     *b = value;
@@ -842,7 +842,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ===== Virtual read functions (Bochs access.h + access2.cc) =====
     //
     // Performance-critical: these are called on every memory-accessing instruction.
-    // Inline TLB lookup with a host pointer avoids the pinned host-mapping
+    // Inline TLB lookup with a host pointer avoids the `get_host_mem_addr`
     // slow path on TLB hits.
 
     /// Read a byte from virtual memory.

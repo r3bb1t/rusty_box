@@ -4038,6 +4038,117 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
+    /// A guest that asks to be powered off must be able to say so to a caller
+    /// that drives the machine with `step_batch`.
+    ///
+    /// The guest-visible property, not the transport: a guest completing the
+    /// port-0x8900 shutdown protocol leaves the CPU perfectly healthy — no
+    /// shutdown activity state, no fault — so the old `(count, is_shutdown)`
+    /// return reported `false` forever and a `step_batch` driver span until it
+    /// hit its own instruction cap. The UEFI and WASM front ends are exactly
+    /// such drivers.
+    #[test]
+    fn a_guest_power_off_request_reaches_a_step_batch_caller() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                const CODE_ADDR: u64 = 0x10_0000;
+                const SHUTDOWN_PORT: u64 = 0x8900;
+
+                let mut emu = Emulator::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatLong64,
+                )
+                .unwrap();
+
+                // `mov al, <letter>` + `out dx, al` for each byte of the
+                // "Shutdown" sequence (iodev/mod.rs, Bochs unmapped.cc), then
+                // spin. DX holds the port.
+                let mut code = alloc::vec::Vec::new();
+                for letter in b"Shutdown" {
+                    code.extend_from_slice(&[0xB0, *letter, 0xEE]);
+                }
+                code.extend_from_slice(&[0xEB, 0xFE]);
+                emu.mem_write(CODE_ADDR, &code).unwrap();
+                emu.reg_write(X86Reg::Rip, CODE_ADDR);
+                emu.reg_write(X86Reg::Rdx, SHUTDOWN_PORT);
+
+                // The request is latched by the device and drained at the next
+                // scheduler boundary, so give the machine a few batches to
+                // carry it out — but a bounded few: spinning forever is the
+                // defect under test.
+                let mut stop = None;
+                for _ in 0..8 {
+                    let outcome = emu.step_batch(1_000).expect("step_batch");
+                    if outcome.is_terminal() {
+                        stop = Some(outcome.stop);
+                        break;
+                    }
+                }
+
+                assert_eq!(
+                    stop,
+                    Some(StopReason::GuestPowerOff),
+                    "a completed port-0x8900 protocol must stop the machine, and must \
+                     be reported as the guest asking rather than as a host request"
+                );
+                assert!(
+                    !emu.cpu().is_in_shutdown(),
+                    "the CPU is healthy — this is why testing the CPU state alone \
+                     could never see a guest power-off"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A stop asked for from inside the CPU loop must stop the machine.
+    ///
+    /// `InstrHookCtx::stop` sets exactly the flag this test sets, so this is
+    /// the hook path without a bespoke tracer. The flag ends the CPU slice on
+    /// its own; what needed fixing is that the slice ending was all it did —
+    /// `step_batch` re-entered the loop for the rest of its wall-clock budget
+    /// and returned as though nothing had been asked.
+    #[test]
+    fn a_stop_requested_inside_the_cpu_loop_stops_the_machine() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                const CODE_ADDR: u64 = 0x10_0000;
+
+                let mut emu = Emulator::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatLong64,
+                )
+                .unwrap();
+                // A guest that never stops on its own, so the only thing that
+                // can end the batch is the request.
+                emu.mem_write(CODE_ADDR, &[0xEB, 0xFE]).unwrap();
+                emu.reg_write(X86Reg::Rip, CODE_ADDR);
+
+                emu.cpu_mut().instrumentation.stop_request = true;
+                let outcome = emu.step_batch(50_000_000).expect("step_batch");
+
+                assert_eq!(
+                    outcome.stop,
+                    StopReason::StopRequested,
+                    "the honoured request must reach the caller, not die in the CPU loop"
+                );
+                assert!(
+                    outcome.is_terminal(),
+                    "a caller driving to completion has to be able to stop on this"
+                );
+                assert!(
+                    !emu.cpu().instrumentation.stop_request,
+                    "the request is consumed, so it cannot re-break every later slice"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn split_page_rmw_faults_before_first_mmio_read() {
         std::thread::Builder::new()

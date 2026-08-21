@@ -17,6 +17,8 @@ use core::ops::RangeBounds;
 use crate::cpu::decoder::Instruction;
 #[cfg(feature = "alloc")]
 use crate::cpu::instrumentation::EmuStopReason;
+#[cfg(feature = "alloc")]
+use crate::emulator::StopReason;
 #[cfg(feature = "instrumentation")]
 use crate::cpu::instrumentation::{
     BranchEvent, HookHandle, HwInterruptEvent, InstrumentationError, IoHookEvent, IoHookType,
@@ -993,21 +995,34 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
                 Some(c) => BATCH.min(c - executed),
                 None => BATCH,
             };
-            let (n, _shutdown) = self.step_batch(budget)?;
-            executed = executed.saturating_add(n);
+            let outcome = self.step_batch(budget)?;
+            executed = executed.saturating_add(outcome.executed);
 
+            // The addresses this wrapper watches are its own business, and they
+            // outrank the batch's verdict: reaching `until` is why the caller
+            // asked to run at all, so it is reported even on a batch that also
+            // ran out of budget.
             if until.is_some_and(|a| self.cpu().rip() == a) {
                 return Ok(EmuStopReason::ReachedUntil);
             }
-            // Check exit addresses
             if !self.exit_set.is_empty() {
                 let rip = self.cpu().rip();
                 if self.exit_set.contains(rip) {
                     return Ok(EmuStopReason::ReachedExit(rip));
                 }
             }
-            if n == 0 && self.cpu().is_waiting_for_event() {
-                return Ok(EmuStopReason::Halted);
+
+            // Everything else the batch already determined. This used to be
+            // inferred as `executed == 0 && is_waiting_for_event()`, which
+            // could not see a guest power-off at all and could not tell a
+            // halted machine from a batch that simply retired nothing.
+            match outcome.stop {
+                StopReason::GuestPowerOff | StopReason::StopRequested => {
+                    return Ok(EmuStopReason::Stopped)
+                }
+                StopReason::CpuShutdown => return Ok(EmuStopReason::Shutdown),
+                StopReason::Halted => return Ok(EmuStopReason::Halted),
+                StopReason::BudgetExhausted => {}
             }
         }
     }
@@ -1019,11 +1034,11 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         'a: 'static,
     {
         self.stop_flag.store(false, Ordering::Relaxed);
-        // Both halves of the batch outcome are machine state the caller can
-        // read back at will — the retired count through the CPU's instruction
-        // counter, the shutdown flag through `is_in_shutdown` — so neither is
-        // lost by not being returned from a one-instruction step.
-        let (_retired, _shutdown) = self.step_batch(1)?;
+        // The outcome is machine state the caller can read back at will — the
+        // retired count through the CPU's instruction counter, the stop cause
+        // through the activity state and the stop flag — so nothing is lost by
+        // not returning it from a one-instruction step.
+        self.step_batch(1)?;
         Ok(())
     }
 }

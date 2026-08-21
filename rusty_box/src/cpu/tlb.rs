@@ -1,4 +1,4 @@
-#![allow(private_interfaces, unused_assignments, dead_code)]
+#![allow(private_interfaces, unused_assignments)]
 
 use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};
 
@@ -29,15 +29,6 @@ pub(crate) trait CachedHostPage: Copy {
     /// Host address of this page. `base` is the start of the region whose
     /// pages this implementation numbers.
     fn host_addr(self, base: *mut u8) -> BxHostpageaddr;
-
-    /// Offset of this page from the start of the whole memory allocation.
-    ///
-    /// `region_offset` is where the region this implementation numbers begins
-    /// within that allocation, so each implementation only has to know its own
-    /// origin. The eviction sidecar speaks exclusively in these, which is what
-    /// lets one comparison cover both TLBs even though they measure from
-    /// different places.
-    fn alloc_offset_from(self, region_offset: usize) -> usize;
 }
 
 /// A page of guest RAM named by where it starts *within the RAM allocation*,
@@ -85,11 +76,6 @@ impl CachedHostPage for RamPage {
         (base as BxHostpageaddr).wrapping_add(self.ram_offset() as BxHostpageaddr)
     }
 
-    #[inline(always)]
-    fn alloc_offset_from(self, region_offset: usize) -> usize {
-        // Identity guest RAM begins `region_offset` bytes into the allocation.
-        region_offset.wrapping_add(self.ram_offset())
-    }
 }
 
 /// A page of directly-fetchable memory, named by where it starts within the
@@ -133,11 +119,6 @@ impl CachedHostPage for AllocPage {
         (base as BxHostpageaddr).wrapping_add(self.alloc_offset() as BxHostpageaddr)
     }
 
-    #[inline(always)]
-    fn alloc_offset_from(self, _region_offset: usize) -> usize {
-        // Already measured from the allocation — its region IS the allocation.
-        self.alloc_offset()
-    }
 }
 
 /// The span instruction fetch is currently reading from, located within the
@@ -210,9 +191,17 @@ pub(crate) struct TLBEntry<P> {
     pub(super) pkey: u32,
     // linear address mask of the page size
     pub(crate) lpf_mask: u32,
-    pub(super) memtype: MemType, // (note from bochs)  // keep it Bit32u for alignment
+    /// Bochs tlb.h `TLB_entry::memtype`. Carried for structural parity: the
+    /// MTRR/PAT memory typing that reads it upstream is not ported, so nothing
+    /// consults it yet. Kept rather than dropped because re-deriving the type
+    /// when that lands means re-deriving where every fill writes it.
+    #[allow(dead_code)]
+    pub(super) memtype: MemType,
 }
 
+/// Bochs tlb.h memory types (`BX_MEMTYPE_*`). Only `UC` is ever constructed
+/// today — see `TLBEntry::memtype`.
+#[allow(dead_code)]
 #[derive(Default, Copy, Clone)]
 enum MemType {
     #[default]
@@ -249,16 +238,25 @@ impl<P> TLBEntry<P> {
         self.access_bits = 0
     }
 
+    /// Bochs tlb.h `getMemtype`. Unused until MTRR/PAT typing is ported — see
+    /// the `memtype` field.
+    #[allow(dead_code)]
     fn get_memtype(&self) -> MemType {
-        {
-            self.memtype
-        }
+        self.memtype
     }
 
     /// Page can be read from the given privilege level.
     /// Bochs tlb.h `isReadOK`: `accessBits & (0x01 << user) & rd_pkey[pkey]`.
     /// The protection-key allow-mask is AND-ed in on EVERY hit, not just on
     /// the walk — callers built without PKEY support pass `u32::MAX`.
+    ///
+    /// Upstream keeps these beside hot paths that open-code the same test, and
+    /// so does this port: `paging.rs`'s data hit folds the read/write choice
+    /// into one dynamic mask, and `cpu.rs`'s instruction hit deliberately omits
+    /// the protection-key mask, because PKU does not apply to instruction
+    /// fetches. Neither can be expressed as a call to these without losing
+    /// that, so they stay as the parity statement of the rule.
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn is_read_ok(&self, user: u32, pkey_mask: u32) -> bool {
         (self.access_bits & (0x01u32 << user) & pkey_mask) != 0
@@ -266,6 +264,8 @@ impl<P> TLBEntry<P> {
 
     /// Page can be written from the given privilege level.
     /// Bochs tlb.h `isWriteOK`: `accessBits & (0x04 << user) & wr_pkey[pkey]`.
+    /// See `is_read_ok` for why this has no in-tree caller.
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn is_write_ok(&self, user: u32, pkey_mask: u32) -> bool {
         (self.access_bits & (0x04u32 << user) & pkey_mask) != 0
@@ -418,24 +418,6 @@ impl<P, const SIZE: usize> Tlb<P, SIZE> {
         if lpf_of(entry.lpf) == lpf_of(laddr) {
             entry.invalidate();
             on_invalidate(idx);
-        }
-    }
-}
-
-impl<P: CachedHostPage, const SIZE: usize> Tlb<P, SIZE> {
-    /// Allocation offset currently visible to the external eviction sidecar.
-    ///
-    /// Invalid entries deliberately contribute `None` so an invalidation
-    /// removes the pin immediately instead of retaining stale over-pinning.
-    #[inline]
-    pub(super) fn pinned_alloc_offset(&self, region_offset: usize, slot: usize) -> Option<usize> {
-        let entry = &self.entries[slot];
-        if entry.valid() {
-            entry
-                .host_page
-                .map(|page| page.alloc_offset_from(region_offset))
-        } else {
-            None
         }
     }
 }

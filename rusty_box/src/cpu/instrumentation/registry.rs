@@ -59,11 +59,28 @@ pub struct InstrumentationRegistry<T: Instrumentation = ()> {
     pub active: HookMask,
 
     /// Cooperative stop request. When a hook sets this to `true`, the CPU
-    /// loop exits at the next trace boundary and `step_batch` returns. This is
-    /// the Rust analogue of Bochs's `bx_pc_system.kill_bochs_request`, scoped
-    /// to instrumentation so hooks can stop execution without global state.
-    /// Single-threaded — plain `bool`, no atomic.
+    /// loop exits at the next trace boundary. This is the Rust analogue of
+    /// Bochs's `bx_pc_system.kill_bochs_request`, scoped to instrumentation so
+    /// hooks can stop execution without global state. Single-threaded — plain
+    /// `bool`, no atomic.
+    ///
+    /// This is the inbound half: the CPU loop consumes it, so a request never
+    /// outlives the slice that honours it and cannot starve a processor that
+    /// keeps re-entering. What the machine above learns is [`Self::stop_honored`].
     pub stop_request: bool,
+
+    /// The outbound half of [`Self::stop_request`]: set by the CPU loop at the
+    /// moment it honours a request, so the machine driving the loop can see
+    /// that a hook — not a budget — ended the slice.
+    ///
+    /// Two fields rather than one because they travel in opposite directions.
+    /// A single self-clearing flag told the CPU to stop and told the machine
+    /// nothing, so `step_batch` re-entered the loop and the stop was lost; a
+    /// single sticky flag would stop the machine but re-break every slice of
+    /// any processor whose flag no one had cleared. The machine drains this one
+    /// at the end of each batch and raises its own stop flag, which is what
+    /// every run loop already honours.
+    pub(crate) stop_honored: bool,
 
     /// Monomorphized tracer — zero-cost when `T = ()`. Wrapped in `Option`
     /// so `fire_*` methods that need `&mut HookCtx` can `take()` the tracer
@@ -113,6 +130,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
         let mut reg = Self {
             active: HookMask::empty(),
             stop_request: false,
+            stop_honored: false,
             tracer: Some(tracer),
             #[cfg(feature = "instrumentation")]
             code_hooks: Vec::new(),
@@ -701,6 +719,7 @@ impl InstrumentationRegistry<()> {
         Self {
             active: HookMask::empty(),
             stop_request: false,
+            stop_honored: false,
             tracer: Some(()),
             #[cfg(feature = "instrumentation")]
             code_hooks: Vec::new(),

@@ -1450,7 +1450,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Pre-compute host page address before borrowing the TLB entry mutably.
         // Cache host pointer for direct memory access on future TLB hits.
         // Bochs stores hostPageAddr in each TLB entry so subsequent accesses
-        // bypass the pinned host-mapping slow path. Pages with MMIO handlers
+        // bypass the `get_host_mem_addr` slow path. Pages with MMIO handlers
         // (VGA 0xA0000-0xBFFFF) or ROM get `NO_DIRECT_ACCESS`.
         let host_page = {
             let a20_ppf = self.apply_a20(ppf);

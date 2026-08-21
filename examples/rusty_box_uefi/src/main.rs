@@ -264,14 +264,14 @@ fn run() -> Status {
     let mut login_sent = false;
 
     while total < max {
-        let (n, shutdown) = match emu.step_batch(batch) {
+        let outcome = match emu.step_batch(batch) {
             Ok(result) => result,
             Err(e) => {
                 error!("CPU error at {}M: {:?}", total / 1_000_000, e);
                 break;
             }
         };
-        total += n;
+        total += outcome.executed;
 
 
         // Drain and print BIOS/serial output (no Vec allocation)
@@ -287,9 +287,14 @@ fn run() -> Status {
         }
         drain_and_print(emu.serial(0).expect("COM1 is always modelled").take_output());
 
-        if shutdown {
+        // Every terminal cause, not just the CPU shutdown state: a guest that
+        // powers off through ACPI S5 leaves the CPU perfectly healthy, so
+        // testing the CPU alone would keep stepping a machine that asked to be
+        // off until this loop hit its own instruction cap.
+        if outcome.is_terminal() {
             info!(
-                "SHUTDOWN at {}k instr, RIP={:#x}",
+                "STOP ({:?}) at {}k instr, RIP={:#x}",
+                outcome.stop,
                 total / 1000,
                 emu.cpu().rip()
             );

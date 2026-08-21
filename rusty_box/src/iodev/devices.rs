@@ -2547,7 +2547,6 @@ mod tests {
     #[test]
     fn bmdma_start_queues_timer_request_at_issuing_epoch() {
         on_big_stack(|| {
-            use crate::iodev::{TimerRequest};
 
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
@@ -2865,7 +2864,6 @@ mod tests {
 
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
-            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
             let mut mem = BxMemC::new(stub, false);
 
@@ -2882,7 +2880,14 @@ mod tests {
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
             assert!(!dm.smram_needs_update, "drain must clear the flag");
-            assert_eq!(mem.smram_state(), (true, true, false));
+            assert_eq!(
+                mem.smram_state(),
+                crate::memory::SmramState {
+                    available: true,
+                    enabled: true,
+                    restricted: false
+                }
+            );
 
             // SMRAME off (0x02): SMRAM fully disabled.
             dm.pci_conf_addr = conf_addr(0x00, 0x72);
@@ -2890,7 +2895,14 @@ mod tests {
             assert!(dm.smram_needs_update);
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
-            assert_eq!(mem.smram_state(), (false, false, false));
+            assert_eq!(
+                mem.smram_state(),
+                crate::memory::SmramState {
+                    available: false,
+                    enabled: false,
+                    restricted: false
+                }
+            );
 
             // Illegal DOPEN&&DCLS combo (SMRAME|DOPEN|DCLS = 0x68): Bochs
             // BX_PANICs; rusty_box must not crash the host on a guest
@@ -2900,7 +2912,14 @@ mod tests {
             assert!(dm.smram_needs_update);
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
-            assert_eq!(mem.smram_state(), (false, false, false));
+            assert_eq!(
+                mem.smram_state(),
+                crate::memory::SmramState {
+                    available: false,
+                    enabled: false,
+                    restricted: false
+                }
+            );
         });
     }
 
@@ -2923,7 +2942,6 @@ mod tests {
 
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
-            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
             let mut mem = BxMemC::new(stub, false);
 
@@ -2992,13 +3010,27 @@ mod tests {
             assert!(dm.smram_needs_update);
             assert!(dm.bios_write_needs_update);
             assert!(!mem.memory_type(12, 1));
-            assert_eq!(mem.smram_state(), (false, false, false));
+            assert_eq!(
+                mem.smram_state(),
+                crate::memory::SmramState {
+                    available: false,
+                    enabled: false,
+                    restricted: false
+                }
+            );
             assert!(!mem.bios_write_enabled());
 
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
             assert!(mem.memory_type(12, 1));
-            assert_eq!(mem.smram_state(), (true, true, false));
+            assert_eq!(
+                mem.smram_state(),
+                crate::memory::SmramState {
+                    available: true,
+                    enabled: true,
+                    restricted: false
+                }
+            );
             assert!(mem.bios_write_enabled());
             assert!(!dm.has_pending_machine_boundary());
         });
@@ -3044,7 +3076,6 @@ mod tests {
 
             let mut target = DeviceManager::new();
             let mut io = BxDevicesC::new();
-            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             let mut mem = BxMemC::new(
                 BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
                 false,

@@ -465,9 +465,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.invalidate_stack_cache();
         self.dtlb.flush();
         self.itlb.flush();
-        // Every entry is now invalid, so the pin sidecar's per-slot host
-        // pointers are all zero: memset instead of the full pinned_host_page
-        // rescan (Track B — full-flush pin publication).
     }
 
     /// Flush all TLB entries (both DTLB and ITLB) and invalidate prefetch/stack caches.

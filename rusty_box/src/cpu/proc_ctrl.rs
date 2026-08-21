@@ -4218,8 +4218,6 @@ mod tests {
     };
     use crate::cpu::svm::BX_VM_CR_MSR_SVMDIS_MASK;
     use crate::params::BxParams;
-    use crate::pc_system::BxPcSystemC;
-    use core::ptr::NonNull;
 
     /// Bochs `SetEFER` (cpu/crregs.cc): a write that tries to set
     /// `EFER.SVME` while `VM_CR.SVMDIS` is locked must #GP(0) and leave the
@@ -4569,6 +4567,7 @@ mod avx_mode_tests {
             );
         }
     }
+    #[test]
     fn a_pending_task_switch_closes_avx_and_evex_together() {
         let mut machine = amd_machine();
         set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);

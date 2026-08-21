@@ -22,7 +22,7 @@
 /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
-use rusty_box::cpu::{core_i7_skylake::Corei7SkylakeX, CpuSetupMode, X86Reg};
+use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
 const CASE_BASE: u64 = 0x0020_0000;

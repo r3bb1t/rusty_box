@@ -607,7 +607,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 use super::rusty_box::MemoryAccessType;
                 match self
                     .memory
-                    .host_mem_range_pinned(vmcbptr, MemoryAccessType::RW, policy)
+                    .host_mem_range(vmcbptr, MemoryAccessType::RW, policy)
                 {
                     // VMCB accessors directly offset this base through PAT.
                     // A block-backed span may end sooner, in which case the

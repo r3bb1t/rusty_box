@@ -39,6 +39,8 @@ pub mod cpu_store;
 use cpu_store::CpuStore;
 mod interactive;
 mod run;
+pub use run::{BatchOutcome, StopReason};
+pub(crate) use run::StopCause;
 mod scheduler;
 mod timers;
 
@@ -405,6 +407,12 @@ pub struct Emulator<T: Instrumentation = ()> {
     pub(crate) stop_flag: Arc<AtomicBool>,
     #[cfg(not(feature = "alloc"))]
     pub(crate) stop_flag: AtomicBool,
+    /// Why *this machine* last raised `stop_flag`. The flag is shared with
+    /// whatever host thread holds a clone, so it can only ever be a bool;
+    /// this says which of the causes behind it applies when the machine is the
+    /// one that raised it. Read only while the flag is up, and reset whenever
+    /// it is found down, so a host raise is never attributed to a guest.
+    pub(crate) stop_cause: StopCause,
 }
 
 impl<'a, T: Instrumentation> Emulator<T> {
@@ -720,6 +728,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
             core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(Arc::new(AtomicBool::new(false)));
+            core::ptr::addr_of_mut!((*ptr).stop_cause).write(StopCause::default());
             Ok(alloc::boxed::Box::from_raw(ptr))
         }
     }
@@ -787,6 +796,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
         core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
         core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
+        core::ptr::addr_of_mut!((*ptr).stop_cause).write(StopCause::default());
         Ok(&mut *ptr)
     }
 
@@ -1122,13 +1132,13 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// Mutably access the BSP CPU for crate-internal emulator operations.
     ///
     /// This is crate-visible so the public API can expose targeted operations
-    /// without allowing safe replacement of the pinned CPU storage.
+    /// without allowing safe replacement of the CPU storage itself.
     #[inline]
     pub(crate) fn cpu_mut(&mut self) -> &mut BxCpuC<T> {
         self.cpu_mut_at(0)
     }
 
-    /// Mutably access the pinned BSP CPU without moving it.
+    /// Mutably access the boot CPU without moving it.
     ///
     /// Prefer the targeted safe `Emulator` operations whenever one exists.
     /// This escape hatch is for external integrations that need arbitrary CPU
@@ -1136,10 +1146,18 @@ impl<'a, T: Instrumentation> Emulator<T> {
     ///
     /// # Safety
     ///
-    /// Pin descriptors do not point at this CPU: their external sidecars are
-    /// refreshed before each memory scope. The caller must not move, replace,
-    /// swap, or retain stale references/raw pointers obtained from the CPU
-    /// beyond their valid borrow and emulator lifetimes.
+    /// The caller must not move, replace or swap the CPU, nor retain
+    /// references or raw pointers taken from it beyond the borrow this returns.
+    ///
+    /// The invariant owner is the TLB: its entries cache page *numbers*
+    /// measured against this machine's memory allocation, and `cpu/access.rs`
+    /// reconstructs a raw host pointer from each one — `host.add(offset)`,
+    /// dereferenced with no bounds check — using a base that `ExecCtx` derives
+    /// from the machine the CPU belongs to. Giving this CPU to another machine
+    /// reinterprets those numbers against a different, possibly smaller
+    /// allocation, so the next memory access dereferences out of bounds.
+    /// Nothing in the type system stops `core::mem::swap` on two of these
+    /// borrows, which is why the function carries the obligation instead.
     ///
     /// ```compile_fail
     /// use rusty_box::cpu::core_i7_skylake::Corei7SkylakeX;

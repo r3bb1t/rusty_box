@@ -5252,7 +5252,6 @@ mod tests {
     use crate::cpu::cpu::CpuMode;
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
-    use crate::memory::{BxMemoryStubC};
 
     /// Every opcode a CPU model admits must have somewhere to go.
     ///

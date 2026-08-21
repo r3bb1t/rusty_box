@@ -89,22 +89,23 @@ impl BxMemC {
         &mut self,
         addr: BxPhyAddress,
     ) -> Result<core::ops::Range<usize>> {
-        let span = bx_guest_ram_span(addr, 1, self.inherited_memory_stub.len)
+        let span = bx_guest_ram_span(addr, 1, self.inherited_memory_stub.guest_len())
             .ok_or(MemoryError::Internal("physical address is not guest RAM"))?;
         self.inherited_memory_stub
             .resident_slot_range(span.start)
     }
 
-    /// The sole CPU-facing direct host mapping, as bytes. Its complete stable
-    /// pin set guards eviction; the caller supplies a by-value CPU memory
-    /// policy.
-    pub(crate) fn get_host_mem_addr_pinned(
+    /// The sole CPU-facing direct host mapping, as bytes. The caller supplies
+    /// a by-value CPU memory policy; a caller that caches what it gets back
+    /// must also record the residency epoch it was answered at, since nothing
+    /// here holds a guest block in place.
+    pub(crate) fn get_host_mem_addr(
         &mut self,
         addr: BxPhyAddress,
         rw: MemoryAccessType,
         policy: CpuMemoryPolicy,
     ) -> Result<Option<&mut [u8]>> {
-        let Some(range) = self.host_mem_range_pinned(addr, rw, policy)? else {
+        let Some(range) = self.host_mem_range(addr, rw, policy)? else {
             return Ok(None);
         };
         Ok(Some(&mut self.inherited_memory_stub.actual_vector_mut()[range]))
@@ -121,7 +122,7 @@ impl BxMemC {
     /// Guest RAM, the ROM image and the bogus page all live in that one
     /// allocation, so a single range type spans every arm — which is why the
     /// instruction side can be offset-based at all.
-    pub(crate) fn host_mem_range_pinned(
+    pub(crate) fn host_mem_range(
         &mut self,
         addr: BxPhyAddress,
         rw: MemoryAccessType,
@@ -182,7 +183,7 @@ impl BxMemC {
                 };
                 return Ok(Some(self.inherited_memory_stub.rom_range(rom_offset)));
             }
-            if bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.len).is_some() && !is_bios
+            if bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.guest_len()).is_some() && !is_bios
             {
                 if !(0x000c0000..0x00100000).contains(&a20_addr) {
                     return Ok(Some(self.resident_ram_range(a20_addr)?));
@@ -213,7 +214,7 @@ impl BxMemC {
             ));
         }
 
-        if !direct_host_write_allowed(a20_addr, self.inherited_memory_stub.len, is_bios) {
+        if !direct_host_write_allowed(a20_addr, self.inherited_memory_stub.guest_len(), is_bios) {
             return Ok(None);
         }
         Ok(Some(self.resident_ram_range(a20_addr)?))
@@ -479,7 +480,7 @@ impl BxMemC {
         // (where is_bios=true) must enter this block to reach the PCI shadow RAM
         // write path. High BIOS addresses (>= bios_rom_addr like 0xFFFF0000) are
         // above RAM len so the `a20_addr < len` check naturally excludes them.
-        if bx_guest_ram_span(a20_addr, len, self.inherited_memory_stub.len).is_some() {
+        if bx_guest_ram_span(a20_addr, len, self.inherited_memory_stub.guest_len()).is_some() {
             // All of data is within limits of physical memory
             if !(0x000a0000..0x00100000).contains(&a20_addr) {
                 // Log writes to very low RAM (first 4KB) - these might be IVT/BDA initialization
@@ -499,7 +500,7 @@ impl BxMemC {
                 // SMMRAM (0xA0000-0xBFFFF)
                 if a20_addr < 0x000c0000 {
                     // Devices are not allowed to access SMMRAM under VGA memory.
-                    let span = bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.len)
+                    let span = bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.guest_len())
                         .ok_or(MemoryError::Internal("physical address is not guest RAM"))?;
                     let vector = self.inherited_memory_stub.get_vector_offset(span.start)?;
                     if let Some(byte) = vector.get_mut(0) {
@@ -521,7 +522,7 @@ impl BxMemC {
                             a20_addr,
                             data_byte
                         );
-                        let span = bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.len)
+                        let span = bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.guest_len())
                             .ok_or(MemoryError::Internal("physical address is not guest RAM"))?;
                         let vector = self.inherited_memory_stub.get_vector_offset(span.start)?;
                         if let Some(byte) = vector.get_mut(0) {
@@ -623,7 +624,7 @@ impl BxMemC {
         // mem_read:
         // Note: Bochs does NOT check is_bios here — addresses in E0000-FFFFF
         // must enter this block to reach the PCI shadow RAM read path.
-        if bx_guest_ram_span(a20_addr, len, self.inherited_memory_stub.len).is_some() {
+        if bx_guest_ram_span(a20_addr, len, self.inherited_memory_stub.guest_len()).is_some() {
             // All of data is within limits of physical memory
             if !(0x000a0000..0x00100000).contains(&a20_addr) {
                 // Regular RAM - delegate to stub
@@ -640,7 +641,7 @@ impl BxMemC {
                 // SMMRAM (0xA0000-0xBFFFF)
                 if a20_addr < 0x000c0000 {
                     // Devices are not allowed to access SMMRAM under VGA memory.
-                    let span = bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.len)
+                    let span = bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.guest_len())
                         .ok_or(MemoryError::Internal("physical address is not guest RAM"))?;
                     let vector = self.inherited_memory_stub.get_vector_offset(span.start)?;
                     if let Some(byte) = vector.first() {
@@ -677,7 +678,7 @@ impl BxMemC {
                         }
                     } else {
                         // Read from ShadowRAM
-                        let span = bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.len)
+                        let span = bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.guest_len())
                             .ok_or(MemoryError::Internal("physical address is not guest RAM"))?;
                         let vector = self.inherited_memory_stub.get_vector_offset(span.start)?;
                         if let Some(byte) = vector.first() {
@@ -926,7 +927,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
         for (what, addr) in [("reset vector", 0xFFFF_FFF0u64), ("bogus page", 0x1_0000_0000)] {
             let range = mem
-                .host_mem_range_pinned(
+                .host_mem_range(
                     addr,
                     MemoryAccessType::Execute,
                     CpuMemoryPolicy::default(),
@@ -961,11 +962,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     /// Whether a mapped region shadows direct RAM at `addr`.
     ///
     /// This is the property the routing actually depends on: a mapped range
-    /// must make `get_host_mem_addr_pinned` decline, so the CPU falls off its
+    /// must make `get_host_mem_addr` decline, so the CPU falls off its
     /// direct path and into the reporting one.
     fn direct_ram_available(mem: &mut BxMemC, addr: u64) -> bool {
         matches!(
-            mem.get_host_mem_addr_pinned(
+            mem.get_host_mem_addr(
                 addr,
                 MemoryAccessType::Read,
                 CpuMemoryPolicy::default(),
@@ -1111,7 +1112,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         mem.set_a20_mask(u64::MAX);
 
         assert!(
-            mem.get_host_mem_addr_pinned(
+            mem.get_host_mem_addr(
                 0x2000,
                 MemoryAccessType::RW,
                 CpuMemoryPolicy::new(false, true),
@@ -1120,7 +1121,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .is_none()
         );
         assert!(
-            mem.get_host_mem_addr_pinned(
+            mem.get_host_mem_addr(
                 0x2000,
                 MemoryAccessType::RW,
                 CpuMemoryPolicy::new(false, false),
@@ -1132,8 +1133,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
     #[test]
     fn enable_smram_bypasses_vga_handler_disable_restores_it() {
-        use crate::cpu::builder::BxCpuBuilder;
-
         // BxICache contains ~19MB fixed arrays; the debug-mode struct literal
         // built by BxCpuBuilder::build() overflows the small default test
         // stack (2MB on win32), so this must run on a big-stack thread —
@@ -1149,8 +1148,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // matters here, so the token stands in for the device.
                 mem.register_memory_handlers(OWNER_A, 0xA0000, 0xBFFFF)
                     .unwrap();
-
-                let cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
 
                 // SMRAM open (DOPEN, unrestricted): the write must land in RAM,
                 // bypassing the mapped region entirely — write_physical_page
@@ -1208,15 +1205,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
     #[test]
     fn bios_write_enabled_gates_high_mirror_rom_writes() {
-        use crate::cpu::builder::BxCpuBuilder;
-
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
                 let mut mem = test_mem();
                 mem.set_a20_mask(0xFFFF_FFFF_FFFF_FFFF); // A20 enabled: no address wraparound
-
-                let cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
 
                 // High BIOS mirror: any address >= bios_rom_addr (default
                 // 0xffff0000), far above the 1MB guest RAM this test_mem()

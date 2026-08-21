@@ -140,10 +140,14 @@ fn run_instructions(emu: &mut Emulator, budget: u64) -> u64 {
     let mut executed_total = 0u64;
     while executed_total < budget {
         let chunk = (budget - executed_total).min(50_000_000);
-        let (executed, shutdown) = emu.step_batch(chunk).expect("step_batch");
-        assert!(!shutdown, "guest shut down inside the instruction budget");
-        assert!(executed > 0, "guest made no progress");
-        executed_total += executed;
+        let outcome = emu.step_batch(chunk).expect("step_batch");
+        assert!(
+            !outcome.is_terminal(),
+            "guest stopped ({:?}) inside the instruction budget",
+            outcome.stop
+        );
+        assert!(outcome.executed > 0, "guest made no progress");
+        executed_total += outcome.executed;
     }
     executed_total
 }

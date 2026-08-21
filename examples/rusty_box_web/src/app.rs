@@ -666,13 +666,16 @@ impl eframe::App for WasmEmulatorApp {
                 let mut frame_executed = 0u64;
                 while frame_executed < FRAME_BUDGET {
                     match emu.step_batch(BATCH_SIZE) {
-                        Ok((executed, is_shutdown)) => {
-                            frame_executed += executed;
-                            if is_shutdown {
+                        Ok(outcome) => {
+                            frame_executed += outcome.executed;
+                            // Terminal covers a guest ACPI power-off, which
+                            // leaves the CPU healthy and so was previously
+                            // invisible here — the frame loop just kept going.
+                            if outcome.is_terminal() {
                                 self.shutdown = true;
                                 break;
                             }
-                            if executed == 0 {
+                            if outcome.executed == 0 {
                                 break;
                             }
                         }
