@@ -41,6 +41,7 @@ mod display;
 pub use display::{
     Display, DisplaySource, Resolution, RowChars, TextGrid, TextPos, TextView,
 };
+
 pub mod cpu_store;
 use cpu_store::CpuStore;
 mod interactive;
@@ -127,13 +128,73 @@ impl CpuMask {
     }
 }
 
+/// How much RAM a machine has, and how much of it stays resident.
+///
+/// One value, because the two numbers are only meaningful together: a guest
+/// size raised without the host size is not a bigger machine, it is the same
+/// machine running out of an overflow file, and that is a decision worth
+/// making on purpose rather than by forgetting a field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemorySize {
+    guest_bytes: usize,
+    host_bytes: usize,
+}
+
+impl MemorySize {
+    /// `mib` mebibytes of guest RAM, all of it resident in host memory.
+    pub const fn mib(mib: usize) -> Self {
+        Self::bytes(mib * 1024 * 1024)
+    }
+
+    /// `bytes` of guest RAM, all of it resident in host memory.
+    pub const fn bytes(bytes: usize) -> Self {
+        Self {
+            guest_bytes: bytes,
+            host_bytes: bytes,
+        }
+    }
+
+    /// A guest larger than the host memory backing it: blocks beyond
+    /// `host_bytes` live in an overflow file and swap in on demand.
+    ///
+    /// Slower, and under `std` it needs somewhere to put that file — which is
+    /// why it is a separate constructor rather than a field anyone can set by
+    /// halves. Bochs calls the same arrangement `memory: host=`.
+    pub const fn partially_resident(guest_bytes: usize, host_bytes: usize) -> Self {
+        Self {
+            guest_bytes,
+            host_bytes,
+        }
+    }
+
+    /// What the guest believes it has.
+    pub const fn guest_bytes(self) -> usize {
+        self.guest_bytes
+    }
+
+    /// What the host keeps resident.
+    pub const fn host_bytes(self) -> usize {
+        self.host_bytes
+    }
+
+    /// Whether this machine has to swap blocks through an overflow file.
+    pub const fn swaps(self) -> bool {
+        self.host_bytes < self.guest_bytes
+    }
+}
+
+impl Default for MemorySize {
+    /// Bochs `BX_DEFAULT_MEM_MEGS` — parity even in the default.
+    fn default() -> Self {
+        Self::mib(32)
+    }
+}
+
 /// Emulator configuration
 #[derive(Debug, Clone)]
 pub struct EmulatorConfig {
-    /// Guest memory size in bytes
-    pub guest_memory_size: usize,
-    /// Host memory size in bytes (can be less than guest for swapping)
-    pub host_memory_size: usize,
+    /// How much RAM the guest has, and how much of it the host keeps resident.
+    pub memory: MemorySize,
     /// Memory block size for allocation
     pub memory_block_size: usize,
     /// Emulated instructions per second, used to calibrate emulated time
@@ -187,8 +248,7 @@ pub struct EmulatorConfig {
 impl Default for EmulatorConfig {
     fn default() -> Self {
         Self {
-            guest_memory_size: 32 * 1024 * 1024,
-            host_memory_size: 32 * 1024 * 1024,
+            memory: MemorySize::default(),
             memory_block_size: 128 * 1024,
             ips: 50_000_000,
             pci_enabled: true,
@@ -714,8 +774,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
     ) -> Result<Box<Self>> {
         let pc_system = BxPcSystemC::new();
         let mem_stub = BxMemoryStubC::create_and_init(
-            config.guest_memory_size,
-            config.host_memory_size,
+            config.memory.guest_bytes(),
+            config.memory.host_bytes(),
             config.memory_block_size,
         )?;
         let memory = BxMemC::new(mem_stub, config.pci_enabled);
@@ -827,7 +887,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     fn configure_pci_devices(&mut self) {
         self.devices.set_pci_enabled(self.config.pci_enabled);
-        let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
+        let ramsize_mb = (self.config.memory.guest_bytes() / (1024 * 1024)) as u32;
         self.device_manager.pci_bridge.init_dram(ramsize_mb);
         if self.config.pci_enabled && self.config.pci_vga {
             self.device_manager.vga.enable_pci();
@@ -877,8 +937,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // In original: BX_MEM(0)->init_memory(memSize, hostMemSize, memBlockSize);
         self.invalidate_all_cpu_host_mappings();
         self.memory.init_memory(
-            self.config.guest_memory_size,
-            self.config.host_memory_size,
+            self.config.memory.guest_bytes(),
+            self.config.memory.host_bytes(),
             self.config.memory_block_size,
         )?;
 
@@ -961,7 +1021,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         self.configure_pci_devices();
         // Initialize fw_cfg device and ACPI CPU/APIC tables.
         {
-            let ram_size = self.config.guest_memory_size as u64;
+            let ram_size = self.config.memory.guest_bytes() as u64;
             let cpu_count = self.config.cpu_params.cpu_count();
             self.device_manager.ioapic.set_id(cpu_count);
             self.device_manager.fw_cfg.init(ram_size, cpu_count);
@@ -1443,7 +1503,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     pub(crate) fn configure_memory_in_cmos_from_config(&mut self) {
         self.device_manager
             .cmos
-            .set_memory_size_from_bytes(self.config.guest_memory_size as u64);
+            .set_memory_size_from_bytes(self.config.memory.guest_bytes() as u64);
     }
 
     /// Configure full CMOS hard drive geometry (matching Bochs harddrv.cc)

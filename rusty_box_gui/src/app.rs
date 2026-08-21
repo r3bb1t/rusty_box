@@ -2644,8 +2644,7 @@ fn web_uploaded_media_config(
 ) -> rusty_box::emulator::EmulatorConfig {
     let ram_size = memory_mib * 1024 * 1024;
     rusty_box::emulator::EmulatorConfig {
-        guest_memory_size: ram_size,
-        host_memory_size: ram_size,
+        memory: rusty_box::emulator::MemorySize::bytes(ram_size),
         memory_block_size: 128 * 1024,
         ips: 300_000_000,
         pci_enabled: true,

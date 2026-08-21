@@ -7,7 +7,7 @@ use crate::{
 use rusty_box::gui::{shared_display::SharedDisplay, BridgeGui};
 use rusty_box::emulator::{
     AtaSlot, BootDevice as GuestBootDevice, BootOrder, DiskGeometry as GuestDiskGeometry,
-    EmulatorConfig, MachineBuilder,
+    EmulatorConfig, MemorySize, MachineBuilder,
 };
 use rusty_box::gui::{BxGui, NoGui, TermGui};
 #[cfg(feature = "gui-egui")]
@@ -123,8 +123,13 @@ where
     prepare_configured_media_files(&config, create_startup_disks)?;
 
     let emulator_config = EmulatorConfig {
-        guest_memory_size: mib_to_bytes("memory_mib", config.memory_mib)?,
-        host_memory_size: mib_to_bytes("host_memory_mib", config.host_memory_mib)?,
+        // The GUI exposes both sizes, so a configuration that asks for a
+        // guest larger than its host backing gets the overflow file it asked
+        // for rather than one it forgot to decline.
+        memory: MemorySize::partially_resident(
+            mib_to_bytes("memory_mib", config.memory_mib)?,
+            mib_to_bytes("host_memory_mib", config.host_memory_mib)?,
+        ),
         memory_block_size: kib_to_bytes("memory_block_kib", config.memory_block_kib)?,
         ips: config.ips,
         pci_enabled: config.pci,

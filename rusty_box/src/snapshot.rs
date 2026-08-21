@@ -597,7 +597,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             instrumentation::CpuSetupMode,
             X86Reg,
         },
-        emulator::EmulatorConfig,
+        emulator::{EmulatorConfig, MemorySize},
         params::BxParams,
     };
     use std::io::Cursor;
@@ -614,8 +614,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
     fn machine() -> Box<Emulator> {
         let config = EmulatorConfig {
-            guest_memory_size: 4 * 1024 * 1024,
-            host_memory_size: 4 * 1024 * 1024,
+            memory: MemorySize::bytes(4 * 1024 * 1024),
             ..EmulatorConfig::default()
         };
         let mut emu = Emulator::new(config).unwrap();
@@ -627,8 +626,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
     fn smp_machine() -> Box<Emulator> {
         let config = EmulatorConfig {
-            guest_memory_size: 4 * 1024 * 1024,
-            host_memory_size: 4 * 1024 * 1024,
+            memory: MemorySize::bytes(4 * 1024 * 1024),
             cpu_params: BxParams::default().with_topology(2, 1, 1).unwrap(),
             ..EmulatorConfig::default()
         };
@@ -640,8 +638,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
     fn relocation_machine() -> Box<Emulator> {
         let config = EmulatorConfig {
-            guest_memory_size: 4 * 1024 * 1024,
-            host_memory_size: 4 * 1024 * 1024,
+            memory: MemorySize::bytes(4 * 1024 * 1024),
             pci_enabled: true,
             pci_vga: true,
             ..EmulatorConfig::default()

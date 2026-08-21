@@ -25,7 +25,7 @@
 
 use rusty_box::{
     emulator::{
-        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MachineBuilder,
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MemorySize, MachineBuilder,
     },
     gui::{NoGui, TermGui},
     Result,
@@ -289,8 +289,7 @@ fn run_alpine() -> Result<()> {
     // Create and configure emulator
     // =========================================================================
     let config = EmulatorConfig {
-        guest_memory_size: ram_bytes,
-        host_memory_size: ram_bytes,
+        memory: MemorySize::bytes(ram_bytes),
         memory_block_size: 128 * 1024,
         ips: 300_000_000,
         pci_enabled: true,

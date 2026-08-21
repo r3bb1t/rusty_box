@@ -16,7 +16,7 @@
 //!   RB_SNAPSHOT     Snapshot file (default target/snapshot_resume.rbx)
 
 use rusty_box::{
-    emulator::{AtaSlot, BootDevice, BootOrder, Emulator, EmulatorConfig, MachineBuilder},
+    emulator::{AtaSlot, BootDevice, BootOrder, Emulator, EmulatorConfig, MemorySize, MachineBuilder},
     gui::NoGui,
 };
 
@@ -99,8 +99,7 @@ fn build_machine(config: &HarnessConfig) -> Box<Emulator> {
 
     let mem_bytes = usize::try_from(config.mem_mib * 1024 * 1024).expect("memory size");
     let emulator_config = EmulatorConfig {
-        guest_memory_size: mem_bytes,
-        host_memory_size: mem_bytes,
+        memory: MemorySize::bytes(mem_bytes),
         ips: 120_000_000,
         pci_enabled: true,
         ..EmulatorConfig::default()

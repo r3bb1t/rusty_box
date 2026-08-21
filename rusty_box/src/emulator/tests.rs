@@ -1031,8 +1031,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 const BLOCK_SIZE: usize = 1024;
                 const START: u64 = (BLOCK_SIZE - 2) as u64;
                 let mut config = EmulatorConfig::default();
-                config.guest_memory_size = 1024 * 1024;
-                config.host_memory_size = 1024 * 1024;
+                config.memory = MemorySize::bytes(1024 * 1024);
                 config.memory_block_size = BLOCK_SIZE;
                 let mut emu = Emulator::new_with_mode(
                     config,
@@ -1766,8 +1765,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 use std::io::Cursor;
                 let build = || {
                     let config = EmulatorConfig {
-                        guest_memory_size: 4 * 1024 * 1024,
-                        host_memory_size: 4 * 1024 * 1024,
+                        memory: MemorySize::bytes(4 * 1024 * 1024),
                         sync_slowdown: true,
                         ..EmulatorConfig::default()
                     };
@@ -1823,8 +1821,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 use std::io::Cursor;
                 let build = |sync_slowdown: bool| {
                     let config = EmulatorConfig {
-                        guest_memory_size: 4 * 1024 * 1024,
-                        host_memory_size: 4 * 1024 * 1024,
+                        memory: MemorySize::bytes(4 * 1024 * 1024),
                         sync_slowdown,
                         ..EmulatorConfig::default()
                     };
@@ -1966,8 +1963,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
-                config.guest_memory_size = 2 * MIB;
-                config.host_memory_size = 2 * MIB;
+                config.memory = MemorySize::bytes(2 * MIB);
                 config.memory_block_size = MIB;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
                 let mut emu = Emulator::new(config).unwrap();
@@ -2008,8 +2004,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
-                config.guest_memory_size = 2 * MIB;
-                config.host_memory_size = 2 * MIB;
+                config.memory = MemorySize::bytes(2 * MIB);
                 config.memory_block_size = MIB;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
                 let mut emu = Emulator::new(config).unwrap();
@@ -2484,7 +2479,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 );
 
                 let acpi = AcpiTableGenerator::generate(
-                    emu.config.guest_memory_size as u64,
+                    emu.config.memory.guest_bytes() as u64,
                     NONFLAT_TOPOLOGY_CPUS,
                 );
                 let madt = acpi_madt_from_tables(acpi.tables_blob());
@@ -2570,7 +2565,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         let mut fw_cfg = crate::iodev::fw_cfg::BxFwCfg::new();
         let mut mem = crate::memory::test_ram();
         fw_cfg.init(
-            EmulatorConfig::default().guest_memory_size as u64,
+            EmulatorConfig::default().memory.guest_bytes() as u64,
             cpu_count,
         );
         assert_eq!(
@@ -2583,7 +2578,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         );
 
         let acpi = AcpiTableGenerator::generate(
-            EmulatorConfig::default().guest_memory_size as u64,
+            EmulatorConfig::default().memory.guest_bytes() as u64,
             cpu_count,
         );
         let madt = acpi_madt_from_tables(acpi.tables_blob());
@@ -5318,8 +5313,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig {
-                    guest_memory_size: 4 * 1024 * 1024,
-                    host_memory_size: 4 * 1024 * 1024,
+                    memory: MemorySize::bytes(4 * 1024 * 1024),
                     cpu_params: BxParams::default().with_topology(2, 1, 1).unwrap(),
                     ..EmulatorConfig::default()
                 };

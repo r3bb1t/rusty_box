@@ -14,7 +14,7 @@ use uefi::prelude::*;
 use rusty_box::{
     cpu::{builder::BxCpuBuilder, cpu::BxCpuC},
     emulator::{
-        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MachineBuilder,
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MemorySize, MachineBuilder,
     },
     memory::BxMemoryStubC,
 };
@@ -159,8 +159,7 @@ fn run() -> Status {
     );
 
     let config = EmulatorConfig {
-        guest_memory_size: 32 * 1024 * 1024,
-        host_memory_size: 32 * 1024 * 1024,
+        memory: MemorySize::bytes(32 * 1024 * 1024),
         memory_block_size: 128 * 1024,
         ips: 300_000_000,
         pci_enabled: true,
@@ -193,7 +192,7 @@ fn run() -> Status {
     };
 
     // 2. Guest RAM buffer (~36MB: 32MB guest + 4MB BIOS ROM + 128KB expansion + pad)
-    let mem_buf_size = rusty_box::config::mem_buffer_size(config.guest_memory_size);
+    let mem_buf_size = rusty_box::config::mem_buffer_size(config.memory.guest_bytes());
     let mem_pages = (mem_buf_size + 4095) / 4096;
     let mem_ptr = alloc_pages(mem_pages);
     if mem_ptr.is_null() {
@@ -210,8 +209,8 @@ fn run() -> Status {
         match BxMemoryStubC::create_from_raw(
             mem_ptr,
             mem_buf_size,
-            config.guest_memory_size,
-            config.host_memory_size,
+            config.memory.guest_bytes(),
+            config.memory.host_bytes(),
             config.memory_block_size,
         ) {
             Ok(s) => s,

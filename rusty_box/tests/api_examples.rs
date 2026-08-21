@@ -15,7 +15,7 @@
 
 use rusty_box::cpu::{CpuSetupMode, ResetReason, X86Reg};
 use rusty_box::emulator::{
-    AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MachineBuilder,
+    AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MemorySize, MachineBuilder,
     PowerState, StopReason,
 };
 use rusty_box::gui::NoGui;
@@ -28,8 +28,7 @@ const HALT_BIOS_BYTES: usize = 0x10000;
 
 fn small_config() -> EmulatorConfig {
     EmulatorConfig {
-        guest_memory_size: 4 * 1024 * 1024,
-        host_memory_size: 4 * 1024 * 1024,
+        memory: MemorySize::bytes(4 * 1024 * 1024),
         ..EmulatorConfig::default()
     }
 }
@@ -65,6 +64,43 @@ fn a_machine_is_assembled_by_the_builder_and_starts_at_its_reset_vector() {
 fn a_machine_with_no_firmware_still_builds() {
     let machine = MachineBuilder::new(small_config()).build().expect("build");
     assert_eq!(machine.ticks(), 0);
+}
+
+/// Guest size and host size are one value, so a machine cannot be given more
+/// RAM than its host backing by forgetting the second field. Asking for the
+/// overflow file is a different constructor.
+#[test]
+fn a_bigger_guest_needs_the_swap_regime_asked_for_by_name() {
+    let resident = MemorySize::mib(64);
+    assert_eq!(resident.guest_bytes(), 64 * 1024 * 1024);
+    assert_eq!(resident.host_bytes(), resident.guest_bytes());
+    assert!(!resident.swaps());
+
+    let swapping = MemorySize::partially_resident(64 * 1024 * 1024, 16 * 1024 * 1024);
+    assert!(swapping.swaps());
+    assert_eq!(swapping.guest_bytes(), 64 * 1024 * 1024);
+    assert_eq!(swapping.host_bytes(), 16 * 1024 * 1024);
+
+    // Bochs `BX_DEFAULT_MEM_MEGS`.
+    assert_eq!(MemorySize::default(), MemorySize::mib(32));
+}
+
+/// The configured size is the size the machine has: a guest addressing past
+/// it gets nothing back, which is the property the number actually means.
+#[test]
+fn the_configured_memory_size_is_the_memory_the_machine_has() {
+    let config = EmulatorConfig {
+        memory: MemorySize::mib(8),
+        ..EmulatorConfig::default()
+    };
+    let mut machine = MachineBuilder::new(config).build().expect("build");
+
+    assert_eq!(machine.mem_size(), 8 * 1024 * 1024);
+
+    // The last byte of guest RAM is writable and reads back.
+    let last = 8 * 1024 * 1024 - 1;
+    machine.mem_write(last, &[0x5A]).expect("write last byte");
+    assert_eq!(machine.mem_read_u8(last).expect("read back"), 0x5A);
 }
 
 // ── Running, and knowing why it stopped ─────────────────────────────────────

@@ -605,6 +605,7 @@ fn attach<T: Instrumentation>(
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use crate::emulator::MemorySize;
     use crate::emulator::StopReason;
 
     const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
@@ -622,8 +623,7 @@ mod tests {
 
     fn small_machine() -> EmulatorConfig {
         EmulatorConfig {
-            guest_memory_size: 4 * 1024 * 1024,
-            host_memory_size: 4 * 1024 * 1024,
+            memory: MemorySize::bytes(4 * 1024 * 1024),
             ..EmulatorConfig::default()
         }
     }

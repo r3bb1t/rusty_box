@@ -7,7 +7,7 @@
 
 use rusty_box::{
     emulator::{
-        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MachineBuilder,
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MemorySize, MachineBuilder,
     },
     gui::shared_display::SharedDisplay,
 };
@@ -115,8 +115,7 @@ impl WasmEmulatorApp {
     /// Initialize the emulator for DLX Linux (embedded disk).
     fn initialize_dlx(&mut self) {
         let config = EmulatorConfig {
-            guest_memory_size: 32 * 1024 * 1024,
-            host_memory_size: 32 * 1024 * 1024,
+            memory: MemorySize::bytes(32 * 1024 * 1024),
             memory_block_size: 128 * 1024,
             ips: 300_000_000,
             pci_enabled: true,
@@ -146,8 +145,7 @@ impl WasmEmulatorApp {
     fn initialize_alpine(&mut self, iso_data: Vec<u8>) {
         let ram_size = 256 * 1024 * 1024; // 256 MB for Alpine
         let config = EmulatorConfig {
-            guest_memory_size: ram_size,
-            host_memory_size: ram_size,
+            memory: MemorySize::bytes(ram_size),
             memory_block_size: 128 * 1024,
             ips: 300_000_000,
             pci_enabled: true,

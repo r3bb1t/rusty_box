@@ -466,7 +466,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         initramfs: Option<&[u8]>,
         cmdline: &str,
     ) -> Result<()> {
-        let ram_size = self.config.guest_memory_size as u64;
+        let ram_size = self.config.memory.guest_bytes() as u64;
         let cpu_count = self.config.cpu_params.cpu_count();
 
         // Shared implementation in `crate::boot` — one boot path serves both
@@ -692,6 +692,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     ///
     /// Devices still advance by the ticks the CPU consumed, so guest time does
     /// not fall behind — only the batching is different.
+    #[cfg(feature = "alloc")]
     pub(crate) fn step_exactly(&mut self, instructions: u64) -> Result<BatchOutcome> {
         let executed = self
             .run_cpu_batch_with_strict_limit(instructions, true)

@@ -32,7 +32,7 @@
 
 use rusty_box::{
     cpu::{HookCtx, HookMask, InstrAction, Instrumentation, X86Reg},
-    emulator::{AtaSlot, BootDevice, BootOrder, EmulatorConfig, MachineBuilder},
+    emulator::{AtaSlot, BootDevice, BootOrder, EmulatorConfig, MemorySize, MachineBuilder},
     gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
     Result,
 };
@@ -345,8 +345,7 @@ fn main() {
 fn run_emulator(boot: &BootConfig, shared: Arc<Mutex<SharedDisplay>>) -> Result<()> {
     let ram_bytes = boot.ram_mb * 1024 * 1024;
     let config = EmulatorConfig {
-        guest_memory_size: ram_bytes,
-        host_memory_size: ram_bytes,
+        memory: MemorySize::bytes(ram_bytes),
         ips: 300_000_000,
         pci_enabled: true,
         sync_slowdown: boot.sync_slowdown,

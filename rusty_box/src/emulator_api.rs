@@ -1230,6 +1230,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use crate::emulator::MemorySize;
 
     /// Reg read/write round-trip on a fresh emulator.
     #[test]
@@ -1680,8 +1681,7 @@ mod tests {
                 const MIB: usize = 1024 * 1024;
                 // 4 MiB guest over 2 MiB host = two resident 1 MiB slots.
                 let cfg = EmulatorConfig {
-                    guest_memory_size: 4 * MIB,
-                    host_memory_size: 2 * MIB,
+                    memory: MemorySize::partially_resident(4 * MIB, 2 * MIB),
                     memory_block_size: MIB,
                     ..Default::default()
                 };
@@ -1726,8 +1726,7 @@ mod tests {
                 const MIB: usize = 1024 * 1024;
                 // 8 MiB guest over 2 MiB host = eight blocks, two slots.
                 let cfg = EmulatorConfig {
-                    guest_memory_size: 8 * MIB,
-                    host_memory_size: 2 * MIB,
+                    memory: MemorySize::partially_resident(8 * MIB, 2 * MIB),
                     memory_block_size: MIB,
                     ..Default::default()
                 };
@@ -1794,8 +1793,7 @@ mod tests {
                 ];
                 for (guest_mib, host_mib, code, marker_addr, marker) in cases {
                     let cfg = EmulatorConfig {
-                        guest_memory_size: guest_mib * MIB,
-                        host_memory_size: host_mib * MIB,
+                        memory: MemorySize::partially_resident(guest_mib * MIB, host_mib * MIB),
                         memory_block_size: MIB,
                         ..Default::default()
                     };
@@ -1853,8 +1851,7 @@ mod tests {
                 const MIB: usize = 1024 * 1024;
                 for host_mib in [1usize, 2, 4] {
                     let cfg = EmulatorConfig {
-                        guest_memory_size: 4 * MIB,
-                        host_memory_size: host_mib * MIB,
+                        memory: MemorySize::partially_resident(4 * MIB, host_mib * MIB),
                         memory_block_size: MIB,
                         ..Default::default()
                     };
@@ -1907,8 +1904,7 @@ mod tests {
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let cfg = EmulatorConfig {
-                    guest_memory_size: 4 * MIB,
-                    host_memory_size: 4 * MIB,
+                    memory: MemorySize::bytes(4 * MIB),
                     memory_block_size: MIB,
                     ..Default::default()
                 };

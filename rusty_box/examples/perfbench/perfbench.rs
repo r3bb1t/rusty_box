@@ -15,7 +15,7 @@
 
 use rusty_box::{
     cpu::{CpuSetupMode, X86Reg},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{Emulator, EmulatorConfig, MemorySize},
 };
 use std::time::Instant;
 
@@ -143,8 +143,7 @@ fn run() {
         .unwrap_or(16);
 
     let cfg = EmulatorConfig {
-        guest_memory_size: GUEST_RAM,
-        host_memory_size: GUEST_RAM,
+        memory: MemorySize::bytes(GUEST_RAM),
         ips: 1_000_000_000,
         pci_enabled: false,
         cpu_params: rusty_box::params::BxParams::default()

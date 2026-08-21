@@ -17,7 +17,7 @@
 //! ```
 
 use rusty_box::{
-    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, MachineBuilder},
+    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, MemorySize, MachineBuilder},
     gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
     Result,
 };
@@ -196,8 +196,7 @@ fn run_emulator(
     // wall-clock time. HLT idle sync handles idle separately. Override RUSTY_BOX_NOSYNC=1.
     let sync = std::env::var("RUSTY_BOX_NOSYNC").map_or(true, |v| v != "1");
     let config = EmulatorConfig {
-        guest_memory_size: ram_bytes,
-        host_memory_size: ram_bytes,
+        memory: MemorySize::bytes(ram_bytes),
         memory_block_size: 128 * 1024,
         ips: 300_000_000,
         pci_enabled: true,

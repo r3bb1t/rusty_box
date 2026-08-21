@@ -11,7 +11,7 @@
 //! ```
 
 use rusty_box::{
-    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, MachineBuilder},
+    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, MemorySize, MachineBuilder},
     gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
     Result,
 };
@@ -169,8 +169,7 @@ fn run_emulator(
     max_instructions: u64,
 ) -> Result<()> {
     let config = EmulatorConfig {
-        guest_memory_size: 32 * 1024 * 1024,
-        host_memory_size: 32 * 1024 * 1024,
+        memory: MemorySize::bytes(32 * 1024 * 1024),
         memory_block_size: 128 * 1024,
         ips: 300_000_000,
         pci_enabled: true,
