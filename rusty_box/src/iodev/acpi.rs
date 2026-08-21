@@ -96,6 +96,18 @@ bitflags! {
     }
 }
 
+/// What an ACPI config-space write asks the machine to do. The PM and SMBus
+/// register blocks each live at a programmable I/O base, and the controller
+/// cannot move its own port registrations.
+///
+/// Bochs re-registers them inline in `pci_write_handler` (acpi.cc); here the
+/// I/O bus lives outside the device, so the request travels back as data.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AcpiWriteEffects {
+    pub pm_base_changed: bool,
+    pub sm_base_changed: bool,
+}
+
 /// I/O access mask for PM register space (64 ports).
 /// Each entry is a bitmask: bit 0 = byte, bit 1 = word, bit 2 = dword.
 /// Bochs acpi.cc
@@ -1180,20 +1192,23 @@ impl BxAcpiCtrl {
         }
     }
 
-    // ─── PCI Configuration Space ─────────────────────────────────────────
+}
+
+// ─── PCI Configuration Space ─────────────────────────────────────────────
+
+impl crate::iodev::pci::PciDevice for BxAcpiCtrl {
+    const DEVFUNC: u8 = crate::iodev::pci::pci_device(1, 3);
+    type WriteEffects = AcpiWriteEffects;
 
     /// Write to PCI configuration space.
     /// Bochs: pci_write_handler() (acpi.cc)
-    ///
-    /// Returns (pm_base_changed, sm_base_changed) to signal that the emulator
-    /// should re-register I/O ports.
-    pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> (bool, bool) {
+    fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> AcpiWriteEffects {
         let mut pm_base_change = false;
         let mut sm_base_change = false;
 
         // Addresses 0x10-0x33 are ignored (BAR region) — acpi.cc
         if (0x10..0x34).contains(&address) {
-            return (false, false);
+            return AcpiWriteEffects::default();
         }
 
         for i in 0..io_len as usize {
@@ -1279,11 +1294,14 @@ impl BxAcpiCtrl {
             }
         }
 
-        (pm_base_change, sm_base_change)
+        AcpiWriteEffects {
+            pm_base_changed: pm_base_change,
+            sm_base_changed: sm_base_change,
+        }
     }
 
     /// Read from PCI configuration space.
-    pub fn pci_read(&self, address: u8, io_len: u8) -> u32 {
+    fn pci_read(&self, address: u8, io_len: u8) -> u32 {
         let mut value: u32 = 0;
         for i in 0..io_len as usize {
             let addr = address as usize + i;
@@ -1294,6 +1312,9 @@ impl BxAcpiCtrl {
         value
     }
 
+}
+
+impl BxAcpiCtrl {
     /// Check if an I/O port address falls within the PM base range.
     pub fn is_pm_port(&self, port: u16) -> bool {
         self.pm_base != 0 && (port as u32 & 0xFFC0) == self.pm_base
@@ -1394,6 +1415,7 @@ impl crate::iodev::device_api::TimedDevice for BxAcpiCtrl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iodev::pci::PciDevice;
 
     /// A power button is a request the guest may refuse, and the guest says
     /// whether it wants to hear about it by setting `PWRBTN_EN`. Pressing it
@@ -1536,9 +1558,14 @@ mod tests {
         // Write PM base = 0xB000 via PCI config 0x40-0x43
         // Byte at 0x40: (0x00 & 0xC0) | 0x01 = 0x01
         // Byte at 0x41: 0xB0
-        acpi.pci_write(0x40, 0x01, 1); // Low byte with I/O indicator
-        let (changed, _) = acpi.pci_write(0x41, 0xB0, 1);
-        assert!(changed);
+        // Low byte with the I/O indicator: the window is still at 0, so
+        // nothing has moved yet.
+        assert_eq!(
+            acpi.pci_write(0x40, 0x01, 1),
+            AcpiWriteEffects::default()
+        );
+        let effects = acpi.pci_write(0x41, 0xB0, 1);
+        assert!(effects.pm_base_changed);
         assert_eq!(acpi.pm_base, 0xB000);
     }
 
@@ -1593,7 +1620,11 @@ mod tests {
         assert!(!acpi.smi_request_pending);
 
         // The BIOS smm_init: pci_config_writel(d, 0x58, value | (1 << 25)).
-        acpi.pci_write(0x58, 1 << 25, 4);
+        // 0x58 is not a BAR, so nothing outside the device has to move.
+        assert_eq!(
+            acpi.pci_write(0x58, 1 << 25, 4),
+            AcpiWriteEffects::default()
+        );
         acpi.generate_smi(0x00);
         assert!(acpi.smi_request_pending, "APMC_EN set: SMI delivered");
 
@@ -1659,25 +1690,31 @@ mod tests {
         let mut acpi = BxAcpiCtrl::new();
 
         // Establish a real PM base first.
-        acpi.pci_write(0x40, 0x0000_B000, 4);
+        assert!(acpi.pci_write(0x40, 0x0000_B000, 4).pm_base_changed);
         assert_eq!(acpi.pm_base, 0xB000);
 
         // All-ones size probe must NOT relocate the window.
-        let (pm_changed, _) = acpi.pci_write(0x40, 0xFFFF_FFFF, 4);
-        assert!(!pm_changed, "a size probe must not signal a base change");
+        let effects = acpi.pci_write(0x40, 0xFFFF_FFFF, 4);
+        assert!(
+            !effects.pm_base_changed,
+            "a size probe must not signal a base change"
+        );
         assert_eq!(acpi.pm_base, 0xB000, "PM window must stay put");
 
         // Re-writing the same base is also not a change.
-        let (pm_changed, _) = acpi.pci_write(0x40, 0x0000_B000, 4);
-        assert!(!pm_changed);
+        let effects = acpi.pci_write(0x40, 0x0000_B000, 4);
+        assert!(!effects.pm_base_changed);
         assert_eq!(acpi.pm_base, 0xB000);
 
         // The SM BAR behaves identically (16-port alignment -> 0xFFF0 probe).
-        acpi.pci_write(0x90, 0x0000_B100, 4);
+        assert!(acpi.pci_write(0x90, 0x0000_B100, 4).sm_base_changed);
         let sm_base = acpi.sm_base;
         assert_eq!(sm_base, 0xB100);
-        let (_, sm_changed) = acpi.pci_write(0x90, 0xFFFF_FFFF, 4);
-        assert!(!sm_changed, "a size probe must not signal a base change");
+        let effects = acpi.pci_write(0x90, 0xFFFF_FFFF, 4);
+        assert!(
+            !effects.sm_base_changed,
+            "a size probe must not signal a base change"
+        );
         assert_eq!(acpi.sm_base, 0xB100, "SM window must stay put");
     }
 

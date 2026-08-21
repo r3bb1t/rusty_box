@@ -35,8 +35,9 @@ use super::dma::BxDmaC;
 use super::fw_cfg::BxFwCfg;
 use super::ioapic::BxIoApic;
 use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT};
-use super::pci::BxPciBridge;
+use super::pci::{BxPciBridge, PciDevice};
 use super::pci2isa::BxPiix3;
+use super::pci_ide::BxPciIde;
 use super::pic::{BxPicC, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA};
 use super::pit::{
     BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_SYSTEM_CONTROL_B,
@@ -122,6 +123,20 @@ fn pci_write_common_gate(reg_addr: u8, value: u32, io_len: u8) -> Option<(u8, u3
     } else {
         Some((reg_addr, value, io_len))
     }
+}
+
+/// Runs the common-register gate, then hands whatever survives it to the
+/// device exactly once. `None` means the write was dropped before the device
+/// saw it, so there are no effects to apply.
+#[must_use]
+fn pci_config_write<D: PciDevice>(
+    device: &mut D,
+    reg_addr: u8,
+    value: u32,
+    io_len: u8,
+) -> Option<D::WriteEffects> {
+    let (address, value, io_len) = pci_write_common_gate(reg_addr, value, io_len)?;
+    Some(device.pci_write(address, value, io_len))
 }
 
 /// Mapping effects committed by one scheduler-boundary pass.
@@ -741,17 +756,17 @@ impl DeviceManager {
     /// Bochs: DEV_pci_rd_memtype() routing in devices.cc
     fn pci_device_read(&self, devfunc: u8, address: u8, io_len: u8) -> u32 {
         match devfunc {
-            // Device 0, Func 0: i440FX host bridge
-            0x00 => self.pci_bridge.pci_read(address, io_len),
-            // Device 1, Func 0: PIIX3 PCI-to-ISA bridge
-            0x08 => self.pci2isa.pci_read(address, io_len),
-            // Device 1, Func 1: PIIX3 IDE controller
-            0x09 => self.ide.bus_master.pci_read(address, io_len),
-            // Device 1, Func 3: PIIX4 ACPI controller
-            0x0B => self.acpi.pci_read(address, io_len),
-            // Device 2, Func 0: PCI VGA (returns 0xFFFFFFFF when pci_vga is off)
-            0x10 => self.vga.pci_read(address, io_len),
-            // Unrecognized device
+            // i440FX host bridge
+            BxPciBridge::DEVFUNC => self.pci_bridge.pci_read(address, io_len),
+            // PIIX3 PCI-to-ISA bridge
+            BxPiix3::DEVFUNC => self.pci2isa.pci_read(address, io_len),
+            // PIIX3 IDE controller
+            BxPciIde::DEVFUNC => self.ide.bus_master.pci_read(address, io_len),
+            // PIIX4 ACPI controller
+            BxAcpiCtrl::DEVFUNC => self.acpi.pci_read(address, io_len),
+            // PCI VGA (returns 0xFFFFFFFF itself when pci_vga is off)
+            BxVgaC::DEVFUNC => self.vga.pci_read(address, io_len),
+            // Unpopulated devfunc: enumeration reads all-ones
             _ => 0xFFFF_FFFF,
         }
     }
@@ -1461,11 +1476,10 @@ impl DeviceManager {
                 // dispatch the (possibly 0x3C-clamped) write to the target
                 // device's pci_write exactly once, for every devfunc.
                 match devfunc {
-                    0x00 => {
-                        if let Some((addr, val, len)) =
-                            pci_write_common_gate(reg_addr, value, io_len)
-                        {
-                            let effects = self.pci_bridge.pci_write(addr, val, len);
+                    BxPciBridge::DEVFUNC => {
+                        let effects =
+                            pci_config_write(&mut self.pci_bridge, reg_addr, value, io_len);
+                        if let Some(effects) = effects {
                             if effects.pam_changed {
                                 self.pam_needs_update = true;
                             }
@@ -1474,11 +1488,10 @@ impl DeviceManager {
                             }
                         }
                     }
-                    0x08 => {
-                        if let Some((addr, val, len)) =
-                            pci_write_common_gate(reg_addr, value, io_len)
-                        {
-                            let effects = self.pci2isa.pci_write(addr, val, len);
+                    BxPiix3::DEVFUNC => {
+                        let effects =
+                            pci_config_write(&mut self.pci2isa, reg_addr, value, io_len);
+                        if let Some(effects) = effects {
                             if effects.bios_write_changed {
                                 self.bios_write_needs_update = true;
                             }
@@ -1490,34 +1503,30 @@ impl DeviceManager {
                             }
                         }
                     }
-                    0x09 => {
-                        if let Some((addr, val, len)) =
-                            pci_write_common_gate(reg_addr, value, io_len)
-                        {
-                            if self.ide.bus_master.pci_write(addr, val, len) {
+                    BxPciIde::DEVFUNC => {
+                        let effects =
+                            pci_config_write(&mut self.ide.bus_master, reg_addr, value, io_len);
+                        if let Some(effects) = effects {
+                            if effects.bmdma_base_changed {
                                 self.pci_ide_bar4_needs_reregister = true;
                             }
                         }
                     }
-                    0x0B => {
-                        if let Some((addr, val, len)) =
-                            pci_write_common_gate(reg_addr, value, io_len)
-                        {
-                            let (pm, sm) = self.acpi.pci_write(addr, val, len);
-                            if pm {
+                    BxAcpiCtrl::DEVFUNC => {
+                        let effects = pci_config_write(&mut self.acpi, reg_addr, value, io_len);
+                        if let Some(effects) = effects {
+                            if effects.pm_base_changed {
                                 self.acpi_pm_needs_reregister = true;
                             }
-                            if sm {
+                            if effects.sm_base_changed {
                                 self.acpi_sm_needs_reregister = true;
                             }
                         }
                     }
-                    0x10 => {
-                        if let Some((addr, val, len)) =
-                            pci_write_common_gate(reg_addr, value, io_len)
-                        {
-                            let change = self.vga.pci_write(addr, val, len);
-                            if change.lfb || change.mmio {
+                    BxVgaC::DEVFUNC => {
+                        let effects = pci_config_write(&mut self.vga, reg_addr, value, io_len);
+                        if let Some(effects) = effects {
+                            if effects.lfb || effects.mmio {
                                 self.vga_bar_needs_reregister = true;
                             }
                         }
@@ -2446,7 +2455,12 @@ mod tests {
             }
 
             // BIOS assigns BAR4 → BM-DMA present.
-            assert!(dm.ide.bus_master.pci_write(0x20, 0x0000_C001, 4));
+            assert!(
+                dm.ide
+                    .bus_master
+                    .pci_write(0x20, 0x0000_C001, 4)
+                    .bmdma_base_changed
+            );
             assert!(dm.ide.bus_master.bmdma_present());
             // Guest builds a single-entry PRD table in one swapped block and
             // targets a second swapped block with the disk payload.
@@ -2559,7 +2573,12 @@ mod tests {
             let mut mem = crate::memory::test_ram();
 
             // BAR4 assigned; BM-DMA ports registered on the I/O bus.
-            assert!(dm.ide.bus_master.pci_write(0x20, 0x0000_C001, 4));
+            assert!(
+                dm.ide
+                    .bus_master
+                    .pci_write(0x20, 0x0000_C001, 4)
+                    .bmdma_base_changed
+            );
             dm.register_pci_ide_bmdma_ports(&mut io);
 
             // The engine needs real scheduler slots to arm.
@@ -2594,6 +2613,49 @@ mod tests {
                 !pc_system.timer_is_active(ch1),
                 "only the programmed channel arms"
             );
+        });
+    }
+
+    /// Each device sits at the devfunc the i440FX/PIIX3 platform puts it at,
+    /// and answers there. The expected values come from Bochs, not from our
+    /// own constants: pci.cc `BX_PCI_DEVICE(0, 0)`, the non-i440BX branches of
+    /// pci2isa.cc / pci_ide.cc / acpi.cc, and the slot-1 auto-assign
+    /// devices.cc `register_pci_handlers` gives the only slot-taking device.
+    /// A guest's chipset drivers and ACPI tables address these by number, so
+    /// moving one makes the device vanish for the guest that looks for it.
+    #[test]
+    fn every_pci_device_answers_at_its_architectural_devfunc() {
+        const I440FX_HOST_BRIDGE: u8 = 0x00;
+        const PIIX3_ISA_BRIDGE: u8 = 0x08;
+        const PIIX3_IDE: u8 = 0x09;
+        const PIIX4_ACPI: u8 = 0x0B;
+        const PCI_VGA: u8 = 0x10;
+
+        assert_eq!(BxPciBridge::DEVFUNC, I440FX_HOST_BRIDGE);
+        assert_eq!(BxPiix3::DEVFUNC, PIIX3_ISA_BRIDGE);
+        assert_eq!(BxPciIde::DEVFUNC, PIIX3_IDE);
+        assert_eq!(BxAcpiCtrl::DEVFUNC, PIIX4_ACPI);
+        assert_eq!(BxVgaC::DEVFUNC, PCI_VGA);
+
+        on_big_stack(|| {
+            let mut dm = DeviceManager::new();
+            // PCI VGA is gated off by default and answers all-ones until it is
+            // enabled; every other device is on the bus from reset.
+            dm.vga.enable_pci();
+
+            for devfunc in [
+                I440FX_HOST_BRIDGE,
+                PIIX3_ISA_BRIDGE,
+                PIIX3_IDE,
+                PIIX4_ACPI,
+                PCI_VGA,
+            ] {
+                assert_ne!(
+                    dm.pci_device_read(devfunc, 0x00, 4),
+                    0xFFFF_FFFF,
+                    "no device answers enumeration at devfunc {devfunc:#04x}"
+                );
+            }
         });
     }
 

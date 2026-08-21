@@ -294,13 +294,31 @@ impl BxPiix3 {
         }
     }
 
-    // ─── PCI Configuration Space ─────────────────────────────────────────
+}
+
+// ─── PCI Configuration Space ─────────────────────────────────────────────
+
+impl super::pci::PciDevice for BxPiix3 {
+    const DEVFUNC: u8 = super::pci::pci_device(1, 0);
+    type WriteEffects = Piix3WriteEffects;
+
+    /// Read from PCI configuration space.
+    fn pci_read(&self, address: u8, io_len: u8) -> u32 {
+        let mut value: u32 = 0;
+        for i in 0..io_len as usize {
+            let addr = address as usize + i;
+            if addr < PCI_CONF_SIZE {
+                value |= (self.pci_conf[addr] as u32) << (i * 8);
+            }
+        }
+        value
+    }
 
     /// Write to PCI configuration space.
     /// Bochs: bx_piix3_c::pci_write_handler() (pci2isa.cc)
     /// Returns which deferred memory-subsystem updates the caller must apply
     /// (the XBCS register changed a bit affecting BIOS-ROM write-enable).
-    pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> Piix3WriteEffects {
+    fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> Piix3WriteEffects {
         let mut effects = Piix3WriteEffects::default();
         // BARs are read-only
         if (0x10..0x34).contains(&address) {
@@ -395,6 +413,9 @@ impl BxPiix3 {
         effects
     }
 
+}
+
+impl BxPiix3 {
     /// Apply the XBCS register (0x4E) BIOS-write-enable bits to the memory
     /// subsystem. Bochs: bx_piix3_c::pci_write_handler() (pci2isa.cc) case
     /// 0x4e's `DEV_mem_set_bios_write`/`DEV_mem_set_bios_rom_access` calls.
@@ -422,18 +443,6 @@ impl BxPiix3 {
             enabled: (self.pci_conf[0x4F] & 0x01) != 0,
             base_offset: ((self.pci_conf[0x80] as u16) & 0x3F) << 10,
         }
-    }
-
-    /// Read from PCI configuration space.
-    pub fn pci_read(&self, address: u8, io_len: u8) -> u32 {
-        let mut value: u32 = 0;
-        for i in 0..io_len as usize {
-            let addr = address as usize + i;
-            if addr < PCI_CONF_SIZE {
-                value |= (self.pci_conf[addr] as u32) << (i * 8);
-            }
-        }
-        value
     }
 
     // ─── PCI IRQ Routing ─────────────────────────────────────────────────
@@ -629,6 +638,7 @@ impl BxPiix3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::pci::PciDevice;
 
     #[test]
     fn test_piix3_new() {

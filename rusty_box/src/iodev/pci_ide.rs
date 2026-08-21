@@ -59,6 +59,18 @@ struct BmDmaSnapshotState {
     data_ready: bool,
     timer_index: Option<usize>,
 }
+/// What a PIIX3 IDE config-space write asks the machine to do. BAR4, the
+/// 16-port BM-DMA I/O window, is the controller's only relocatable resource,
+/// and the controller cannot move its own port registrations.
+///
+/// Bochs applies this inline in `bx_pci_ide_c::pci_write_handler` (pci_ide.cc)
+/// via `DEV_register_ioread_handler_range`; here the I/O bus lives outside the
+/// device, so the request travels back as data.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PciIdeWriteEffects {
+    pub bmdma_base_changed: bool,
+}
+
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
 
@@ -560,17 +572,23 @@ impl BxPciIde {
         }
     }
 
-    // ─── PCI Configuration Space ─────────────────────────────────────────
+}
+
+// ─── PCI Configuration Space ─────────────────────────────────────────────
+
+impl super::pci::PciDevice for BxPciIde {
+    const DEVFUNC: u8 = super::pci::pci_device(1, 1);
+    type WriteEffects = PciIdeWriteEffects;
 
     /// Write to PCI configuration space.
     /// Bochs: bx_pci_ide_c::pci_write_handler() (pci_ide.cc)
     #[inline(never)]
-    pub fn pci_write(&mut self, address: u8, mut value: u32, io_len: u8) -> bool {
+    fn pci_write(&mut self, address: u8, mut value: u32, io_len: u8) -> PciIdeWriteEffects {
         // BAR0-BAR3 and reserved 0x24..0x40 are read-only (Bochs pci_ide.cc
         // pci_write_handler skips 0x10..0x20 and 0x24..0x40; BAR4 at
         // 0x20..0x24 IS writable — the 16-port BM-DMA I/O BAR).
         if (0x10..0x20).contains(&address) || (address > 0x23 && address < 0x40) {
-            return false;
+            return PciIdeWriteEffects::default();
         }
 
         // BAR4 size probe: a full-dword write of >= 0xfffffff0 must read back
@@ -640,11 +658,13 @@ impl BxPciIde {
             }
         }
 
-        bar4_changed
+        PciIdeWriteEffects {
+            bmdma_base_changed: bar4_changed,
+        }
     }
 
     /// Read from PCI configuration space.
-    pub fn pci_read(&self, address: u8, io_len: u8) -> u32 {
+    fn pci_read(&self, address: u8, io_len: u8) -> u32 {
         let mut value: u32 = 0;
         for i in 0..io_len as usize {
             let addr = address as usize + i;
@@ -655,6 +675,9 @@ impl BxPciIde {
         value
     }
 
+}
+
+impl BxPciIde {
     /// Exact byte count for this controller's contribution to the combined
     /// PCI payload. The enclosing PCI codec owns the section-version prefix.
     #[cfg(feature = "std")]
@@ -802,6 +825,7 @@ impl BxPciIde {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::pci::PciDevice;
     use std::io::Cursor;
 
 
@@ -858,8 +882,8 @@ mod tests {
         let mut ide = BxPciIde::new();
         ide.reset();
         // BIOS assigns the 16-port I/O BAR (Bochs init_bar_io(4, 16, ...)).
-        let changed = ide.pci_write(0x20, 0x0000C001, 4);
-        assert!(changed);
+        let effects = ide.pci_write(0x20, 0x0000C001, 4);
+        assert!(effects.bmdma_base_changed);
         assert_eq!(ide.bmdma_base, 0xC000);
         assert!(ide.bmdma_present());
         // Low nibble keeps the I/O-space type bit.
@@ -872,13 +896,13 @@ mod tests {
         ide.reset();
         // Size probe: full-ones write must read back the 16-port size mask
         // and must NOT move the committed base.
-        let changed = ide.pci_write(0x20, 0xFFFF_FFFF, 4);
-        assert!(!changed);
+        let effects = ide.pci_write(0x20, 0xFFFF_FFFF, 4);
+        assert!(!effects.bmdma_base_changed);
         assert_eq!(ide.bmdma_base, 0);
         assert_eq!(ide.pci_read(0x20, 4), 0xFFFF_FFF1);
         // The real base write right after the probe commits normally.
-        let changed = ide.pci_write(0x20, 0x0000C001, 4);
-        assert!(changed);
+        let effects = ide.pci_write(0x20, 0x0000C001, 4);
+        assert!(effects.bmdma_base_changed);
         assert_eq!(ide.bmdma_base, 0xC000);
     }
 
@@ -886,7 +910,7 @@ mod tests {
     fn test_bar4_base_survives_reset() {
         let mut ide = BxPciIde::new();
         ide.reset();
-        assert!(ide.pci_write(0x20, 0x0000C001, 4));
+        assert!(ide.pci_write(0x20, 0x0000C001, 4).bmdma_base_changed);
         ide.reset();
         // Bochs pci_ide.cc reset() leaves BAR assignments untouched.
         assert_eq!(ide.bmdma_base, 0xC000);
@@ -928,7 +952,7 @@ mod tests {
     #[test]
     fn pci_ide_snapshot_resumes_mid_bmdma_transfer() {
         let mut ide = BxPciIde::new();
-        assert!(ide.pci_write(0x20, 0x0000_c001, 4));
+        assert!(ide.pci_write(0x20, 0x0000_c001, 4).bmdma_base_changed);
         ide.bmdma_write(0xc004, 0x0000_1200, 4);
         ide.bmdma_write(0xc000, 0x09, 1);
         let channel = &mut ide.bmdma[0];

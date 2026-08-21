@@ -11,6 +11,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         instrumentation::{CpuSetupMode, X86Reg},
     };
     use crate::cpu::apic::LocalApicCpuEvent;
+    use crate::iodev::pci::PciDevice;
     use crate::iodev::{DeviceTimerOwner, TimerRequest};
     use crate::pc_system::TimerOwner;
     const TEST_SMP_PACKAGES: u32 = 2;

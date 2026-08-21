@@ -4396,9 +4396,15 @@ impl BxVgaC {
         // BAR2 = VBE MMIO, 32-bit non-prefetchable memory, base 0 until assigned.
     }
 
+}
+
+impl crate::iodev::pci::PciDevice for BxVgaC {
+    const DEVFUNC: u8 = crate::iodev::pci::pci_device(2, 0);
+    type WriteEffects = VgaBarChange;
+
     /// Read the PCI config space. Reads back `0xFFFFFFFF` (no device) when PCI is
     /// disabled, so a gated-off VGA is invisible to enumeration.
-    pub(crate) fn pci_read(&self, address: u8, io_len: u8) -> u32 {
+    fn pci_read(&self, address: u8, io_len: u8) -> u32 {
         if !self.pci_enabled {
             return 0xFFFF_FFFF;
         }
@@ -4415,7 +4421,7 @@ impl BxVgaC {
     /// Write PCI config space, handling BAR0 (LFB) and BAR2 (MMIO) sizing and
     /// queuing relocation. Mirrors Bochs `pci_write_handler_common` + vga.cc
     /// `pci_write_handler`. The caller must relocate memory handlers, then commit.
-    pub(crate) fn pci_write(&mut self, address: u8, mut value: u32, io_len: u8) -> VgaBarChange {
+    fn pci_write(&mut self, address: u8, mut value: u32, io_len: u8) -> VgaBarChange {
         if !self.pci_enabled {
             return VgaBarChange::default();
         }
@@ -4490,6 +4496,9 @@ impl BxVgaC {
         change
     }
 
+}
+
+impl BxVgaC {
     /// Inspect the LFB relocation awaiting memory-handler re-registration.
     pub(crate) fn peek_pending_lfb_relocate(&self) -> Option<(u32, u32)> {
         self.pending_lfb_relocate
@@ -5021,6 +5030,7 @@ fn validate_vga_snapshot_bar_base(base: u32, span: u32) -> io::Result<()> {
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
+    use crate::iodev::pci::PciDevice;
     #[cfg(feature = "std")]
     use crate::snapshot::SnapshotSection;
     #[cfg(feature = "std")]

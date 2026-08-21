@@ -1462,6 +1462,7 @@ impl BxDevicesC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::pci::PciDevice;
 
     /// BxDevicesC is ~1.5MB due to [IoHandlerEntry; 65536] x2.
     /// Allocate on heap to avoid test stack overflow.
@@ -1506,8 +1507,11 @@ mod tests {
             dm.pci_bridge.reset();
             dm.pci2isa.reset();
 
-            // SMRAME|DOPEN: open and unrestricted.
-            dm.pci_bridge.pci_write(0x72, 0x48, 1);
+            // SMRAME|DOPEN: open and unrestricted. SMRAM is a memory mapping,
+            // not a BAR, so the write asks for a PAM/SMRAM re-derive and no
+            // port re-registration.
+            let effects = dm.pci_bridge.pci_write(0x72, 0x48, 1);
+            assert!(effects.smram_changed && !effects.pam_changed);
             let first = dm.pci_bridge.smram_effect();
             assert_eq!(
                 first,

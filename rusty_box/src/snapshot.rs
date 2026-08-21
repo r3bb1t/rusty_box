@@ -639,6 +639,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emulator::{EmulatorConfig, MemorySize},
         params::BxParams,
     };
+    use crate::iodev::pci::PciDevice;
     use std::io::Cursor;
 
     /// Every section-owning device claims a distinct tag, and every tag it
@@ -1221,11 +1222,18 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             const MMIO: u32 = 0xf100_0000;
 
             let mut source = relocation_machine();
-            assert!(source.device_manager.ide.bus_master.pci_write(0x20, BMDMA | 1, 4));
+            assert!(
+                source
+                    .device_manager
+                    .ide
+                    .bus_master
+                    .pci_write(0x20, BMDMA | 1, 4)
+                    .bmdma_base_changed
+            );
             source.device_manager.pci_ide_bar4_needs_reregister = true;
-            let (pm_changed, _) = source.device_manager.acpi.pci_write(0x40, PM | 1, 4);
-            let (_, sm_changed) = source.device_manager.acpi.pci_write(0x90, SM | 1, 4);
-            assert!(pm_changed && sm_changed);
+            let pm = source.device_manager.acpi.pci_write(0x40, PM | 1, 4);
+            let sm = source.device_manager.acpi.pci_write(0x90, SM | 1, 4);
+            assert!(pm.pm_base_changed && sm.sm_base_changed);
             source.device_manager.acpi_pm_needs_reregister = true;
             source.device_manager.acpi_sm_needs_reregister = true;
             let lfb_change = source.device_manager.vga.pci_write(0x10, LFB, 4);
