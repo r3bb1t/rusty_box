@@ -39,7 +39,7 @@ pub mod cpu_store;
 use cpu_store::CpuStore;
 mod interactive;
 mod run;
-pub use run::{BatchOutcome, Keyboard, Power, PowerState, StopReason};
+pub use run::{BatchOutcome, Keyboard, Mouse, Power, PowerState, StopReason};
 pub(crate) use run::StopCause;
 mod scheduler;
 mod timers;

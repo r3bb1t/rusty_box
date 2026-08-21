@@ -148,10 +148,8 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> HostInputSink
         match event {
             HostInputEvent::Scancode(sc) => self.send_scancode(sc),
             HostInputEvent::Key(key, pressed) => self.send_key(key, pressed),
-            // The PS/2 mouse path does not yet report; it is always taken.
             HostInputEvent::Mouse(mouse) => {
-                self.send_mouse_event(mouse.dx, mouse.dy, mouse.dz, mouse.buttons);
-                true
+                self.send_mouse_event(mouse.dx, mouse.dy, mouse.dz, mouse.buttons)
             }
         }
     }

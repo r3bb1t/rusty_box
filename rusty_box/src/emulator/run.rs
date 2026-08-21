@@ -156,6 +156,28 @@ impl<T: Instrumentation> Keyboard<'_, T> {
     }
 }
 
+/// The machine's PS/2 mouse, as a host driving it sees it.
+pub struct Mouse<'m, T: Instrumentation> {
+    machine: &'m mut Emulator<T>,
+}
+
+impl<T: Instrumentation> Mouse<'_, T> {
+    /// Report relative motion and the current button mask (bit 0 left, bit 1
+    /// right, bit 2 middle), returning whether a packet reached the guest.
+    ///
+    /// A `false` is usually not backpressure: the guest may have the mouse in
+    /// remote mode or reporting disabled, or nothing may have changed. Motion
+    /// refused for any of those reasons accumulates and folds into the next
+    /// packet, because PS/2 deltas are relative — a button edge does not, which
+    /// is the case worth checking for.
+    pub fn motion(&mut self, dx: i32, dy: i32, dz: i32, buttons: u8) -> bool {
+        self.machine
+            .device_manager
+            .keyboard
+            .mouse_motion(dx, dy, dz, buttons)
+    }
+}
+
 /// Why a batch of execution ended.
 ///
 /// Exhaustive over what `step_batch` can actually determine at the moment it
@@ -657,6 +679,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
         Keyboard { machine: self }
     }
 
+    /// The machine's PS/2 mouse, for a host driving it.
+    pub fn mouse(&mut self) -> Mouse<'_, T> {
+        Mouse { machine: self }
+    }
+
     /// How many ticks of guest time may pass before the next device timer
     /// fires, or `None` when no timer is armed.
     ///
@@ -827,10 +854,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// Deltas are in mouse counts; `buttons` is a bitmask (bit 0 = left,
     /// bit 1 = right, bit 2 = middle). Mirrors [`send_scancode`] for the WASM
     /// path and the native input pump. Bochs keyboard.cc mouse_motion.
-    pub fn send_mouse_event(&mut self, dx: i32, dy: i32, dz: i32, buttons: u8) {
-        self.device_manager
-            .keyboard
-            .mouse_motion(dx, dy, dz, buttons);
+    /// Returns whether a packet reached the guest; see [`Mouse::motion`] for
+    /// why a `false` is usually not backpressure.
+    pub fn send_mouse_event(&mut self, dx: i32, dy: i32, dz: i32, buttons: u8) -> bool {
+        self.mouse().motion(dx, dy, dz, buttons)
     }
 
     #[cfg(feature = "alloc")]

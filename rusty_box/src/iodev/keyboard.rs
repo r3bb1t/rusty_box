@@ -1238,9 +1238,20 @@ impl BxKeyboardC {
 
     /// Build and enqueue a PS/2 movement packet from the accumulated deltas.
     /// Bochs keyboard.cc create_mouse_packet.
-    fn create_mouse_packet(&mut self, force_enq: bool) {
+    ///
+    /// Returns whether a packet reached the guest. `false` also covers the two
+    /// cases where there was nothing to send — a packet already pending, or no
+    /// movement to report — because from a caller's point of view those are the
+    /// same fact: the guest did not receive a packet from this call.
+    ///
+    /// Unlike the keyboard, this cannot half-deliver: `mouse_enq_packet` checks
+    /// room for the whole 3- or 4-byte packet before writing any of it, exactly
+    /// as Bochs's `mouse_enQ_packet` does, so a full ring drops the packet
+    /// entire rather than leaving the guest a torn one.
+    #[must_use]
+    fn create_mouse_packet(&mut self, force_enq: bool) -> bool {
         if self.mouse_internal_buffer.num_elements != 0 && !force_enq {
-            return;
+            return false;
         }
 
         let mut delta_x = self.mouse.delayed_dx;
@@ -1248,7 +1259,7 @@ impl BxKeyboardC {
         let button_state = self.mouse.button_status | 0x08;
 
         if !force_enq && delta_x == 0 && delta_y == 0 {
-            return;
+            return false;
         }
 
         if delta_x > 254 {
@@ -1302,14 +1313,32 @@ impl BxKeyboardC {
 
         let b4 = self.mouse.delayed_dz.wrapping_neg() as u8;
 
-        self.mouse_enq_packet(b1, b2, b3, b4);
+        self.mouse_enq_packet(b1, b2, b3, b4)
+    }
+
+    /// Flush residual delayed motion during the device's own periodic tick —
+    /// Bochs keyboard.cc `periodic()` calls `create_mouse_packet` here so
+    /// clamped or deferred motion does not stick until the next host event.
+    ///
+    /// The one place the packet verdict is deliberately not propagated, and the
+    /// reason is that it carries nothing a tick could act on: `false` is
+    /// ordinarily just "no motion pending", and when it does mean a full ring
+    /// the deltas stay accumulated and the next tick retries. A host-driven
+    /// update is the opposite case, and reports.
+    fn flush_delayed_mouse_motion(&mut self) {
+        let _flushed_or_nothing_pending = self.create_mouse_packet(false);
     }
 
     /// Flush any pending movement and clear accumulated deltas when the host
     /// toggles PS/2 mouse capture. Bochs keyboard.cc mouse_enabled_changed.
     pub(crate) fn mouse_enabled_changed(&mut self, enabled: bool) {
-        if self.mouse.delayed_dx != 0 || self.mouse.delayed_dy != 0 || self.mouse.delayed_dz != 0 {
-            self.create_mouse_packet(true);
+        if (self.mouse.delayed_dx != 0 || self.mouse.delayed_dy != 0 || self.mouse.delayed_dz != 0)
+            && !self.create_mouse_packet(true)
+        {
+            // The deltas are cleared below regardless, so a refused flush loses
+            // that movement outright. Nothing else can be done — the host has
+            // already changed capture state — but it is worth saying.
+            tracing::debug!("PS/2 mouse ring full on capture change; pending movement discarded");
         }
         self.mouse.delayed_dx = 0;
         self.mouse.delayed_dy = 0;
@@ -1323,22 +1352,34 @@ impl BxKeyboardC {
     /// Host mouse movement / button update. Accumulates relative deltas and
     /// enqueues PS/2 packets as needed. Bochs keyboard.cc mouse_motion (relative
     /// path only; absolute-position tablets are not modeled here).
+    /// Returns whether this update reached the guest as a packet.
+    ///
+    /// `false` covers three different situations that are one fact to a caller:
+    /// the guest put the mouse in remote mode or disabled reporting (it is
+    /// polling, not listening), nothing actually changed, or its 16-byte ring
+    /// was full. Only the last is backpressure, and a host cannot usefully tell
+    /// them apart — in all three the movement did not arrive.
+    ///
+    /// Motion lost this way is largely self-correcting: PS/2 deltas are
+    /// relative and accumulate in `delayed_dx`/`dy`, so a refused packet folds
+    /// into the next one. A refused BUTTON edge does not, which is why this
+    /// reports at all.
     pub(crate) fn mouse_motion(
         &mut self,
         mut delta_x: i32,
         mut delta_y: i32,
         mut delta_z: i32,
         mut button_state: u8,
-    ) {
+    ) -> bool {
         let mut force_enq = false;
 
         // Don't generate interrupts if we are in remote mode.
         if self.mouse.mode == MOUSE_MODE_REMOTE {
-            return;
+            return false;
         }
         // Note: `enable` only applies in stream mode.
         if !self.mouse.enable {
-            return;
+            return false;
         }
 
         // Scale down the motion.
@@ -1359,7 +1400,7 @@ impl BxKeyboardC {
             && delta_z == 0
             && self.mouse.button_status == (button_state & 0x7)
         {
-            return; // useless call, nothing changed
+            return false; // useless call, nothing changed
         }
 
         if self.mouse.button_status != (button_state & 0x7) || delta_z != 0 {
@@ -1393,7 +1434,7 @@ impl BxKeyboardC {
             force_enq = true;
         }
 
-        self.create_mouse_packet(force_enq);
+        self.create_mouse_packet(force_enq)
     }
 
     /// Set timer_pending flag (keyboard.cc)
@@ -1929,11 +1970,7 @@ impl BxKeyboardC {
                 self.kbd_controller.irq1_requested = true;
             }
         } else {
-            // Bochs keyboard.cc periodic(): flush any residual delayed mouse
-            // motion into a packet before servicing the mouse buffer, so clamped
-            // or deferred motion doesn't stick until the next host event. A no-op
-            // when there is no pending motion.
-            self.create_mouse_packet(false);
+            self.flush_delayed_mouse_motion();
             // Try mouse internal buffer
             if self.kbd_controller.aux_clock_enabled && self.mouse_internal_buffer.num_elements > 0
             {
@@ -2846,6 +2883,57 @@ mod tests {
         kbd.mouse.mode = MOUSE_MODE_STREAM;
         kbd.mouse.enable = true;
         kbd
+    }
+
+    /// The mouse differs from the keyboard in a way worth pinning: it is
+    /// all-or-nothing. `mouse_enq_packet` checks room for the whole 3- or
+    /// 4-byte packet before writing any of it (Bochs `mouse_enQ_packet`), so a
+    /// full ring can never leave the guest a torn packet — where the keyboard,
+    /// enqueuing byte by byte, can and does.
+    ///
+    /// It also reports, so a host can tell a delivered movement from a dropped
+    /// one. That matters for button edges, which unlike motion do not fold
+    /// into the next packet.
+    #[test]
+    fn a_full_mouse_ring_refuses_whole_packets_rather_than_tearing_them() {
+        let mut kbd = stream_mouse();
+
+        // Fill the ring with whole packets until one is refused.
+        let mut delivered = 0;
+        for _ in 0..BX_MOUSE_BUFF_SIZE {
+            if !kbd.mouse_motion(4, 4, 0, 0) {
+                break;
+            }
+            delivered += 1;
+        }
+
+        assert!(delivered > 0, "an empty ring must accept the first packet");
+        assert!(
+            !kbd.mouse_motion(4, 4, 0, 0),
+            "a full ring must refuse, and say so"
+        );
+
+        // Whatever is queued is a whole number of packets — never a fragment.
+        let packet_len = if kbd.mouse.im_mode { 4 } else { 3 };
+        assert_eq!(
+            kbd.mouse_internal_buffer.num_elements % packet_len,
+            0,
+            "a refusal must leave only whole packets queued, never a torn one"
+        );
+    }
+
+    /// A guest that put its mouse in remote mode is polling, not listening, so
+    /// nothing is enqueued and the caller is told.
+    #[test]
+    fn a_remote_mode_mouse_reports_that_nothing_was_delivered() {
+        let mut kbd = stream_mouse();
+        kbd.mouse.mode = MOUSE_MODE_REMOTE;
+
+        assert!(!kbd.mouse_motion(4, 4, 0, 0));
+        assert_eq!(
+            kbd.mouse_internal_buffer.num_elements, 0,
+            "remote mode enqueues nothing"
+        );
     }
 
     fn mouse_byte(kbd: &BxKeyboardC, i: usize) -> u8 {
