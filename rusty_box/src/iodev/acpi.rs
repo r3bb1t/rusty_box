@@ -907,6 +907,19 @@ impl BxAcpiCtrl {
         self.irq9_level = level;
     }
 
+    /// The host pressed the machine's power button.
+    ///
+    /// Bochs acpi.cc raises `PWRBTN_STS` and re-evaluates SCI, which is all a
+    /// power button physically does: an ACPI-aware guest sees the status bit,
+    /// takes the interrupt if it enabled `PWRBTN_EN`, and decides for itself
+    /// whether to shut down. A guest that ignores it keeps running — which is
+    /// the behaviour a real machine has, and the reason this cannot be a
+    /// "power off" verb.
+    pub(crate) fn press_power_button(&mut self, system_ticks: u64) {
+        self.pmsts |= PmStatus::PWRBTN_STS.bits();
+        self.pm_update_sci(system_ticks);
+    }
+
     /// Handle SMI command (ACPI enable/disable).
     /// Bochs: generate_smi() (acpi.cc)
     /// Bochs acpi.cc `generate_smi`: the ACPI enable/disable commands toggle
@@ -1374,6 +1387,43 @@ impl crate::iodev::device_api::TimedDevice for BxAcpiCtrl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A power button is a request the guest may refuse, and the guest says
+    /// whether it wants to hear about it by setting `PWRBTN_EN`. Pressing it
+    /// always raises the status bit — that is the button being pressed — but
+    /// raises SCI only for a guest that asked for the interrupt.
+    ///
+    /// Getting this wrong in the permissive direction would interrupt a guest
+    /// that never armed the button; in the strict direction it would drop the
+    /// press entirely and an ACPI-aware guest would never shut down.
+    #[test]
+    fn the_power_button_interrupts_only_a_guest_that_armed_it() {
+        let mut acpi = BxAcpiCtrl::new();
+        acpi.pmen = 0;
+
+        acpi.press_power_button(0);
+
+        assert_ne!(
+            acpi.pmsts & PmStatus::PWRBTN_STS.bits(),
+            0,
+            "the press is recorded whether or not the guest is listening"
+        );
+        assert!(
+            !acpi.irq9_level,
+            "a guest that never set PWRBTN_EN must not be interrupted"
+        );
+
+        let mut armed = BxAcpiCtrl::new();
+        armed.pmen = PmEnable::PWRBTN_EN.bits();
+
+        armed.press_power_button(0);
+
+        assert_ne!(armed.pmsts & PmStatus::PWRBTN_STS.bits(), 0);
+        assert!(
+            armed.irq9_level,
+            "a guest that armed the button must take the SCI"
+        );
+    }
 
     #[test]
     fn test_acpi_new() {

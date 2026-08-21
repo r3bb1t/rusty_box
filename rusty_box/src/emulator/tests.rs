@@ -4150,6 +4150,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     "the CPU is healthy — this is why testing the CPU state alone \
                      could never see a guest power-off"
                 );
+                assert_eq!(
+                    emu.power().state(),
+                    crate::emulator::PowerState::PoweredOff,
+                    "the machine's power state and the batch's verdict describe the \
+                     same event, so they must not be able to disagree"
+                );
             })
             .unwrap()
             .join()

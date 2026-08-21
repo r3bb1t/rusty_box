@@ -14,11 +14,76 @@ use crate::{cpu::CpuError, Error};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::Emulator;
+use super::{Emulator, ResetReason};
 // Only the direct-Linux-boot path below reaches a CPU through the store, and
 // that path needs an allocator.
 #[cfg(feature = "alloc")]
 use super::cpu_store::CpuStore;
+
+/// What state a machine's power is in.
+///
+/// Asked at any time, unlike [`StopReason`], which explains why one particular
+/// batch returned. A caller that has just restored a snapshot, or that has not
+/// stepped yet, has no batch outcome to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PowerState {
+    /// Executing, or halted waiting for an interrupt — either way, alive.
+    Running,
+    /// The guest asked to be powered off: ACPI `PM1_CNT` with `SLP_EN` and
+    /// `SLP_TYP` = S5, or the port-0x8900 shutdown protocol. The CPU is
+    /// perfectly healthy; it is the machine that is finished.
+    PoweredOff,
+    /// The boot CPU is in the architectural shutdown state, a triple fault
+    /// being the usual way in.
+    CpuShutdown,
+}
+
+/// The machine's power and reset controls — Bochs's chipset-level ACPI, which
+/// every profile has, so this is not a device that can be absent.
+pub struct Power<'m, T: Instrumentation> {
+    machine: &'m mut Emulator<T>,
+}
+
+impl<T: Instrumentation> Power<'_, T> {
+    /// Press the power button.
+    ///
+    /// This is a request to the guest, not an order: it raises ACPI's
+    /// `PWRBTN_STS` and re-evaluates SCI, exactly as Bochs acpi.cc does. An
+    /// ACPI-aware guest takes the interrupt and shuts itself down, at which
+    /// point a batch reports [`StopReason::GuestPowerOff`]. A guest that never
+    /// enabled `PWRBTN_EN`, or that chooses to ignore it, keeps running — as
+    /// it would on real hardware.
+    pub fn press_power_button(&mut self) {
+        let ticks = self.machine.pc_system.time_ticks();
+        self.machine
+            .device_manager
+            .acpi
+            .press_power_button(ticks);
+    }
+
+    /// Reset the machine. Unlike the power button this is not negotiable with
+    /// the guest.
+    pub fn reset(&mut self, reason: ResetReason) -> Result<()> {
+        self.machine.reset(reason)
+    }
+
+    /// The machine's current power state.
+    pub fn state(&self) -> PowerState {
+        if self.machine.cpu_ref(0).is_in_shutdown() {
+            return PowerState::CpuShutdown;
+        }
+        if self
+            .machine
+            .stop_flag
+            .load(core::sync::atomic::Ordering::Relaxed)
+            && self.machine.stop_cause == StopCause::GuestPowerOff
+        {
+            return PowerState::PoweredOff;
+        }
+        PowerState::Running
+    }
+}
 
 /// Why a batch of execution ended.
 ///
@@ -509,6 +574,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
             executed: total_executed,
             stop: self.classify_batch_stop(),
         })
+    }
+
+    /// The machine's power and reset controls.
+    pub fn power(&mut self) -> Power<'_, T> {
+        Power { machine: self }
     }
 
     /// How many ticks of guest time may pass before the next device timer
