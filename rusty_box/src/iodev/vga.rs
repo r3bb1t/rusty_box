@@ -6116,6 +6116,33 @@ mod tests {
 /// the LFB; the return value reports whether the access was claimed, which the
 /// dispatcher has never consulted — an address only reaches here because the
 /// map already decided it belongs to this device.
+/// The VGA's port block — Bochs vgacore.cc `read_handler`/`write_handler`.
+///
+/// A port access neither raises an interrupt nor arms a timer here: the
+/// vertical-retrace timer is machine-owned and re-armed at the scheduler
+/// boundary from the CRTC timing, so the only capability this device takes
+/// from its context is the clock the retrace phase is measured against.
+impl crate::iodev::device_api::PioDevice for BxVgaC {
+    fn pio_read(
+        &mut self,
+        port: u16,
+        len: crate::iodev::device_api::IoLen,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) -> u32 {
+        self.read_port(port, len.bytes(), ctx.now_ticks)
+    }
+
+    fn pio_write(
+        &mut self,
+        port: u16,
+        value: u32,
+        len: crate::iodev::device_api::IoLen,
+        _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) {
+        self.write_port(port, value, len.bytes());
+    }
+}
+
 impl crate::iodev::device_api::MmioDevice for BxVgaC {
     #[inline]
     fn mmio_read(

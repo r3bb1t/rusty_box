@@ -717,7 +717,7 @@ impl BxDevicesC {
                 }
                 let result = match routed {
                     Some(value) => value,
-                    None => Self::dispatch_read(dm, slot, port, io_len, current_ticks),
+                    None => Self::dispatch_read(dm, slot, port, io_len),
                 };
                 let (fwds, count) = dm.pic.take_ioapic_forwards();
                 if let Some(level) = dm.dma.take_hrq_request() {
@@ -1161,13 +1161,16 @@ impl BxDevicesC {
     /// Disjoint from [`devices::DeviceManager::bind_pio`] by construction: a
     /// slot is answered by exactly one of the two, so a device converted to the
     /// device API loses its arm here in the same change.
+    ///
+    /// Takes no clock: every device still on this path answers from its own
+    /// registers alone. The VGA was the last one that needed emulated time,
+    /// and it reads it off its context now.
     #[inline]
     fn dispatch_read(
         dm: &mut devices::DeviceManager,
         slot: DevSlot,
         port: u16,
         io_len: u8,
-        current_ticks: u64,
     ) -> u32 {
         match slot {
             DevSlot::PIC => dm.pic.read(port, io_len),
@@ -1176,7 +1179,6 @@ impl BxDevicesC {
                 let devices::DeviceManager { ide, pic, .. } = dm;
                 ide.read(port, io_len, pic)
             }
-            DevSlot::VGA => dm.vga.read_port(port, io_len, current_ticks),
             DevSlot::PORT92 => dm.port92_read(port, io_len),
             DevSlot::PCI => dm.pci_read(port, io_len),
             DevSlot::FW_CFG => dm.fw_cfg.read_port_mut(port, io_len),
@@ -1210,7 +1212,6 @@ impl BxDevicesC {
                 let devices::DeviceManager { ide, pic, .. } = dm;
                 ide.write(port, value, io_len, pic)
             }
-            DevSlot::VGA => dm.vga.write_port(port, value, io_len),
             DevSlot::PORT92 => dm.port92_write(port, value, io_len),
             DevSlot::PCI => dm.pci_write(port, value, io_len),
             DevSlot::FW_CFG => dm.fw_cfg_write(port, value, io_len, mem),
@@ -1622,6 +1623,7 @@ mod tests {
             DevSlot::CMOS,
             DevSlot::PIT,
             DevSlot::KEYBOARD,
+            DevSlot::VGA,
         ];
 
         on_big_stack(|| {

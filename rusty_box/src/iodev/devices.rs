@@ -1340,6 +1340,7 @@ impl DeviceManager {
             ref mut keyboard,
             ref mut acpi,
             ref mut serial,
+            ref mut vga,
             ..
         } = *self;
         let mut handles = wiring::TimerHandles::default();
@@ -1374,6 +1375,10 @@ impl DeviceManager {
             // The 8042's timer is continuous and registered by the machine, so
             // the device never arms it itself and its context carries none.
             DevSlot::KEYBOARD => keyboard,
+            // The VGA's vertical-retrace timer is likewise machine-owned and
+            // re-armed at the scheduler boundary from the CRTC timing, so a
+            // port write never arms it from in here.
+            DevSlot::VGA => vga,
             _ => return None,
         };
         Some(PioBinding {

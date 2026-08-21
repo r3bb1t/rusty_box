@@ -5517,3 +5517,41 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             "the guest must read back the mask its own OUT installed"
         );
     }
+
+    /// The VGA answers its ports through the device API now, not through the
+    /// legacy per-device dispatch. A guest selecting a CRTC register and
+    /// writing it must read the same value back — the property that would
+    /// break if the conversion had left the port claimed by neither path, or
+    /// by both.
+    #[test]
+    fn a_guest_reaches_the_vga_through_the_device_api() {
+        const CRTC_CURSOR_START: u8 = 0x0A;
+        const VALUE: u8 = 0x0D;
+        let code = [
+            0xBA, 0xD4, 0x03, 0x00, 0x00, // mov edx, 0x03D4 (CRTC index)
+            0xB0, CRTC_CURSOR_START, // mov al, 0x0A
+            0xEE, // out dx, al
+            0xBA, 0xD5, 0x03, 0x00, 0x00, // mov edx, 0x03D5 (CRTC data)
+            0xB0, VALUE, // mov al, 0x0D
+            0xEE, // out dx, al
+            0xEC, // in al, dx
+            0xF4, // hlt
+        ];
+
+        let mut emu =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+                .unwrap();
+        emu.devices.init(&mut emu.memory).unwrap();
+        emu.device_manager
+            .init(&mut emu.devices, &mut emu.memory)
+            .unwrap();
+        emu.virt_write(STAMP_CODE_ADDRESS, &code).unwrap();
+        emu.reg_write(X86Reg::Rip, STAMP_CODE_ADDRESS);
+        emu.run_cpu_batch(code.len() as u64).unwrap();
+
+        assert_eq!(
+            emu.reg_read(X86Reg::Rax) as u8,
+            VALUE,
+            "the guest must read back the CRTC value its own OUT installed"
+        );
+    }
