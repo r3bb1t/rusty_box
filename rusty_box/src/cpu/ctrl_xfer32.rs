@@ -3,12 +3,12 @@
 //! Based on Bochs ctrl_xfer32.cc
 
 use super::{
-    cpu::{BxCpuC, Exception},
+    cpu::Exception,
     decoder::{BxSegregs, Instruction},
     error::{CpuError, Result},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Helper functions for branching
     // =========================================================================
@@ -89,7 +89,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let eip = self.eip();
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
         self.branch_near32(new_eip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, rip);
         Ok(())
     }
 
@@ -100,7 +101,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let new_eip = self.get_gpr32(dst);
         self.branch_near32(new_eip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
-        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, rip);
         Ok(())
     }
 
@@ -112,7 +114,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let new_eip = self.v_read_dword(seg, eaddr)?;
         self.branch_near32(new_eip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
-        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, rip);
         Ok(())
     }
 
@@ -145,7 +148,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
 
         self.branch_near32(new_eip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Call, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Call, rip);
         Ok(())
     }
 
@@ -163,7 +167,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
         self.branch_near32(new_eip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
-        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
         Ok(())
     }
 
@@ -191,7 +196,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
         self.branch_near32(new_eip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
-        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
         Ok(())
     }
 
@@ -220,7 +226,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             );
         }
         self.branch_near32(return_eip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
         Ok(())
     }
 
@@ -230,7 +237,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let imm16 = instr.iw();
 
         self.branch_near32(return_eip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
 
         let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
         if ss_d_b {

@@ -1232,9 +1232,8 @@ mod smc_mask_tests {
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::{smc_cache_line_mask, BxICache, BxICacheEntry, Opcode, BX_ICACHE_INVALID_PHY_ADDRESS};
     use crate::{
-        cpu::{core_i7_skylake::Corei7SkylakeX, cpu::Exception, CpuSetupMode, X86Reg},
+        cpu::{cpu::Exception, CpuSetupMode, X86Reg},
         emulator::{Emulator, EmulatorConfig},
-        error::Error,
     };
 
     #[test]

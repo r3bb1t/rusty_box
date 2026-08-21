@@ -12,19 +12,6 @@ use crate::{
 use super::{CpuMask, Emulator, BOCHS_APIC_BUS_ID_MASK};
 
 impl<'a, T: Instrumentation> Emulator<T> {
-    /// Extend the borrow of memory owned by this Emulator to match lifetime 'a.
-    ///
-    /// # Safety
-    /// Sound because:
-    /// 1. Memory is owned by Emulator which outlives every cpu_loop call
-    /// 2. We hold &mut self, preventing concurrent access
-    /// 3. CPU does not retain the reference beyond the call
-    /// 4. No other code path accesses self.memory during CPU execution
-    #[inline]
-    unsafe fn borrow_memory_for_cpu(&mut self) -> &'a mut BxMemC {
-        core::mem::transmute::<&mut BxMemC, &'a mut BxMemC>(&mut self.memory)
-    }
-
     /// Transmute a `NonNull<BxMemC>` to `NonNull<BxMemC>` for wiring
     /// into BxDevicesC during a CPU batch. The pointer remains valid for the
     /// duration of the batch because memory is owned by Emulator.
@@ -132,7 +119,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// manager pointers are installed only around an individual CPU slice, so
     /// every scheduler commit runs with ordinary exclusive borrows.
     pub(super) fn clear_scheduler_raw_wiring(&mut self) {
-        self.devices.clear_device_manager();
         self.device_manager.mem_ptr = None;
     }
 
@@ -186,19 +172,17 @@ impl<'a, T: Instrumentation> Emulator<T> {
         })
     }
 
-    /// Run a CPU batch with full I/O wiring.
+    /// Run a CPU batch.
     ///
-    /// Sets up all the NonNull pointers that `cpu_loop_n_with_io` needs,
-    /// executes `batch_size` instructions, then tears down the wiring.
-    ///
-    /// # Safety
-    /// Same invariants as `borrow_memory_for_cpu`: caller must hold `&mut self`
-    /// and no other code path may access memory/devices during the batch.
-    pub unsafe fn run_cpu_batch(&mut self, batch_size: u64) -> CpuResult<u64> {
-        unsafe { self.run_cpu_batch_with_strict_limit(batch_size, false) }
+    /// The CPU, memory and both buses reach the loop as borrows through
+    /// `ExecCtx`; what raw wiring remains is device-side, installed and
+    /// cleared entirely within this call, so `&mut self` is the whole
+    /// contract and there is nothing left for a caller to uphold.
+    pub fn run_cpu_batch(&mut self, batch_size: u64) -> CpuResult<u64> {
+        self.run_cpu_batch_with_strict_limit(batch_size, false)
     }
 
-    pub(super) unsafe fn run_cpu_batch_with_strict_limit(
+    pub(super) fn run_cpu_batch_with_strict_limit(
         &mut self,
         batch_size: u64,
         strict_limit: bool,
@@ -294,9 +278,16 @@ impl<'a, T: Instrumentation> Emulator<T> {
                     cpu.lapic.cpu_ticks_at_sync = cpu.cpu_ticks();
                 }
 
-                let mem_static = self.mem_nonnull_static();
-                (*io_ptr.as_ptr()).set_device_manager(dm_ptr);
-                (*dm_ptr.as_ptr()).mem_ptr = Some(mem_static);
+                // SAFETY: `fw_cfg` writes guest RAM from inside a port
+                // handler, and reaches it through this pointer. It names
+                // `self.memory`, a field disjoint from every other the
+                // slice borrows, and `clear_scheduler_raw_wiring` clears it
+                // below before anything else touches memory. The last raw
+                // wiring left in the scheduler.
+                unsafe {
+                    let mem_static = self.mem_nonnull_static();
+                    self.device_manager.mem_ptr = Some(mem_static);
+                }
 
                 let ticks_before = self.cpu_ref(cpu_index).cpu_ticks();
                 // The CPU, memory and pin set now come from one borrow of the
@@ -306,6 +297,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 // The slice entry points live on `ExecCtx` now, so memory, the
                 // pin set and both buses come from the context itself. The
                 // scheduler no longer names any of them.
+                // SAFETY: `pic_ref` and `dma_ref` point at two disjoint
+                // fields of `self.device_manager`, taken before the loop and
+                // never aliased inside it — the slice reaches the rest of
+                // the machine through `ExecCtx`, which borrows different
+                // fields. Also Phase G's to delete.
+                let (pic, dma) = unsafe { (&mut *pic_ref, &mut *dma_ref) };
                 let slice_result = {
                     let mut ctx = self.exec_ctx(cpu_index);
                     if smp {
@@ -313,17 +310,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
                             per_cpu_batch,
                             strict_smp_deadline,
                             cpu_count as u64,
-                            Some(&mut *pic_ref),
-                            Some(&mut *dma_ref),
+                            Some(pic),
+                            Some(dma),
                         )
                     } else {
-                        ctx.cpu_loop_n_with_io(
-                            per_cpu_batch,
-                            strict_up_deadline,
-                            1,
-                            Some(&mut *pic_ref),
-                            Some(&mut *dma_ref),
-                        )
+                        ctx.cpu_loop_n_with_io(per_cpu_batch, strict_up_deadline, 1, Some(pic), Some(dma))
                     }
                 };
 
@@ -489,25 +480,16 @@ impl<'a, T: Instrumentation> Emulator<T> {
         self.memory.smc_clear_pending();
     }
 
-    /// Inject an external interrupt with temporary memory bus wiring.
+    /// Inject an external interrupt.
     ///
-    /// Wires the memory bus so the interrupt path can read IVT/IDT and push
-    /// stack frames, then clears it after injection.
+    /// Delivery reads the IVT/IDT and pushes a stack frame, so it runs on an
+    /// execution context — assembling one is what gives it memory.
     ///
     /// Used by `run_interactive` / `step_batch` for manual interrupt delivery
     /// between CPU batches. Also available for no-alloc callers doing their
     /// own batch loops (e.g. UEFI example).
-    ///
-    /// # Safety
-    /// Same invariants as `borrow_memory_for_cpu`.
-    pub unsafe fn inject_interrupt(&mut self, vector: u8) -> CpuResult<()> {
-        // Destructured: the CPU and memory are disjoint fields, so this needs
-        // no lifetime extension — the transmute it replaces existed only to
-        // hand the CPU a borrow that outlived the statement.
-        let Self { cpu, memory, .. } = self;
-        cpu.wire_memory_access(core::ptr::NonNull::from(&mut *memory));
+    pub fn inject_interrupt(&mut self, vector: u8) -> CpuResult<()> {
         let result = self.exec_ctx(0).inject_external_interrupt(vector);
-        self.cpu.clear_memory_access();
         self.refresh_cpu_masks(0);
         result
     }
@@ -1190,17 +1172,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
             LocalApicCpuEvent::Smi => self.cpu_mut_at(target).deliver_smi(),
             LocalApicCpuEvent::Nmi => self.cpu_mut_at(target).deliver_nmi(),
             LocalApicCpuEvent::Init => self.cpu_mut_at(target).deliver_init(),
-            LocalApicCpuEvent::Sipi(vector) => {
-                // deliver_sipi VMexits when the target is in VMX non-root
-                // operation, and the exit can walk the VMEXIT MSR store/load
-                // lists. Wire the memory bus for the call so those guest-memory
-                // accesses resolve, then clear it (mirrors inject_interrupt).
-                let mem_ptr =
-                    core::ptr::NonNull::from(&mut *unsafe { self.borrow_memory_for_cpu() });
-                self.cpu_mut_at(target).wire_memory_access(mem_ptr);
-                self.exec_ctx(target).deliver_sipi(vector);
-                self.cpu_mut_at(target).clear_memory_access();
-            }
+            // deliver_sipi VMexits when the target is in VMX non-root
+            // operation, and the exit can walk the VMEXIT MSR store/load
+            // lists, so it runs on the target's execution context.
+            LocalApicCpuEvent::Sipi(vector) => self.exec_ctx(target).deliver_sipi(vector),
         }
     }
     /// Rebuild CPU interrupt-level bits after snapshot restore without

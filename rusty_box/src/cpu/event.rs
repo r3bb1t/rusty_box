@@ -13,6 +13,98 @@ use super::{
 /// guest memory to the DMA controller. Bochs `handleAsyncEvent` (event.cc)
 /// reaches the same state through the globals this borrow replaces.
 impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
+    /// Handle wait for event - matches Bochs event.cc:handleWaitForEvent()
+    /// Called when CPU is halted (HLT) or waiting (MWAIT)
+    /// Returns true if should return from cpu_loop
+    fn handle_wait_for_event(&mut self, dma: Option<&mut crate::dma::BxDmaC>) -> bool {
+        // For WAIT_FOR_SIPI, just return (matches Bochs event.cc)
+        if matches!(self.activity_state, CpuActivityState::WaitForSipi) {
+            tracing::trace!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");
+            return true;
+        }
+
+        // Handle DMA also when CPU is halted (Bochs event.cc)
+        if self.get_hrq() {
+            if let Some(dma) = dma {
+                let (_cpu, mem, _devices, _pc_system) = self.slice_parts();
+                dma.raise_hlda(Some(mem));
+                // Bochs dma.cc raise_HLDA: synchronous set_HRQ(0) at
+                // terminal count (see handle_async_event above).
+                if let Some(level) = dma.take_hrq_request() {
+                    self.pc_system.set_hrq(level);
+                }
+            }
+        }
+
+        // For single processor, check if an external interrupt can wake us.
+        // Matches Bochs event.cc
+        //
+        // MWAIT_IF (ECX[0]=1 at MWAIT): wake on interrupt even when IF=0
+        // (Bochs event.cc)
+        let mwait_if = matches!(self.activity_state, CpuActivityState::MwaitIf);
+        let in_mwait = matches!(
+            self.activity_state,
+            CpuActivityState::Mwait | CpuActivityState::MwaitIf
+        );
+
+        // SMI/INIT wake HLT/MWAIT regardless of IF (Bochs event.cc
+        // handleWaitForEvent checks unmasked BX_EVENT_SMI | BX_EVENT_INIT).
+        if self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_SMI | BxCpuC::<T>::BX_EVENT_INIT) {
+            if in_mwait {
+                self.monitor.reset_monitor();
+            }
+            self.inhibit_mask = 0;
+            return false; // Continue to SMI/INIT delivery
+        }
+
+        // NMI can wake from HLT/MWAIT only when unmasked (Bochs event.cc).
+        if self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_NMI) {
+            // Bochs event.cc: reset monitor when waking from MWAIT
+            if in_mwait {
+                self.monitor.reset_monitor();
+            }
+            self.inhibit_mask = 0;
+            return false; // Continue to NMI delivery
+        }
+
+        // PIC interrupt can wake from HLT/MWAIT if IF=1
+        if self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_INTR != 0
+            && (self.eflags.contains(EFlags::IF_) || mwait_if)
+        {
+            // Bochs event.cc: reset monitor when waking from MWAIT
+            if in_mwait {
+                self.monitor.reset_monitor();
+            }
+            self.inhibit_mask = 0;
+            return false; // Continue to interrupt delivery
+        }
+
+        // LAPIC interrupt can also wake from HLT/MWAIT if IF=1
+        if (self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR != 0 || self.lapic.intr)
+            && (self.eflags.contains(EFlags::IF_) || mwait_if)
+        {
+            // Bochs event.cc: reset monitor when waking from MWAIT
+            if in_mwait {
+                self.monitor.reset_monitor();
+            }
+            self.inhibit_mask = 0;
+            return false; // Continue to LAPIC interrupt delivery
+        }
+
+        // Monitor triggered by a write (wakeup_monitor set activity_state to
+        // Active). Bochs event.cc breaks out here without touching
+        // inhibit_mask — only the interrupt-wake branch clears it.
+        if matches!(self.activity_state, CpuActivityState::Active) {
+            tracing::trace!("CPU activity_state became ACTIVE, waking up");
+            return false;
+        }
+
+        // HALT condition remains: return from cpu_loop so other CPUs (or the
+        // emulator scheduler) get a chance, leaving inhibit_mask untouched
+        // exactly like Bochs event.cc handleWaitForEvent's return-1 path.
+        true
+    }
+
     /// Handle async events - matches Bochs event.cc handleAsyncEvent()
     /// Returns true if should return from cpu_loop
     pub(super) fn handle_async_event(
@@ -25,8 +117,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         if !matches!(self.activity_state, CpuActivityState::Active) {
             // For one processor, pass the time as quickly as possible until
             // an interrupt wakes up the CPU.
-            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
-            if cpu.handle_wait_for_event(dma.as_deref_mut(), Some(mem)) {
+            if self.handle_wait_for_event(dma.as_deref_mut()) {
                 return true; // Return to caller of cpu_loop
             }
         }
@@ -487,9 +578,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                 // async_event clear below observes the dropped line instead
                 // of thrashing the trace until the next boundary.
                 if let Some(level) = dma.take_hrq_request() {
-                    if let Some(ps) = self.pc_system_mut() {
-                        ps.set_hrq(level);
-                    }
+                    self.pc_system.set_hrq(level);
                 }
             }
         }
@@ -589,102 +678,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
-    /// Handle wait for event - matches Bochs event.cc:handleWaitForEvent()
-    /// Called when CPU is halted (HLT) or waiting (MWAIT)
-    /// Returns true if should return from cpu_loop
-    fn handle_wait_for_event(
-        &mut self,
-        dma: Option<&mut crate::dma::BxDmaC>,
-        mem: Option<&mut crate::memory::BxMemC>,
-    ) -> bool {
-        // For WAIT_FOR_SIPI, just return (matches Bochs event.cc)
-        if matches!(self.activity_state, CpuActivityState::WaitForSipi) {
-            tracing::trace!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");
-            return true;
-        }
-
-        // Handle DMA also when CPU is halted (Bochs event.cc)
-        if self.get_hrq() {
-            if let Some(dma) = dma {
-                dma.raise_hlda(mem);
-                // Bochs dma.cc raise_HLDA: synchronous set_HRQ(0) at
-                // terminal count (see handle_async_event above).
-                if let Some(level) = dma.take_hrq_request() {
-                    if let Some(ps) = self.pc_system_mut() {
-                        ps.set_hrq(level);
-                    }
-                }
-            }
-        }
-
-        // For single processor, check if an external interrupt can wake us.
-        // Matches Bochs event.cc
-        //
-        // MWAIT_IF (ECX[0]=1 at MWAIT): wake on interrupt even when IF=0
-        // (Bochs event.cc)
-        let mwait_if = matches!(self.activity_state, CpuActivityState::MwaitIf);
-        let in_mwait = matches!(
-            self.activity_state,
-            CpuActivityState::Mwait | CpuActivityState::MwaitIf
-        );
-
-        // SMI/INIT wake HLT/MWAIT regardless of IF (Bochs event.cc
-        // handleWaitForEvent checks unmasked BX_EVENT_SMI | BX_EVENT_INIT).
-        if self.is_unmasked_event_pending(Self::BX_EVENT_SMI | Self::BX_EVENT_INIT) {
-            if in_mwait {
-                self.monitor.reset_monitor();
-            }
-            self.inhibit_mask = 0;
-            return false; // Continue to SMI/INIT delivery
-        }
-
-        // NMI can wake from HLT/MWAIT only when unmasked (Bochs event.cc).
-        if self.is_unmasked_event_pending(Self::BX_EVENT_NMI) {
-            // Bochs event.cc: reset monitor when waking from MWAIT
-            if in_mwait {
-                self.monitor.reset_monitor();
-            }
-            self.inhibit_mask = 0;
-            return false; // Continue to NMI delivery
-        }
-
-        // PIC interrupt can wake from HLT/MWAIT if IF=1
-        if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0
-            && (self.eflags.contains(EFlags::IF_) || mwait_if)
-        {
-            // Bochs event.cc: reset monitor when waking from MWAIT
-            if in_mwait {
-                self.monitor.reset_monitor();
-            }
-            self.inhibit_mask = 0;
-            return false; // Continue to interrupt delivery
-        }
-
-        // LAPIC interrupt can also wake from HLT/MWAIT if IF=1
-        if (self.pending_event & Self::BX_EVENT_PENDING_LAPIC_INTR != 0 || self.lapic.intr)
-            && (self.eflags.contains(EFlags::IF_) || mwait_if)
-        {
-            // Bochs event.cc: reset monitor when waking from MWAIT
-            if in_mwait {
-                self.monitor.reset_monitor();
-            }
-            self.inhibit_mask = 0;
-            return false; // Continue to LAPIC interrupt delivery
-        }
-
-        // Monitor triggered by a write (wakeup_monitor set activity_state to
-        // Active). Bochs event.cc breaks out here without touching
-        // inhibit_mask — only the interrupt-wake branch clears it.
-        if matches!(self.activity_state, CpuActivityState::Active) {
-            tracing::trace!("CPU activity_state became ACTIVE, waking up");
-            return false;
-        }
-
-        // HALT condition remains: return from cpu_loop so other CPUs (or the
-        // emulator scheduler) get a chance, leaving inhibit_mask untouched
-        // exactly like Bochs event.cc handleWaitForEvent's return-1 path.
-        true
-    }
 
     /// Whether this CPU would deliver a Priority-4 debug trap at its next
     /// async-event boundary.
@@ -785,7 +778,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 mod tests {
     use super::*;
     use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::ResetReason;
     use crate::params::{BxParams, CpuTopology};
 
@@ -820,6 +812,7 @@ mod tests {
     struct TestBus {
         memory: crate::memory::BxMemC,
         devices: crate::iodev::BxDevicesC,
+        device_manager: crate::iodev::devices::DeviceManager,
         pc_system: crate::pc_system::BxPcSystemC,
     }
 
@@ -832,12 +825,19 @@ mod tests {
                     false,
                 ),
                 devices: crate::iodev::BxDevicesC::new(),
+                device_manager: crate::iodev::devices::DeviceManager::new(),
                 pc_system: crate::pc_system::BxPcSystemC::new(),
             }
         }
 
         fn ctx<'a>(&'a mut self, cpu: &'a mut BxCpuC) -> ExecCtx<'a, ()> {
-            ExecCtx::new(cpu, &mut self.memory, &mut self.devices, &mut self.pc_system)
+            ExecCtx::new(
+                cpu,
+                &mut self.memory,
+                &mut self.devices,
+                &mut self.device_manager,
+                &mut self.pc_system,
+            )
         }
     }
 
@@ -1126,7 +1126,8 @@ mod tests {
         );
 
         // RSM releases the held events (Bochs smm.cc RSM).
-        ap.rsm(&crate::cpu::decoder::Instruction::default())
+        bus.ctx(&mut ap)
+            .rsm(&crate::cpu::decoder::Instruction::default())
             .expect("RSM must succeed outside VMX/SVM guest mode");
         assert!(!ap.in_smm);
         assert_eq!(
@@ -1177,7 +1178,8 @@ mod tests {
         // RSM restores VMX operation and forces CR0.PE/NE/PG + CR4.VMXE
         // in the restored state (Bochs smm.cc
         // resume_from_system_management_mode).
-        ap.rsm(&crate::cpu::decoder::Instruction::default())
+        bus.ctx(&mut ap)
+            .rsm(&crate::cpu::decoder::Instruction::default())
             .expect("RSM must succeed outside VMX/SVM guest mode");
         assert!(!ap.in_smm);
         assert!(ap.in_vmx, "RSM must restore VMX root operation");

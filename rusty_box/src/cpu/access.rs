@@ -17,7 +17,7 @@ use super::descriptor::{
     SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
 };
 use super::rusty_box::MemoryAccessType;
-use super::{BxCpuC, Result};
+use super::Result;
 use crate::{
     config::{BxAddress, BxPhyAddress, BxPtrEquiv},
     memory::memory_rusty_box::bx_guest_ram_span,
@@ -222,7 +222,7 @@ fn addr_write_u64(addr: BxPtrEquiv, val: u64) {
     unsafe { (addr as *mut u64).write_unaligned(val) }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     #[inline(always)]
     fn direct_ram_offset(&self, addr: u64, len: usize) -> Option<(BxPhyAddress, usize)> {
         let a20 = addr & self.a20_mask;
@@ -237,7 +237,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Separated to keep the inlined fast path small for better icache utilization.
     #[cold]
     #[inline(never)]
-    fn mem_read_byte_slow(&self, addr: u64) -> u8 {
+    fn mem_read_byte_slow(&mut self, addr: u64) -> u8 {
         // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
         {
             let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
@@ -250,28 +250,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
         }
         let paddr: BxPhyAddress = addr as BxPhyAddress;
-        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            if let Ok(Some(slice)) = mem.get_host_mem_addr_pinned(
-                paddr,
-                MemoryAccessType::Read,
-                policy,
-            ) {
-                let val = slice.first().copied().unwrap_or(0);
-                return val;
-            }
-
-            let mut data = [0u8; 1];
-            if self
-                .read_physical_routed(mem, policy, paddr, 1, &mut data)
-                .is_ok()
-            {
-                return data[0];
-            }
-
-            return 0;
+        let policy = self.access_policy(paddr);
+        if let Ok(Some(slice)) =
+            self.memory
+                .get_host_mem_addr_pinned(paddr, MemoryAccessType::Read, policy)
+        {
+            return slice.first().copied().unwrap_or(0);
         }
 
-
+        let mut data = [0u8; 1];
+        if self
+            .read_physical_routed(policy, paddr, 1, &mut data)
+            .is_ok()
+        {
+            return data[0];
+        }
+        // The routed read reports failure only for an address the memory
+        // system cannot form at all; this accessor has no error channel, and
+        // zero is the value the slow path has always yielded there.
         0
     }
     /// Slow path for mem_write_byte: MMIO/VGA/ROM through memory system handlers.
@@ -307,12 +303,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
         }
         let paddr: BxPhyAddress = addr as BxPhyAddress;
-        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            if let Ok(Some(slice)) = mem.get_host_mem_addr_pinned(
-                paddr,
-                MemoryAccessType::Write,
-                policy,
-            ) {
+        {
+            let policy = self.access_policy(paddr);
+            if let Ok(Some(slice)) =
+                self.memory
+                    .get_host_mem_addr_pinned(paddr, MemoryAccessType::Write, policy)
+            {
                 if let Some(b) = slice.get_mut(0) {
                     *b = value;
                 }
@@ -322,15 +318,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
             // Vetoed: go through handler-aware physical write.
             let mut data = [value];
-            if let Err(e) =
-                self.write_physical_routed(mem, policy, paddr, 1, &mut data)
-            {
+            if let Err(e) = self.write_physical_routed(policy, paddr, 1, &mut data) {
                 tracing::warn!("physical write failed at paddr={:#x}: {e}", paddr);
             }
             self.smc_write_check(paddr, 1);
             return;
         }
-
     }
     /// Write-back phase of a read-modify-write byte access.
     /// Uses address_xlation populated by read_rmw_virtual_byte.
@@ -409,7 +402,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
     }
     #[inline(always)]
-    pub(super) fn mem_read_byte(&self, addr: u64) -> u8 {
+    pub(super) fn mem_read_byte(&mut self, addr: u64) -> u8 {
         // Fast path: direct host pointer for plain RAM.
         // This matches what Bochs does via hostPageAddr in TLB entries — the vast
         // majority of physical accesses hit RAM and can be served with a single
@@ -422,7 +415,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.mem_read_byte_slow(addr)
     }
     #[inline(always)]
-    pub(super) fn mem_read_word(&self, addr: u64) -> u16 {
+    pub(super) fn mem_read_word(&mut self, addr: u64) -> u16 {
         let a20_addr = addr & self.a20_mask;
         let crosses_physical_page = (a20_addr & 0x0fff) == 0x0fff;
         if !crosses_physical_page {
@@ -431,13 +424,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 return read_unaligned_u16(host_offset(self.mem_host_base, linear));
             }
             if self.lapic.is_selected(a20_addr as BxPhyAddress) {
-                return self.lapic.read(a20_addr as BxPhyAddress, 2, self.cpu_ticks()) as u16;
+                return self
+                    .lapic
+                    .read(a20_addr as BxPhyAddress, 2, self.cpu_ticks())
+                    as u16;
             }
             let paddr = addr as BxPhyAddress;
-            if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+            {
+                let policy = self.access_policy(paddr);
                 let mut data = [0u8; 2];
                 if self
-                    .read_physical_routed(mem, policy, paddr, 2, &mut data)
+                    .read_physical_routed(policy, paddr, 2, &mut data)
                     .is_ok()
                 {
                     return u16::from_le_bytes(data);
@@ -452,7 +449,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         lo | (hi << 8)
     }
     #[inline(always)]
-    pub(super) fn mem_read_dword(&self, addr: u64) -> u32 {
+    pub(super) fn mem_read_dword(&mut self, addr: u64) -> u32 {
         let a20_addr = addr & self.a20_mask;
         // Fast path: direct host pointer for plain RAM
         if let Some((_a20_addr, linear)) = self.direct_ram_offset(addr, 4) {
@@ -461,15 +458,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // LAPIC MMIO intercept: 32-bit aligned register access
         // Bochs apic.cc read() — LAPIC registers are always dword-accessed.
         if self.lapic.is_selected(a20_addr as BxPhyAddress) {
-            return self.lapic.read(a20_addr as BxPhyAddress, 4, self.cpu_ticks());
+            return self
+                .lapic
+                .read(a20_addr as BxPhyAddress, 4, self.cpu_ticks());
         }
         // Slow path: route through read_physical_page to hit registered MMIO handlers
         // (IOAPIC, VGA, etc.) with proper dword access width.
         let paddr: BxPhyAddress = addr as BxPhyAddress;
-        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+        {
+            let policy = self.access_policy(paddr);
             let mut data = [0u8; 4];
             if self
-                .read_physical_routed(mem, policy, paddr, 4, &mut data)
+                .read_physical_routed(policy, paddr, 4, &mut data)
                 .is_ok()
             {
                 return u32::from_le_bytes(data);
@@ -510,10 +510,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 return;
             }
             let paddr = addr as BxPhyAddress;
-            if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+            {
+                let policy = self.access_policy(paddr);
                 let mut data = value.to_le_bytes();
                 if self
-                    .write_physical_routed(mem, policy, paddr, 2, &mut data)
+                    .write_physical_routed(policy, paddr, 2, &mut data)
                     .is_ok()
                 {
                     self.smc_write_check(paddr, 2);
@@ -547,10 +548,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // Slow path: route through write_physical_page to hit registered MMIO handlers
         // (IOAPIC, VGA, etc.) with proper dword access width.
         let paddr: BxPhyAddress = addr as BxPhyAddress;
-        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+        {
+            let policy = self.access_policy(paddr);
             let mut data = value.to_le_bytes();
             if self
-                .write_physical_routed(mem, policy, paddr, 4, &mut data)
+                .write_physical_routed(policy, paddr, 4, &mut data)
                 .is_ok()
             {
                 self.smc_write_check(paddr, 4);
@@ -722,12 +724,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Returns true if the access is permitted.
     ///
     /// Bochs: read_virtual_checks (access.cc)
-    pub(super) fn read_virtual_checks(
-        &mut self,
-        seg_idx: usize,
-        offset: u32,
-        length: u32,
-    ) -> bool {
+    pub(super) fn read_virtual_checks(&mut self, seg_idx: usize, offset: u32, length: u32) -> bool {
         let seg = &self.sregs[seg_idx];
         let cache = &seg.cache;
 
@@ -1046,11 +1043,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Prepare a dword RMW translation without reading physical memory.
     /// This lets callers complete permission checks before MMIO callbacks.
     #[inline]
-    pub(super) fn prepare_rmw_virtual_dword(
-        &mut self,
-        seg: BxSegregs,
-        offset: u32,
-    ) -> Result<u64> {
+    pub(super) fn prepare_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
         let laddr = self.agen_write32(seg, offset, 4)? as u64;
         self.prepare_rmw_linear_dword(laddr)?;
         Ok(laddr)
@@ -1526,12 +1519,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let mut translated = false;
         loop {
-            let tlb = self.dtlb.get_entry_of(laddr, 0);
+            let tlb = self.dtlb.entry_of(laddr, 0);
             if tlb.lpf == lpf
                 && (tlb.access_bits
-                & needed_bit
-                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0
+                    & needed_bit
+                    & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                    != 0
                 && tlb.host_page.is_some()
                 && !self.mem_host_base.is_null()
             {
@@ -1549,7 +1542,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 if remaining == 0 {
                     return Ok(None);
                 }
-                let ptr = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page).wrapping_add(page_offset);
+                let ptr = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page)
+                    .wrapping_add(page_offset);
                 return Ok(Some((ptr, remaining, paddr)));
             }
             if translated || !self.cr0.pg() {
@@ -1605,12 +1599,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let needed_bit = 1u32 << (self.user_pl as u32);
         let mut translated = false;
         loop {
-            let tlb = self.dtlb.get_entry_of(laddr, 0);
+            let tlb = self.dtlb.entry_of(laddr, 0);
             if tlb.lpf == lpf
                 && (tlb.access_bits
-                & needed_bit
-                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0
+                    & needed_bit
+                    & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                    != 0
                 && tlb.host_page.is_some()
                 && !self.mem_host_base.is_null()
             {
@@ -1628,7 +1622,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 if remaining == 0 {
                     return Ok(None);
                 }
-                let ptr = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page).wrapping_add(page_offset);
+                let ptr = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page)
+                    .wrapping_add(page_offset);
                 return Ok(Some((ptr, remaining)));
             }
             if translated || !self.cr0.pg() {
@@ -1784,11 +1779,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(crate) fn read_linear_byte(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u8> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 0);
-        if tlb.lpf == lpf && (tlb.access_bits
+        let tlb = self.dtlb.entry_of(laddr, 0);
+        if tlb.lpf == lpf
+            && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page.is_some() {
+                != 0
+            && tlb.host_page.is_some()
+        {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
@@ -1833,11 +1831,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.check_alignment(laddr, 1)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 1);
-        if tlb.lpf == lpf && (tlb.access_bits
+        let tlb = self.dtlb.entry_of(laddr, 1);
+        if tlb.lpf == lpf
+            && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page.is_some() {
+                != 0
+            && tlb.host_page.is_some()
+        {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
@@ -1893,11 +1894,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.check_alignment(laddr, 3)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 3);
-        if tlb.lpf == lpf && (tlb.access_bits
+        let tlb = self.dtlb.entry_of(laddr, 3);
+        if tlb.lpf == lpf
+            && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page.is_some() {
+                != 0
+            && tlb.host_page.is_some()
+        {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
@@ -1954,11 +1958,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.check_alignment(laddr, 7)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 7);
-        if tlb.lpf == lpf && (tlb.access_bits
+        let tlb = self.dtlb.entry_of(laddr, 7);
+        if tlb.lpf == lpf
+            && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page.is_some() {
+                != 0
+            && tlb.host_page.is_some()
+        {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
@@ -2014,11 +2021,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(crate) fn write_linear_byte(&mut self, _seg: BxSegregs, laddr: u64, val: u8) -> Result<()> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 0);
-        if tlb.lpf == lpf && (tlb.access_bits
+        let tlb = self.dtlb.entry_of(laddr, 0);
+        if tlb.lpf == lpf
+            && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page.is_some() {
+                != 0
+            && tlb.host_page.is_some()
+        {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
@@ -2069,11 +2079,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.check_alignment(laddr, 1)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 1);
-        if tlb.lpf == lpf && (tlb.access_bits
+        let tlb = self.dtlb.entry_of(laddr, 1);
+        if tlb.lpf == lpf
+            && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page.is_some() {
+                != 0
+            && tlb.host_page.is_some()
+        {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
@@ -2166,11 +2179,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.check_gdt_watchpoint(laddr, val as u64, 4);
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 3);
-        if tlb.lpf == lpf && (tlb.access_bits
+        let tlb = self.dtlb.entry_of(laddr, 3);
+        if tlb.lpf == lpf
+            && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page.is_some() {
+                != 0
+            && tlb.host_page.is_some()
+        {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
@@ -2234,12 +2250,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.check_gdt_watchpoint(laddr, val, 8);
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 7);
+        let tlb = self.dtlb.entry_of(laddr, 7);
         // DIAGNOSTIC: bypass TLB for writes to test stale-TLB theory
-        if tlb.lpf == lpf && (tlb.access_bits
+        if tlb.lpf == lpf
+            && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page.is_some() {
+                != 0
+            && tlb.host_page.is_some()
+        {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             #[cfg(feature = "instrumentation")]
@@ -2301,7 +2320,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     ) -> Result<u32> {
         let user = (curr_pl == 3) as u32;
         let lpf = laddr & super::tlb::LPF_MASK;
-        let tlb = self.dtlb.get_entry_of(laddr, 3);
+        let tlb = self.dtlb.entry_of(laddr, 3);
         let pkey_mask = self.rd_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page.is_some()
         {
@@ -2324,7 +2343,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     ) -> Result<u64> {
         let user = (curr_pl == 3) as u32;
         let lpf = laddr & super::tlb::LPF_MASK;
-        let tlb = self.dtlb.get_entry_of(laddr, 7);
+        let tlb = self.dtlb.entry_of(laddr, 7);
         let pkey_mask = self.rd_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page.is_some()
         {
@@ -2346,7 +2365,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     ) -> Result<()> {
         let user = (curr_pl == 3) as u32;
         let lpf = laddr & super::tlb::LPF_MASK;
-        let tlb = self.dtlb.get_entry_of(laddr, 3);
+        let tlb = self.dtlb.entry_of(laddr, 3);
         let pkey_mask = self.wr_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf
             && tlb.is_shadow_stack_write_ok(user, pkey_mask)
@@ -2376,7 +2395,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     ) -> Result<()> {
         let user = (curr_pl == 3) as u32;
         let lpf = laddr & super::tlb::LPF_MASK;
-        let tlb = self.dtlb.get_entry_of(laddr, 7);
+        let tlb = self.dtlb.entry_of(laddr, 7);
         let pkey_mask = self.wr_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf
             && tlb.is_shadow_stack_write_ok(user, pkey_mask)
@@ -2406,13 +2425,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // ---- Inline TLB fast path (Bochs access2.cc) ----
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 7);
-        if tlb.lpf == lpf && (tlb.access_bits
+        let tlb = self.dtlb.entry_of(laddr, 7);
+        if tlb.lpf == lpf
+            && (tlb.access_bits
                 & needed_bit
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
-                != 0 && tlb.host_page.is_some() {
+                != 0
+            && tlb.host_page.is_some()
+        {
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
-            let host_addr = super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | page_offset;
+            let host_addr =
+                super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.smc_write_check(paddr, 8);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
@@ -2464,7 +2487,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn prepare_rmw_linear_byte(&mut self, laddr: u64) -> Result<()> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 0);
+        let tlb = self.dtlb.entry_of(laddr, 0);
         if self.mmio.is_empty()
             && tlb.lpf == lpf
             && (tlb.access_bits
@@ -2473,10 +2496,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 != 0
             && tlb.host_page.is_some()
         {
-            self.address_xlation.pages =
-                super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | (laddr & 0x0fff) as BxPtrEquiv;
-            self.address_xlation.paddress1 =
-                tlb.ppf | (laddr & 0x0fff) as BxPhyAddress;
+            // Both values are read out of the entry before either is
+            // stored: the probe holds the TLB shared, and writing
+            // `address_xlation` needs the context mutably.
+            let pages = super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page)
+                | (laddr & 0x0fff) as BxPtrEquiv;
+            let paddress1 = tlb.ppf | (laddr & 0x0fff) as BxPhyAddress;
+            self.address_xlation.pages = pages;
+            self.address_xlation.paddress1 = paddress1;
             return Ok(());
         }
 
@@ -2514,7 +2541,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // ---- Inline TLB fast path (Bochs access2.cc) ----
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 1);
+        let tlb = self.dtlb.entry_of(laddr, 1);
         if self.mmio.is_empty()
             && tlb.lpf == lpf
             && (tlb.access_bits
@@ -2524,7 +2551,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             && tlb.host_page.is_some()
         {
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
-            let host_addr = super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | page_offset;
+            let host_addr =
+                super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
@@ -2593,7 +2621,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn prepare_rmw_linear_dword(&mut self, laddr: u64) -> Result<()> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
-        let tlb = self.dtlb.get_entry_of(laddr, 3);
+        let tlb = self.dtlb.entry_of(laddr, 3);
         if self.mmio.is_empty()
             && tlb.lpf == lpf
             && (tlb.access_bits
@@ -2602,10 +2630,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 != 0
             && tlb.host_page.is_some()
         {
-            self.address_xlation.pages =
-                super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | (laddr & 0x0fff) as BxPtrEquiv;
-            self.address_xlation.paddress1 =
-                tlb.ppf | (laddr & 0x0fff) as BxPhyAddress;
+            // Both values are read out of the entry before either is
+            // stored: the probe holds the TLB shared, and writing
+            // `address_xlation` needs the context mutably.
+            let pages = super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page)
+                | (laddr & 0x0fff) as BxPtrEquiv;
+            let paddress1 = tlb.ppf | (laddr & 0x0fff) as BxPhyAddress;
+            self.address_xlation.pages = pages;
+            self.address_xlation.paddress1 = paddress1;
             return Ok(());
         }
 
@@ -3149,21 +3181,27 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::cpu::{
-        builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX, crregs::BxCr0,
-    };
+    use crate::cpu::crregs::BxCr0;
 
     #[test]
     fn bulk_host_mapping_rejects_pci_hole_and_translates_above_4g() {
+        // A `TestMachine` embeds memory, devices, the device manager and
+        // the PC system — more than a default test stack holds.
+        const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
         const GIB: usize = 1 << 30;
         const HIGH_GPA: u64 = 0x1_0000_0100;
         const PCI_HOLE: u64 = 0xC000_0000;
 
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
         let fake_base = 0x1000usize as *mut u8;
         // This test exercises pointer selection only; no returned pointer is
         // dereferenced. The synthetic extent avoids a multi-GiB allocation
-        // while making the high-GPA translation observable.
+        // while making the high-GPA translation observable, so the context's
+        // real bases are overridden here rather than provisioned.
         cpu.mem_host_base = fake_base;
         cpu.mem_host_len = 3 * GIB + 0x180;
         cpu.a20_mask = u64::MAX;
@@ -3208,5 +3246,9 @@ mod tests {
             cpu.get_host_write_ptr_for_bulk(laddr).unwrap().is_none(),
             "a TLB pointer must not bypass the PCI hole"
         );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

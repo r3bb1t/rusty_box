@@ -5,7 +5,7 @@
 //! Safe structs backed by byte arrays with inline accessor methods.
 //! On x86 targets LLVM optimises from_le_bytes/to_le_bytes to identical code as union access.
 
-use crate::cpu::{decoder::Instruction, BxCpuC};
+use crate::cpu::decoder::Instruction;
 
 pub(super) const MXCSR_RESET: u32 = Mxcsr::RESET.bits();
 pub(super) const MXCSR_MASK: u32 = 0x0000_FFBF; // Valid bits mask (no bit 6 DAZ on older CPUs)
@@ -406,7 +406,7 @@ pub(super) const MXCSR_EXCEPTIONS: u32 = Mxcsr::IE
 // CPU helper methods for XMM register access
 // ============================================================================
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Clear a vector register (all 512 bits to zero)
     #[allow(non_snake_case)]
     pub(super) fn BX_CLEAR_AVX_REG(&mut self, index: usize) {
@@ -563,7 +563,6 @@ mod tests {
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use crate::{
         cpu::{
-            core_i7_skylake::Corei7SkylakeX,
             cpu::Exception,
             CpuSetupMode, X86Reg,
         },

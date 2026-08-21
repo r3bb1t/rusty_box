@@ -9,6 +9,8 @@
 
 #[cfg(feature = "alloc")]
 use crate::gui::BxGui;
+#[cfg(feature = "std")]
+use crate::pc_system::TimerOwner;
 #[cfg(feature = "alloc")]
 use crate::{
     cpu::builder::BxCpuBuilder, iodev::acpi_tables::AcpiTableGenerator, memory::MemoryError,
@@ -28,8 +30,6 @@ use crate::{
     pc_system::BxPcSystemC,
     Error, Result,
 };
-#[cfg(feature = "std")]
-use crate::pc_system::TimerOwner;
 
 #[cfg(feature = "alloc")]
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
@@ -202,6 +202,20 @@ const SLOWDOWN_MAX_DELAY_USEC: u32 = 1_500;
 #[cfg(feature = "std")]
 const SLOWDOWN_REALTIME_QUANTUM_USEC: u64 = 1_000_000;
 
+/// One data-TLB slot, as [`Emulator::get_dtlb_info`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DtlbInfo {
+    /// Linear page frame the slot is tagged with.
+    pub lpf: u64,
+    /// Physical page frame it maps to.
+    pub ppf: u64,
+    /// Per-privilege permission bits Bochs calls `accessBits`.
+    pub access_bits: u32,
+    /// Byte offset of the backing page into guest RAM, or `None` when the page
+    /// has no direct mapping.
+    pub ram_offset: Option<usize>,
+}
+
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SlowdownAction {
@@ -265,8 +279,7 @@ impl SlowdownTimerState {
         emulated_time_usec: u64,
         host_time: std::time::Instant,
     ) -> SlowdownAction {
-        let total_emulated_usec =
-            emulated_time_usec.saturating_sub(self.start_emulated_time_usec);
+        let total_emulated_usec = emulated_time_usec.saturating_sub(self.start_emulated_time_usec);
         let total_realtime_usec =
             u64::try_from(host_time.duration_since(self.start_time).as_micros())
                 .unwrap_or(u64::MAX);
@@ -473,7 +486,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
         }
     }
 
-
     #[cfg(feature = "alloc")]
     pub(crate) fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<T> {
         if index == 0 {
@@ -497,6 +509,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             ap_cpus,
             memory,
             devices,
+            device_manager,
             pc_system,
             ..
         } = self;
@@ -505,7 +518,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         } else {
             &mut ap_cpus[index - 1]
         };
-        crate::cpu::exec_ctx::ExecCtx::new(this_cpu, memory, devices, pc_system)
+        crate::cpu::exec_ctx::ExecCtx::new(this_cpu, memory, devices, device_manager, pc_system)
     }
 
     /// No-alloc counterpart. Same split, different storage: the BSP is
@@ -518,6 +531,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             ap_cpu_ptrs,
             memory,
             devices,
+            device_manager,
             pc_system,
             ..
         } = self;
@@ -529,7 +543,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             // borrow of this one.
             unsafe { &mut *ap_cpu_ptrs[index - 1] }
         };
-        crate::cpu::exec_ctx::ExecCtx::new(this_cpu, memory, devices, pc_system)
+        crate::cpu::exec_ctx::ExecCtx::new(this_cpu, memory, devices, device_manager, pc_system)
     }
 
     #[cfg(not(feature = "alloc"))]
@@ -571,14 +585,18 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 acpi,
                 vga,
             )
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+            .map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+            })?;
 
         let sci_level = self
             .device_manager
             .acpi
             .post_restore_snapshot_v3(self.pc_system.time_ticks());
         self.device_manager.serial.after_restore_snapshot_v3()?;
-        self.device_manager.vga.rebuild_snapshot_v3_derived_state()?;
+        self.device_manager
+            .vga
+            .rebuild_snapshot_v3_derived_state()?;
         self.validate_restored_irq_levels(&keyboard, &cmos, sci_level)?;
         self.sync_restored_event_levels();
         self.rebuild_cpu_masks_from_scan();
@@ -697,8 +715,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             if seek_in_flight {
                 continue;
             }
-            if pic.irq_line_level(irq) != self.device_manager.ide.drives.get_irq_level(channel)
-            {
+            if pic.irq_line_level(irq) != self.device_manager.ide.drives.get_irq_level(channel) {
                 return Err(mismatch("ATA IRQ"));
             }
         }
@@ -906,8 +923,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
         core::ptr::addr_of_mut!((*ptr).initialized).write(false);
         core::ptr::addr_of_mut!((*ptr).snapshot_restore_failed).write(false);
         core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
-            core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
-            core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
+        core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
+        core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
         core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
         Ok(&mut *ptr)
     }
@@ -1332,7 +1349,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
         tracing::debug!("Emulator reset ({:?})", reset_type);
         self.devices.discard_scheduler_boundary_work();
 
-
         // Reset PC system (enables A20)
         self.pc_system.reset(reset_type);
 
@@ -1528,10 +1544,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     pub fn peek_ram_at(&mut self, addr: usize, len: usize) -> alloc::vec::Vec<u8> {
         let mut bytes = alloc::vec![0; len];
         // Stable emulator pin storage outlives the exclusive memory borrow.
-        let copied = self
-            .memory
-            .read_ram(addr as u64, &mut bytes)
-            .unwrap_or(0);
+        let copied = self.memory.read_ram(addr as u64, &mut bytes).unwrap_or(0);
         bytes.truncate(copied);
         bytes
     }
@@ -1638,7 +1651,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
         spt: u8,
     ) -> std::io::Result<()> {
         self.device_manager
-            .ide.drives
+            .ide
+            .drives
             .attach_disk(channel, drive, path, cylinders, heads, spt)
     }
 
@@ -1651,7 +1665,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
         path: &str,
     ) -> std::io::Result<()> {
         self.device_manager
-            .ide.drives
+            .ide
+            .drives
             .attach_cdrom_image(channel, drive, path)
     }
 
@@ -1713,7 +1728,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// Attach a CD-ROM ISO from in-memory data (for UEFI, WASM, or any environment).
     pub fn attach_cdrom_data(&mut self, channel: usize, drive: usize, data: alloc::vec::Vec<u8>) {
         self.device_manager
-            .ide.drives
+            .ide
+            .drives
             .attach_cdrom_data(channel, drive, data);
     }
 
@@ -1732,14 +1748,16 @@ impl<'a, T: Instrumentation> Emulator<T> {
         spt: u8,
     ) {
         self.device_manager
-            .ide.drives
+            .ide
+            .drives
             .attach_disk_data(channel, drive, data, cylinders, heads, spt);
     }
 
     /// Attach a CD-ROM ISO from a static byte slice (no-alloc).
     pub fn attach_cdrom_data_ref(&mut self, channel: usize, drive: usize, data: &'static [u8]) {
         self.device_manager
-            .ide.drives
+            .ide
+            .drives
             .attach_cdrom_data_ref(channel, drive, data);
     }
 
@@ -1754,7 +1772,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
         spt: u8,
     ) {
         self.device_manager
-            .ide.drives
+            .ide
+            .drives
             .attach_disk_data_ref(channel, drive, data, cylinders, heads, spt);
     }
 
@@ -1891,29 +1910,27 @@ impl<'a, T: Instrumentation> Emulator<T> {
         }
     }
 
-    /// Get DTLB entry info for a given linear address.
-    /// Returns (lpf, ppf, access_bits, host page address) for the TLB slot
-    /// that would be used for a dword read at `laddr`.
-    pub fn get_dtlb_info(&self, laddr: u64) -> (u64, u64, u32, crate::config::BxPtrEquiv) {
+    /// The DTLB slot a dword read at `laddr` would use.
+    ///
+    /// `ram_offset` is `None` when the page carries no direct mapping — it is
+    /// MMIO, ROM, or outside guest RAM — which is exactly what the entry
+    /// stores. Reporting the offset rather than a host address keeps this
+    /// answerable without a live execution context, and is the unit the entry
+    /// is actually keyed by (R4).
+    pub fn get_dtlb_info(&self, laddr: u64) -> DtlbInfo {
         let idx = self.cpu.dtlb.get_index_of(laddr, 3);
         let entry = &self.cpu.dtlb.entries[idx];
-        (
-            entry.lpf,
-            entry.ppf,
-            entry.access_bits,
-            crate::cpu::tlb::host_page_addr_bits(self.cpu.mem_host_base, entry.host_page),
-        )
+        DtlbInfo {
+            lpf: entry.lpf,
+            ppf: entry.ppf,
+            access_bits: entry.access_bits,
+            ram_offset: entry.host_page.map(|page| page.ram_offset()),
+        }
     }
 
     /// Get user_pl flag (true = CPL==3).
     pub fn get_user_pl(&self) -> bool {
         self.cpu.user_pl
-    }
-
-
-    /// Get mem_host_len for diagnostics.
-    pub fn get_mem_host_len(&self) -> usize {
-        self.cpu.mem_host_len
     }
 
     /// Read a physical dword through the block-aware RAM interface.
@@ -2093,9 +2110,8 @@ impl<T: Instrumentation> Emulator<T> {
                 if pml4e & 1 == 0 {
                     return 0;
                 }
-                let pdpte = self.read_physical_u64_or_zero(
-                    (pml4e & 0xFFFFF_FFFFF000) + pdpt_idx * 8,
-                );
+                let pdpte =
+                    self.read_physical_u64_or_zero((pml4e & 0xFFFFF_FFFFF000) + pdpt_idx * 8);
                 if pdpte & 1 == 0 {
                     return 0;
                 }
@@ -2104,20 +2120,15 @@ impl<T: Instrumentation> Emulator<T> {
                         (pdpte & 0xFFFFF_C0000000) | (addr & 0x3FFFFFFF),
                     );
                 }
-                let pde = self.read_physical_u64_or_zero(
-                    (pdpte & 0xFFFFF_FFFFF000) + pd_idx * 8,
-                );
+                let pde = self.read_physical_u64_or_zero((pdpte & 0xFFFFF_FFFFF000) + pd_idx * 8);
                 if pde & 1 == 0 {
                     return 0;
                 }
                 if pde & 0x80 != 0 {
-                    return self.read_physical_u64_or_zero(
-                        (pde & 0xFFFFF_FFE00000) | (addr & 0x1FFFFF),
-                    );
+                    return self
+                        .read_physical_u64_or_zero((pde & 0xFFFFF_FFE00000) | (addr & 0x1FFFFF));
                 }
-                let pte = self.read_physical_u64_or_zero(
-                    (pde & 0xFFFFF_FFFFF000) + pt_idx * 8,
-                );
+                let pte = self.read_physical_u64_or_zero((pde & 0xFFFFF_FFFFF000) + pt_idx * 8);
                 if pte & 1 == 0 {
                     return 0;
                 }
@@ -2146,16 +2157,14 @@ impl<T: Instrumentation> Emulator<T> {
             let pt_idx = (rip >> 12) & 0x1FF;
             let pml4e = self.read_physical_u64_or_zero(cr3 + pml4_idx * 8);
             if pml4e & 1 != 0 {
-                let pdpte = self.read_physical_u64_or_zero(
-                    (pml4e & 0x000FFFFF_FFFFF000) + pdpt_idx * 8,
-                );
+                let pdpte =
+                    self.read_physical_u64_or_zero((pml4e & 0x000FFFFF_FFFFF000) + pdpt_idx * 8);
                 if pdpte & 1 != 0 {
                     let paddr = if pdpte & 0x80 != 0 {
                         (pdpte & 0x000FFFFF_C0000000) | (rip & 0x3FFFFFFF)
                     } else {
-                        let pde = self.read_physical_u64_or_zero(
-                            (pdpte & 0x000FFFFF_FFFFF000) + pd_idx * 8,
-                        );
+                        let pde = self
+                            .read_physical_u64_or_zero((pdpte & 0x000FFFFF_FFFFF000) + pd_idx * 8);
                         if pde & 1 != 0 {
                             if pde & 0x80 != 0 {
                                 (pde & 0x000FFFFF_FFE00000) | (rip & 0x1FFFFF)

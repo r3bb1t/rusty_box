@@ -6,7 +6,6 @@
 //! (LLDT and LTR are in segment_ctrl_pro.rs)
 
 use super::{
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
     descriptor::SegTypeBits,
     Result,

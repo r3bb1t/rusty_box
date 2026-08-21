@@ -2569,8 +2569,6 @@ mod tests {
     //! that, because a wrong-width handler produces a correct-looking result
     //! everywhere except the masked lanes.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::{BxSegregs, Instruction};
     use rusty_box_decoder::opcode::Opcode;
 

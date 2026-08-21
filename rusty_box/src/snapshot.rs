@@ -593,7 +593,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
     use crate::{
         cpu::{
-            core_i7_skylake::Corei7SkylakeX,
             cpu::CpuActivityState,
             instrumentation::CpuSetupMode,
             X86Reg,
@@ -720,7 +719,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             "expected {expected_message:?} in {error:?}"
         );
         assert!(!emu.is_initialized());
-        let execution_error = unsafe { emu.run_cpu_batch(1) }.unwrap_err();
+        let execution_error = emu.run_cpu_batch(1).unwrap_err();
         assert!(
             matches!(execution_error, crate::cpu::CpuError::CpuNotInitialized),
             "poisoned machine executed after restore failure: {execution_error}"

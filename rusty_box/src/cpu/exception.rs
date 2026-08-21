@@ -4,7 +4,7 @@ use crate::cpu::{
     decoder::features::X86Feature,
 };
 
-use super::{BxCpuC, Result};
+use super::Result;
 
 /// Interrupt type, based on BX_INTERRUPT_TYPE in Bochs
 #[derive(Debug, Clone, Copy)]
@@ -248,7 +248,7 @@ const EXCEPTIONS_INFO: [BxExceptionInfo; BX_CPU_HANDLED_EXCEPTIONS as _] = [
     },
 ];
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Bochs `BX_CPU_C::get_exception_type` — returns the exception-type
     /// classification (BENIGN/CONTRIBUTORY/PAGE_FAULT/DOUBLE_FAULT) for
     /// the given vector. Out-of-range vectors return BENIGN. #CP and
@@ -286,8 +286,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // Diagnostic ring for the pf_diag tripwire (see cpu.rs field docs).
         #[cfg(feature = "std")]
         {
-            self.exc_diag_ring[self.exc_diag_idx % 32] =
-                (self.icount, vector as u8, error_code, self.prev_rip);
+            let slot = self.exc_diag_idx % 32;
+            self.exc_diag_ring[slot] = (self.icount, vector as u8, error_code, self.prev_rip);
             self.exc_diag_idx = self.exc_diag_idx.wrapping_add(1);
         }
         // Log the caller site for #GP to identify spurious exceptions during debugging
@@ -347,10 +347,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         if matches!(exception_class, ExceptionClass::Fault) {
             // restore RIP/RSP to value before error occurred
-            self.set_rip(self.prev_rip);
+            let rip = self.prev_rip;
+            self.set_rip(rip);
             if self.speculative_rsp {
-                self.set_rsp(self.prev_rsp);
-                self.set_ssp(self.prev_ssp);
+                let rsp = self.prev_rsp;
+                self.set_rsp(rsp);
+                let ssp = self.prev_ssp;
+                self.set_ssp(ssp);
             }
             self.speculative_rsp = false;
 

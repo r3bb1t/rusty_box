@@ -415,7 +415,6 @@ pub struct BxDevicesC {
     pub(crate) diag_io_writes: u64,
     /// Pointer to DeviceManager for enum-based I/O dispatch.
     /// Set by the emulator before CPU execution; single-threaded.
-    device_manager: Option<core::ptr::NonNull<devices::DeviceManager>>,
     /// Final physical INT level after the latest I/O dispatch which changed
     /// the PIC. This overwrites edge history so a clear followed by a reassert
     /// is observed by the CPU as asserted.
@@ -474,7 +473,6 @@ impl BxDevicesC {
             last_io_read_value: 0,
             diag_io_reads: 0,
             diag_io_writes: 0,
-            device_manager: None,
             pic_intr_level: None,
             hrq_level: None,
             scheduler_boundary_requested: false,
@@ -689,6 +687,7 @@ impl BxDevicesC {
         io_len: u8,
         current_ticks: u64,
         pc_system: &mut crate::pc_system::BxPcSystemC,
+        dm: &mut devices::DeviceManager,
     ) -> u32 {
         self.diag_io_reads += 1;
         let entry = &self.read_handlers[port as usize];
@@ -704,7 +703,7 @@ impl BxDevicesC {
         let mut pic_intr_level = None;
         let mut hrq_level = None;
         let value = if let Some(width) = handler_width {
-            if let Some(dm) = self.device_manager_mut() {
+            {
                 // Devices on the device API route through one context; the
                 // rest still go through per-device dispatch. The two sets are
                 // disjoint by construction — `bind_pio` answers for exactly the
@@ -735,8 +734,6 @@ impl BxDevicesC {
                 }
                 pic_intr_level = Self::take_pic_level_after_dispatch(dm);
                 result
-            } else {
-                self.default_read_handler(port, io_len)
             }
         } else {
             self.default_read_handler(port, io_len)
@@ -761,6 +758,7 @@ impl BxDevicesC {
         io_len: u8,
         current_ticks: u64,
         pc_system: &mut crate::pc_system::BxPcSystemC,
+        dm: &mut devices::DeviceManager,
     ) {
         self.diag_io_writes += 1;
         let entry = &self.write_handlers[port as usize];
@@ -774,7 +772,7 @@ impl BxDevicesC {
             let mut pic_intr_level = None;
             let mut hrq_level = None;
             let mut machine_boundary_pending = false;
-            let dispatched = if let Some(dm) = self.device_manager_mut() {
+            let dispatched = {
                 // See `inp` on why the two paths cannot overlap.
                 let mut routed = false;
                 if let Some(bound) = dm.bind_pio(slot, port) {
@@ -803,8 +801,6 @@ impl BxDevicesC {
                 pic_intr_level = Self::take_pic_level_after_dispatch(dm);
                 machine_boundary_pending = dm.has_pending_machine_boundary();
                 true
-            } else {
-                false
             };
 
             if machine_boundary_pending {
@@ -841,11 +837,9 @@ impl BxDevicesC {
         len: u32,
         data: &mut [u8],
         clock: device_api::DeviceClock,
+        dm: &mut devices::DeviceManager,
     ) -> bool {
         let slot = DevSlot::from_mmio_token(token);
-        let Some(dm) = self.device_manager_mut() else {
-            return false;
-        };
         match dm.bind_mmio(slot) {
             Some(device) => {
                 device.mmio_read(addr, len, data, clock);
@@ -866,11 +860,9 @@ impl BxDevicesC {
         len: u32,
         data: &[u8],
         clock: device_api::DeviceClock,
+        dm: &mut devices::DeviceManager,
     ) -> bool {
         let slot = DevSlot::from_mmio_token(token);
-        let Some(dm) = self.device_manager_mut() else {
-            return false;
-        };
         match dm.bind_mmio(slot) {
             Some(device) => {
                 device.mmio_write(addr, len, data, clock);
@@ -895,6 +887,7 @@ impl BxDevicesC {
         io_len: u8,
         buf: &mut [u8],
         current_ticks: u64,
+        dm: &mut devices::DeviceManager,
     ) -> usize {
         // Only optimize IDE data ports (base + 0 = data register).
         if (port != 0x1F0 && port != 0x170) || (io_len != 2 && io_len != 4) {
@@ -910,7 +903,7 @@ impl BxDevicesC {
         // future device-owned timer producers preserve the same boundary.
         let _ = current_ticks;
         let mut pic_intr_level = None;
-        let bytes_read = if let Some(dm) = self.device_manager_mut() {
+        let bytes_read = {
             let result = {
                 let devices::DeviceManager {
                     ref mut ide,
@@ -932,8 +925,6 @@ impl BxDevicesC {
             }
             pic_intr_level = Self::take_pic_level_after_dispatch(dm);
             result
-        } else {
-            0
         };
         if let Some(level) = pic_intr_level {
             self.pic_intr_level = Some(level);
@@ -1144,24 +1135,6 @@ impl BxDevicesC {
     /// Drain BIOS POST codes (port 0x80/0x84) as an iterator (no-alloc).
     pub fn drain_port80_output(&mut self) -> Port80Drain<'_> {
         Port80Drain(self.port80_output.drain())
-    }
-
-    /// Set device_manager pointer for enum-based I/O dispatch.
-    /// Called by emulator before CPU execution.
-    pub fn set_device_manager(&mut self, dm: core::ptr::NonNull<devices::DeviceManager>) {
-        self.device_manager = Some(dm);
-    }
-
-    /// Clear device_manager pointer after CPU execution.
-    pub fn clear_device_manager(&mut self) {
-        self.device_manager = None;
-    }
-
-    /// Access the device manager only while the emulator has installed its
-    /// single-threaded dispatch pointer for the current CPU slice.
-    #[inline(always)]
-    fn device_manager_mut(&mut self) -> Option<&mut devices::DeviceManager> {
-        self.device_manager.map(|mut pointer| unsafe { pointer.as_mut() })
     }
 
     /// Arm the IDE controller's own deadlines, anchored to the access that
@@ -1684,11 +1657,12 @@ mod tests {
     fn test_default_handlers() {
         let mut devices = boxed_devices();
         let mut pc_system = crate::pc_system::BxPcSystemC::new();
+        let mut dm = devices::DeviceManager::new();
 
         // Reading unhandled port should return 0xFF/0xFFFF/0xFFFFFFFF
-        assert_eq!(devices.inp(0x1234, 1, 0, &mut pc_system), 0xFF);
-        assert_eq!(devices.inp(0x1234, 2, 0, &mut pc_system), 0xFFFF);
-        assert_eq!(devices.inp(0x1234, 4, 0, &mut pc_system), 0xFFFFFFFF);
+        assert_eq!(devices.inp(0x1234, 1, 0, &mut pc_system, &mut dm), 0xFF);
+        assert_eq!(devices.inp(0x1234, 2, 0, &mut pc_system, &mut dm), 0xFFFF);
+        assert_eq!(devices.inp(0x1234, 4, 0, &mut pc_system, &mut dm), 0xFFFFFFFF);
     }
 
     // Bochs unmapped.cc port 0x8900 "Shutdown" protocol: the ASCII bytes of
@@ -1727,15 +1701,16 @@ mod tests {
     fn bios_message_ports_stay_out_of_the_e9_console_stream() {
         let mut devices = boxed_devices();
         let mut pc_system = crate::pc_system::BxPcSystemC::new();
+        let mut dm = devices::DeviceManager::new();
 
         // Bochs biosdev.cc: rombios/vgabios message ports flush to the log on
         // newline and must never reach the guest-visible 0xE9 console stream
         // (this leaked BIOS text onto the COM1 stdout mirror).
         for byte in b"PIIX3/PIIX4 init: elcr=60 70\n" {
-            devices.outp(0x0402, u32::from(*byte), 1, 0, &mut pc_system);
+            devices.outp(0x0402, u32::from(*byte), 1, 0, &mut pc_system, &mut dm);
         }
         for byte in b"VBE present\n" {
-            devices.outp(0x0500, u32::from(*byte), 1, 0, &mut pc_system);
+            devices.outp(0x0500, u32::from(*byte), 1, 0, &mut pc_system, &mut dm);
         }
         assert!(devices.port_e9_output.is_empty());
         assert_eq!(devices.bios_message_i, 0, "newline must flush the rombios buffer");
@@ -1744,29 +1719,38 @@ mod tests {
         // A line longer than the Bochs 80-byte buffer flushes on overflow and
         // keeps accumulating the remainder.
         for _ in 0..BX_BIOS_MESSAGE_SIZE + 5 {
-            devices.outp(0x0403, u32::from(b'x'), 1, 0, &mut pc_system);
+            devices.outp(0x0403, u32::from(b'x'), 1, 0, &mut pc_system, &mut dm);
         }
         assert_eq!(devices.bios_message_i, 5);
         assert!(devices.port_e9_output.is_empty());
 
         // The genuine port-0xE9 debug console still lands in the stream.
-        devices.outp(0x00E9, u32::from(b'X'), 1, 0, &mut pc_system);
+        devices.outp(0x00E9, u32::from(b'X'), 1, 0, &mut pc_system, &mut dm);
         assert_eq!(devices.port_e9_output.len(), 1);
     }
 
+    /// Port registration is per-instance state, not a global table: two
+    /// device buses in one process must not see each other's handlers.
+    /// Asserted on the routing tables themselves — an unclaimed port and a
+    /// claimed one can return the same value by coincidence.
     #[test]
     fn test_multiple_instances() {
         let mut dev1 = boxed_devices();
+        let dev2 = boxed_devices();
         let mut pc_system = crate::pc_system::BxPcSystemC::new();
-        let mut dev2 = boxed_devices();
+        let mut dm = devices::DeviceManager::new();
 
-        // Register handler only on dev1
         dev1.register_io_read_handler(DevSlot::PIC, 0x100, "test", 0x1);
 
-        // dev1 has a device registered, dev2 does not.
-        // Without a device_manager, both return default.
-        assert_eq!(dev1.inp(0x100, 1, 0, &mut pc_system), 0xFF);
-        assert_eq!(dev2.inp(0x100, 1, 0, &mut pc_system), 0xFF);
+        assert_eq!(dev1.read_handlers[0x100].slot, DevSlot::PIC);
+        assert!(
+            dev2.read_handlers[0x100].slot.is_none(),
+            "registering on one bus must not claim the port on another"
+        );
+
+        // The unclaimed bus still answers with the default handler.
+        assert_eq!(dev2.read_handlers[0x100].slot.is_none(), true);
+        let _ = dev1.inp(0x100, 1, 0, &mut pc_system, &mut dm);
     }
 
     #[test]
@@ -1855,9 +1839,7 @@ mod tests {
             dm.pic.master.int_pin = true;
 
             io.register_io_read_handler(DevSlot::PIC, 0x20, "PIC", 0x1);
-            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
-            let _ = io.inp(0x20, 1, 91, &mut pc_system);
-            io.clear_device_manager();
+            let _ = io.inp(0x20, 1, 91, &mut pc_system, &mut dm);
 
             assert_eq!(io.take_pic_intr_level(), Some(true));
             assert_eq!(io.take_pic_intr_level(), None);
@@ -1883,9 +1865,7 @@ mod tests {
 
             io.set_timer_ips(1_000_000);
             io.register_io_read_handler(DevSlot::KEYBOARD, keyboard::KBD_DATA_PORT, "Keyboard", 0x1);
-            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
-            assert_eq!(io.inp(keyboard::KBD_DATA_PORT, 1, 77, &mut pc_system), delivered);
-            io.clear_device_manager();
+            assert_eq!(io.inp(keyboard::KBD_DATA_PORT, 1, 77, &mut pc_system, &mut dm), delivered);
 
             assert_eq!(dm.pic.master.irq_in[1], 0);
             // The 8042 timer is continuous (Bochs keyboard.cc): keyboard port

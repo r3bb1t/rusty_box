@@ -578,8 +578,6 @@ mod tests {
     //! Memory-touching execution is exercised by guest code under alpine
     //! when AVX-512 paths are taken (none in alpine kernel itself).
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::{BxSegregs, Instruction};
     use rusty_box_decoder::fetch_decode64;
     use rusty_box_decoder::opcode::Opcode;

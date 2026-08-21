@@ -701,8 +701,6 @@ mod tests {
     //! *data* rather than as a writemask, and VPCONFLICT looks only backwards
     //! — element n never sees elements above it.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::BxSegregs;
     use rusty_box_decoder::opcode::Opcode;
 

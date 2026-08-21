@@ -13,7 +13,7 @@ use super::decoder::BxSegregs;
 use super::instrumentation::Instrumentation;
 use super::{BxCpuC, Result};
 
-impl<T: Instrumentation> BxCpuC<T> {
+impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Bochs uintr.cc uintr_masked — the user-level interrupt can be delivered
     /// only when running long-64 mode + UIF=1 + CPL=3.
     #[inline]
@@ -25,9 +25,9 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// event according to CR4.UINTR and UIRR state.
     pub(super) fn uintr_uirr_update(&mut self) {
         if self.cr4.uintr() && self.uintr.uirr != 0 {
-            self.signal_event(Self::BX_EVENT_PENDING_UINTR);
+            self.signal_event(BxCpuC::<T>::BX_EVENT_PENDING_UINTR);
         } else {
-            self.clear_event(Self::BX_EVENT_PENDING_UINTR);
+            self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_UINTR);
         }
     }
 
@@ -35,9 +35,9 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// according to the conditions that allow delivery.
     pub(super) fn uintr_control(&mut self) {
         if self.uintr_masked() {
-            self.mask_event(Self::BX_EVENT_PENDING_UINTR);
+            self.mask_event(BxCpuC::<T>::BX_EVENT_PENDING_UINTR);
         } else {
-            self.unmask_event(Self::BX_EVENT_PENDING_UINTR);
+            self.unmask_event(BxCpuC::<T>::BX_EVENT_PENDING_UINTR);
         }
     }
 

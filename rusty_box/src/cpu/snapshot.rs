@@ -1293,7 +1293,6 @@ mod tests {
     use std::io::Cursor;
 
     use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::crregs::{BxCr0, BxEfer};
     use crate::cpu::decoder::BxSegregs;
     use crate::cpu::eflags::EFlags;

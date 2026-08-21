@@ -796,8 +796,14 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
 
     /// Translate a guest virtual address to guest physical address using
     /// the current page tables (CR3). Returns Err on page fault.
-    pub fn virt_to_phys(&self, vaddr: u64) -> Result<u64> {
-        self.cpu().translate_linear_for_api(vaddr).map_err(Error::Cpu)
+    ///
+    /// Takes `&mut self` because the walk reads the guest's paging structures
+    /// the same way an executing walk does — through the routed physical path,
+    /// which can page a block back in under partial residency.
+    pub fn virt_to_phys(&mut self, vaddr: u64) -> Result<u64> {
+        self.exec_ctx(0)
+            .translate_linear_system_read(vaddr)
+            .map_err(Error::Cpu)
     }
 
     /// Read bytes from guest VIRTUAL memory. Translates through current
@@ -826,7 +832,9 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
             let va = vaddr + offset as u64;
             let page_offset = (va & 0xFFF) as usize;
             let chunk = (0x1000 - page_offset).min(buf.len() - offset);
-            let pa = self.cpu().translate_linear_with_cr3_for_api(va, cr3)
+            let pa = self
+                .exec_ctx(0)
+                .translate_linear_with_cr3(va, cr3)
                 .ok_or_else(|| Error::Memory(crate::memory::MemoryError::PageNotPresent))?;
             self.mem_read(pa, &mut buf[offset..offset + chunk])?;
             offset += chunk;
@@ -1194,7 +1202,6 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    use crate::cpu::core_i7_skylake::Corei7SkylakeX;
 
     /// Reg read/write round-trip on a fresh emulator.
     #[test]

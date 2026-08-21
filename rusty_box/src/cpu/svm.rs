@@ -374,7 +374,7 @@ use super::{
     segment_ctrl_pro::parse_selector,
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =====================================================================
     //  VMCB physical-memory access helpers
     // =====================================================================
@@ -402,12 +402,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             let host = self.vmcb_host_ptr(base, offset) as *const u8;
             // SAFETY: the offset was validated by set_vmcbptr; single-threaded
             unsafe { *host }
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            let mut data = [0u8; 1];
-            let _ = self.read_physical_routed(mem, policy, paddr, 1, &mut data);
-            data[0]
         } else {
-            0
+            let policy = self.access_policy(paddr);
+            let mut data = [0u8; 1];
+            if let Err(e) = self.read_physical_routed(policy, paddr, 1, &mut data) {
+                tracing::warn!("vmcb_read8({:#010x}) failed: {:?}", offset, e);
+                return 0xff;
+            }
+            data[0]
         }
     }
 
@@ -417,12 +419,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if let Some(base) = self.vmcb_host_offset {
             let host = self.vmcb_host_ptr(base, offset) as *const [u8; 2];
             u16::from_le_bytes(unsafe { *host })
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            let mut data = [0u8; 2];
-            let _ = self.read_physical_routed(mem, policy, paddr, 2, &mut data);
-            u16::from_le_bytes(data)
         } else {
-            0
+            let policy = self.access_policy(paddr);
+            let mut data = [0u8; 2];
+            if let Err(e) = self.read_physical_routed(policy, paddr, 2, &mut data) {
+                tracing::warn!("vmcb_read16({:#010x}) failed: {:?}", offset, e);
+                return 0xffff;
+            }
+            u16::from_le_bytes(data)
         }
     }
 
@@ -432,12 +436,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if let Some(base) = self.vmcb_host_offset {
             let host = self.vmcb_host_ptr(base, offset) as *const [u8; 4];
             u32::from_le_bytes(unsafe { *host })
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            let mut data = [0u8; 4];
-            let _ = self.read_physical_routed(mem, policy, paddr, 4, &mut data);
-            u32::from_le_bytes(data)
         } else {
-            0
+            let policy = self.access_policy(paddr);
+            let mut data = [0u8; 4];
+            if let Err(e) = self.read_physical_routed(policy, paddr, 4, &mut data) {
+                tracing::warn!("vmcb_read32({:#010x}) failed: {:?}", offset, e);
+                return 0xffff_ffff;
+            }
+            u32::from_le_bytes(data)
         }
     }
 
@@ -447,12 +453,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if let Some(base) = self.vmcb_host_offset {
             let host = self.vmcb_host_ptr(base, offset) as *const [u8; 8];
             u64::from_le_bytes(unsafe { *host })
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            let mut data = [0u8; 8];
-            let _ = self.read_physical_routed(mem, policy, paddr, 8, &mut data);
-            u64::from_le_bytes(data)
         } else {
-            0
+            let policy = self.access_policy(paddr);
+            let mut data = [0u8; 8];
+            if let Err(e) = self.read_physical_routed(policy, paddr, 8, &mut data) {
+                tracing::warn!("vmcb_read64({:#010x}) failed: {:?}", offset, e);
+                return u64::MAX;
+            }
+            u64::from_le_bytes(data)
         }
     }
 
@@ -465,9 +473,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             unsafe {
                 *host = val;
             }
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+        } else {
+            let policy = self.access_policy(paddr);
             let mut data = [val];
-            let _ = self.write_physical_routed(mem, policy, paddr, 1, &mut data);
+            if let Err(e) = self.write_physical_routed(policy, paddr, 1, &mut data) {
+                tracing::warn!("vmcb_write8({:#010x}) failed: {:?}", offset, e);
+            }
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -481,9 +492,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             unsafe {
                 *host = val.to_le_bytes();
             }
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+        } else {
+            let policy = self.access_policy(paddr);
             let mut data = val.to_le_bytes();
-            let _ = self.write_physical_routed(mem, policy, paddr, 2, &mut data);
+            if let Err(e) = self.write_physical_routed(policy, paddr, 2, &mut data) {
+                tracing::warn!("vmcb_write16({:#010x}) failed: {:?}", offset, e);
+            }
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -497,9 +511,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             unsafe {
                 *host = val.to_le_bytes();
             }
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+        } else {
+            let policy = self.access_policy(paddr);
             let mut data = val.to_le_bytes();
-            let _ = self.write_physical_routed(mem, policy, paddr, 4, &mut data);
+            if let Err(e) = self.write_physical_routed(policy, paddr, 4, &mut data) {
+                tracing::warn!("vmcb_write32({:#010x}) failed: {:?}", offset, e);
+            }
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -513,9 +530,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             unsafe {
                 *host = val.to_le_bytes();
             }
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+        } else {
+            let policy = self.access_policy(paddr);
             let mut data = val.to_le_bytes();
-            let _ = self.write_physical_routed(mem, policy, paddr, 8, &mut data);
+            if let Err(e) = self.write_physical_routed(policy, paddr, 8, &mut data) {
+                tracing::warn!("vmcb_write64({:#010x}) failed: {:?}", offset, e);
+            }
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -582,13 +602,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.vmcbptr = vmcbptr;
         if vmcbptr != 0 {
             // Try to get a direct host pointer for fast VMCB access
-            if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(vmcbptr) } {
+            {
+                let policy = self.access_policy(vmcbptr);
                 use super::rusty_box::MemoryAccessType;
-                match mem.host_mem_range_pinned(
-                    vmcbptr,
-                    MemoryAccessType::RW,
-                    policy,
-                ) {
+                match self
+                    .memory
+                    .host_mem_range_pinned(vmcbptr, MemoryAccessType::RW, policy)
+                {
                     // VMCB accessors directly offset this base through PAT.
                     // A block-backed span may end sooner, in which case the
                     // handler-aware physical-access paths remain authoritative.
@@ -730,7 +750,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         self.vmcb_write8(SVM_GUEST_CPL, cpl);
 
-        let inhibit = self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS);
+        let inhibit = self.interrupts_inhibited(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS);
         self.vmcb_write8(SVM_CONTROL_INTERRUPT_SHADOW, inhibit as u8);
 
         let nested_paging = self.vmcb.as_ref().map_or(false, |v| v.ctrls.nested_paging);
@@ -990,7 +1010,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.sregs[BxSegregs::Ss as usize].cache.dpl = guest_cpl;
 
         if guest_inhibit {
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS);
+            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS);
         }
 
         self.async_event = 0;
@@ -1045,9 +1065,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
 
         // VMEXITs are FAULT-like: restore RIP/RSP to pre-instruction values
-        self.set_rip(self.prev_rip);
+        let rip = self.prev_rip;
+        self.set_rip(rip);
         if self.speculative_rsp {
-            self.set_rsp(self.prev_rsp);
+            let rsp = self.prev_rsp;
+            self.set_rsp(rsp);
         }
         self.speculative_rsp = false;
 
@@ -1549,9 +1571,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// bitmap regions, with the read failure logged so the cause is
     /// visible in traces.
     pub(super) fn read_physical_byte(&mut self, paddr: u64) -> u8 {
-        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return 0xff; };
+        let policy = self.access_policy(paddr);
         let mut data = [0u8; 1];
-        match self.read_physical_routed(mem, policy, paddr, 1, &mut data) {
+        match self.read_physical_routed(policy, paddr, 1, &mut data) {
             Ok(()) => data[0],
             Err(e) => {
                 tracing::warn!(

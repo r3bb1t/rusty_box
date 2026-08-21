@@ -2131,7 +2131,6 @@ mod tests {
 
     use super::*;
     use crate::cpu::{
-        core_i7_skylake::Corei7SkylakeX,
         instrumentation::{CpuSetupMode, X86Reg},
         CpuError,
     };
@@ -2302,7 +2301,7 @@ mod tests {
         code.push(0xEF);
         emu.virt_write(code_address, &code).unwrap();
         emu.reg_write(X86Reg::Rip, code_address);
-        unsafe { emu.run_cpu_batch(64) }
+        emu.run_cpu_batch(64)
     }
 
     fn guest_inb(emu: &mut Emulator, port: u16) -> crate::cpu::Result<u8> {
@@ -2316,7 +2315,7 @@ mod tests {
         ];
         emu.virt_write(GUEST_TEST_CODE, &code).unwrap();
         emu.reg_write(X86Reg::Rip, GUEST_TEST_CODE);
-        unsafe { emu.run_cpu_batch(2) }?;
+        emu.run_cpu_batch(2)?;
         assert_eq!(emu.devices.last_io_read_port, port);
         Ok(emu.reg_read(X86Reg::Rax) as u8)
     }
@@ -2332,7 +2331,7 @@ mod tests {
         code.extend_from_slice(&address.to_le_bytes());
         emu.virt_write(code_address, &code).unwrap();
         emu.reg_write(X86Reg::Rip, code_address);
-        unsafe { emu.run_cpu_batch(1) }
+        emu.run_cpu_batch(1)
     }
 
     #[test]
@@ -2551,7 +2550,7 @@ mod tests {
     #[test]
     fn bmdma_start_queues_timer_request_at_issuing_epoch() {
         on_big_stack(|| {
-            use crate::iodev::{DeviceTimerOwner, TimerRequest};
+            use crate::iodev::{TimerRequest};
 
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
@@ -2572,13 +2571,11 @@ mod tests {
             dm.ide.bus_master.bmdma[0].timer_index = Some(ch0);
             dm.ide.bus_master.bmdma[1].timer_index = Some(ch1);
 
-            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
 
             // Guest programs DTPR and starts the engine. Bochs arms the
             // one-tick BM-DMA callback at this issuing instruction's epoch.
-            io.outp(0xC004, 0x8000, 4, 41, &mut pc_system);
-            io.outp(0xC000, 0x09, 1, 41, &mut pc_system);
-            io.clear_device_manager();
+            io.outp(0xC004, 0x8000, 4, 41, &mut pc_system, &mut dm);
+            io.outp(0xC000, 0x09, 1, 41, &mut pc_system, &mut dm);
 
             assert_eq!(
                 dm.ide.bus_master.take_pending_timer_arm(0),
@@ -2643,12 +2640,10 @@ mod tests {
                 "port 0xCF9 read must be registered (Bochs pci2isa.cc init)"
             );
 
-            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
             // Set reset type = hardware (bit1), then trigger (bit1|bit2) —
             // Bochs pci2isa.cc write case 0x0cf9.
-            io.outp(0x0CF9, 0x02, 1, 0, &mut pc_system);
-            io.outp(0x0CF9, 0x06, 1, 0, &mut pc_system);
-            io.clear_device_manager();
+            io.outp(0x0CF9, 0x02, 1, 0, &mut pc_system, &mut dm);
+            io.outp(0x0CF9, 0x06, 1, 0, &mut pc_system, &mut dm);
 
             assert_eq!(
                 dm.pci2isa.reset_request,
@@ -2656,9 +2651,7 @@ mod tests {
                 "OUT 0xCF9,0x06 with reset_type=hardware must request a hardware reset"
             );
 
-            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
-            let value = io.inp(0x0CF9, 1, 0, &mut pc_system);
-            io.clear_device_manager();
+            let value = io.inp(0x0CF9, 1, 0, &mut pc_system, &mut dm);
             assert_eq!(
                 value, 0x02,
                 "read of 0xCF9 must return the stored pci_reset value, not the unhandled sentinel"
@@ -2676,11 +2669,9 @@ mod tests {
             let mut pc_system = crate::pc_system::BxPcSystemC::new();
             dm.register_pci_handlers(&mut io);
 
-            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
             // ELCR1 bit5 -> IRQ5 level-triggered (Bochs pci2isa.cc write case
             // 0x04d0: DEV_pic_set_mode(1, elcr1)).
-            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system);
-            io.clear_device_manager();
+            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system, &mut dm);
 
             assert_eq!(dm.pci2isa.elcr1, 0x20);
             assert!(
@@ -2692,11 +2683,9 @@ mod tests {
                 "pic.set_mode(true, elcr1) must mirror ELCR1 into master edge_level"
             );
 
-            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
             // ELCR2 bit2 -> IRQ10 level-triggered (Bochs pci2isa.cc write case
             // 0x04d1: DEV_pic_set_mode(0, elcr2)).
-            io.outp(0x04D1, 0x04, 1, 0, &mut pc_system);
-            io.clear_device_manager();
+            io.outp(0x04D1, 0x04, 1, 0, &mut pc_system, &mut dm);
 
             assert_eq!(dm.pci2isa.elcr2, 0x04);
             assert!(
@@ -2719,9 +2708,7 @@ mod tests {
             dm.register_pci_handlers(&mut io);
 
             // Mark IRQ5 level-triggered via the real ELCR1 port write path.
-            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
-            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system);
-            io.clear_device_manager();
+            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system, &mut dm);
             assert_eq!(dm.pic.master.edge_level, 0x20);
 
             // Unmask IRQ5 and assert the line (a level-triggered device holds
@@ -2992,14 +2979,12 @@ mod tests {
             let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
             let mut mem = BxMemC::new(stub, false);
 
-            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
-            io.outp(0x0CF8, conf_addr(0x00, 0x59), 4, 11, &mut pc_system);
-            io.outp(0x0CFD, 0x30, 1, 11, &mut pc_system);
-            io.outp(0x0CF8, conf_addr(0x00, 0x72), 4, 11, &mut pc_system);
-            io.outp(0x0CFE, 0x48, 1, 11, &mut pc_system);
-            io.outp(0x0CF8, conf_addr(0x08, 0x4E), 4, 11, &mut pc_system);
-            io.outp(0x0CFE, 0x04, 1, 11, &mut pc_system);
-            io.clear_device_manager();
+            io.outp(0x0CF8, conf_addr(0x00, 0x59), 4, 11, &mut pc_system, &mut dm);
+            io.outp(0x0CFD, 0x30, 1, 11, &mut pc_system, &mut dm);
+            io.outp(0x0CF8, conf_addr(0x00, 0x72), 4, 11, &mut pc_system, &mut dm);
+            io.outp(0x0CFE, 0x48, 1, 11, &mut pc_system, &mut dm);
+            io.outp(0x0CF8, conf_addr(0x08, 0x4E), 4, 11, &mut pc_system, &mut dm);
+            io.outp(0x0CFE, 0x04, 1, 11, &mut pc_system, &mut dm);
 
             assert!(io.take_scheduler_boundary_requested());
             assert!(dm.pam_needs_update);

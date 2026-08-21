@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 #![allow(unused_unsafe)]
 
-use crate::cpu::{BxCpuC};
+use crate::cpu::BxCpuC;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Leave the ACTIVE activity state. Bochs proc_ctrl.cc `enter_sleep_state`.
@@ -281,33 +281,47 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.tsc_adjust = newval.wrapping_sub(system_ticks.wrapping_mul(Self::TSC_SCALE)) as i64
     }
 
-    /// Get current system ticks from pc_system (Bochs: bx_pc_system.time_ticks()).
-    /// Falls back to `cpu_ticks()` when pc_system is not wired (unit tests).
+    /// Tick count for a CPU that is not executing against a machine.
+    ///
+    /// Ticks this CPU has retired, with no machine clock involved.
+    ///
+    /// Deliberately NOT named `system_ticks`: that name also exists on
+    /// [`ExecCtx`](crate::cpu::exec_ctx::ExecCtx), and a `BxCpuC` method
+    /// reached through `Deref` from a context binds to THIS one silently.
+    /// A distinct name is what keeps a caller that wants machine time from
+    /// getting CPU-local time without a compile error.
+    #[inline]
+    pub(crate) fn cpu_local_ticks(&self) -> u64 {
+        self.cpu_ticks()
+    }
+}
+
+// =========================================================================
+// System control instructions
+// =========================================================================
+
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
+    /// Current system ticks — Bochs `bx_pc_system.time_ticks()`.
     ///
     /// UP observes the live pc-system clock plus the ticks this CPU generated
-    /// in the wired batch — `cpu_ticks()`, so fast-REP bulk transfers advance
+    /// in the current batch — `cpu_ticks()`, so fast-REP bulk transfers advance
     /// time exactly like Bochs BX_TICKN. SMP freezes every CPU's view at the
     /// round-start epoch and advances global time only when the emulator
     /// completes that full round.
     #[inline]
     pub(crate) fn system_ticks(&self) -> u64 {
-        let Some(pc_system) = self.pc_system_ptr else {
-            return self.cpu_ticks();
-        };
-        if self.pc_system_tick_denominator == 1 {
-            // SAFETY: pc_system_ptr is wired only for the active execution
-            // scope and cleared before the emulator regains this borrow.
-            let live_ticks = unsafe { pc_system.as_ref().time_ticks() };
-            live_ticks
-                .wrapping_add(self.cpu_ticks().wrapping_sub(self.pc_system_cpu_ticks_at_sync))
-        } else {
-            self.pc_system_ticks_at_sync
+        match self.slice_clock {
+            // Assembled outside a slice — no machine clock has been taken,
+            // so reading `pc_system` here would measure against a stale
+            // epoch from whichever slice ran last.
+            crate::cpu::cpu::SliceClock::Detached => self.cpu_local_ticks(),
+            crate::cpu::cpu::SliceClock::LiveUp { cpu_ticks_at_sync } => {
+                let live_ticks = self.pc_system.time_ticks();
+                live_ticks.wrapping_add(self.cpu_ticks().wrapping_sub(cpu_ticks_at_sync))
+            }
+            crate::cpu::cpu::SliceClock::FrozenRound { epoch } => epoch,
         }
     }
-
-    // =========================================================================
-    // System control instructions
-    // =========================================================================
 
     /// WBINVD — Write Back and Invalidate Cache
     /// Based on Bochs proc_ctrl.cc
@@ -893,7 +907,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.set_rax(ticks & 0xFFFF_FFFF);
         self.set_rdx(ticks >> 32);
         // ECX = IA32_TSC_AUX MSR (processor ID) — Bochs proc_ctrl.cc
-        self.set_rcx(self.msr.tsc_aux as u64);
+        let rcx = self.msr.tsc_aux as u64;
+        self.set_rcx(rcx);
 
         Ok(())
     }
@@ -1206,10 +1221,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         match msr {
-            BX_MSR_TSC => self.set_tsc(val, self.system_ticks()),
+            BX_MSR_TSC => {
+                let ticks = self.system_ticks();
+                self.set_tsc(val, ticks);
+            }
             BX_MSR_APICBASE => {
                 self.msr.apicbase = val as _;
-                self.lapic.set_base(self.msr.apicbase);
+                let apicbase = self.msr.apicbase;
+                self.lapic.set_base(apicbase);
                 self.sync_lapic_events();
             }
             BX_MSR_PLATFORM_ID => {
@@ -1287,7 +1306,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             // Bochs msr.cc PKS write — val stored, then set_PKeys recomputes allow masks.
             BX_MSR_IA32_PKRS => {
-                self.set_pkeys(self.pkru, val as u32);
+                let pkru = self.pkru;
+                self.set_pkeys(pkru, val as u32);
             }
             // Bochs msr.cc IA32_FEATURE_CONTROL write — once the LOCK bit
             // (bit 0) is set, changing the MSR raises #GP. Firmware can rerun
@@ -1550,8 +1570,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             4 | 6 => {
                 // DR6: preserve reserved bits, only allow bits 0-3 (B0-B3) and bits 13-15 (BD,BS,BT)
                 // Bochs crregs.cc: (dr6.val32 & 0xFFFF0FF0) | (val & 0x0000E00F)
-                self.dr6
-                    .set32((self.dr6.get32() & 0xFFFF0FF0) | (val & 0x0000E00F));
+                let dr6 = (self.dr6.get32() & 0xFFFF0FF0) | (val & 0x0000E00F);
+                self.dr6.set32(dr6);
             }
             5 | 7 => {
                 // DR7: mask off reserved bits and set bit 10 (always 1)
@@ -1916,23 +1936,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.setup_flat_ss(0);
         // Load RSP/RIP from MSRs (Bochs proc_ctrl.cc)
         if self.long_mode() {
-            self.set_rsp(self.msr.sysenter_esp_msr);
-            self.set_rip(self.msr.sysenter_eip_msr);
+            let rsp = self.msr.sysenter_esp_msr;
+            self.set_rsp(rsp);
+            let rip = self.msr.sysenter_eip_msr;
+            self.set_rip(rip);
         } else {
-            self.set_esp(self.msr.sysenter_esp_msr as u32);
-            self.set_eip(self.msr.sysenter_eip_msr as u32);
+            let esp = self.msr.sysenter_esp_msr as u32;
+            self.set_esp(esp);
+            let eip = self.msr.sysenter_eip_msr as u32;
+            self.set_eip(eip);
         }
 
         // Bochs: BX_INSTR_FAR_BRANCH(BX_CPU_ID, BX_INSTR_IS_SYSENTER, ...)
         let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .value;
-        self.on_far_branch(
-            super::instrumentation::BranchType::Sysenter,
-            0,
-            new_cs,
-            self.rip(),
-        );
+        let rip = self.rip();
+        self.on_far_branch(super::instrumentation::BranchType::Sysenter, 0, new_cs, rip);
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1978,8 +1998,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             );
             self.setup_flat_cs(3, true);
 
-            self.set_rsp(self.rcx());
-            self.set_rip(self.rdx());
+            let rsp = self.rcx();
+            self.set_rsp(rsp);
+            let rip = self.rdx();
+            self.set_rip(rip);
         } else {
             // 32-bit SYSEXIT: CS = (sysenter_cs_msr + 16) | 3 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
@@ -1988,8 +2010,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             );
             self.setup_flat_cs(3, false);
 
-            self.set_esp(self.ecx());
-            self.set_eip(self.edx());
+            let esp = self.ecx();
+            self.set_esp(esp);
+            let eip = self.edx();
+            self.set_eip(eip);
         }
 
         // SS = (sysenter_cs_msr + (os64 ? 40 : 24)) | 3 (Bochs proc_ctrl.cc)
@@ -2004,12 +2028,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .value;
-        self.on_far_branch(
-            super::instrumentation::BranchType::Sysexit,
-            0,
-            new_cs,
-            self.rip(),
-        );
+        let rip = self.rip();
+        self.on_far_branch(super::instrumentation::BranchType::Sysexit, 0, new_cs, rip);
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -2278,12 +2298,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .value;
-        self.on_far_branch(
-            super::instrumentation::BranchType::Syscall,
-            0,
-            new_cs,
-            self.rip(),
-        );
+        let rip = self.rip();
+        self.on_far_branch(super::instrumentation::BranchType::Syscall, 0, new_cs, rip);
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -2377,7 +2393,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
 
             // Bochs proc_ctrl.cc — restore RFLAGS from R11
-            self.write_eflags(self.r11() as u32, EFlags::VALID_MASK.bits());
+            let r11 = self.r11() as u32;
+            let bits = EFlags::VALID_MASK.bits();
+            self.write_eflags(r11, bits);
         } else {
             // Legacy/compat mode SYSRET (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
@@ -2422,12 +2440,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .value;
-        self.on_far_branch(
-            super::instrumentation::BranchType::Sysret,
-            0,
-            new_cs,
-            self.rip(),
-        );
+        let rip = self.rip();
+        self.on_far_branch(super::instrumentation::BranchType::Sysret, 0, new_cs, rip);
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -3246,66 +3260,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     }
                 }
             }
-        }
-    }
-
-    /// Recompute rd_pkey/wr_pkey allow-masks from current PKRU/PKRS/CR4/CR0.
-    /// Bochs proc_ctrl.cc set_PKeys. Call this anywhere Bochs invokes set_PKeys:
-    /// after PKRU/PKRS WRMSR, after CR0.WP flip, after CR4.PKE/PKS flip, at CPU
-    /// reset, and on VMX/SVM host-load paths.
-    pub(super) fn set_pkeys(&mut self, pkru_val: u32, pkrs_val: u32) {
-        self.pkru = pkru_val;
-        self.pkrs = pkrs_val;
-
-        use super::paging::TlbAccess;
-        const ALL_RW: TlbAccess = TlbAccess::SYS_READ_OK
-            .union(TlbAccess::USER_READ_OK)
-            .union(TlbAccess::SYS_WRITE_OK)
-            .union(TlbAccess::USER_WRITE_OK);
-        const USER_RW: TlbAccess = TlbAccess::USER_READ_OK.union(TlbAccess::USER_WRITE_OK);
-        const SYS_RW: TlbAccess = TlbAccess::SYS_READ_OK.union(TlbAccess::SYS_WRITE_OK);
-
-        for i in 0..16 {
-            let mut rd_allow = ALL_RW;
-            let mut wr_allow = ALL_RW;
-
-            if self.long_mode() {
-                if self.cr4.pke() {
-                    // PKRU.accessDisable → strip user read/write.
-                    if pkru_val & (1 << (i * 2)) != 0 {
-                        rd_allow.remove(USER_RW);
-                        wr_allow.remove(USER_RW);
-                    }
-                    // PKRU.writeDisable → strip user write; also sys write when CR0.WP.
-                    if pkru_val & (1 << (i * 2 + 1)) != 0 {
-                        wr_allow.remove(TlbAccess::USER_WRITE_OK);
-                        if self.cr0.wp() {
-                            wr_allow.remove(TlbAccess::SYS_WRITE_OK);
-                        }
-                    }
-                }
-                if self.cr4.pks() {
-                    if pkrs_val & (1 << (i * 2)) != 0 {
-                        rd_allow.remove(SYS_RW);
-                        wr_allow.remove(SYS_RW);
-                    }
-                    if pkrs_val & (1 << (i * 2 + 1)) != 0 && self.cr0.wp() {
-                        wr_allow.remove(TlbAccess::SYS_WRITE_OK);
-                    }
-                }
-            }
-
-            // Bochs proc_ctrl.cc BX_SUPPORT_CET branch — for every regular
-            // access bit that's set, also set the corresponding SS bit. The
-            // SS flags live 4 positions above their regular counterparts in
-            // TlbAccess, so a bitflag-friendly shift-merge works.
-            let rd_ss = TlbAccess::from_bits_retain(rd_allow.bits() << 4);
-            let wr_ss = TlbAccess::from_bits_retain(wr_allow.bits() << 4);
-            rd_allow.insert(rd_ss);
-            wr_allow.insert(wr_ss);
-
-            self.rd_pkey[i] = rd_allow.bits();
-            self.wr_pkey[i] = wr_allow.bits();
         }
     }
 
@@ -4188,7 +4142,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // Take effect of changing the PKRU state — Bochs xsave.cc xrstor(),
         // keyed on the requested bitmap rather than on which branch above ran.
         if (requested & (1u64 << super::crregs::Xcr0Component::Pkru as u32)) != 0 {
-            self.set_pkeys(pkru_tmp, self.pkrs);
+            let pkrs = self.pkrs;
+            self.set_pkeys(pkru_tmp, pkrs);
         }
 
         Ok(())
@@ -4199,9 +4154,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 mod tests {
     //! Bochs-parity tests for `proc_ctrl::wrmsr_value` MSR-write side effects.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
-    use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::crregs::BxEfer;
     use crate::cpu::decoder::Instruction;
     use crate::cpu::msr::{
@@ -4222,9 +4174,10 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut machine =
-            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
+                let mut machine = crate::cpu::exec_ctx::TestMachine::with_model(
+                    crate::cpu::CpuModel::amd_ryzen(),
+                );
+                let mut cpu = machine.ctx();
                 // Make SVME a supported bit so the reserved-bits gate doesn't
                 // shadow the SVMDIS check (AmdRyzen advertises IsaSvm so this
                 // is already set, but force it for clarity).
@@ -4258,9 +4211,10 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut machine =
-            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
+                let mut machine = crate::cpu::exec_ctx::TestMachine::with_model(
+                    crate::cpu::CpuModel::amd_ryzen(),
+                );
+                let mut cpu = machine.ctx();
                 cpu.efer_suppmask |= BxEfer::SVME.bits();
                 cpu.msr.svm_vm_cr = 0;
 
@@ -4276,57 +4230,76 @@ mod tests {
             .unwrap();
     }
 
+    /// Uniprocessor machine time is the live pc-system clock plus whatever
+    /// this CPU has retired since the slice began — Bochs `BX_TICKN`.
     #[test]
-    fn wired_system_ticks_include_live_icount_delta() {
+    fn up_system_ticks_include_live_icount_delta() {
         let mut machine =
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        machine.pc_system_mut().initialize(1_000_000);
+        machine.pc_system_mut().tickn(1_234);
         let mut cpu = machine.ctx();
-        let mut pc_system = BxPcSystemC::new();
-        pc_system.initialize(1_000_000);
-        pc_system.tickn(1_234);
 
         cpu.icount = 500;
-        cpu.set_pc_system_ptr(NonNull::from(&mut pc_system));
+        cpu.begin_slice_clock(1);
         assert_eq!(cpu.system_ticks(), 1_234);
 
         cpu.icount = 777;
-        assert_eq!(cpu.system_ticks(), 1_511);
-        cpu.clear_pc_system();
+        assert_eq!(
+            cpu.system_ticks(),
+            1_511,
+            "ticks retired inside the slice must be visible immediately"
+        );
     }
 
+    /// A CPU that never began a slice has no machine clock to read, so it
+    /// reports its own ticks rather than measuring against a stale epoch.
     #[test]
-    fn wired_smp_system_ticks_remain_at_round_epoch() {
+    fn detached_system_ticks_report_cpu_local_time() {
         let mut machine =
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        machine.pc_system_mut().initialize(1_000_000);
+        machine.pc_system_mut().tickn(9_999);
         let mut cpu = machine.ctx();
-        let mut pc_system = BxPcSystemC::new();
-        pc_system.initialize(1_000_000);
-        pc_system.tickn(1_234);
+
+        cpu.icount = 42;
+        assert_eq!(
+            cpu.system_ticks(),
+            cpu.cpu_local_ticks(),
+            "an unstarted slice must not adopt the pc-system clock"
+        );
+    }
+
+    /// SMP freezes every CPU's view at the round-start epoch; global time
+    /// advances only when the emulator completes the round.
+    #[test]
+    fn smp_system_ticks_remain_at_round_epoch() {
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        machine.pc_system_mut().initialize(1_000_000);
+        machine.pc_system_mut().tickn(1_234);
+        let mut cpu = machine.ctx();
 
         cpu.icount = 500;
-        cpu.set_pc_system_ptr_with_tick_denominator(NonNull::from(&mut pc_system), 8);
+        cpu.begin_slice_clock(8);
         assert_eq!(cpu.system_ticks(), 1_234);
 
         // A sibling may not observe this round's batch time before the
         // emulator wraps the full CPU round.
-        pc_system.tickn(71);
+        cpu.pc_system.tickn(71);
         cpu.icount = 780;
         assert_eq!(cpu.system_ticks(), 1_234);
-        cpu.clear_pc_system();
     }
 
     #[test]
     fn tsc_deadline_msr_arms_local_apic_timer() {
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
-        let mut pc_system = BxPcSystemC::new();
-        pc_system.initialize(1_000_000);
-        pc_system.tickn(2_000);
-        cpu.set_pc_system_ptr(NonNull::from(&mut pc_system));
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.pc_system.initialize(1_000_000);
+        cpu.pc_system.tickn(2_000);
 
         let current_ticks = cpu.system_ticks();
-        assert!(cpu
-            .lapic
-            .write_x2apic(0x320, 0x0004_0030, current_ticks));
+        assert!(cpu.lapic.write_x2apic(0x320, 0x0004_0030, current_ticks));
         let deadline = current_ticks + 123;
 
         cpu.wrmsr_value(BX_MSR_TSC_DEADLINE, deadline).unwrap();
@@ -4345,7 +4318,6 @@ mod tests {
             })
         );
         assert!(cpu.take_scheduler_boundary_request());
-        cpu.clear_pc_system();
     }
 
     #[test]
@@ -4386,7 +4358,8 @@ mod tests {
 
     #[test]
     fn feature_control_allows_idempotent_locked_firmware_write() {
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
         cpu.reset(crate::cpu::ResetReason::Hardware);
 
         cpu.wrmsr_value(BX_MSR_IA32_FEATURE_CONTROL, 0x5).unwrap();
@@ -4403,7 +4376,8 @@ mod tests {
 
     #[test]
     fn wrmsr_apicbase_updates_lapic_base_and_mode() {
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
         cpu.reset(crate::cpu::ResetReason::Hardware);
 
         let relocated_xapic_base = 0xfee1_0800u64;
@@ -4441,7 +4415,8 @@ mod tests {
             .with_topology(8, 1, 1)
             .unwrap()
             .cpu_topology();
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
         cpu.configure_smp(SOURCE_APIC_ID, topology);
         cpu.reset(crate::cpu::ResetReason::Hardware);
         cpu.configure_smp(SOURCE_APIC_ID, topology);
@@ -4474,8 +4449,6 @@ mod avx_mode_tests {
     //! anything, so every EVEX opcode carrying PREPARE_EVEX became #UD at
     //! decode no matter what the guest had enabled in XCR0.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::crregs::{BxCr0, BxCr4};
     use crate::cpu::opcodes_table::{BxAvxVectorLength, FetchModeMask};
 
@@ -4484,46 +4457,66 @@ mod avx_mode_tests {
     const XCR0_YMM: u32 = 1 << 2;
     const XCR0_AVX512: u32 = (1 << 5) | (1 << 6) | (1 << 7);
 
-    fn cpu_with(xcr0: u32) -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC> {
-        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
+    /// Configure an existing machine in place.
+    ///
+    /// Deliberately not a constructor returning `TestMachine` by value: that
+    /// struct embeds memory, devices and the PC system, and moving it out of a
+    /// helper overflows the default test stack.
+    fn set_xcr0(machine: &mut crate::cpu::exec_ctx::TestMachine, xcr0: u32) {
+        let mut c = machine.ctx();
         c.cr0.insert(BxCr0::PE);
         // protected_mode() reads cpu_mode, which CR0.PE alone does not update.
         c.cpu_mode = crate::cpu::cpu::CpuMode::Ia32Protected;
         c.cr4.insert(BxCr4::OSXSAVE);
         c.xcr0.set32(xcr0);
         c.handle_avx_mode_change();
-        c
+    }
+
+    fn amd_machine() -> crate::cpu::exec_ctx::TestMachine {
+        crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen())
     }
 
     #[test]
     fn evex_decode_gate_needs_opmask_and_both_zmm_halves() {
+        // One machine for every case: the gate is recomputed from XCR0 on
+        // each call, and a TestMachine is far too large to keep several
+        // alive on a test stack at once.
+        let mut machine = amd_machine();
+
         // AVX state alone opens AVX but not EVEX.
-        let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM);
-        assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
-        assert!(!c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
-        assert!(!c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
-        assert_eq!(c.maxvl, BxAvxVectorLength::Vl256);
+        set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM);
+        {
+            let c = machine.ctx();
+            assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
+            assert!(!c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+            assert!(!c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
+            assert_eq!(c.maxvl, BxAvxVectorLength::Vl256);
+        }
 
         // All three AVX-512 bits open it.
-        let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
-        assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
-        assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
-        assert!(c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
-        assert_eq!(c.maxvl, BxAvxVectorLength::Vl512);
+        set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        {
+            let c = machine.ctx();
+            assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
+            assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+            assert!(c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
+            assert_eq!(c.maxvl, BxAvxVectorLength::Vl512);
+        }
 
         // Any one of them missing closes it again.
         for missing in [1u32 << 5, 1 << 6, 1 << 7] {
-            let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | (XCR0_AVX512 & !missing));
+            set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM | (XCR0_AVX512 & !missing));
+            let c = machine.ctx();
             assert!(
                 !c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK),
                 "XCR0 without bit {missing:#x} must not enable EVEX"
             );
         }
     }
-
-    #[test]
     fn a_pending_task_switch_closes_avx_and_evex_together() {
-        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        let mut machine = amd_machine();
+        set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        let mut c = machine.ctx();
         assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
 
         c.cr0.insert(BxCr0::TS);
@@ -4544,7 +4537,9 @@ mod avx_mode_tests {
 
         // An AVX guest with no ZMM state: bits 256..511 are not architecturally
         // visible, so a VEX write does not touch them.
-        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM);
+        let mut machine = amd_machine();
+        set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM);
+        let mut c = machine.ctx();
         for q in 0..8 {
             c.vmm[1].set_zmm64u(q, 0xA5A5_A5A5_A5A5_A5A5);
         }
@@ -4557,13 +4552,77 @@ mod avx_mode_tests {
         );
 
         // With ZMM state enabled the same write clears the whole register.
-        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        let mut machine = amd_machine();
+        set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        let mut c = machine.ctx();
         for q in 0..8 {
             c.vmm[1].set_zmm64u(q, 0xA5A5_A5A5_A5A5_A5A5);
         }
         c.write_xmm_reg(1, BxPackedXmmRegister::default());
         for q in 2..8 {
             assert_eq!(c.vmm[1].zmm64u(q), 0, "qword {q}");
+        }
+    }
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Recompute rd_pkey/wr_pkey allow-masks from current PKRU/PKRS/CR4/CR0.
+    /// Bochs proc_ctrl.cc set_PKeys. Call this anywhere Bochs invokes set_PKeys:
+    /// after PKRU/PKRS WRMSR, after CR0.WP flip, after CR4.PKE/PKS flip, at CPU
+    /// reset, and on VMX/SVM host-load paths.
+    pub(super) fn set_pkeys(&mut self, pkru_val: u32, pkrs_val: u32) {
+        self.pkru = pkru_val;
+        self.pkrs = pkrs_val;
+
+        use super::paging::TlbAccess;
+        const ALL_RW: TlbAccess = TlbAccess::SYS_READ_OK
+            .union(TlbAccess::USER_READ_OK)
+            .union(TlbAccess::SYS_WRITE_OK)
+            .union(TlbAccess::USER_WRITE_OK);
+        const USER_RW: TlbAccess = TlbAccess::USER_READ_OK.union(TlbAccess::USER_WRITE_OK);
+        const SYS_RW: TlbAccess = TlbAccess::SYS_READ_OK.union(TlbAccess::SYS_WRITE_OK);
+
+        for i in 0..16 {
+            let mut rd_allow = ALL_RW;
+            let mut wr_allow = ALL_RW;
+
+            if self.long_mode() {
+                if self.cr4.pke() {
+                    // PKRU.accessDisable → strip user read/write.
+                    if pkru_val & (1 << (i * 2)) != 0 {
+                        rd_allow.remove(USER_RW);
+                        wr_allow.remove(USER_RW);
+                    }
+                    // PKRU.writeDisable → strip user write; also sys write when CR0.WP.
+                    if pkru_val & (1 << (i * 2 + 1)) != 0 {
+                        wr_allow.remove(TlbAccess::USER_WRITE_OK);
+                        if self.cr0.wp() {
+                            wr_allow.remove(TlbAccess::SYS_WRITE_OK);
+                        }
+                    }
+                }
+                if self.cr4.pks() {
+                    if pkrs_val & (1 << (i * 2)) != 0 {
+                        rd_allow.remove(SYS_RW);
+                        wr_allow.remove(SYS_RW);
+                    }
+                    if pkrs_val & (1 << (i * 2 + 1)) != 0 && self.cr0.wp() {
+                        wr_allow.remove(TlbAccess::SYS_WRITE_OK);
+                    }
+                }
+            }
+
+            // Bochs proc_ctrl.cc BX_SUPPORT_CET branch — for every regular
+            // access bit that's set, also set the corresponding SS bit. The
+            // SS flags live 4 positions above their regular counterparts in
+            // TlbAccess, so a bitflag-friendly shift-merge works.
+            let rd_ss = TlbAccess::from_bits_retain(rd_allow.bits() << 4);
+            let wr_ss = TlbAccess::from_bits_retain(wr_allow.bits() << 4);
+            rd_allow.insert(rd_ss);
+            wr_allow.insert(wr_ss);
+
+            self.rd_pkey[i] = rd_allow.bits();
+            self.wr_pkey[i] = wr_allow.bits();
         }
     }
 }

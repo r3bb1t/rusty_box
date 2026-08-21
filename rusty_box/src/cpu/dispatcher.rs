@@ -5250,11 +5250,9 @@ mod tests {
     use super::*;
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::cpu::CpuMode;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
-    use crate::memory::{BxMemC, BxMemoryStubC};
-    use std::ptr::NonNull;
+    use crate::memory::{BxMemoryStubC};
 
     /// Every opcode a CPU model admits must have somewhere to go.
     ///
@@ -5283,7 +5281,6 @@ mod tests {
     /// or call-position uses — so the parse is exact.
     #[test]
     fn every_opcode_a_model_admits_has_a_dispatcher_arm() {
-        use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
         use crate::cpu::decoder::Opcode;
         use rusty_box_decoder::opcode_isa::OPCODE_VARIANT_COUNT;
 
@@ -5736,12 +5733,6 @@ mod tests {
         let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
 
-        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-        let mut mem = BxMemC::new(mem_stub, false);
-        cpu.a20_mask = mem.a20_mask();
-        cpu.install_memory_bases(&mut mem);
-        assert!(!cpu.mem_host_base.is_null());
-        cpu.wire_memory_access(NonNull::from(&mut mem));
 
         let mut instr = Instruction::default();
         instr.set_ia_opcode(Opcode::V256VpsadbwVdqHdqWdq);
@@ -5785,7 +5776,6 @@ mod tests {
         for qword in 4..8 {
             assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
         }
-        cpu.clear_memory_access();
     }
 
     #[test]
@@ -5793,12 +5783,6 @@ mod tests {
         let mut machine =
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
         let mut cpu = machine.ctx();
-        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-        let mut mem = BxMemC::new(mem_stub, false);
-        cpu.a20_mask = mem.a20_mask();
-        cpu.install_memory_bases(&mut mem);
-        assert!(!cpu.mem_host_base.is_null());
-        cpu.wire_memory_access(NonNull::from(&mut mem));
         cpu.cpu_mode = CpuMode::Long64;
 
         cpu.linaddr_width = 48;
@@ -5828,7 +5812,6 @@ mod tests {
             0x1234_0000,
             "BTS Ed,Gd in 64-bit address mode must not truncate the memory address"
         );
-        cpu.clear_memory_access();
     }
 
     #[test]
@@ -5836,12 +5819,6 @@ mod tests {
         let mut machine =
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
         let mut cpu = machine.ctx();
-        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-        let mut mem = BxMemC::new(mem_stub, false);
-        cpu.a20_mask = mem.a20_mask();
-        cpu.install_memory_bases(&mut mem);
-        assert!(!cpu.mem_host_base.is_null());
-        cpu.wire_memory_access(NonNull::from(&mut mem));
         cpu.cpu_mode = CpuMode::Long64;
         cpu.linaddr_width = 48;
 
@@ -5871,7 +5848,6 @@ mod tests {
             0x1200,
             "BTS Ew,Gw in 64-bit address mode must not truncate the memory address"
         );
-        cpu.clear_memory_access();
     }
 
     #[derive(Clone, Copy)]
@@ -5952,12 +5928,6 @@ mod tests {
         let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
 
-        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-        let mut mem = BxMemC::new(mem_stub, false);
-        cpu.a20_mask = mem.a20_mask();
-        cpu.install_memory_bases(&mut mem);
-        assert!(!cpu.mem_host_base.is_null());
-        cpu.wire_memory_access(NonNull::from(&mut mem));
 
         let mut instr = Instruction::default();
         instr.set_ia_opcode(Opcode::VxorpsVpsHpsWps);
@@ -5998,7 +5968,6 @@ mod tests {
         for qword in 4..8 {
             assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
         }
-        cpu.clear_memory_access();
     }
 
     #[test]
@@ -6430,12 +6399,6 @@ mod tests {
             cpu.cpu_mode = CpuMode::Long64;
             cpu.linaddr_width = 48;
 
-            let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-            let mut mem = BxMemC::new(mem_stub, false);
-            cpu.a20_mask = mem.a20_mask();
-            cpu.install_memory_bases(&mut mem);
-            assert!(!cpu.mem_host_base.is_null());
-            cpu.wire_memory_access(NonNull::from(&mut mem));
 
             let mut instr = Instruction::default();
             instr.set_ia_opcode(opcode);
@@ -6472,8 +6435,7 @@ mod tests {
                     "{opcode:?} {form:?} upper qword {qword}"
                 );
             }
-            cpu.clear_memory_access();
-        }
+            }
     }
 
     // Build a scalar-ss FMA instruction: dst=vmm1, src1(rm)=vmm3, src2(vvvv)=vmm2.

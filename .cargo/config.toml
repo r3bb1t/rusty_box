@@ -6,6 +6,13 @@
 
 MAX_INSTRUCTIONS="20000000000"
 
+# libtest gives each test its own thread, whose default stack is 2 MiB. A
+# TestMachine is ~1.4 MiB (DeviceManager 788 KiB + BxDevicesC 332 KiB + BxMemC
+# 268 KiB), so a test that builds one per loop iteration overflows. Raising the
+# floor here fixes it in one place instead of wrapping ~100 call sites in
+# hand-rolled 64 MiB threads.
+RUST_MIN_STACK="16777216"
+
 # Boot profile: "dlx", "alpine" (BIOS/ISOLINUX), "alpine-direct" (direct kernel boot)
 # Leave commented for auto-detect (BIOS boot when Alpine ISO found)
 # RUSTY_BOX_BOOT="alpine-direct"

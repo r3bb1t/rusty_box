@@ -900,8 +900,6 @@ mod tests {
 
     // ---- AVX512_DQ qword <-> float, driven through the dispatcher ----------
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::BxSegregs;
     use crate::cpu::xmm::MXCSR_RESET;
     use rusty_box_decoder::opcode::Opcode;

@@ -46,7 +46,20 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // 222 -> 212: the fetch and async-event entry points hold memory as a
     // borrow, so the raw `*mut BxMemC` re-borrows that fed `prefetch`,
     // `serve_icache_miss` and the icache tests are gone.
-    ("rusty_box/src", 212),
+    // 212 -> 176: `BxCpuC` no longer stores its bus at all. The `mem_bus`,
+    // `io_bus` and `pc_system_ptr` pointers, the accessors that laundered
+    // each deref, and the wiring that installed and cleared them are gone;
+    // an `ExecCtx` holds the machine as borrows instead.
+    // 176 -> 116: `run_cpu_batch` and `inject_interrupt` are safe fns. Their
+    // bodies' remaining raw wiring is device-side and named by SAFETY blocks
+    // that own it; the ~58 `unsafe { … }` wrappers at their call sites, and
+    // two `'a: 'static` bounds justified by a deleted helper, are gone.
+    // 116 -> 115: the device manager reaches port and MMIO dispatch as a
+    // borrow on `ExecCtx`, so `BxDevicesC`'s stored pointer, its set/clear
+    // pair and the accessor that laundered each deref are gone. What remains
+    // is `DeviceManager.mem_ptr`, which fw_cfg uses to write guest RAM from
+    // inside a port handler.
+    ("rusty_box/src", 115),
     ("rusty_box_decoder/src", 0),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. The survivor is

@@ -3,12 +3,11 @@
 //! Based on Bochs stack64.cc
 
 use super::{
-    cpu::BxCpuC,
     decoder::{BxSegregs, Instruction},
     eflags::EFlags,
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // 64-bit PUSH/POP primitives
     // Based on Bochs stack64.cc

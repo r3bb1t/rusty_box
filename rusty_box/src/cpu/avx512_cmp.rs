@@ -1000,8 +1000,6 @@ mod tests {
     //!     takes src1 rather than being merged or zeroed, so it must write
     //!     the full vector.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::{BxSegregs, Instruction};
     use rusty_box_decoder::opcode::Opcode;
 

@@ -291,10 +291,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// `max_instructions`, ticks devices, syncs A20, then returns.
     ///
     /// Returns `(instructions_executed, is_shutdown)`.
-    pub fn step_batch(&mut self, max_instructions: u64) -> Result<(u64, bool)>
-    where
-        'a: 'static,
-    {
+    pub fn step_batch(&mut self, max_instructions: u64) -> Result<(u64, bool)> {
         let ips = self.config.ips as u64;
         let mut total_executed = 0u64;
         // Wall-clock budget: 15ms keeps GUI responsive at 60 fps.
@@ -308,7 +305,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         'batch: loop {
             // --- Run CPU batch ---
             // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
-            let result = unsafe { self.run_cpu_batch(max_instructions) };
+            let result = self.run_cpu_batch(max_instructions);
 
             let executed = match result {
                 Ok(n) => n,
@@ -370,7 +367,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             {
                 let vector = self.iac();
                 // SAFETY: see borrow_memory_for_cpu / inject_interrupt
-                if let Err(e) = unsafe { self.inject_interrupt(vector) } {
+                if let Err(e) = self.inject_interrupt(vector) {
                     tracing::warn!("PIC interrupt injection (vector {vector:#04x}) failed: {e:?}");
                 }
             }

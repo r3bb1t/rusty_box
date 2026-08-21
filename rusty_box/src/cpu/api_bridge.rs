@@ -11,7 +11,7 @@
 
 use super::decoder::BxSegregs;
 use super::instrumentation::X86Reg;
-use super::{BxCpuC};
+use super::BxCpuC;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ── RFLAGS / EFLAGS ────────────────────────────────────────────────
@@ -285,11 +285,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     #[inline]
     pub(crate) fn tsc_for_api(&self) -> u64 {
-        self.get_virtual_tsc(self.system_ticks())
+        self.get_virtual_tsc(self.cpu_local_ticks())
     }
     #[inline]
     pub(crate) fn set_tsc_for_api(&mut self, v: u64) {
-        let t = self.system_ticks();
+        let t = self.cpu_local_ticks();
         self.set_tsc(v, t);
     }
 
@@ -326,10 +326,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         use super::msr::*;
         let apicbase = self.msr.apicbase as u64;
         let v = match msr {
-            BX_MSR_TSC => self.get_virtual_tsc(self.system_ticks()),
+            BX_MSR_TSC => self.get_virtual_tsc(self.cpu_local_ticks()),
             BX_MSR_APICBASE => apicbase,
             BX_MSR_PLATFORM_ID => 0,
-            BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.system_ticks()),
+            BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.cpu_local_ticks()),
             BX_MSR_TSC_DEADLINE => self.lapic.get_tsc_deadline(),
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr as u64,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr,
@@ -354,7 +354,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         use super::msr::*;
         match msr {
             BX_MSR_TSC => {
-                let t = self.system_ticks();
+                let t = self.cpu_local_ticks();
                 self.set_tsc(val, t);
             }
             BX_MSR_APICBASE => {
@@ -363,7 +363,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             BX_MSR_PLATFORM_ID => return Err(super::CpuError::UnimplementedInstruction), // read-only
             BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => { /* ignore write */ }
             BX_MSR_TSC_DEADLINE => {
-                let current_ticks = self.system_ticks();
+                let current_ticks = self.cpu_local_ticks();
                 self.lapic.set_tsc_deadline(val, current_ticks);
                 self.sync_lapic_events();
             }
@@ -382,16 +382,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             _ => return Err(super::CpuError::UnimplementedInstruction),
         }
         Ok(())
-    }
-
-    /// Translate a linear (virtual) address to physical using current page tables.
-    /// Returns Err if the translation faults (page not present, protection violation).
-    pub(crate) fn translate_linear_for_api(&self, laddr: u64) -> super::Result<u64> {
-        self.translate_linear_system_read(laddr)
-    }
-
-    pub(crate) fn translate_linear_with_cr3_for_api(&self, laddr: u64, cr3: u64) -> Option<u64> {
-        self.translate_linear_with_cr3(laddr, cr3)
     }
 
     // ── FPU read/write ─────────────────────────────────────────────
@@ -940,8 +930,10 @@ fn trunc_u32(v: u64) -> u32 {
 
 use crate::cpu::instrumentation::CpuAccess;
 
+/// Hooks reach guest memory, so the accessor they are handed is the
+/// execution context rather than the CPU alone.
 impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
-    for BxCpuC<T>
+    for crate::cpu::exec_ctx::ExecCtx<'_, T>
 {
     fn reg_read(&self, reg: X86Reg) -> u64 {
         self.api_reg_read(reg)
@@ -951,7 +943,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
         self.api_reg_write(reg, val)
     }
 
-    fn mem_read(&self, addr: u64, buf: &mut [u8]) -> bool {
+    fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> bool {
         for (i, slot) in buf.iter_mut().enumerate() {
             *slot = self.mem_read_byte(addr + i as u64);
         }
@@ -965,21 +957,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
         true
     }
 
-    fn virt_read(&self, vaddr: u64, buf: &mut [u8]) -> bool {
+    fn virt_read(&mut self, vaddr: u64, buf: &mut [u8]) -> bool {
         virt_read_chunked(
             buf,
             vaddr,
-            |va| self.translate_linear_for_diag(va),
-            |pa| self.mem_read_byte(pa),
+            |ctx: &mut Self, va| ctx.translate_linear_for_diag(va),
+            self,
         )
     }
 
-    fn virt_read_with_cr3(&self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool {
+    fn virt_read_with_cr3(&mut self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool {
         virt_read_chunked(
             buf,
             vaddr,
-            |va| self.translate_linear_with_cr3(va, cr3),
-            |pa| self.mem_read_byte(pa),
+            |ctx: &mut Self, va| ctx.translate_linear_with_cr3(va, cr3),
+            self,
         )
     }
 
@@ -1002,39 +994,58 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
 /// `translate(va) -> Option<pa>` once per page and `read_byte(pa) -> u8` for
 /// each byte. Returns `true` on success, `false` if any page translation
 /// fails (partial read leaves earlier pages populated).
-fn virt_read_chunked<Tr, Rd>(buf: &mut [u8], start_va: u64, translate: Tr, read_byte: Rd) -> bool
+/// Walk `buf` one page at a time, translating each page before reading it.
+///
+/// `ctx` is threaded through rather than captured, because translating and
+/// reading both need it mutably and a closure capturing it could only do one
+/// of the two.
+fn virt_read_chunked<C, Tr>(buf: &mut [u8], start_va: u64, translate: Tr, ctx: &mut C) -> bool
 where
-    Tr: Fn(u64) -> Option<u64>,
-    Rd: Fn(u64) -> u8,
+    C: ReadsPhysical,
+    Tr: Fn(&mut C, u64) -> Option<u64>,
 {
     let mut off: usize = 0;
     while off < buf.len() {
         let va = start_va.wrapping_add(off as u64);
         let page_off = usize::try_from(va & 0xFFF).expect("page offset fits usize");
         let chunk = (0x1000 - page_off).min(buf.len() - off);
-        let Some(pa) = translate(va) else {
+        let Some(pa) = translate(ctx, va) else {
             return false;
         };
         for i in 0..chunk {
-            buf[off + i] = read_byte(pa + i as u64);
+            buf[off + i] = ctx.read_physical_byte(pa + i as u64);
         }
         off += chunk;
     }
     true
 }
 
+/// The one operation [`virt_read_chunked`] needs from what it is reading.
+trait ReadsPhysical {
+    fn read_physical_byte(&mut self, paddr: u64) -> u8;
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> ReadsPhysical
+    for crate::cpu::exec_ctx::ExecCtx<'_, T>
+{
+    #[inline]
+    fn read_physical_byte(&mut self, paddr: u64) -> u8 {
+        self.mem_read_byte(paddr)
+    }
+}
+
 // ─────────────────────────── pre_* hook firing ───────────────────────────
 //
-// These methods live on BxCpuC (not on the registry) because they need to
-// build a `HookCtx` wrapping `&mut BxCpuC` while simultaneously calling into
-// the tracer. We split-borrow by `take()`-ing the tracer out of the registry
-// Option slot, running the hook, then putting it back. `None` is visible
-// only during the hook call — user code can't observe it.
+// These methods live on the execution context (not on the registry) because
+// they need to build a `HookCtx` wrapping it while simultaneously calling
+// into the tracer. We split-borrow by `take()`-ing the tracer out of the
+// registry Option slot, running the hook, then putting it back. `None` is
+// visible only during the hook call — user code can't observe it.
 
 #[cfg(feature = "instrumentation")]
 use crate::cpu::instrumentation::{HookCtx, InstrAction};
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Fire the `pre_syscall` trait hook. Called from `syscall()` /
     /// `sysenter()` BEFORE the architectural CS/RIP transition. The hook
     /// returns an `InstrAction` which the caller inspects to decide whether

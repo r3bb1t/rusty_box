@@ -3,10 +3,7 @@
 //! Implements IN and OUT instructions for port I/O.
 //! Mirrors `io.cc` from Bochs.
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-    BxCpuC,
-};
+use super::decoder::{BxSegregs, Instruction};
 use crate::cpu::rusty_box::MemoryAccessType;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
@@ -592,7 +589,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut fastrep_iterations = 0usize;
         let mut event_words_remaining = self.ticks_left_next_event() as usize;
 
-
         if self.direct_rep_bulk_allowed(true) && !self.get_df() && self.async_event == 0 {
             while cx != 0 && event_words_remaining != 0 {
                 let di = self.di();
@@ -603,9 +599,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 else {
                     break;
                 };
-                let page_words = (0x1000usize - (laddr as usize & 0x0fff))
-                    .min(host_remaining)
-                    / 2;
+                let page_words = (0x1000usize - (laddr as usize & 0x0fff)).min(host_remaining) / 2;
                 let segment_words = (0x1_0000usize - usize::from(di)) / 2;
                 let chunk_words = usize::from(cx)
                     .min(page_words)
@@ -644,7 +638,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 if self.async_event != 0 {
                     self.assert_rf();
                     let prev_rip = self.prev_rip;
-            self.set_rip(prev_rip);
+                    self.set_rip(prev_rip);
                     self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                     return Ok(());
                 }
@@ -718,7 +712,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             if ecx == 0 {
                 let ecx = self.ecx();
-            self.set_rcx(ecx as u64);
+                self.set_rcx(ecx as u64);
                 return Ok(());
             }
             if self.async_event != 0 {
@@ -756,12 +750,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 else {
                     break;
                 };
-                let page_words = (0x1000usize - (laddr as usize & 0x0fff))
-                    .min(host_remaining)
-                    / 2;
-                let chunk_words = (ecx as usize)
-                    .min(page_words)
-                    .min(event_words_remaining);
+                let page_words = (0x1000usize - (laddr as usize & 0x0fff)).min(host_remaining) / 2;
+                let chunk_words = (ecx as usize).min(page_words).min(event_words_remaining);
                 let Some(bulk_bytes) = chunk_words.checked_mul(2) else {
                     break;
                 };
@@ -796,7 +786,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 if self.async_event != 0 {
                     self.assert_rf();
                     let prev_rip = self.prev_rip;
-            self.set_rip(prev_rip);
+                    self.set_rip(prev_rip);
                     self.set_rcx(ecx as u64);
                     self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                     return Ok(());
@@ -952,7 +942,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             if ecx == 0 {
                 let ecx = self.ecx();
-            self.set_rcx(ecx as u64);
+                self.set_rcx(ecx as u64);
                 return Ok(());
             }
             if self.async_event != 0 {
@@ -985,7 +975,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             if ecx == 0 {
                 let ecx = self.ecx();
-            self.set_rcx(ecx as u64);
+                self.set_rcx(ecx as u64);
                 return Ok(());
             }
             if self.async_event != 0 {
@@ -1018,7 +1008,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             if ecx == 0 {
                 let ecx = self.ecx();
-            self.set_rcx(ecx as u64);
+                self.set_rcx(ecx as u64);
                 return Ok(());
             }
             if self.async_event != 0 {
@@ -1198,9 +1188,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 else {
                     break;
                 };
-                let page_words = (0x1000usize - (laddr as usize & 0x0fff))
-                    .min(host_remaining)
-                    / 2;
+                let page_words = (0x1000usize - (laddr as usize & 0x0fff)).min(host_remaining) / 2;
                 let chunk_words = (rcx.min(usize::MAX as u64) as usize)
                     .min(page_words)
                     .min(event_words_remaining);
@@ -1247,7 +1235,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 if self.async_event != 0 {
                     self.assert_rf();
                     let prev_rip = self.prev_rip;
-            self.set_rip(prev_rip);
+                    self.set_rip(prev_rip);
                     self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                     return Ok(());
                 }
@@ -1612,11 +1600,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         #[cfg(feature = "alloc")]
         let current_ticks = self.system_ticks();
         #[cfg(feature = "alloc")]
-        if let Some(io) = self.io_bus_mut() {
-            let bytes_read = io.inp_bulk(port, io_len, buf, current_ticks);
+        {
+            let bytes_read = self.devices
+                .inp_bulk(port, io_len, buf, current_ticks, self.device_manager);
             self.sync_io_events();
             return bytes_read;
         }
+        #[cfg(not(feature = "alloc"))]
         0
     }
 
@@ -1636,17 +1626,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         #[cfg(feature = "alloc")]
         let current_ticks = self.system_ticks();
         #[cfg(feature = "alloc")]
-        let value = if let Some((io, pc_system)) = self.io_and_pc_system_mut() {
-            let value = io.inp(port, len, current_ticks, pc_system);
+        let value = {
+            let value =
+                self.devices
+                    .inp(port, len, current_ticks, self.pc_system, self.device_manager);
             self.sync_io_events();
             value
-        } else {
-            match len {
-                1 => 0xFF,
-                2 => 0xFFFF,
-                4 => 0xFFFFFFFF,
-                _ => 0xFF,
-            }
         };
         #[cfg(not(feature = "alloc"))]
         let value = match len {
@@ -1703,11 +1688,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         #[cfg(feature = "alloc")]
         let current_ticks = self.system_ticks();
         #[cfg(feature = "alloc")]
-        let dispatched = if let Some((io, pc_system)) = self.io_and_pc_system_mut() {
-            io.outp(port, value, len, current_ticks, pc_system);
+        let dispatched = {
+            self.devices.outp(
+                port,
+                value,
+                len,
+                current_ticks,
+                self.pc_system,
+                self.device_manager,
+            );
             true
-        } else {
-            false
         };
         #[cfg(feature = "alloc")]
         if dispatched {

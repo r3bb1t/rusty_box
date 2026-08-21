@@ -1121,7 +1121,7 @@ pub type BxVmxCap = VmxCap;
 #[derive(Debug, Default)]
 pub struct VmxCap {}
 
-impl<T: Instrumentation> BxCpuC<T> {
+impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // VMX flag-based result helpers — Bochs cpu.h VMsucceed / VMfailInvalid
     // and vmx.cc BX_CPU_C::VMfail.
@@ -1210,7 +1210,7 @@ impl<T: Instrumentation> BxCpuC<T> {
             self.vmcsptr = BX_INVALID_VMCSPTR;
             self.vmxonptr = paddr;
             self.in_vmx = true;
-            self.mask_event(Self::BX_EVENT_INIT);
+            self.mask_event(BxCpuC::<T>::BX_EVENT_INIT);
             self.monitor.reset_monitor();
             self.vmsucceed();
             return Ok(());
@@ -1256,7 +1256,7 @@ impl<T: Instrumentation> BxCpuC<T> {
 
         self.vmxonptr = BX_INVALID_VMCSPTR;
         self.in_vmx = false;
-        self.unmask_event(Self::BX_EVENT_INIT);
+        self.unmask_event(BxCpuC::<T>::BX_EVENT_INIT);
         self.monitor.reset_monitor();
         self.vmsucceed();
         Ok(())
@@ -1595,9 +1595,9 @@ impl<T: Instrumentation> BxCpuC<T> {
     }
 
     fn read_phys_word(&mut self, paddr: u64) -> u16 {
-        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return 0xffff; };
+        let policy = self.access_policy(paddr);
         let mut data = [0u8; 2];
-        if let Err(e) = self.read_physical_routed(mem, policy, paddr, 2, &mut data) {
+        if let Err(e) = self.read_physical_routed(policy, paddr, 2, &mut data) {
             tracing::warn!("read_phys_word({:#018x}) failed: {:?}", paddr, e);
             return 0xffff;
         }
@@ -1605,9 +1605,9 @@ impl<T: Instrumentation> BxCpuC<T> {
     }
 
     fn read_phys_dword(&mut self, paddr: u64) -> u32 {
-        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return 0xffff_ffff; };
+        let policy = self.access_policy(paddr);
         let mut data = [0u8; 4];
-        if let Err(e) = self.read_physical_routed(mem, policy, paddr, 4, &mut data) {
+        if let Err(e) = self.read_physical_routed(policy, paddr, 4, &mut data) {
             tracing::warn!("read_phys_dword({:#018x}) failed: {:?}", paddr, e);
             return 0xffff_ffff;
         }
@@ -1615,9 +1615,9 @@ impl<T: Instrumentation> BxCpuC<T> {
     }
 
     fn read_phys_qword(&mut self, paddr: u64) -> u64 {
-        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return u64::MAX; };
+        let policy = self.access_policy(paddr);
         let mut data = [0u8; 8];
-        if let Err(e) = self.read_physical_routed(mem, policy, paddr, 8, &mut data) {
+        if let Err(e) = self.read_physical_routed(policy, paddr, 8, &mut data) {
             tracing::warn!("read_phys_qword({:#018x}) failed: {:?}", paddr, e);
             return u64::MAX;
         }
@@ -1625,9 +1625,9 @@ impl<T: Instrumentation> BxCpuC<T> {
     }
 
     fn write_phys_word(&mut self, paddr: u64, val: u16) {
-        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return; };
+        let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
-        if let Err(e) = self.write_physical_routed(mem, policy, paddr, 2, &mut data) {
+        if let Err(e) = self.write_physical_routed(policy, paddr, 2, &mut data) {
             tracing::warn!("write_phys_word({:#018x}) failed: {:?}", paddr, e);
         }
         // Bochs handleSMC flushes the writer synchronously at the store.
@@ -1635,9 +1635,9 @@ impl<T: Instrumentation> BxCpuC<T> {
     }
 
     fn write_phys_dword(&mut self, paddr: u64, val: u32) {
-        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return; };
+        let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
-        if let Err(e) = self.write_physical_routed(mem, policy, paddr, 4, &mut data) {
+        if let Err(e) = self.write_physical_routed(policy, paddr, 4, &mut data) {
             tracing::warn!("write_phys_dword({:#018x}) failed: {:?}", paddr, e);
         }
         // Bochs handleSMC flushes the writer synchronously at the store.
@@ -1645,9 +1645,9 @@ impl<T: Instrumentation> BxCpuC<T> {
     }
 
     fn write_phys_qword(&mut self, paddr: u64, val: u64) {
-        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return; };
+        let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
-        if let Err(e) = self.write_physical_routed(mem, policy, paddr, 8, &mut data) {
+        if let Err(e) = self.write_physical_routed(policy, paddr, 8, &mut data) {
             tracing::warn!("write_phys_qword({:#018x}) failed: {:?}", paddr, e);
         }
         // Bochs handleSMC flushes the writer synchronously at the store.
@@ -2062,7 +2062,7 @@ impl<T: Instrumentation> BxCpuC<T> {
         // Bochs vmx.cc VMLAUNCH/VMRESUME: a pending MOV_SS interrupt
         // shadow makes VMENTRY illegal — the inhibition would otherwise
         // suppress the host's first guest event.
-        if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS) {
+        if self.interrupts_inhibited(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS_BY_MOVSS) {
             self.vmfail(VmxErr::VmentryMovSsBlocking);
             return Ok(());
         }
@@ -2119,7 +2119,7 @@ impl<T: Instrumentation> BxCpuC<T> {
         // `launched` is updated only on the VMLAUNCH path AFTER the
         // VM-entry MSR-load succeeds — moved below.
         self.in_vmx_guest = true;
-        self.unmask_event(Self::BX_EVENT_INIT);
+        self.unmask_event(BxCpuC::<T>::BX_EVENT_INIT);
 
         // Bochs vmx.cc VMenter — apply guest STI/MOV_SS shadow before
         // any interrupt-relevant event signaling:
@@ -2131,9 +2131,9 @@ impl<T: Instrumentation> BxCpuC<T> {
         const BX_VMX_INTERRUPTS_BLOCKED_NMI_BLOCKED: u32 = 1 << 3;
         let interruptibility = self.vmcs.guest_interruptibility_state;
         if interruptibility & BX_VMX_INTERRUPTS_BLOCKED_BY_STI != 0 {
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS);
+            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS);
         } else if interruptibility & BX_VMX_INTERRUPTS_BLOCKED_BY_MOV_SS != 0 {
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
+            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         } else {
             self.inhibit_mask = 0;
         }
@@ -2144,12 +2144,12 @@ impl<T: Instrumentation> BxCpuC<T> {
         //     if (VIRTUAL_NMI()) mask_event(VMX_VIRTUAL_NMI);
         //     else               mask_event(NMI);
         //   }
-        self.unmask_event(Self::BX_EVENT_VMX_VIRTUAL_NMI | Self::BX_EVENT_NMI);
+        self.unmask_event(BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI | BxCpuC::<T>::BX_EVENT_NMI);
         if interruptibility & BX_VMX_INTERRUPTS_BLOCKED_NMI_BLOCKED != 0 {
             if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI != 0 {
-                self.mask_event(Self::BX_EVENT_VMX_VIRTUAL_NMI);
+                self.mask_event(BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI);
             } else {
-                self.mask_event(Self::BX_EVENT_NMI);
+                self.mask_event(BxCpuC::<T>::BX_EVENT_NMI);
             }
         }
 
@@ -2163,14 +2163,14 @@ impl<T: Instrumentation> BxCpuC<T> {
         // VMENTRY itself. All three events are cleared at VMEXIT.
         let proc1 = self.vmcs.proc_based_ctls;
         if proc1 & VMX_VM_EXEC_CTRL1_MONITOR_TRAP_FLAG != 0 {
-            self.signal_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
-            self.mask_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
+            self.signal_event(BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
+            self.mask_event(BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
         }
         if proc1 & VMX_VM_EXEC_CTRL1_NMI_WINDOW_EXITING != 0 {
-            self.signal_event(Self::BX_EVENT_VMX_VIRTUAL_NMI);
+            self.signal_event(BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI);
         }
         if proc1 & VMX_VM_EXEC_CTRL1_INTERRUPT_WINDOW_VMEXIT != 0 {
-            self.signal_event(Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING);
+            self.signal_event(BxCpuC::<T>::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING);
         }
 
         // Bochs vmx.cc step 5: walk the VM-entry MSR-load list and write
@@ -2417,10 +2417,13 @@ impl<T: Instrumentation> BxCpuC<T> {
         // are taken AFTER the instruction completes, so they keep the
         // post-instruction RIP/RSP/SSP.
         if !reason.is_trap_like() {
-            self.set_rip(self.prev_rip);
+            let rip = self.prev_rip;
+            self.set_rip(rip);
             if self.speculative_rsp {
-                self.set_rsp(self.prev_rsp);
-                self.set_ssp(self.prev_ssp);
+                let rsp = self.prev_rsp;
+                self.set_rsp(rsp);
+                let ssp = self.prev_ssp;
+                self.set_ssp(ssp);
             }
         }
         self.speculative_rsp = false;
@@ -2558,25 +2561,25 @@ impl<T: Instrumentation> BxCpuC<T> {
             // and NMI-blocked event bits, mirroring Bochs vmx.cc-
             // 2803.
             let mut interruptibility = 0u32;
-            if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
-                if self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
+            if self.interrupts_inhibited(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS) {
+                if self.interrupts_inhibited(BxCpuC::<T>::BX_INHIBIT_DEBUG) {
                     interruptibility |= 1 << 1; // BLOCKED_BY_MOV_SS
                 } else {
                     interruptibility |= 1 << 0; // BLOCKED_BY_STI
                 }
             }
             if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI != 0 {
-                if (self.event_mask & Self::BX_EVENT_VMX_VIRTUAL_NMI) != 0 {
+                if (self.event_mask & BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI) != 0 {
                     interruptibility |= 1 << 3;
                 }
-            } else if (self.event_mask & Self::BX_EVENT_NMI) != 0 {
+            } else if (self.event_mask & BxCpuC::<T>::BX_EVENT_NMI) != 0 {
                 interruptibility |= 1 << 3;
             }
             self.vmcs.guest_interruptibility_state = interruptibility;
 
             // Pending #DB exceptions — Bochs vmx.cc.
             let trap_like = reason.is_trap_like();
-            let clear_dbg = !self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG)
+            let clear_dbg = !self.interrupts_inhibited(BxCpuC::<T>::BX_INHIBIT_DEBUG)
                 && !trap_like
                 && !matches!(
                     reason,
@@ -2616,14 +2619,14 @@ impl<T: Instrumentation> BxCpuC<T> {
         //   PREEMPTION_TIMER_EXPIRED | VIRTUAL_NMI |
         //   PENDING_VMX_VIRTUAL_INTR
         self.clear_event(
-            Self::BX_EVENT_VMX_VTPR_UPDATE
-                | Self::BX_EVENT_VMX_VEOI_UPDATE
-                | Self::BX_EVENT_VMX_VIRTUAL_APIC_WRITE
-                | Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG
-                | Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING
-                | Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED
-                | Self::BX_EVENT_VMX_VIRTUAL_NMI
-                | Self::BX_EVENT_PENDING_VMX_VIRTUAL_INTR,
+            BxCpuC::<T>::BX_EVENT_VMX_VTPR_UPDATE
+                | BxCpuC::<T>::BX_EVENT_VMX_VEOI_UPDATE
+                | BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_APIC_WRITE
+                | BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG
+                | BxCpuC::<T>::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING
+                | BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED
+                | BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI
+                | BxCpuC::<T>::BX_EVENT_PENDING_VMX_VIRTUAL_INTR,
         );
 
         // ── STEP 2: load host state ──────────────────────────────────
@@ -2651,9 +2654,9 @@ impl<T: Instrumentation> BxCpuC<T> {
         //   if (reason == EXCEPTION_NMI && vec==2) mask_event(BX_EVENT_NMI)
         //   EXT = 0
         //   last_exception_type = BX_ET_NONE
-        self.mask_event(Self::BX_EVENT_INIT);
+        self.mask_event(BxCpuC::<T>::BX_EVENT_INIT);
         if reason == VmxVmexitReason::ExceptionNmi && vector == 2 {
-            self.mask_event(Self::BX_EVENT_NMI);
+            self.mask_event(BxCpuC::<T>::BX_EVENT_NMI);
         }
         // The host always resumes running; `vmexit_load_host_state` above has
         // already done this, but Bochs vmx.cc VMexit re-states it here so the
@@ -2718,10 +2721,10 @@ impl<T: Instrumentation> BxCpuC<T> {
         // armed and fire as phantom VMEXITs once the host re-enters.
         self.in_vmx_guest = false;
         self.clear_event(
-            Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG
-                | Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING
-                | Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED
-                | Self::BX_EVENT_VMX_VIRTUAL_NMI,
+            BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG
+                | BxCpuC::<T>::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING
+                | BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED
+                | BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI,
         );
 
         // STEP 2: load host state. The host VMCS fields were validated
@@ -2754,7 +2757,7 @@ impl<T: Instrumentation> BxCpuC<T> {
         // root mode disables it), clear EXT and last_exception_type.
         // The NMI-mask branch from the regular path doesn't apply here —
         // VMENTRY-failure reasons are never EXCEPTION_NMI.
-        self.mask_event(Self::BX_EVENT_INIT);
+        self.mask_event(BxCpuC::<T>::BX_EVENT_INIT);
         self.ext = false;
         self.last_exception_type = -1; // BX_ET_NONE
 
@@ -3902,7 +3905,8 @@ impl<T: Instrumentation> BxCpuC<T> {
         // EFER must be set BEFORE CR4/CR0 because long-mode bits influence
         // paging-mode validation downstream (Bochs comment).
         if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_EFER_MSR != 0 {
-            self.efer.set32(self.vmcs.host_ia32_efer as u32);
+            let host_efer = self.vmcs.host_ia32_efer as u32;
+            self.efer.set32(host_efer);
         } else {
             // Bochs vmx.cc fallback: when LOAD_EFER_MSR is clear,
             // EFER.LME and EFER.LMA track x86_64_host directly.
@@ -3916,25 +3920,27 @@ impl<T: Instrumentation> BxCpuC<T> {
             self.efer = BxEfer::from_bits_truncate(efer);
         }
 
-        self.cr0.set32(self.vmcs.host_cr0 as u32);
+        let host_cr0 = self.vmcs.host_cr0 as u32;
+        self.cr0.set32(host_cr0);
         self.cr3 = self.vmcs.host_cr3;
-        self.cr4.set_val(self.vmcs.host_cr4);
-        self.set_rsp(self.vmcs.host_rsp);
-        self.set_rip(self.vmcs.host_rip);
+        let host_cr4 = self.vmcs.host_cr4;
+        self.cr4.set_val(host_cr4);
+        let rsp = self.vmcs.host_rsp;
+        self.set_rsp(rsp);
+        let rip = self.vmcs.host_rip;
+        self.set_rip(rip);
 
         // Bochs vmx.cc: 32-bit PAE host requires PDPTR
         // validation. A failure aborts the VMEXIT (Bochs VMABORT_HOST_
         // PDPTR_CORRUPTED). We surface #UD into the host so the failure
         // is visible.
+        let host_cr3 = self.vmcs.host_cr3;
         if !x86_64_host
             && super::crregs::BxCr4::from_bits_truncate(self.vmcs.host_cr4)
                 .contains(super::crregs::BxCr4::PAE)
-            && !self.check_pdptrs(self.vmcs.host_cr3)?
+            && !self.check_pdptrs(host_cr3)?
         {
-            tracing::error!(
-                "VMABORT: host PDPTRs corrupted (cr3={:#018x})",
-                self.vmcs.host_cr3
-            );
+            tracing::error!("VMABORT: host PDPTRs corrupted (cr3={:#018x})", host_cr3);
             self.in_vmx_guest = false;
             self.invalidate_prefetch_q();
             return self.exception(Exception::Ud, 0);
@@ -3944,7 +3950,8 @@ impl<T: Instrumentation> BxCpuC<T> {
         // on the corresponding LOAD_HOST_* bit; with the bit clear the
         // host inherits the guest's value (per SDM 28.5).
         if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_PAT_MSR != 0 {
-            self.msr.pat.set_U64(self.vmcs.host_ia32_pat);
+            let host_pat = self.vmcs.host_ia32_pat;
+            self.msr.pat.set_U64(host_pat);
         }
         if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_PERF_GLOBAL_CTRL_MSR != 0 {
             // PMU not modelled; the host VMCS field is preserved so the
@@ -3957,7 +3964,9 @@ impl<T: Instrumentation> BxCpuC<T> {
         if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_HOST_PKRS != 0 {
             // Bochs crregs.cc set_PKeys recomputes allow masks from PKRU
             // and PKRS together.
-            self.set_pkeys(self.pkru, self.vmcs.host_pkrs as u32);
+            let pkru = self.pkru;
+            let host_pkrs = self.vmcs.host_pkrs as u32;
+            self.set_pkeys(pkru, host_pkrs);
         }
         if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_HOST_CET_STATE != 0 {
             // Bochs vmx.cc loads supervisor-CET MSR + SSP + interrupt SSP
@@ -3998,16 +4007,18 @@ impl<T: Instrumentation> BxCpuC<T> {
         // selector leaves the descriptor cache unusable; overriding the
         // base would corrupt the segment record.
         if x86_64_host || self.sregs[BxSegregs::Fs as usize].cache.valid != 0 {
+            let host_fs_base = self.vmcs.host_fs_base;
             self.sregs[BxSegregs::Fs as usize]
                 .cache
                 .u
-                .set_segment_base(self.vmcs.host_fs_base);
+                .set_segment_base(host_fs_base);
         }
         if x86_64_host || self.sregs[BxSegregs::Gs as usize].cache.valid != 0 {
+            let host_gs_base = self.vmcs.host_gs_base;
             self.sregs[BxSegregs::Gs as usize]
                 .cache
                 .u
-                .set_segment_base(self.vmcs.host_gs_base);
+                .set_segment_base(host_gs_base);
         }
 
         // TR + LDTR. Bochs marks LDTR unusable (valid=0) and parses TR from
@@ -4015,7 +4026,8 @@ impl<T: Instrumentation> BxCpuC<T> {
         super::segment_ctrl_pro::parse_selector(self.vmcs.host_tr_selector, &mut self.tr.selector);
         let (d1, d2) = self.fetch_raw_descriptor(&self.tr.selector.clone())?;
         self.tr.cache = self.parse_descriptor(d1, d2)?;
-        self.tr.cache.u.set_segment_base(self.vmcs.host_tr_base);
+        let host_tr_base = self.vmcs.host_tr_base;
+        self.tr.cache.u.set_segment_base(host_tr_base);
         self.tr.cache.valid = 1;
         self.ldtr.cache.valid = 0;
 
@@ -4108,13 +4120,16 @@ impl<T: Instrumentation> BxCpuC<T> {
         // EFER first — long-mode bits gate downstream paging mode
         // checks (Bochs vmx.cc).
         if entry_ctls & VMX_VMENTRY_CTRL_LOAD_GUEST_EFER_MSR != 0 {
-            self.efer.set32(self.vmcs.guest_ia32_efer as u32);
+            let guest_efer = self.vmcs.guest_ia32_efer as u32;
+            self.efer.set32(guest_efer);
         }
 
         // CRs.
-        self.cr0.set32(self.vmcs.guest_cr0 as u32);
+        let guest_cr0 = self.vmcs.guest_cr0 as u32;
+        self.cr0.set32(guest_cr0);
         self.cr3 = self.vmcs.guest_cr3;
-        self.cr4.set_val(self.vmcs.guest_cr4);
+        let guest_cr4 = self.vmcs.guest_cr4;
+        self.cr4.set_val(guest_cr4);
 
         // DR7 + IA32_DEBUGCTL only when LOAD_DBG_CTRLS is set.
         if entry_ctls & VMX_VMENTRY_CTRL_LOAD_DBG_CTRLS != 0 {
@@ -4125,14 +4140,18 @@ impl<T: Instrumentation> BxCpuC<T> {
         }
 
         // RIP / RSP / RFLAGS.
-        self.set_rsp(self.vmcs.guest_rsp);
-        self.set_rip(self.vmcs.guest_rip);
+        let rsp = self.vmcs.guest_rsp;
+        self.set_rsp(rsp);
+        let rip = self.vmcs.guest_rip;
+        self.set_rip(rip);
         self.prev_rip = self.vmcs.guest_rip;
-        self.write_eflags(self.vmcs.guest_rflags as u32, 0x003F_FFFF);
+        let guest_rflags = self.vmcs.guest_rflags as u32;
+        self.write_eflags(guest_rflags, 0x003F_FFFF);
 
         // PAT only when LOAD_PAT_MSR is set.
         if entry_ctls & VMX_VMENTRY_CTRL_LOAD_GUEST_PAT_MSR != 0 {
-            self.msr.pat.set_U64(self.vmcs.guest_ia32_pat);
+            let guest_pat = self.vmcs.guest_ia32_pat;
+            self.msr.pat.set_U64(guest_pat);
         }
 
         // SYSENTER MSRs are loaded unconditionally (Bochs vmx.cc).
@@ -4215,14 +4234,10 @@ impl<T: Instrumentation> BxCpuC<T> {
         let ldtr_unusable = (ldtr_ar >> 16) & 1 != 0;
         self.ldtr.cache.set_ar_byte((ldtr_ar & 0xFF) as u8);
         self.ldtr.cache.valid = if ldtr_unusable { 0 } else { 1 };
-        self.ldtr
-            .cache
-            .u
-            .set_segment_base(self.vmcs.guest_ldtr_base);
-        self.ldtr
-            .cache
-            .u
-            .set_segment_limit_scaled(self.vmcs.guest_ldtr_limit);
+        let guest_ldtr_base = self.vmcs.guest_ldtr_base;
+        self.ldtr.cache.u.set_segment_base(guest_ldtr_base);
+        let guest_ldtr_limit = self.vmcs.guest_ldtr_limit;
+        self.ldtr.cache.u.set_segment_limit_scaled(guest_ldtr_limit);
         self.ldtr.cache.u.set_segment_g((ldtr_ar >> 15) & 1 != 0);
         self.ldtr.cache.u.set_segment_d_b((ldtr_ar >> 14) & 1 != 0);
         self.ldtr.cache.u.set_segment_l((ldtr_ar >> 13) & 1 != 0);
@@ -4233,11 +4248,10 @@ impl<T: Instrumentation> BxCpuC<T> {
         let tr_ar = self.vmcs.guest_tr_ar;
         self.tr.cache.set_ar_byte((tr_ar & 0xFF) as u8);
         self.tr.cache.valid = 1;
-        self.tr.cache.u.set_segment_base(self.vmcs.guest_tr_base);
-        self.tr
-            .cache
-            .u
-            .set_segment_limit_scaled(self.vmcs.guest_tr_limit);
+        let guest_tr_base = self.vmcs.guest_tr_base;
+        self.tr.cache.u.set_segment_base(guest_tr_base);
+        let guest_tr_limit = self.vmcs.guest_tr_limit;
+        self.tr.cache.u.set_segment_limit_scaled(guest_tr_limit);
         self.tr.cache.u.set_segment_g((tr_ar >> 15) & 1 != 0);
         self.tr.cache.u.set_segment_d_b((tr_ar >> 14) & 1 != 0);
         self.tr.cache.u.set_segment_l((tr_ar >> 13) & 1 != 0);
@@ -4256,11 +4270,14 @@ impl<T: Instrumentation> BxCpuC<T> {
         // block.
         if entry_ctls & VMX_VMENTRY_CTRL_LOAD_GUEST_CET_STATE != 0 {
             self.msr.ia32_cet_control[0] = self.vmcs.guest_ia32_s_cet;
-            self.set_ssp(self.vmcs.guest_ssp);
+            let ssp = self.vmcs.guest_ssp;
+            self.set_ssp(ssp);
             self.msr.ia32_interrupt_ssp_table = self.vmcs.guest_interrupt_ssp_table_addr;
         }
         if entry_ctls & VMX_VMENTRY_CTRL_LOAD_GUEST_PKRS != 0 {
-            self.set_pkeys(self.pkru, self.vmcs.guest_pkrs as u32);
+            let pkru = self.pkru;
+            let guest_pkrs = self.vmcs.guest_pkrs as u32;
+            self.set_pkeys(pkru, guest_pkrs);
         }
         if entry_ctls & VMX_VMENTRY_CTRL_LOAD_GUEST_IA32_SPEC_CTRL != 0 {
             self.msr.ia32_spec_ctrl = self.vmcs.guest_ia32_spec_ctrl as u32;
@@ -4462,10 +4479,9 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// atomic RMW. Logs and continues on failure to match the lenient
     /// posture of `read_physical_byte`.
     fn write_physical_byte(&mut self, paddr: u64, val: u8) {
-        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { tracing::warn!("write_physical_byte({:#018x}): no mem bus", paddr);
-        return; };
+        let policy = self.access_policy(paddr);
         let mut data = [val];
-        if let Err(e) = self.write_physical_routed(mem, policy, paddr, 1, &mut data) {
+        if let Err(e) = self.write_physical_routed(policy, paddr, 1, &mut data) {
             tracing::warn!(
                 "write_physical_byte({:#018x}) failed: {:?}; byte dropped",
                 paddr,
@@ -4524,7 +4540,7 @@ impl<T: Instrumentation> BxCpuC<T> {
         self.write_physical_byte(paddr + 32, on_byte & !0x1);
 
         if any_pir {
-            self.signal_event(Self::BX_EVENT_PENDING_VMX_VIRTUAL_INTR);
+            self.signal_event(BxCpuC::<T>::BX_EVENT_PENDING_VMX_VIRTUAL_INTR);
         }
         Ok(())
     }
@@ -4634,9 +4650,9 @@ impl<T: Instrumentation> BxCpuC<T> {
                 // host's real NMI line is independent); without VIRTUAL_NMI
                 // the standard NMI mask is set.
                 if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI != 0 {
-                    self.mask_event(Self::BX_EVENT_VMX_VIRTUAL_NMI);
+                    self.mask_event(BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI);
                 } else {
-                    self.mask_event(Self::BX_EVENT_NMI);
+                    self.mask_event(BxCpuC::<T>::BX_EVENT_NMI);
                 }
                 self.ext = true;
                 super::exception::InterruptType::Nmi
@@ -4667,7 +4683,7 @@ impl<T: Instrumentation> BxCpuC<T> {
                 // here; if a stale value sneaks through, abort the
                 // VMENTRY rather than silently fabricating an event.
                 if vector == 0 {
-                    self.signal_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
+                    self.signal_event(BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
                     return Ok(());
                 }
                 tracing::error!(
@@ -4763,13 +4779,13 @@ impl<T: Instrumentation> BxCpuC<T> {
     pub(super) fn vmenter_arm_preemption_timer(&mut self) {
         if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_VMX_PREEMPTION_TIMER_VMEXIT == 0 {
             self.lapic.deactivate_vmx_preemption_timer();
-            self.clear_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+            self.clear_event(BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
             return;
         }
         let value = self.vmcs.vmx_preemption_timer_value;
-        self.clear_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+        self.clear_event(BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
         if value == 0 {
-            self.signal_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+            self.signal_event(BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
         } else {
             let now = self.system_ticks();
             self.lapic.set_vmx_preemption_timer(value, now);
@@ -4787,7 +4803,7 @@ impl<T: Instrumentation> BxCpuC<T> {
             self.vmcs.vmx_preemption_timer_value = self.lapic.read_vmx_preemption_timer(now);
         }
         self.lapic.deactivate_vmx_preemption_timer();
-        self.clear_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+        self.clear_event(BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
     }
 
     /// Preemption-timer expiry check — Bochs event.cc
@@ -4796,10 +4812,10 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// signal the event; exits with reason
     /// `VMX_VMEXIT_VMX_PREEMPTION_TIMER_EXPIRED`.
     pub(super) fn vmexit_check_preemption_timer(&mut self) -> Result<bool> {
-        if !self.is_unmasked_event_pending(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED) {
+        if !self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED) {
             return Ok(false);
         }
-        self.clear_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+        self.clear_event(BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
         self.vmx_vmexit(VmxVmexitReason::VmxPreemptionTimerExpired, 0)?;
         Ok(true)
     }
@@ -4814,15 +4830,15 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// NEXT instruction boundary after VMENTRY masked it for one
     /// instruction.
     pub(super) fn vmexit_check_monitor_trap_flag(&mut self) -> Result<bool> {
-        if (self.pending_event & Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG) == 0 {
+        if (self.pending_event & BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG) == 0 {
             return Ok(false);
         }
-        if self.is_unmasked_event_pending(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG) {
-            self.clear_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
+        if self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG) {
+            self.clear_event(BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
             self.vmx_vmexit(VmxVmexitReason::MonitorTrapFlag, 0)?;
             return Ok(true);
         }
-        self.unmask_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
+        self.unmask_event(BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
         Ok(false)
     }
 
@@ -4833,7 +4849,7 @@ impl<T: Instrumentation> BxCpuC<T> {
     pub(super) fn poll_vmx_preemption_timer(&mut self) -> bool {
         let now = self.system_ticks();
         if self.lapic.vmx_preemption_timer_expired(now) {
-            self.signal_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+            self.signal_event(BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
             return true;
         }
         false
@@ -4845,7 +4861,7 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// proc-based controls; virtual-NMI blocking masks it. The exit
     /// fires when the event is both pending and unmasked.
     pub(super) fn vmexit_check_nmi_window(&mut self) -> Result<bool> {
-        if !self.is_unmasked_event_pending(Self::BX_EVENT_VMX_VIRTUAL_NMI) {
+        if !self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI) {
             return Ok(false);
         }
         self.vmx_vmexit(VmxVmexitReason::NmiWindow, 0)?;
@@ -4859,7 +4875,7 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// is pending, `RFLAGS.IF=1`, and external-interrupt inhibition is
     /// clear (the inhibit gate is in the caller's chain).
     pub(super) fn vmexit_check_interrupt_window(&mut self) -> Result<bool> {
-        if (self.pending_event & Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING) == 0 {
+        if (self.pending_event & BxCpuC::<T>::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING) == 0 {
             return Ok(false);
         }
         if !self.eflags.contains(super::eflags::EFlags::IF_) {

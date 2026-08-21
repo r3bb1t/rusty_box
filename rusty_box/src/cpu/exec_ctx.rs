@@ -1,24 +1,33 @@
 //! The machine state one CPU needs while it executes, held as borrows.
 //!
-//! `BxCpuC` currently stores its bus access as raw pointers (`mem_bus`,
-//! `io_bus`, `pc_system_ptr`) installed for the duration of a scheduler slice.
-//! Those fields are what force `unsafe impl Send for Emulator`: a struct with a
-//! pointer into its sibling fields is self-referential, so the compiler cannot
-//! derive `Send` no matter how disciplined the wiring is.
+//! A CPU cannot reach its own bus. It is one field of a machine, and the
+//! memory, devices and PC system it drives are siblings — so the thing that
+//! executes an instruction is not the CPU alone but the CPU together with
+//! those siblings, borrowed at once. That combination is this type.
 //!
-//! `ExecCtx` says the same thing with borrows. It is built per slice from
-//! disjoint `Emulator` fields, so the borrow checker enforces the aliasing rule
-//! the raw wiring documents in prose, and nothing needs to be stored on the CPU
-//! at all.
+//! Saying it with borrows rather than with stored pointers is what makes the
+//! aliasing rule checkable: a context is built per scheduler slice from
+//! disjoint machine fields, so the borrow checker enforces what prose used to
+//! promise, and a CPU sitting outside a slice has no bus to misuse.
 //!
 //! It `Deref`s to the CPU, so code written against `&mut BxCpuC` keeps reading
 //! `self.rip()`, `self.get_gpr32(..)` and the rest verbatim; only the bus
 //! accessors resolve to this type instead.
+//!
+//! Two hazards come with that `Deref`. A `BxCpuC` method named after a field
+//! here (`memory`, `devices`, `pc_system`) would be silently shadowed, so those
+//! names are reserved; and `Self::CONST` inside an `impl ExecCtx` block does
+//! NOT reach the CPU's associated constants — `Deref` forwards methods, not
+//! `Self` — so those are spelled `BxCpuC::<T>::CONST`.
 
 use core::ops::{Deref, DerefMut};
 
 use super::{cpu::BxCpuC, instrumentation::Instrumentation};
-use crate::{iodev::BxDevicesC, memory::BxMemC, pc_system::BxPcSystemC};
+use crate::{
+    iodev::{devices::DeviceManager, BxDevicesC},
+    memory::BxMemC,
+    pc_system::BxPcSystemC,
+};
 
 /// One CPU plus the machine it is executing against.
 pub(crate) struct ExecCtx<'a, T: Instrumentation> {
@@ -27,23 +36,69 @@ pub(crate) struct ExecCtx<'a, T: Instrumentation> {
     /// property the raw `mem_bus` pointer existed to fake.
     pub(crate) memory: &'a mut BxMemC,
     pub(crate) devices: &'a mut BxDevicesC,
+    /// The device models themselves. Disjoint from `devices`, which owns
+    /// the port tables that route to them — port dispatch needs both.
+    pub(crate) device_manager: &'a mut DeviceManager,
     pub(crate) pc_system: &'a mut BxPcSystemC,
+    /// Guest RAM as one host slice, or null when residency is partial. The
+    /// data TLB measures its cached page offsets from here.
+    pub(crate) mem_host_base: *mut u8,
+    pub(crate) mem_host_len: usize,
+    /// The whole memory allocation — guest RAM, ROM and the bogus page. The
+    /// instruction TLB, the fetch window and the VMCB measure from here,
+    /// because fetch also runs out of ROM and out of relocated blocks.
+    pub(crate) mem_alloc_base: *mut u8,
 }
 
 impl<'a, T: Instrumentation> ExecCtx<'a, T> {
+    /// Borrow a CPU together with the machine it runs against.
+    ///
+    /// Both allocation bases are measured here, from this context's own
+    /// `memory`, and they are measured together: the data TLB counts from the
+    /// identity guest-RAM base and the instruction TLB from the allocation
+    /// base, so a cached offset resolved against a base that was never taken
+    /// is a wild pointer. Deriving them at assembly rather than storing them
+    /// on the CPU is what makes a stale base unrepresentable — there is no
+    /// window in which a context holds bases from a different memory.
     #[inline]
     pub(crate) fn new(
         cpu: &'a mut BxCpuC<T>,
         memory: &'a mut BxMemC,
         devices: &'a mut BxDevicesC,
+        device_manager: &'a mut DeviceManager,
         pc_system: &'a mut BxPcSystemC,
     ) -> Self {
+        let (mem_host_base, mem_host_len) = memory.identity_guest_base();
+        let (mem_alloc_base, _alloc_len) = memory.allocation_span();
         Self {
             cpu,
             memory,
             devices,
+            device_manager,
             pc_system,
+            mem_host_base,
+            mem_host_len,
+            mem_alloc_base,
         }
+    }
+
+    /// The instruction-fetch window as bytes.
+    ///
+    /// The returned lifetime is deliberately not tied to `&self`. The bytes
+    /// live in the memory allocation, not in the CPU, and their validity rests
+    /// on the window being set and on the residency epoch not having moved —
+    /// not on any borrow of this context. Tying it to `&self` would forbid the
+    /// fetch paths from touching `self.i_cache` while holding the window,
+    /// which is exactly what they must do.
+    #[inline(always)]
+    pub(super) fn fetch_window_bytes<'w>(&self) -> Option<&'w [u8]> {
+        let base = self.mem_alloc_base;
+        self.eip_fetch_window.map(|w| {
+            // SAFETY: the window is only ever set from a live directly-mapped
+            // span, and `revalidate_allocation_caches` retires it whenever the
+            // residency epoch moves, so the span still names those bytes.
+            unsafe { core::slice::from_raw_parts(base.wrapping_add(w.start), w.len) }
+        })
     }
 
     /// Everything a scheduler slice hands to the CPU loop, in one borrow.
@@ -65,7 +120,6 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
     ) {
         (self.cpu, self.memory, self.devices, self.pc_system)
     }
-
 }
 
 /// Machine parts for tests that drive instructions directly.
@@ -82,7 +136,14 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
 pub(crate) struct TestMachine {
     cpu: alloc::boxed::Box<BxCpuC<()>>,
     memory: BxMemC,
-    devices: BxDevicesC,
+    /// `devices` (~332 KiB) and `device_manager` (~788 KiB) are boxed so the
+    /// struct stays small and, more importantly, so building one never has
+    /// their sizes live in the frame at once. Together they take a machine
+    /// to ~1.4 MiB, which overflows a default test thread stack as soon as a
+    /// test builds one per loop iteration. Test-only; off every execution
+    /// path.
+    devices: alloc::boxed::Box<BxDevicesC>,
+    device_manager: alloc::boxed::Box<DeviceManager>,
     pc_system: BxPcSystemC,
 }
 
@@ -108,22 +169,48 @@ impl TestMachine {
             crate::memory::BxMemoryStubC::create_and_init(MIB, MIB, 4096).unwrap(),
             false,
         );
+        Self::from_parts(cpu, memory)
+    }
+
+    /// A machine over caller-supplied memory, for tests that need a specific
+    /// size, backing contents, or A20 setting.
+    pub(crate) fn from_parts(cpu: alloc::boxed::Box<BxCpuC<()>>, memory: BxMemC) -> Self {
         Self {
             cpu,
             memory,
-            devices: BxDevicesC::new(),
+            devices: alloc::boxed::Box::new(BxDevicesC::new()),
+            device_manager: alloc::boxed::Box::new(DeviceManager::new()),
             pc_system: BxPcSystemC::new(),
         }
     }
 
     /// Borrow the machine as an execution context.
+    ///
+    /// The A20 mask is taken here for the same reason `cpu_loop_n_impl` takes
+    /// it at slice entry: it is CPU-side state mirroring a chipset line, and a
+    /// test context that skipped it would mask guest addresses differently
+    /// from a real slice.
     pub(crate) fn ctx(&mut self) -> ExecCtx<'_, ()> {
+        self.cpu.a20_mask = self.memory.a20_mask();
         ExecCtx::new(
             &mut self.cpu,
             &mut self.memory,
             &mut self.devices,
+            &mut self.device_manager,
             &mut self.pc_system,
         )
+    }
+
+    /// The machine's memory, for a test that prepares or inspects it outside
+    /// an execution context.
+    pub(crate) fn memory_mut(&mut self) -> &mut BxMemC {
+        &mut self.memory
+    }
+
+    /// The machine's PC system, for a test that arms timers or advances the
+    /// clock before taking a context.
+    pub(crate) fn pc_system_mut(&mut self) -> &mut BxPcSystemC {
+        &mut self.pc_system
     }
 }
 
@@ -139,9 +226,18 @@ pub(crate) fn exec_with<T: Instrumentation, R>(
     memory: &mut BxMemC,
     f: impl FnOnce(&mut ExecCtx<'_, T>) -> R,
 ) -> R {
-    let mut devices = BxDevicesC::new();
+    // Boxed for the same reason `TestMachine` boxes them: together they are
+    // over a megabyte, too much to place in a test's frame.
+    let mut devices = alloc::boxed::Box::new(BxDevicesC::new());
+    let mut device_manager = alloc::boxed::Box::new(DeviceManager::new());
     let mut pc_system = BxPcSystemC::new();
-    let mut ctx = ExecCtx::new(cpu, memory, &mut devices, &mut pc_system);
+    let mut ctx = ExecCtx::new(
+        cpu,
+        memory,
+        &mut devices,
+        &mut device_manager,
+        &mut pc_system,
+    );
     f(&mut ctx)
 }
 
@@ -174,13 +270,16 @@ mod tests {
                 ctx.memory.set_a20_mask(u64::MAX);
                 let _ = ctx.pc_system.get_enable_a20();
 
+                // Assembling the context is what takes the allocation bases —
+                // no separate install step can be forgotten.
+                assert!(!ctx.mem_alloc_base.is_null());
+
                 // All four at once, the CPU and memory both mutable. A handler
                 // that translates an address and then touches the bytes needs
                 // exactly this, and it is the combination the raw wiring
                 // existed to fake.
                 let (cpu, memory, _devices, _pc_system) = ctx.slice_parts();
-                cpu.install_memory_bases(memory);
-                assert!(!cpu.mem_alloc_base.is_null());
+                memory.set_a20_mask(u64::MAX);
                 assert_eq!(cpu.rip(), rip, "deref must reach the same cpu");
             })
             .unwrap()

@@ -6,15 +6,12 @@
 /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
-    use crate::cpu::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::decoder::Instruction;
     use crate::cpu::{
         instrumentation::{CpuSetupMode, X86Reg},
-        rusty_box::MemoryAccessType,
     };
     use crate::cpu::apic::LocalApicCpuEvent;
     use crate::iodev::{DeviceTimerOwner, TimerRequest};
-    use crate::memory::CpuMemoryPolicy;
     use crate::pc_system::TimerOwner;
     const TEST_SMP_PACKAGES: u32 = 2;
     const TEST_SMP_CORES: u32 = 1;
@@ -97,7 +94,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rsp, 0x0058_0000);
 
                 // SAFETY: memory-bus wiring invariants held by the emulator.
-                unsafe { emu.inject_interrupt(0x20) }.expect("inject");
+                emu.inject_interrupt(0x20).expect("inject");
 
                 assert_eq!(
                     emu.cpu().rip(),
@@ -134,17 +131,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     /// offsets, so a test that sets only `mem_host_base` publishes a wild
     /// offset, and the pin silently stops covering the block it names — which
     /// is exactly what these eviction tests exist to prove it does cover.
-    fn resident_block(emu: &mut Emulator) -> (usize, *mut u8) {
-        // Stable CPU pin storage outlives the exclusive memory borrow.
-        let start = emu
-            .memory
-            .host_mem_range_pinned(0, MemoryAccessType::RW, CpuMemoryPolicy::default())
-            .unwrap()
-            .expect("resident block must have a pinned direct span")
-            .start;
-        (start, emu.memory.allocation_span().0)
-    }
-
     fn topology_level_ecx(subleaf: u32, level_type: u32) -> u32 {
         subleaf | (level_type << CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT)
     }
@@ -349,7 +335,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .register_timer(TimerOwner::NullTimer, 1, true, false, "one_tick")
                     .unwrap();
 
-                let elapsed = unsafe { emu.run_cpu_batch(quantum / 2) }.unwrap();
+                let elapsed = emu.run_cpu_batch(quantum / 2).unwrap();
 
                 assert_eq!(elapsed, (1 + quantum) / 2);
                 assert_eq!(emu.pc_system.time_ticks(), elapsed);
@@ -381,7 +367,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let quantum = emu.smp_quantum_ticks();
                 let short_round = quantum / 2;
                 assert!(short_round > 1);
-                let _ = unsafe { emu.run_cpu_batch(quantum) }.unwrap();
+                let _ = emu.run_cpu_batch(quantum).unwrap();
                 emu.reg_write(X86Reg::Rip, 0x1000);
                 emu.pc_system.initialize(1_000_000);
                 emu.pc_system
@@ -395,7 +381,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .unwrap();
                 let icount_before = emu.cpu_ref(BSP_INDEX).icount;
 
-                let elapsed = unsafe { emu.run_cpu_batch(short_round) }.unwrap();
+                let elapsed = emu.run_cpu_batch(short_round).unwrap();
 
                 assert_eq!(
                     emu.cpu_ref(BSP_INDEX).icount - icount_before,
@@ -430,7 +416,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, CODE);
 
                 let executed =
-                    unsafe { emu.run_cpu_batch_with_strict_limit(501, true) }.unwrap();
+                    emu.run_cpu_batch_with_strict_limit(501, true).unwrap();
 
                 assert_eq!(executed, 501, "strict budget must be exact");
                 // 501 instructions = 251 decs + 250 taken jnz.
@@ -460,7 +446,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .register_timer(TimerOwner::NullTimer, 1, true, true, "one_tick")
                     .unwrap();
 
-                let executed = unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                let executed = emu.run_cpu_batch(4096).unwrap();
                 assert!(
                     (1..128).contains(&executed),
                     "one-tick deadline did not stop the active batch promptly: {executed}"
@@ -518,7 +504,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // only the handler at 0x38000 issues `out 0xb3, 0`, and that
                 // address is reachable only via SMI entry at SMBASE+0x8000.
                 for _ in 0..8 {
-                    let _ = unsafe { emu.run_cpu_batch(64) }.unwrap();
+                    let _ = emu.run_cpu_batch(64).unwrap();
                     emu.service_scheduler_boundary(0).unwrap();
                     if emu.device_manager.pci2isa.apms == 0
                         && !emu.cpu_mut_at(0).smm_mode()
@@ -789,7 +775,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // The tick-1 fire ends the batch and transfers the byte to the
                 // output buffer, but Bochs keyboard.cc periodic() only LATCHES
                 // the IRQ on a transfer — it is not raised until the next fire.
-                let executed = unsafe { emu.run_cpu_batch(4_096) }.unwrap();
+                let executed = emu.run_cpu_batch(4_096).unwrap();
                 assert_eq!(executed, 1);
                 assert!(emu.device_manager.keyboard.kbd_controller.outb);
                 assert_eq!(emu.device_manager.pic.master.irq_in[1], 0);
@@ -803,7 +789,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     Some(1),
                 );
                 emu.drain_device_timer_requests();
-                unsafe { emu.run_cpu_batch(4_096) }.unwrap();
+                emu.run_cpu_batch(4_096).unwrap();
                 assert_ne!(emu.device_manager.pic.master.irq_in[1], 0);
             })
             .unwrap()
@@ -946,7 +932,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 }
                 emu.drain_device_timer_requests();
 
-                let executed = unsafe { emu.run_cpu_batch(512) }.unwrap();
+                let executed = emu.run_cpu_batch(512).unwrap();
                 assert_eq!(executed, 1, "the tied exact deadline must end the batch");
                 assert_eq!(emu.pc_system.time_ticks(), 1);
                 assert!(emu.device_manager.keyboard.kbd_controller.outb);
@@ -965,7 +951,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     "tied CMOS owners must fire in one-second-then-UIP order"
                 );
 
-                let executed = unsafe { emu.run_cpu_batch(512) }.unwrap();
+                let executed = emu.run_cpu_batch(512).unwrap();
                 assert_eq!(executed, 244, "the mixed owner must fire at its exact deadline");
                 assert_eq!(emu.pc_system.time_ticks(), 245);
                 assert!(!emu.pc_system.is_timer_active(uip_handle));
@@ -1003,7 +989,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, START);
 
                 let before = emu.cpu_ref(BSP_INDEX).icount;
-                let executed = unsafe { emu.run_cpu_batch(4) }.unwrap();
+                let executed = emu.run_cpu_batch(4).unwrap();
                 assert!(executed >= 5);
                 assert!(emu.cpu_ref(BSP_INDEX).icount - before >= 5);
                 assert_eq!(emu.reg_read(X86Reg::Rip), START + 4);
@@ -1032,7 +1018,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 let before = emu.cpu_ref(BSP_INDEX).icount;
                 let executed =
-                    unsafe { emu.run_cpu_batch_with_strict_limit(4, true) }.unwrap();
+                    emu.run_cpu_batch_with_strict_limit(4, true).unwrap();
 
                 assert_eq!(executed, 4);
                 assert_eq!(emu.cpu_ref(BSP_INDEX).icount - before, 4);
@@ -1108,7 +1094,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let ticks_before = emu.pc_system.time_ticks();
 
                 let before = emu.cpu_ref(BSP_INDEX).icount;
-                let executed = unsafe { emu.run_cpu_batch(1) }.unwrap();
+                let executed = emu.run_cpu_batch(1).unwrap();
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
 
                 // The trace executes REP INSW plus the following parking jump.
@@ -1186,7 +1172,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     EVENT_BUDGET as u32
                 );
 
-                unsafe { emu.run_cpu_batch(1) }.unwrap();
+                emu.run_cpu_batch(1).unwrap();
 
                 assert_eq!(emu.reg_read(X86Reg::Rcx), COUNT - EVENT_BUDGET);
                 assert_eq!(
@@ -1218,7 +1204,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, 0x1000);
 
                 let before = emu.cpu_ref(BSP_INDEX).icount;
-                let executed = unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                let executed = emu.run_cpu_batch(4096).unwrap();
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
 
                 assert!(
@@ -1259,7 +1245,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 }
 
                 let before = emu.cpu_ref(BSP_INDEX).icount;
-                let executed = unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                let executed = emu.run_cpu_batch(4096).unwrap();
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
 
                 assert!(
@@ -1300,7 +1286,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.virt_write(0x1000, &code).unwrap();
                 emu.reg_write(X86Reg::Rip, 0x1000);
 
-                let executed = unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                let executed = emu.run_cpu_batch(4096).unwrap();
 
                 assert!(
                     executed < 4096,
@@ -1343,7 +1329,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.virt_write(0x1000, &code).unwrap();
                 emu.reg_write(X86Reg::Rip, 0x1000);
 
-                unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                emu.run_cpu_batch(4096).unwrap();
 
                 assert_eq!(
                     emu.reg_read(X86Reg::Rcx),
@@ -1406,7 +1392,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rcx, 0);
                 emu.reg_write(X86Reg::Rip, CODE);
 
-                unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                emu.run_cpu_batch(4096).unwrap();
 
                 assert_eq!(emu.mem_read_vec(patched_inc, 1).unwrap(), [0xF4]);
                 assert_eq!(emu.cpu_ref(0).activity_state, CpuActivityState::Hlt);
@@ -1458,7 +1444,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.rebuild_cpu_masks_from_scan();
 
                 for _ in 0..100 {
-                    unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                    emu.run_cpu_batch(4096).unwrap();
                     if matches!(emu.cpu_ref(AP_INDEX).activity_state, CpuActivityState::Hlt) {
                         break;
                     }
@@ -1504,7 +1490,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, 0x1000);
 
                 // Let the CPU cache and spin the loop trace.
-                unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                emu.run_cpu_batch(4096).unwrap();
                 // A real DMA controller write patches the jmp to hlt;hlt.
                 let dma = &mut emu.device_manager.dma;
                 assert!(dma.register_dma8_channel(2, dma_read, dma_write, "SMC test"));
@@ -1518,7 +1504,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 dma.raise_hlda(Some(&mut emu.memory));
 
                 for _ in 0..50 {
-                    unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                    emu.run_cpu_batch(4096).unwrap();
                     if matches!(emu.cpu_ref(0).activity_state, CpuActivityState::Hlt) {
                         break;
                     }
@@ -1548,7 +1534,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.virt_write(0x1000, &code).unwrap();
                 emu.reg_write(X86Reg::Rip, 0x1000);
 
-                let executed = unsafe { emu.run_cpu_batch(100_000) }.unwrap();
+                let executed = emu.run_cpu_batch(100_000).unwrap();
                 assert!(
                     executed >= 100_000,
                     "active batch retained a fixed polling cap: {executed}"
@@ -1564,7 +1550,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 high_ips_emu.virt_write(0x1000, &code).unwrap();
                 high_ips_emu.reg_write(X86Reg::Rip, 0x1000);
 
-                let executed = unsafe { high_ips_emu.run_cpu_batch(100_000) }.unwrap();
+                let executed = high_ips_emu.run_cpu_batch(100_000).unwrap();
                 assert!(
                     executed >= 100_000,
                     "configured IPS reintroduced an active polling cap: {executed}"
@@ -1596,7 +1582,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, 0x1000);
 
                 for _ in 0..16 {
-                    let executed = unsafe { emu.run_cpu_batch(100_000) }.unwrap();
+                    let executed = emu.run_cpu_batch(100_000).unwrap();
                     if !emu.batch_advanced_pc_system {
                         emu.advance_pc_system_after_cpu_ticks(executed);
                     }
@@ -1929,19 +1915,17 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
                 let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                let (block, alloc_base) = resident_block(&mut emu);
 
+                // Prime a valid direct mapping on every CPU. The entry's page
+                // number is all the invalidation test observes — the host base
+                // it resolves against is derived per execution context, not
+                // stored here.
                 for cpu_index in 0..emu.cpu_count() {
                     let cpu = emu.cpu_mut_at(cpu_index);
-                    cpu.mem_host_base = alloc_base.wrapping_add(block);
-                    cpu.mem_alloc_base = alloc_base;
                     let entry = &mut cpu.dtlb.entries[0];
                     entry.lpf = 0;
                     entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 }
-                // The mapping is cached on the CPU itself now that no sidecar
-                // mirrors it, so the flush is asserted where it happens.
-                let _ = block;
                 assert!(emu.cpu_ref(0).dtlb.entries[0].valid());
 
                 emu.device_manager.pci_conf_addr = 0x8000_0058;
@@ -1973,16 +1957,16 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
                 let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                let (block, alloc_base) = resident_block(&mut emu);
 
-                for cpu_index in 0..emu.cpu_count() {
-                    let cpu = emu.cpu_mut_at(cpu_index);
-                    cpu.mem_host_base = alloc_base.wrapping_add(block);
-                    cpu.mem_alloc_base = alloc_base;
-                    let entry = &mut cpu.dtlb.entries[0];
-                    entry.lpf = 0;
-                    entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
-                }
+                // Only the entry's validity is observed here; see the PAM test.
+                let prime = |emu: &mut Emulator| {
+                    for cpu_index in 0..emu.cpu_count() {
+                        let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
+                        entry.lpf = 0;
+                        entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
+                    }
+                };
+                prime(&mut emu);
                 emu.write_port_92h(0x00);
                 assert!(!emu.pc_system.get_enable_a20());
                 assert!(
@@ -1990,14 +1974,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     "an A20 change must invalidate every cached mapping"
                 );
 
-                for cpu_index in 0..emu.cpu_count() {
-                    let cpu = emu.cpu_mut_at(cpu_index);
-                    cpu.mem_host_base = alloc_base.wrapping_add(block);
-                    cpu.mem_alloc_base = alloc_base;
-                    let entry = &mut cpu.dtlb.entries[0];
-                    entry.lpf = 0;
-                    entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
-                }
+                prime(&mut emu);
                 emu.device_manager.keyboard.write(
                     crate::iodev::keyboard::KBD_COMMAND_PORT,
                     0xDF,
@@ -2070,7 +2047,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                         .unwrap();
                     emu.virt_write(CODE, code).unwrap();
                     emu.reg_write(X86Reg::Rip, CODE);
-                    let executed = unsafe { emu.run_cpu_batch(64) }.unwrap();
+                    let executed = emu.run_cpu_batch(64).unwrap();
                     assert!(executed > 0);
                     assert!(
                         emu.devices.take_port_e9_output().is_empty(),
@@ -2225,7 +2202,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // first instruction completes the batch.
                 emu.virt_write(CODE, &[0x90, 0xF4]).unwrap();
                 emu.reg_write(X86Reg::Rip, CODE);
-                let executed = unsafe { emu.run_cpu_batch(8) }.unwrap();
+                let executed = emu.run_cpu_batch(8).unwrap();
                 assert!(executed > 0);
 
                 // Payload landed at page_reg 0x20 -> physical 0x20_0000.
@@ -2278,7 +2255,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, CODE);
 
                 let t0 = emu.pc_system.time_ticks();
-                let executed = unsafe { emu.run_cpu_batch(64) }.unwrap();
+                let executed = emu.run_cpu_batch(64).unwrap();
                 assert!(executed > 0);
                 assert!(
                     emu.devices.take_port_e9_output().is_empty(),
@@ -2371,7 +2348,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 for cpu_index in 0..NONFLAT_TOPOLOGY_CPUS as usize {
                     assert_eq!(emu.cpu_ref(cpu_index).lapic.get_id(), cpu_index as u32);
 
-                    let cpu = emu.cpu_mut_at(cpu_index);
+                    let mut cpu = emu.exec_ctx(cpu_index);
                     cpu.set_eax(CPUID_LEAF_FEATURE_INFO);
                     cpu.set_ecx(0);
                     cpu.cpuid(&instr).unwrap();
@@ -2401,7 +2378,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
                     cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_CORE);
                     cpu.cpuid(&instr).unwrap();
-                    assert_eq!(cpu.eax(), BxCpuC::<()>::bochs_topology_shift(4));
+                    // 4 logical processors below the package => a 2-bit shift.
+                    // Literal on purpose: comparing against the function under
+                    // test can only ever agree with it.
+                    assert_eq!(cpu.eax(), 2);
                     assert_eq!(cpu.ebx(), 4);
                     assert_eq!(
                         cpu.ecx(),
@@ -2465,7 +2445,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let instr = Instruction::default();
 
                 for cpu_index in 0..emu.cpu_count() {
-                    let cpu = emu.cpu_mut_at(cpu_index);
+                    let mut cpu = emu.exec_ctx(cpu_index);
                     cpu.set_eax(0x15);
                     cpu.set_ecx(0);
                     cpu.cpuid(&instr).unwrap();
@@ -2493,7 +2473,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // Default config (CpuidFreq::None): the frequency leaves read
                 // as not enumerated so guests PIT-calibrate the true rate.
                 let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
-                let cpu = emu.cpu_mut_at(0);
+                let mut cpu = emu.exec_ctx(0);
                 cpu.set_eax(0x15);
                 cpu.set_ecx(0);
                 cpu.cpuid(&instr).unwrap();
@@ -2801,7 +2781,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.rebuild_cpu_masks_from_scan();
                 let before = emu.cpu_ref(AP_INDEX).icount;
 
-                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
 
                 assert!(executed > 0);
                 assert!(
@@ -2854,7 +2834,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 }
                 emu.refresh_cpu_masks(BSP_INDEX);
 
-                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
 
                 assert!(executed > 0);
                 assert_eq!(
@@ -2908,7 +2888,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // in Bochs — so the INIT must be processed before the SIPI is
                 // sent, mirroring the MP-spec INIT/SIPI delay.
                 send_bsp_icr_init(&mut emu);
-                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
                 assert!(executed > 0);
                 assert_eq!(
                     emu.cpu_ref(AP_INDEX).activity_state,
@@ -2919,7 +2899,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 send_bsp_icr_sipi(&mut emu, SECOND_TRAMPOLINE_VECTOR);
                 let before = emu.cpu_ref(AP_INDEX).icount;
 
-                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
 
                 assert!(executed > 0);
                 assert_eq!(
@@ -2985,7 +2965,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .cpu_ref(AP_INDEX)
                     .is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_INIT));
 
-                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
                 assert!(executed > 0);
                 assert_eq!(
                     emu.cpu_ref(AP_INDEX).activity_state,
@@ -3027,7 +3007,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .cpu_ref(AP_INDEX)
                     .is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_INIT));
 
-                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
                 assert!(executed > 0);
                 assert_eq!(
                     emu.cpu_ref(AP_INDEX).activity_state,
@@ -3117,7 +3097,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 let before = emu.cpu_ref(AP_INDEX).icount;
                 let quantum = emu.smp_quantum_ticks();
-                let elapsed = unsafe { emu.run_cpu_batch(quantum) }.unwrap();
+                let elapsed = emu.run_cpu_batch(quantum).unwrap();
                 let ap_delta = emu.cpu_ref(AP_INDEX).icount - before;
 
                 assert!(elapsed >= quantum);
@@ -3162,7 +3142,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.rebuild_cpu_masks_from_scan();
 
                 let quantum = emu.smp_quantum_ticks();
-                let _elapsed = unsafe { emu.run_cpu_batch(quantum) }.unwrap();
+                let _elapsed = emu.run_cpu_batch(quantum).unwrap();
                 assert_eq!(
                     emu.cpu_ref(AP_INDEX).rax(),
                     0,
@@ -3215,7 +3195,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.service_lapic_local_events();
 
                 let quantum = emu.smp_quantum_ticks();
-                let elapsed = unsafe { emu.run_cpu_batch(quantum) }.unwrap();
+                let elapsed = emu.run_cpu_batch(quantum).unwrap();
 
                 assert!(elapsed > 0);
                 assert!(
@@ -3285,7 +3265,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let quantum = emu.smp_quantum_ticks();
                 let first = read_tmcct(&mut emu);
                 for _ in 0..8 {
-                    unsafe { emu.run_cpu_batch(quantum) }.unwrap();
+                    emu.run_cpu_batch(quantum).unwrap();
                 }
                 let later = read_tmcct(&mut emu);
 
@@ -3460,7 +3440,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 );
 
                 let baseline_icount = emu.cpu_ref(AP_INDEX).icount;
-                unsafe { emu.run_cpu_batch(256) }.unwrap();
+                emu.run_cpu_batch(256).unwrap();
 
                 let ap = emu.cpu_ref(AP_INDEX);
                 assert!(
@@ -3572,7 +3552,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, CODE);
                 emu.reg_write(X86Reg::Rbx, 0);
 
-                unsafe { emu.run_cpu_batch(64) }.unwrap();
+                emu.run_cpu_batch(64).unwrap();
 
                 assert_eq!(
                     emu.reg_read(X86Reg::Rbx),
@@ -3637,7 +3617,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, CODE);
                 emu.reg_write(X86Reg::Rbx, 0);
 
-                unsafe { emu.run_cpu_batch(64) }.unwrap();
+                emu.run_cpu_batch(64).unwrap();
 
                 let timer_period = emu
                     .cpu_ref(BSP_INDEX)
@@ -3927,7 +3907,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let before = emu.cpu_ref(BSP_INDEX).icount;
                 // batch_size=1 finishes after the first round: the quantum
                 // credits alone guarantee elapsed >= 1.
-                let elapsed = unsafe { emu.run_cpu_batch(1) }.unwrap();
+                let elapsed = emu.run_cpu_batch(1).unwrap();
 
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
                 // Bochs main.cc bx_begin_simulation: every CPU that executes
@@ -4032,7 +4012,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rdi, DEST_ADDR);
                 emu.reg_write(X86Reg::Rcx, 1);
 
-                unsafe { emu.run_cpu_batch(1) }.unwrap();
+                emu.run_cpu_batch(1).unwrap();
                 assert_eq!(emu.mem_read_vec(DEST_ADDR, 2).unwrap(), [0x34, 0x12]);
                 assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
             })
@@ -4081,7 +4061,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rdx, UNMAPPED_PORT);
                 emu.reg_write(X86Reg::Rdi, DEST_ADDR);
 
-                unsafe { emu.run_cpu_batch(1) }.unwrap();
+                emu.run_cpu_batch(1).unwrap();
                 assert_eq!(emu.reg_read(X86Reg::Cr2), 0x20_0000);
                 assert_eq!(
                     reads.load(Ordering::SeqCst),
@@ -4140,7 +4120,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rdx, UNMAPPED_PORT);
                 emu.reg_write(X86Reg::Rdi, DEST_ADDR);
 
-                unsafe { emu.run_cpu_batch(1) }.unwrap();
+                emu.run_cpu_batch(1).unwrap();
                 assert_eq!(reads.load(Ordering::SeqCst), 0);
                 assert_eq!(writes.load(Ordering::SeqCst), 0);
             })
@@ -4190,7 +4170,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rdi, DEST_ADDR);
                 emu.reg_write(X86Reg::Rcx, 1);
 
-                unsafe { emu.run_cpu_batch(1) }.unwrap();
+                emu.run_cpu_batch(1).unwrap();
 
                 assert_eq!(reads.load(Ordering::SeqCst), 1);
                 assert_eq!(writes.load(Ordering::SeqCst), 1);
@@ -4255,7 +4235,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     fn phase6_run<T: crate::cpu::instrumentation::Instrumentation>(
         emu: &mut Emulator<T>,
     ) {
-        unsafe { emu.run_cpu_batch(1) }.unwrap();
+        emu.run_cpu_batch(1).unwrap();
     }
 
     #[cfg(feature = "instrumentation")]

@@ -3,9 +3,9 @@
 
 use super::decoder::BxSegregs;
 use super::eflags::EFlags;
-use crate::cpu::{BxCpuC};
+use crate::cpu::BxCpuC;
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     pub(super) fn clc(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         self.set_cf(false);
         Ok(())
@@ -17,7 +17,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     }
 
     pub(super) fn cmc(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
-        self.set_cf(self.getb_cf() == 0);
+        let cf = self.getb_cf() == 0;
+        self.set_cf(cf);
         Ok(())
     }
 
@@ -96,7 +97,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // Only inhibit if IF was previously clear
         if !self.eflags.contains(EFlags::IF_) {
             self.eflags.insert(EFlags::IF_);
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS);
+            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS);
             // Bochs flag_ctrl.cc: handleInterruptMaskChange() after setting IF
             self.handle_interrupt_mask_change();
         }

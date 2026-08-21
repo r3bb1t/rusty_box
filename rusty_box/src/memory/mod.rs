@@ -778,10 +778,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     };
     use std::io::{self, Read, Seek, SeekFrom};
     use crate::{
-        cpu::{
-            builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX,
-            rusty_box::MemoryAccessType,
-        },
+        cpu::{builder::BxCpuBuilder, rusty_box::MemoryAccessType},
         Error,
     };
 

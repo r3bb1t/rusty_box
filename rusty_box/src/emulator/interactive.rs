@@ -36,10 +36,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// - Executes CPU instructions in batches
     ///
     /// Returns the number of instructions executed, or an error.
-    pub fn run_interactive(&mut self, max_instructions: u64) -> Result<u64>
-    where
-        'a: 'static, // Required for borrow_memory_for_cpu safety
-    {
+    pub fn run_interactive(&mut self, max_instructions: u64) -> Result<u64> {
         self.prepare_run();
 
         // Verify VGA BIOS and IPL diagnostic ranges through block-aware RAM
@@ -140,7 +137,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             let batch_size = remaining_instructions.min(INSTRUCTION_BATCH_SIZE);
             // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
             let result =
-                unsafe { self.run_cpu_batch_with_strict_limit(batch_size, true) };
+                self.run_cpu_batch_with_strict_limit(batch_size, true);
 
 
             let _should_update_gui = match result {
@@ -437,7 +434,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                                 {
                                     let vec = self.iac();
                                     // SAFETY: see borrow_memory_for_cpu / inject_interrupt
-                                    if let Err(e) = unsafe { self.inject_interrupt(vec) } {
+                                    if let Err(e) = self.inject_interrupt(vec) {
                                         tracing::warn!(
                                             "PIC interrupt injection (vector {vec:#04x}) failed: {e:?}"
                                         );
@@ -455,9 +452,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                                     break;
                                 }
                                 // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
-                                let r2 = unsafe {
-                                    self.run_cpu_batch_with_strict_limit(batch2, true)
-                                };
+                                let r2 = self.run_cpu_batch_with_strict_limit(batch2, true);
                                 if let Ok(ex2) = r2 {
                                     instructions_executed += ex2;
                                     if !self.batch_advanced_pc_system {
@@ -587,7 +582,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         // Temporarily wire the memory bus so the interrupt path can
                         // read IVT/IDT and push stack frames correctly.
                         // SAFETY: see borrow_memory_for_cpu / inject_interrupt
-                        let inject_result = unsafe { self.inject_interrupt(vector) };
+                        let inject_result = self.inject_interrupt(vector);
 
                         match &inject_result {
                             Ok(()) => {

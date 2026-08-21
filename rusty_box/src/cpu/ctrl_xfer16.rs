@@ -3,12 +3,12 @@
 //! Based on Bochs ctrl_xfer16.cc
 
 use super::{
-    cpu::{BxCpuC, Exception},
+    cpu::Exception,
     decoder::{BxSegregs, Instruction},
     error::{CpuError, Result},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Helper functions for branching
     // =========================================================================
@@ -54,7 +54,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let ip = self.get_ip();
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, rip);
         Ok(())
     }
 
@@ -64,7 +65,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let ip = self.get_ip();
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, rip);
         Ok(())
     }
 
@@ -75,7 +77,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let new_ip = self.get_gpr16(dst);
         self.branch_near16(new_ip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
-        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, rip);
         Ok(())
     }
 
@@ -87,7 +90,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let new_ip = self.v_read_word(seg, eaddr)?;
         self.branch_near16(new_ip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
-        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, rip);
         Ok(())
     }
 
@@ -119,7 +123,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Call, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Call, rip);
         Ok(())
     }
 
@@ -137,7 +142,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
         self.branch_near16(new_ip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
-        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
         Ok(())
     }
 
@@ -156,7 +162,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
         self.branch_near16(new_ip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
-        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
         Ok(())
     }
 
@@ -177,7 +184,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn ret_near16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let return_ip = self.pop_16()?;
         self.branch_near16(return_ip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
         Ok(())
     }
 
@@ -197,7 +205,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             let sp = self.get_gpr16(4);
             self.set_gpr16(4, sp.wrapping_add(imm16));
         }
-        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
         Ok(())
     }
 

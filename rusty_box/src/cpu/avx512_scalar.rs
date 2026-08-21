@@ -814,8 +814,6 @@ mod tests {
     //! exponent, scalef multiplies by a power of two, and getmant returns
     //! the significand normalised into the interval imm8[1:0] selects.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::{BxSegregs, Instruction};
     use crate::cpu::xmm::MXCSR_RESET;
     use rusty_box_decoder::opcode::Opcode;

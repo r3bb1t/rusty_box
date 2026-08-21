@@ -448,8 +448,6 @@ mod tests {
     //! multiply-add. Only comparing the two mnemonics against each other, on
     //! the same inputs, pins the parity down.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::{BxSegregs, Instruction};
     use crate::cpu::xmm::MXCSR_RESET;
     use rusty_box_decoder::opcode::Opcode;

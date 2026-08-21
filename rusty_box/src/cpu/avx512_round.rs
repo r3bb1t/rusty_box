@@ -936,8 +936,6 @@ mod tests {
     //! scale, and VRANGE's carries a magnitude flag and a sign override that
     //! can hand back a value whose sign belongs to neither input's ordering.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::BxSegregs;
     use crate::cpu::xmm::MXCSR_RESET;
     use rusty_box_decoder::opcode::Opcode;

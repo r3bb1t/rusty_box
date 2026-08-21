@@ -1133,7 +1133,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     #[test]
     fn enable_smram_bypasses_vga_handler_disable_restores_it() {
         use crate::cpu::builder::BxCpuBuilder;
-        use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
 
         // BxICache contains ~19MB fixed arrays; the debug-mode struct literal
         // built by BxCpuBuilder::build() overflows the small default test
@@ -1210,7 +1209,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     #[test]
     fn bios_write_enabled_gates_high_mirror_rom_writes() {
         use crate::cpu::builder::BxCpuBuilder;
-        use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
 
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)

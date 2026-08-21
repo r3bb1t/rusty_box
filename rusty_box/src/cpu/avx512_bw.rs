@@ -1286,8 +1286,6 @@ mod tests {
     //! These drive `execute_instruction` rather than the handler directly,
     //! because the dispatcher arm is itself part of what is under test.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::{BxSegregs, Instruction};
     use rusty_box_decoder::opcode::Opcode;
 

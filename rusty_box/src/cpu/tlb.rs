@@ -188,10 +188,8 @@ pub(crate) fn host_page_ptr<P: CachedHostPage>(base: *mut u8, page: Option<P>) -
 /// the all-zero pattern and the entry is the size it would be as a bare
 /// integer. A regression here would grow every one of the 3072 TLB entries
 /// per CPU.
-const _: () =
-    assert!(core::mem::size_of::<Option<AllocPage>>() == core::mem::size_of::<usize>());
-const _: () =
-    assert!(core::mem::size_of::<Option<RamPage>>() == core::mem::size_of::<usize>());
+const _: () = assert!(core::mem::size_of::<Option<AllocPage>>() == core::mem::size_of::<usize>());
+const _: () = assert!(core::mem::size_of::<Option<RamPage>>() == core::mem::size_of::<usize>());
 
 pub(crate) struct TLBEntry<P> {
     /// linear page frame
@@ -327,6 +325,18 @@ impl<P, const SIZE: usize> Tlb<P, SIZE> {
         let i = self.get_index_of(lpf, len);
         &mut self.entries[i]
     }
+
+    /// The matching entry, for a lookup that only tests it.
+    ///
+    /// Every access begins by probing its slot and comparing tags; only a miss
+    /// goes on to refill. Taking that probe as a shared borrow is what lets the
+    /// hit path read the protection keys and the allocation base alongside the
+    /// entry, which it must do to answer the access at all.
+    #[inline]
+    pub(super) fn entry_of(&self, lpf: u64, len: u32) -> &TLBEntry<P> {
+        let i = self.get_index_of(lpf, len);
+        &self.entries[i]
+    }
     /// Invalidate the direct-mapped slot selected for a prospective mapping.
     ///
     /// Unlike `invlpg`, this deliberately clears a colliding entry even when
@@ -410,8 +420,6 @@ impl<P, const SIZE: usize> Tlb<P, SIZE> {
             on_invalidate(idx);
         }
     }
-
-
 }
 
 impl<P: CachedHostPage, const SIZE: usize> Tlb<P, SIZE> {
@@ -480,7 +488,10 @@ mod const_initialiser_tests {
             let page = RamPage::from_ram_offset(offset)
                 .unwrap_or_else(|| panic!("offset {offset:#x} is a legitimate RAM page"));
             assert_eq!(page.ram_offset(), offset);
-            assert_eq!(page.host_addr(0x1_0000 as *mut u8) as usize, 0x1_0000 + offset);
+            assert_eq!(
+                page.host_addr(0x1_0000 as *mut u8) as usize,
+                0x1_0000 + offset
+            );
         }
         // Not the start of a page, so it names no page at all.
         assert!(RamPage::from_ram_offset(0x1001).is_none());

@@ -8,7 +8,7 @@ use super::{
     error::{CpuError, Result},
 };
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Helper functions for branching
     // =========================================================================
@@ -62,7 +62,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
 
         if !self.is_canonical(new_rip) {
-            self.set_rsp(self.prev_rsp);
+            let rsp = self.prev_rsp;
+            self.set_rsp(rsp);
             self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
@@ -94,7 +95,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
 
         if !self.is_canonical(new_rip) {
-            self.set_rsp(self.prev_rsp);
+            let rsp = self.prev_rsp;
+            self.set_rsp(rsp);
             self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
@@ -247,7 +249,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
 
         if !self.is_canonical(new_rip) {
-            self.set_rsp(self.prev_rsp);
+            let rsp = self.prev_rsp;
+            self.set_rsp(rsp);
             self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
@@ -312,14 +315,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         if !self.is_canonical(return_rip) {
             // Restore RSP before exception (RSP_SPECULATIVE rollback)
-            self.set_rsp(self.prev_rsp);
+            let rsp = self.prev_rsp;
+            self.set_rsp(rsp);
             self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
         }
 
         self.set_rip(return_rip);
-        self.set_rsp(self.rsp().wrapping_add(instr.iw() as u64));
+        let rsp = self.rsp().wrapping_add(instr.iw() as u64);
+        self.set_rsp(rsp);
 
         // RSP_COMMIT (matching C++ line 71)
         self.speculative_rsp = false;
@@ -374,7 +379,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // (We don't have VMX guest mode, but set for completeness)
 
         // Unmask NMI (matching C++ line 478)
-        self.unmask_event(Self::BX_EVENT_NMI);
+        self.unmask_event(BxCpuC::<T>::BX_EVENT_NMI);
 
         // BX_ASSERT(long_mode()) — matching C++ line 488
 

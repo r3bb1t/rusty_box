@@ -731,18 +731,14 @@ type XSaveStateInUsePtr_tR = fn() -> bool;
 type XSavePtr_tR = fn(&Instruction, usize);
 type XRestorPtr_tR = fn(&Instruction, usize);
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
-    pub(super) fn xsave_xrestor_init(&mut self) {
-        //self
-    }
-}
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {}
 
 // =========================================================================
 // MOV Rd, CRn / MOV CRn, Rd / LMSW -- Control Register Instructions
 // Matching Bochs crregs.cc
 // =========================================================================
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ----- MOV Rd, CRn (reads) -----
     // All MOV CRn require CPL=0, matching Bochs crregs.cc
 
@@ -1026,7 +1022,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // check so any of the three triggers both side-effects.
         if (old_cr0 & 0x80010001) != (val_32 & 0x80010001) {
             self.tlb_flush();
-            self.set_pkeys(self.pkru, self.pkrs);
+            let pkru = self.pkru;
+            let pkrs = self.pkrs;
+            self.set_pkeys(pkru, pkrs);
         }
 
         // Bochs crregs.cc
@@ -1314,7 +1312,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // at the end of the routine. The pkey allow-mask depends on
         // CR4.PKE and CR4.PKS, but Bochs recomputes always to keep the
         // tail of SetCR4 free of conditional branches.
-        self.set_pkeys(self.pkru, self.pkrs);
+        let pkru = self.pkru;
+        let pkrs = self.pkrs;
+        self.set_pkeys(pkru, pkrs);
 
         // BOCHS BX_INSTR_TLB_CNTRL with MovCr4 kind
         #[cfg(feature = "instrumentation")]
@@ -1587,6 +1587,189 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // Matching Bochs crregs.cc
     // =========================================================================
 
+    // =========================================================================
+    // MOV Rq, CRn — 64-bit CR reads (long mode)
+    // Matching Bochs crregs.cc MOV_RqCR0 / MOV_RqCR2 / MOV_RqCR3 / MOV_RqCR4
+    // =========================================================================
+
+    pub fn mov_rq_cr0(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_alt_mov_cr8(instr)?;
+        self.check_cpl0_for_cr_dr()?;
+        // Bochs MOV_RqCR0: the CR index (extended by REX.R) is carried in
+        // dst() in the rusty_box decoder; instr.src() carries the GPR.
+        // CR8 reads land here too because the form_opcode mask is 3 bits.
+        let cr_idx = instr.dst();
+        let dst_gpr = instr.src();
+        if cr_idx == 8 {
+            // Bochs ReadCR8 (crregs.cc): SVM CR8 read intercept
+            // fires BEFORE the VMX intercept.
+            if self.in_svm_guest && self.svm_cr_read_intercepted(8) {
+                return self.svm_vmexit(super::svm::SvmVmexit::Cr8Read as i32, 0, 0);
+            }
+            // Bochs ReadCR8 (crregs.cc): VMX intercept fires
+            // AFTER the SVM check.
+            if self.in_vmx_guest && self.vmexit_check_cr8_read(dst_gpr)? {
+                return Ok(());
+            }
+            let val = self.read_cr8();
+            self.set_gpr64(usize::from(dst_gpr), val);
+            return Ok(());
+        }
+        // Bochs crregs.cc MOV_RqCR0 — SVM CR0 read intercept.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(0) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Read as i32, 0, 0);
+        }
+        let val = u64::from(self.cr0.get32());
+        self.set_gpr64(usize::from(dst_gpr), val);
+        Ok(())
+    }
+
+    pub fn mov_rq_cr2(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        // Bochs crregs.cc MOV_RqCR2 — SVM CR2 read intercept.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(2) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr2Read as i32, 0, 0);
+        }
+        let src = instr.src() as usize;
+        let cr2 = self.cr2;
+        self.set_gpr64(src, cr2);
+        Ok(())
+    }
+
+    pub fn mov_rq_cr3(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        let gpr = instr.src();
+        // Bochs crregs.cc MOV_RqCR3 — SVM CR3 read intercept BEFORE VMX gate.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(3) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr3Read as i32, 0, 0);
+        }
+        // Bochs vmexit.cc VMexit_CR3_Read — gated on CR3_READ_VMEXIT.
+        if self.in_vmx_guest && self.vmexit_check_cr3_read(gpr)? {
+            return Ok(());
+        }
+        let gpr = usize::from(gpr);
+        let cr3 = self.cr3;
+        self.set_gpr64(gpr, cr3);
+        Ok(())
+    }
+
+    pub fn mov_rq_cr4(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        // Bochs crregs.cc MOV_RqCR4 — SVM CR4 read intercept.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(4) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr4Read as i32, 0, 0);
+        }
+        let val = self.cr4.get();
+        self.set_gpr64(instr.src() as usize, val);
+        Ok(())
+    }
+
+    // =========================================================================
+    // MOV Rq, DRn / MOV DRn, Rq — 64-bit DR reads/writes (long mode)
+    // Matching Bochs crregs.cc MOV_RqDq / MOV_DqRq
+    // =========================================================================
+
+    pub fn mov_rq_dq(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        // Reuse 32-bit handler which already reads DR correctly
+        self.mov_rd_dd(instr)
+    }
+
+    pub fn mov_dq_rq(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        // Reuse 32-bit handler which already writes DR correctly
+        self.mov_dd_rd(instr)
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    use super::super::apic::APIC_EDGE_TRIGGERED;
+    use crate::cpu::{BxCpuC, ResetReason};
+
+    /// `LOCK MOV CR0` is AMD's ALT_MOV_CR8 alias for CR8, and is the only way
+    /// 32-bit code can reach the task priority register — CR8 otherwise needs
+    /// REX.R, which does not exist outside 64-bit mode.
+    ///
+    /// The decoders extend CR0 -> CR8 whenever the prefix is present, because
+    /// they cannot see the CPU's feature set. This is the other half: a model
+    /// without `IsaAltMovCr8` must reject it. Bochs makes the same split
+    /// differently, marking the opcodes `BX_LOCKABLE` in
+    /// `init_FetchDecodeTables` only when the feature is present, so the #UD
+    /// falls out at decode instead.
+    #[test]
+    fn lock_mov_cr0_reaches_cr8_only_on_a_model_that_advertises_it() {
+        use crate::cpu::decoder::{Instruction, Opcode, X86Feature};
+
+        fn locked_mov_cr0_write() -> Instruction {
+            let mut i = Instruction::default();
+            i.set_ia_opcode(Opcode::MovCr0rq);
+            i.init(0, 0, 1, 1);
+            i.assert_mod_c0();
+            i.set_lock();
+            i.set_src_reg(0, 8); // what the decoder does with the LOCK prefix
+            i.set_src_reg(1, 1); // source GPR
+            i
+        }
+
+        // AMD advertises ALT_MOV_CR8: the write must land on the LAPIC TPR.
+        let mut amd_machine = crate::cpu::exec_ctx::TestMachine::with_model(
+            crate::cpu::CpuModel::amd_ryzen(),
+        );
+        let mut amd = amd_machine.ctx();
+        amd.reset(ResetReason::Hardware);
+        assert!(amd.bx_cpuid_support_isa_extension(X86Feature::IsaAltMovCr8));
+        amd.set_gpr64(1, 0x0F);
+        amd.mov_cr0_rq(&locked_mov_cr0_write()).unwrap();
+        assert_eq!(
+            amd.lapic.get_tpr(),
+            0xF0,
+            "LOCK MOV CR0 must write CR8, i.e. the task priority register"
+        );
+
+        // Intel does not advertise it, so the same instruction is #UD.
+        let mut intel_machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut intel = intel_machine.ctx();
+        intel.reset(ResetReason::Hardware);
+        assert!(!intel.bx_cpuid_support_isa_extension(X86Feature::IsaAltMovCr8));
+        let before = intel.lapic.get_tpr();
+        intel.set_gpr64(1, 0x0F);
+        let _ = intel.mov_cr0_rq(&locked_mov_cr0_write());
+        assert_eq!(
+            intel.lapic.get_tpr(),
+            before,
+            "without ALT_MOV_CR8 the alias must not touch the TPR"
+        );
+    }
+
+    #[test]
+    fn write_cr8_lowering_tpr_signals_pending_lapic_event() {
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+        cpu.lapic.write_aligned(0x0F0, 0x1FF, 0);
+        cpu.lapic.set_tpr(0x40);
+        cpu.lapic.trigger_irq(0x30, APIC_EDGE_TRIGGERED, false);
+        assert!(!cpu.lapic.intr);
+        assert!(!cpu.lapic.intr_pending);
+
+        cpu.pending_event = 0;
+        cpu.async_event = 0;
+        cpu.unmask_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
+        cpu.write_cr8(0).unwrap();
+
+        assert!(cpu.lapic.intr);
+        assert!(!cpu.lapic.intr_pending);
+        assert!((cpu.pending_event & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR) != 0);
+        assert!(cpu.async_event != 0);
+    }
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    pub(super) fn xsave_xrestor_init(&mut self) {
+        //self
+    }
+
     /// Compute CR4 supported bits mask from CPUID features.
     /// Matches Bochs crregs.cc get_cr4_allow_mask()
     pub(super) fn get_cr4_allow_mask(&self) -> u64 {
@@ -1770,176 +1953,5 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
 
         allow
-    }
-
-    // =========================================================================
-    // MOV Rq, CRn — 64-bit CR reads (long mode)
-    // Matching Bochs crregs.cc MOV_RqCR0 / MOV_RqCR2 / MOV_RqCR3 / MOV_RqCR4
-    // =========================================================================
-
-    pub fn mov_rq_cr0(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        self.check_alt_mov_cr8(instr)?;
-        self.check_cpl0_for_cr_dr()?;
-        // Bochs MOV_RqCR0: the CR index (extended by REX.R) is carried in
-        // dst() in the rusty_box decoder; instr.src() carries the GPR.
-        // CR8 reads land here too because the form_opcode mask is 3 bits.
-        let cr_idx = instr.dst();
-        let dst_gpr = instr.src();
-        if cr_idx == 8 {
-            // Bochs ReadCR8 (crregs.cc): SVM CR8 read intercept
-            // fires BEFORE the VMX intercept.
-            if self.in_svm_guest && self.svm_cr_read_intercepted(8) {
-                return self.svm_vmexit(super::svm::SvmVmexit::Cr8Read as i32, 0, 0);
-            }
-            // Bochs ReadCR8 (crregs.cc): VMX intercept fires
-            // AFTER the SVM check.
-            if self.in_vmx_guest && self.vmexit_check_cr8_read(dst_gpr)? {
-                return Ok(());
-            }
-            let val = self.read_cr8();
-            self.set_gpr64(usize::from(dst_gpr), val);
-            return Ok(());
-        }
-        // Bochs crregs.cc MOV_RqCR0 — SVM CR0 read intercept.
-        if self.in_svm_guest && self.svm_cr_read_intercepted(0) {
-            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Read as i32, 0, 0);
-        }
-        let val = u64::from(self.cr0.get32());
-        self.set_gpr64(usize::from(dst_gpr), val);
-        Ok(())
-    }
-
-    pub fn mov_rq_cr2(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        self.check_cpl0_for_cr_dr()?;
-        // Bochs crregs.cc MOV_RqCR2 — SVM CR2 read intercept.
-        if self.in_svm_guest && self.svm_cr_read_intercepted(2) {
-            return self.svm_vmexit(super::svm::SvmVmexit::Cr2Read as i32, 0, 0);
-        }
-        self.set_gpr64(instr.src() as usize, self.cr2);
-        Ok(())
-    }
-
-    pub fn mov_rq_cr3(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        self.check_cpl0_for_cr_dr()?;
-        let gpr = instr.src();
-        // Bochs crregs.cc MOV_RqCR3 — SVM CR3 read intercept BEFORE VMX gate.
-        if self.in_svm_guest && self.svm_cr_read_intercepted(3) {
-            return self.svm_vmexit(super::svm::SvmVmexit::Cr3Read as i32, 0, 0);
-        }
-        // Bochs vmexit.cc VMexit_CR3_Read — gated on CR3_READ_VMEXIT.
-        if self.in_vmx_guest && self.vmexit_check_cr3_read(gpr)? {
-            return Ok(());
-        }
-        self.set_gpr64(usize::from(gpr), self.cr3);
-        Ok(())
-    }
-
-    pub fn mov_rq_cr4(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        self.check_cpl0_for_cr_dr()?;
-        // Bochs crregs.cc MOV_RqCR4 — SVM CR4 read intercept.
-        if self.in_svm_guest && self.svm_cr_read_intercepted(4) {
-            return self.svm_vmexit(super::svm::SvmVmexit::Cr4Read as i32, 0, 0);
-        }
-        let val = self.cr4.get();
-        self.set_gpr64(instr.src() as usize, val);
-        Ok(())
-    }
-
-    // =========================================================================
-    // MOV Rq, DRn / MOV DRn, Rq — 64-bit DR reads/writes (long mode)
-    // Matching Bochs crregs.cc MOV_RqDq / MOV_DqRq
-    // =========================================================================
-
-    pub fn mov_rq_dq(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        self.check_cpl0_for_cr_dr()?;
-        // Reuse 32-bit handler which already reads DR correctly
-        self.mov_rd_dd(instr)
-    }
-
-    pub fn mov_dq_rq(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        self.check_cpl0_for_cr_dr()?;
-        // Reuse 32-bit handler which already writes DR correctly
-        self.mov_dd_rd(instr)
-    }
-}
-
-#[cfg(all(test, feature = "alloc"))]
-mod tests {
-    use super::super::apic::APIC_EDGE_TRIGGERED;
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
-    use crate::cpu::{BxCpuC, ResetReason};
-
-    /// `LOCK MOV CR0` is AMD's ALT_MOV_CR8 alias for CR8, and is the only way
-    /// 32-bit code can reach the task priority register — CR8 otherwise needs
-    /// REX.R, which does not exist outside 64-bit mode.
-    ///
-    /// The decoders extend CR0 -> CR8 whenever the prefix is present, because
-    /// they cannot see the CPU's feature set. This is the other half: a model
-    /// without `IsaAltMovCr8` must reject it. Bochs makes the same split
-    /// differently, marking the opcodes `BX_LOCKABLE` in
-    /// `init_FetchDecodeTables` only when the feature is present, so the #UD
-    /// falls out at decode instead.
-    #[test]
-    fn lock_mov_cr0_reaches_cr8_only_on_a_model_that_advertises_it() {
-        use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
-        use crate::cpu::decoder::{Instruction, Opcode, X86Feature};
-
-        fn locked_mov_cr0_write() -> Instruction {
-            let mut i = Instruction::default();
-            i.set_ia_opcode(Opcode::MovCr0rq);
-            i.init(0, 0, 1, 1);
-            i.assert_mod_c0();
-            i.set_lock();
-            i.set_src_reg(0, 8); // what the decoder does with the LOCK prefix
-            i.set_src_reg(1, 1); // source GPR
-            i
-        }
-
-        // AMD advertises ALT_MOV_CR8: the write must land on the LAPIC TPR.
-        let mut amd = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
-        amd.reset(ResetReason::Hardware);
-        assert!(amd.bx_cpuid_support_isa_extension(X86Feature::IsaAltMovCr8));
-        amd.set_gpr64(1, 0x0F);
-        amd.mov_cr0_rq(&locked_mov_cr0_write()).unwrap();
-        assert_eq!(
-            amd.lapic.get_tpr(),
-            0xF0,
-            "LOCK MOV CR0 must write CR8, i.e. the task priority register"
-        );
-
-        // Intel does not advertise it, so the same instruction is #UD.
-        let mut intel = BxCpuBuilder::new().build().unwrap();
-        intel.reset(ResetReason::Hardware);
-        assert!(!intel.bx_cpuid_support_isa_extension(X86Feature::IsaAltMovCr8));
-        let before = intel.lapic.get_tpr();
-        intel.set_gpr64(1, 0x0F);
-        let _ = intel.mov_cr0_rq(&locked_mov_cr0_write());
-        assert_eq!(
-            intel.lapic.get_tpr(),
-            before,
-            "without ALT_MOV_CR8 the alias must not touch the TPR"
-        );
-    }
-
-    #[test]
-    fn write_cr8_lowering_tpr_signals_pending_lapic_event() {
-        let mut cpu = BxCpuBuilder::new().build().unwrap();
-        cpu.reset(ResetReason::Hardware);
-        cpu.lapic.write_aligned(0x0F0, 0x1FF, 0);
-        cpu.lapic.set_tpr(0x40);
-        cpu.lapic.trigger_irq(0x30, APIC_EDGE_TRIGGERED, false);
-        assert!(!cpu.lapic.intr);
-        assert!(!cpu.lapic.intr_pending);
-
-        cpu.pending_event = 0;
-        cpu.async_event = 0;
-        cpu.unmask_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
-        cpu.write_cr8(0).unwrap();
-
-        assert!(cpu.lapic.intr);
-        assert!(!cpu.lapic.intr_pending);
-        assert!((cpu.pending_event & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR) != 0);
-        assert!(cpu.async_event != 0);
     }
 }
