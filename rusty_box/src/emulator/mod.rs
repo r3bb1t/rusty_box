@@ -424,7 +424,11 @@ pub struct Emulator<T: Instrumentation = ()> {
 }
 
 impl<'a, T: Instrumentation> Emulator<T> {
-    pub(crate) fn cpu_count(&self) -> usize {
+    /// How many processors this machine has, boot processor included.
+    ///
+    /// Fixed at construction from the configured topology; a guest cannot
+    /// change it.
+    pub fn cpu_count(&self) -> usize {
         self.cpus.count()
     }
 

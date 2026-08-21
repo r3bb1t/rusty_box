@@ -246,8 +246,11 @@ fn run() -> Status {
     emu.prepare_run();
 
     info!("Starting BIOS boot...");
-    emu.send_scancode(0x3B); // F1 (skip keyboard error)
-    emu.send_scancode(0xBB);
+    // F1, to skip the BIOS keyboard-error prompt.
+    let queued = emu.keyboard().scancodes(&[0x3B, 0xBB]);
+    if queued != 2 {
+        info!("keyboard ring was full; F1 not queued");
+    }
 
     // Main loop — mirrors run_interactive
     let batch: u64 = 100_000;
@@ -298,8 +301,10 @@ fn run() -> Status {
         // Auto-login after kernel boots
         if !login_sent && total > 50_000_000 {
             login_sent = true;
-            for &sc in &[0x13u8, 0x93, 0x18, 0x98, 0x18, 0x98, 0x14, 0x94, 0x1C, 0x9C] {
-                emu.send_scancode(sc);
+            let login = [0x13u8, 0x93, 0x18, 0x98, 0x18, 0x98, 0x14, 0x94, 0x1C, 0x9C];
+            let sent = emu.keyboard().scancodes(&login);
+            if sent != login.len() {
+                info!("login sequence truncated at {sent} of {}", login.len());
             }
         }
 

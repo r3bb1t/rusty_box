@@ -885,6 +885,28 @@ pub enum CpuSetupMode {
     FlatLong64,
 }
 
+impl CpuSetupMode {
+    /// The first physical address guest code may occupy without colliding
+    /// with the structures `Emulator::setup_cpu_mode` writes for this mode.
+    ///
+    /// Every mode but real writes a flat GDT low in memory, and `FlatLong64`
+    /// additionally builds the identity page tables. Code placed below this
+    /// is overwritten by the setup — and in long mode, overwriting the PML4
+    /// means the first fetch page-faults with nothing executed and no other
+    /// sign that anything is wrong. Page-aligned, so it is directly usable as
+    /// a load address.
+    pub const fn first_free_physical_address(self) -> u64 {
+        match self {
+            // Writes no tables of its own; the guest owns all of memory.
+            CpuSetupMode::RealMode => 0,
+            // A flat GDT at 0x0800, three descriptors wide.
+            CpuSetupMode::Protected16 | CpuSetupMode::FlatProtected32 => 0x1000,
+            // The GDT, then PML4, PDPT and four page directories from 0x1000.
+            CpuSetupMode::FlatLong64 => 0x7000,
+        }
+    }
+}
+
 // ─────────────────────────── ExitSet ───────────────────────────
 
 /// Fixed-capacity set of exit addresses (no alloc).

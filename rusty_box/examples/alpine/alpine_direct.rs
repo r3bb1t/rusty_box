@@ -305,7 +305,7 @@ fn run_alpine() -> Result<()> {
         emu = builder.build()?;
         println!("  CD-ROM attached: {}", iso_path);
 
-        emu.init_vga_text_mode3();
+        emu.display().init_text_mode3();
 
         println!("  Command line: {}", cmdline);
         emu.setup_direct_linux_boot(&vmlinuz, Some(&initramfs), &cmdline)?;
@@ -394,7 +394,7 @@ fn run_alpine() -> Result<()> {
                 "[{}M] Pressing Enter at ISOLINUX boot prompt",
                 total_executed / 1_000_000
             );
-            emu.send_string("\n");
+            let _typed = emu.keyboard().type_text("\n");
             enter_injected = true;
         }
 

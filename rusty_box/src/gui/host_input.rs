@@ -146,10 +146,10 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> HostInputSink
 {
     fn push(&mut self, event: HostInputEvent) -> bool {
         match event {
-            HostInputEvent::Scancode(sc) => self.send_scancode(sc),
-            HostInputEvent::Key(key, pressed) => self.send_key(key, pressed),
+            HostInputEvent::Scancode(sc) => self.keyboard().scancodes(&[sc]) == 1,
+            HostInputEvent::Key(key, pressed) => self.keyboard().key(key, pressed),
             HostInputEvent::Mouse(mouse) => {
-                self.send_mouse_event(mouse.dx, mouse.dy, mouse.dz, mouse.buttons)
+                self.mouse().motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons)
             }
         }
     }

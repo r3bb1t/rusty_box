@@ -212,10 +212,41 @@ impl<D: DisplaySource> Iterator for RowChars<'_, D> {
 
 impl<D: DisplaySource> ExactSizeIterator for RowChars<'_, D> {}
 
-/// Diagnostics that only make sense for the VGA, and so are not part of the
-/// role every adapter answers to.
+/// Driving the VGA adapter, and diagnostics that only make sense for it — so
+/// neither is part of the role every adapter answers to.
 #[cfg(feature = "alloc")]
 impl Display<'_, crate::iodev::vga::BxVgaC> {
+    /// Render the current frame into a shared framebuffer.
+    ///
+    /// The pump a front end that owns the machine on its own thread calls once
+    /// per frame; the `BxGui` path does the same thing through a trait object.
+    pub fn render_into(&mut self, framebuffer: &mut crate::gui::shared_display::SharedDisplay) {
+        super::run::render_vga_into(self.source, framebuffer);
+    }
+
+    /// Make the next render redraw everything.
+    ///
+    /// A freshly built machine has drawn nothing, so the first frame has no
+    /// previous state to diff against — Bochs vgacore.cc forces the same full
+    /// redraw after a mode set.
+    pub fn force_update(&mut self) {
+        self.source.force_initial_update();
+    }
+
+    /// Program standard text mode 3 (80x25 colour).
+    ///
+    /// Needed for a direct kernel boot, where no video BIOS runs to do it and
+    /// the kernel's console driver expects the adapter already in text mode.
+    pub fn init_text_mode3(&mut self) {
+        self.source.init_text_mode3();
+    }
+
+    /// Raise the DISPI capability ceiling and seed the power-on dimensions the
+    /// guest's video BIOS reports. Survives guest resets.
+    pub fn set_preferred_mode(&mut self, width: u16, height: u16, bpp: u16) {
+        self.source.set_preferred_mode(width, height, bpp);
+    }
+
     /// Every row the text aperture holds, displayed or not, one string each.
     ///
     /// [`TextView`] reads the page the CRTC start address points at. This

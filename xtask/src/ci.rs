@@ -319,6 +319,25 @@ const MATRIX: &[Step] = &[
         stdout_marker: None,
     },
     Step {
+        // The lib tests reach into the crate's own internals; this compiles
+        // and runs the public API the way a consumer writes it, which is the
+        // only thing that catches a surface that is correct inside and
+        // unusable outside.
+        name: "public API examples",
+        args: &[
+            "test",
+            "--release",
+            "-p",
+            "rusty_box",
+            "--features",
+            "std",
+            "--test",
+            "api_examples",
+        ],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
         // The GUI's browser front end is the only consumer of several
         // `#[cfg(target_arch = "wasm32")]` code paths, so no other step in
         // this suite compiles them. One such path went stale unnoticed.

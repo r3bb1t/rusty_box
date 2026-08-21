@@ -267,7 +267,7 @@ fn run_emulator(
 
     if let Some((kernel, initramfs, cmdline)) = direct_boot {
         // No BIOS runs — initialize VGA for the kernel's vgacon.
-        emu.init_vga_text_mode3();
+        emu.display().init_text_mode3();
         emu.setup_direct_linux_boot(&kernel, Some(&initramfs), &cmdline)?;
     }
 
@@ -278,7 +278,7 @@ fn run_emulator(
     if matches!(profile, BootProfile::Alpine { .. }) {
         emu.prepare_run();
         println!("Pre-queuing ISOLINUX boot: Enter (use ISO default config)");
-        emu.send_string("\n");
+        let _typed = emu.keyboard().type_text("\n");
     }
 
     println!("Emulator started (max {} instructions)", max_instructions);

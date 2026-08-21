@@ -181,11 +181,12 @@ where
     // BxVgaC::set_preferred_mode persists it across any later guest-triggered
     // reset). Raises the DISPI caps so the guest may select this resolution.
     if let Some(mode) = config.vga_mode {
-        emu.set_vga_preferred_mode(mode.width, mode.height, mode.bpp);
+        emu.display()
+            .set_preferred_mode(mode.width, mode.height, mode.bpp);
     }
     if should_prequeue_boot_enter(&config.boot_order) {
         emu.prepare_run();
-        emu.send_string("\n");
+        let _typed = emu.keyboard().type_text("\n");
     }
     let instructions_executed = emu.run_interactive(config.max_instructions)?;
 

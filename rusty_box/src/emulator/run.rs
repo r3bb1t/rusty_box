@@ -25,8 +25,12 @@ use super::cpu_store::CpuStore;
 /// Asked at any time, unlike [`StopReason`], which explains why one particular
 /// batch returned. A caller that has just restored a snapshot, or that has not
 /// stepped yet, has no batch outcome to read.
+///
+/// Closed on purpose (R5): a machine that learns a new power state should
+/// break every caller that decides what to do about it, rather than have them
+/// fall into a wildcard. `#[non_exhaustive]` would buy semver room this
+/// pre-1.0 surface has not asked for and cost exactly that.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum PowerState {
     /// Executing, or halted waiting for an interrupt — either way, alive.
     Running,
@@ -101,6 +105,7 @@ impl<T: Instrumentation> Keyboard<'_, T> {
     /// Press or release a key, rendered through the guest's active scancode
     /// set. Returns whether the whole sequence reached the guest — see
     /// `BxKeyboardC::gen_scancode` for why a key can be partly delivered.
+    #[must_use = "a refused key never reached the guest"]
     pub fn key(&mut self, key: crate::iodev::scancodes::BxKey, pressed: bool) -> bool {
         self.machine
             .device_manager
@@ -111,6 +116,7 @@ impl<T: Instrumentation> Keyboard<'_, T> {
     /// Press and release a key. `false` if either half was not delivered
     /// intact — including the case where the press landed and the release did
     /// not, which a guest sees as a stuck key.
+    #[must_use = "a half-delivered tap leaves the guest holding the key down"]
     pub fn tap(&mut self, key: crate::iodev::scancodes::BxKey) -> bool {
         let down = self.key(key, true);
         let up = self.key(key, false);
@@ -170,6 +176,7 @@ impl<T: Instrumentation> Mouse<'_, T> {
     /// refused for any of those reasons accumulates and folds into the next
     /// packet, because PS/2 deltas are relative — a button edge does not, which
     /// is the case worth checking for.
+    #[must_use = "a refused packet carried a button edge the guest will never see"]
     pub fn motion(&mut self, dx: i32, dy: i32, dz: i32, buttons: u8) -> bool {
         self.machine
             .device_manager
@@ -188,8 +195,13 @@ impl<T: Instrumentation> Mouse<'_, T> {
 /// The order matters where causes coincide — a guest that powers off on the
 /// same batch that exhausts its budget is reported as powering off, because the
 /// budget will still be there next call and the power-off will not.
+///
+/// Closed on purpose (R5). The reserved breakpoint cause the debugger seam
+/// will add is precisely the kind a caller must not silently ignore, so
+/// adding it should be a compile error everywhere a stop is dispatched.
+/// [`BatchOutcome::is_terminal`] is there for callers who only need the
+/// boolean and should not have to enumerate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum StopReason {
     /// The guest asked to be powered off: ACPI `PM1_CNT` with `SLP_EN` and
     /// `SLP_TYP` = S5, or the port-0x8900 shutdown protocol. Bochs treats both
@@ -669,6 +681,31 @@ impl<'a, T: Instrumentation> Emulator<T> {
         })
     }
 
+    /// Execute at most `instructions` guest instructions, and no more.
+    ///
+    /// The strict counterpart to [`Self::step_batch`]. That one treats its
+    /// argument as one inner batch and keeps going for a 15 ms wall-clock
+    /// budget, which is right for throughput and wrong for anything that has
+    /// to look at the machine between instructions: an address to stop at, a
+    /// single step, a debugger. This one runs the count and returns, with no
+    /// wall clock and no HLT fast-forward past it.
+    ///
+    /// Devices still advance by the ticks the CPU consumed, so guest time does
+    /// not fall behind — only the batching is different.
+    pub(crate) fn step_exactly(&mut self, instructions: u64) -> Result<BatchOutcome> {
+        let executed = self
+            .run_cpu_batch_with_strict_limit(instructions, true)
+            .map_err(crate::error::Error::Cpu)?;
+        if !self.batch_advanced_pc_system {
+            self.advance_pc_system_after_cpu_ticks(executed);
+        }
+        self.pump_gui_input();
+        Ok(BatchOutcome {
+            executed,
+            stop: self.classify_batch_stop(),
+        })
+    }
+
     /// The machine's power and reset controls.
     pub fn power(&mut self) -> Power<'_, T> {
         Power { machine: self }
@@ -737,22 +774,28 @@ impl<'a, T: Instrumentation> Emulator<T> {
         StopReason::BudgetExhausted
     }
 
-    #[cfg(feature = "alloc")]
-    /// Render VGA text output into a `SharedDisplay` framebuffer.
-    ///
-    /// This is the single-threaded equivalent of `update_gui()` — instead of
-    /// going through the `BxGui` trait (which requires `Arc<Mutex<>>` for
-    /// thread-safe sharing), it writes directly to the provided display.
-    /// Ideal for WASM where the emulator and display are owned by the same
-    /// event loop.
-    pub fn update_display(&mut self, display: &mut crate::gui::shared_display::SharedDisplay) {
+}
+
+/// Render one VGA frame into a `SharedDisplay` framebuffer.
+///
+/// The single-threaded equivalent of `update_gui()` — instead of going through
+/// the `BxGui` trait (which requires `Arc<Mutex<>>` for thread-safe sharing),
+/// it writes directly to the provided display. Ideal for WASM where the
+/// emulator and display are owned by the same event loop. Reached through
+/// [`crate::emulator::Display::render_into`].
+#[cfg(feature = "alloc")]
+pub(crate) fn render_vga_into(
+    vga: &mut crate::iodev::vga::BxVgaC,
+    display: &mut crate::gui::shared_display::SharedDisplay,
+) {
+    {
         #[cfg(debug_assertions)]
         let dbg = {
             static DBG_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
             DBG_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
         };
 
-        if let Some(update_result) = self.device_manager.vga.update() {
+        if let Some(update_result) = vga.update() {
             match update_result {
                 VgaDisplayUpdate::Text(update_result) => {
                     #[cfg(debug_assertions)]
@@ -830,57 +873,4 @@ impl<'a, T: Instrumentation> Emulator<T> {
         }
     }
 
-    /// Send a PS/2 scancode to the keyboard device.
-    ///
-    /// For environments that handle keyboard input outside of `BxGui`
-    /// (e.g. the WASM app processes egui events directly).
-    /// Deliver a guest key press/release, rendered through the guest's active
-    /// scancode set (Bochs keyboard.cc `gen_scancode`). Prefer this over
-    /// [`Emulator::send_scancode`], which bypasses the set selection.
-    /// Returns whether the key reached the guest intact; see
-    /// [`Emulator::keyboard`] for the handle that reports backpressure across
-    /// a whole sequence.
-    pub fn send_key(&mut self, key: crate::iodev::scancodes::BxKey, pressed: bool) -> bool {
-        self.keyboard().key(key, pressed)
-    }
-
-    /// Returns whether the byte was accepted.
-    pub fn send_scancode(&mut self, scancode: u8) -> bool {
-        self.device_manager.keyboard.send_scancode(scancode)
-    }
-
-    /// Send a relative PS/2 mouse update to the aux (mouse) device.
-    ///
-    /// Deltas are in mouse counts; `buttons` is a bitmask (bit 0 = left,
-    /// bit 1 = right, bit 2 = middle). Mirrors [`send_scancode`] for the WASM
-    /// path and the native input pump. Bochs keyboard.cc mouse_motion.
-    /// Returns whether a packet reached the guest; see [`Mouse::motion`] for
-    /// why a `false` is usually not backpressure.
-    pub fn send_mouse_event(&mut self, dx: i32, dy: i32, dz: i32, buttons: u8) -> bool {
-        self.mouse().motion(dx, dy, dz, buttons)
-    }
-
-    #[cfg(feature = "alloc")]
-    /// Send a string as PS/2 Set 2 scancodes (make + break for each character).
-    ///
-    /// Useful for headless testing — inject "root\n" to type at a login prompt.
-    /// Each character is converted to its scancode sequence including shift
-    /// modifier when needed.
-    /// Returns how many characters were delivered whole. A short count means
-    /// the guest's 16-byte keyboard ring filled — step the machine and resume
-    /// from that character.
-    pub fn send_string(&mut self, text: &str) -> usize {
-        self.keyboard().type_text(text)
-    }
-
-    /// Force VGA to generate an initial update (call before first `update_display`).
-    pub fn force_vga_update(&mut self) {
-        self.device_manager.vga.force_initial_update();
-    }
-
-    /// Initialize VGA to standard text mode 3 (80x25 color).
-    /// Must be called for direct kernel boot where no BIOS runs.
-    pub fn init_vga_text_mode3(&mut self) {
-        self.device_manager.vga.init_text_mode3();
-    }
 }

@@ -161,12 +161,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         self.pc_system.get_enable_a20()
     }
 
-    /// Preferred display mode reported to the guest's video BIOS.
-    #[inline]
-    pub fn set_vga_preferred_mode(&mut self, width: u16, height: u16, bpp: u16) {
-        self.device_manager
-            .set_vga_preferred_mode(width, height, bpp);
-    }
 }
 
 // ─────────────────────────── Hook registration ───────────────────────────
@@ -976,6 +970,15 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         let mut executed: u64 = 0;
         const BATCH: u64 = 4096;
 
+        // An address the caller wants execution to stop AT can only be
+        // honoured by looking after every instruction: a batch that runs past
+        // it leaves RIP somewhere else and the address is simply missed. So a
+        // run that watches addresses single-steps, and one that does not keeps
+        // the full batch. The caller opts into the cost by asking for the
+        // precision.
+        let watching_addresses = until.is_some() || !self.exit_set.is_empty();
+        let stride = if watching_addresses { 1 } else { BATCH };
+
         loop {
             if self.stop_flag.load(Ordering::Relaxed) {
                 return Ok(EmuStopReason::Stopped);
@@ -992,10 +995,14 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
             }
 
             let budget = match count {
-                Some(c) => BATCH.min(c - executed),
-                None => BATCH,
+                Some(c) => stride.min(c - executed),
+                None => stride,
             };
-            let outcome = self.step_batch(budget)?;
+            let outcome = if watching_addresses {
+                self.step_exactly(budget)?
+            } else {
+                self.step_batch(budget)?
+            };
             executed = executed.saturating_add(outcome.executed);
 
             // The addresses this wrapper watches are its own business, and they
@@ -1037,8 +1044,10 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         // The outcome is machine state the caller can read back at will — the
         // retired count through the CPU's instruction counter, the stop cause
         // through the activity state and the stop flag — so nothing is lost by
-        // not returning it from a one-instruction step.
-        self.step_batch(1)?;
+        // not returning it from a one-instruction step. It goes through the
+        // strict path: `step_batch(1)` would treat the 1 as an inner batch and
+        // keep running for its wall-clock budget, which is not a step.
+        self.step_exactly(1)?;
         Ok(())
     }
 }

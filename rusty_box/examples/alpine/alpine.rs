@@ -546,9 +546,7 @@ fn run_alpine() -> Result<()> {
                     "[{}M] Injecting Enter key to boot prompt",
                     total_executed / 1_000_000
                 );
-                for &sc in ENTER_SCANCODE {
-                    emu.send_scancode(sc);
-                }
+                let _sent = emu.keyboard().scancodes(ENTER_SCANCODE);
                 enter_injected = true;
             }
 
@@ -597,14 +595,10 @@ fn run_alpine() -> Result<()> {
                         "(headless) Injecting 'root\\n' at {}M instructions",
                         total_executed / 1_000_000
                     );
-                    for &sc in LOGIN_SCANCODES {
-                        emu.send_scancode(sc);
-                    }
+                    let _sent = emu.keyboard().scancodes(LOGIN_SCANCODES);
                     logged_in = true;
                 } else {
-                    for &sc in KEEP_ALIVE_SCANCODE {
-                        emu.send_scancode(sc);
-                    }
+                    let _sent = emu.keyboard().scancodes(KEEP_ALIVE_SCANCODE);
                 }
             }
         }

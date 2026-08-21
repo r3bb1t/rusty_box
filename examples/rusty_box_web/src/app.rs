@@ -135,7 +135,7 @@ impl WasmEmulatorApp {
                     DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT),
                 )
                 .build()?;
-            emu.force_vga_update();
+            emu.display().force_update();
             Ok(emu)
         })();
 
@@ -164,7 +164,7 @@ impl WasmEmulatorApp {
                 .boot_order(BootOrder::just(BootDevice::Cdrom))
                 .cdrom_bytes(AtaSlot::SECONDARY_MASTER, iso_data)
                 .build()?;
-            emu.force_vga_update();
+            emu.display().force_update();
             Ok(emu)
         })();
 
@@ -292,16 +292,15 @@ impl WasmEmulatorApp {
                     egui::Event::Text(text) => {
                         for ch in text.chars() {
                             let seq = rusty_box::gui::char_to_scancode_sequence(ch);
-                            for sc in &seq {
-                                emu.send_scancode(*sc);
-                            }
+                            // Stops at the first byte the guest's ring refuses,
+                            // so a full ring drops whole keys rather than
+                            // leaving the guest a make with no break.
+                            let _sent = emu.keyboard().scancodes(&seq);
                         }
                     }
                     egui::Event::Key { key, pressed, .. } => {
                         let seq = egui_key_to_scancodes(*key, *pressed);
-                        for sc in &seq {
-                            emu.send_scancode(*sc);
-                        }
+                        let _sent = emu.keyboard().scancodes(&seq);
                     }
                     _ => {}
                 }
@@ -668,7 +667,7 @@ impl eframe::App for WasmEmulatorApp {
                     }
                 }
                 self.total_instructions += frame_executed;
-                emu.update_display(&mut self.display);
+                emu.display().render_into(&mut self.display);
             }
         }
 

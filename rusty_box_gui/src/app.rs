@@ -2770,7 +2770,7 @@ impl WebShellApp {
                 .cdrom_bytes(AtaSlot::SECONDARY_MASTER, iso_data)
                 .build()
                 .map_err(|error| format!("{error:?}"))?;
-                emu.force_vga_update();
+                emu.display().force_update();
                 return Ok(Some(emu));
             }
         }
@@ -2935,7 +2935,7 @@ impl WebShellApp {
                     }
                 }
                 self.total_instructions = self.total_instructions.saturating_add(frame_executed);
-                emu.update_display(&mut self.display);
+                emu.display().render_into(&mut self.display);
             }
         }
     }
@@ -2950,13 +2950,15 @@ impl WebShellApp {
                     egui::Event::Text(text) => {
                         for ch in text.chars() {
                             for (key, pressed) in rusty_box::gui::char_to_bx_key_sequence(ch) {
-                                emu.send_key(key, pressed);
+                                // A full ring drops the keystroke; the next
+                                // frame's input is unaffected.
+                                let _delivered = emu.keyboard().key(key, pressed);
                             }
                         }
                     }
                     egui::Event::Key { key, pressed, .. } => {
                         if let Some(bx_key) = egui_key_to_bx_key(*key) {
-                            emu.send_key(bx_key, *pressed);
+                            let _delivered = emu.keyboard().key(bx_key, *pressed);
                         }
                     }
                     _ => {}

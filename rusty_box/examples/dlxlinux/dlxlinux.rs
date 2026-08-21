@@ -429,9 +429,7 @@ fn run_dlxlinux() -> Result<()> {
                             "(headless) LILO prompt detected — injecting Enter at {}M instructions",
                             total_executed / 1_000_000
                         );
-                        for &sc in LILO_ENTER_SCANCODES {
-                            emu.send_scancode(sc);
-                        }
+                        let _sent = emu.keyboard().scancodes(LILO_ENTER_SCANCODES);
                         lilo_boot_entered = true;
                     }
 
@@ -461,17 +459,13 @@ fn run_dlxlinux() -> Result<()> {
                             "(headless) Injecting 'root\\n' at {}M instructions",
                             total_executed / 1_000_000
                         );
-                        for &sc in LOGIN_SCANCODES {
-                            emu.send_scancode(sc);
-                        }
+                        let _sent = emu.keyboard().scancodes(LOGIN_SCANCODES);
                         logged_in = true;
                     }
                 }
 
                 // Keep-alive: reset console blank timer
-                for &sc in KEEP_ALIVE_SCANCODE {
-                    emu.send_scancode(sc);
-                }
+                let _sent = emu.keyboard().scancodes(KEEP_ALIVE_SCANCODE);
             }
         }
         run_result

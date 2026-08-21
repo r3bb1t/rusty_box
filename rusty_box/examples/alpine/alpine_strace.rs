@@ -375,7 +375,7 @@ fn run_emulator(boot: &BootConfig, shared: Arc<Mutex<SharedDisplay>>) -> Result<
             let mut emu = builder.build()?;
             // Pre-queue Enter at the ISOLINUX prompt to accept the ISO default.
             emu.prepare_run();
-            emu.send_string("\n");
+            let _typed = emu.keyboard().type_text("\n");
             emu
         }
         BootMode::Direct => {
@@ -389,7 +389,7 @@ fn run_emulator(boot: &BootConfig, shared: Arc<Mutex<SharedDisplay>>) -> Result<
             );
             // No firmware: the kernel goes straight into guest memory.
             let mut emu = builder.build()?;
-            emu.init_vga_text_mode3();
+            emu.display().init_text_mode3();
             emu.setup_direct_linux_boot(&vmlinuz, Some(&initramfs), &cmdline)?;
             emu
         }
