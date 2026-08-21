@@ -49,7 +49,14 @@ pub enum HostInputEvent {
 /// thread) and by `Emulator` (wasm: applies them immediately). One egui
 /// translator feeds either.
 pub trait HostInputSink {
-    fn push(&mut self, event: HostInputEvent);
+    /// Returns whether the event was taken. A sink that queues for another
+    /// thread reports whether its queue had room; a sink that applies events
+    /// straight to a machine reports whether the guest's own 16-byte keyboard
+    /// ring did. Either way a `false` means this event did NOT reach the guest,
+    /// and a caller feeding a batch should stop rather than push the rest in
+    /// after a hole.
+    #[must_use]
+    fn push(&mut self, event: HostInputEvent) -> bool;
 }
 
 /// Translate this frame's egui pointer state into at most one [`HostMouseEvent`]
@@ -87,42 +94,64 @@ pub fn translate_egui_mouse(
     }
 
     if dx != 0 || dy != 0 || dz != 0 || buttons != prev_buttons {
-        sink.push(HostInputEvent::Mouse(HostMouseEvent {
+        if !sink.push(HostInputEvent::Mouse(HostMouseEvent {
             dx,
             dy,
             dz,
             buttons,
-        }));
+        })) {
+            // A dropped motion is self-correcting: PS/2 deltas are relative, so
+            // the next frame's delta is measured from the same pointer position
+            // and the guest simply sees one coarser movement. A dropped BUTTON
+            // edge is not, so it is worth saying when it happens.
+            tracing::debug!("host mouse event refused by the sink; motion coalesces into the next frame");
+        }
     }
     buttons
 }
 
-/// Push a batch of scancodes into a sink.
-pub fn push_scancodes(sink: &mut impl HostInputSink, scancodes: &[u8]) {
+/// Push a batch of scancodes into a sink, returning how many were taken.
+///
+/// Stops at the first refusal, so the count is the resume point:
+/// `scancodes[accepted..]` is what still has to go. Pushing past a refusal
+/// would leave the guest a sequence with a hole in the middle, which is worse
+/// than a short one.
+pub fn push_scancodes(sink: &mut impl HostInputSink, scancodes: &[u8]) -> usize {
+    let mut accepted = 0;
     for &sc in scancodes {
-        sink.push(HostInputEvent::Scancode(sc));
+        if !sink.push(HostInputEvent::Scancode(sc)) {
+            break;
+        }
+        accepted += 1;
     }
+    accepted
 }
 
 impl HostInputSink for super::shared_display::SharedDisplay {
-    fn push(&mut self, event: HostInputEvent) {
+    /// These queues grow on the host side and hand off to the emulator thread,
+    /// so they cannot refuse an event; the guest's ring is what may fill, and
+    /// that is reported when the queue is drained into the machine.
+    fn push(&mut self, event: HostInputEvent) -> bool {
         match event {
             HostInputEvent::Scancode(sc) => self.pending_scancodes.push(sc),
             HostInputEvent::Key(key, pressed) => self.pending_keys.push((key, pressed)),
             HostInputEvent::Mouse(mouse) => self.pending_mouse.push(mouse),
         }
+        true
     }
 }
 
 impl<'a, T: crate::cpu::instrumentation::Instrumentation> HostInputSink
     for crate::emulator::Emulator<T>
 {
-    fn push(&mut self, event: HostInputEvent) {
+    fn push(&mut self, event: HostInputEvent) -> bool {
         match event {
             HostInputEvent::Scancode(sc) => self.send_scancode(sc),
             HostInputEvent::Key(key, pressed) => self.send_key(key, pressed),
+            // The PS/2 mouse path does not yet report; it is always taken.
             HostInputEvent::Mouse(mouse) => {
                 self.send_mouse_event(mouse.dx, mouse.dy, mouse.dz, mouse.buttons);
+                true
             }
         }
     }
@@ -136,7 +165,8 @@ pub struct RecordingSink {
 }
 
 impl HostInputSink for RecordingSink {
-    fn push(&mut self, event: HostInputEvent) {
+    fn push(&mut self, event: HostInputEvent) -> bool {
         self.events.push(event);
+        true
     }
 }

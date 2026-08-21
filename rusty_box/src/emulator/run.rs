@@ -85,6 +85,77 @@ impl<T: Instrumentation> Power<'_, T> {
     }
 }
 
+/// The machine's keyboard, as a host driving it sees it.
+///
+/// Every verb reports how much got through. The i8042's ring is 16 bytes and a
+/// guest that is not draining it fills it quickly, so a host typing into a busy
+/// machine WILL overrun — Bochs and QEMU both drop silently at that point, and
+/// the caller finds out by the guest missing keystrokes. Reporting instead
+/// turns that into backpressure: send, see how much landed, step the machine,
+/// send the rest.
+pub struct Keyboard<'m, T: Instrumentation> {
+    machine: &'m mut Emulator<T>,
+}
+
+impl<T: Instrumentation> Keyboard<'_, T> {
+    /// Press or release a key, rendered through the guest's active scancode
+    /// set. Returns whether the whole sequence reached the guest — see
+    /// `BxKeyboardC::gen_scancode` for why a key can be partly delivered.
+    pub fn key(&mut self, key: crate::iodev::scancodes::BxKey, pressed: bool) -> bool {
+        self.machine
+            .device_manager
+            .keyboard
+            .gen_scancode(key, pressed)
+    }
+
+    /// Press and release a key. `false` if either half was not delivered
+    /// intact — including the case where the press landed and the release did
+    /// not, which a guest sees as a stuck key.
+    pub fn tap(&mut self, key: crate::iodev::scancodes::BxKey) -> bool {
+        let down = self.key(key, true);
+        let up = self.key(key, false);
+        down && up
+    }
+
+    /// Feed raw scancode bytes, returning how many were accepted.
+    ///
+    /// Stops at the first byte the ring refuses, so the count is also the
+    /// resume point: `bytes[accepted..]` is exactly what still has to be sent.
+    #[must_use = "a short count means the guest did not receive the rest"]
+    pub fn scancodes(&mut self, bytes: &[u8]) -> usize {
+        let mut accepted = 0;
+        for &byte in bytes {
+            if !self.machine.device_manager.keyboard.send_scancode(byte) {
+                break;
+            }
+            accepted += 1;
+        }
+        accepted
+    }
+
+    /// Type text, returning how many CHARACTERS were delivered whole.
+    ///
+    /// Characters, not bytes: one character can be several scancodes, and a
+    /// count of bytes would let a caller resume mid-key and hand the guest a
+    /// prefix with no code. Resume from `text[..].chars().skip(n)`.
+    #[cfg(feature = "alloc")]
+    #[must_use = "a short count means the guest did not receive the rest of the text"]
+    pub fn type_text(&mut self, text: &str) -> usize {
+        let mut typed = 0;
+        for ch in text.chars() {
+            let scancodes = crate::gui::keymap::char_to_scancode_sequence(ch);
+            // A character is delivered or it is not; a partly-sent one is the
+            // corruption this count exists to prevent, so stop at the first
+            // refusal rather than pushing the remaining bytes in after it.
+            if self.scancodes(&scancodes) != scancodes.len() {
+                break;
+            }
+            typed += 1;
+        }
+        typed
+    }
+}
+
 /// Why a batch of execution ended.
 ///
 /// Exhaustive over what `step_batch` can actually determine at the moment it
@@ -581,6 +652,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
         Power { machine: self }
     }
 
+    /// The machine's keyboard, for a host driving it.
+    pub fn keyboard(&mut self) -> Keyboard<'_, T> {
+        Keyboard { machine: self }
+    }
+
     /// How many ticks of guest time may pass before the next device timer
     /// fires, or `None` when no timer is armed.
     ///
@@ -734,12 +810,16 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// Deliver a guest key press/release, rendered through the guest's active
     /// scancode set (Bochs keyboard.cc `gen_scancode`). Prefer this over
     /// [`Emulator::send_scancode`], which bypasses the set selection.
-    pub fn send_key(&mut self, key: crate::iodev::scancodes::BxKey, pressed: bool) {
-        self.device_manager.keyboard.gen_scancode(key, pressed);
+    /// Returns whether the key reached the guest intact; see
+    /// [`Emulator::keyboard`] for the handle that reports backpressure across
+    /// a whole sequence.
+    pub fn send_key(&mut self, key: crate::iodev::scancodes::BxKey, pressed: bool) -> bool {
+        self.keyboard().key(key, pressed)
     }
 
-    pub fn send_scancode(&mut self, scancode: u8) {
-        self.device_manager.keyboard.send_scancode(scancode);
+    /// Returns whether the byte was accepted.
+    pub fn send_scancode(&mut self, scancode: u8) -> bool {
+        self.device_manager.keyboard.send_scancode(scancode)
     }
 
     /// Send a relative PS/2 mouse update to the aux (mouse) device.
@@ -759,13 +839,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// Useful for headless testing — inject "root\n" to type at a login prompt.
     /// Each character is converted to its scancode sequence including shift
     /// modifier when needed.
-    pub fn send_string(&mut self, text: &str) {
-        for ch in text.chars() {
-            let scancodes = crate::gui::keymap::char_to_scancode_sequence(ch);
-            for &sc in &scancodes {
-                self.device_manager.keyboard.send_scancode(sc);
-            }
-        }
+    /// Returns how many characters were delivered whole. A short count means
+    /// the guest's 16-byte keyboard ring filled — step the machine and resume
+    /// from that character.
+    pub fn send_string(&mut self, text: &str) -> usize {
+        self.keyboard().type_text(text)
     }
 
     /// Force VGA to generate an initial update (call before first `update_display`).

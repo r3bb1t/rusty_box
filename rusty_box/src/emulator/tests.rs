@@ -4162,6 +4162,53 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
+    /// Typing into a machine that is not draining its keyboard must report how
+    /// much got through, so the host can resume rather than lose the rest.
+    ///
+    /// The guest's ring is 16 bytes and every character costs at least two
+    /// scancodes, so a long string cannot fit in one go. Bochs and QEMU both
+    /// drop the overflow silently; the count is what turns that into
+    /// backpressure. It counts CHARACTERS delivered whole — a byte count would
+    /// let a caller resume mid-key and hand the guest a prefix with no code.
+    #[test]
+    fn typing_more_than_the_keyboard_ring_holds_reports_what_landed() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                emu.init_memory_and_pc_system().unwrap();
+                emu.init_cpu_and_devices().unwrap();
+
+                // Far more than the 16-byte ring can hold, and the guest is not
+                // running, so nothing drains it.
+                let text = "the quick brown fox jumps over the lazy dog";
+                let typed = emu.keyboard().type_text(text);
+
+                assert!(
+                    typed < text.chars().count(),
+                    "a 16-byte ring cannot swallow {} characters — a full count \
+                     would mean the overflow was silently dropped",
+                    text.chars().count()
+                );
+                assert!(
+                    typed > 0,
+                    "an empty ring must accept at least the first character"
+                );
+
+                // The count is a resume point: asking again delivers nothing
+                // more while the ring stays full, rather than pretending.
+                let again: String = text.chars().skip(typed).collect();
+                assert_eq!(
+                    emu.keyboard().type_text(&again),
+                    0,
+                    "a still-full ring must keep reporting zero, not silently drop"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     /// A stop asked for from inside the CPU loop must stop the machine.
     ///
     /// `InstrHookCtx::stop` sets exactly the flag this test sets, so this is

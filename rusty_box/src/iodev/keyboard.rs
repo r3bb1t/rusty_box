@@ -1159,14 +1159,22 @@ impl BxKeyboardC {
         }
     }
 
-    /// Queue scancode in internal keyboard ring buffer (keyboard.cc)
+    /// Queue a scancode in the internal keyboard ring — Bochs keyboard.cc.
+    /// Returns whether it fit; a full ring drops the byte, as upstream does.
     ///
     /// The byte is NOT immediately visible in the output buffer. It must be
     /// transferred by `periodic()` (called from the device tick path).
-    fn kbd_enq(&mut self, scancode: u8) {
+    ///
+    /// Reporting rather than logging is what lets the two kinds of caller
+    /// differ. A device replying to its own command cannot un-generate the
+    /// reply, so it can only note the loss and carry on — Bochs's behaviour.
+    /// A host injecting keystrokes CAN act: it stops and retries, which is the
+    /// difference between backpressure and silently feeding a guest a
+    /// truncated key.
+    #[must_use]
+    fn kbd_enq(&mut self, scancode: u8) -> bool {
         if self.kbd_internal_buffer.num_elements >= BX_KBD_ELEMENTS {
-            tracing::warn!("Keyboard: Internal buffer full, ignoring {:#04x}", scancode);
-            return;
+            return false;
         }
 
         let tail = (self.kbd_internal_buffer.head + self.kbd_internal_buffer.num_elements)
@@ -1176,6 +1184,18 @@ impl BxKeyboardC {
 
         if !self.kbd_controller.outb && self.kbd_controller.kbd_clock_enabled {
             self.activate_timer();
+        }
+        true
+    }
+
+    /// Queue a byte the keyboard itself produced — an ACK, a command reply, a
+    /// typematic repeat. Bochs logs a full ring and continues, because a device
+    /// cannot refuse to have generated its own reply; that is the entire
+    /// reaction available here, and naming it once keeps it off the 20-odd
+    /// call sites that would otherwise each have to ignore a result.
+    fn kbd_enq_reply(&mut self, byte: u8) {
+        if !self.kbd_enq(byte) {
+            tracing::warn!("Keyboard: internal buffer full, dropping reply {byte:#04x}");
         }
     }
 
@@ -1442,14 +1462,14 @@ impl BxKeyboardC {
             self.kbd_internal_buffer.expecting_typematic = false;
             self.kbd_internal_buffer.delay = (value >> 5) & TYPEMATIC_DELAY_MASK;
             self.kbd_internal_buffer.repeat_rate = value & TYPEMATIC_RATE_MASK;
-            self.kbd_enq(KBD_RESP_ACK);
+            self.kbd_enq_reply(KBD_RESP_ACK);
             return;
         }
 
         if self.kbd_internal_buffer.expecting_led_write {
             self.kbd_internal_buffer.led_status = value;
             self.kbd_internal_buffer.expecting_led_write = false;
-            self.kbd_enq(KBD_RESP_ACK);
+            self.kbd_enq_reply(KBD_RESP_ACK);
             return;
         }
 
@@ -1458,21 +1478,21 @@ impl BxKeyboardC {
             if value != 0 {
                 if value < 4 {
                     self.kbd_controller.current_scancodes_set = value - 1;
-                    self.kbd_enq(KBD_RESP_ACK);
+                    self.kbd_enq_reply(KBD_RESP_ACK);
                 } else {
-                    self.kbd_enq(KBD_RESP_ERROR);
+                    self.kbd_enq_reply(KBD_RESP_ERROR);
                 }
             } else {
                 // Query current set: send ACK then set number
-                self.kbd_enq(KBD_RESP_ACK);
-                self.kbd_enq(1 + self.kbd_controller.current_scancodes_set);
+                self.kbd_enq_reply(KBD_RESP_ACK);
+                self.kbd_enq_reply(1 + self.kbd_controller.current_scancodes_set);
             }
             return;
         }
 
         match value {
             0x00 => {
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
             }
             0x05 => {
                 // (mch) trying to get this to work...
@@ -1486,23 +1506,23 @@ impl BxKeyboardC {
             }
             KBD_CMD_ECHO => {
                 // Echo
-                self.kbd_enq(KBD_RESP_ECHO);
+                self.kbd_enq_reply(KBD_RESP_ECHO);
             }
             KBD_CMD_SELECT_SCAN_SET => {
                 // Select alternate scan code set
                 self.kbd_controller.expecting_scancodes_set = true;
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
             }
             KBD_CMD_IDENTIFY => {
                 // Identify keyboard — keyboard.cc
                 if self.kbd_controller.kbd_type != BX_KBD_XT_TYPE {
-                    self.kbd_enq(KBD_RESP_ACK);
+                    self.kbd_enq_reply(KBD_RESP_ACK);
                     if self.kbd_controller.kbd_type == BX_KBD_MF_TYPE {
-                        self.kbd_enq(KBD_ID_MF2_BYTE1);
+                        self.kbd_enq_reply(KBD_ID_MF2_BYTE1);
                         if self.kbd_controller.scancodes_translate {
-                            self.kbd_enq(KBD_ID_MF2_XLAT);
+                            self.kbd_enq_reply(KBD_ID_MF2_XLAT);
                         } else {
-                            self.kbd_enq(KBD_ID_MF2_NO_XLAT);
+                            self.kbd_enq_reply(KBD_ID_MF2_NO_XLAT);
                         }
                     }
                 }
@@ -1510,23 +1530,23 @@ impl BxKeyboardC {
             KBD_CMD_SET_TYPEMATIC => {
                 // Set typematic rate
                 self.kbd_internal_buffer.expecting_typematic = true;
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
             }
             KBD_CMD_ENABLE_SCANNING => {
                 // Enable scanning
                 self.kbd_internal_buffer.scanning_enabled = true;
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
             }
             KBD_CMD_RESET_DISABLE => {
                 // Reset keyboard and disable scanning
                 self.resetinternals(true);
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
                 self.kbd_internal_buffer.scanning_enabled = false;
             }
             KBD_CMD_RESET_ENABLE => {
                 // Reset keyboard and enable scanning
                 self.resetinternals(true);
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
                 self.kbd_internal_buffer.scanning_enabled = true;
             }
             KBD_CMD_RESEND => {
@@ -1537,20 +1557,20 @@ impl BxKeyboardC {
                 // Reset keyboard + BAT — keyboard.cc
                 tracing::trace!("Keyboard: Reset command received");
                 self.resetinternals(true);
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
                 self.kbd_controller.bat_in_progress = true;
-                self.kbd_enq(KBD_RESP_BAT_OK);
+                self.kbd_enq_reply(KBD_RESP_BAT_OK);
             }
             0xD3 => {
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
             }
             0xF7..=0xFD => {
                 // PS/2 extensions not supported — return error (Bochs returns 0xFE NACK)
-                self.kbd_enq(KBD_RESP_RESEND);
+                self.kbd_enq_reply(KBD_RESP_RESEND);
             }
             _ => {
                 tracing::warn!("Keyboard: Unknown kbd command {:#04x}", value);
-                self.kbd_enq(KBD_RESP_RESEND);
+                self.kbd_enq_reply(KBD_RESP_RESEND);
             }
         }
     }
@@ -1956,40 +1976,57 @@ impl BxKeyboardC {
     /// the 8042 is translating (CCB bit 6) each byte goes through
     /// `translation8042`, with a 0xF0 break prefix folded into bit 7 of the
     /// following byte instead of being emitted.
-    pub fn gen_scancode(&mut self, key: super::scancodes::BxKey, pressed: bool) {
+    /// Returns whether EVERY byte of the sequence reached the ring.
+    ///
+    /// A key can be several bytes, and Bochs enqueues them one at a time, so a
+    /// ring that fills mid-sequence leaves the guest an `E0` prefix with no
+    /// code after it — a corrupted keystroke rather than a lost one. That
+    /// truncation is upstream's behaviour and is kept; what is new is saying so,
+    /// which is the only way a host injecting keys can know to slow down.
+    /// `false` also covers a keyboard whose clock is low or whose scanning the
+    /// guest disabled: in every case the key did not get through intact.
+    pub fn gen_scancode(&mut self, key: super::scancodes::BxKey, pressed: bool) -> bool {
         // Ignore scancode if the keyboard clock is driven low.
         if !self.kbd_controller.kbd_clock_enabled {
-            return;
+            return false;
         }
         // Ignore scancode if scanning is disabled.
         if !self.kbd_internal_buffer.scanning_enabled {
-            return;
+            return false;
         }
 
         let set = (self.kbd_controller.current_scancodes_set as usize).min(2);
         let entry = &super::scancodes::SCANCODES[key.index()][set];
         let bytes: &'static [u8] = if pressed { entry.make } else { entry.brek };
 
+        // Every byte is attempted even after one is refused, because Bochs
+        // checks the ring per byte and so must this; the verdict accumulates
+        // rather than short-circuiting.
+        let mut delivered_intact = true;
         if self.kbd_controller.scancodes_translate {
             let mut escaped = 0x00u8;
             for &byte in bytes {
                 if byte == 0xF0 {
                     escaped = 0x80;
                 } else {
-                    self.kbd_enq(TRANSLATION_8042[byte as usize] | escaped);
+                    delivered_intact &= self.kbd_enq(TRANSLATION_8042[byte as usize] | escaped);
                     escaped = 0x00;
                 }
             }
         } else {
             for &byte in bytes {
-                self.kbd_enq(byte);
+                delivered_intact &= self.kbd_enq(byte);
             }
         }
+        delivered_intact
     }
 
-    pub fn send_scancode(&mut self, scancode: u8) {
+    /// Returns whether the byte reached the ring. See `gen_scancode`; a `0xF0`
+    /// break prefix under translation enqueues nothing by design and so always
+    /// reports success.
+    pub fn send_scancode(&mut self, scancode: u8) -> bool {
         if !self.kbd_controller.kbd_clock_enabled || !self.kbd_internal_buffer.scanning_enabled {
-            return;
+            return false;
         }
 
         if self.kbd_controller.scancodes_translate {
@@ -1997,6 +2034,7 @@ impl BxKeyboardC {
             if scancode == 0xF0 {
                 // 0xF0 = Set 2 break prefix: set escaped flag, don't enqueue
                 self.scancode_escaped = true;
+                true
             } else {
                 let escaped = if self.scancode_escaped {
                     0x80u8
@@ -2004,11 +2042,11 @@ impl BxKeyboardC {
                     0x00u8
                 };
                 self.scancode_escaped = false;
-                self.kbd_enq(TRANSLATION_8042[scancode as usize] | escaped);
+                self.kbd_enq(TRANSLATION_8042[scancode as usize] | escaped)
             }
         } else {
             // Raw mode — send bytes unmodified
-            self.kbd_enq(scancode);
+            self.kbd_enq(scancode)
         }
     }
 
@@ -2940,7 +2978,7 @@ mod tests {
         // with timer_pending == 0).
         assert_eq!(kbd.timer_callback(), 0);
 
-        kbd.kbd_enq(0x1E);
+        assert!(kbd.kbd_enq(0x1E), "an empty ring takes the byte");
         assert_eq!(kbd.kbd_controller.timer_pending, 1);
 
         // Bochs keyboard.cc periodic(): the transfer fire makes the byte
@@ -3022,11 +3060,15 @@ mod tests {
         // 16 queued scancodes, then drops further ones (num_elements caps at 16).
         let mut kbd = BxKeyboardC::new();
         for i in 0..16u8 {
-            kbd.kbd_enq(0x10 + i);
+            assert!(kbd.kbd_enq(0x10 + i), "byte {i} fits inside the 16-entry ring");
         }
         assert_eq!(kbd.kbd_internal_buffer.num_elements, 16, "ring holds 16 entries");
-        // The 17th scancode is dropped, not queued.
-        kbd.kbd_enq(0xFF);
+        // The 17th scancode is dropped, not queued — and says so, which is what
+        // lets a host injecting input back off instead of losing keystrokes.
+        assert!(
+            !kbd.kbd_enq(0xFF),
+            "a full ring must REPORT the refusal, not just silently not grow"
+        );
         assert_eq!(
             kbd.kbd_internal_buffer.num_elements, 16,
             "the 17th scancode is dropped at the Bochs 16-entry limit"
