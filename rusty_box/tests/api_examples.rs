@@ -15,8 +15,8 @@
 
 use rusty_box::cpu::{CpuSetupMode, ResetReason, X86Reg};
 use rusty_box::emulator::{
-    AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MemorySize, MachineBuilder,
-    PowerState, StopReason,
+    AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder,
+    MemorySize, PowerState, StopReason,
 };
 use rusty_box::gui::NoGui;
 use rusty_box::iodev::scancodes::BxKey;
@@ -83,6 +83,21 @@ fn a_bigger_guest_needs_the_swap_regime_asked_for_by_name() {
 
     // Bochs `BX_DEFAULT_MEM_MEGS`.
     assert_eq!(MemorySize::default(), MemorySize::mib(32));
+}
+
+/// The instruction rate is a rate, so it is a type. Every guest-visible clock
+/// is calibrated from it, which is why it is not an anonymous `u32` sitting
+/// next to a byte count and a block size.
+#[test]
+fn the_instruction_rate_is_a_named_rate() {
+    let rate = Ips::new(300_000_000);
+    assert_eq!(rate.per_second(), 300_000_000);
+    assert_eq!(rate.per_second_u64(), 300_000_000u64);
+
+    // Bochs config.cc `cpu: ips`.
+    assert_eq!(Ips::default(), Ips::BOCHS_DEFAULT);
+    assert_eq!(Ips::BOCHS_DEFAULT.per_second(), 50_000_000);
+    assert_eq!(EmulatorConfig::default().ips, Ips::BOCHS_DEFAULT);
 }
 
 /// The configured size is the size the machine has: a guest addressing past

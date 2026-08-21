@@ -340,7 +340,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
                     // Advance virtual time (Bochs-like ticking).
                     // Required so PIT can generate IRQ0 and BIOS can progress past HLT waits.
-                    if self.config.ips != 0 {
+                    if self.config.ips.per_second() != 0 {
                         if matches!(
                             self.cpu_ref(0).activity_state,
                             CpuActivityState::Hlt

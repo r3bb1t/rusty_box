@@ -7,7 +7,7 @@ use crate::{
 use rusty_box::gui::{shared_display::SharedDisplay, BridgeGui};
 use rusty_box::emulator::{
     AtaSlot, BootDevice as GuestBootDevice, BootOrder, DiskGeometry as GuestDiskGeometry,
-    EmulatorConfig, MemorySize, MachineBuilder,
+    EmulatorConfig, Ips, MachineBuilder, MemorySize,
 };
 use rusty_box::gui::{BxGui, NoGui, TermGui};
 #[cfg(feature = "gui-egui")]
@@ -131,7 +131,7 @@ where
             mib_to_bytes("host_memory_mib", config.host_memory_mib)?,
         ),
         memory_block_size: kib_to_bytes("memory_block_kib", config.memory_block_kib)?,
-        ips: config.ips,
+        ips: Ips::new(config.ips),
         pci_enabled: config.pci,
         pci_vga: config.pci_vga,
         sync_slowdown: config.sync_slowdown,

@@ -241,7 +241,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 const CODE_ADDR: u64 = 0x1000;
                 let mut config = EmulatorConfig::default();
                 config.cpuid_freq = crate::cpu::cpuid::CpuidFreq::Ips;
-                config.ips = 120_000_000;
+                config.ips = Ips::new(120_000_000);
                 let mut emu =
                     Emulator::<NoopTracer>::new_with_mode_and_instrumentation(
                         config,
@@ -554,7 +554,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // its budget through `config.ips`, so a config still holding the
                 // default would disagree with the clock programmed below.
                 let cfg = EmulatorConfig {
-                    ips: 1_000_000,
+                    ips: Ips::new(1_000_000),
                     ..EmulatorConfig::default()
                 };
                 let mut emu =
@@ -682,7 +682,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // `service_scheduler_boundary` converts its budget through
                 // `config.ips`.
                 let cfg = EmulatorConfig {
-                    ips: 1_000_000,
+                    ips: Ips::new(1_000_000),
                     ..EmulatorConfig::default()
                 };
                 let mut emu =
@@ -1597,7 +1597,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 );
 
                 let mut high_ips_config = EmulatorConfig::default();
-                high_ips_config.ips = 300_000_000;
+                high_ips_config.ips = Ips::new(300_000_000);
                 let mut high_ips_emu = Emulator::new_with_mode(
                     high_ips_config,
                     CpuSetupMode::FlatProtected32,
@@ -1623,7 +1623,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
-                config.ips = 300_000_000;
+                config.ips = Ips::new(300_000_000);
                 let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
@@ -1696,7 +1696,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 for deadline in [7u32, 37] {
                     let config = EmulatorConfig::default();
                     let mut emu = Emulator::new(config).unwrap();
-                    emu.pc_system.initialize(emu.config.ips);
+                    emu.pc_system.initialize(emu.config.ips.per_second());
                     emu.pc_system
                         .register_timer(
                             TimerOwner::Lapic(0),
@@ -1741,8 +1741,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let mut config = EmulatorConfig::default();
                 config.sync_slowdown = true;
                 let mut emu = Emulator::new(config).unwrap();
-                emu.pc_system.initialize(emu.config.ips);
-                emu.devices.set_timer_ips(u64::from(emu.config.ips));
+                emu.pc_system.initialize(emu.config.ips.per_second());
+                emu.devices.set_timer_ips(emu.config.ips.per_second_u64());
                 emu.register_timer_owners().unwrap();
 
                 let slowdown_ticks = emu
@@ -1861,8 +1861,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 let mut emu =
                     Emulator::new(EmulatorConfig::default()).unwrap();
-                emu.pc_system.initialize(emu.config.ips);
-                emu.devices.set_timer_ips(u64::from(emu.config.ips));
+                emu.pc_system.initialize(emu.config.ips.per_second());
+                emu.devices.set_timer_ips(emu.config.ips.per_second_u64());
                 emu.register_timer_owners().unwrap();
                 let keyboard_handle = emu.device_manager.keyboard.timer_handle().unwrap();
                 let one_second_handle =
@@ -2507,7 +2507,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // on every AP (Bochs cpuid.cc get_freq_leaf_15/16).
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default().with_topology(1, 2, 1).unwrap();
-                config.ips = 120_000_000;
+                config.ips = Ips::new(120_000_000);
                 config.cpuid_freq = CpuidFreq::Ips;
                 let mut emu = Emulator::new(config).unwrap();
                 let instr = Instruction::default();

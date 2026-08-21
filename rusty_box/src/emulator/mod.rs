@@ -128,6 +128,43 @@ impl CpuMask {
     }
 }
 
+/// Emulated instructions per second: the rate that ties guest time to the
+/// wall clock.
+///
+/// A rate, not a count, which is why it is a type (R4). Every guest-visible
+/// clock is calibrated from it — the PIT, the ACPI PM timer, the TSC and
+/// CPUID's frequency leaves all derive their tick rate from this one number —
+/// so a machine given the wrong one has a guest whose sense of time is wrong
+/// in a way no test of instruction results can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Ips(u32);
+
+impl Ips {
+    /// Bochs config.cc `cpu: ips`. Upstream raised this from 4M to 50M
+    /// because 4M badly under-reports a modern host, which makes every guest
+    /// timeout fire early.
+    pub const BOCHS_DEFAULT: Self = Self(50_000_000);
+
+    pub const fn new(per_second: u32) -> Self {
+        Self(per_second)
+    }
+
+    pub const fn per_second(self) -> u32 {
+        self.0
+    }
+
+    /// The same rate, where the tick arithmetic needs 64-bit headroom.
+    pub const fn per_second_u64(self) -> u64 {
+        self.0 as u64
+    }
+}
+
+impl Default for Ips {
+    fn default() -> Self {
+        Self::BOCHS_DEFAULT
+    }
+}
+
 /// How much RAM a machine has, and how much of it stays resident.
 ///
 /// One value, because the two numbers are only meaningful together: a guest
@@ -197,11 +234,8 @@ pub struct EmulatorConfig {
     pub memory: MemorySize,
     /// Memory block size for allocation
     pub memory_block_size: usize,
-    /// Emulated instructions per second, used to calibrate emulated time
-    /// against wall-clock time. Bochs config.cc raised its default from 4M to
-    /// 50M — 4M badly under-reports modern hosts, which makes every guest
-    /// timeout fire early.
-    pub ips: u32,
+    /// The rate that calibrates emulated time against wall-clock time.
+    pub ips: Ips,
     /// Enable PCI support
     pub pci_enabled: bool,
     /// Register the VGA adapter as a PCI device (`1234:1111`, class `0300`) so a
@@ -250,7 +284,7 @@ impl Default for EmulatorConfig {
         Self {
             memory: MemorySize::default(),
             memory_block_size: 128 * 1024,
-            ips: 50_000_000,
+            ips: Ips::BOCHS_DEFAULT,
             pci_enabled: true,
             pci_vga: false,
             cpu_params: BxParams::default(),
@@ -729,7 +763,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         let mut cpu = BxCpuBuilder::new().build_with_tracer(tracer)?;
         cpu.configure_smp(0, topology);
         cpu.set_smp_quantum(config.smp_quantum);
-        cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
+        cpu.set_cpuid_freq(config.cpuid_freq, config.ips.per_second());
         Self::new_from_parts(config, cpu_store::OwnedCpus::new(alloc::vec![cpu]))
     }
 
@@ -754,7 +788,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         let mut cpu = build_cpu()?;
         cpu.configure_smp(0, topology);
         cpu.set_smp_quantum(config.smp_quantum);
-        cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
+        cpu.set_cpuid_freq(config.cpuid_freq, config.ips.per_second());
 
         let mut cpus = Vec::with_capacity(cpu_count as usize);
         cpus.push(cpu);
@@ -762,7 +796,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             let mut ap_cpu = build_cpu()?;
             ap_cpu.configure_smp(cpu_id, topology);
             ap_cpu.set_smp_quantum(config.smp_quantum);
-            ap_cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
+            ap_cpu.set_cpuid_freq(config.cpuid_freq, config.ips.per_second());
             cpus.push(ap_cpu);
         }
         Self::new_from_parts(config, cpu_store::OwnedCpus::new(cpus))
@@ -851,7 +885,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         for (index, slot) in cpus.iter_mut().take(configured_cpu_count).enumerate() {
             slot.configure_smp(index as u32, topology);
             slot.set_smp_quantum(config.smp_quantum);
-            slot.set_cpuid_freq(config.cpuid_freq, config.ips);
+            slot.set_cpuid_freq(config.cpuid_freq, config.ips.per_second());
         }
         let cpus = cpu_store::BorrowedCpus::new(&mut cpus[..configured_cpu_count]);
         let ptr = storage.as_mut_ptr();
@@ -927,11 +961,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
         tracing::debug!("Initializing hardware...");
 
         // Step 1: Initialize PC system with IPS (line 1201)
-        self.pc_system.initialize(self.config.ips);
-        self.devices.set_timer_ips(u64::from(self.config.ips));
+        self.pc_system.initialize(self.config.ips.per_second());
+        self.devices.set_timer_ips(self.config.ips.per_second_u64());
         self.smp_tick_remainder = 0;
         self.batch_advanced_pc_system = false;
-        tracing::trace!("PC system initialized with {} IPS", self.config.ips);
+        tracing::trace!("PC system initialized with {} IPS", self.config.ips.per_second());
 
         // Step 2: Memory initialization (line 1312)
         // In original: BX_MEM(0)->init_memory(memSize, hostMemSize, memBlockSize);
@@ -956,7 +990,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// `init_memory_and_pc_system` that still has work to do there.
     #[cfg(not(feature = "alloc"))]
     pub(crate) fn init_pc_system(&mut self) {
-        self.pc_system.initialize(self.config.ips);
+        self.pc_system.initialize(self.config.ips.per_second());
         self.smp_tick_remainder = 0;
         self.memory.set_a20_mask(self.pc_system.a20_mask());
     }
@@ -979,8 +1013,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // timer conversion against the default `ips = 1`. Re-running it in
         // the alloc flow is harmless — no timers are registered until
         // `register_timer_owners` below and no virtual time has advanced.
-        self.pc_system.initialize(self.config.ips);
-        self.devices.set_timer_ips(u64::from(self.config.ips));
+        self.pc_system.initialize(self.config.ips.per_second());
+        self.devices.set_timer_ips(self.config.ips.per_second_u64());
         self.smp_tick_remainder = 0;
         self.batch_advanced_pc_system = false;
 
@@ -1333,7 +1367,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
         // Initialize PIT icount sync so PIT counter reads advance with CPU time.
         // This is critical for kernel PIT-polling calibration loops (e.g., Alpine Linux).
-        let ips = self.config.ips as u64;
+        let ips = self.config.ips.per_second_u64();
         if ips > 0 {
             // The PIT/ACPI absolute time cursor lives in the system-tick
             // domain — the same clock the port-I/O read paths pass via
@@ -1355,7 +1389,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
         // Initialize VGA icount-based timing for retrace computation.
         {
-            let ips = self.config.ips as u64;
+            let ips = self.config.ips.per_second_u64();
             self.device_manager.vga.set_icount_sync(ips);
         }
 

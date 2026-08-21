@@ -2646,7 +2646,7 @@ fn web_uploaded_media_config(
     rusty_box::emulator::EmulatorConfig {
         memory: rusty_box::emulator::MemorySize::bytes(ram_size),
         memory_block_size: 128 * 1024,
-        ips: 300_000_000,
+        ips: rusty_box::emulator::Ips::new(300_000_000),
         pci_enabled: true,
         cpu_params: BxParams::default()
             .with_topology(cpu_count, 1, 1)

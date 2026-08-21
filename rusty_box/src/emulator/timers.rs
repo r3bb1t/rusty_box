@@ -257,7 +257,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     pub fn dispatch_timer_fires(&mut self) {
         let (owners, counts, count) = self.pc_system.take_fired_timers();
         let current_ticks = self.pc_system.time_ticks();
-        let ips = u64::from(self.config.ips);
+        let ips = self.config.ips.per_second_u64();
         for entry in 0..count {
             match owners[entry] {
                 TimerOwner::NullTimer => {}

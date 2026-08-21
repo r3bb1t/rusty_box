@@ -18,7 +18,7 @@ use rusty_box::{
     cpu::{
         CpuSetupMode, HookCtx, HookMask, InstrAction, Instrumentation, X86Reg,
     },
-    emulator::{Emulator, EmulatorConfig, MemorySize},
+    emulator::{Emulator, EmulatorConfig, Ips, MemorySize},
 };
 
 /// `msfvenom -p linux/x64/shell_reverse_tcp LHOST=127.0.0.1 LPORT=4444 -f raw`
@@ -99,7 +99,7 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let cfg = EmulatorConfig {
         memory: MemorySize::bytes(GUEST_RAM),
-        ips: 1_000_000_000,
+        ips: Ips::new(1_000_000_000),
         pci_enabled: false,
         ..EmulatorConfig::default()
     };

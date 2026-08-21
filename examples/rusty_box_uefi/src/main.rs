@@ -14,7 +14,7 @@ use uefi::prelude::*;
 use rusty_box::{
     cpu::{builder::BxCpuBuilder, cpu::BxCpuC},
     emulator::{
-        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MemorySize, MachineBuilder,
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder,
     },
     memory::BxMemoryStubC,
 };
@@ -161,7 +161,7 @@ fn run() -> Status {
     let config = EmulatorConfig {
         memory: MemorySize::bytes(32 * 1024 * 1024),
         memory_block_size: 128 * 1024,
-        ips: 300_000_000,
+        ips: Ips::new(300_000_000),
         pci_enabled: true,
         ..Default::default()
     };

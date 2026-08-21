@@ -561,7 +561,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// `batch_instructions` cannot tell "the guest powered off" from "the budget
     /// ran out", and under `std` cannot even tell the budget ran out.
     pub fn step_batch(&mut self, batch_instructions: u64) -> Result<BatchOutcome> {
-        let ips = self.config.ips as u64;
+        let ips = self.config.ips.per_second_u64();
         let mut total_executed = 0u64;
         // Wall-clock budget: 15ms keeps GUI responsive at 60 fps.
         // Bochs runs CPU on a dedicated thread with no frame budget; we emulate

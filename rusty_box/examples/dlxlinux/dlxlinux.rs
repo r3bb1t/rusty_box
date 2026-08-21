@@ -14,7 +14,7 @@
 //! - IPS: 15000000
 
 use rusty_box::{
-    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, MemorySize, MachineBuilder},
+    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MemorySize, MachineBuilder},
     gui::{NoGui, TermGui},
     Result,
 };
@@ -216,7 +216,7 @@ fn run_dlxlinux() -> Result<()> {
         // Stack overflow fixed by Boxing icache.mpool and returning Box<Emulator>
         memory: MemorySize::bytes(32 * 1024 * 1024), // 32 MB
         memory_block_size: 128 * 1024,
-        ips: 300_000_000,
+        ips: Ips::new(300_000_000),
         pci_enabled: true,
         ..Default::default()
     };
@@ -224,7 +224,7 @@ fn run_dlxlinux() -> Result<()> {
     tracing::info!(
         "Creating emulator: {} MB RAM, {} MIPS",
         config.memory.guest_bytes() / (1024 * 1024),
-        config.ips / 1_000_000,
+        config.ips.per_second() / 1_000_000,
     );
 
     // =========================================================================

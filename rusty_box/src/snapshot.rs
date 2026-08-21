@@ -867,7 +867,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             emu.drain_device_timer_requests();
             // `machine()` uses the default config, so convert with its rate.
             let seek_ticks = (u128::from(arm_usec)
-                * u128::from(EmulatorConfig::default().ips))
+                * u128::from(EmulatorConfig::default().ips.per_second()))
             .div_ceil(1_000_000) as u64;
 
             // Advance to mid-seek and snapshot with the timer still armed.
