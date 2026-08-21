@@ -797,6 +797,59 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
+    /// A caller must be able to ask how long the machine will idle before a
+    /// device needs attention, so it can size a step instead of grinding
+    /// through instructions that retire nothing.
+    ///
+    /// The answer is a DURATION from now, which is the whole point: the
+    /// absolute deadline beside it is meaningless to anyone who cannot see the
+    /// machine's tick counter.
+    #[test]
+    fn the_machine_reports_how_long_until_its_next_device_deadline() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                const PROGRAMMING_TICKS: u64 = 100;
+                const PERIOD_TICKS: u64 = 10;
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                emu.pc_system.initialize(1_000_000);
+                emu.devices.set_timer_ips(1_000_000);
+
+                assert_eq!(
+                    emu.ticks_to_next_timer_deadline(),
+                    None,
+                    "with nothing armed there is no deadline to wait for"
+                );
+
+                let handle = emu
+                    .pc_system
+                    .register_timer(TimerOwner::CmosPeriodic, 1, false, false, "deadline query")
+                    .unwrap();
+                emu.device_manager.cmos.periodic_timer_handle = Some(handle);
+                emu.devices.request_timer_after_usec_with_mode(
+                    DeviceTimerOwner::CmosPeriodic,
+                    PROGRAMMING_TICKS,
+                    Some(PERIOD_TICKS),
+                    true,
+                );
+                emu.drain_device_timer_requests();
+
+                let full = PROGRAMMING_TICKS + PERIOD_TICKS;
+                assert_eq!(emu.ticks_to_next_timer_deadline(), Some(full));
+
+                // Advancing time must shorten the wait by exactly what elapsed.
+                emu.service_scheduler_boundary(PROGRAMMING_TICKS).unwrap();
+                assert_eq!(
+                    emu.ticks_to_next_timer_deadline(),
+                    Some(full - PROGRAMMING_TICKS),
+                    "the query is a duration from now, not a fixed point"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn deferred_continuous_timer_keeps_its_programmed_period() {
         std::thread::Builder::new()
@@ -829,13 +882,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.drain_device_timer_requests();
 
                 assert_eq!(
-                    emu.pc_system.next_timer_deadline_ticks(),
+                    emu.pc_system.next_timer_deadline_at(),
                     Some(PROGRAMMING_TICKS + PERIOD_TICKS)
                 );
                 emu.service_scheduler_boundary(PROGRAMMING_TICKS + PERIOD_TICKS)
                     .unwrap();
                 assert_eq!(
-                    emu.pc_system.next_timer_deadline_ticks(),
+                    emu.pc_system.next_timer_deadline_at(),
                     Some(PROGRAMMING_TICKS + 2 * PERIOD_TICKS),
                     "repeat interval must exclude ticks elapsed before programming"
                 );
@@ -881,7 +934,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 emu.service_scheduler_boundary(1).unwrap();
                 assert!(emu.pc_system.is_timer_active(uip_handle));
-                assert_eq!(emu.pc_system.next_timer_deadline_ticks(), Some(246));
+                assert_eq!(emu.pc_system.next_timer_deadline_at(), Some(246));
             })
             .unwrap()
             .join()

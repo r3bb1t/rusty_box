@@ -511,6 +511,24 @@ impl<'a, T: Instrumentation> Emulator<T> {
         })
     }
 
+    /// How many ticks of guest time may pass before the next device timer
+    /// fires, or `None` when no timer is armed.
+    ///
+    /// The question a caller asks to avoid grinding through idle instructions:
+    /// a machine waiting on a PIT or RTC deadline retires nothing interesting
+    /// until it arrives, so a driver can size its next `step_batch` from this
+    /// instead of stepping blindly and checking afterwards. QEMU's qtest
+    /// exposes the same thing as its most-used verb, `clock_step` with no
+    /// argument; this is the query form, leaving the caller to decide how far
+    /// to actually run.
+    ///
+    /// Zero means a deadline is due now. It shares its computation with the
+    /// scheduler's own deadline cap, so the two cannot disagree about when the
+    /// next event is.
+    pub fn ticks_to_next_timer_deadline(&self) -> Option<u64> {
+        self.pc_system.ticks_to_next_timer_deadline()
+    }
+
     /// Why the batch loop above just ended.
     ///
     /// Asked once, after the loop, from state that is still live — which is

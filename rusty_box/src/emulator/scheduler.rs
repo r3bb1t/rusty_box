@@ -1110,11 +1110,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 break;
             }
 
-            let now = self.pc_system.time_ticks();
+            // At least one tick: this loop must make progress even when a
+            // deadline is already due, which the query reports as zero.
             let until_deadline = self
                 .pc_system
-                .next_timer_deadline_ticks()
-                .map(|deadline| deadline.saturating_sub(now).max(1))
+                .ticks_to_next_timer_deadline()
+                .map(|ticks| ticks.max(1))
                 .unwrap_or(u64::MAX);
             let step = remaining.min(until_deadline).min(u64::from(u32::MAX));
             debug_assert_ne!(step, 0);

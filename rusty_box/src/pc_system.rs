@@ -1285,11 +1285,13 @@ impl BxPcSystemC {
         min
     }
 
-    /// Return the earliest active non-null timer deadline in absolute ticks.
+    /// The earliest active non-null timer deadline, as an ABSOLUTE tick — a
+    /// point on the machine's timeline, not a duration. For "how long until
+    /// it fires" use `ticks_to_next_timer_deadline`.
     ///
     /// The central scheduler uses this fixed-storage query to cap an elapsed
     /// step before a device callback can rearm another owner.
-    pub fn next_timer_deadline_ticks(&self) -> Option<u64> {
+    pub fn next_timer_deadline_at(&self) -> Option<u64> {
         let mut deadline: Option<u64> = None;
         for timer in self.timers[..self.num_timers].iter() {
             if !timer.flags.contains(TimerFlags::ACTIVE) || timer.owner == TimerOwner::NullTimer {
@@ -1301,6 +1303,19 @@ impl BxPcSystemC {
             });
         }
         deadline
+    }
+
+    /// How many ticks from now until the earliest armed timer fires, or `None`
+    /// when nothing is armed and time may be advanced freely.
+    ///
+    /// Zero means a deadline is already due at the current tick — reported
+    /// honestly rather than rounded up, because a caller that needs forward
+    /// progress knows to ask for at least one tick and a caller that is only
+    /// asking "how long may I sleep" needs the truth.
+    pub fn ticks_to_next_timer_deadline(&self) -> Option<u64> {
+        let now = self.time_ticks();
+        self.next_timer_deadline_at()
+            .map(|deadline| deadline.saturating_sub(now))
     }
 
 
@@ -1961,7 +1976,7 @@ mod tests {
         assert_eq!(pc.get_num_ticks_left_next_event(), 100);
         pc.activate_timer_at_ticks(earlier, now + 50, false).unwrap();
         assert_eq!(pc.get_num_ticks_left_next_event(), 50);
-        assert_eq!(pc.next_timer_deadline_ticks(), Some(now + 50));
+        assert_eq!(pc.next_timer_deadline_at(), Some(now + 50));
         assert_eq!(pc.time_ticks(), now);
 
         pc.tickn(50);
@@ -2030,7 +2045,7 @@ mod tests {
         restored.restore_snapshot_v3(&mut reader).unwrap();
 
         assert_eq!(restored.time_ticks(), source.time_ticks());
-        assert_eq!(restored.next_timer_deadline_ticks(), Some(deadline));
+        assert_eq!(restored.next_timer_deadline_at(), Some(deadline));
         assert_eq!(restored.timer_countdown(handle), 41);
         restored
             .validate_timer_handle_owner(handle, TimerOwner::CmosPeriodic)
@@ -2071,7 +2086,7 @@ mod tests {
             .unwrap();
         source.activate_timer_at_ticks(far, source.time_ticks() + 500, true).unwrap();
         source.activate_timer_at_ticks(near, source.time_ticks() + 40, false).unwrap();
-        assert_eq!(source.next_timer_deadline_ticks(), Some(source.time_ticks() + 40));
+        assert_eq!(source.next_timer_deadline_at(), Some(source.time_ticks() + 40));
 
         // Deactivate the timer the countdown points at; the countdown is NOT
         // re-narrowed, so it now precedes the earliest active deadline (500).

@@ -2230,7 +2230,7 @@ mod tests {
 
         assert_eq!(restored_pc.time_ticks(), source_pc.time_ticks());
         assert_eq!(
-            restored_pc.next_timer_deadline_ticks(),
+            restored_pc.next_timer_deadline_at(),
             Some(periodic_deadline),
             "the PC-system phase must remain at the saved periodic deadline"
         );
