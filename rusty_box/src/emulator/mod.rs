@@ -19,7 +19,7 @@ use crate::{
     cpu::{
         cpu::CpuActivityState,
         instrumentation::{ExitSet, Instrumentation},
-        BxCpuC, CpuError, CpuidFreq, ResetReason,
+        BxCpuC, CpuidFreq, ResetReason,
     },
     iodev::{
         devices::{DeviceManager, SystemControlPort},
@@ -28,13 +28,15 @@ use crate::{
     memory::{BxMemC, BxMemoryStubC},
     params::BxParams,
     pc_system::BxPcSystemC,
-    Error, Result,
+    Result,
 };
 
 #[cfg(feature = "alloc")]
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::AtomicBool;
 
+mod builder;
+pub use builder::{AtaSlot, BootDevice, BootOrder, BuildError, DiskGeometry, MachineBuilder};
 pub mod cpu_store;
 use cpu_store::CpuStore;
 mod interactive;
@@ -314,28 +316,30 @@ impl Default for SlowdownTimerState {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use rusty_box::emulator::{Emulator, EmulatorConfig};
-/// use rusty_box::cpu::core_i7_skylake::Corei7SkylakeX;
+/// A machine is assembled by [`MachineBuilder`] and arrives at its reset
+/// vector; the only way to get one is to build one.
 ///
-/// let config = EmulatorConfig::default();
-/// let mut emu = Emulator::new(config)?;
-/// emu.initialize()?;
-/// emu.load_bios(&bios_data, 0xfffe0000)?;
-/// emu.reset(ResetReason::Hardware)?;
-/// // Read architectural state through `cpu()` and mutate it through targeted
-/// // emulator operations such as `reg_write()` and `reset()`.
-/// assert_eq!(emu.cpu().rip(), 0);
+/// ```no_run
+/// use rusty_box::emulator::{EmulatorConfig, MachineBuilder};
+///
+/// # fn main() -> rusty_box::Result<()> {
+/// # let bios_data: &[u8] = &[];
+/// let mut machine = MachineBuilder::new(EmulatorConfig::default())
+///     .bios(bios_data)
+///     .build()?;
+/// let outcome = machine.step_batch(100_000)?;
+/// println!("{} instructions, stopped: {:?}", outcome.executed, outcome.stop);
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// The memory backing is intentionally not publicly replaceable:
 ///
 /// ```compile_fail
-/// use rusty_box::cpu::core_i7_skylake::Corei7SkylakeX;
-/// use rusty_box::emulator::{Emulator, EmulatorConfig};
+/// use rusty_box::emulator::{EmulatorConfig, MachineBuilder};
 ///
-/// let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
-/// let _ = &mut emu.memory;
+/// let mut machine = MachineBuilder::new(EmulatorConfig::default()).build().unwrap();
+/// let _ = &mut machine.memory;
 /// ```
 pub struct Emulator<T: Instrumentation = ()> {
     /// Every CPU this machine has, boot processor at index 0 — Bochs
@@ -633,35 +637,44 @@ impl<'a, T: Instrumentation> Emulator<T> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a> Emulator<()> {
-    /// Create a new emulator with no instrumentation (`T = ()`).
+impl Emulator<()> {
+    /// Construct an uninitialised machine with no instrumentation.
     ///
-    /// Returns `Box<Self>` because Emulator is ~1.4 MB.
-    pub fn new(config: EmulatorConfig) -> Result<Box<Self>> {
-        Self::new_inner(config, || Ok(BxCpuBuilder::new().build()?))
+    /// In-crate shorthand for the untraced factory; every machine that leaves
+    /// this crate is assembled by [`MachineBuilder`] instead.
+    pub(crate) fn new(config: EmulatorConfig) -> Result<Box<Self>> {
+        Self::with_tracer_factory(config, || ())
     }
 }
 
 #[cfg(feature = "alloc")]
 impl<'a, T: Instrumentation> Emulator<T> {
-    /// Create a new emulator with a monomorphized tracer.
-    ///
-    /// The tracer type `T` is baked in at construction and cannot be changed.
-    /// All tracer dispatch is inlined — zero overhead.
-    pub fn new_with_instrumentation(config: EmulatorConfig, tracer: T) -> Result<Box<Self>> {
-        if config.cpu_params.cpu_count() > 1 {
-            return Err(CpuError::UnsupportedCpuOperation {
-                operation: "instrumented SMP construction requires a per-CPU tracer factory",
-            }
-            .into());
+    /// Construct an uninitialised machine whose sole processor carries
+    /// `tracer`. One tracer instance cannot be shared, so this shape is
+    /// uniprocessor; `MachineBuilder` is what enforces that.
+    pub(crate) fn with_tracer(config: EmulatorConfig, tracer: T) -> Result<Box<Self>> {
+        let requested = config.cpu_params.cpu_count();
+        if requested > 1 {
+            return Err(BuildError::InstrumentedSmp { requested }.into());
         }
-
         let topology = config.cpu_params.cpu_topology();
         let mut cpu = BxCpuBuilder::new().build_with_tracer(tracer)?;
         cpu.configure_smp(0, topology);
         cpu.set_smp_quantum(config.smp_quantum);
         cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
         Self::new_from_parts(config, cpu_store::OwnedCpus::new(alloc::vec![cpu]))
+    }
+
+    /// Construct an uninitialised machine, minting a fresh tracer for every
+    /// processor. The tracer type `T` is baked in at construction and cannot
+    /// be changed; all tracer dispatch is inlined.
+    pub(crate) fn with_tracer_factory(
+        config: EmulatorConfig,
+        make_tracer: fn() -> T,
+    ) -> Result<Box<Self>> {
+        Self::new_inner(config, move || {
+            Ok(BxCpuBuilder::new().build_with_tracer(make_tracer())?)
+        })
     }
 
     fn new_inner<F>(config: EmulatorConfig, mut build_cpu: F) -> Result<Box<Self>>
@@ -714,6 +727,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
             core::ptr::addr_of_mut!((*ptr).devices).write(devices);
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
             core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
+            core::ptr::addr_of_mut!((*ptr).runnable_mask).write(CpuMask::default());
+            core::ptr::addr_of_mut!((*ptr).lapic_work_mask).write(CpuMask::default());
             core::ptr::addr_of_mut!((*ptr).smp_tick_remainder).write(0);
             core::ptr::addr_of_mut!((*ptr).batch_advanced_pc_system).write(false);
             #[cfg(feature = "std")]
@@ -736,23 +751,18 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
 impl<'a, T: Instrumentation> Emulator<T> {
     #[cfg(not(feature = "alloc"))]
-    /// Initialize an Emulator at a caller-provided memory location.
+    /// Construct a machine inside caller-provided storage.
     ///
-    /// In no-alloc environments the caller is responsible for allocating and
-    /// initializing the `BxMemoryStubC` (e.g. from a firmware-provided buffer).
-    ///
-    /// # Safety
-    /// - `ptr` must point to a valid, zeroed, properly aligned allocation of `size_of::<Self>()` bytes
-    /// - `cpu` must point to a valid, initialized BxCpuC
-    /// - `mem_stub` must be a fully initialized memory stub
-    /// - Every CPU in `cpus`, and the memory stub, must outlive the machine
+    /// A no-alloc host owns the three big allocations, so it supplies this
+    /// machine's storage, its processors and an already-initialised
+    /// `BxMemoryStubC` (typically over a firmware-provided buffer).
     ///
     /// `cpus` is the machine's whole CPU set, boot processor at index 0 — the
     /// same order the `alloc` store uses. It is a slice of exclusive borrows
     /// rather than a slice of CPUs so a no-alloc host can place each CPU
     /// wherever it likes; nothing requires them to be contiguous.
-    pub unsafe fn init_at(
-        ptr: *mut Self,
+    pub(crate) fn init_at(
+        storage: &'a mut core::mem::MaybeUninit<Self>,
         cpus: &'static mut [&'static mut BxCpuC<T>],
         mem_stub: BxMemoryStubC,
         config: EmulatorConfig,
@@ -760,7 +770,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         let topology = config.cpu_params.cpu_topology();
         let configured_cpu_count = config.cpu_params.cpu_count() as usize;
         if cpus.len() < configured_cpu_count {
-            return Err(CpuError::UnsupportedCpuOperation {
+            return Err(crate::cpu::CpuError::UnsupportedCpuOperation {
                 operation: "no-alloc SMP requires caller-provided CPU storage",
             }
             .into());
@@ -776,28 +786,35 @@ impl<'a, T: Instrumentation> Emulator<T> {
             slot.set_cpuid_freq(config.cpuid_freq, config.ips);
         }
         let cpus = cpu_store::BorrowedCpus::new(&mut cpus[..configured_cpu_count]);
-        // The descriptor sidecars are 40 KiB each. Initialize only the used
-        // prefix directly in the caller-provided Emulator storage so no-alloc
-        // construction neither allocates nor builds/moves a 254-entry stack
-        // temporary.
-        core::ptr::addr_of_mut!((*ptr).cpus).write(cpus);
-        core::ptr::addr_of_mut!((*ptr).memory).write(memory);
-        core::ptr::addr_of_mut!((*ptr).devices).write(devices);
-        core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
-        core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
-        core::ptr::addr_of_mut!((*ptr).smp_tick_remainder).write(0);
-        core::ptr::addr_of_mut!((*ptr).batch_advanced_pc_system).write(false);
-        #[cfg(feature = "std")]
-        core::ptr::addr_of_mut!((*ptr).slowdown_timer).write(SlowdownTimerState::new());
-        core::ptr::addr_of_mut!((*ptr).config).write(config);
-        core::ptr::addr_of_mut!((*ptr).initialized).write(false);
-        core::ptr::addr_of_mut!((*ptr).snapshot_restore_failed).write(false);
-        core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
-        core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
-        core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
-        core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
-        core::ptr::addr_of_mut!((*ptr).stop_cause).write(StopCause::default());
-        Ok(&mut *ptr)
+        let ptr = storage.as_mut_ptr();
+        // SAFETY: `storage` is an exclusive borrow of an allocation sized and
+        // aligned for `Self`, and every field below is written before the
+        // reference is created, so no caller can observe uninitialised state.
+        // The descriptor sidecars are 40 KiB each, which is why the fields are
+        // written in place rather than through a `Self { .. }` temporary that
+        // would have to be built on the stack and moved.
+        unsafe {
+            core::ptr::addr_of_mut!((*ptr).cpus).write(cpus);
+            core::ptr::addr_of_mut!((*ptr).memory).write(memory);
+            core::ptr::addr_of_mut!((*ptr).devices).write(devices);
+            core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
+            core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
+            core::ptr::addr_of_mut!((*ptr).runnable_mask).write(CpuMask::default());
+            core::ptr::addr_of_mut!((*ptr).lapic_work_mask).write(CpuMask::default());
+            core::ptr::addr_of_mut!((*ptr).smp_tick_remainder).write(0);
+            core::ptr::addr_of_mut!((*ptr).batch_advanced_pc_system).write(false);
+            #[cfg(feature = "std")]
+            core::ptr::addr_of_mut!((*ptr).slowdown_timer).write(SlowdownTimerState::new());
+            core::ptr::addr_of_mut!((*ptr).config).write(config);
+            core::ptr::addr_of_mut!((*ptr).initialized).write(false);
+            core::ptr::addr_of_mut!((*ptr).snapshot_restore_failed).write(false);
+            core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
+            core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
+            core::ptr::addr_of_mut!((*ptr).stop_cause).write(StopCause::default());
+            Ok(&mut *ptr)
+        }
     }
 
     fn configure_pci_devices(&mut self) {
@@ -811,114 +828,17 @@ impl<'a, T: Instrumentation> Emulator<T> {
         tracing::trace!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
     }
 
-    #[cfg(feature = "alloc")]
-    pub fn initialize(&mut self) -> Result<()> {
-        if self.initialized {
-            tracing::trace!("Emulator already initialized");
-            return Ok(());
-        }
-
-        tracing::debug!("Initializing emulator");
-
-        // Step 1: Initialize PC system with IPS (line 1201)
-        self.pc_system.initialize(self.config.ips);
-        self.devices.set_timer_ips(u64::from(self.config.ips));
-        self.smp_tick_remainder = 0;
-        self.batch_advanced_pc_system = false;
-        tracing::trace!("PC system initialized with {} IPS", self.config.ips);
-
-        // Step 2: Memory initialization (line 1312)
-        // In original: BX_MEM(0)->init_memory(memSize, hostMemSize, memBlockSize);
-        self.invalidate_all_cpu_host_mappings();
-        self.memory.init_memory(
-            self.config.guest_memory_size,
-            self.config.host_memory_size,
-            self.config.memory_block_size,
-        )?;
-
-        // Sync A20 mask from PC system (after memory init, matching original)
-        self.memory.set_a20_mask(self.pc_system.a20_mask());
-        tracing::trace!("Memory initialized and A20 mask synced");
-
-        // Step 3-5: BIOS/ROM/RAM loading should happen HERE (after memory init, before CPU init)
-        // But since this method doesn't have BIOS data, it's loaded separately after this call.
-        // For correct initialization, use init_memory() + load_bios() + init_cpu_and_devices()
-
-        let cpu_params = self.config.cpu_params.clone();
-        for cpu_index in 0..self.cpu_count() {
-            self.cpu_mut_at(cpu_index).initialize(cpu_params.clone())?;
-        }
-        tracing::trace!("CPUs initialized");
-
-        // Step 7: CPU sanity checks (line 1338) - separate call to match original
-        for cpu_index in 0..self.cpu_count() {
-            self.cpu_mut_at(cpu_index).sanity_checks()?;
-        }
-        tracing::trace!("CPU sanity checks passed");
-
-        // Step 8: Register CPU state (line 1339)
-        for cpu_index in 0..self.cpu_count() {
-            self.cpu_ref(cpu_index).register_state();
-        }
-        tracing::trace!("CPU state registered");
-
-        // Note: BX_INSTR_INITIALIZE(0) at line 1340 is instrumentation initialization
-        // This is optional and not yet implemented in Rust version
-
-        // Step 9: Initialize devices (line 1353)
-        self.devices.init(&mut self.memory)?;
-
-        // Bochs clock:time0 — apply the RTC power-up seed source (local / utc /
-        // fixed) from config. The CMOS was seeded at construction with the Utc
-        // default; re-seed it here so the guest's RTC matches the configuration
-        // before any device reset or the BIOS reads it.
-        self.device_manager.cmos.set_time0(self.config.rtc_time0);
-
-        // Initialize device manager (actual hardware + I/O handler registration)
-        self.device_manager
-            .init(&mut self.devices, &mut self.memory)?;
-        self.configure_pci_devices();
-        // Initialize fw_cfg device and ACPI CPU/APIC tables.
-        {
-            let ram_size = self.config.guest_memory_size as u64;
-            let cpu_count = self.config.cpu_params.cpu_count();
-            self.device_manager.ioapic.set_id(cpu_count);
-            self.device_manager.fw_cfg.init(ram_size, cpu_count);
-            let acpi = AcpiTableGenerator::generate(ram_size, cpu_count);
-            self.device_manager.fw_cfg.add_acpi_tables(
-                acpi.tables_blob(),
-                acpi.rsdp_blob(),
-                acpi.loader_blob(),
-            );
-        }
-        tracing::trace!("Devices initialized");
-
-        self.register_timer_owners()?;
-
-        // Note: SIM->opt_plugin_ctrl("*", 0) at line 1355 unloads unused optional plugins
-        // This is optional plugin management, not yet implemented in Rust version
-
-        // Step 10: PC system register state (line 1356)
-        self.pc_system.register_state();
-
-        // Step 11: Device register state (line 1357)
-        self.devices.register_state()?;
-        tracing::trace!("State registered");
-
-        // Note: bx_set_log_actions_by_device(1) at line 1359 sets up logging per device
-        // This is only called if not restoring state, and is optional logging setup
-
-        self.rebuild_cpu_masks_from_scan();
-        self.snapshot_restore_failed = false;
-        self.initialized = true;
-        tracing::debug!("Emulator initialization complete");
-
-        // Note: Steps 12-14 (Reset, GUI signal handlers, Start timers) are done via:
-        // - reset() method (called after BIOS loading)
-        // - init_gui() method (calls init_signal_handlers)
-        // - reset() also calls start_timers()
-
-        Ok(())
+    /// Bring the hardware up with no firmware and no media — the shape a test
+    /// wants when it drives the machine through the register-level API rather
+    /// than booting it.
+    ///
+    /// Firmware belongs between the two halves (Bochs main.cc loads the BIOS
+    /// after memory init and before CPU init), which is why
+    /// [`MachineBuilder`] and not this method is what boots a machine.
+    #[cfg(all(feature = "alloc", test))]
+    pub(crate) fn initialize(&mut self) -> Result<()> {
+        self.init_memory_and_pc_system()?;
+        self.init_cpu_and_devices()
     }
 
     /// Initialize memory and PC system (Step 1-2 of initialization)
@@ -930,7 +850,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// After this, call `load_bios()` and `load_optional_rom()`, then `init_cpu_and_devices()`.
     /// This matches the original Bochs sequence: Memory init → Load BIOS → CPU init → Device init.
     #[cfg(feature = "alloc")]
-    pub fn init_memory_and_pc_system(&mut self) -> Result<()> {
+    pub(crate) fn init_memory_and_pc_system(&mut self) -> Result<()> {
         if self.initialized {
             tracing::trace!("Emulator already initialized");
             return Ok(());
@@ -962,9 +882,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
     }
 
     /// Initialize PC system timers and sync A20 mask.
-    /// Use this instead of `init_memory_and_pc_system` when memory was
-    /// initialized externally (e.g. via `init_at`).
-    pub fn init_pc_system(&mut self) {
+    ///
+    /// The no-alloc machine's memory arrives already initialised inside a
+    /// caller-built stub, so this is the half of
+    /// `init_memory_and_pc_system` that still has work to do there.
+    #[cfg(not(feature = "alloc"))]
+    pub(crate) fn init_pc_system(&mut self) {
         self.pc_system.initialize(self.config.ips);
         self.smp_tick_remainder = 0;
         self.memory.set_a20_mask(self.pc_system.a20_mask());
@@ -981,7 +904,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// 11. Device register state - line 1357
     ///
     /// Call this AFTER `init_memory_and_pc_system()` and `load_bios()`.
-    pub fn init_cpu_and_devices(&mut self) -> Result<()> {
+    pub(crate) fn init_cpu_and_devices(&mut self) -> Result<()> {
         // The no-alloc construction path (`init_at`) has no separate
         // `init_memory_and_pc_system` step, so make this initializer
         // self-sufficient: without it a no-alloc machine ran every device
@@ -1075,11 +998,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
     }
 
     #[cfg(feature = "alloc")]
-    /// Set the GUI instance
+    /// Install the display front end.
     ///
-    /// Based on load_and_init_display_lib() in main.cc
-    pub fn set_gui<G: BxGui + 'static>(&mut self, gui: G) {
-        self.gui = Some(Box::new(gui));
+    /// Bochs main.cc `load_and_init_display_lib`, which runs before
+    /// `bx_init_hardware`; `MachineBuilder` preserves that ordering.
+    pub(crate) fn set_boxed_gui(&mut self, gui: Box<dyn BxGui>) {
+        self.gui = Some(gui);
         tracing::debug!("GUI set");
     }
 
@@ -1089,7 +1013,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// Based on bx_init_hardware() GUI initialization in main.cc
     /// This calls specific_init() to set up the GUI, but signal handlers are
     /// initialized separately via init_gui_signal_handlers() after reset.
-    pub fn init_gui(&mut self, argc: i32, argv: &[&str]) -> Result<()> {
+    pub(crate) fn init_gui(&mut self, argc: i32, argv: &[&str]) -> Result<()> {
         if let Some(ref mut gui) = self.gui {
             gui.specific_init(argc, argv, 32); // BX_HEADER_BAR_Y = 32
             gui.update_drive_status_buttons();
@@ -1178,7 +1102,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// # Arguments
     /// * `bios_data` - Raw BIOS ROM data
     /// * `address` - Load address (typically 0xfffe0000 for 128KB BIOS)
-    pub fn load_bios(&mut self, bios_data: &[u8], address: u64) -> Result<()> {
+    pub(crate) fn load_bios(&mut self, bios_data: &[u8], address: u64) -> Result<()> {
         self.memory.load_ROM(bios_data, address, 0)?;
         tracing::debug!("Loaded BIOS ({} bytes) at {:#x}", bios_data.len(), address);
         Ok(())
@@ -1189,7 +1113,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// # Arguments
     /// * `rom_data` - Raw ROM data
     /// * `address` - Load address (must be in 0xC0000-0xFFFFF range)
-    pub fn load_optional_rom(&mut self, rom_data: &[u8], address: u64) -> Result<()> {
+    pub(crate) fn load_optional_rom(&mut self, rom_data: &[u8], address: u64) -> Result<()> {
         self.memory.load_ROM(rom_data, address, 2)?;
         tracing::debug!(
             "Loaded optional ROM ({} bytes) at {:#x}",
@@ -1206,7 +1130,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// # Arguments
     /// * `ram_data` - Raw RAM image data
     /// * `address` - Load address in physical memory
-    pub fn load_ram(&mut self, ram_data: &[u8], address: u64) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn load_ram(&mut self, ram_data: &[u8], address: u64) -> Result<()> {
         // Stable CPU pin storage outlives this exclusive memory borrow.
         self.memory.load_RAM(ram_data, address)?;
         tracing::debug!(
@@ -1319,28 +1244,17 @@ impl<'a, T: Instrumentation> Emulator<T> {
     ///
     /// This should be called after reset() and before start_timers() to match
     /// original Bochs sequence (line 1383).
-    pub fn init_gui_signal_handlers(&mut self) {
+    pub(crate) fn init_gui_signal_handlers(&mut self) {
         if let Some(ref mut gui) = self.gui {
             gui.init_signal_handlers();
             tracing::trace!("GUI signal handlers initialized");
         }
     }
 
-    /// Start timers and prepare for execution
-    /// Note: Timers are now started in reset(), so this is mostly for compatibility
-    pub fn start(&mut self) {
+    /// Arm the timer wheel, the last step of Bochs main.cc's hardware bring-up.
+    pub(crate) fn start_timers(&mut self) {
         self.pc_system.start_timers();
         tracing::trace!("Timers started");
-    }
-
-    /// Check if the emulator is ready to run
-    ///
-    /// Call this before accessing `cpu.cpu_loop()`.
-    pub fn ready_to_run(&self) -> Result<()> {
-        if !self.initialized {
-            return Err(Error::Cpu(CpuError::CpuNotInitialized));
-        }
-        Ok(())
     }
 
     /// Prepare for execution (start timers and log)
@@ -1379,7 +1293,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
         self.smp_tick_remainder = 0;
         self.batch_advanced_pc_system = false;
-        self.start();
+        self.start_timers();
     }
 
     /// Get current instruction pointer
@@ -1443,11 +1357,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// Read-only access to this emulator's configuration.
     pub fn config_ref(&self) -> &EmulatorConfig {
         &self.config
-    }
-
-    /// Check if the emulator has been initialized
-    pub fn is_initialized(&self) -> bool {
-        self.initialized
     }
 
     #[cfg(feature = "std")]
@@ -1520,7 +1429,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// * `heads` - Number of heads
     /// * `spt` - Sectors per track
     #[cfg(feature = "std")]
-    pub fn attach_disk(
+    pub(crate) fn attach_disk(
         &mut self,
         channel: usize,
         drive: usize,
@@ -1537,7 +1446,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Attach a CD-ROM ISO image to a channel/drive (requires std feature)
     #[cfg(feature = "std")]
-    pub fn attach_cdrom(
+    pub(crate) fn attach_cdrom(
         &mut self,
         channel: usize,
         drive: usize,
@@ -1551,28 +1460,14 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Configure CMOS memory size from total RAM bytes.
     /// This is the preferred method — it matches Bochs devices.cc.
-    pub fn configure_memory_in_cmos_from_config(&mut self) {
+    pub(crate) fn configure_memory_in_cmos_from_config(&mut self) {
         self.device_manager
             .cmos
             .set_memory_size_from_bytes(self.config.guest_memory_size as u64);
     }
 
-    /// Configure CMOS memory size (legacy interface)
-    pub fn configure_memory_in_cmos(&mut self, base_kb: u16, extended_kb: u16) {
-        self.device_manager
-            .cmos
-            .set_memory_size(base_kb, extended_kb);
-    }
-
-    /// Configure CMOS hard drive (type byte only — legacy)
-    pub fn configure_disk_in_cmos(&mut self, drive_num: u8, drive_type: u8) {
-        self.device_manager
-            .cmos
-            .set_hard_drive(drive_num, drive_type);
-    }
-
     /// Configure full CMOS hard drive geometry (matching Bochs harddrv.cc)
-    pub fn configure_disk_geometry_in_cmos(
+    pub(crate) fn configure_disk_geometry_in_cmos(
         &mut self,
         drive: u8,
         cylinders: u16,
@@ -1584,20 +1479,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
             .configure_disk_geometry(drive, cylinders, heads, spt);
     }
 
-    /// Configure floppy drives in CMOS
-    ///
-    /// drive_type: 0=none, 1=360K, 2=1.2M, 3=720K, 4=1.44M, 5=2.88M
-    /// Matches Bochs bochsrc `floppya`/`floppyb` type configuration.
-    pub fn configure_floppy_in_cmos(&mut self, drive_a_type: u8, drive_b_type: u8) {
-        self.device_manager
-            .cmos
-            .set_floppy_config(drive_a_type, drive_b_type);
-    }
-
     /// Configure boot sequence in CMOS
     ///
     /// Boot device codes: 0=none, 1=floppy, 2=hard disk, 3=cdrom
-    pub fn configure_boot_sequence(&mut self, first: u8, second: u8, third: u8) {
+    pub(crate) fn configure_boot_sequence(&mut self, first: u8, second: u8, third: u8) {
         self.device_manager
             .cmos
             .set_boot_sequence(first, second, third);
@@ -1605,7 +1490,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     #[cfg(feature = "alloc")]
     /// Attach a CD-ROM ISO from in-memory data (for UEFI, WASM, or any environment).
-    pub fn attach_cdrom_data(&mut self, channel: usize, drive: usize, data: alloc::vec::Vec<u8>) {
+    pub(crate) fn attach_cdrom_data(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        data: alloc::vec::Vec<u8>,
+    ) {
         self.device_manager
             .ide
             .drives
@@ -1617,7 +1507,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     ///
     /// Wraps `HardDrive::attach_disk_data()` which stores the disk image
     /// in a `Vec<u8>` instead of using file I/O.
-    pub fn attach_disk_data(
+    pub(crate) fn attach_disk_data(
         &mut self,
         channel: usize,
         drive: usize,
@@ -1633,7 +1523,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
     }
 
     /// Attach a CD-ROM ISO from a static byte slice (no-alloc).
-    pub fn attach_cdrom_data_ref(&mut self, channel: usize, drive: usize, data: &'static [u8]) {
+    pub(crate) fn attach_cdrom_data_ref(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        data: &'static [u8],
+    ) {
         self.device_manager
             .ide
             .drives
@@ -1641,7 +1536,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     }
 
     /// Attach a hard disk from a static byte slice (no-alloc).
-    pub fn attach_disk_data_ref(
+    pub(crate) fn attach_disk_data_ref(
         &mut self,
         channel: usize,
         drive: usize,

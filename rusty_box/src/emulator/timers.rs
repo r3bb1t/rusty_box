@@ -13,29 +13,13 @@ use super::Emulator;
 use super::SLOWDOWN_QUANTUM_USEC;
 
 impl<'a, T: Instrumentation> Emulator<T> {
-    /// Initialize the emulator
+    /// Give every device that needs one a slot in the timer wheel, and hand
+    /// each device its handle.
     ///
-    /// This runs the full initialization sequence from Bochs main.cc (bx_init_hardware):
-    /// 1. PC system initialization (timers, IPS) - line 1201
-    /// 2. Memory initialization - line 1312
-    /// 3. BIOS load - line 1315-1316 (done via load_bios() after this call)
-    /// 4. Optional ROM load - line 1319-1325 (done via load_optional_rom())
-    /// 5. Optional RAM load - line 1328-1334 (done via load_ram())
-    /// 6. CPU initialization - line 1337
-    /// 7. CPU sanity checks - line 1338
-    /// 8. CPU register state - line 1339
-    /// 9. Device initialization - line 1353
-    /// 10. PC system register state - line 1356
-    /// 11. Device register state - line 1357
-    /// 12. Reset - line 1363 (done via reset() after this call)
-    /// 13. GUI signal handlers - line 1383 (done via init_gui() or after reset)
-    /// 14. Start timers - line 1384 (done in reset())
-    ///
-    /// After this, call `load_bios()` to load a BIOS image, then `reset()` and `run()`.
-    ///
-    /// **IMPORTANT**: For correct BIOS initialization sequence matching original Bochs,
-    /// use `init_memory()` + `load_bios()` + `init_cpu_and_devices()` instead of this method.
-    /// See main.cc for the correct sequence.
+    /// Bochs registers these from the individual device `init` methods
+    /// (pit.cc, keyboard.cc, …); here the wheel is machine-owned, so
+    /// registration happens once, from device initialisation, and a device
+    /// keeps only its handle.
     pub(super) fn register_timer_owners(&mut self) -> Result<()> {
         let pit = self
             .pc_system

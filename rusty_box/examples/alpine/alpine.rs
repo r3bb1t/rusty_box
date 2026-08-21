@@ -24,8 +24,9 @@
 //! ```
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MachineBuilder,
+    },
     gui::{NoGui, TermGui},
     Result,
 };
@@ -86,6 +87,8 @@ fn read_guest_u32(emu: &mut Emulator, addr: u64) -> Option<u32> {
     Some(u32::from_le_bytes(bytes))
 }
 
+/// Only the debug-assertions BDA dump reads a 16-bit guest field.
+#[cfg(debug_assertions)]
 fn read_guest_u16(emu: &mut Emulator, addr: u64) -> Option<u16> {
     let mut bytes = [0; 2];
     emu.mem_read(addr, &mut bytes).ok()?;
@@ -294,68 +297,42 @@ fn run_alpine() -> Result<()> {
         ..Default::default()
     };
 
-    let mut emu = Emulator::new(config)?;
+    // =========================================================================
+    // Assemble the machine
+    // =========================================================================
+    let disk_path_str = disk_path.to_string_lossy().to_string();
+    let mut builder = MachineBuilder::new(config).bios(&bios_data);
 
-    // =========================================================================
-    // Set up GUI
-    // =========================================================================
     if headless {
-        emu.set_gui(NoGui::new());
+        builder = builder.gui(NoGui::new());
         println!("(headless) RUSTY_BOX_HEADLESS=1: terminal repaint disabled");
     } else {
-        let term_gui = TermGui::new();
-        emu.set_gui(term_gui);
+        builder = builder.gui(TermGui::new());
     }
 
-    // =========================================================================
-    // Initialize hardware
-    // =========================================================================
-    emu.init_memory_and_pc_system()?;
-
-    // Load BIOS
-    let bios_size = bios_data.len() as u64;
-    let bios_load_addr = !(bios_size - 1);
-    emu.load_bios(&bios_data, bios_load_addr)?;
-
-    // Load VGA BIOS
-    if let Some((_vga_path, vga_data)) = vga_bios {
-        emu.load_optional_rom(&vga_data, 0xC0000)?;
+    if let Some((_vga_path, ref vga_data)) = vga_bios {
+        builder = builder.vga_bios(vga_data);
     }
-
-    // Initialize CPU and devices
-    emu.init_cpu_and_devices()?;
-
-    // =========================================================================
-    // Configure CMOS
-    // =========================================================================
-    // Use the bytes-based API that correctly handles large RAM sizes
-    emu.configure_memory_in_cmos_from_config();
-
-    let disk_path_str = disk_path.to_string_lossy().to_string();
 
     if is_iso {
-        // CD-ROM boot: attach as ATAPI device on channel 1, master (drive 0)
-        // Matches Bochs config: ata1-master: type=cdrom (secondary channel, 0x170, IRQ 15)
-        emu.configure_boot_sequence(3, 0, 0); // 3 = cdrom first
-        emu.attach_cdrom(1, 0, &disk_path_str)
-            .expect("Failed to attach CD-ROM image");
+        // Bochs config `ata1-master: type=cdrom` — the secondary channel
+        // (0x170, IRQ 15).
+        builder = builder
+            .boot_order(BootOrder::just(BootDevice::Cdrom))
+            .cdrom_file(AtaSlot::SECONDARY_MASTER, &disk_path_str);
         println!("  CD-ROM attached on ata1-master: {}", disk_path_str);
     } else {
-        // Hard disk boot: configure CHS geometry and attach
-        emu.configure_disk_geometry_in_cmos(0, cylinders, heads, spt);
-        emu.configure_boot_sequence(2, 0, 0); // 2 = hard disk first
-        emu.attach_disk(0, 0, &disk_path_str, cylinders.into(), heads, spt)
-            .expect("Failed to attach disk image");
+        builder = builder
+            .boot_order(BootOrder::just(BootDevice::Disk))
+            .disk_file(
+                AtaSlot::PRIMARY_MASTER,
+                &disk_path_str,
+                DiskGeometry::new(cylinders.into(), heads, spt),
+            );
         println!("  Disk attached: CHS={}/{}/{}", cylinders, heads, spt);
     }
 
-    // =========================================================================
-    // Initialize GUI and reset
-    // =========================================================================
-    emu.init_gui(0, &[])?;
-    emu.reset(ResetReason::Hardware)?;
-    emu.init_gui_signal_handlers();
-    emu.start();
+    let mut emu = builder.build()?;
 
     // =========================================================================
     // Show boot state

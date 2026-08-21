@@ -16,8 +16,7 @@
 //!   RB_SNAPSHOT     Snapshot file (default target/snapshot_resume.rbx)
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{AtaSlot, BootDevice, BootOrder, Emulator, EmulatorConfig, MachineBuilder},
     gui::NoGui,
 };
 
@@ -107,20 +106,14 @@ fn build_machine(config: &HarnessConfig) -> Box<Emulator> {
         ..EmulatorConfig::default()
     };
 
-    let mut emu = Emulator::new(emulator_config).expect("build emulator");
-    emu.set_gui(NoGui::new());
-    emu.init_memory_and_pc_system().expect("init memory/pc-system");
-
-    let bios_load_addr = !(bios.len() as u64 - 1);
-    emu.load_bios(&bios, bios_load_addr).expect("load BIOS");
-    emu.load_optional_rom(&vga_bios, 0xC0000).expect("load VGA BIOS");
-    emu.init_cpu_and_devices().expect("init CPU/devices");
-    emu.configure_memory_in_cmos_from_config();
-    // ELTORITO boot codes: 3 = cdrom first.
-    emu.configure_boot_sequence(3, 0, 0);
-    emu.attach_cdrom(0, 0, &config.iso).expect("attach ISO");
-    emu.reset(ResetReason::Hardware).expect("hardware reset");
-    emu
+    MachineBuilder::new(emulator_config)
+        .gui(NoGui::new())
+        .bios(&bios)
+        .vga_bios(&vga_bios)
+        .boot_order(BootOrder::just(BootDevice::Cdrom))
+        .cdrom_file(AtaSlot::PRIMARY_MASTER, &config.iso)
+        .build()
+        .expect("build machine")
 }
 
 fn workspace_root() -> std::path::PathBuf {

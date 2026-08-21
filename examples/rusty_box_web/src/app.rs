@@ -6,10 +6,22 @@
 //! owned directly by the app.
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MachineBuilder,
+    },
     gui::shared_display::SharedDisplay,
 };
+
+/// The VGA BIOS padded to a whole number of 512-byte option-ROM blocks, which
+/// is what the ROM window expects.
+fn padded_vga_bios() -> Vec<u8> {
+    let mut data = VGA_BIOS_DATA.to_vec();
+    let remainder = data.len() % 512;
+    if remainder != 0 {
+        data.resize(data.len() + (512 - remainder), 0);
+    }
+    data
+}
 
 // Embedded binary assets (compiled into the WASM)
 const BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
@@ -112,31 +124,18 @@ impl WasmEmulatorApp {
         };
 
         let result = (|| -> rusty_box::Result<Box<Emulator>> {
-            let mut emu = Emulator::new(config)?;
-            emu.init_memory_and_pc_system()?;
-
-            let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
-            emu.load_bios(BIOS_DATA, bios_load_addr)?;
-
-            let mut vga_data = VGA_BIOS_DATA.to_vec();
-            let remainder = vga_data.len() % 512;
-            if remainder != 0 {
-                vga_data.resize(vga_data.len() + (512 - remainder), 0);
-            }
-            emu.load_optional_rom(&vga_data, 0xC0000)?;
-
-            emu.init_cpu_and_devices()?;
-            emu.configure_memory_in_cmos(640, 31 * 1024);
-            emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
-            emu.configure_boot_sequence(2, 0, 0); // Boot from disk
-
-            emu.attach_disk_data(0, 0, DISK_DATA.to_vec(), DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT);
-
-            emu.init_gui(0, &[])?;
-            emu.reset(ResetReason::Hardware)?;
-            emu.start();
+            let vga_data = padded_vga_bios();
+            let mut emu = MachineBuilder::new(config)
+                .bios(BIOS_DATA)
+                .vga_bios(&vga_data)
+                .boot_order(BootOrder::just(BootDevice::Disk))
+                .disk_bytes(
+                    AtaSlot::PRIMARY_MASTER,
+                    DISK_DATA.to_vec(),
+                    DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT),
+                )
+                .build()?;
             emu.force_vga_update();
-
             Ok(emu)
         })();
 
@@ -156,34 +155,16 @@ impl WasmEmulatorApp {
         };
 
         let result = (|| -> rusty_box::Result<Box<Emulator>> {
-            let mut emu = Emulator::new(config)?;
-            emu.init_memory_and_pc_system()?;
-
-            let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
-            emu.load_bios(BIOS_DATA, bios_load_addr)?;
-
-            let mut vga_data = VGA_BIOS_DATA.to_vec();
-            let remainder = vga_data.len() % 512;
-            if remainder != 0 {
-                vga_data.resize(vga_data.len() + (512 - remainder), 0);
-            }
-            emu.load_optional_rom(&vga_data, 0xC0000)?;
-
-            emu.init_cpu_and_devices()?;
-
-            // 256 MB: 640 KB conventional + ~255 MB extended
-            let ext_kb = ((ram_size / 1024) - 1024).min(u16::MAX as usize);
-            emu.configure_memory_in_cmos(640, ext_kb as u16);
-            emu.configure_boot_sequence(3, 0, 0); // Boot from CD-ROM
-
-            // Attach CD-ROM on secondary channel (channel 1, drive 0)
-            emu.attach_cdrom_data(1, 0, iso_data);
-
-            emu.init_gui(0, &[])?;
-            emu.reset(ResetReason::Hardware)?;
-            emu.start();
+            let vga_data = padded_vga_bios();
+            // The CMOS memory size comes from the configuration, so the guest
+            // is told about all 256 MB.
+            let mut emu = MachineBuilder::new(config)
+                .bios(BIOS_DATA)
+                .vga_bios(&vga_data)
+                .boot_order(BootOrder::just(BootDevice::Cdrom))
+                .cdrom_bytes(AtaSlot::SECONDARY_MASTER, iso_data)
+                .build()?;
             emu.force_vga_update();
-
             Ok(emu)
         })();
 

@@ -1073,7 +1073,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         mode: CpuSetupMode,
         tracer: T,
     ) -> Result<Box<Self>> {
-        let mut emu = Self::new_with_instrumentation(config, tracer)?;
+        let mut emu = Self::with_tracer(config, tracer)?;
         emu.init_memory_and_pc_system()?;
         emu.reset(crate::cpu::ResetReason::Hardware)?;
         emu.setup_cpu_mode(mode)?;
@@ -1083,7 +1083,8 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
 
 impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Reconfigure an existing emulator for the given CPU mode, skipping BIOS.
-    /// Must be called after `initialize()` (or from `new_with_mode`).
+    /// The machine must already have memory and a PC system, which is what
+    /// [`Emulator::new_with_mode`] arranges.
     pub fn setup_cpu_mode(&mut self, mode: CpuSetupMode) -> Result<()> {
         match mode {
             CpuSetupMode::RealMode => self.setup_real_mode(),

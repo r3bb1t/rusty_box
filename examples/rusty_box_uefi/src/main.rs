@@ -7,12 +7,15 @@
 #![no_main]
 #![no_std]
 
+use core::mem::MaybeUninit;
 use log::{error, info};
 use uefi::prelude::*;
 
 use rusty_box::{
-    cpu::{builder::BxCpuBuilder, cpu::BxCpuC, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    cpu::{builder::BxCpuBuilder, cpu::BxCpuC},
+    emulator::{
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, MachineBuilder,
+    },
     memory::BxMemoryStubC,
 };
 
@@ -221,36 +224,25 @@ fn run() -> Status {
         "Allocating Emulator ({} bytes)...",
         core::mem::size_of::<Emulator>()
     );
-    let emu_ptr: *mut Emulator = alloc_zeroed_for();
-    let emu = unsafe {
-        match Emulator::init_at(emu_ptr, cpus, mem_stub, config) {
-            Ok(e) => e,
-            Err(e) => bail!("Emulator init failed: {:?}", e),
-        }
+    let emu_ptr: *mut MaybeUninit<Emulator> = alloc_zeroed_for();
+    // SAFETY: `alloc_zeroed_for` returned firmware pages sized and aligned for
+    // the machine, and nothing else ever borrows them.
+    let emu_storage: &'static mut MaybeUninit<Emulator> = unsafe { &mut *emu_ptr };
+    let emu = match MachineBuilder::new(config)
+        .bios(BIOS_ROM)
+        .vga_bios(VGA_BIOS)
+        .boot_order(BootOrder::just(BootDevice::Disk))
+        .disk_static(
+            AtaSlot::PRIMARY_MASTER,
+            DLX_DISK,
+            DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT),
+        )
+        .build_at(emu_storage, cpus, mem_stub)
+    {
+        Ok(e) => e,
+        Err(e) => bail!("Machine build failed: {:?}", e),
     };
 
-    // --- Initialize hardware ---
-    emu.init_pc_system();
-
-    let bios_addr = !(BIOS_ROM.len() as u64 - 1);
-    if let Err(e) = emu.load_bios(BIOS_ROM, bios_addr) {
-        bail!("BIOS: {:?}", e);
-    }
-    let _ = emu.load_optional_rom(VGA_BIOS, 0xC0000);
-
-    if let Err(e) = emu.init_cpu_and_devices() {
-        bail!("CPU init: {:?}", e);
-    }
-
-    emu.configure_memory_in_cmos_from_config();
-    emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
-    emu.configure_boot_sequence(2, 0, 0);
-    emu.attach_disk_data_ref(0, 0, DLX_DISK, DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT);
-
-    if let Err(e) = emu.reset(ResetReason::Hardware) {
-        bail!("Reset: {:?}", e);
-    }
-    emu.start();
     emu.prepare_run();
 
     info!("Starting BIOS boot...");

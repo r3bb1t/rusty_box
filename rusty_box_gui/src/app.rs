@@ -2457,14 +2457,11 @@ enum WebBootMode {
 }
 #[cfg(any(test, target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Assembling a machine is one blocking call, so the browser gets a frame to
+/// paint the notice before it runs.
 enum WebStartupStage {
-    CreateEmulator,
-    InitializeMemory,
-    LoadBios,
-    LoadVgaBios,
-    InitializeDevices,
-    AttachMedia,
-    StartEmulator,
+    Announce,
+    BuildMachine,
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -2490,7 +2487,6 @@ enum WebConsoleSurface {
 #[cfg(target_arch = "wasm32")]
 struct WebStartupState {
     stage: WebStartupStage,
-    emulator: Option<WebEmulator>,
     iso_data: Option<Vec<u8>>,
     memory_mib: usize,
     cpu_count: u32,
@@ -2500,8 +2496,7 @@ struct WebStartupState {
 impl WebStartupState {
     fn new(iso_data: Vec<u8>, memory_mib: usize, cpu_count: u32) -> Self {
         Self {
-            stage: WebStartupStage::CreateEmulator,
-            emulator: None,
+            stage: WebStartupStage::Announce,
             iso_data: Some(iso_data),
             memory_mib,
             cpu_count,
@@ -2553,26 +2548,16 @@ const WEB_STARTUP_STEPS_PER_FRAME: usize = 1;
 #[cfg(any(test, target_arch = "wasm32"))]
 fn web_next_startup_stage(stage: WebStartupStage) -> Option<WebStartupStage> {
     match stage {
-        WebStartupStage::CreateEmulator => Some(WebStartupStage::InitializeMemory),
-        WebStartupStage::InitializeMemory => Some(WebStartupStage::LoadBios),
-        WebStartupStage::LoadBios => Some(WebStartupStage::LoadVgaBios),
-        WebStartupStage::LoadVgaBios => Some(WebStartupStage::InitializeDevices),
-        WebStartupStage::InitializeDevices => Some(WebStartupStage::AttachMedia),
-        WebStartupStage::AttachMedia => Some(WebStartupStage::StartEmulator),
-        WebStartupStage::StartEmulator => None,
+        WebStartupStage::Announce => Some(WebStartupStage::BuildMachine),
+        WebStartupStage::BuildMachine => None,
     }
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
 fn web_startup_stage_label(stage: WebStartupStage) -> &'static str {
     match stage {
-        WebStartupStage::CreateEmulator => "Allocating guest memory",
-        WebStartupStage::InitializeMemory => "Allocating guest memory",
-        WebStartupStage::LoadBios => "Loading BIOS",
-        WebStartupStage::LoadVgaBios => "Loading VGA BIOS",
-        WebStartupStage::InitializeDevices => "Initializing devices",
-        WebStartupStage::AttachMedia => "Attaching boot media",
-        WebStartupStage::StartEmulator => "Starting CPU",
+        WebStartupStage::Announce => "Allocating guest memory",
+        WebStartupStage::BuildMachine => "Starting virtual machine",
     }
 }
 
@@ -2764,89 +2749,34 @@ impl WebShellApp {
         };
 
         match startup.stage {
-            WebStartupStage::CreateEmulator => {
-                let emu = rusty_box::emulator::Emulator::<
-                    rusty_box::cpu::core_i7_skylake::Corei7SkylakeX,
-                >::new(web_uploaded_media_config(
-                    startup.memory_mib,
-                    startup.cpu_count,
-                ))
-                .map_err(|error| format!("{error:?}"))?;
-                startup.emulator = Some(emu);
-            }
-            WebStartupStage::InitializeMemory => {
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before memory initialization")
-                    .init_memory_and_pc_system()
-                    .map_err(|error| format!("{error:?}"))?;
-            }
-            WebStartupStage::LoadBios => {
-                let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before BIOS load")
-                    .load_bios(BIOS_DATA, bios_load_addr)
-                    .map_err(|error| format!("{error:?}"))?;
-            }
-            WebStartupStage::LoadVgaBios => {
+            WebStartupStage::Announce => {}
+            WebStartupStage::BuildMachine => {
+                let iso_data = startup.iso_data.take().ok_or_else(|| {
+                    "uploaded boot media was not available during startup".to_owned()
+                })?;
                 let mut vga_data = VGA_BIOS_DATA.to_vec();
                 let remainder = vga_data.len() % 512;
                 if remainder != 0 {
                     vga_data.resize(vga_data.len() + (512 - remainder), 0);
                 }
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before VGA BIOS load")
-                    .load_optional_rom(&vga_data, 0xC0000)
-                    .map_err(|error| format!("{error:?}"))?;
-            }
-            WebStartupStage::InitializeDevices => {
-                let emu = startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before device initialization");
-                emu.init_cpu_and_devices()
-                    .map_err(|error| format!("{error:?}"))?;
-                let ram_size = startup.memory_mib * 1024 * 1024;
-                let ext_kb = ((ram_size / 1024) - 1024).min(u16::MAX as usize);
-                emu.configure_memory_in_cmos(640, ext_kb as u16);
-                emu.configure_boot_sequence(3, 0, 0);
-            }
-            WebStartupStage::AttachMedia => {
-                let iso_data = startup.iso_data.take().ok_or_else(|| {
-                    "uploaded boot media was not available during startup".to_owned()
-                })?;
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before media attach")
-                    .attach_cdrom_data(1, 0, iso_data);
-            }
-            WebStartupStage::StartEmulator => {
-                let emu = startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before emulator start");
-                emu.init_gui(0, &[]).map_err(|error| format!("{error:?}"))?;
-                emu.reset(rusty_box::cpu::ResetReason::Hardware)
-                    .map_err(|error| format!("{error:?}"))?;
-                emu.start();
+                use rusty_box::emulator::{AtaSlot, BootDevice, BootOrder, MachineBuilder};
+                let mut emu = MachineBuilder::new(web_uploaded_media_config(
+                    startup.memory_mib,
+                    startup.cpu_count,
+                ))
+                .bios(BIOS_DATA)
+                .vga_bios(&vga_data)
+                .boot_order(BootOrder::just(BootDevice::Cdrom))
+                .cdrom_bytes(AtaSlot::SECONDARY_MASTER, iso_data)
+                .build()
+                .map_err(|error| format!("{error:?}"))?;
                 emu.force_vga_update();
-                return Ok(Some(
-                    startup
-                        .emulator
-                        .take()
-                        .expect("startup emulator should exist after start"),
-                ));
+                return Ok(Some(emu));
             }
         }
 
         startup.stage = web_next_startup_stage(startup.stage)
-            .expect("startup stage should advance until StartEmulator");
+            .expect("startup stage should advance until the machine is built");
         Ok(None)
     }
 
@@ -2983,13 +2913,17 @@ impl WebShellApp {
                     web_time::Instant::now().duration_since(frame_start),
                 ) {
                     match emu.step_batch(WEB_BATCH_SIZE) {
-                        Ok((executed, is_shutdown)) => {
-                            frame_executed = frame_executed.saturating_add(executed);
-                            if is_shutdown {
+                        Ok(outcome) => {
+                            frame_executed = frame_executed.saturating_add(outcome.executed);
+                            // Every terminal cause, not just a CPU shutdown: a
+                            // guest that powers itself off through ACPI leaves
+                            // the CPU healthy, so testing the CPU alone would
+                            // keep pumping a machine that asked to be off.
+                            if outcome.is_terminal() {
                                 self.shutdown = true;
                                 break;
                             }
-                            if executed == 0 {
+                            if outcome.executed == 0 {
                                 break;
                             }
                         }
@@ -3357,7 +3291,7 @@ impl WebShellApp {
                     .startup
                     .as_ref()
                     .map(|startup| startup.stage)
-                    .unwrap_or(WebStartupStage::CreateEmulator);
+                    .unwrap_or(WebStartupStage::Announce);
                 ui.centered_and_justified(|ui| {
                     ui.vertical_centered(|ui| {
                         ui.spinner();
@@ -4234,17 +4168,15 @@ mod tests {
     #[test]
     fn web_uploaded_media_startup_is_split_across_frames() {
         assert_eq!(WEB_STARTUP_STEPS_PER_FRAME, 1);
+        // The notice is painted on its own frame, so the browser is never
+        // asked to render it and run the blocking build in the same one.
         assert_eq!(
-            web_next_startup_stage(WebStartupStage::CreateEmulator),
-            Some(WebStartupStage::InitializeMemory)
+            web_next_startup_stage(WebStartupStage::Announce),
+            Some(WebStartupStage::BuildMachine)
         );
-        assert_eq!(web_next_startup_stage(WebStartupStage::StartEmulator), None);
+        assert_eq!(web_next_startup_stage(WebStartupStage::BuildMachine), None);
         assert_eq!(
-            web_startup_stage_label(WebStartupStage::CreateEmulator),
-            "Allocating guest memory"
-        );
-        assert_eq!(
-            web_startup_stage_label(WebStartupStage::InitializeMemory),
+            web_startup_stage_label(WebStartupStage::Announce),
             "Allocating guest memory"
         );
     }

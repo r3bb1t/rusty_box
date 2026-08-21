@@ -11,8 +11,7 @@
 //! ```
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, MachineBuilder},
     gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
     Result,
 };
@@ -178,48 +177,25 @@ fn run_emulator(
         ..Default::default()
     };
 
-    let mut emu = Emulator::new(config)?;
+    let mut builder = MachineBuilder::new(config)
+        .gui(BridgeGui::new(Arc::clone(&shared)))
+        .bios(bios_data)
+        .boot_order(BootOrder::just(BootDevice::Disk))
+        .disk_file(
+            AtaSlot::PRIMARY_MASTER,
+            disk_path,
+            DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT),
+        );
+    if let Some(vga_data) = vga_bios {
+        builder = builder.vga_bios(vga_data);
+    }
+    let mut emu = builder.build()?;
 
     // Wire the shared stop_flag so the GUI reset button can interrupt run_interactive
     emu.set_stop_flag({
         let d = shared.lock().unwrap();
         Arc::clone(&d.stop_flag)
     });
-
-    // Set BridgeGui as the GUI
-    let bridge = BridgeGui::new(Arc::clone(&shared));
-    emu.set_gui(bridge);
-
-    // Initialize hardware
-    emu.init_memory_and_pc_system()?;
-
-    // Load BIOS
-    let bios_size = bios_data.len() as u64;
-    let bios_load_addr = !(bios_size - 1);
-    emu.load_bios(bios_data, bios_load_addr)?;
-
-    // Load VGA BIOS
-    if let Some(vga_data) = vga_bios {
-        emu.load_optional_rom(vga_data, 0xC0000)?;
-    }
-
-    // Initialize CPU and devices
-    emu.init_cpu_and_devices()?;
-
-    // Configure CMOS
-    emu.configure_memory_in_cmos(640, 31 * 1024);
-    emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
-    emu.configure_boot_sequence(2, 0, 0);
-
-    // Attach disk
-    emu.attach_disk(0, 0, disk_path, DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT)
-        .expect("Failed to attach disk image");
-
-    // Initialize GUI, reset, start
-    emu.init_gui(0, &[])?;
-    emu.reset(ResetReason::Hardware)?;
-    emu.init_gui_signal_handlers();
-    emu.start();
 
     println!("Emulator started (max {} instructions)", max_instructions);
     let start_time = Instant::now();

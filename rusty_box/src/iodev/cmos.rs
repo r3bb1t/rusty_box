@@ -1205,28 +1205,6 @@ impl BxCmosC {
         self.update_checksum();
     }
 
-    /// Configure memory size in CMOS (legacy interface, kept for compatibility)
-    ///
-    /// `_base_kb`: conventional memory. It lies inside the first megabyte, which
-    /// the total below already counts in full, so adding it would report more
-    /// physical RAM than exists and the guest kernel would map pages past the
-    /// end of it. The CMOS base-memory register is a fixed 640 KB regardless.
-    /// `extended_kb`: extended memory above 1 MB.
-    pub fn set_memory_size(&mut self, _base_kb: u16, extended_kb: u16) {
-        let total_bytes = (1024u64 + extended_kb as u64) * 1024;
-        self.set_memory_size_from_bytes(total_bytes);
-    }
-
-    /// Configure hard drive type byte only (legacy — prefer configure_disk_geometry)
-    pub fn set_hard_drive(&mut self, drive_num: u8, drive_type: u8) {
-        if drive_num == 0 {
-            self.ram[0x12] = (self.ram[0x12] & 0x0F) | (drive_type << 4);
-        } else if drive_num == 1 {
-            self.ram[0x12] = (self.ram[0x12] & 0xF0) | (drive_type & 0x0F);
-        }
-        self.update_checksum();
-    }
-
     /// Configure full hard drive geometry in CMOS (matching Bochs harddrv.cc)
     ///
     /// Sets drive type byte (0x12) plus extended geometry registers:
@@ -1274,6 +1252,11 @@ impl BxCmosC {
     ///
     /// drive_type: 0=none, 1=360K, 2=1.2M, 3=720K, 4=1.44M, 5=2.88M
     /// Sets CMOS 0x10 (floppy types) and updates equipment byte (0x14).
+    ///
+    /// Ported ahead of its device: Bochs floppy.cc is the only caller of this
+    /// CMOS write and the floppy controller is not ported yet, so nothing in
+    /// this tree reaches it.
+    #[allow(dead_code)]
     pub fn set_floppy_config(&mut self, drive_a_type: u8, drive_b_type: u8) {
         // CMOS 0x10: high nibble = drive A type, low nibble = drive B type
         self.ram[0x10] = (drive_a_type << 4) | (drive_b_type & 0x0F);
@@ -1645,11 +1628,13 @@ mod tests {
     fn test_cmos_memory_config() {
         let mut cmos = BxCmosC::new();
 
-        // Set 32MB total memory
-        cmos.set_memory_size(640, 31744); // 640KB base + 31MB extended
+        cmos.set_memory_size_from_bytes(32 * 1024 * 1024);
 
-        assert_eq!(cmos.ram[0x15], 0x80); // 640 low byte
-        assert_eq!(cmos.ram[0x16], 0x02); // 640 high byte
+        assert_eq!(cmos.ram[0x15], 0x80); // 640 KB base, low byte
+        assert_eq!(cmos.ram[0x16], 0x02); // 640 KB base, high byte
+        // 32 MiB less the first megabyte, in KiB, is 0x7C00.
+        assert_eq!(cmos.ram[0x17], 0x00);
+        assert_eq!(cmos.ram[0x18], 0x7C);
     }
 
     #[test]

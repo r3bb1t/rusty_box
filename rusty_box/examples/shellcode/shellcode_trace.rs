@@ -16,8 +16,7 @@
 
 use rusty_box::{
     cpu::{
-        core_i7_skylake::Corei7SkylakeX, CpuSetupMode, HookCtx, HookMask, InstrAction,
-        Instrumentation, ResetReason, X86Reg,
+        CpuSetupMode, HookCtx, HookMask, InstrAction, Instrumentation, X86Reg,
     },
     emulator::{Emulator, EmulatorConfig},
 };
@@ -109,11 +108,11 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         next_fd: 3,
         ..Default::default()
     };
-    let mut emu =
-        Emulator::<Tracer>::new_with_instrumentation(cfg.clone(), tracer)?;
-    emu.init_memory_and_pc_system()?;
-    unsafe { emu.cpu_mut_unchecked() }.reset(ResetReason::Hardware);
-    emu.setup_cpu_mode(CpuSetupMode::FlatLong64)?;
+    let mut emu = Emulator::<Tracer>::new_with_mode_and_instrumentation(
+        cfg.clone(),
+        CpuSetupMode::FlatLong64,
+        tracer,
+    )?;
 
     emu.mem_write(SHELLCODE_BASE, SHELLCODE)?;
     emu.reg_write(X86Reg::Rsp, STACK_TOP);

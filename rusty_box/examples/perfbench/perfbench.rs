@@ -14,7 +14,7 @@
 //!   samply record ./target/release/examples/perfbench
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, CpuSetupMode, ResetReason, X86Reg},
+    cpu::{CpuSetupMode, X86Reg},
     emulator::{Emulator, EmulatorConfig},
 };
 use std::time::Instant;
@@ -154,10 +154,8 @@ fn run() {
         ..EmulatorConfig::default()
     };
 
-    let mut emu = Emulator::new(cfg.clone()).expect("new");
-    emu.init_memory_and_pc_system().expect("init memory");
-    unsafe { emu.cpu_mut_unchecked() }.reset(ResetReason::Hardware);
-    emu.setup_cpu_mode(CpuSetupMode::FlatLong64).expect("mode");
+    let mut emu =
+        Emulator::new_with_mode(cfg.clone(), CpuSetupMode::FlatLong64).expect("machine");
 
     let (mode, code, _ipi) = select_loop();
     emu.mem_write(CODE_BASE, code).expect("write code");

@@ -709,7 +709,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         expected_message: &str,
     ) {
         let mut emu = machine();
-        assert!(emu.is_initialized());
         let error = emu
             .restore_snapshot(&mut Cursor::new(snapshot))
             .unwrap_err();
@@ -718,7 +717,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             error.to_string().contains(expected_message),
             "expected {expected_message:?} in {error:?}"
         );
-        assert!(!emu.is_initialized());
         let execution_error = emu.run_cpu_batch(1).unwrap_err();
         assert!(
             matches!(execution_error, crate::cpu::CpuError::CpuNotInitialized),
@@ -1488,7 +1486,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             restored
                 .restore_snapshot(&mut Cursor::new(&extended))
                 .unwrap();
-            assert!(restored.is_initialized());
             assert_eq!(restored.reg_read(X86Reg::Rax), 0xA5A5_5A5A_DEAD_BEEF);
         });
     }

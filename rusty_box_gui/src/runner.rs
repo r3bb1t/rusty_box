@@ -1,15 +1,15 @@
 use crate::{
     args::{Args, BootDevice, DisplayBackend, LogLevel},
-    config::{ResolvedCdrom, ResolvedConfig, ResolvedDisk},
+    config::ResolvedConfig,
     error::RunError,
 };
 #[cfg(feature = "gui-egui")]
 use rusty_box::gui::{shared_display::SharedDisplay, BridgeGui};
-use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
-    gui::{BxGui, NoGui, TermGui},
+use rusty_box::emulator::{
+    AtaSlot, BootDevice as GuestBootDevice, BootOrder, DiskGeometry as GuestDiskGeometry,
+    EmulatorConfig, MachineBuilder,
 };
+use rusty_box::gui::{BxGui, NoGui, TermGui};
 #[cfg(feature = "gui-egui")]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "gui-egui")]
@@ -119,7 +119,7 @@ where
         Some(path) => Some(read_vga_bios_file(path)?),
         None => None,
     };
-    validate_configured_media_slots(&config)?;
+    let slots = resolve_media_slots(&config)?;
     prepare_configured_media_files(&config, create_startup_disks)?;
 
     let emulator_config = EmulatorConfig {
@@ -137,10 +137,29 @@ where
         ..EmulatorConfig::default()
     };
 
+    let mut builder = MachineBuilder::new(emulator_config)
+        .gui(gui)
+        .bios(&bios_data)
+        .boot_order(boot_sequence(&config.boot_order));
+    if let Some(data) = &vga_data {
+        builder = builder.vga_bios(data);
+    }
+    if let (Some(disk), Some(slot)) = (&config.disk, slots.disk) {
+        let geometry = disk.geometry;
+        builder = builder.disk_file(
+            slot,
+            path_to_str(&disk.path)?,
+            GuestDiskGeometry::new(geometry.cylinders, geometry.heads, geometry.sectors_per_track),
+        );
+    }
+    if let (Some(cdrom), Some(slot)) = (&config.cdrom, slots.cdrom) {
+        builder = builder.cdrom_file(slot, path_to_str(&cdrom.path)?);
+    }
+
     #[cfg(not(feature = "guest-trace"))]
-    let mut emu = Emulator::new(emulator_config)?;
+    let mut emu = builder.build()?;
     // Diagnostic build: run the CPU with the guest-death tracer installed.
-    // Single-CPU only — new_with_instrumentation rejects SMP configs.
+    // Single-CPU only — one tracer instance cannot be shared between processors.
     #[cfg(feature = "guest-trace")]
     let mut emu = {
         let trace_log = crate::guest_trace::GuestTracer::default_log_path();
@@ -152,73 +171,18 @@ where
             }
         })?;
         tracing::info!("guest-trace: recording guest evidence to {trace_log}");
-        Emulator::<crate::guest_trace::GuestTracer>::new_with_instrumentation(
-            emulator_config,
-            tracer,
-        )?
+        builder.tracer(tracer).build()?
     };
+
     if let Some(stop_flag) = stop_flag {
         emu.set_stop_flag(stop_flag);
     }
-    emu.set_gui(gui);
-
-    emu.init_memory_and_pc_system()?;
-    let bios_load_addr = !(bios_data.len() as u64 - 1);
-    emu.load_bios(&bios_data, bios_load_addr)?;
-    if let Some(data) = &vga_data {
-        emu.load_optional_rom(data, 0xC0000)?;
-    }
-    emu.init_cpu_and_devices()?;
-    emu.configure_memory_in_cmos_from_config();
-    let (first_boot, second_boot, third_boot) = boot_sequence(&config.boot_order);
-    emu.configure_boot_sequence(first_boot, second_boot, third_boot);
-
-    if let Some(disk) = &config.disk {
-        let geometry = disk.geometry;
-        emu.configure_disk_geometry_in_cmos(
-            disk_cmos_drive(disk),
-            // Bochs harddrv.cc truncates the physical cylinder count to Bit16u when
-            // filling the CMOS geometry registers; large disks are addressed via LBA.
-            geometry.cylinders as u16,
-            geometry.heads,
-            geometry.sectors_per_track,
-        );
-        let disk_path = path_to_str(&disk.path)?;
-        emu.attach_disk(
-            disk.channel,
-            disk.drive,
-            disk_path,
-            geometry.cylinders,
-            geometry.heads,
-            geometry.sectors_per_track,
-        )
-        .map_err(|source| RunError::MediaAttach {
-            kind: "disk",
-            path: disk.path.clone(),
-            source,
-        })?;
-    }
-
-    if let Some(cdrom) = &config.cdrom {
-        let cdrom_path = path_to_str(&cdrom.path)?;
-        emu.attach_cdrom(cdrom.channel, cdrom.drive, cdrom_path)
-            .map_err(|source| RunError::MediaAttach {
-                kind: "CD-ROM",
-                path: cdrom.path.clone(),
-                source,
-            })?;
-    }
-
-    emu.init_gui(0, &[])?;
-    emu.reset(ResetReason::Hardware)?;
     // Apply the pre-boot VBE mode after reset (reset re-defaults the VGA, and
     // BxVgaC::set_preferred_mode persists it across any later guest-triggered
     // reset). Raises the DISPI caps so the guest may select this resolution.
     if let Some(mode) = config.vga_mode {
         emu.set_vga_preferred_mode(mode.width, mode.height, mode.bpp);
     }
-    emu.init_gui_signal_handlers();
-    emu.start();
     if should_prequeue_boot_enter(&config.boot_order) {
         emu.prepare_run();
         emu.send_string("\n");
@@ -471,57 +435,72 @@ fn bytes_from_units(field: &'static str, value: u32, scale: u64) -> Result<usize
     usize::try_from(bytes).map_err(|_| RunError::ValueOverflow { field })
 }
 
-fn boot_sequence(boot_order: &[BootDevice]) -> (u8, u8, u8) {
-    let mut values = [0; 3];
+fn boot_sequence(boot_order: &[BootDevice]) -> BootOrder {
+    let mut positions = [GuestBootDevice::None; 3];
     for (index, device) in boot_order.iter().take(3).enumerate() {
-        values[index] = match device {
-            BootDevice::Disk => 2,
-            BootDevice::Cdrom => 3,
+        positions[index] = match device {
+            BootDevice::Disk => GuestBootDevice::Disk,
+            BootDevice::Cdrom => GuestBootDevice::Cdrom,
         };
     }
-    (values[0], values[1], values[2])
+    BootOrder::new(positions[0], positions[1], positions[2])
 }
 
-fn validate_configured_media_slots(config: &ResolvedConfig) -> Result<(), RunError> {
-    if let Some(disk) = &config.disk {
-        validate_ata_slot("disk.channel", disk.channel)?;
-        validate_ata_slot("disk.drive", disk.drive)?;
-        if let Some(cdrom) = &config.cdrom {
-            validate_distinct_media_slots(disk, cdrom)?;
+/// Where the configured media hang off the ATA controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct MediaSlots {
+    disk: Option<AtaSlot>,
+    cdrom: Option<AtaSlot>,
+}
+
+/// The one place a configured channel/drive pair becomes an [`AtaSlot`], so
+/// an out-of-range socket and a double-booked one are both rejected once.
+fn resolve_media_slots(config: &ResolvedConfig) -> Result<MediaSlots, RunError> {
+    let disk = match &config.disk {
+        Some(disk) => Some(ata_slot(
+            "disk.channel",
+            "disk.drive",
+            disk.channel,
+            disk.drive,
+        )?),
+        None => None,
+    };
+    let cdrom = match &config.cdrom {
+        Some(cdrom) => Some(ata_slot(
+            "cdrom.channel",
+            "cdrom.drive",
+            cdrom.channel,
+            cdrom.drive,
+        )?),
+        None => None,
+    };
+    if let (Some(disk_slot), Some(cdrom_slot), Some(cdrom)) = (disk, cdrom, &config.cdrom) {
+        if disk_slot == cdrom_slot {
+            return Err(RunError::MediaAttach {
+                kind: "CD-ROM",
+                path: cdrom.path.clone(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ATA slot already used by disk",
+                ),
+            });
         }
     }
-    if let Some(cdrom) = &config.cdrom {
-        validate_ata_slot("cdrom.channel", cdrom.channel)?;
-        validate_ata_slot("cdrom.drive", cdrom.drive)?;
-    }
-    Ok(())
+    Ok(MediaSlots { disk, cdrom })
 }
 
-fn validate_distinct_media_slots(
-    disk: &ResolvedDisk,
-    cdrom: &ResolvedCdrom,
-) -> Result<(), RunError> {
-    if disk.channel == cdrom.channel && disk.drive == cdrom.drive {
-        Err(RunError::MediaAttach {
-            kind: "CD-ROM",
-            path: cdrom.path.clone(),
-            source: io::Error::new(io::ErrorKind::InvalidInput, "ATA slot already used by disk"),
-        })
-    } else {
-        Ok(())
+fn ata_slot(
+    channel_field: &'static str,
+    drive_field: &'static str,
+    channel: usize,
+    drive: usize,
+) -> Result<AtaSlot, RunError> {
+    if channel > 1 {
+        return Err(RunError::ValueOverflow {
+            field: channel_field,
+        });
     }
-}
-
-fn validate_ata_slot(field: &'static str, value: usize) -> Result<(), RunError> {
-    if value > 1 {
-        Err(RunError::ValueOverflow { field })
-    } else {
-        Ok(())
-    }
-}
-
-fn disk_cmos_drive(disk: &ResolvedDisk) -> u8 {
-    disk.drive as u8
+    AtaSlot::new(channel, drive).ok_or(RunError::ValueOverflow { field: drive_field })
 }
 
 fn should_prequeue_boot_enter(boot_order: &[BootDevice]) -> bool {
@@ -537,7 +516,7 @@ fn path_to_str(path: &PathBuf) -> Result<&str, RunError> {
 mod tests {
     use super::*;
     use crate::args::DiskGeometry;
-    use crate::config::ResolvedDiskCreation;
+    use crate::config::{ResolvedCdrom, ResolvedDisk, ResolvedDiskCreation};
     use rusty_box::params::BxParams;
     use rusty_box_bximage::ImageSize;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -801,11 +780,18 @@ mod tests {
     }
 
     #[test]
-    fn boot_sequence_pads_missing_devices_with_zero() {
-        assert_eq!(boot_sequence(&[BootDevice::Disk]), (2, 0, 0));
+    fn boot_sequence_pads_missing_devices_with_nothing() {
+        assert_eq!(
+            boot_sequence(&[BootDevice::Disk]),
+            BootOrder::just(GuestBootDevice::Disk)
+        );
         assert_eq!(
             boot_sequence(&[BootDevice::Cdrom, BootDevice::Disk]),
-            (3, 2, 0)
+            BootOrder::new(
+                GuestBootDevice::Cdrom,
+                GuestBootDevice::Disk,
+                GuestBootDevice::None
+            )
         );
     }
 
@@ -823,16 +809,47 @@ mod tests {
         assert!(!should_prequeue_boot_enter(&[]));
     }
 
+    fn resolved_disk(channel: usize, drive: usize) -> ResolvedDisk {
+        ResolvedDisk {
+            path: PathBuf::from("disk.img"),
+            geometry: DiskGeometry {
+                cylinders: 306,
+                heads: 4,
+                sectors_per_track: 17,
+            },
+            channel,
+            drive,
+            creation: None,
+        }
+    }
+
+    fn media_config(disk: Option<ResolvedDisk>, cdrom: Option<ResolvedCdrom>) -> ResolvedConfig {
+        let mut config = disk_creation_config(PathBuf::from("disk.img"), false);
+        config.disk = disk;
+        config.cdrom = cdrom;
+        config
+    }
+
     #[test]
     fn rejects_out_of_range_ata_slots() {
+        let config = media_config(Some(resolved_disk(2, 0)), None);
         assert!(matches!(
-            validate_ata_slot("disk.channel", 2),
+            resolve_media_slots(&config),
             Err(RunError::ValueOverflow {
                 field: "disk.channel"
             })
         ));
+
+        let config = media_config(
+            None,
+            Some(ResolvedCdrom {
+                path: PathBuf::from("cdrom.iso"),
+                channel: 0,
+                drive: 2,
+            }),
+        );
         assert!(matches!(
-            validate_ata_slot("cdrom.drive", 2),
+            resolve_media_slots(&config),
             Err(RunError::ValueOverflow {
                 field: "cdrom.drive"
             })
@@ -840,42 +857,34 @@ mod tests {
     }
 
     #[test]
-    fn cmos_drive_uses_configured_disk_drive() {
-        let disk = ResolvedDisk {
-            path: PathBuf::from("disk.img"),
-            geometry: DiskGeometry {
-                cylinders: 306,
-                heads: 4,
-                sectors_per_track: 17,
-            },
-            channel: 0,
-            drive: 1,
-            creation: None,
-        };
+    fn configured_channel_and_drive_name_an_ata_slot() {
+        let config = media_config(
+            Some(resolved_disk(0, 1)),
+            Some(ResolvedCdrom {
+                path: PathBuf::from("cdrom.iso"),
+                channel: 1,
+                drive: 0,
+            }),
+        );
 
-        assert_eq!(disk_cmos_drive(&disk), 1);
+        let slots = resolve_media_slots(&config).unwrap();
+
+        assert_eq!(slots.disk, Some(AtaSlot::PRIMARY_SLAVE));
+        assert_eq!(slots.cdrom, Some(AtaSlot::SECONDARY_MASTER));
     }
 
     #[test]
     fn rejects_disk_cdrom_same_ata_slot() {
-        let disk = ResolvedDisk {
-            path: PathBuf::from("disk.img"),
-            geometry: DiskGeometry {
-                cylinders: 306,
-                heads: 4,
-                sectors_per_track: 17,
-            },
-            channel: 0,
-            drive: 0,
-            creation: None,
-        };
-        let cdrom = ResolvedCdrom {
-            path: PathBuf::from("cdrom.iso"),
-            channel: 0,
-            drive: 0,
-        };
+        let config = media_config(
+            Some(resolved_disk(0, 0)),
+            Some(ResolvedCdrom {
+                path: PathBuf::from("cdrom.iso"),
+                channel: 0,
+                drive: 0,
+            }),
+        );
 
-        let error = validate_distinct_media_slots(&disk, &cdrom).unwrap_err();
+        let error = resolve_media_slots(&config).unwrap_err();
 
         assert!(matches!(
             error,

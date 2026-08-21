@@ -24,8 +24,7 @@
 //! ```
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{AtaSlot, BootDevice, BootOrder, EmulatorConfig, MachineBuilder},
     gui::{NoGui, TermGui},
     Result,
 };
@@ -227,11 +226,16 @@ fn run_alpine() -> Result<()> {
         "Creating emulator with {} MB RAM (boot mode: {})...",
         ram_mb, boot_mode
     );
-    let mut emu = Emulator::new(config)?;
+    // Both boot paths share the machine's chipset: the Alpine ISO on
+    // ata1-master and a terminal (or no) display.
+    let mut builder = MachineBuilder::new(config).cdrom_file(AtaSlot::SECONDARY_MASTER, &iso_path);
+    builder = if headless {
+        builder.gui(NoGui::new())
+    } else {
+        builder.gui(TermGui::new())
+    };
 
-    // Initialize memory + PC system
-    emu.init_memory_and_pc_system()?;
-
+    let mut emu;
     if bios_boot {
         // =====================================================================
         // BIOS Boot Path
@@ -249,9 +253,9 @@ fn run_alpine() -> Result<()> {
             find_file(&bios_strs).expect("Could not find BIOS-bochs-latest");
         println!("  BIOS loaded: {} bytes ({})", bios_data.len(), bios_path);
 
-        let bios_size = bios_data.len() as u64;
-        let bios_load_addr = !(bios_size - 1);
-        emu.load_bios(&bios_data, bios_load_addr)?;
+        builder = builder
+            .bios(&bios_data)
+            .boot_order(BootOrder::just(BootDevice::Cdrom));
 
         // Find and load VGA BIOS
         let vga_candidates = [
@@ -260,35 +264,14 @@ fn run_alpine() -> Result<()> {
             "binaries/bios/VGABIOS-lgpl-latest.bin".to_string(),
         ];
         let vga_strs: Vec<&str> = vga_candidates.iter().map(|s| s.as_str()).collect();
-        if let Some((vga_path, vga_data)) = find_file(&vga_strs) {
-            emu.load_optional_rom(&vga_data, 0xC0000)?;
+        let vga_bios = find_file(&vga_strs);
+        if let Some((ref vga_path, ref vga_data)) = vga_bios {
+            builder = builder.vga_bios(vga_data);
             println!("  VGA BIOS loaded: {} bytes ({})", vga_data.len(), vga_path);
         }
 
-        // Initialize CPU + devices
-        emu.init_cpu_and_devices()?;
-
-        // Configure for CD-ROM boot
-        emu.configure_memory_in_cmos_from_config();
-        emu.configure_boot_sequence(3, 0, 0); // CD-ROM first
-
-        // Attach ISO as CD-ROM
-        emu.attach_cdrom(1, 0, &iso_path)
-            .expect("Failed to attach Alpine ISO as CD-ROM");
+        emu = builder.build()?;
         println!("  CD-ROM attached: {}", iso_path);
-
-        // Initialize GUI
-        if headless {
-            emu.set_gui(NoGui::new());
-        } else {
-            emu.set_gui(TermGui::new());
-        }
-        emu.init_gui(0, &[])?;
-
-        // Reset and start
-        emu.reset(ResetReason::Hardware)?;
-        emu.init_gui_signal_handlers();
-        emu.start();
         emu.prepare_run();
 
         println!("  Boot: BIOS POST → ISOLINUX → kernel");
@@ -318,32 +301,14 @@ fn run_alpine() -> Result<()> {
             "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0 modules=loop,squashfs,cdrom,sr_mod,isofs modloop=/boot/modloop-virt".to_string()
         );
 
-        // Initialize CPU + devices
-        emu.init_cpu_and_devices()?;
-        emu.configure_memory_in_cmos_from_config();
-
-        // Attach ISO as CD-ROM
-        emu.attach_cdrom(1, 0, &iso_path)
-            .expect("Failed to attach Alpine ISO as CD-ROM");
+        // No firmware: the kernel is placed straight into guest memory below.
+        emu = builder.build()?;
         println!("  CD-ROM attached: {}", iso_path);
 
-        // Initialize GUI
-        if headless {
-            emu.set_gui(NoGui::new());
-        } else {
-            emu.set_gui(TermGui::new());
-        }
-        emu.init_gui(0, &[])?;
-
-        // Reset and set up direct boot
-        emu.reset(ResetReason::Hardware)?;
         emu.init_vga_text_mode3();
 
         println!("  Command line: {}", cmdline);
         emu.setup_direct_linux_boot(&vmlinuz, Some(&initramfs), &cmdline)?;
-
-        emu.init_gui_signal_handlers();
-        emu.start();
 
         println!("  Boot: direct kernel (EIP={:#010x})", emu.cpu().rip());
     }

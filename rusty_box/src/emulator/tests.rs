@@ -266,18 +266,26 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
+    /// Hardware initialisation is what makes a machine able to run guest code
+    /// at all. `MachineBuilder` performs it, which is why an assembled machine
+    /// never needs the question asked.
     #[test]
-    fn test_emulator_initialization() {
+    fn a_machine_executes_guest_code_after_hardware_initialisation() {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let config = EmulatorConfig::default();
-                let mut emu = Emulator::new(config).unwrap();
-                assert!(!emu.is_initialized());
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                emu.initialize().unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.setup_cpu_mode(CpuSetupMode::FlatProtected32).unwrap();
 
-                let result = emu.initialize();
-                assert!(result.is_ok());
-                assert!(emu.is_initialized());
+                const CODE_ADDR: u64 = 0x1000;
+                // mov eax, 0x2A ; hlt
+                emu.virt_write(CODE_ADDR, &[0xB8, 0x2A, 0x00, 0x00, 0x00, 0xF4])
+                    .unwrap();
+                emu.reg_write(X86Reg::Rip, CODE_ADDR);
+                emu.run_cpu_batch(2).unwrap();
+                assert_eq!(emu.reg_read(X86Reg::Rax), 0x2A);
             })
             .unwrap()
             .join()
@@ -295,10 +303,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let emu2 = Emulator::new(config).unwrap();
 
                 emu1.initialize().unwrap();
-
-                // emu2 should still be uninitialized
-                assert!(emu1.is_initialized());
-                assert!(!emu2.is_initialized());
 
                 // Different tick counts
                 emu1.pc_system.tickn(1000);

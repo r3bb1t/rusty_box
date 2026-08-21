@@ -14,8 +14,7 @@
 //! - IPS: 15000000
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, MachineBuilder},
     gui::{NoGui, TermGui},
     Result,
 };
@@ -229,119 +228,41 @@ fn run_dlxlinux() -> Result<()> {
         config.ips / 1_000_000,
     );
 
-    let mut emu = Emulator::new(config)?;
+    // =========================================================================
+    // Assemble the machine
+    // =========================================================================
+    // The builder performs the whole Bochs main.cc bring-up: memory, BIOS,
+    // CPUs, devices, CMOS, media, GUI, reset, timers — in that order.
+    tracing::info!("Assembling machine...");
+    let disk_path_str = disk_path.to_string_lossy().to_string();
+    let mut builder = MachineBuilder::new(config)
+        .bios(&bios_data)
+        .boot_order(BootOrder::just(BootDevice::Disk))
+        .disk_file(
+            AtaSlot::PRIMARY_MASTER,
+            &disk_path_str,
+            DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT),
+        );
 
-    // =========================================================================
-    // Set up GUI (must be done BEFORE initialize() to match original Bochs)
-    // =========================================================================
     if headless {
-        emu.set_gui(NoGui::new());
-        tracing::info!("✓ GUI set (NoGui / headless)");
+        builder = builder.gui(NoGui::new());
         println!("(headless) RUSTY_BOX_HEADLESS=1: terminal repaint disabled");
     } else {
-        let term_gui = TermGui::new();
-        emu.set_gui(term_gui);
-        tracing::info!("✓ GUI set (TermGui)");
+        builder = builder.gui(TermGui::new());
     }
 
-    // =========================================================================
-    // Initialize hardware - Part 1: Memory and PC system
-    // =========================================================================
-    // Following original Bochs sequence from main.cc:
-    // 1. Memory init (line 1312)
-    // 2. Load BIOS (line 1315)
-    // 3. CPU init (line 1337)
-    // 4. Device init (line 1353)
-    tracing::info!("Initializing hardware...");
-    emu.init_memory_and_pc_system()?;
-
-    // =========================================================================
-    // Load BIOS ROMs (AFTER memory init, BEFORE CPU init)
-    // =========================================================================
-    // BIOS must be loaded at 0xF0000 (matching original Bochs)
-    // This makes it accessible in the F000 segment (0xF0000-0xFFFFF)
-    // The memory system maps 0xE0000-0xFFFFF to BIOS ROM via bios_map_last128k()
-    // At CPU reset, CS.base is specially set to 0xFFFF0000, allowing the first
-    // instruction fetch from 0xFFFFFFF0 to access the same ROM data
-    let bios_size = bios_data.len() as u64;
-    // Calculate BIOS load address following original Bochs logic:
-    // romaddress = ~(size - 1) for reset vector support (misc_mem.cc)
-    // 64KB BIOS:  ~0xFFFF = 0xFFFF0000 (ends at 4GB, wraps in u32)
-    // 128KB BIOS: ~0x1FFFF = 0xFFFE0000
-    // Validation: (romaddress + size) should wrap to 0 OR equal 0x100000
-    let bios_load_addr = !(bios_size - 1);
-    tracing::info!(
-        "BIOS size: {} bytes ({} KB), load address: {:#x}",
-        bios_size,
-        bios_size / 1024,
-        bios_load_addr
-    );
-    emu.load_bios(&bios_data, bios_load_addr)?;
-    tracing::info!("✓ Loaded system BIOS at {:#x}", bios_load_addr);
-
-    // Load VGA BIOS at 0xC0000 (optional)
-    if let Some((_vga_path, vga_data)) = vga_bios {
-        emu.load_optional_rom(&vga_data, 0xC0000)?;
-        tracing::info!("✓ Loaded VGA BIOS at 0xC0000");
+    if let Some((_vga_path, ref vga_data)) = vga_bios {
+        builder = builder.vga_bios(vga_data);
     }
 
-    // =========================================================================
-    // Initialize hardware - Part 2: CPU and devices
-    // =========================================================================
-    emu.init_cpu_and_devices()?;
-
-    // =========================================================================
-    // Configure CMOS (AFTER device initialization)
-    // =========================================================================
-    // Configure CMOS for 32 MB memory (matches bochsrc.bxrc)
-    // Uses guest_memory_size from config (32 MB) — avoids double-counting base_kb
-    emu.configure_memory_in_cmos_from_config();
-
-    // Configure hard drive geometry in CMOS (matching Bochs harddrv.cc)
-    // Sets type=0xF (extended) + registers 0x19, 0x1B-0x23 for drive 0
-    emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
-
-    // Configure boot sequence: boot from hard disk first (matching Bochs floppy.cc)
-    // ELTORITO boot device codes: 0=none, 1=floppy, 2=hard disk, 3=cdrom
-    emu.configure_boot_sequence(2, 0, 0);
-
-    // =========================================================================
-    // Attach disk image
-    // =========================================================================
-    tracing::info!("Attaching disk image: {}", disk_path.display());
-    let disk_path_str = disk_path.to_string_lossy().to_string();
-    emu.attach_disk(0, 0, &disk_path_str, DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT)
-        .expect("Failed to attach disk image");
+    let mut emu = builder.build()?;
     tracing::info!(
-        "✓ Disk attached: CHS={}/{}/{}",
+        "✓ Machine ready: BIOS {} KB, disk CHS={}/{}/{}",
+        bios_data.len() / 1024,
         DLX_CYLINDERS,
         DLX_HEADS,
         DLX_SPT
     );
-
-    // =========================================================================
-    // Initialize GUI (sets up terminal, but signal handlers after reset)
-    // =========================================================================
-    emu.init_gui(0, &[])?;
-    tracing::info!("✓ Terminal GUI initialized");
-
-    // =========================================================================
-    // Hardware reset (enables A20, resets CPU and devices)
-    // =========================================================================
-    emu.reset(ResetReason::Hardware)?;
-    tracing::info!("✓ Hardware reset complete");
-
-    // =========================================================================
-    // Initialize GUI signal handlers (after reset, before start_timers)
-    // =========================================================================
-    emu.init_gui_signal_handlers();
-    tracing::info!("✓ GUI signal handlers initialized");
-
-    // =========================================================================
-    // Start timers (after signal handlers, matching original Bochs line 1384)
-    // =========================================================================
-    emu.start();
-    tracing::info!("✓ Timers started");
 
     // =========================================================================
     // Show boot state

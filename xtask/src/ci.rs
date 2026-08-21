@@ -319,6 +319,22 @@ const MATRIX: &[Step] = &[
         stdout_marker: None,
     },
     Step {
+        // The GUI's browser front end is the only consumer of several
+        // `#[cfg(target_arch = "wasm32")]` code paths, so no other step in
+        // this suite compiles them. One such path went stale unnoticed.
+        name: "GUI wasm target check",
+        args: &[
+            "check",
+            "--release",
+            "-p",
+            "rusty_box_gui",
+            "--target",
+            "wasm32-unknown-unknown",
+        ],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
         name: "all-features check",
         args: &["check", "--release", "-p", "rusty_box", "--all-features"],
         envs: &[],
