@@ -139,6 +139,70 @@ fn pci_config_write<D: PciDevice>(
     Some(device.pci_write(address, value, io_len))
 }
 
+bitflags::bitflags! {
+    /// Work a guest I/O write asked for that cannot be done from inside the
+    /// I/O dispatch path, because it needs the memory bus or the I/O bus that
+    /// the writing device deliberately cannot reach.
+    ///
+    /// Bochs performs each of these synchronously inside the config-space
+    /// handler (pci.cc, pci2isa.cc, pci_ide.cc, acpi.cc); this port defers them
+    /// to the next machine boundary, where memory and the I/O bus are both in
+    /// hand. One value rather than one bool per item so the pending set is a
+    /// single thing to pass, snapshot, and clear.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct PendingPlatformWork: u16 {
+        /// PCI IDE BAR4 moved: re-register the BM-DMA I/O ports.
+        const PCI_IDE_BAR4      = 1 << 0;
+        /// ACPI PM base moved: re-register the PM I/O ports.
+        const ACPI_PM_PORTS     = 1 << 1;
+        /// ACPI SMBus base moved: re-register the SMBus I/O ports.
+        const ACPI_SM_PORTS     = 1 << 2;
+        /// PAM registers changed: re-derive shadow-RAM memory types.
+        const PAM               = 1 << 3;
+        /// SMRAM control register written: re-apply SMRAM routing.
+        const SMRAM             = 1 << 4;
+        /// PIIX3 XBCS changed: re-apply BIOS-ROM write-enable to memory.
+        const BIOS_WRITE        = 1 << 5;
+        /// A VGA PCI BAR moved: re-register its memory handlers.
+        const VGA_BARS          = 1 << 6;
+        /// PIIX3 0x4F/0x80 written: re-sync I/O APIC enable state and base.
+        const IOAPIC_ENABLE     = 1 << 7;
+    }
+}
+
+/// The v3 PLATFORM section's pending-work layout: one bool per item, in this
+/// order. Fixed by the on-disk format, so it is written down once and both the
+/// encoder and the decoder walk it rather than each listing the fields.
+#[cfg(feature = "std")]
+pub(crate) const SNAPSHOT_PENDING_ORDER: [PendingPlatformWork; 7] = [
+    PendingPlatformWork::PCI_IDE_BAR4,
+    PendingPlatformWork::ACPI_PM_PORTS,
+    PendingPlatformWork::ACPI_SM_PORTS,
+    PendingPlatformWork::PAM,
+    PendingPlatformWork::SMRAM,
+    PendingPlatformWork::BIOS_WRITE,
+    PendingPlatformWork::VGA_BARS,
+];
+
+impl PendingPlatformWork {
+    /// The items a snapshot carries. `IOAPIC_ENABLE` is deliberately absent:
+    /// Bochs applies it synchronously and its ioapic.cc `reset()` does not
+    /// re-sync, so it is live-only transient state with nothing to restore.
+    pub(crate) const SNAPSHOTTED: Self = Self::PCI_IDE_BAR4
+        .union(Self::ACPI_PM_PORTS)
+        .union(Self::ACPI_SM_PORTS)
+        .union(Self::PAM)
+        .union(Self::SMRAM)
+        .union(Self::BIOS_WRITE)
+        .union(Self::VGA_BARS);
+
+    /// Sets or clears `item` according to `wanted`, so a re-derivation reads
+    /// as one statement instead of a branch.
+    pub(crate) fn set_to(&mut self, item: Self, wanted: bool) {
+        self.set(item, wanted);
+    }
+}
+
 /// Mapping effects committed by one scheduler-boundary pass.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MachineBoundaryEffects {
@@ -159,13 +223,7 @@ pub(crate) struct PlatformSnapshotRestore {
     pub(crate) port92_a20_gate: bool,
     pub(crate) port92_a20_change_pending: bool,
     pub(crate) port92_reset_request: Option<ResetReason>,
-    pub(crate) pci_ide_bar4_needs_reregister: bool,
-    pub(crate) acpi_pm_needs_reregister: bool,
-    pub(crate) acpi_sm_needs_reregister: bool,
-    pub(crate) pam_needs_update: bool,
-    pub(crate) smram_needs_update: bool,
-    pub(crate) bios_write_needs_update: bool,
-    pub(crate) vga_bar_needs_reregister: bool,
+    pub(crate) pending: PendingPlatformWork,
     pub(crate) committed_bmdma_ports_base: u16,
     pub(crate) committed_pm_ports_base: u16,
     pub(crate) committed_sm_ports_base: u16,
@@ -222,33 +280,9 @@ pub struct DeviceManager {
     /// PCI configuration address register (shadow copy for handler dispatch)
     /// Bochs: bx_devices_c::pci_conf_addr (devices.cc)
     pub(crate) pci_conf_addr: u32,
-    /// Deferred: PCI IDE BAR4 changed, needs BM-DMA port re-registration
-    pub(crate) pci_ide_bar4_needs_reregister: bool,
-    /// Deferred: ACPI PM base changed, needs port re-registration
-    pub(crate) acpi_pm_needs_reregister: bool,
-    /// Deferred: ACPI SMBus base changed, needs port re-registration
-    pub(crate) acpi_sm_needs_reregister: bool,
-    /// Deferred: PAM registers changed, needs memory type update
-    pub pam_needs_update: bool,
-    /// Deferred: the SMRAM control register (0x72) was written, needs SMRAM
-    /// routing re-applied to memory (Bochs pci.cc smram_control's
-    /// mem->enable_smram()/disable_smram() calls).
-    pub smram_needs_update: bool,
-    /// Deferred: the PIIX3 XBCS register (0x4E) changed a bit affecting
-    /// BIOS-ROM write-enable state, needs re-applied to memory (Bochs
-    /// pci2isa.cc pci_write_handler case 0x4e's
-    /// DEV_mem_set_bios_write()/DEV_mem_set_bios_rom_access() calls).
-    pub bios_write_needs_update: bool,
-    /// Deferred: a VGA PCI BAR (LFB or MMIO) changed, needs memory-handler
-    /// (re)registration at the new base.
-    pub(crate) vga_bar_needs_reregister: bool,
-    /// Deferred: the PIIX3 0x4F (APIC enable) or 0x80 (APIC base) config
-    /// register was written; the I/O APIC enable state + MMIO base must be
-    /// re-synced (Bochs pci2isa.cc pci_write_handler cases 0x4f/0x80's
-    /// DEV_ioapic_set_enabled() calls). Live-only transient: Bochs applies this
-    /// synchronously and its ioapic.cc reset() does not re-sync the IOAPIC, so
-    /// it is cleared (not re-derived) on reset and never snapshotted.
-    pub(crate) ioapic_enable_needs_update: bool,
+    /// Work a guest I/O write asked for that needs the memory or I/O bus, so
+    /// it waits for the next machine boundary. See [`PendingPlatformWork`].
+    pub(crate) pending: PendingPlatformWork,
     /// Deferred: the PIIX3 0x4F "1-meg extended BIOS enable" bit changed;
     /// carries the new BIOS_ROM_1MEG access value (Bochs pci2isa.cc case 0x4f's
     /// DEV_mem_set_bios_rom_access(BIOS_ROM_1MEG, ...)). Not derivable from
@@ -296,14 +330,7 @@ impl DeviceManager {
     /// Whether any I/O-produced machine effect must be applied before the
     /// next guest instruction.
     pub(crate) fn has_pending_machine_boundary(&self) -> bool {
-        self.pci_ide_bar4_needs_reregister
-            || self.acpi_pm_needs_reregister
-            || self.acpi_sm_needs_reregister
-            || self.pam_needs_update
-            || self.smram_needs_update
-            || self.bios_write_needs_update
-            || self.vga_bar_needs_reregister
-            || self.ioapic_enable_needs_update
+        !self.pending.is_empty()
             || self.bios_1meg_access_pending.is_some()
             || self.port92.a20_change_pending
             || self.keyboard.a20_change_pending
@@ -360,14 +387,7 @@ impl DeviceManager {
             serial: BxSerialC::new(1), // COM1 only
             fw_cfg: BxFwCfg::new(),
             pci_conf_addr: 0,
-            pci_ide_bar4_needs_reregister: false,
-            acpi_pm_needs_reregister: false,
-            acpi_sm_needs_reregister: false,
-            pam_needs_update: false,
-            smram_needs_update: false,
-            bios_write_needs_update: false,
-            vga_bar_needs_reregister: false,
-            ioapic_enable_needs_update: false,
+            pending: PendingPlatformWork::empty(),
             bios_1meg_access_pending: None,
             cmos_reset_timer_sync: None,
             diag_iac_count: 0,
@@ -474,27 +494,36 @@ impl DeviceManager {
             self.pci2isa.reset();
             self.ide.bus_master.reset();
             self.pci_conf_addr = 0;
-            self.pci_ide_bar4_needs_reregister =
-                self.bmdma_ports_base != self.ide.bus_master.bmdma_base as u16;
-            self.acpi_pm_needs_reregister =
-                self.pm_ports_base != self.acpi.pm_base as u16;
-            self.acpi_sm_needs_reregister =
-                self.sm_ports_base != self.acpi.sm_base as u16;
-            self.vga_bar_needs_reregister = self.vga.peek_pending_lfb_relocate().is_some()
-                || self.vga.peek_pending_mmio_relocate().is_some();
+            self.pending.set_to(
+                PendingPlatformWork::PCI_IDE_BAR4,
+                self.bmdma_ports_base != self.ide.bus_master.bmdma_base as u16,
+            );
+            self.pending.set_to(
+                PendingPlatformWork::ACPI_PM_PORTS,
+                self.pm_ports_base != self.acpi.pm_base as u16,
+            );
+            self.pending.set_to(
+                PendingPlatformWork::ACPI_SM_PORTS,
+                self.sm_ports_base != self.acpi.sm_base as u16,
+            );
+            self.pending.set_to(
+                PendingPlatformWork::VGA_BARS,
+                self.vga.peek_pending_lfb_relocate().is_some()
+                    || self.vga.peek_pending_mmio_relocate().is_some(),
+            );
             // Bochs ioapic.cc reset() does NOT re-sync the IOAPIC enable state
             // (unlike PAM/SMRAM/XBCS, which pci.cc/pci2isa.cc re-apply below):
             // the IOAPIC keeps its last-applied enable/base across a guest
             // reset. Drop any pending 0x4f/0x80 enable write rather than
             // re-deriving from the reset pci_conf[0x4f]=0 (which would
             // spuriously disable the IOAPIC).
-            self.ioapic_enable_needs_update = false;
+            self.pending.remove(PendingPlatformWork::IOAPIC_ENABLE);
             self.bios_1meg_access_pending = None;
             // Re-apply the reset SMRAM/XBCS state synchronously before the
             // guest resumes. Hardware reset may already have disabled SMRAM;
             // the operation is idempotent.
-            self.smram_needs_update = true;
-            self.bios_write_needs_update = true;
+            self.pending
+                .insert(PendingPlatformWork::SMRAM | PendingPlatformWork::BIOS_WRITE);
             // Bochs pci.cc bx_pci_bridge_c::reset() re-applies memory type
             // for every PAM area directly (DEV_mem_set_memory_type loop)
             // right after zeroing the PAM config bytes, so the shadow-RAM
@@ -502,7 +531,7 @@ impl DeviceManager {
             // can't touch memory here (BxMemC isn't available to
             // DeviceManager::reset), so defer it the same way pci_write's
             // PAM branch does; drained by the next shared machine boundary.
-            self.pam_needs_update = true;
+            self.pending.insert(PendingPlatformWork::PAM);
         }
 
         Ok(())
@@ -864,53 +893,57 @@ impl DeviceManager {
     ) -> Result<MachineBoundaryEffects> {
         let mut effects = MachineBoundaryEffects::default();
 
-        if self.pci_ide_bar4_needs_reregister {
+        // Every arm clears its item only AFTER the work has succeeded. A
+        // relocation can fail — a target range may already be claimed — and
+        // the caller retries the boundary, so clearing first would drop the
+        // request and leave the guest's BAR write silently unhonoured.
+        if self.pending.contains(PendingPlatformWork::PCI_IDE_BAR4) {
             self.register_pci_ide_bmdma_ports(io);
-            self.pci_ide_bar4_needs_reregister = false;
+            self.pending.remove(PendingPlatformWork::PCI_IDE_BAR4);
         }
-        if self.acpi_pm_needs_reregister {
+        if self.pending.contains(PendingPlatformWork::ACPI_PM_PORTS) {
             self.relocate_acpi_pm_ports(io);
-            self.acpi_pm_needs_reregister = false;
+            self.pending.remove(PendingPlatformWork::ACPI_PM_PORTS);
         }
-        if self.acpi_sm_needs_reregister {
+        if self.pending.contains(PendingPlatformWork::ACPI_SM_PORTS) {
             self.relocate_acpi_sm_ports(io);
-            self.acpi_sm_needs_reregister = false;
+            self.pending.remove(PendingPlatformWork::ACPI_SM_PORTS);
         }
-        if self.pam_needs_update {
+        if self.pending.contains(PendingPlatformWork::PAM) {
             let effect = self.pci_bridge.shadow_ram_effect();
             self.apply_chipset_effect(effect, mem)?;
-            self.pam_needs_update = false;
+            self.pending.remove(PendingPlatformWork::PAM);
             effects.memory_mapping_changed = true;
         }
-        if self.smram_needs_update {
+        if self.pending.contains(PendingPlatformWork::SMRAM) {
             let effect = self.pci_bridge.smram_effect();
             self.apply_chipset_effect(effect, mem)?;
-            self.smram_needs_update = false;
+            self.pending.remove(PendingPlatformWork::SMRAM);
             effects.memory_mapping_changed = true;
         }
-        if self.bios_write_needs_update {
+        if self.pending.contains(PendingPlatformWork::BIOS_WRITE) {
             let effect = self.pci2isa.bios_rom_effect();
             self.apply_chipset_effect(effect, mem)?;
-            self.bios_write_needs_update = false;
+            self.pending.remove(PendingPlatformWork::BIOS_WRITE);
             effects.memory_mapping_changed = true;
         }
-        if self.ioapic_enable_needs_update {
+        if self.pending.contains(PendingPlatformWork::IOAPIC_ENABLE) {
             // Only flag a memory-map change when the IOAPIC MMIO window was
             // actually (un)registered or moved.
             let effect = self.pci2isa.ioapic_enable_effect();
             if self.apply_chipset_effect(effect, mem)? {
                 effects.memory_mapping_changed = true;
             }
-            self.ioapic_enable_needs_update = false;
+            self.pending.remove(PendingPlatformWork::IOAPIC_ENABLE);
         }
         if let Some(enabled) = self.bios_1meg_access_pending.take() {
             // Tracked-but-inert bitmask (Bochs logs "not supported"), so no
             // memory_mapping_changed.
             self.apply_chipset_effect(ChipsetEffect::BiosRom1Meg(enabled), mem)?;
         }
-        if self.vga_bar_needs_reregister {
+        if self.pending.contains(PendingPlatformWork::VGA_BARS) {
             effects.memory_mapping_changed |= self.reregister_vga_bars(mem)?;
-            self.vga_bar_needs_reregister = false;
+            self.pending.remove(PendingPlatformWork::VGA_BARS);
         }
 
         io.pci_conf_addr = self.pci_conf_addr;
@@ -1481,10 +1514,10 @@ impl DeviceManager {
                             pci_config_write(&mut self.pci_bridge, reg_addr, value, io_len);
                         if let Some(effects) = effects {
                             if effects.pam_changed {
-                                self.pam_needs_update = true;
+                                self.pending.insert(PendingPlatformWork::PAM);
                             }
                             if effects.smram_changed {
-                                self.smram_needs_update = true;
+                                self.pending.insert(PendingPlatformWork::SMRAM);
                             }
                         }
                     }
@@ -1493,10 +1526,10 @@ impl DeviceManager {
                             pci_config_write(&mut self.pci2isa, reg_addr, value, io_len);
                         if let Some(effects) = effects {
                             if effects.bios_write_changed {
-                                self.bios_write_needs_update = true;
+                                self.pending.insert(PendingPlatformWork::BIOS_WRITE);
                             }
                             if effects.ioapic_enable_changed {
-                                self.ioapic_enable_needs_update = true;
+                                self.pending.insert(PendingPlatformWork::IOAPIC_ENABLE);
                             }
                             if let Some(v) = effects.bios_1meg_access {
                                 self.bios_1meg_access_pending = Some(v);
@@ -1508,7 +1541,7 @@ impl DeviceManager {
                             pci_config_write(&mut self.ide.bus_master, reg_addr, value, io_len);
                         if let Some(effects) = effects {
                             if effects.bmdma_base_changed {
-                                self.pci_ide_bar4_needs_reregister = true;
+                                self.pending.insert(PendingPlatformWork::PCI_IDE_BAR4);
                             }
                         }
                     }
@@ -1516,10 +1549,10 @@ impl DeviceManager {
                         let effects = pci_config_write(&mut self.acpi, reg_addr, value, io_len);
                         if let Some(effects) = effects {
                             if effects.pm_base_changed {
-                                self.acpi_pm_needs_reregister = true;
+                                self.pending.insert(PendingPlatformWork::ACPI_PM_PORTS);
                             }
                             if effects.sm_base_changed {
-                                self.acpi_sm_needs_reregister = true;
+                                self.pending.insert(PendingPlatformWork::ACPI_SM_PORTS);
                             }
                         }
                     }
@@ -1527,7 +1560,7 @@ impl DeviceManager {
                         let effects = pci_config_write(&mut self.vga, reg_addr, value, io_len);
                         if let Some(effects) = effects {
                             if effects.lfb || effects.mmio {
-                                self.vga_bar_needs_reregister = true;
+                                self.pending.insert(PendingPlatformWork::VGA_BARS);
                             }
                         }
                     }
@@ -1851,13 +1884,12 @@ impl DeviceManager {
 
         self.port92.save_snapshot_v3_body(writer)?;
         writer.write_u32(self.pci_conf_addr)?;
-        writer.write_bool(self.pci_ide_bar4_needs_reregister)?;
-        writer.write_bool(self.acpi_pm_needs_reregister)?;
-        writer.write_bool(self.acpi_sm_needs_reregister)?;
-        writer.write_bool(self.pam_needs_update)?;
-        writer.write_bool(self.smram_needs_update)?;
-        writer.write_bool(self.bios_write_needs_update)?;
-        writer.write_bool(self.vga_bar_needs_reregister)?;
+        // One bool per item, in this order — the v3 wire layout predates
+        // `PendingPlatformWork` and is not changed by it. IOAPIC_ENABLE is
+        // absent by design; see `PendingPlatformWork::SNAPSHOTTED`.
+        for item in SNAPSHOT_PENDING_ORDER {
+            writer.write_bool(self.pending.contains(item))?;
+        }
         writer.write_u16(self.bmdma_ports_base)?;
         writer.write_u16(self.pm_ports_base)?;
         writer.write_u16(self.sm_ports_base)?;
@@ -1880,13 +1912,10 @@ impl DeviceManager {
     ) -> io::Result<PlatformSnapshotRestore> {
         self.port92.restore_snapshot_v3_body(reader)?;
         let pci_conf_addr = reader.read_u32()?;
-        let pci_ide_bar4_needs_reregister = reader.read_bool()?;
-        let acpi_pm_needs_reregister = reader.read_bool()?;
-        let acpi_sm_needs_reregister = reader.read_bool()?;
-        let pam_needs_update = reader.read_bool()?;
-        let smram_needs_update = reader.read_bool()?;
-        let bios_write_needs_update = reader.read_bool()?;
-        let vga_bar_needs_reregister = reader.read_bool()?;
+        let mut pending = PendingPlatformWork::empty();
+        for item in SNAPSHOT_PENDING_ORDER {
+            pending.set_to(item, reader.read_bool()?);
+        }
         let committed_bmdma_ports_base = reader.read_u16()?;
         let committed_pm_ports_base = reader.read_u16()?;
         let committed_sm_ports_base = reader.read_u16()?;
@@ -1899,10 +1928,7 @@ impl DeviceManager {
         let desired_vga_mmio_base = reader.read_u32()?;
 
         Self::validate_snapshot_v3_topology(
-            pci_ide_bar4_needs_reregister,
-            acpi_pm_needs_reregister,
-            acpi_sm_needs_reregister,
-            vga_bar_needs_reregister,
+            pending,
             committed_bmdma_ports_base,
             committed_pm_ports_base,
             committed_sm_ports_base,
@@ -1921,13 +1947,7 @@ impl DeviceManager {
             port92_a20_gate: self.port92.a20_gate,
             port92_a20_change_pending: self.port92.a20_change_pending,
             port92_reset_request: self.port92.reset_request,
-            pci_ide_bar4_needs_reregister,
-            acpi_pm_needs_reregister,
-            acpi_sm_needs_reregister,
-            pam_needs_update,
-            smram_needs_update,
-            bios_write_needs_update,
-            vga_bar_needs_reregister,
+            pending,
             committed_bmdma_ports_base,
             committed_pm_ports_base,
             committed_sm_ports_base,
@@ -1955,10 +1975,7 @@ impl DeviceManager {
             ));
         }
         Self::validate_snapshot_v3_topology(
-            self.pci_ide_bar4_needs_reregister,
-            self.acpi_pm_needs_reregister,
-            self.acpi_sm_needs_reregister,
-            self.vga_bar_needs_reregister,
+            self.pending,
             self.bmdma_ports_base,
             self.pm_ports_base,
             self.sm_ports_base,
@@ -1975,10 +1992,7 @@ impl DeviceManager {
 
     #[allow(clippy::too_many_arguments)]
     fn validate_snapshot_v3_topology(
-        pci_ide_pending: bool,
-        acpi_pm_pending: bool,
-        acpi_sm_pending: bool,
-        vga_pending: bool,
+        pending: PendingPlatformWork,
         committed_bmdma: u16,
         committed_pm: u16,
         committed_sm: u16,
@@ -2009,13 +2023,22 @@ impl DeviceManager {
         )?;
 
         validate_snapshot_mapping_flag(
-            pci_ide_pending,
+            pending.contains(PendingPlatformWork::PCI_IDE_BAR4),
             u32::from(committed_bmdma),
             desired_bmdma,
         )?;
-        validate_snapshot_mapping_flag(acpi_pm_pending, u32::from(committed_pm), desired_pm)?;
-        validate_snapshot_mapping_flag(acpi_sm_pending, u32::from(committed_sm), desired_sm)?;
-        if vga_pending != (committed_vga_mmio != desired_vga_mmio
+        validate_snapshot_mapping_flag(
+            pending.contains(PendingPlatformWork::ACPI_PM_PORTS),
+            u32::from(committed_pm),
+            desired_pm,
+        )?;
+        validate_snapshot_mapping_flag(
+            pending.contains(PendingPlatformWork::ACPI_SM_PORTS),
+            u32::from(committed_sm),
+            desired_sm,
+        )?;
+        if pending.contains(PendingPlatformWork::VGA_BARS)
+            != (committed_vga_mmio != desired_vga_mmio
             || committed_vga_lfb != desired_vga_lfb)
         {
             return Err(invalid_platform_snapshot(
@@ -2079,20 +2102,22 @@ impl DeviceManager {
         ] {
             self.apply_chipset_effect(effect, mem)?;
         }
-        self.pam_needs_update = false;
-        self.smram_needs_update = false;
-        self.bios_write_needs_update = false;
+        self.pending.remove(
+            PendingPlatformWork::PAM
+                | PendingPlatformWork::SMRAM
+                | PendingPlatformWork::BIOS_WRITE,
+        );
 
         self.ide.bus_master.bmdma_base = pci.bmdma_base;
         self.register_pci_ide_bmdma_ports(io);
-        self.pci_ide_bar4_needs_reregister = false;
+        self.pending.remove(PendingPlatformWork::PCI_IDE_BAR4);
 
         self.acpi.pm_base = acpi.pm_base;
         self.relocate_acpi_pm_ports(io);
-        self.acpi_pm_needs_reregister = false;
+        self.pending.remove(PendingPlatformWork::ACPI_PM_PORTS);
         self.acpi.sm_base = acpi.sm_base;
         self.relocate_acpi_sm_ports(io);
-        self.acpi_sm_needs_reregister = false;
+        self.pending.remove(PendingPlatformWork::ACPI_SM_PORTS);
 
         let device_id = DevSlot::VGA.mmio_token();
         let lfb_size = u64::from(self.vga.lfb_size());
@@ -2115,7 +2140,7 @@ impl DeviceManager {
         ));
         mem.relocate_memory_handlers(device_id, old_mmio, new_mmio)?;
         self.vga.commit_snapshot_v3_mapping_target(vga);
-        self.vga_bar_needs_reregister = false;
+        self.pending.remove(PendingPlatformWork::VGA_BARS);
 
         self.pci_conf_addr = platform.pci_conf_addr;
         io.pci_conf_addr = platform.pci_conf_addr;
@@ -2412,7 +2437,10 @@ mod tests {
                 emu.device_manager.vga.peek_pending_lfb_relocate(),
                 Some((committed_lfb, failed_target))
             );
-            assert!(emu.device_manager.vga_bar_needs_reregister);
+            assert!(emu
+                .device_manager
+                .pending
+                .contains(PendingPlatformWork::VGA_BARS));
             assert!(
                 emu.memory
                     .register_memory_handlers(
@@ -2616,6 +2644,32 @@ mod tests {
         });
     }
 
+    /// The v3 PLATFORM layout lists every snapshotted item exactly once, and
+    /// omits the live-only one. A new `PendingPlatformWork` flag added without
+    /// a decision about the wire format would otherwise either go unsaved, or
+    /// shift every later bool by one byte and misdecode every saved snapshot.
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_v3_pending_layout_covers_exactly_the_snapshotted_items() {
+        let mut seen = PendingPlatformWork::empty();
+        for item in SNAPSHOT_PENDING_ORDER {
+            assert!(
+                !seen.contains(item),
+                "{item:?} appears twice in the v3 PLATFORM layout"
+            );
+            seen.insert(item);
+        }
+        assert_eq!(
+            seen,
+            PendingPlatformWork::SNAPSHOTTED,
+            "the v3 PLATFORM layout and the snapshotted set disagree"
+        );
+        assert!(
+            !PendingPlatformWork::SNAPSHOTTED.contains(PendingPlatformWork::IOAPIC_ENABLE),
+            "the I/O APIC enable request is live-only and must not be saved"
+        );
+    }
+
     /// Each device sits at the devfunc the i440FX/PIIX3 platform puts it at,
     /// and answers there. The expected values come from Bochs, not from our
     /// own constants: pci.cc `BX_PCI_DEVICE(0, 0)`, the non-i440BX branches of
@@ -2671,7 +2725,7 @@ mod tests {
 
             let change = dm.vga.pci_write(0x18, 0xF000_0000, 4);
             assert!(change.mmio);
-            dm.vga_bar_needs_reregister = true;
+            dm.pending.insert(PendingPlatformWork::VGA_BARS);
             dm.reregister_vga_bars(&mut mem).unwrap();
 
             assert!(dm.vga.is_mmio_addr(0xF000_0500));
@@ -2941,12 +2995,12 @@ mod tests {
             // SMRAME|DOPEN (0x48): SMRAM open, unrestricted.
             dm.pci_write(0xCFE, 0x48, 1);
             assert!(
-                dm.smram_needs_update,
+                dm.pending.contains(PendingPlatformWork::SMRAM),
                 "writing 0x72 must set the deferred flag"
             );
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
-            assert!(!dm.smram_needs_update, "drain must clear the flag");
+            assert!(!dm.pending.contains(PendingPlatformWork::SMRAM), "drain must clear the flag");
             assert_eq!(
                 mem.smram_state(),
                 crate::memory::SmramState {
@@ -2959,7 +3013,7 @@ mod tests {
             // SMRAME off (0x02): SMRAM fully disabled.
             dm.pci_conf_addr = conf_addr(0x00, 0x72);
             dm.pci_write(0xCFE, 0x02, 1);
-            assert!(dm.smram_needs_update);
+            assert!(dm.pending.contains(PendingPlatformWork::SMRAM));
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
             assert_eq!(
@@ -2976,7 +3030,7 @@ mod tests {
             // register write and instead treats it as disabled.
             dm.pci_conf_addr = conf_addr(0x00, 0x72);
             dm.pci_write(0xCFE, 0x68, 1);
-            assert!(dm.smram_needs_update);
+            assert!(dm.pending.contains(PendingPlatformWork::SMRAM));
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
             assert_eq!(
@@ -3017,7 +3071,7 @@ mod tests {
             // byte lands at data port 0xCFC + (0x59 - 0x58) == 0xCFD.
             dm.pci_conf_addr = conf_addr(0x00, 0x59);
             dm.pci_write(0xCFD, 0x30, 1); // area12: read=1, write=1
-            assert!(dm.pam_needs_update);
+            assert!(dm.pending.contains(PendingPlatformWork::PAM));
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
             assert_eq!(
@@ -3036,12 +3090,12 @@ mod tests {
                 "reset must zero the PAM config byte"
             );
             assert!(
-                dm.pam_needs_update,
+                dm.pending.contains(PendingPlatformWork::PAM),
                 "reset must mark PAM for re-application to memory"
             );
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
-            assert!(!dm.pam_needs_update, "drain must clear the flag");
+            assert!(!dm.pending.contains(PendingPlatformWork::PAM), "drain must clear the flag");
             assert_eq!(
                 mem.memory_type(12, 1),
                 false,
@@ -3073,9 +3127,9 @@ mod tests {
             io.outp(0x0CFE, 0x04, 1, 11, &mut pc_system, &mut dm, &mut mem);
 
             assert!(io.take_scheduler_boundary_requested());
-            assert!(dm.pam_needs_update);
-            assert!(dm.smram_needs_update);
-            assert!(dm.bios_write_needs_update);
+            assert!(dm.pending.contains(PendingPlatformWork::PAM));
+            assert!(dm.pending.contains(PendingPlatformWork::SMRAM));
+            assert!(dm.pending.contains(PendingPlatformWork::BIOS_WRITE));
             assert!(!mem.memory_type(12, 1));
             assert_eq!(
                 mem.smram_state(),
@@ -3136,7 +3190,7 @@ mod tests {
             source.port92.write(0x01);
             assert!(source.port92.reset_request.is_some());
             source.pci_conf_addr = 0x8000_0900;
-            source.pam_needs_update = true;
+            source.pending.insert(PendingPlatformWork::PAM);
 
             let mut saved = Vec::new();
             source.save_snapshot_v3_body(&mut saved).unwrap();
@@ -3171,7 +3225,7 @@ mod tests {
                 "restored A20 and reset effects must remain queued for the machine boundary"
             );
             assert_eq!(restored.pci_conf_addr, source.pci_conf_addr);
-            assert!(restored.pam_needs_update);
+            assert!(restored.pending.contains(PendingPlatformWork::PAM));
             assert_eq!(
                 io.pci_conf_addr, 0xA000_0000,
                 "component decode must not overwrite the live I/O dispatch latch"

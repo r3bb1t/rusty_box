@@ -1984,7 +1984,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 emu.device_manager.pci_conf_addr = 0x8000_0058;
                 emu.device_manager.pci_write(0x0CFD, 0x30, 1);
-                assert!(emu.device_manager.pam_needs_update);
+                assert!(emu
+                    .device_manager
+                    .pending
+                    .contains(crate::iodev::devices::PendingPlatformWork::PAM));
                 emu.service_scheduler_boundary(0).unwrap();
 
                 assert!(

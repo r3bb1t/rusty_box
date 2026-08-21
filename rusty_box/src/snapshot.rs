@@ -639,6 +639,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emulator::{EmulatorConfig, MemorySize},
         params::BxParams,
     };
+    use crate::iodev::devices::PendingPlatformWork;
     use crate::iodev::pci::PciDevice;
     use std::io::Cursor;
 
@@ -1230,16 +1231,16 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .pci_write(0x20, BMDMA | 1, 4)
                     .bmdma_base_changed
             );
-            source.device_manager.pci_ide_bar4_needs_reregister = true;
+            source.device_manager.pending.insert(PendingPlatformWork::PCI_IDE_BAR4);
             let pm = source.device_manager.acpi.pci_write(0x40, PM | 1, 4);
             let sm = source.device_manager.acpi.pci_write(0x90, SM | 1, 4);
             assert!(pm.pm_base_changed && sm.sm_base_changed);
-            source.device_manager.acpi_pm_needs_reregister = true;
-            source.device_manager.acpi_sm_needs_reregister = true;
+            source.device_manager.pending.insert(PendingPlatformWork::ACPI_PM_PORTS);
+            source.device_manager.pending.insert(PendingPlatformWork::ACPI_SM_PORTS);
             let lfb_change = source.device_manager.vga.pci_write(0x10, LFB, 4);
             let mmio_change = source.device_manager.vga.pci_write(0x18, MMIO, 4);
             assert!(lfb_change.lfb && mmio_change.mmio);
-            source.device_manager.vga_bar_needs_reregister = true;
+            source.device_manager.pending.insert(PendingPlatformWork::VGA_BARS);
             source.service_scheduler_boundary(0).unwrap();
 
             let desired_vga = source
@@ -1274,10 +1275,22 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             assert_eq!(restored.device_manager.acpi.pm_base, PM);
             assert_eq!(restored.device_manager.acpi.sm_base, SM);
             assert_eq!(restored_vga, desired_vga);
-            assert!(!restored.device_manager.pci_ide_bar4_needs_reregister);
-            assert!(!restored.device_manager.acpi_pm_needs_reregister);
-            assert!(!restored.device_manager.acpi_sm_needs_reregister);
-            assert!(!restored.device_manager.vga_bar_needs_reregister);
+            assert!(!restored
+                .device_manager
+                .pending
+                .contains(PendingPlatformWork::PCI_IDE_BAR4));
+            assert!(!restored
+                .device_manager
+                .pending
+                .contains(PendingPlatformWork::ACPI_PM_PORTS));
+            assert!(!restored
+                .device_manager
+                .pending
+                .contains(PendingPlatformWork::ACPI_SM_PORTS));
+            assert!(!restored
+                .device_manager
+                .pending
+                .contains(PendingPlatformWork::VGA_BARS));
         });
     }
 

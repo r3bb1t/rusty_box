@@ -1060,15 +1060,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
         if !quiesced {
             #[cfg(test)]
             tracing::debug!(
-                "machine boundary failed to quiesce: pending={:?}",
+                "machine boundary failed to quiesce: platform={:?} rest={:?}",
+                self.device_manager.pending,
                 (
-                    self.device_manager.pci_ide_bar4_needs_reregister,
-                    self.device_manager.acpi_pm_needs_reregister,
-                    self.device_manager.acpi_sm_needs_reregister,
-                    self.device_manager.pam_needs_update,
-                    self.device_manager.smram_needs_update,
-                    self.device_manager.bios_write_needs_update,
-                    self.device_manager.vga_bar_needs_reregister,
                     self.device_manager.port92.a20_change_pending,
                     self.device_manager.keyboard.a20_change_pending,
                     self.device_manager.port92.reset_request,
