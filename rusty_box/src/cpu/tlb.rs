@@ -440,6 +440,80 @@ pub(super) fn ppf_of(paddr: BxAddress) -> BxAddress {
     paddr & PPF_MASK
 }
 
+/// The distinction every non-global invalidation rests on.
+///
+/// `INVVPID` type 3, `INVPCID` types 0/1/3, a `MOV CR3` and a task switch all
+/// invalidate everything EXCEPT pages the guest marked global, while `INVPCID`
+/// type 2 and a `CR4.PGE` change take the globals too. Getting this backwards
+/// is not a crash — the guest silently runs on a stale kernel mapping, or pays
+/// for a full flush it asked to avoid.
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+
+    /// A TLB holding one global page in slot 0 and one ordinary page in slot 1.
+    /// Entries are planted directly so the test states which page is global
+    /// rather than depending on a page walk to derive it.
+    fn tlb_with_a_global_and_an_ordinary_page() -> Tlb<RamPage, 8> {
+        let mut tlb = Tlb::<RamPage, 8>::new();
+        for (slot, access_bits) in [(0usize, TLB_GLOBAL_PAGE | 0x1), (1usize, 0x1)] {
+            tlb.entries[slot].lpf = (slot as u64) << 12;
+            tlb.entries[slot].ppf = (slot as BxPhyAddress) << 12;
+            tlb.entries[slot].access_bits = access_bits;
+        }
+        tlb
+    }
+
+    #[test]
+    fn a_non_global_flush_keeps_global_pages() {
+        let mut tlb = tlb_with_a_global_and_an_ordinary_page();
+
+        tlb.flush_non_global();
+
+        assert!(
+            tlb.entries[0].valid(),
+            "a page the guest marked global must survive a non-global invalidation"
+        );
+        assert!(
+            !tlb.entries[1].valid(),
+            "an ordinary page must not survive it"
+        );
+    }
+
+    #[test]
+    fn a_full_flush_takes_global_pages_too() {
+        let mut tlb = tlb_with_a_global_and_an_ordinary_page();
+
+        tlb.flush();
+
+        assert!(
+            !tlb.entries[0].valid(),
+            "an all-context invalidation must reach global pages as well"
+        );
+        assert!(!tlb.entries[1].valid());
+    }
+
+    /// The non-global pass rebuilds `split_large` from the entries it KEEPS.
+    /// Left stale from the pre-flush contents, a large-page mapping that the
+    /// flush just removed would keep forcing every later lookup down the
+    /// split-large path.
+    #[test]
+    fn a_non_global_flush_recomputes_the_large_page_verdict() {
+        let mut tlb = tlb_with_a_global_and_an_ordinary_page();
+        // Only the ordinary page is large, and the flush removes it.
+        tlb.entries[1].lpf_mask = 0x1F_FFFF;
+        tlb.split_large = true;
+
+        tlb.flush_non_global();
+
+        assert!(
+            !tlb.split_large,
+            "the only large page was invalidated, so nothing still demands the \
+             split-large path"
+        );
+    }
+}
+
 #[cfg(test)]
 mod const_initialiser_tests {
     use super::*;

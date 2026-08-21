@@ -1472,23 +1472,27 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         Err(e)
     }
 
-    /// Read 64-bit qword from memory (matching mem_read_qword)
-    pub(super) fn mem_read_qword(&mut self, laddr: u64) -> u64 {
-        // Read 8 bytes from memory
+    /// Read a qword from PHYSICAL memory, little-endian.
+    ///
+    /// Physical, not linear: `mem_read_byte` masks A20 and goes straight to
+    /// the host mapping, applying no paging. That is what lets the page-table
+    /// and EPT walkers use it to read their own entries — a linear read would
+    /// translate an entry's address through the very tables being walked.
+    pub(super) fn mem_read_qword(&mut self, paddr: u64) -> u64 {
         let bytes = [
-            self.mem_read_byte(laddr),
-            self.mem_read_byte(laddr + 1),
-            self.mem_read_byte(laddr + 2),
-            self.mem_read_byte(laddr + 3),
-            self.mem_read_byte(laddr + 4),
-            self.mem_read_byte(laddr + 5),
-            self.mem_read_byte(laddr + 6),
-            self.mem_read_byte(laddr + 7),
+            self.mem_read_byte(paddr),
+            self.mem_read_byte(paddr + 1),
+            self.mem_read_byte(paddr + 2),
+            self.mem_read_byte(paddr + 3),
+            self.mem_read_byte(paddr + 4),
+            self.mem_read_byte(paddr + 5),
+            self.mem_read_byte(paddr + 6),
+            self.mem_read_byte(paddr + 7),
         ];
         u64::from_le_bytes(bytes)
     }
 
-    /// Write 64-bit qword to memory (matching mem_write_qword)
+    /// Write a qword to PHYSICAL memory, little-endian. See `mem_read_qword`.
     pub(super) fn mem_write_qword(&mut self, paddr: u64, value: u64) {
         // Write 8 bytes to memory
         let bytes = value.to_le_bytes();

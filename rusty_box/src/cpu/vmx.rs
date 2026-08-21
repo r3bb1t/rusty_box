@@ -6384,6 +6384,127 @@ mod tests {
         ctx
     }
 
+    // ── EPT ────────────────────────────────────────────────────────────────
+    // EPT became reachable by a guest only once ACTIVATE_SECONDARY_CONTROLS
+    // was unlocked for the virtual-APIC port, and no boot gate runs a
+    // hypervisor — so the walker below is the only thing that exercises it.
+
+    /// A four-level EPT hierarchy, one table per page, starting at the base of
+    /// extended memory so it clears the conventional/VGA/ROM windows.
+    const EPT_PML4: u64 = 0x10_0000;
+    const EPT_PDPT: u64 = 0x10_1000;
+    const EPT_PD: u64 = 0x10_2000;
+    const EPT_PT: u64 = 0x10_3000;
+    /// The host-physical page the translation below must land on.
+    const EPT_TARGET: u64 = 0x10_4000;
+    /// Guest-physical address to translate. Chosen so every table index is
+    /// zero EXCEPT the leaf's, which is 1 — a walker that stopped short, or
+    /// indexed the wrong level, cannot land on `EPT_TARGET` by accident.
+    const EPT_GUEST_PA: u64 = 0x1000;
+
+    /// Read / write / execute, with a write-back memory type on the leaf.
+    /// Non-leaf entries must keep bits [6:3] clear or the walk calls
+    /// misconfiguration, so only the leaf carries a type.
+    const EPT_RWX: u64 = 0x7;
+    const EPT_WB_LEAF: u64 = 0x7 | (6 << 3);
+
+    /// A machine whose EPT is enabled and whose tables map `EPT_GUEST_PA`.
+    /// Placed directly rather than through VMENTRY: these tests exercise the
+    /// walker, not entry validation.
+    fn ept_guest(machine: &mut TestMachine) -> ExecCtx<'_, ()> {
+        let mut ctx = machine.ctx();
+        ctx.memory.set_a20_mask(u64::MAX);
+        ctx.in_vmx = true;
+        ctx.in_vmx_guest = true;
+        ctx.vmcs.proc_based_ctls = VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS;
+        ctx.vmcs.secondary_proc_based_ctls = VMX_VM_EXEC_CTRL2_EPT_ENABLE;
+        ctx.vmcs.eptptr = EPT_PML4;
+
+        ctx.mem_write_qword(EPT_PML4, EPT_PDPT | EPT_RWX);
+        ctx.mem_write_qword(EPT_PDPT, EPT_PD | EPT_RWX);
+        ctx.mem_write_qword(EPT_PD, EPT_PT | EPT_RWX);
+        // Leaf index for EPT_GUEST_PA: (pa >> 9) & 0xFF8 == 8.
+        ctx.mem_write_qword(EPT_PT + 8, EPT_TARGET | EPT_WB_LEAF);
+        ctx
+    }
+
+    /// The guest-visible property EPT exists for: with it enabled, a
+    /// guest-physical address is not a host-physical address — it is whatever
+    /// the hypervisor's tables say it is.
+    #[test]
+    fn ept_translates_a_guest_physical_address_through_its_tables() {
+        let mut machine = TestMachine::new();
+        let mut ctx = ept_guest(&mut machine);
+
+        let host = ctx
+            .ept_translate_for_data(EPT_GUEST_PA, 0, false, true, false, BxRwAccess::Read)
+            .expect("a fully permitted mapping translates");
+
+        assert_eq!(
+            host, EPT_TARGET,
+            "the walk must land on the page the leaf entry names, not on the \
+             guest-physical address itself"
+        );
+    }
+
+    /// The offset inside the page rides through untouched, so a translation is
+    /// a page remap and not an address rewrite.
+    #[test]
+    fn ept_carries_the_page_offset_through_the_walk() {
+        let mut machine = TestMachine::new();
+        let mut ctx = ept_guest(&mut machine);
+
+        let host = ctx
+            .ept_translate_for_data(EPT_GUEST_PA + 0x2A, 0, false, true, false, BxRwAccess::Read)
+            .expect("a fully permitted mapping translates");
+
+        assert_eq!(host, EPT_TARGET + 0x2A);
+    }
+
+    /// With EPT off, a guest-physical address IS the host-physical address.
+    /// Pins that the walker is gated on the control bit rather than on the
+    /// EPTPTR happening to be set — the tables here are still in place.
+    #[test]
+    fn a_guest_without_ept_enabled_is_not_translated() {
+        let mut machine = TestMachine::new();
+        let mut ctx = ept_guest(&mut machine);
+        ctx.vmcs.secondary_proc_based_ctls = 0;
+
+        let host = ctx
+            .ept_translate_for_data(EPT_GUEST_PA, 0, false, true, false, BxRwAccess::Read)
+            .expect("an untranslated access cannot fail");
+
+        assert_eq!(host, EPT_GUEST_PA);
+    }
+
+    /// The accessed and dirty bits the hypervisor reads back to find which
+    /// guest pages were touched. `EPTPTR` bit 6 arms them; a write sets D on
+    /// the leaf and A on every level above it.
+    #[test]
+    fn ept_access_and_dirty_bits_record_a_write() {
+        let mut machine = TestMachine::new();
+        let mut ctx = ept_guest(&mut machine);
+        ctx.vmcs.eptptr = EPT_PML4 | 0x40;
+
+        ctx.ept_translate_for_data(EPT_GUEST_PA, 0, false, true, false, BxRwAccess::Write)
+            .expect("a fully permitted mapping translates");
+
+        for (name, addr) in [
+            ("pml4", EPT_PML4),
+            ("pdpt", EPT_PDPT),
+            ("pd", EPT_PD),
+        ] {
+            assert_ne!(
+                ctx.mem_read_qword(addr) & 0x100,
+                0,
+                "{name} entry must carry the accessed bit after a walk"
+            );
+        }
+        let leaf = ctx.mem_read_qword(EPT_PT + 8);
+        assert_ne!(leaf & 0x100, 0, "leaf entry must carry the accessed bit");
+        assert_ne!(leaf & 0x200, 0, "a write must set the leaf's dirty bit");
+    }
+
     /// Bochs vapic.cc stores each 32-bit slice of the 256-bit virtual IRR/ISR
     /// 16 bytes apart, matching the xAPIC register layout rather than packing
     /// them 4 bytes apart. A packed implementation still round-trips a single
