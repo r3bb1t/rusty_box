@@ -749,9 +749,12 @@ impl BxHpetC {
 const HPET_SNAPSHOT_VERSION: u32 = 1;
 
 #[cfg(feature = "std")]
-impl BxHpetC {
+impl crate::snapshot::SnapshotSection for BxHpetC {
+    const TAG: u32 = crate::snapshot::SEC_HPET;
+    type Restored = ();
+
     /// Byte length of the HPET snapshot section (fixed layout).
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_v3_len(&self) -> io::Result<u64> {
         // Bochs hpet.cc register_state(): config, isr, hpet_counter, plus
         // per-timer {config, cmp, fsb, period}. version u32 + 3 × u64 +
         // HPET_NUM_TIMERS × 4 × u64.
@@ -768,7 +771,7 @@ impl BxHpetC {
     /// reference exactly as Bochs does. The comparator pc-system timers are
     /// re-registered by `register_timer_owners`, so their handles are not part
     /// of the format; the pending queue is always empty at a snapshot boundary.
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         debug_assert!(
             !self.has_pending_work(),
             "HPET snapshot taken with side effects still queued"
@@ -792,7 +795,7 @@ impl BxHpetC {
     /// the omitted reference/last_checked fields start at zero; rusty_box
     /// restores in place, so it zeroes them explicitly to reproduce Bochs's
     /// counter-restore behavior exactly.
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore_snapshot_v3<R: Read>(
         &mut self,
         reader: &mut SnapshotReader<R>,
     ) -> io::Result<()> {
@@ -858,6 +861,8 @@ impl crate::iodev::device_api::MmioDevice for BxHpetC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "std")]
+    use crate::snapshot::SnapshotSection;
 
     const IPS: u64 = 1_000_000_000; // 1 tick per ns keeps conversions exact
 

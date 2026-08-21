@@ -1355,12 +1355,18 @@ impl BxPcSystemC {
         (owners, counts, count)
     }
 
+}
+
+#[cfg(feature = "std")]
+impl crate::snapshot::SnapshotSection for BxPcSystemC {
+    const TAG: u32 = crate::snapshot::SEC_PC_SYSTEM;
+    type Restored = ();
+
     /// Return the exact v3 payload length for this PC-system object.
     ///
     /// The payload owns its section-version prefix and streams every timer
     /// slot, so the section writer never needs a staging buffer.
-    #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_v3_len(&self) -> io::Result<u64> {
         self.validate_snapshot_v3_state()?;
 
         let mut len = 0u64;
@@ -1410,8 +1416,7 @@ impl BxPcSystemC {
 
     /// Stream the complete v3 PC-system state, including all timer ownership
     /// and pending timer-dispatch work.
-    #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         self.validate_snapshot_v3_state()?;
 
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
@@ -1460,8 +1465,7 @@ impl BxPcSystemC {
     /// Callback topology is intentionally not represented here: device codecs
     /// retain their host anchors and validate their saved timer handles through
     /// `validate_timer_handle_owner` after this object has restored.
-    #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore_snapshot_v3<R: Read>(
         &mut self,
         reader: &mut SnapshotReader<R>,
     ) -> io::Result<()> {
@@ -1556,6 +1560,9 @@ impl BxPcSystemC {
         Ok(())
     }
 
+}
+
+impl BxPcSystemC {
     /// Locate the registered slot owned by `owner`, if any.
     #[cfg(feature = "std")]
     pub(crate) fn find_timer_slot_by_owner(&self, owner: TimerOwner) -> Option<usize> {
@@ -1619,6 +1626,8 @@ impl BxPcSystemC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "std")]
+    use crate::snapshot::SnapshotSection;
 
     #[test]
     fn test_new_pc_system() {

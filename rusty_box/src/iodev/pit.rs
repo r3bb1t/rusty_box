@@ -1460,9 +1460,12 @@ impl BxPitC {
 }
 
 #[cfg(feature = "std")]
-impl BxPitC {
+impl crate::snapshot::SnapshotSection for BxPitC {
+    const TAG: u32 = crate::snapshot::SEC_PIT;
+    type Restored = ();
+
     /// Exact length of the versioned PIT v3 section payload.
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_v3_len(&self) -> io::Result<u64> {
         const COUNTER_LEN: u64 = 33;
         if PIT_NUM_COUNTERS > bounds::MAX_SNAPSHOT_COUNT {
             return Err(pit_snapshot_invalid("PIT counter count exceeds implementation bound"));
@@ -1491,7 +1494,7 @@ impl BxPitC {
 
     /// Stream all mutable PIT counter and phase state.  Registered handlers,
     /// host-time anchors, and the configured instruction rate remain live.
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         validate_pit_phase(
             self.ips,
             self.usec_remainder,
@@ -1518,7 +1521,7 @@ impl BxPitC {
     /// Restore mutable PIT state without touching its callback topology or
     /// generating IRQ0 edges.  PC-system owner validation is intentionally
     /// deferred until its full timer table has been restored.
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore_snapshot_v3<R: Read>(
         &mut self,
         reader: &mut SnapshotReader<R>,
     ) -> io::Result<()> {
@@ -1566,6 +1569,10 @@ impl BxPitC {
         Ok(())
     }
 
+}
+
+#[cfg(feature = "std")]
+impl BxPitC {
     /// Re-anchor host-only realtime state and report the final IRQ0 level
     /// after every section is restored.  The PC-system deadline already holds
     /// the exact PIT phase, so this deliberately neither arms nor replays it.

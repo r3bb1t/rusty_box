@@ -2126,8 +2126,11 @@ pub(crate) struct KeyboardSnapshotRestore {
 }
 
 #[cfg(feature = "std")]
-impl BxKeyboardC {
-    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+impl crate::snapshot::SnapshotSection for BxKeyboardC {
+    const TAG: u32 = crate::snapshot::SEC_KEYBOARD;
+    type Restored = KeyboardSnapshotRestore;
+
+    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
         validate_keyboard_ring(
             self.kbd_internal_buffer.head,
             self.kbd_internal_buffer.num_elements,
@@ -2174,7 +2177,7 @@ impl BxKeyboardC {
         )
     }
 
-    pub(crate) fn save_snapshot_v3<W: Write + ?Sized>(
+    fn save_snapshot_v3<W: Write>(
         &self,
         writer: &mut W,
     ) -> std::io::Result<()> {
@@ -2232,7 +2235,7 @@ impl BxKeyboardC {
         save_reset_request(writer, self.reset_requested)
     }
 
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore_snapshot_v3<R: Read>(
         &mut self,
         reader: &mut SnapshotReader<R>,
     ) -> std::io::Result<KeyboardSnapshotRestore> {

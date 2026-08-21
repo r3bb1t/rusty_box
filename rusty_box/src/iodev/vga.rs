@@ -1136,9 +1136,15 @@ impl BxVgaC {
         self.ips = if ips > 0 { ips } else { 15_000_000 };
     }
 
+}
+
+#[cfg(feature = "std")]
+impl crate::snapshot::SnapshotSection for BxVgaC {
+    const TAG: u32 = crate::snapshot::SEC_VGA;
+    type Restored = VgaSnapshotRestoreTarget;
+
     /// Returns the exact byte length of the standalone VGA v3 section payload.
-    #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_v3_len(&self) -> io::Result<u64> {
         self.validate_snapshot_v3_source()?;
 
         let text_len = snapshot_v3_usize_len(VGA_TEXT_MEM_SIZE)?;
@@ -1180,8 +1186,7 @@ impl BxVgaC {
     ///
     /// Fixed buffers are written straight to the destination; this method never
     /// creates a payload vector or a copy of the framebuffer.
-    #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         self.validate_snapshot_v3_source()?;
 
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
@@ -1283,8 +1288,7 @@ impl BxVgaC {
     /// Decoding never changes `vbe.base_address` or `mmio_base`, nor does it
     /// register a memory handler.  The caller must use the returned target only
     /// after the machine-level atomic relocation succeeds.
-    #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore_snapshot_v3<R: Read>(
         &mut self,
         reader: &mut SnapshotReader<R>,
     ) -> io::Result<VgaSnapshotRestoreTarget> {
@@ -1494,6 +1498,9 @@ impl BxVgaC {
         Ok(target)
     }
 
+}
+
+impl BxVgaC {
     /// Returns the desired VGA BAR targets encoded in PCI configuration without
     /// changing handler registration or committing a queued relocation.
     #[cfg(feature = "std")]
@@ -5014,6 +5021,8 @@ fn validate_vga_snapshot_bar_base(base: u32, span: u32) -> io::Result<()> {
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
+    #[cfg(feature = "std")]
+    use crate::snapshot::SnapshotSection;
     #[cfg(feature = "std")]
     use std::io::Cursor;
 

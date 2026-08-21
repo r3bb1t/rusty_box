@@ -241,6 +241,45 @@ fn write_section<W: Write + ?Sized>(
     write_section_with_limit(writer, id, len, MAX_SNAPSHOT_SECTION_LEN, body)
 }
 
+/// A device that owns exactly one section of the v3 stream.
+///
+/// The section tag travels with the device instead of with the call site, so a
+/// section body can never be written under another device's identity, and the
+/// declared length can never be computed from a different device than the one
+/// that fills it — the whole section is derived from a single `&D`.
+#[cfg(feature = "std")]
+pub(crate) trait SnapshotSection {
+    /// This device's identity in the v3 stream.
+    const TAG: u32;
+
+    /// What a restore hands back for the machine to act on. `()` means the
+    /// device's state is entirely its own: nothing outside it has to move.
+    type Restored;
+
+    /// The exact byte length [`Self::save_snapshot_v3`] will write. Validating
+    /// the state it would serialize is part of the answer, so an unserializable
+    /// device fails here rather than half-way through a section body.
+    fn snapshot_v3_len(&self) -> io::Result<u64>;
+
+    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()>;
+
+    fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<Self::Restored>;
+}
+
+/// Writes one device's whole section: its tag, its declared length, its body.
+#[cfg(feature = "std")]
+fn write_device_section<W: Write + ?Sized, D: SnapshotSection>(
+    writer: &mut W,
+    device: &D,
+) -> io::Result<()> {
+    write_section(writer, D::TAG, device.snapshot_v3_len()?, |section| {
+        device.save_snapshot_v3(section)
+    })
+}
+
 #[cfg(feature = "std")]
 fn memory_block_len(geometry: MemorySnapshotGeometry, block: u32) -> io::Result<u64> {
     let start = u64::from(block).checked_mul(geometry.block_size).ok_or_else(|| invalid_snapshot("snapshot memory block offset overflows"))?;
@@ -344,24 +383,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         writer.write_all(SNAPSHOT_MAGIC)?; writer.write_u32(SNAPSHOT_V3_VERSION)?; writer.write_u32(SNAPSHOT_V3_SECTION_ORDER.len() as u32)?;
         let memory_len = memory_payload_len(&self.memory)?;
         write_section_with_limit(writer, SEC_MEMORY, memory_len, memory_len, |s| save_memory(&mut self.memory, s))?;
-        write_section(writer, SEC_PC_SYSTEM, self.pc_system.snapshot_v3_len()?, |s| self.pc_system.save_snapshot_v3(s))?;
+        write_device_section(writer, &self.pc_system)?;
         let platform_len = checked_snapshot_len_add(4, checked_snapshot_len_add(self.device_manager.fw_cfg.snapshot_v3_body_len()?, checked_snapshot_len_add(self.devices.snapshot_v3_body_len()?, self.device_manager.snapshot_v3_body_len()?)?)?)?;
         write_section(writer, SEC_PLATFORM, platform_len, |s| { s.write_u32(SNAPSHOT_SECTION_VERSION)?; self.device_manager.fw_cfg.save_snapshot_v3_body(s)?; self.devices.save_snapshot_v3_body(s)?; self.device_manager.save_snapshot_v3_body(s) })?;
         write_section(writer, SEC_CPU, cpu_len(self)?, |s| save_cpus(self, s))?;
-        write_section(writer, SEC_PIC, self.device_manager.pic.snapshot_v3_len()?, |s| self.device_manager.pic.save_snapshot_v3(s))?;
-        write_section(writer, SEC_PIT, self.device_manager.pit.snapshot_v3_len()?, |s| self.device_manager.pit.save_snapshot_v3(s))?;
-        write_section(writer, SEC_CMOS, self.device_manager.cmos.snapshot_v3_len()?, |s| self.device_manager.cmos.save_snapshot_v3(s))?;
-        write_section(writer, SEC_DMA, self.device_manager.dma.snapshot_v3_len()?, |s| self.device_manager.dma.save_snapshot_v3(s))?;
-        write_section(writer, SEC_KEYBOARD, self.device_manager.keyboard.snapshot_v3_len()?, |s| self.device_manager.keyboard.save_snapshot_v3(s))?;
-        write_section(writer, SEC_SERIAL, self.device_manager.serial.snapshot_v3_len()?, |s| self.device_manager.serial.save_snapshot_v3(s))?;
-        write_section(writer, SEC_HARDDRV, self.device_manager.ide.drives.snapshot_v3_len()?, |s| self.device_manager.ide.drives.save_snapshot_v3(s))?;
+        write_device_section(writer, &self.device_manager.pic)?;
+        write_device_section(writer, &self.device_manager.pit)?;
+        write_device_section(writer, &self.device_manager.cmos)?;
+        write_device_section(writer, &self.device_manager.dma)?;
+        write_device_section(writer, &self.device_manager.keyboard)?;
+        write_device_section(writer, &self.device_manager.serial)?;
+        write_device_section(writer, &self.device_manager.ide.drives)?;
         let pci_len = checked_snapshot_len_add(4, checked_snapshot_len_add(self.device_manager.pci_bridge.snapshot_v3_body_len()?, checked_snapshot_len_add(self.device_manager.pci2isa.snapshot_v3_body_len()?, self.device_manager.ide.bus_master.snapshot_v3_body_len()?)?)?)?;
         write_section(writer, SEC_PCI, pci_len, |s| { s.write_u32(SNAPSHOT_SECTION_VERSION)?; self.device_manager.pci_bridge.save_snapshot_v3_body(s)?; self.device_manager.pci2isa.save_snapshot_v3_body(s)?; self.device_manager.ide.bus_master.save_snapshot_v3_body(s) })?;
-        write_section(writer, SEC_ACPI, self.device_manager.acpi.snapshot_v3_len()?, |s| self.device_manager.acpi.save_snapshot_v3(s))?;
-        write_section(writer, SEC_VGA, self.device_manager.vga.snapshot_v3_len()?, |s| self.device_manager.vga.save_snapshot_v3(s))?;
-        write_section(writer, SEC_IOAPIC, self.device_manager.ioapic.snapshot_v3_len()?, |s| self.device_manager.ioapic.save_snapshot_v3(s))?;
+        write_device_section(writer, &self.device_manager.acpi)?;
+        write_device_section(writer, &self.device_manager.vga)?;
+        write_device_section(writer, &self.device_manager.ioapic)?;
         write_section(writer, SEC_LAPIC, lapic_len(self)?, |s| save_lapics(self, s))?;
-        write_section(writer, SEC_HPET, self.device_manager.hpet.snapshot_v3_len()?, |s| self.device_manager.hpet.save_snapshot_v3(s))
+        write_device_section(writer, &self.device_manager.hpet)
     }
 
     pub fn restore_snapshot<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
@@ -602,6 +641,38 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     };
     use std::io::Cursor;
 
+    /// Every section-owning device claims a distinct tag, and every tag it
+    /// claims is one the container actually expects. A device whose `TAG` was
+    /// copied from a neighbour would otherwise surface only as a snapshot that
+    /// fails to reload, at the byte where two sections collide.
+    #[test]
+    fn every_section_device_claims_a_distinct_expected_tag() {
+        let claimed = [
+            <crate::pc_system::BxPcSystemC as SnapshotSection>::TAG,
+            <crate::pic::BxPicC as SnapshotSection>::TAG,
+            <crate::iodev::pit::BxPitC as SnapshotSection>::TAG,
+            <crate::iodev::cmos::BxCmosC as SnapshotSection>::TAG,
+            <crate::dma::BxDmaC as SnapshotSection>::TAG,
+            <crate::iodev::keyboard::BxKeyboardC as SnapshotSection>::TAG,
+            <crate::iodev::serial::BxSerialC as SnapshotSection>::TAG,
+            <crate::iodev::harddrv::BxHardDriveC as SnapshotSection>::TAG,
+            <crate::iodev::acpi::BxAcpiCtrl as SnapshotSection>::TAG,
+            <crate::iodev::vga::BxVgaC as SnapshotSection>::TAG,
+            <crate::iodev::ioapic::BxIoApic as SnapshotSection>::TAG,
+            <crate::iodev::hpet::BxHpetC as SnapshotSection>::TAG,
+        ];
+
+        for (index, tag) in claimed.iter().enumerate() {
+            assert!(
+                SNAPSHOT_V3_SECTION_ORDER.contains(tag),
+                "section tag {tag} is claimed by a device but never written"
+            );
+            assert!(
+                !claimed[..index].contains(tag),
+                "section tag {tag} is claimed by two devices"
+            );
+        }
+    }
 
     fn on_large_stack(f: impl FnOnce() + Send + 'static) {
         std::thread::Builder::new()
@@ -661,14 +732,16 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     #[derive(Clone, Copy, Debug)]
-    struct SnapshotSection {
+    /// One section header as it appears in an encoded stream, located by byte
+    /// offset — the reader's view, not a device's.
+    struct ParsedSection {
         id: u32,
         header: usize,
         payload: usize,
         len: usize,
     }
 
-    fn snapshot_sections(snapshot: &[u8]) -> Vec<SnapshotSection> {
+    fn snapshot_sections(snapshot: &[u8]) -> Vec<ParsedSection> {
         assert!(snapshot.len() >= 16);
         let count = u32::from_le_bytes(snapshot[12..16].try_into().unwrap()) as usize;
         let mut cursor = 16usize;
@@ -680,7 +753,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 u64::from_le_bytes(snapshot[cursor + 4..cursor + 12].try_into().unwrap()) as usize;
             let payload = cursor + 12;
             assert!(payload + len <= snapshot.len());
-            sections.push(SnapshotSection {
+            sections.push(ParsedSection {
                 id,
                 header: cursor,
                 payload,

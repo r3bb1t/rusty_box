@@ -361,9 +361,15 @@ impl BxAcpiCtrl {
         Self::validate_snapshot_v3_bases(pm_base, sm_base, pci_conf)
     }
 
+}
+
+#[cfg(feature = "std")]
+impl crate::snapshot::SnapshotSection for BxAcpiCtrl {
+    const TAG: u32 = crate::snapshot::SEC_ACPI;
+    type Restored = AcpiSnapshotRestore;
+
     /// Exact byte count for the single-section ACPI v3 payload.
-    #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_v3_len(&self) -> io::Result<u64> {
         self.validate_snapshot_v3_state(
             self.devfunc,
             self.uefi_enabled,
@@ -429,8 +435,7 @@ impl BxAcpiCtrl {
     }
 
     /// Stream all serializable ACPI state into a versioned v3 section payload.
-    #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         self.snapshot_v3_len()?;
 
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
@@ -468,8 +473,7 @@ impl BxAcpiCtrl {
     ///
     /// PM/SM bases and the raw timer slot are returned for parent-owned
     /// validation and atomic topology relocation.
-    #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore_snapshot_v3<R: Read>(
         &mut self,
         reader: &mut SnapshotReader<R>,
     ) -> io::Result<AcpiSnapshotRestore> {
@@ -554,6 +558,9 @@ impl BxAcpiCtrl {
         })
     }
 
+}
+
+impl BxAcpiCtrl {
     /// Recreate host-only timer anchors and derive SCI without injecting an edge.
     #[cfg(feature = "std")]
     pub(crate) fn post_restore_snapshot_v3(&mut self, system_ticks: u64) -> bool {

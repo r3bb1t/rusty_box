@@ -5819,9 +5819,12 @@ impl AtaDrive {
 }
 
 #[cfg(feature = "std")]
-impl BxHardDriveC {
+impl crate::snapshot::SnapshotSection for BxHardDriveC {
+    const TAG: u32 = crate::snapshot::SEC_HARDDRV;
+    type Restored = ();
+
     /// Exact payload length for the HARDDRV v3 section, including its version.
-    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
         let mut len = 4u64;
         for channel in &self.channels {
             snapshot_add_len(&mut len, 6)?;
@@ -5839,7 +5842,7 @@ impl BxHardDriveC {
     }
 
     /// Streams the complete HARDDRV v3 section without staging its fixed buffers or media.
-    pub(crate) fn save_snapshot_v3<W: Write + ?Sized>(
+    fn save_snapshot_v3<W: Write>(
         &self,
         writer: &mut W,
     ) -> std::io::Result<()> {
@@ -5874,7 +5877,7 @@ impl BxHardDriveC {
     }
 
     /// Restores the HARDDRV v3 section while retaining the live media resources.
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore_snapshot_v3<R: Read>(
         &mut self,
         reader: &mut SnapshotReader<R>,
     ) -> std::io::Result<()> {
@@ -5913,6 +5916,7 @@ impl BxHardDriveC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::SnapshotSection;
     use std::{
         fs::{self, File},
         io::{Cursor, ErrorKind, Read, Seek, SeekFrom, Write},

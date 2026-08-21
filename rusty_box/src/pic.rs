@@ -1023,8 +1023,11 @@ impl BxPicC {
 }
 
 #[cfg(feature = "std")]
-impl BxPicC {
-    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+impl crate::snapshot::SnapshotSection for BxPicC {
+    const TAG: u32 = crate::snapshot::SEC_PIC;
+    type Restored = ();
+
+    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
         if self.num_ioapic_forwards > PIC_IOAPIC_FORWARD_CAPACITY {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1047,7 +1050,10 @@ impl BxPicC {
         crate::snapshot::checked_snapshot_len_add(fixed, queue)
     }
 
-    pub(crate) fn save_snapshot_v3<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn save_snapshot_v3<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
         use crate::snapshot::SnapshotWriteExt;
         self.snapshot_v3_len()?;
         writer.write_u32(crate::snapshot::SNAPSHOT_SECTION_VERSION)?;
@@ -1084,7 +1090,10 @@ impl BxPicC {
         Ok(())
     }
 
-    pub(crate) fn restore_snapshot_v3<R: std::io::Read>(&mut self, reader: &mut crate::snapshot::SnapshotReader<R>) -> std::io::Result<()> {
+    fn restore_snapshot_v3<R: std::io::Read>(
+        &mut self,
+        reader: &mut crate::snapshot::SnapshotReader<R>,
+    ) -> std::io::Result<()> {
         if reader.read_u32()? != crate::snapshot::SNAPSHOT_SECTION_VERSION {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported PIC snapshot section version"));
         }

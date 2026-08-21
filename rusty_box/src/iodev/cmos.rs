@@ -1307,9 +1307,12 @@ impl BxCmosC {
 }
 
 #[cfg(feature = "std")]
-impl BxCmosC {
+impl crate::snapshot::SnapshotSection for BxCmosC {
+    const TAG: u32 = crate::snapshot::SEC_CMOS;
+    type Restored = ();
+
     /// Exact length of the versioned CMOS v3 section payload.
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_v3_len(&self) -> io::Result<u64> {
         let ram_len = u64::try_from(CMOS_SIZE)
             .map_err(|_| cmos_snapshot_invalid("CMOS RAM length does not fit u64"))?;
         if ram_len > bounds::MAX_SNAPSHOT_SECTION_LEN {
@@ -1342,7 +1345,7 @@ impl BxCmosC {
 
     /// Stream every mutable RTC register and timer-owner reference.  Live
     /// port registrations and host resources are intentionally not encoded.
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         validate_cmos_snapshot(
             &self.ram,
             self.address,
@@ -1369,7 +1372,7 @@ impl BxCmosC {
     /// Restore mutable RTC state without registering timers or raising/lowering
     /// IRQ8.  The machine validates the raw timer handles against its restored
     /// owner table and applies the final level only after full restoration.
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore_snapshot_v3<R: Read>(
         &mut self,
         reader: &mut SnapshotReader<R>,
     ) -> io::Result<()> {
@@ -1417,6 +1420,10 @@ impl BxCmosC {
         Ok(())
     }
 
+}
+
+#[cfg(feature = "std")]
+impl BxCmosC {
     /// Rebuild values derived from the restored CMOS register image without
     /// changing PC-system deadlines or generating an IRQ edge.
     pub(crate) fn post_restore_snapshot_v3(&mut self) -> CmosSnapshotRestoreState {
@@ -1598,6 +1605,8 @@ impl crate::iodev::device_api::TimedDevice for BxCmosC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "std")]
+    use crate::snapshot::SnapshotSection;
 
     #[test]
     fn test_cmos_creation() {

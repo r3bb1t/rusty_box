@@ -1012,8 +1012,11 @@ impl BxIoApic {
 }
 
 #[cfg(feature = "std")]
-impl BxIoApic {
-    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+impl crate::snapshot::SnapshotSection for BxIoApic {
+    const TAG: u32 = crate::snapshot::SEC_IOAPIC;
+    type Restored = ();
+
+    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
         validate_ioapic_snapshot_state(self)?;
         let routes = checked_snapshot_len_mul(24, 8)?;
         let queue = checked_snapshot_len_mul(
@@ -1026,7 +1029,7 @@ impl BxIoApic {
         checked_snapshot_len_add(queue_prefix, queue)
     }
 
-    pub(crate) fn save_snapshot_v3<W: Write + ?Sized>(
+    fn save_snapshot_v3<W: Write>(
         &self,
         writer: &mut W,
     ) -> std::io::Result<()> {
@@ -1056,7 +1059,7 @@ impl BxIoApic {
         Ok(())
     }
 
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore_snapshot_v3<R: Read>(
         &mut self,
         reader: &mut SnapshotReader<R>,
     ) -> std::io::Result<()> {

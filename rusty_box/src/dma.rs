@@ -909,8 +909,11 @@ impl BxDmaC {
 }
 
 #[cfg(feature = "std")]
-impl BxDmaC {
-    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+impl crate::snapshot::SnapshotSection for BxDmaC {
+    const TAG: u32 = crate::snapshot::SEC_DMA;
+    type Restored = ();
+
+    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
         for controller in &self.s {
             validate_dma_controller(controller)?;
         }
@@ -923,7 +926,7 @@ impl BxDmaC {
         checked_snapshot_len_add(prefix_and_controllers, tail)
     }
 
-    pub(crate) fn save_snapshot_v3<W: Write + ?Sized>(
+    fn save_snapshot_v3<W: Write>(
         &self,
         writer: &mut W,
     ) -> std::io::Result<()> {
@@ -943,7 +946,7 @@ impl BxDmaC {
         Ok(())
     }
 
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore_snapshot_v3<R: Read>(
         &mut self,
         reader: &mut SnapshotReader<R>,
     ) -> std::io::Result<()> {
@@ -1092,6 +1095,8 @@ fn restore_dma_controller<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "std")]
+    use crate::snapshot::SnapshotSection;
 
     #[test]
     fn test_dma_creation() {

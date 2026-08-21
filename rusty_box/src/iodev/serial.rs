@@ -1953,9 +1953,12 @@ impl BxSerialC {
 }
 
 #[cfg(feature = "std")]
-impl BxSerialC {
+impl crate::snapshot::SnapshotSection for BxSerialC {
+    const TAG: u32 = crate::snapshot::SEC_SERIAL;
+    type Restored = ();
+
     /// Encoded byte length of the complete SERIAL v3 section payload.
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_v3_len(&self) -> io::Result<u64> {
         if self.num_ports > self.ports.len() {
             return Err(invalid_serial_snapshot(
                 "serial live port count exceeds controller capacity",
@@ -1972,7 +1975,7 @@ impl BxSerialC {
 
     /// Streams the complete SERIAL v3 section payload without staging a
     /// payload buffer or changing host output/callback wiring.
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         self.snapshot_v3_len()?;
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         writer.write_u32(checked_serial_count(self.num_ports)?)?;
@@ -1996,7 +1999,7 @@ impl BxSerialC {
 
     /// Decodes the complete SERIAL v3 section payload. Timer owner validation
     /// and derived timing are deliberately deferred to the restore hooks.
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore_snapshot_v3<R: Read>(
         &mut self,
         reader: &mut SnapshotReader<R>,
     ) -> io::Result<()> {
@@ -2034,6 +2037,10 @@ impl BxSerialC {
         reader.finish_exact()
     }
 
+}
+
+#[cfg(feature = "std")]
+impl BxSerialC {
     /// Validates decoded FIFO-timeout and TX-shift handles after PC_SYSTEM
     /// owners have been restored. `validate_fifo` must reject non-SerialFifo(port)
     /// owners and `validate_tx` must reject non-SerialTx(port) owners.
@@ -2197,6 +2204,8 @@ impl TimedDevice for BxSerialC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "std")]
+    use crate::snapshot::SnapshotSection;
 
     #[cfg(feature = "std")]
     #[test]
