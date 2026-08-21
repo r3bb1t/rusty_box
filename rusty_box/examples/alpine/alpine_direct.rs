@@ -469,7 +469,11 @@ fn run_alpine() -> Result<()> {
     emu.dump_alpine_diag();
 
     // VGA text dump
-    let vga = emu.vga_text_dump();
+    let vga = emu
+        .display()
+        .text()
+        .map(|text| text.to_text())
+        .unwrap_or_default();
     if !vga.trim().is_empty() {
         println!("\n--- VGA Text ---");
         println!("{}", vga);

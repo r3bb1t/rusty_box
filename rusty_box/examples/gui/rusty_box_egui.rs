@@ -307,7 +307,9 @@ fn run_emulator(
     }
 
     println!("\n===== VGA TEXT DUMP =====");
-    println!("{}", emu.vga_text_dump());
+    if let Some(text) = emu.display().text() {
+        println!("{}", text.to_text());
+    }
 
     if let Ok(mut display) = shared.lock() {
         display.emu_running = false;

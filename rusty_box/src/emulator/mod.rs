@@ -37,6 +37,10 @@ use core::sync::atomic::AtomicBool;
 
 mod builder;
 pub use builder::{AtaSlot, BootDevice, BootOrder, BuildError, DiskGeometry, MachineBuilder};
+mod display;
+pub use display::{
+    Display, DisplaySource, Resolution, RowChars, TextGrid, TextPos, TextView,
+};
 pub mod cpu_store;
 use cpu_store::CpuStore;
 mod interactive;
@@ -1302,34 +1306,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
     }
 
     #[cfg(feature = "alloc")]
-    /// Return the current VGA text-mode screen as a string.
-    ///
-    /// This is useful for headless debugging (no terminal repaint).
-    pub fn vga_text_dump(&self) -> String {
-        self.device_manager.vga.get_text_screen()
-    }
-
-    #[cfg(feature = "alloc")]
-    pub fn vga_probe_dump(&self) -> String {
-        self.device_manager.vga.probe_summary()
-    }
-
-    #[cfg(feature = "alloc")]
-    /// Scan all VGA text memory for any non-space printable characters.
-    /// Useful when the screen has been cleared and we need to find if a new
-    /// prompt was written somewhere in text_memory that the CRTC start address
-    /// may not be pointing to yet.
-    pub fn vga_scan_text_memory(&self) -> String {
-        self.device_manager.vga.scan_all_text_memory()
-    }
-
-    #[cfg(feature = "alloc")]
-    /// Return all rows from VGA text memory (for full-dump diagnostics).
-    pub fn vga_all_text_rows(&self) -> alloc::vec::Vec<alloc::string::String> {
-        self.device_manager.vga.get_all_text_rows()
-    }
-
-    #[cfg(feature = "alloc")]
     /// Read up to `len` physical-RAM bytes for diagnostics.
     ///
     /// The result is intentionally a requested-size copy: guest RAM can be
@@ -1549,12 +1525,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
             .ide
             .drives
             .attach_disk_data_ref(channel, drive, data, cylinders, heads, spt);
-    }
-
-    #[cfg(feature = "alloc")]
-    /// Get VGA memory handler probe summary for diagnostics.
-    pub fn vga_probe_summary(&self) -> alloc::string::String {
-        self.device_manager.vga.probe_summary()
     }
 
     /// Get the number of registered memory handlers (for diagnostics).

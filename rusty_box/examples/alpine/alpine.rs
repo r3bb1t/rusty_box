@@ -568,7 +568,7 @@ fn run_alpine() -> Result<()> {
 
             // Check VGA text for boot progress
             if total_executed >= 100_000_000 {
-                let vga_text = emu.vga_scan_text_memory();
+                let vga_text = emu.display().describe_text_aperture();
                 let has_login = vga_text.contains("login:");
 
                 let preview: Vec<&str> = vga_text

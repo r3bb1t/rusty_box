@@ -415,7 +415,10 @@ fn run_dlxlinux() -> Result<()> {
                 // Print VGA preview: every 1M before login, every 50M after
                 let print_interval = if logged_in { 50_000_000 } else { 1_000_000 };
                 if total_executed % print_interval == 0 || !logged_in {
-                    let rows = emu.vga_all_text_rows();
+                    // The whole aperture, not just the displayed page: this
+                    // watches for prompts the CRTC start address may have
+                    // scrolled away from.
+                    let rows = emu.display().dump_text_aperture();
                     let has_login = rows.iter().any(|r| r.contains("login:"));
 
                     // Boot the default image at the LILO prompt (waits forever
@@ -546,7 +549,9 @@ fn run_dlxlinux() -> Result<()> {
     // In headless mode, dump the current VGA text screen
     if headless {
         println!("\n===== VGA TEXT DUMP =====");
-        println!("{}", emu.vga_text_dump());
+        if let Some(text) = emu.display().text() {
+            println!("{}", text.to_text());
+        }
     }
 
     Ok(())

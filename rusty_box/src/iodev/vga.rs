@@ -353,6 +353,39 @@ const TEXT_ROWS: usize = 25;
 const BYTES_PER_CHAR: usize = 2;
 const BYTES_PER_ROW: usize = TEXT_COLS * BYTES_PER_CHAR;
 
+/// The character grid a text-mode frame is laid out on, read off the CRTC and
+/// sequencer registers exactly as Bochs vgacore.cc `update()` does.
+///
+/// One computation with two readers — the frame renderer and the automation
+/// text view — so a screen scrape can never disagree with what was drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VgaTextGeometry {
+    /// Character columns per row.
+    pub(crate) cols: usize,
+    /// Character rows on screen.
+    pub(crate) rows: usize,
+    /// Byte offset of the first displayed character cell.
+    pub(crate) start_address: u16,
+    /// Bytes between the starts of consecutive rows.
+    pub(crate) line_offset: u16,
+    /// Byte offset of the cursor cell, or [`Self::CURSOR_OFF`].
+    pub(crate) cursor_address: u16,
+    /// Pixel width of one character cell.
+    pub(crate) char_width: u32,
+    /// Scan lines per character cell — Bochs `MSL + 1`.
+    pub(crate) char_height: u32,
+    /// Displayed pixel width.
+    pub(crate) pixel_width: u32,
+    /// Displayed pixel height.
+    pub(crate) pixel_height: u32,
+}
+
+impl VgaTextGeometry {
+    /// The `cursor_address` Bochs substitutes when the cursor lies outside the
+    /// displayed page.
+    pub(crate) const CURSOR_OFF: u16 = 0x7FFF;
+}
+
 /// VGA update result - contains data needed for GUI update
 /// This is returned by update() to allow no_std compatibility
 pub(crate) struct VgaUpdateResult {
@@ -548,9 +581,14 @@ impl From<&VbeState> for VgaSnapshotVbeState {
     }
 }
 
-/// VGA controller state
+/// VGA controller state.
+///
+/// Public only as an identity: it names the adapter a `StandardPc` machine
+/// drives, so [`crate::emulator::Display`] can be spelled without erasing it.
+/// Every field and inherent method stays crate-private — the surface a caller
+/// gets is the role traits the adapter implements, and nothing else.
 #[derive(Debug)]
-pub(crate) struct BxVgaC {
+pub struct BxVgaC {
     /// CRTC index register
     crtc_index: u8,
     /// CRTC registers (25 registers)
@@ -595,19 +633,6 @@ pub(crate) struct BxVgaC {
     /// Set when text mode parameters change
     text_buffer_update: bool,
 
-    // =====================================================================
-    // Bochs-aligned observability (debug-only but always-on, no globals)
-    // =====================================================================
-    /// Total handler invocations (incremented on every call to vga_mem_write_handler).
-    probe_handler_calls: u64,
-    /// Count of writes that were accepted by current `memory_mapping` window gating.
-    probe_mapped_writes: u64,
-    /// Count of writes that were ignored because they fell outside the selected window.
-    probe_unmapped_writes: u64,
-    /// First mapped write observed: (phys_addr, value, memory_mapping)
-    probe_first_mapped: Option<(BxPhyAddress, u8, VgaMemoryMapping)>,
-    /// First unmapped write observed: (phys_addr, value, memory_mapping)
-    probe_first_unmapped: Option<(BxPhyAddress, u8, VgaMemoryMapping)>,
 
     // =====================================================================
     // VGA Enable and PEL/DAC registers (ports 0x3C3, 0x3C6-0x3C9)
@@ -864,12 +889,6 @@ impl BxVgaC {
             vga_mem_updated: 0,
             text_buffer_update: true, // Initial update needed
 
-            probe_handler_calls: 0,
-            probe_mapped_writes: 0,
-            probe_unmapped_writes: 0,
-            probe_first_mapped: None,
-            probe_first_unmapped: None,
-
             // VGA Enable and PEL/DAC registers
             vga_enabled: true, // VGA enabled by default
             // Bochs init_standard_vga(): s.feature_control = 0
@@ -981,40 +1000,6 @@ impl BxVgaC {
         // attr_regs[0x11, 0x13, 0x14] stay 0 from array init
 
         vga
-    }
-
-    #[cfg(feature = "alloc")]
-    /// Summary of VGA memory write activity (for headless debugging).
-    pub(crate) fn probe_summary(&self) -> String {
-        use core::fmt::Write;
-        let mut s = String::new();
-        writeln!(
-            s,
-            "handler_calls={} mapped_writes={} unmapped_writes={}",
-            self.probe_handler_calls, self.probe_mapped_writes, self.probe_unmapped_writes
-        )
-        .ok();
-        if let Some((addr, val, mm)) = self.probe_first_mapped {
-            writeln!(
-                s,
-                "first_mapped: addr={:#x} val={:#02x} memory_mapping={:?}",
-                addr, val, mm
-            )
-            .ok();
-        } else {
-            writeln!(s, "first_mapped: <none>").ok();
-        }
-        if let Some((addr, val, mm)) = self.probe_first_unmapped {
-            writeln!(
-                s,
-                "first_unmapped: addr={:#x} val={:#02x} memory_mapping={:?}",
-                addr, val, mm
-            )
-            .ok();
-        } else {
-            writeln!(s, "first_unmapped: <none>").ok();
-        }
-        s
     }
 
     /// Initialize VGA device
@@ -2555,38 +2540,134 @@ impl BxVgaC {
         }
     }
 
+    /// Whether the adapter is presenting a character grid rather than pixels.
+    ///
+    /// Bochs vgacore.cc `update()` tests `graphics_alpha` together with the
+    /// memory mapping, because a text aperture is what makes the character
+    /// generator the picture source.
+    pub(crate) fn in_text_mode(&self) -> bool {
+        let graphics_alpha = (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
+        let memory_mapping = VgaMemoryMapping::from_u8(
+            (self.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT)
+                & GFX_MISC_MEMORY_MAP_MASK,
+        );
+        !graphics_alpha
+            && (memory_mapping == VgaMemoryMapping::MonoText32k
+                || memory_mapping == VgaMemoryMapping::ColorText32k)
+    }
+
+    /// The character grid the current CRTC/sequencer programming describes, or
+    /// `None` when the adapter is in a graphics mode or the grid would not fit
+    /// the text aperture.
+    ///
+    /// Bochs vgacore.cc `update()`, text branch.
+    pub(crate) fn text_geometry(&self) -> Option<VgaTextGeometry> {
+        if !self.in_text_mode() {
+            return None;
+        }
+
+        // The CRTC offset register counts dwords; the text aperture stores
+        // char/attribute pairs, so a row spans four bytes per unit.
+        let mut line_offset = u16::from(self.crtc_regs[CRTC_OFFSET]) * 4;
+        if line_offset == 0 {
+            line_offset = (TEXT_COLS * BYTES_PER_CHAR) as u16;
+        }
+
+        let mut cols = usize::from(self.crtc_regs[CRTC_HORIZ_DISPLAY_END]) + 1;
+        let mut msl = usize::from(self.crtc_regs[CRTC_MAX_SCAN_LINE] & CRTC_MSL_MASK);
+        let vde = usize::from(self.crtc_regs[CRTC_VERT_DISPLAY_END])
+            + ((usize::from(self.crtc_regs[CRTC_OVERFLOW] & CRTC_OVERFLOW_VDE_BIT8)) << 7)
+            + ((usize::from(self.crtc_regs[CRTC_OVERFLOW] & CRTC_OVERFLOW_VDE_BIT9)) << 3);
+
+        // Bochs workaround for update() calls before the VGABIOS has programmed
+        // the CRTC: both values are replaced together, so a register pair that
+        // is half-programmed still describes the standard grid.
+        if cols == 1 || msl == 0 {
+            cols = TEXT_COLS;
+            msl = 15;
+        }
+        // The emulated CGA 160x100x16 mode drives a two-scanline cell through
+        // a 400-line display; Bochs widens the cell to four so the row count
+        // comes out at 100.
+        if msl == 1 && vde == 399 {
+            msl = 3;
+        }
+
+        let rows = (vde + 1) / (msl + 1);
+        // Bochs reports "text mode: out of memory" and draws no frame when the
+        // grid would run past the 128 KiB text aperture.
+        if rows.saturating_mul(usize::from(line_offset)) > (1 << 17) {
+            return None;
+        }
+
+        let start_address = self.crtc_start_addr << 1;
+        let cursor_cell = (u16::from(self.crtc_regs[CRTC_CURSOR_LOC_HIGH]) << 8)
+            | u16::from(self.crtc_regs[CRTC_CURSOR_LOC_LOW]);
+        let cursor_address = cursor_cell * 2;
+        let last_address = start_address.wrapping_add(line_offset.wrapping_mul(rows as u16));
+        let cursor_address = if cursor_address < start_address || cursor_address > last_address {
+            VgaTextGeometry::CURSOR_OFF
+        } else {
+            cursor_address
+        };
+
+        let mut char_width =
+            if (self.seq_regs[SEQ_REG_CLOCKING_MODE] & SEQ_CLOCKING_8DOT_CHAR) != 0 {
+                8u32
+            } else {
+                9u32
+            };
+        if (self.seq_regs[SEQ_REG_CLOCKING_MODE] & SEQ_CLOCKING_DOTCLOCKDIV2) != 0 {
+            char_width <<= 1;
+        }
+
+        Some(VgaTextGeometry {
+            cols,
+            rows,
+            start_address,
+            line_offset,
+            cursor_address,
+            char_width,
+            char_height: (msl + 1) as u32,
+            pixel_width: char_width * cols as u32,
+            pixel_height: (vde + 1) as u32,
+        })
+    }
+
+    /// The character at `(row, col)` of the displayed page, rendered for a
+    /// screen scrape: printable ASCII as itself, a blank cell as a space, and
+    /// anything else as `?`.
+    ///
+    /// The text aperture is flat — `[char0, attr0, char1, attr1, …]` at
+    /// `physical_addr & 0x7FFF` — and the walk wraps inside it exactly as the
+    /// renderer's does.
+    pub(crate) fn text_char_at(&self, geometry: &VgaTextGeometry, row: usize, col: usize) -> char {
+        let offset = (usize::from(geometry.start_address)
+            + row * usize::from(geometry.line_offset)
+            + col * BYTES_PER_CHAR)
+            & (VGA_TEXT_MEM_SIZE - 1);
+        match self.text_memory.get(offset).copied().unwrap_or(0) {
+            0 => ' ',
+            byte if (0x20..0x7F).contains(&byte) => byte as char,
+            _ => '?',
+        }
+    }
+
     #[cfg(feature = "alloc")]
     /// Get text mode screen contents as a string
     pub(crate) fn get_text_screen(&self) -> String {
+        let Some(geometry) = self.text_geometry() else {
+            return String::new();
+        };
         let mut result = String::new();
-
-        // Our text_memory is flat: [char0, attr0, char1, attr1, ...] at offsets
-        // (physical_addr & 0x7FFF). For 80x25 mode, each row is 160 bytes.
-        // CRTC start address is in character cells (words).
-        // Bochs renderers read the per-frame latch (s.CRTC.start_addr), not the
-        // live registers, so a mid-frame write cannot tear the picture.
-        let start_addr_words = self.crtc_start_addr;
-        let start_address = (start_addr_words as usize) * BYTES_PER_CHAR;
-
-        let mem_mask = VGA_TEXT_MEM_SIZE - 1; // 0x7fff
-
-        for row in 0..TEXT_ROWS {
-            let row_base = start_address + row * BYTES_PER_ROW;
-            for col in 0..TEXT_COLS {
-                let off = (row_base + col * BYTES_PER_CHAR) & mem_mask;
-                let ch = self.text_memory.get(off).copied().unwrap_or(0);
-                if (0x20..0x7F).contains(&ch) {
-                    result.push(ch as char);
-                } else if ch == 0 {
-                    result.push(' ');
-                } else {
-                    result.push('?');
-                }
+        for row in 0..geometry.rows {
+            let start = result.len();
+            for col in 0..geometry.cols {
+                result.push(self.text_char_at(&geometry, row, col));
             }
             // Trim trailing spaces
-            let trimmed = result.trim_end_matches(' ');
-            let trim_len = trimmed.len();
-            result.truncate(trim_len);
+            let trim_len = result[start..].trim_end_matches(' ').len();
+            result.truncate(start + trim_len);
             result.push('\n');
         }
         result
@@ -3303,16 +3384,7 @@ impl BxVgaC {
         //
         // Text mode when `graphics_alpha == 0`. Memory mapping selects which aperture
         // is active (B0000 vs B8000 for mono/color text).
-        let graphics_alpha = (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
-        let memory_mapping = VgaMemoryMapping::from_u8(
-            (self.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT)
-                & GFX_MISC_MEMORY_MAP_MASK,
-        );
-        let is_text_mode = (!graphics_alpha)
-            && (memory_mapping == VgaMemoryMapping::MonoText32k
-                || memory_mapping == VgaMemoryMapping::ColorText32k);
-
-        if !is_text_mode {
+        if !self.in_text_mode() {
             return None;
         }
 
@@ -3334,23 +3406,17 @@ impl BxVgaC {
         // We'll update `self.text_snapshot` to the new state at the end of this call.
         let old_snapshot = self.text_snapshot.clone();
 
-        // Calculate text mode parameters (matching vgacore.cc). The start
-        // address comes from the per-frame latch, as in Bochs's renderers
+        // The grid comes from the shared reader, so the frame drawn here and
+        // any scrape of the same registers describe the same screen. The start
+        // address is the per-frame latch, as in Bochs's renderers
         // (`tm_info.start_address = (s.CRTC.start_addr << 1)`).
-        let start_addr = self.crtc_start_addr;
-        let start_address = start_addr << 1;
+        let geometry = self.text_geometry()?;
+        let start_address = geometry.start_address;
+        let line_offset = geometry.line_offset;
+        let cursor_address = geometry.cursor_address;
 
         let cs_start = self.crtc_regs[CRTC_CURSOR_START] & CRTC_CURSOR_START_MASK;
         let cs_end = self.crtc_regs[CRTC_CURSOR_END] & CRTC_CURSOR_END_MASK;
-
-        // Line offset: CRTC offset register is in dwords; our text buffer is interleaved
-        // (char+attr pairs), so each row = crtc_offset * 4 bytes.
-        // Bochs planar uses * 2 (one byte per char in plane 0); we use * 4 for interleaved.
-        let mut line_offset = (self.crtc_regs[CRTC_OFFSET] as u16) * 4;
-        if line_offset == 0 {
-            // Default to 80 columns * 2 bytes per char (interleaved)
-            line_offset = (TEXT_COLS * BYTES_PER_CHAR) as u16;
-        }
 
         let line_compare = {
             let lc_low = self.crtc_regs[CRTC_LINE_COMPARE] as u16;
@@ -3386,41 +3452,6 @@ impl BxVgaC {
             // Bochs vgacore.cc update(): actl_palette[i] = palette_reg[i] & pel.mask
             *palette = self.attr_regs[i] & self.pel_mask;
         }
-
-        // Calculate rows and cols (matching vgacore.cc)
-        let mut cols = (self.crtc_regs[CRTC_HORIZ_DISPLAY_END] + 1) as usize;
-        let mut msl = (self.crtc_regs[CRTC_MAX_SCAN_LINE] & CRTC_MSL_MASK) as usize;
-        let vde = (self.crtc_regs[CRTC_VERT_DISPLAY_END] as usize)
-            + (((self.crtc_regs[CRTC_OVERFLOW] & CRTC_OVERFLOW_VDE_BIT8) as usize) << 7)
-            + (((self.crtc_regs[CRTC_OVERFLOW] & CRTC_OVERFLOW_VDE_BIT9) as usize) << 3);
-
-        // Workaround for update() calls before VGABIOS init (matching vgacore.cc)
-        if cols == 1 || msl == 0 {
-            cols = TEXT_COLS;
-        }
-        if msl == 0 {
-            msl = 15;
-        }
-
-        let rows = if msl > 0 {
-            (vde + 1) / (msl + 1)
-        } else {
-            TEXT_ROWS
-        };
-        let rows = rows.min(TEXT_ROWS); // Cap at 25 rows
-
-        // Calculate cursor address (matching vgacore.cc)
-        let cursor_addr = ((self.crtc_regs[CRTC_CURSOR_LOC_HIGH] as u16) << 8)
-            | (self.crtc_regs[CRTC_CURSOR_LOC_LOW] as u16);
-        let cursor_address = cursor_addr * 2; // Convert to byte offset
-
-        // Validate cursor address
-        let max_addr = start_address + (line_offset * rows as u16);
-        let cursor_address = if cursor_address < start_address || cursor_address > max_addr {
-            0x7fff // Invalid cursor
-        } else {
-            cursor_address
-        };
 
         // Copy from VGA memory to text_buffer if needed.
         // We update the visible page whenever memory changed since the last update,
@@ -3464,23 +3495,11 @@ impl BxVgaC {
             self.text_dirty = false;
         }
 
-        // Compute dimension_update parameters (matching vgacore.cc)
-        let c_width = if (self.seq_regs[SEQ_REG_CLOCKING_MODE] & SEQ_CLOCKING_8DOT_CHAR) != 0 {
-            8u32
-        } else {
-            9u32
-        };
-        // x_dotclockdiv2 = sequencer.reg1 bit 3 (vgacore.cc)
-        let x_dotclockdiv2 =
-            (self.seq_regs[SEQ_REG_CLOCKING_MODE] & SEQ_CLOCKING_DOTCLOCKDIV2) != 0;
-        let c_width = if x_dotclockdiv2 {
-            c_width << 1
-        } else {
-            c_width
-        };
-        let i_width = c_width * cols as u32;
-        let i_height = (vde + 1) as u32;
-        let fh = (msl + 1) as u32;
+        // Dimension_update parameters (matching vgacore.cc)
+        let c_width = geometry.char_width;
+        let i_width = geometry.pixel_width;
+        let i_height = geometry.pixel_height;
+        let fh = geometry.char_height;
 
         // Only signal dimension change when something actually changed (vgacore.cc)
         let dimension_changed = i_width != self.last_xres
@@ -3609,7 +3628,6 @@ impl BxVgaC {
         if self.is_mmio_addr(addr) {
             return self.vbe_mmio_write(addr, len, data);
         }
-        self.probe_handler_calls = self.probe_handler_calls.wrapping_add(1);
         for (i, current_addr) in (addr..(addr + len as u64)).enumerate() {
             if let Some(&value) = data.get(i) {
                 #[cfg(feature = "alloc")]
@@ -3809,12 +3827,6 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
     };
     offset = offset.wrapping_add(vga.ext_offset);
 
-    // Update probe counters
-    vga.probe_mapped_writes = vga.probe_mapped_writes.wrapping_add(1);
-    if vga.probe_first_mapped.is_none() {
-        let mm = VgaMemoryMapping::from_u8(memory_mapping);
-        vga.probe_first_mapped = Some((addr, value, mm));
-    }
 
     // Chain-four mode (Mode 13h: 320x200x256) — Bochs vgacore.cc
     if vga.seq_chain_four {
@@ -5017,6 +5029,152 @@ mod tests {
         vga
     }
 
+    /// A colour-text adapter whose CRTC describes `cols` columns of
+    /// `char_height`-scanline cells over a `scan_lines`-line display.
+    fn text_mode_vga(cols: u8, char_height: u8, scan_lines: u16) -> BxVgaC {
+        let mut vga = BxVgaC::new();
+        vga.graphics_regs[GFX_REG_MISC] =
+            (VgaMemoryMapping::ColorText32k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+        vga.crtc_regs[CRTC_HORIZ_DISPLAY_END] = cols.saturating_sub(1);
+        vga.crtc_regs[CRTC_MAX_SCAN_LINE] = char_height.saturating_sub(1) & CRTC_MSL_MASK;
+        let vde = scan_lines - 1;
+        vga.crtc_regs[CRTC_VERT_DISPLAY_END] = (vde & 0xFF) as u8;
+        let mut overflow = 0u8;
+        if vde & 0x100 != 0 {
+            overflow |= CRTC_OVERFLOW_VDE_BIT8;
+        }
+        if vde & 0x200 != 0 {
+            overflow |= CRTC_OVERFLOW_VDE_BIT9;
+        }
+        vga.crtc_regs[CRTC_OVERFLOW] = overflow;
+        vga.crtc_regs[CRTC_OFFSET] = (u16::from(cols) * BYTES_PER_CHAR as u16 / 4) as u8;
+        vga
+    }
+
+    /// Bochs vgacore.cc update() derives the row count from the display end and
+    /// the cell height, and caps nothing: an 80x50 guest has fifty rows.
+    #[test]
+    fn a_fifty_row_text_mode_reports_all_fifty_rows() {
+        let vga = text_mode_vga(80, 8, 400);
+        let geometry = vga.text_geometry().expect("text mode");
+        assert_eq!(geometry.cols, 80);
+        assert_eq!(geometry.rows, 50);
+        assert_eq!(geometry.char_height, 8);
+        assert_eq!(geometry.pixel_height, 400);
+    }
+
+    /// The cursor is valid anywhere on the displayed page. Capping the page at
+    /// 25 rows made a cursor below row 25 read as absent, so a guest in 80x50
+    /// drew no cursor at all past the halfway line.
+    #[test]
+    fn a_cursor_below_the_first_twenty_five_rows_is_still_on_screen() {
+        let mut vga = text_mode_vga(80, 8, 400);
+        // Row 30, column 0.
+        let cell = 30u16 * 80;
+        vga.crtc_regs[CRTC_CURSOR_LOC_HIGH] = (cell >> 8) as u8;
+        vga.crtc_regs[CRTC_CURSOR_LOC_LOW] = (cell & 0xFF) as u8;
+
+        let geometry = vga.text_geometry().expect("text mode");
+        assert_ne!(geometry.cursor_address, VgaTextGeometry::CURSOR_OFF);
+        assert_eq!(geometry.cursor_address, cell * 2);
+    }
+
+    /// A cursor parked past the last displayed row reads as absent, which is
+    /// the `0x7fff` Bochs substitutes.
+    #[test]
+    fn a_cursor_past_the_last_row_reads_as_absent() {
+        let mut vga = text_mode_vga(80, 16, 400);
+        let cell = 0x3F00u16;
+        vga.crtc_regs[CRTC_CURSOR_LOC_HIGH] = (cell >> 8) as u8;
+        vga.crtc_regs[CRTC_CURSOR_LOC_LOW] = (cell & 0xFF) as u8;
+
+        let geometry = vga.text_geometry().expect("text mode");
+        assert_eq!(geometry.cursor_address, VgaTextGeometry::CURSOR_OFF);
+    }
+
+    /// Bochs replaces the column count and the cell height together when the
+    /// CRTC has not been programmed yet, so a half-written register pair still
+    /// describes the standard 80x25 grid rather than a grid built from one
+    /// real value and one default.
+    #[test]
+    fn an_unprogrammed_crtc_falls_back_to_the_whole_standard_grid() {
+        let mut vga = text_mode_vga(80, 8, 400);
+        vga.crtc_regs[CRTC_HORIZ_DISPLAY_END] = 0; // cols == 1
+
+        let geometry = vga.text_geometry().expect("text mode");
+        assert_eq!(geometry.cols, 80);
+        assert_eq!(geometry.char_height, 16);
+        assert_eq!(geometry.rows, 25);
+    }
+
+    /// The emulated CGA 160x100x16 mode programs two-scanline cells over a
+    /// 400-line display; Bochs widens the cell to four so the grid comes out
+    /// at 100 rows instead of 200.
+    #[test]
+    fn the_emulated_cga_160x100_mode_gets_a_hundred_rows() {
+        let vga = text_mode_vga(80, 2, 400);
+        let geometry = vga.text_geometry().expect("text mode");
+        assert_eq!(geometry.rows, 100);
+        assert_eq!(geometry.char_height, 4);
+    }
+
+    /// A grid that would run past the text aperture draws no frame at all —
+    /// Bochs reports "text mode: out of memory" and returns.
+    #[test]
+    fn a_grid_too_large_for_the_text_aperture_draws_nothing() {
+        // 512 rows of two scan lines each, at the widest row stride the CRTC
+        // offset register can ask for.
+        let mut vga = text_mode_vga(80, 2, 1024);
+        vga.crtc_regs[CRTC_OFFSET] = 0xFF;
+        assert_eq!(vga.text_geometry(), None);
+    }
+
+    /// Reading a real adapter through the display role sees the characters the
+    /// guest wrote, at the grid the CRTC describes — not a fixed 80x25 one.
+    #[test]
+    fn the_display_role_reads_the_guest_text_plane() {
+        use crate::emulator::{DisplaySource, TextPos};
+
+        let mut vga = text_mode_vga(80, 8, 400);
+        // "OK" at row 2, column 4 of the displayed page, char/attribute pairs.
+        let geometry = vga.text_geometry().expect("text mode");
+        let cell =
+            usize::from(geometry.start_address) + 2 * usize::from(geometry.line_offset) + 4 * 2;
+        vga.text_memory[cell] = b'O';
+        vga.text_memory[cell + 2] = b'K';
+
+        let grid = vga.text_grid().expect("text mode");
+        assert_eq!(grid.rows, 50);
+        assert_eq!(grid.cols, 80);
+        assert_eq!(vga.text_char(TextPos::new(2, 4)), 'O');
+        assert_eq!(vga.text_char(TextPos::new(2, 5)), 'K');
+        assert_eq!(vga.text_char(TextPos::new(2, 6)), ' ');
+        assert_eq!(vga.resolution(), crate::emulator::Resolution::new(720, 400));
+    }
+
+    /// The cursor's cell is reported in grid coordinates, which is what a
+    /// caller reading the screen can act on.
+    #[test]
+    fn the_display_role_reports_the_cursor_cell() {
+        use crate::emulator::{DisplaySource, TextPos};
+
+        let mut vga = text_mode_vga(80, 8, 400);
+        let cell = 30u16 * 80 + 7;
+        vga.crtc_regs[CRTC_CURSOR_LOC_HIGH] = (cell >> 8) as u8;
+        vga.crtc_regs[CRTC_CURSOR_LOC_LOW] = (cell & 0xFF) as u8;
+
+        let grid = vga.text_grid().expect("text mode");
+        assert_eq!(grid.cursor, Some(TextPos::new(30, 7)));
+    }
+
+    /// A graphics mode has no character grid to report.
+    #[test]
+    fn a_graphics_mode_has_no_text_geometry() {
+        let mut vga = text_mode_vga(80, 16, 400);
+        vga.graphics_regs[GFX_REG_MISC] |= GFX_MISC_GRAPHICS_ALPHA;
+        assert_eq!(vga.text_geometry(), None);
+    }
+
     #[test]
     fn pci_disabled_is_invisible_to_enumeration() {
         let vga = BxVgaC::new();
@@ -5979,5 +6137,59 @@ impl crate::iodev::device_api::MmioDevice for BxVgaC {
         _clock: crate::iodev::device_api::DeviceClock,
     ) {
         let _claimed = self.mem_write(addr, len, data);
+    }
+}
+
+/// Reading the VGA's screen.
+///
+/// Bochs's `get_text_snapshot` hands the GUI the live text plane and the same
+/// grid the renderer used; this reports the same thing one cell at a time so a
+/// no-alloc caller can read a screen without a buffer.
+impl crate::emulator::DisplaySource for BxVgaC {
+    fn resolution(&self) -> crate::emulator::Resolution {
+        if let Some(geometry) = self.text_geometry() {
+            return crate::emulator::Resolution::new(
+                geometry.pixel_width,
+                geometry.pixel_height,
+            );
+        }
+        if self.vbe.enabled != 0 {
+            return crate::emulator::Resolution::new(
+                u32::from(self.vbe.xres),
+                u32::from(self.vbe.yres),
+            );
+        }
+        let (width, height) = self.determine_screen_dimensions();
+        crate::emulator::Resolution::new(width, height)
+    }
+
+    fn text_grid(&self) -> Option<crate::emulator::TextGrid> {
+        let geometry = self.text_geometry()?;
+        let cursor = if geometry.cursor_address == VgaTextGeometry::CURSOR_OFF
+            || geometry.line_offset == 0
+        {
+            None
+        } else {
+            let from_start = geometry.cursor_address.saturating_sub(geometry.start_address);
+            Some(crate::emulator::TextPos::new(
+                usize::from(from_start / geometry.line_offset),
+                usize::from((from_start % geometry.line_offset) / BYTES_PER_CHAR as u16),
+            ))
+        };
+        Some(crate::emulator::TextGrid {
+            rows: geometry.rows,
+            cols: geometry.cols,
+            cursor,
+        })
+    }
+
+    fn text_char(&self, pos: crate::emulator::TextPos) -> char {
+        let Some(geometry) = self.text_geometry() else {
+            return ' ';
+        };
+        if pos.row >= geometry.rows || pos.col >= geometry.cols {
+            return ' ';
+        }
+        self.text_char_at(&geometry, pos.row, pos.col)
     }
 }
