@@ -61,6 +61,14 @@ pub(crate) struct PioBinding<'a> {
     pub(crate) handles: wiring::TimerHandles,
 }
 
+/// One memory-mapped device bound to the machine parts its context is built
+/// from — the memory-side twin of [`PioBinding`], split for the same reason.
+pub(crate) struct MmioBinding<'a> {
+    pub(crate) device: &'a mut dyn MmioDevice,
+    pub(crate) pic: &'a mut BxPicC,
+    pub(crate) handles: wiring::TimerHandles,
+}
+
 /// Port 0x92 - System Control Port
 /// Bit 0: Fast A20 gate control (1 = A20 enabled)
 /// Bit 1: Fast reset (writing 1 triggers CPU reset)
@@ -1017,11 +1025,11 @@ impl DeviceManager {
         &mut self,
         mem: &mut crate::memory::BxMemC,
     ) -> Result<bool> {
-        use crate::iodev::vga::PCI_VGA_MMIO_SIZE;
-        let device_id = DevSlot::VGA.mmio_token();
+        use crate::iodev::vga::{VgaWindow, PCI_VGA_MMIO_SIZE};
         let mut changed = false;
 
         if let Some((old_base, new_base)) = self.vga.peek_pending_lfb_relocate() {
+            let device_id = DevSlot::VGA.mmio_window_token(VgaWindow::Lfb.id());
             let size = u64::from(self.vga.lfb_size());
             let old_range =
                 (old_base != 0).then_some((u64::from(old_base), u64::from(old_base) + size - 1));
@@ -1034,6 +1042,7 @@ impl DeviceManager {
         }
 
         if let Some((old_base, new_base)) = self.vga.peek_pending_mmio_relocate() {
+            let device_id = DevSlot::VGA.mmio_window_token(VgaWindow::Registers.id());
             let size = u64::from(PCI_VGA_MMIO_SIZE);
             let old_range =
                 (old_base != 0).then_some((u64::from(old_base), u64::from(old_base) + size - 1));
@@ -1439,17 +1448,30 @@ impl DeviceManager {
     /// Bind `slot` to the device behind its memory-mapped range.
     ///
     /// The memory counterpart of [`Self::bind_pio`], and the sole statement of
-    /// which slots answer a physical address. No interrupt controller comes
-    /// with it: a memory-mapped access here reaches a device that drives
-    /// neither an interrupt line nor a timer synchronously, so the binding is
-    /// the device alone.
-    pub(crate) fn bind_mmio(&mut self, slot: DevSlot) -> Option<&mut dyn MmioDevice> {
-        match slot {
-            DevSlot::VGA => Some(&mut self.vga),
-            DevSlot::IOAPIC => Some(&mut self.ioapic),
-            DevSlot::HPET => Some(&mut self.hpet),
-            _ => None,
-        }
+    /// which slots answer a physical address. It carries the same interrupt
+    /// controller and timer slots, because Bochs devices reached through memory
+    /// drive both from inside the access — hpet.cc arms a comparator and raises
+    /// its interrupt within the write that programmed it.
+    pub(crate) fn bind_mmio(&mut self, slot: DevSlot) -> Option<MmioBinding<'_>> {
+        let Self {
+            ref mut pic,
+            ref mut vga,
+            ref mut ioapic,
+            ref mut hpet,
+            ..
+        } = *self;
+        let handles = wiring::TimerHandles::default();
+        let device: &mut dyn MmioDevice = match slot {
+            DevSlot::VGA => vga,
+            DevSlot::IOAPIC => ioapic,
+            DevSlot::HPET => hpet,
+            _ => return None,
+        };
+        Some(MmioBinding {
+            device,
+            pic,
+            handles,
+        })
     }
 
     /// Apply the chipset effects devices raised during a port dispatch.
@@ -2119,7 +2141,12 @@ impl DeviceManager {
         self.relocate_acpi_sm_ports(io);
         self.pending.remove(PendingPlatformWork::ACPI_SM_PORTS);
 
-        let device_id = DevSlot::VGA.mmio_token();
+        // Each aperture relocates under its own window's token, the same ones
+        // `reregister_vga_bars` mints: the token is what names the window an
+        // access landed in, so sharing one across the framebuffer and the
+        // register block would route an LFB access into the legacy aperture.
+        let lfb_id = DevSlot::VGA.mmio_window_token(super::vga::VgaWindow::Lfb.id());
+        let registers_id = DevSlot::VGA.mmio_window_token(super::vga::VgaWindow::Registers.id());
         let lfb_size = u64::from(self.vga.lfb_size());
         let old_lfb = (live_vga.lfb_base != 0).then_some((
             u64::from(live_vga.lfb_base),
@@ -2129,7 +2156,7 @@ impl DeviceManager {
             u64::from(vga.lfb_base),
             u64::from(vga.lfb_base) + lfb_size - 1,
         ));
-        mem.relocate_memory_handlers(device_id, old_lfb, new_lfb)?;
+        mem.relocate_memory_handlers(lfb_id, old_lfb, new_lfb)?;
         let old_mmio = (live_vga.mmio_base != 0).then_some((
             u64::from(live_vga.mmio_base),
             u64::from(live_vga.mmio_base) + u64::from(super::vga::PCI_VGA_MMIO_SIZE) - 1,
@@ -2138,7 +2165,7 @@ impl DeviceManager {
             u64::from(vga.mmio_base),
             u64::from(vga.mmio_base) + u64::from(super::vga::PCI_VGA_MMIO_SIZE) - 1,
         ));
-        mem.relocate_memory_handlers(device_id, old_mmio, new_mmio)?;
+        mem.relocate_memory_handlers(registers_id, old_mmio, new_mmio)?;
         self.vga.commit_snapshot_v3_mapping_target(vga);
         self.pending.remove(PendingPlatformWork::VGA_BARS);
 
@@ -2150,6 +2177,16 @@ impl DeviceManager {
 
 #[cfg(test)]
 mod tests {
+    /// The hit a guest access `offset` bytes into VGA's BAR2 register window
+    /// must produce. Asserting the routed window and offset is asserting what
+    /// the access does; a bare "some region covers this address" is not.
+    fn vga_registers_at(offset: u64) -> crate::memory::mmio_map::MmioHit {
+        crate::memory::mmio_map::MmioHit {
+            token: DevSlot::VGA.mmio_window_token(crate::iodev::vga::VgaWindow::Registers.id()),
+            offset,
+        }
+    }
+
     /// Drive the PIT's own IRQ0 drain through the device API, with no
     /// scheduler attached — the behaviour under test is the PIC edge
     /// sequence, not timer arming.
@@ -2404,12 +2441,18 @@ mod tests {
 
             guest_pci_bar_write(&mut emu, 0x10, 0x18, 0xF000_0000).unwrap();
             guest_memory_read(&mut emu, 0xF000_0500).unwrap();
-            assert!(emu.device_manager.vga.is_mmio_addr(0xF000_0500));
+            assert_eq!(
+                emu.memory.mmio.lookup(0xF000_0500),
+                Some(vga_registers_at(0x500))
+            );
 
             guest_pci_bar_write(&mut emu, 0x10, 0x18, 0xF100_0000).unwrap();
             guest_memory_read(&mut emu, 0xF100_0500).unwrap();
-            assert!(!emu.device_manager.vga.is_mmio_addr(0xF000_0500));
-            assert!(emu.device_manager.vga.is_mmio_addr(0xF100_0500));
+            assert_eq!(emu.memory.mmio.lookup(0xF000_0500), None);
+            assert_eq!(
+                emu.memory.mmio.lookup(0xF100_0500),
+                Some(vga_registers_at(0x500))
+            );
             assert!(
                 emu.memory
                     .register_memory_handlers(DevSlot::NONE.mmio_token(), 0xF000_0000, 0xF000_0FFF)
@@ -2728,7 +2771,7 @@ mod tests {
             dm.pending.insert(PendingPlatformWork::VGA_BARS);
             dm.reregister_vga_bars(&mut mem).unwrap();
 
-            assert!(dm.vga.is_mmio_addr(0xF000_0500));
+            assert_eq!(mem.mmio.lookup(0xF000_0500), Some(vga_registers_at(0x500)));
             assert!(
                 mem.register_memory_handlers(DevSlot::NONE.mmio_token(), 0xF000_0000, 0xF000_0FFF)
                     .is_err(),

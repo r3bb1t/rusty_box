@@ -1275,6 +1275,34 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             assert_eq!(restored.device_manager.acpi.pm_base, PM);
             assert_eq!(restored.device_manager.acpi.sm_base, SM);
             assert_eq!(restored_vga, desired_vga);
+
+            // The bases above are what the device recorded; these are what a
+            // guest access does with them. Restore registers each aperture
+            // under its own window's token, so an access carries the window it
+            // landed in — routing the framebuffer through the token of the
+            // legacy aperture would hand the card an LFB offset to decode as
+            // planar memory.
+            let routes = |base: u64, window: crate::iodev::vga::VgaWindow, at: u64| {
+                (
+                    base,
+                    restored.memory.mmio.lookup(base),
+                    Some(crate::memory::mmio_map::MmioHit {
+                        token: crate::iodev::DevSlot::VGA.mmio_window_token(window.id()),
+                        offset: at,
+                    }),
+                )
+            };
+            for (base, actual, expected) in [
+                routes(0xA_0000, crate::iodev::vga::VgaWindow::Legacy, 0),
+                routes(u64::from(LFB) + 0x24, crate::iodev::vga::VgaWindow::Lfb, 0x24),
+                routes(
+                    u64::from(MMIO) + 0x500,
+                    crate::iodev::vga::VgaWindow::Registers,
+                    0x500,
+                ),
+            ] {
+                assert_eq!(actual, expected, "{base:#x} must route to its own window");
+            }
             assert!(!restored
                 .device_manager
                 .pending

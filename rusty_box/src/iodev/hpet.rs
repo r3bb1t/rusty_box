@@ -829,32 +829,38 @@ impl crate::snapshot::SnapshotSection for BxHpetC {
 /// The HPET register block as a memory-mapped device.
 ///
 /// Bochs hpet.cc reads `bx_pc_system.time_nsec()` inside the handler, so the
-/// counter a guest observes is the one live at the access. That clock arrives
-/// as a value here; it used to be stamped onto the memory subsystem by the CPU
-/// before every access that might land in this range.
+/// counter a guest observes is the one live at the access; the context carries
+/// that clock.
+///
+/// One window, so the id is not consulted. The register decode masks with
+/// `& 0x3ff` and the window is the 1 KiB block at the fixed, 1 KiB-aligned
+/// [`HPET_BASE`], so the offset and the physical address agree on every bit the
+/// decode looks at.
 impl crate::iodev::device_api::MmioDevice for BxHpetC {
     #[inline]
     fn mmio_read(
         &mut self,
-        addr: u64,
+        _window: crate::iodev::device_api::WindowId,
+        at: crate::iodev::device_api::WindowOffset,
         len: u32,
         data: &mut [u8],
-        clock: crate::iodev::device_api::DeviceClock,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
     ) {
-        self.set_now(clock.now_ticks, clock.ips);
-        self.mem_read(addr, len, data);
+        self.set_now(ctx.now_ticks, ctx.ips);
+        self.mem_read(at.get(), len, data);
     }
 
     #[inline]
     fn mmio_write(
         &mut self,
-        addr: u64,
+        _window: crate::iodev::device_api::WindowId,
+        at: crate::iodev::device_api::WindowOffset,
         len: u32,
         data: &[u8],
-        clock: crate::iodev::device_api::DeviceClock,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
     ) {
-        self.set_now(clock.now_ticks, clock.ips);
-        self.mem_write(addr, len, data);
+        self.set_now(ctx.now_ticks, ctx.ips);
+        self.mem_write(at.get(), len, data);
     }
 }
 

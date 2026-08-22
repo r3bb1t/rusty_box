@@ -956,6 +956,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
     // Two owners. The map stores tokens, so these are values, not pointers —
     // the identity a mapping is matched on can no longer dangle.
+    /// The routing outcome for `token` at `offset` bytes into its region.
+    fn hit(token: super::super::mmio_map::MmioToken, offset: u64) -> super::super::mmio_map::MmioHit {
+        super::super::mmio_map::MmioHit { token, offset }
+    }
+
     const OWNER_A: super::super::mmio_map::MmioToken = super::super::mmio_map::MmioToken(1);
     const OWNER_B: super::super::mmio_map::MmioToken = super::super::mmio_map::MmioToken(2);
 
@@ -1011,12 +1016,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert_eq!(
             mem.read_physical_page(CpuMemoryPolicy::default(), 0x4010, 4, &mut data)
                 .unwrap(),
-            PhysAccess::Mmio(OWNER_B)
+            PhysAccess::Mmio(hit(OWNER_B, 0x10))
         );
         assert_eq!(
             mem.write_physical_page(CpuMemoryPolicy::default(), 0x4010, 4, &mut data)
                 .unwrap(),
-            PhysAccess::Mmio(OWNER_B)
+            PhysAccess::Mmio(hit(OWNER_B, 0x10))
         );
         assert_eq!(
             mem.read_physical_page(CpuMemoryPolicy::default(), 0x5010, 4, &mut data)
@@ -1046,12 +1051,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert_eq!(
             mem.read_physical_page(CpuMemoryPolicy::default(), old.0, 4, &mut data)
                 .unwrap(),
-            PhysAccess::Mmio(OWNER_A)
+            PhysAccess::Mmio(hit(OWNER_A, 0))
         );
         assert_eq!(
             mem.read_physical_page(CpuMemoryPolicy::default(), blocker.0, 4, &mut data)
                 .unwrap(),
-            PhysAccess::Mmio(OWNER_B)
+            PhysAccess::Mmio(hit(OWNER_B, 0))
         );
     }
 
@@ -1071,12 +1076,19 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
         mem.relocate_memory_handlers(OWNER_A, None, Some(initial))
             .unwrap();
-        assert_eq!(read(&mut mem, initial.0, &mut data), PhysAccess::Mmio(OWNER_A));
+        assert_eq!(
+            read(&mut mem, initial.0, &mut data),
+            PhysAccess::Mmio(hit(OWNER_A, 0))
+        );
 
         mem.relocate_memory_handlers(OWNER_A, Some(initial), Some(moved))
             .unwrap();
         assert_eq!(read(&mut mem, initial.0, &mut data), PhysAccess::Done);
-        assert_eq!(read(&mut mem, moved.0, &mut data), PhysAccess::Mmio(OWNER_A));
+        assert_eq!(
+            read(&mut mem, moved.0, &mut data),
+            PhysAccess::Mmio(hit(OWNER_A, 0)),
+            "a relocated region reports offsets from its new base"
+        );
 
         mem.relocate_memory_handlers(OWNER_A, Some(moved), None)
             .unwrap();
@@ -1180,7 +1192,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                         &mut data2,
                     )
                     .unwrap(),
-                    PhysAccess::Mmio(OWNER_A),
+                    PhysAccess::Mmio(hit(OWNER_A, 0x1000)),
                     "SMRAM disabled must route the write to the mapped device"
                 );
                 assert_eq!(mem.read_ram(0xA1000, &mut ram_byte).unwrap(), 1);

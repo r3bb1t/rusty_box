@@ -1408,27 +1408,34 @@ impl BxIoApic {
 // ---------------------------------------------------------------------------
 
 /// The I/O APIC window as a memory-mapped device — Bochs ioapic.cc.
+/// One window, so the id is not consulted. The register decode masks the low
+/// bits of what it is given (`& 0xFF`), and the window base is always a
+/// multiple of 1024 — `IOAPIC_BASE_ADDR | ((value & 0x3f) << 10)`, Bochs
+/// pci2isa.cc case 0x80 — so the offset and the physical address agree on
+/// every bit the decode looks at.
 impl crate::iodev::device_api::MmioDevice for BxIoApic {
     #[inline]
     fn mmio_read(
         &mut self,
-        addr: u64,
+        _window: crate::iodev::device_api::WindowId,
+        at: crate::iodev::device_api::WindowOffset,
         len: u32,
         data: &mut [u8],
-        _clock: crate::iodev::device_api::DeviceClock,
+        _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
     ) {
-        let _claimed = BxIoApic::mem_read(self, addr, len, data);
+        let _claimed = BxIoApic::mem_read(self, at.get(), len, data);
     }
 
     #[inline]
     fn mmio_write(
         &mut self,
-        addr: u64,
+        _window: crate::iodev::device_api::WindowId,
+        at: crate::iodev::device_api::WindowOffset,
         len: u32,
         data: &[u8],
-        _clock: crate::iodev::device_api::DeviceClock,
+        _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
     ) {
-        let _claimed = BxIoApic::mem_write(self, addr, len, data);
+        let _claimed = BxIoApic::mem_write(self, at.get(), len, data);
     }
 }
 

@@ -320,6 +320,42 @@ const VGA_WINDOW_GRAPHICS_BASE: BxPhyAddress = 0xA0000;
 const VGA_WINDOW_GRAPHICS_END: BxPhyAddress = 0xBFFFF;
 const VGA_WINDOW_VGA64K_END: BxPhyAddress = 0xAFFFF;
 
+/// The physical ranges this adapter answers.
+///
+/// Three disjoint windows under one device, which is why the machine reports
+/// which one an access landed in: Bochs decides the same question by comparing
+/// the address against `vbe.base_address` and the BAR2 base, and a device that
+/// routes on its own bases has to keep them in step with wherever the machine
+/// actually mapped it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VgaWindow {
+    /// The legacy `A0000-BFFFF` aperture — planar, latched, chain-4.
+    Legacy,
+    /// The linear framebuffer behind PCI BAR0.
+    Lfb,
+    /// The Bochs DISPI register block behind PCI BAR2.
+    Registers,
+}
+
+impl VgaWindow {
+    #[inline]
+    pub(crate) const fn id(self) -> crate::iodev::device_api::WindowId {
+        crate::iodev::device_api::WindowId(self as u8)
+    }
+
+    /// The inverse of [`Self::id`]. `None` for a window this adapter never
+    /// minted a token for, which the machine cannot produce and a test can.
+    #[inline]
+    fn from_id(window: crate::iodev::device_api::WindowId) -> Option<Self> {
+        match window.0 {
+            0 => Some(Self::Legacy),
+            1 => Some(Self::Lfb),
+            2 => Some(Self::Registers),
+            _ => None,
+        }
+    }
+}
+
 // ---- Misc output register bits ----
 const MISC_OUT_COLOR_EMULATION: u8 = 0x01;
 const MISC_OUT_ENABLE_RAM: u8 = 0x02;
@@ -1045,14 +1081,14 @@ impl BxVgaC {
 
         // Register memory handlers for VGA memory range (0xA0000-0xBFFFF)
         // This matches DEV_register_memory_handlers in vgacore.cc line 177
-        let device_id = crate::iodev::DevSlot::VGA.mmio_token();
-        mem.register_memory_handlers(device_id, VGA_WINDOW_GRAPHICS_BASE, VGA_WINDOW_GRAPHICS_END)?;
+        let legacy = crate::iodev::DevSlot::VGA.mmio_window_token(VgaWindow::Legacy.id());
+        mem.register_memory_handlers(legacy, VGA_WINDOW_GRAPHICS_BASE, VGA_WINDOW_GRAPHICS_END)?;
         #[cfg(feature = "alloc")]
         {
             let begin = self.vbe.base_address as BxPhyAddress;
             let end = begin + self.vbe_memsize as BxPhyAddress - 1;
-            let device_id = crate::iodev::DevSlot::VGA.mmio_token();
-            mem.register_memory_handlers(device_id, begin, end)?;
+            let lfb = crate::iodev::DevSlot::VGA.mmio_window_token(VgaWindow::Lfb.id());
+            mem.register_memory_handlers(lfb, begin, end)?;
         }
 
         tracing::debug!("VGA initialized (80x25 text mode)");
@@ -3592,13 +3628,19 @@ impl BxVgaC {
         self.mark_tile_updated(x_tile, y_tile);
     }
 
-    pub(crate) fn mem_read(&mut self, addr: BxPhyAddress, len: u32, data: &mut [u8]) -> bool {
-        // BAR2 (VBE MMIO) window is registered as a VGA memory handler; route it
-        // to the dispi MMIO handler rather than the framebuffer/legacy path.
-        if self.is_mmio_addr(addr) {
-            return self.vbe_mmio_read(addr, len, data);
-        }
-        for (i, current_addr) in (addr..(addr + len as u64)).enumerate() {
+    /// Read from the legacy `A0000-BFFFF` aperture.
+    ///
+    /// Bochs `bx_vgacore_c::mem_read`. The physical address is reconstructed
+    /// from the window base because the VBE aperture path addresses by it; the
+    /// *routing* decision it used to serve is gone.
+    pub(crate) fn legacy_read(
+        &mut self,
+        at: crate::iodev::device_api::WindowOffset,
+        len: u32,
+        data: &mut [u8],
+    ) {
+        let base = VGA_WINDOW_GRAPHICS_BASE + at.get();
+        for (i, current_addr) in (base..(base + len as u64)).enumerate() {
             if let Some(byte) = data.get_mut(i) {
                 #[cfg(feature = "alloc")]
                 {
@@ -3606,36 +3648,62 @@ impl BxVgaC {
                         *byte = self.vbe_mem_read_byte(current_addr);
                         continue;
                     }
-                    if current_addr >= self.vbe.base_address as BxPhyAddress {
-                        let offset = current_addr - self.vbe.base_address as BxPhyAddress;
-                        if self.seq_chain_four && offset < 0x40000 {
-                            // Bochs vga.cc mem_read: chain-4 LFB accesses go
-                            // straight to bx_vgacore_c::mem_read(offset) with the
-                            // raw offset — the full 256KB is addressable. Wrapping
-                            // to 128KB and re-entering at the legacy window base
-                            // re-applied window gating (mapping 1 returns 0xFF past
-                            // 64KB and 128-256KB aliased downward).
-                            *byte = vga_mem_read_byte(self, offset);
-                        } else {
-                            *byte = 0xff;
-                        }
-                        continue;
-                    }
                 }
                 *byte = vga_mem_read_byte(self, current_addr);
             }
         }
-        true
     }
 
-    /// VGA memory write handler (called from memory system)
-    /// Based on bx_vgacore_c::mem_write / mem_write_handler in vgacore.cc
-    /// Implements all 4 write modes with full planar memory support.
-    pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) -> bool {
-        if self.is_mmio_addr(addr) {
-            return self.vbe_mmio_write(addr, len, data);
+    /// Read from the linear framebuffer behind BAR0.
+    ///
+    /// Bochs vga.cc `mem_read`'s LFB arm: chain-4 accesses reach
+    /// `bx_vgacore_c::mem_read(offset)` with the raw offset, so the full 256 KB
+    /// is addressable — wrapping to 128 KB and re-entering at the legacy base
+    /// would re-apply window gating.
+    ///
+    /// The window exists in every build so the dispatch has one shape; only the
+    /// backing store is `alloc`-only. Without it `init` never registers the
+    /// window, so a machine cannot route here at all — reaching it means one was
+    /// mapped that nothing can serve.
+    pub(crate) fn lfb_read(
+        &mut self,
+        at: crate::iodev::device_api::WindowOffset,
+        len: u32,
+        data: &mut [u8],
+    ) {
+        #[cfg(not(feature = "alloc"))]
+        {
+            let _ = (at, len);
+            tracing::error!("VGA: framebuffer read with no backing store");
+            data.fill(0xff);
         }
-        for (i, current_addr) in (addr..(addr + len as u64)).enumerate() {
+        #[cfg(feature = "alloc")]
+        for i in 0..len as u64 {
+            let Some(byte) = data.get_mut(i as usize) else {
+                break;
+            };
+            let offset = at.get() + i;
+            if self.vbe.enabled != 0 && self.vbe.bpp != VBE_DISPI_BPP_4 {
+                *byte = self.vbe_mem_read_byte(self.vbe.base_address as BxPhyAddress + offset);
+            } else if self.seq_chain_four && offset < 0x40000 {
+                *byte = vga_mem_read_byte(self, offset);
+            } else {
+                *byte = 0xff;
+            }
+        }
+    }
+
+    /// Write to the legacy `A0000-BFFFF` aperture — Bochs
+    /// `bx_vgacore_c::mem_write`, all four write modes with full planar
+    /// memory support.
+    pub(crate) fn legacy_write(
+        &mut self,
+        at: crate::iodev::device_api::WindowOffset,
+        len: u32,
+        data: &[u8],
+    ) {
+        let base = VGA_WINDOW_GRAPHICS_BASE + at.get();
+        for (i, current_addr) in (base..(base + len as u64)).enumerate() {
             if let Some(&value) = data.get(i) {
                 #[cfg(feature = "alloc")]
                 {
@@ -3643,22 +3711,82 @@ impl BxVgaC {
                         self.vbe_mem_write_byte(current_addr, value);
                         continue;
                     }
-                    if current_addr >= self.vbe.base_address as BxPhyAddress {
-                        let offset = current_addr - self.vbe.base_address as BxPhyAddress;
-                        if self.seq_chain_four && offset < 0x40000 {
-                            // Bochs vga.cc mem_write: chain-4 LFB writes go
-                            // straight to bx_vgacore_c::mem_write(offset, value)
-                            // with the raw offset (full 256KB), not wrapped to
-                            // 128KB through the legacy window.
-                            vga_mem_write_byte(self, offset, value);
-                        }
-                        continue;
-                    }
                 }
                 vga_mem_write_byte(self, current_addr, value);
             }
         }
-        true
+    }
+
+    /// Write to the linear framebuffer behind BAR0. Bochs vga.cc `mem_write`'s
+    /// LFB arm: chain-4 writes take the raw offset over the full 256 KB, and a
+    /// non-chain-4 write past the aperture is dropped.
+    ///
+    /// Present in every build for the reason [`Self::lfb_read`] gives.
+    pub(crate) fn lfb_write(
+        &mut self,
+        at: crate::iodev::device_api::WindowOffset,
+        len: u32,
+        data: &[u8],
+    ) {
+        #[cfg(not(feature = "alloc"))]
+        {
+            let _ = (at, len, data);
+            tracing::error!("VGA: framebuffer write with no backing store");
+        }
+        #[cfg(feature = "alloc")]
+        for i in 0..len as u64 {
+            let Some(&value) = data.get(i as usize) else {
+                break;
+            };
+            let offset = at.get() + i;
+            if self.vbe.enabled != 0 && self.vbe.bpp != VBE_DISPI_BPP_4 {
+                self.vbe_mem_write_byte(self.vbe.base_address as BxPhyAddress + offset, value);
+            } else if self.seq_chain_four && offset < 0x40000 {
+                vga_mem_write_byte(self, offset, value);
+            }
+        }
+    }
+}
+
+/// The adapter's three windows, each answering only what the machine routed to
+/// it. Replaces `is_mmio_addr`, which existed solely to re-derive this split
+/// from the physical address.
+impl crate::iodev::device_api::MmioDevice for BxVgaC {
+    fn mmio_read(
+        &mut self,
+        window: crate::iodev::device_api::WindowId,
+        at: crate::iodev::device_api::WindowOffset,
+        len: u32,
+        data: &mut [u8],
+        _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) {
+        match VgaWindow::from_id(window) {
+            Some(VgaWindow::Legacy) => self.legacy_read(at, len, data),
+            Some(VgaWindow::Lfb) => self.lfb_read(at, len, data),
+            Some(VgaWindow::Registers) => self.vbe_mmio_read(at, len, data),
+            None => {
+                tracing::error!("VGA: read from window {window:?}, which it never declared");
+                data.fill(0xff);
+            }
+        }
+    }
+
+    fn mmio_write(
+        &mut self,
+        window: crate::iodev::device_api::WindowId,
+        at: crate::iodev::device_api::WindowOffset,
+        len: u32,
+        data: &[u8],
+        _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) {
+        match VgaWindow::from_id(window) {
+            Some(VgaWindow::Legacy) => self.legacy_write(at, len, data),
+            Some(VgaWindow::Lfb) => self.lfb_write(at, len, data),
+            Some(VgaWindow::Registers) => self.vbe_mmio_write(at, len, data),
+            None => {
+                tracing::error!("VGA: write to window {window:?}, which it never declared")
+            }
+        }
     }
 }
 
@@ -4341,9 +4469,10 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
 //   0x400-0x4FF: VBE EDID data (currently unimplemented)
 //   0x500-0x515: Bochs VBE extension registers (PCI_VGA_BOCHS_OFFSET)
 //
-// When PCI is enabled the BAR2 window is registered as a memory handler on BAR2
-// commit; mem_read/mem_write detect the MMIO range (is_mmio_addr) and route to
-// vbe_mmio_read / vbe_mmio_write. BAR0 is the linear framebuffer.
+// When PCI is enabled the BAR2 window is registered as its own memory handler
+// on BAR2 commit, so an access arrives already named as `VgaWindow::Registers`
+// with an offset from the window base, and routes to vbe_mmio_read /
+// vbe_mmio_write. BAR0 is the linear framebuffer.
 
 /// Result of a PCI config write: which BAR (if any) queued a new base for
 /// transactional memory-handler relocation.
@@ -4525,14 +4654,6 @@ impl BxVgaC {
         Some(relocate)
     }
 
-    /// Whether `addr` falls in the committed BAR2 MMIO window.
-    pub(crate) fn is_mmio_addr(&self, addr: BxPhyAddress) -> bool {
-        self.pci_enabled
-            && self.mmio_base != 0
-            && addr >= self.mmio_base as BxPhyAddress
-            && addr < self.mmio_base as BxPhyAddress + PCI_VGA_MMIO_SIZE as BxPhyAddress
-    }
-
     fn vbe_read_index(&self, index: u16) -> u16 {
         match index {
             VBE_DISPI_INDEX_ID => self.vbe.cur_dispi,
@@ -4594,8 +4715,13 @@ impl BxVgaC {
     ///
     /// Translates MMIO offset reads into VBE register reads.
     /// Matches Bochs `bx_vga_c::vbe_mmio_read_handler`.
-    pub(crate) fn vbe_mmio_read(&mut self, addr: BxPhyAddress, len: u32, data: &mut [u8]) -> bool {
-        let offset = (addr & 0xFFF) as u32;
+    pub(crate) fn vbe_mmio_read(
+        &mut self,
+        at: crate::iodev::device_api::WindowOffset,
+        len: u32,
+        data: &mut [u8],
+    ) {
+        let offset = (at.get() & 0xFFF) as u32;
         let mut value: u32 = 0xFFFF_FFFF;
 
         if offset >= PCI_VGA_BOCHS_OFFSET && offset < PCI_VGA_BOCHS_OFFSET + PCI_VGA_BOCHS_SIZE {
@@ -4623,16 +4749,19 @@ impl BxVgaC {
                 tracing::error!("vbe_mmio_read: unsupported len={}", len);
             }
         }
-
-        true
     }
 
     /// MMIO write handler for BAR2.
     ///
     /// Translates MMIO offset writes into VBE register writes.
     /// Matches Bochs `bx_vga_c::vbe_mmio_write_handler`.
-    pub(crate) fn vbe_mmio_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) -> bool {
-        let offset = (addr & 0xFFF) as u32;
+    pub(crate) fn vbe_mmio_write(
+        &mut self,
+        at: crate::iodev::device_api::WindowOffset,
+        len: u32,
+        data: &[u8],
+    ) {
+        let offset = (at.get() & 0xFFF) as u32;
 
         let value: u32 = match len {
             1 => data.first().copied().unwrap_or(0) as u32,
@@ -4648,7 +4777,7 @@ impl BxVgaC {
             }
             _ => {
                 tracing::error!("vbe_mmio_write: unsupported len={}", len);
-                return true;
+                return;
             }
         };
 
@@ -4658,8 +4787,6 @@ impl BxVgaC {
             self.vbe.curindex = index;
             self.vbe_write_index(index, value as u16);
         }
-
-        true
     }
 
     /// Handle a VBE data-port write (port 0x01CF or MMIO-dispatched).
@@ -5030,6 +5157,7 @@ fn validate_vga_snapshot_bar_base(base: u32, span: u32) -> io::Result<()> {
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
+    use crate::iodev::device_api::WindowOffset;
     use crate::iodev::pci::PciDevice;
     #[cfg(feature = "std")]
     use crate::snapshot::SnapshotSection;
@@ -5293,15 +5421,16 @@ mod tests {
             vga.peek_pending_mmio_relocate(),
             Some((0xF000_0000, 0xF010_0000))
         );
-        assert!(vga.is_mmio_addr(0xF000_0500));
-        assert!(!vga.is_mmio_addr(0xF010_0500));
+        assert_eq!(
+            vga.mmio_base, 0xF000_0000,
+            "the live window stays where the machine registered it"
+        );
 
         assert_eq!(
             vga.commit_pending_mmio_relocate(),
             Some((0xF000_0000, 0xF010_0000))
         );
-        assert!(!vga.is_mmio_addr(0xF000_0500));
-        assert!(vga.is_mmio_addr(0xF010_0500));
+        assert_eq!(vga.mmio_base, 0xF010_0000);
     }
 
 
@@ -5410,8 +5539,8 @@ mod tests {
             VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED,
         );
 
-        vga.mem_write(
-            VBE_DISPI_LFB_PHYSICAL_ADDRESS as BxPhyAddress,
+        vga.lfb_write(
+            WindowOffset(0),
             4,
             &[0x11, 0x22, 0x33, 0x44],
         );
@@ -5445,7 +5574,7 @@ mod tests {
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, 1);
 
-        vga.mem_write(VGA_WINDOW_GRAPHICS_BASE, 1, &[0x5a]);
+        vga.legacy_write(WindowOffset(0), 1, &[0x5a]);
 
         assert_eq!(vga.vga_memory[0], 0);
         assert_eq!(vga.vga_memory[0x10000], 0x5a);
@@ -5466,7 +5595,7 @@ mod tests {
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, 1);
 
-        vga.mem_write(VGA_WINDOW_GRAPHICS_BASE, 1, &[0x5a]);
+        vga.legacy_write(WindowOffset(0), 1, &[0x5a]);
 
         assert_eq!(vga.vbe_memory[0x10000], 0x5a);
     }
@@ -5488,9 +5617,9 @@ mod tests {
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, 1);
 
-        vga.mem_write(VGA_WINDOW_GRAPHICS_BASE, 1, &[0x3c]);
+        vga.legacy_write(WindowOffset(0), 1, &[0x3c]);
         let mut byte = [0];
-        vga.mem_read(VGA_WINDOW_GRAPHICS_BASE, 1, &mut byte);
+        vga.legacy_read(WindowOffset(0), 1, &mut byte);
 
         assert_eq!(byte[0], 0x3c);
     }
@@ -5509,13 +5638,13 @@ mod tests {
         write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, VBE_DISPI_BANK_WR | 1);
-        vga.mem_write(VGA_WINDOW_GRAPHICS_BASE, 1, &[0x7b]);
+        vga.legacy_write(WindowOffset(0), 1, &[0x7b]);
 
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, VBE_DISPI_BANK_WR);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, VBE_DISPI_BANK_RD | 1);
 
         let mut byte = [0];
-        vga.mem_read(VGA_WINDOW_GRAPHICS_BASE, 1, &mut byte);
+        vga.legacy_read(WindowOffset(0), 1, &mut byte);
 
         assert_eq!(byte[0], 0x7b);
     }
@@ -5536,7 +5665,7 @@ mod tests {
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, 1);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
 
-        vga.mem_write(VGA_WINDOW_GRAPHICS_BASE, 1, &[0xa5]);
+        vga.legacy_write(WindowOffset(0), 1, &[0xa5]);
 
         assert_eq!(vga.vga_memory[0], 0xa5);
     }
@@ -5550,7 +5679,7 @@ mod tests {
         write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_8);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
         vga.pel_data[5] = [0x3f, 0, 0];
-        vga.mem_write(VBE_DISPI_LFB_PHYSICAL_ADDRESS as BxPhyAddress, 1, &[5]);
+        vga.lfb_write(WindowOffset(0), 1, &[5]);
 
         let Some(VgaDisplayUpdate::Graphics(first)) = vga.update() else {
             panic!("expected first graphics update");
@@ -5589,7 +5718,7 @@ mod tests {
         vga.crtc_regs[CRTC_MODE_CONTROL] = 0x40;
         vga.pel_data[5] = [0x3f, 0, 0];
 
-        vga.mem_write(VGA_WINDOW_GRAPHICS_BASE, 1, &[5]);
+        vga.legacy_write(WindowOffset(0), 1, &[5]);
 
         let Some(VgaDisplayUpdate::Graphics(update)) = vga.update() else {
             panic!("expected legacy graphics update");
@@ -5621,7 +5750,7 @@ mod tests {
         vga.crtc_regs[CRTC_VERT_BLANK_START] = 0;
         vga.crtc_regs[CRTC_MODE_CONTROL] = 0x40;
 
-        vga.mem_write(VGA_WINDOW_GRAPHICS_BASE, 1, &[5]);
+        vga.legacy_write(WindowOffset(0), 1, &[5]);
         assert!(matches!(vga.update(), Some(VgaDisplayUpdate::Graphics(_))));
         assert!(vga.update().is_none());
 
@@ -6096,7 +6225,7 @@ mod tests {
         );
 
         let mut value = [0];
-        restored.mem_read(target.lfb_base as BxPhyAddress + 0x1234, 1, &mut value);
+        restored.lfb_read(WindowOffset(0x1234), 1, &mut value);
         assert_eq!(value, [0xB2], "VBE backing memory must survive restore");
 
         restored.write_port(VGA_DAC_STATE, 0x4D, 1);
@@ -6108,7 +6237,7 @@ mod tests {
         assert_eq!(restored.read_port(VGA_STATUS, 1, 0), 0xA9);
 
         write_vbe(&mut restored, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
-        restored.mem_read(VGA_WINDOW_GRAPHICS_BASE + 0x24, 1, &mut value);
+        restored.legacy_read(WindowOffset(0x24), 1, &mut value);
         assert_eq!(value, [0xA1], "planar memory must survive restore");
         assert_eq!(restored.get_text_memory()[0x42], b'V');
     }
@@ -6159,30 +6288,6 @@ impl crate::iodev::device_api::PioDevice for BxVgaC {
         _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
     ) {
         self.write_port(port, value, len.bytes());
-    }
-}
-
-impl crate::iodev::device_api::MmioDevice for BxVgaC {
-    #[inline]
-    fn mmio_read(
-        &mut self,
-        addr: u64,
-        len: u32,
-        data: &mut [u8],
-        _clock: crate::iodev::device_api::DeviceClock,
-    ) {
-        let _claimed = self.mem_read(addr, len, data);
-    }
-
-    #[inline]
-    fn mmio_write(
-        &mut self,
-        addr: u64,
-        len: u32,
-        data: &[u8],
-        _clock: crate::iodev::device_api::DeviceClock,
-    ) {
-        let _claimed = self.mem_write(addr, len, data);
     }
 }
 

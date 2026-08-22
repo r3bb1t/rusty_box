@@ -671,19 +671,23 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 // A device writing into another device's window. Bochs would
                 // recurse into the target's handler from inside the memory
                 // write; the routing is explicit here instead.
-                Ok(crate::memory::PhysAccess::Mmio(token)) => {
-                    let clock = crate::iodev::device_api::DeviceClock {
-                        now_ticks: self.pc_system.time_ticks(),
-                        ips: self.pc_system.ips(),
-                    };
-                    let slot = crate::iodev::DevSlot::from_mmio_token(token);
-                    match self.device_manager.bind_mmio(slot) {
-                        Some(device) => {
-                            device.mmio_write(address, bytes.len() as u32, &bytes, clock)
-                        }
-                        None => tracing::error!(
-                            "HPET: FSB message to {address:#x} routed to {slot:?}, which maps no device"
-                        ),
+                Ok(crate::memory::PhysAccess::Mmio(hit)) => {
+                    // Through the same choke point a guest access takes, so
+                    // the two cannot disagree about how a token is routed.
+                    // Time is the wheel's, because this runs at the boundary
+                    // rather than inside a batch.
+                    let now_ticks = self.pc_system.time_ticks();
+                    if !self.devices.mmio_write(
+                        hit,
+                        bytes.len() as u32,
+                        &bytes,
+                        now_ticks,
+                        &mut self.pc_system,
+                        &mut self.device_manager,
+                    ) {
+                        tracing::error!(
+                            "HPET: FSB message to {address:#x} routed to a slot with no device"
+                        );
                     }
                 }
                 Err(error) => {

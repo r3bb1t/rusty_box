@@ -50,6 +50,36 @@ impl IoLen {
     }
 }
 
+/// Which of a device's memory-mapped windows an access landed in.
+///
+/// A device may occupy several disjoint physical ranges — the VGA answers the
+/// legacy `A0000` aperture, a linear framebuffer and a register block — and
+/// Bochs distinguishes them by comparing the address against bases the device
+/// keeps for itself. The machine already knows which range it routed, so it
+/// says so, and the device matches on a closed set instead of re-deciding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowId(pub u8);
+
+impl WindowId {
+    /// The window a device that declares only one gets.
+    pub const FIRST: Self = Self(0);
+}
+
+/// How far into its window an access landed.
+///
+/// Distinct from a physical address on purpose (R4): the device never learns
+/// where the machine mapped it, so it cannot route on a base it would then have
+/// to keep in step with the machine's mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WindowOffset(pub u64);
+
+impl WindowOffset {
+    #[inline]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// Identifies one timer owned by one device.
 ///
 /// `local` is the device's own index for the timer, so a device owning several
@@ -153,20 +183,6 @@ pub trait PioDevice {
     fn pio_write(&mut self, port: u16, value: u32, len: IoLen, ctx: &mut DeviceCtx<'_>);
 }
 
-/// Emulated time at an access.
-///
-/// Bochs devices read `bx_pc_system.time_ticks()` / `time_nsec()` from inside a
-/// handler. A device reached through memory gets it as a value instead, which
-/// is what lets the memory subsystem stop carrying a clock of its own for the
-/// HPET's benefit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct DeviceClock {
-    /// Scheduler ticks at the access.
-    pub now_ticks: u64,
-    /// Emulated instructions per second — Bochs `bx_pc_system.m_ips`.
-    pub ips: u64,
-}
-
 /// A device that occupies a physical address range.
 ///
 /// Mirrors the Bochs `memory_handler_t` read/write pair, minus the `void
@@ -174,15 +190,33 @@ pub struct DeviceClock {
 /// for is identified by a token the platform routes rather than by a pointer
 /// the memory subsystem dereferences.
 ///
-/// Only a clock is supplied, not a full [`DeviceCtx`]: the memory-mapped
-/// devices this machine registers — VGA, the I/O APIC, the HPET — raise no
-/// interrupt and arm no timer from inside an MMIO access. The HPET does produce
-/// timer work, but latches it for the scheduler boundary to drain, which is a
-/// device conversion of its own rather than something this contract should
-/// anticipate with capabilities nothing yet calls.
+/// The access names the window it landed in and how far into it, never the
+/// physical address. A device with several windows therefore matches on a
+/// closed set rather than comparing against bases of its own, and no device
+/// needs to know where the machine mapped it.
+///
+/// The same [`DeviceCtx`] the port path builds, for the same reason: Bochs
+/// hpet.cc arms a comparator and raises its interrupt from inside the MMIO
+/// write that programmed it, so a memory-reached device needs the interrupt
+/// and timer capabilities a port-reached one has. Narrowing this to a bare
+/// clock would put a latch back between the write and its effect.
 pub trait MmioDevice {
-    fn mmio_read(&mut self, addr: u64, len: u32, data: &mut [u8], clock: DeviceClock);
-    fn mmio_write(&mut self, addr: u64, len: u32, data: &[u8], clock: DeviceClock);
+    fn mmio_read(
+        &mut self,
+        window: WindowId,
+        at: WindowOffset,
+        len: u32,
+        data: &mut [u8],
+        ctx: &mut DeviceCtx<'_>,
+    );
+    fn mmio_write(
+        &mut self,
+        window: WindowId,
+        at: WindowOffset,
+        len: u32,
+        data: &[u8],
+        ctx: &mut DeviceCtx<'_>,
+    );
 }
 
 /// The i440FX SMRAM control state — Bochs pci.cc `smram_control`.

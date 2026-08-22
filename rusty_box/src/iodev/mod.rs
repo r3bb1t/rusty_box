@@ -300,13 +300,38 @@ impl DevSlot {
     /// back on an access, which is the whole of what it knows about devices.
     #[inline]
     pub(crate) const fn mmio_token(self) -> crate::memory::mmio_map::MmioToken {
-        crate::memory::mmio_map::MmioToken(self.0 as u16)
+        self.mmio_window_token(device_api::WindowId::FIRST)
+    }
+
+    /// The token for one of this device's windows.
+    ///
+    /// A device with several disjoint ranges — the VGA's legacy aperture,
+    /// framebuffer and register block — mints one token per range, so the
+    /// access that comes back names the window as well as the device. The two
+    /// halves live in one `u16` because the memory subsystem stores the token
+    /// verbatim and interprets neither: which byte means what is the platform's
+    /// business, and this pair of functions is where it is decided.
+    #[inline]
+    pub(crate) const fn mmio_window_token(
+        self,
+        window: device_api::WindowId,
+    ) -> crate::memory::mmio_map::MmioToken {
+        crate::memory::mmio_map::MmioToken((self.0 as u16) | ((window.0 as u16) << 8))
     }
 
     /// Recover the slot a memory access reported. Inverse of [`Self::mmio_token`].
     #[inline]
     pub(crate) const fn from_mmio_token(token: crate::memory::mmio_map::MmioToken) -> Self {
         Self(token.0 as u8)
+    }
+
+    /// Recover the window a memory access reported. Inverse of
+    /// [`Self::mmio_window_token`].
+    #[inline]
+    pub(crate) const fn window_from_mmio_token(
+        token: crate::memory::mmio_map::MmioToken,
+    ) -> device_api::WindowId {
+        device_api::WindowId((token.0 >> 8) as u8)
     }
 
     /// Human-readable name, for diagnostics and registration logging.
@@ -819,44 +844,66 @@ impl BxDevicesC {
     /// it, which reads as an unclaimed region rather than as stale data.
     pub fn mmio_read(
         &mut self,
-        token: crate::memory::mmio_map::MmioToken,
-        addr: u64,
+        hit: crate::memory::mmio_map::MmioHit,
         len: u32,
         data: &mut [u8],
-        clock: device_api::DeviceClock,
+        now_ticks: u64,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
         dm: &mut devices::DeviceManager,
     ) -> bool {
-        let slot = DevSlot::from_mmio_token(token);
+        let slot = DevSlot::from_mmio_token(hit.token);
+        let window = DevSlot::window_from_mmio_token(hit.token);
+        let at = device_api::WindowOffset(hit.offset);
         match dm.bind_mmio(slot) {
-            Some(device) => {
-                device.mmio_read(addr, len, data, clock);
+            Some(bound) => {
+                wiring::with_device_ctx(
+                    bound.pic,
+                    pc_system,
+                    bound.handles,
+                    now_ticks,
+                    |ctx| bound.device.mmio_read(window, at, len, data, ctx),
+                );
                 true
             }
             None => {
-                tracing::warn!("MMIO read of {addr:#x} routed to {slot:?}, which maps no device");
+                tracing::warn!(
+                    "MMIO read at {window:?}+{:#x} routed to {slot:?}, which maps no device",
+                    hit.offset
+                );
                 false
             }
         }
     }
 
-    /// Service a memory-mapped write attributed to `token`. See [`Self::mmio_read`].
+    /// Service a memory-mapped write attributed to `hit`. See [`Self::mmio_read`].
     pub fn mmio_write(
         &mut self,
-        token: crate::memory::mmio_map::MmioToken,
-        addr: u64,
+        hit: crate::memory::mmio_map::MmioHit,
         len: u32,
         data: &[u8],
-        clock: device_api::DeviceClock,
+        now_ticks: u64,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
         dm: &mut devices::DeviceManager,
     ) -> bool {
-        let slot = DevSlot::from_mmio_token(token);
+        let slot = DevSlot::from_mmio_token(hit.token);
+        let window = DevSlot::window_from_mmio_token(hit.token);
+        let at = device_api::WindowOffset(hit.offset);
         match dm.bind_mmio(slot) {
-            Some(device) => {
-                device.mmio_write(addr, len, data, clock);
+            Some(bound) => {
+                wiring::with_device_ctx(
+                    bound.pic,
+                    pc_system,
+                    bound.handles,
+                    now_ticks,
+                    |ctx| bound.device.mmio_write(window, at, len, data, ctx),
+                );
                 true
             }
             None => {
-                tracing::warn!("MMIO write of {addr:#x} routed to {slot:?}, which maps no device");
+                tracing::warn!(
+                    "MMIO write at {window:?}+{:#x} routed to {slot:?}, which maps no device",
+                    hit.offset
+                );
                 false
             }
         }
@@ -1556,24 +1603,29 @@ mod tests {
     fn a_reported_mmio_token_reaches_the_device_that_owns_it() {
         on_big_stack(|| {
             let mut dm = alloc::boxed::Box::new(devices::DeviceManager::new());
-            let clock = device_api::DeviceClock {
-                now_ticks: 0,
-                ips: 1_000_000,
-            };
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
+            pc_system.initialize(1_000_000);
 
             // Writing through the slot the map would report must land in the
             // device, not merely be accepted. IOREGSEL is the cleanest witness:
             // an unconditional register that reads back what was written,
             // needing no mode programming first.
-            const IOREGSEL: u64 = 0xFEC0_0000;
-            let device = dm
+            const IOREGSEL: device_api::WindowOffset = device_api::WindowOffset(0);
+            let window = device_api::WindowId::FIRST;
+            let bound = dm
                 .bind_mmio(DevSlot::IOAPIC)
                 .expect("the I/O APIC slot must map a device");
-            device.mmio_write(IOREGSEL, 4, &0x12u32.to_ne_bytes(), clock);
+            wiring::with_device_ctx(bound.pic, &mut pc_system, bound.handles, 0, |ctx| {
+                bound
+                    .device
+                    .mmio_write(window, IOREGSEL, 4, &0x12u32.to_ne_bytes(), ctx)
+            });
 
             let mut readback = [0u8; 4];
-            let device = dm.bind_mmio(DevSlot::IOAPIC).expect("still bound");
-            device.mmio_read(IOREGSEL, 4, &mut readback, clock);
+            let bound = dm.bind_mmio(DevSlot::IOAPIC).expect("still bound");
+            wiring::with_device_ctx(bound.pic, &mut pc_system, bound.handles, 0, |ctx| {
+                bound.device.mmio_read(window, IOREGSEL, 4, &mut readback, ctx)
+            });
             assert_eq!(
                 u32::from_ne_bytes(readback),
                 0x12,

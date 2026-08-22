@@ -181,6 +181,11 @@ impl WheelTimerService<'_> {
 
     fn arm_ticks(&mut self, key: TimerKey, delay_ticks: u64, continuous: bool) {
         let Some(handle) = self.handles.get(key.local) else {
+            // The binding that built this context did not carry the device's
+            // handle for `local`, so the deadline has nowhere to go. Saying so
+            // is the point: a device armed a timer and the wheel never learned
+            // of it, which no later symptom names.
+            tracing::error!("device timer {key:?} armed with no handle bound; deadline dropped");
             return;
         };
         let deadline = self.now_ticks.saturating_add(delay_ticks);

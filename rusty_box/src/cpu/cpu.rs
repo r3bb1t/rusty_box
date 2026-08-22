@@ -1803,19 +1803,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         cpu.slice_clock = clock;
     }
 
-    /// Emulated time for a device reached through memory.
-    ///
-    /// Bochs devices read `bx_pc_system` from inside their handler, so the
-    /// clock a guest observes is the one live at the access. The HPET is the
-    /// one device here that depends on it.
-    #[inline]
-    fn device_clock(&self) -> crate::iodev::device_api::DeviceClock {
-        crate::iodev::device_api::DeviceClock {
-            now_ticks: self.system_ticks(),
-            ips: self.pc_system.ips(),
-        }
-    }
-
     /// Apply final I/O state after a port dispatch.
     ///
     /// The producer collapses PIC edge activity to a final physical level and
@@ -4384,15 +4371,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> crate::Result<()> {
         match self.memory.read_physical_page(policy, paddr, len, data)? {
             crate::memory::PhysAccess::Done => Ok(()),
-            crate::memory::PhysAccess::Mmio(token) => {
-                let clock = self.device_clock();
-                let a20_addr = self.memory.a20_addr(paddr);
+            crate::memory::PhysAccess::Mmio(hit) => {
+                // Bochs devices read `bx_pc_system` from inside their handler,
+                // so the tick a guest observes is the one live at the access,
+                // not the wheel's position at the last batch boundary.
+                let now_ticks = self.system_ticks();
                 self.devices.mmio_read(
-                    token,
-                    a20_addr,
+                    hit,
                     len as u32,
                     data,
-                    clock,
+                    now_ticks,
+                    self.pc_system,
                     self.device_manager,
                 );
                 Ok(())
@@ -4410,15 +4399,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> crate::Result<()> {
         match self.memory.write_physical_page(policy, paddr, len, data)? {
             crate::memory::PhysAccess::Done => Ok(()),
-            crate::memory::PhysAccess::Mmio(token) => {
-                let clock = self.device_clock();
-                let a20_addr = self.memory.a20_addr(paddr);
+            crate::memory::PhysAccess::Mmio(hit) => {
+                let now_ticks = self.system_ticks();
                 self.devices.mmio_write(
-                    token,
-                    a20_addr,
+                    hit,
                     len as u32,
                     &data[..len],
-                    clock,
+                    now_ticks,
+                    self.pc_system,
                     self.device_manager,
                 );
                 Ok(())

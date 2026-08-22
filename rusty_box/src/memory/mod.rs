@@ -215,7 +215,9 @@ pub enum PhysAccess {
     /// Memory serviced the access completely.
     Done,
     /// The address belongs to a memory-mapped device, which has not run yet.
-    Mmio(mmio_map::MmioToken),
+    /// Carries where in that device's window it landed, so the dispatcher
+    /// never has to subtract a base it would have to learn from the device.
+    Mmio(mmio_map::MmioHit),
 }
 
 //#define BIOS_MAP_LAST128K(addr) (((addr) | 0xfff00000) & BIOS_MASK)

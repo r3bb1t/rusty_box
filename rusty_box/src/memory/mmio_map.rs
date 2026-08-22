@@ -37,6 +37,19 @@ use crate::config::BxPhyAddress;
 #[repr(transparent)]
 pub struct MmioToken(pub u16);
 
+/// Where a physical access landed: whose region, and how far into it.
+///
+/// The offset is what the region already knows — memory found the region by
+/// its base, so subtracting that base costs nothing and saves the device
+/// re-deriving it from a base of its own. Kept together in one value so no
+/// dispatch site can pass the owner without the position.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MmioHit {
+    pub token: MmioToken,
+    /// Bytes from the start of the region the token names.
+    pub offset: u64,
+}
+
 /// Maximum regions mapped at once.
 ///
 /// The PC machine maps five (the VGA text/graphics window, the VGA LFB and MMIO
@@ -100,14 +113,14 @@ impl MmioMap {
         }
     }
 
-    /// The token owning `addr`, if any.
+    /// The region covering `addr`, if any.
     ///
     /// The hot half of this module: every physical access that misses the
     /// direct-RAM path asks. The occupancy bitmap answers the overwhelmingly
     /// common "no region here" in one load and one test, which is what the
     /// per-megabyte pointer table bought and why it is kept in this form.
     #[inline]
-    pub(crate) fn lookup(&self, addr: BxPhyAddress) -> Option<MmioToken> {
+    fn find(&self, addr: BxPhyAddress) -> Option<&MmioRegion> {
         let page = (addr >> 20) as usize;
         if page < MAPPED_MEGABYTES {
             if self.occupancy[page / 64] & (1u64 << (page % 64)) == 0 {
@@ -120,14 +133,23 @@ impl MmioMap {
             .iter()
             .flatten()
             .find(|region| region.contains(addr))
-            .map(|region| region.token)
+    }
+
+    /// Where an access to `addr` landed: whose region, and how far into it.
+    #[inline]
+    pub(crate) fn lookup(&self, addr: BxPhyAddress) -> Option<MmioHit> {
+        self.find(addr).map(|region| MmioHit {
+            token: region.token,
+            offset: addr - region.begin,
+        })
     }
 
     /// Whether any region covers `addr` — the direct-access path's question,
-    /// which needs the decision but not the owner.
+    /// which needs the decision but neither the owner nor the position, and so
+    /// does not compute them.
     #[inline]
     pub(crate) fn covers(&self, addr: BxPhyAddress) -> bool {
-        self.lookup(addr).is_some()
+        self.find(addr).is_some()
     }
 
     /// The 64 KB sub-range bitmap a region occupies within one 1 MB page.
@@ -308,14 +330,56 @@ mod tests {
     const VGA: MmioToken = MmioToken(1);
     const IOAPIC: MmioToken = MmioToken(2);
 
+    /// The owning token at `addr`. Most cases here are about *which* region
+    /// answers, not where in it the access landed; the offset has its own test.
+    fn owner(map: &MmioMap, addr: BxPhyAddress) -> Option<MmioToken> {
+        map.lookup(addr).map(|hit| hit.token)
+    }
+
     #[test]
     fn lookup_finds_the_owning_region_and_rejects_neighbours() {
         let mut map = MmioMap::new();
         map.map(VGA, 0xA_0000, 0xB_FFFF).unwrap();
-        assert_eq!(map.lookup(0xA_0000), Some(VGA));
-        assert_eq!(map.lookup(0xB_FFFF), Some(VGA));
-        assert_eq!(map.lookup(0x9_FFFF), None);
-        assert_eq!(map.lookup(0xC_0000), None);
+        assert_eq!(owner(&map, 0xA_0000), Some(VGA));
+        assert_eq!(owner(&map, 0xB_FFFF), Some(VGA));
+        assert_eq!(owner(&map, 0x9_FFFF), None);
+        assert_eq!(owner(&map, 0xC_0000), None);
+    }
+
+    /// The offset is measured from the region that answered, so a device never
+    /// sees an absolute address and a relocated region needs no base of its own
+    /// to subtract. A region moved by a BAR write reports the same offsets at
+    /// its new base as it did at the old one.
+    #[test]
+    fn a_hit_reports_the_distance_from_the_region_base() {
+        let mut map = MmioMap::new();
+        map.map(VGA, 0xA_0000, 0xB_FFFF).unwrap();
+        assert_eq!(map.lookup(0xA_0000), Some(MmioHit { token: VGA, offset: 0 }));
+        assert_eq!(
+            map.lookup(0xA_0500),
+            Some(MmioHit {
+                token: VGA,
+                offset: 0x500
+            })
+        );
+        assert_eq!(
+            map.lookup(0xB_FFFF),
+            Some(MmioHit {
+                token: VGA,
+                offset: 0x1_FFFF
+            })
+        );
+
+        map.relocate(VGA, Some((0xA_0000, 0xB_FFFF)), Some((0xF00_0000, 0xF01_FFFF)))
+            .unwrap();
+        assert_eq!(map.lookup(0xA_0500), None);
+        assert_eq!(
+            map.lookup(0xF00_0500),
+            Some(MmioHit {
+                token: VGA,
+                offset: 0x500
+            })
+        );
     }
 
     /// Bochs decides overlap on 64 KB sub-ranges of a 1 MB page, not on the
@@ -346,11 +410,11 @@ mod tests {
         let mut map = MmioMap::new();
         map.map(VGA, 0xE000_0000, 0xE0FF_FFFF).unwrap();
         map.unmap(IOAPIC, 0xE000_0000, 0xE0FF_FFFF).unwrap();
-        assert_eq!(map.lookup(0xE000_0000), Some(VGA), "wrong token must not unmap");
+        assert_eq!(owner(&map, 0xE000_0000), Some(VGA), "wrong token must not unmap");
         map.unmap(VGA, 0xE000_0000, 0xE0FF_0000).unwrap();
-        assert_eq!(map.lookup(0xE000_0000), Some(VGA), "wrong range must not unmap");
+        assert_eq!(owner(&map, 0xE000_0000), Some(VGA), "wrong range must not unmap");
         map.unmap(VGA, 0xE000_0000, 0xE0FF_FFFF).unwrap();
-        assert_eq!(map.lookup(0xE000_0000), None);
+        assert_eq!(owner(&map, 0xE000_0000), None);
         assert_eq!(map.len(), 0);
     }
 
@@ -366,7 +430,7 @@ mod tests {
             Some((0xE000_0000, 0xE01F_FFFF)),
         )
         .expect("a region must be allowed to grow over its own ground");
-        assert_eq!(map.lookup(0xE01F_FFFF), Some(VGA));
+        assert_eq!(owner(&map, 0xE01F_FFFF), Some(VGA));
         assert_eq!(map.len(), 1);
     }
 
@@ -385,8 +449,8 @@ mod tests {
             ),
             Err(MemoryError::OverlappingHandlers)
         ));
-        assert_eq!(map.lookup(0xE000_0000), Some(VGA));
-        assert_eq!(map.lookup(0xFEC0_0000), Some(IOAPIC));
+        assert_eq!(owner(&map, 0xE000_0000), Some(VGA));
+        assert_eq!(owner(&map, 0xFEC0_0000), Some(IOAPIC));
     }
 
     /// The occupancy bitmap is a rejection accelerator, never an answer: it
@@ -398,8 +462,8 @@ mod tests {
         map.map(VGA, 0x10_0000, 0x10_0FFF).unwrap();
         map.map(IOAPIC, 0x11_0000, 0x11_0FFF).unwrap();
         map.unmap(VGA, 0x10_0000, 0x10_0FFF).unwrap();
-        assert_eq!(map.lookup(0x11_0000), Some(IOAPIC), "shared megabyte lost");
-        assert_eq!(map.lookup(0x10_0000), None);
+        assert_eq!(owner(&map, 0x11_0000), Some(IOAPIC), "shared megabyte lost");
+        assert_eq!(owner(&map, 0x10_0000), None);
     }
 
     #[test]
@@ -407,8 +471,8 @@ mod tests {
         let mut map = MmioMap::new();
         let high: BxPhyAddress = 1 << 32;
         map.map(VGA, high, high + 0xFFFF).unwrap();
-        assert_eq!(map.lookup(high), Some(VGA));
-        assert_eq!(map.lookup(high - 1), None);
+        assert_eq!(owner(&map, high), Some(VGA));
+        assert_eq!(owner(&map, high - 1), None);
     }
 
     #[test]
