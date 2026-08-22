@@ -29,7 +29,7 @@ use super::{
 // unused-import lint is allowed rather than losing the no-std resolution.
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use crate::cpu::float::FloatExt;
+use rusty_box_core::FloatExt;
 
 /// Width pairing of a VPMOV widening conversion, named after the mnemonic
 /// suffix: `Bw` is byte-to-word, `Dq` dword-to-qword, and so on.

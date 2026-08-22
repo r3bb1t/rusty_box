@@ -3700,6 +3700,7 @@ dependencies = [
  "libc",
  "libm",
  "paste",
+ "rusty_box_core",
  "rusty_box_decoder",
  "tempfile",
  "thiserror 2.0.18",
@@ -3727,6 +3728,13 @@ name = "rusty_box_bximage"
 version = "0.0.3"
 dependencies = [
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rusty_box_core"
+version = "0.0.3"
+dependencies = [
+ "libm",
 ]
 
 [[package]]

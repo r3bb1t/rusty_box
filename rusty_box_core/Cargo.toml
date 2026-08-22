@@ -1,0 +1,26 @@
+[package]
+name = "rusty_box_core"
+description = "Architecture-neutral foundations shared by the rusty_box emulator, its device models and its execution engines"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+# The float methods `core` lacks. Not optional: `FloatExt` exists precisely so
+# arithmetic code needs no `cfg`, and making its backing optional would put one
+# back at every use site.
+libm = "0.2"
+
+[features]
+default = []
+# Additive: `alloc` adds owning conveniences, `std` adds host-backed ones and
+# routes `FloatExt` to the inherent methods instead of libm. Neither changes the
+# shape of anything that exists without them (R0).
+alloc = []
+std = ["alloc"]
+
+[lints]
+workspace = true

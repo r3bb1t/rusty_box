@@ -37,7 +37,7 @@ use super::{
 // unused-import lint is allowed rather than losing the no-std resolution.
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use crate::cpu::float::FloatExt;
+use rusty_box_core::FloatExt;
 
 // ============================================================================
 // Helper functions (duplicated from avx512.rs — module-private there)

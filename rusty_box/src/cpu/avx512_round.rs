@@ -43,7 +43,7 @@ use super::{
 // unused-import lint is allowed rather than losing the no-std resolution.
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use crate::cpu::float::FloatExt;
+use rusty_box_core::FloatExt;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]

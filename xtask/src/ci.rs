@@ -68,6 +68,9 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // read it. Every build's machine now derives `Send`.
     ("rusty_box/src", 97),
     ("rusty_box_decoder/src", 0),
+    // Zero, and structurally so: the crate carries `#![forbid(unsafe_code)]`,
+    // which the workspace lint table backs with a `deny` any new crate inherits.
+    ("rusty_box_core/src", 0),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. Zero, permanently: thread
 /// safety is derived from ownership, and `Emulator`'s `const` assertion in
@@ -243,6 +246,42 @@ struct Step {
 }
 
 const MATRIX: &[Step] = &[
+    // The core crate is proven on its own, in every configuration it ships,
+    // BEFORE anything that depends on it: a foundation that only compiles as
+    // part of its consumer is not a foundation. Its default build is the
+    // strictest one (no_std, no alloc), so the additive features are checked
+    // for what they add rather than for making it work.
+    Step {
+        name: "core tests (no_std + no_alloc)",
+        args: &["test", "--release", "-p", "rusty_box_core"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        name: "core tests (alloc)",
+        args: &["test", "--release", "-p", "rusty_box_core", "--features", "alloc"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        name: "core tests (std)",
+        args: &["test", "--release", "-p", "rusty_box_core", "--features", "std"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        name: "core bare-metal target check",
+        args: &[
+            "check",
+            "--release",
+            "-p",
+            "rusty_box_core",
+            "--target",
+            "x86_64-unknown-none",
+        ],
+        envs: &[],
+        stdout_marker: None,
+    },
     Step {
         name: "decoder tests",
         args: &["test", "--release", "-p", "rusty_box_decoder"],

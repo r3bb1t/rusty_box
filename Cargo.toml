@@ -1,5 +1,5 @@
 [workspace]
-members = ["rusty_box", "rusty_box_decoder", "rusty_box_gui", "rusty_box_bximage", "rusty_box_android", "xtask", "examples/rusty_box_web", "examples/rusty_box_uefi", "examples/no_alloc_smoke"]
+members = ["rusty_box_core", "rusty_box", "rusty_box_decoder", "rusty_box_gui", "rusty_box_bximage", "rusty_box_android", "xtask", "examples/rusty_box_web", "examples/rusty_box_uefi", "examples/no_alloc_smoke"]
 default-members = ["rusty_box"]
 resolver = "2"
 
@@ -12,6 +12,7 @@ repository = "https://github.com/r3bb1t/rusty_box"
 homepage = "https://github.com/r3bb1t/rusty_box"
 
 [workspace.dependencies]
+rusty_box_core = { path = "rusty_box_core", version = "0.0.3" }
 tracing = { version = "0.1", default-features = false, features = ["max_level_trace", "release_max_level_info"] }
 thiserror = { version = "2", default-features = false }
 clap = { version = "4.6", features = ["derive"] }
@@ -23,6 +24,14 @@ paste = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 egui = "0.35"
 eframe = { version = "0.35", default-features = false, features = ["x11", "wayland", "glow"] }
+
+# The default for a library crate here is proof-carrying. A crate opts in with
+# `[lints] workspace = true`; the ones that cannot yet (rusty_box, at 103 unsafe
+# tokens under a decreasing ratchet) simply do not, and P8 is where the last of
+# them joins. Host FFI will live only in named leaf crates, which opt out by
+# name with a `// UNSAFETY:` note and a ratchet baseline of their own.
+[workspace.lints.rust]
+unsafe_code = "deny"
 
 [profile.release]
 panic = "abort"

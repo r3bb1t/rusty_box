@@ -1,5 +1,14 @@
+//! The `f32`/`f64` methods `core` does not have.
+//!
+//! `std` provides `sqrt`, `floor` and friends as inherent methods; `core` does
+//! not, because they need a math library. One trait, implemented over `std`
+//! where it exists and `libm` where it does not, so arithmetic code reads the
+//! same in both builds and neither one gets a `cfg` of its own.
+
+/// Kept whole rather than trimmed to today's callers: this is the `std` float
+/// surface, and a method missing from it is a `cfg` at a use site.
 #[allow(dead_code)]
-pub(crate) trait FloatExt: Sized {
+pub trait FloatExt: Sized {
     fn sqrt(self) -> Self;
     fn floor(self) -> Self;
     fn ceil(self) -> Self;

@@ -11,7 +11,7 @@
 //! Ported from Bochs geforce.cc/geforce.h.
 
 #[cfg(not(feature = "std"))]
-use crate::cpu::float::FloatExt;
+use rusty_box_core::FloatExt;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use alloc::{boxed::Box, vec::Vec};

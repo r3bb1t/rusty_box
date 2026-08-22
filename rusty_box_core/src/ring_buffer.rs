@@ -198,9 +198,11 @@ mod tests {
         rb.push_back(10);
         rb.push_back(20);
         rb.push_back(30);
-        let v: Vec<u8> = rb.drain().collect();
-        assert_eq!(v, vec![10, 20, 30]);
-        assert!(rb.is_empty());
+        assert!(
+            rb.drain().eq([10u8, 20, 30]),
+            "drain yields every element in insertion order"
+        );
+        assert!(rb.is_empty(), "and leaves the buffer empty");
     }
 
     #[test]

@@ -16,12 +16,9 @@ pub use instrumentation::{HookHandle, InstrumentationError, IoHookType, MemHookT
 /// Re-exported beside the trait so implementing one needs a single import.
 pub use decoder::Instruction;
 
-/// Reason for CPU reset (always available, no alloc needed).
-#[derive(Debug, PartialEq, Copy, Clone)]
-pub enum ResetReason {
-    Software = 10,
-    Hardware = 11,
-}
+/// Re-exported where the CPU's consumers already look for it; a reset is a
+/// machine event, so the type itself is arch-neutral and lives in the core.
+pub use rusty_box_core::ResetReason;
 
 // Core CPU emulation modules (no alloc needed)
 pub mod error;
@@ -89,7 +86,6 @@ pub(super) mod event;
 pub(super) mod exception;
 pub(super) mod flag_ctrl;
 pub(super) mod flag_ctrl_pro;
-pub(crate) mod float;
 pub(super) mod fpu;
 pub(super) mod fred;
 pub(super) mod gf2;
