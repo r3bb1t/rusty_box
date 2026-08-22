@@ -97,6 +97,8 @@ pub use crate::pic;
 pub mod geforce;
 pub mod pit;
 pub mod device_api;
+/// Where a display adapter pushes a frame — the front-end contract.
+pub mod display_sink;
 pub mod ide;
 pub mod serial;
 pub(crate) mod wiring;

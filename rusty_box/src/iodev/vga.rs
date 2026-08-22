@@ -25,6 +25,10 @@
 #[cfg(feature = "alloc")]
 use alloc::{string::String, vec, vec::Vec};
 
+use crate::iodev::display_sink::{CursorPos, Dimensions, DisplaySink, Refreshed, Rgb};
+/// Only the graphics paths place tiles, and they need a buffer to convert into.
+#[cfg(feature = "alloc")]
+use crate::iodev::display_sink::TilePos;
 use crate::{config::BxPhyAddress, memory::BxMemC, Result};
 #[cfg(feature = "std")]
 use std::io::{self, Error, ErrorKind, Read, Write};
@@ -177,6 +181,9 @@ const VBE_DISPI_LFB_PHYSICAL_ADDRESS: u32 = 0xE000_0000;
 
 const VGA_X_TILESIZE: u32 = 16;
 const VGA_Y_TILESIZE: u32 = 24;
+/// One tile of RGBA pixels. A frame pushes tiles one at a time through a buffer
+/// of this size, so no part of the graphics path allocates.
+const TILE_RGBA_BYTES: usize = (VGA_X_TILESIZE * VGA_Y_TILESIZE * 4) as usize;
 
 /// QEMU-compatible MMIO BAR2 size (4KB)
 pub(crate) const PCI_VGA_MMIO_SIZE: u32 = 0x1000;
@@ -420,59 +427,6 @@ impl VgaTextGeometry {
     /// The `cursor_address` Bochs substitutes when the cursor lies outside the
     /// displayed page.
     pub(crate) const CURSOR_OFF: u16 = 0x7FFF;
-}
-
-/// VGA update result - contains data needed for GUI update
-/// This is returned by update() to allow no_std compatibility
-pub(crate) struct VgaUpdateResult {
-    /// Whether an update is needed
-    pub(crate) needs_update: bool,
-    /// Text buffer (new state)
-    pub(crate) text_buffer: [u8; VGA_TEXT_MEM_SIZE],
-    /// Text snapshot (old state) for comparison
-    pub(crate) text_snapshot: [u8; VGA_TEXT_MEM_SIZE],
-    /// Cursor address in text buffer
-    pub(crate) cursor_address: u16,
-    /// Text mode info
-    pub(crate) tm_info: VgaTextModeInfo,
-    /// Whether dimension_update should be called on the GUI
-    pub(crate) dimension_changed: bool,
-    /// Pixel width (for dimension_update)
-    pub(crate) iwidth: u32,
-    /// Pixel height (for dimension_update)
-    pub(crate) iheight: u32,
-    /// Font height in pixels (for dimension_update)
-    pub(crate) fheight: u32,
-    /// Font/char width in pixels (for dimension_update)
-    pub(crate) fwidth: u32,
-    /// The character generator changed this frame; the GUI must re-copy both
-    /// charmaps. Bochs signals this to its GUI through `set_text_charmap`,
-    /// which sets `bx_gui_c::charmap_updated` and forces a full text redraw.
-    pub(crate) charmap_updated: bool,
-}
-
-#[cfg(feature = "alloc")]
-pub(crate) enum VgaDisplayUpdate {
-    Text(VgaUpdateResult),
-    Graphics(VgaGraphicsUpdate),
-}
-
-#[cfg(feature = "alloc")]
-pub(crate) struct VgaGraphicsUpdate {
-    pub(crate) dimension_changed: bool,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) bpp: u16,
-    pub(crate) tiles: Vec<VgaGraphicsTile>,
-}
-
-#[cfg(feature = "alloc")]
-pub(crate) struct VgaGraphicsTile {
-    pub(crate) x: u32,
-    pub(crate) y: u32,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) rgba: Vec<u8>,
 }
 
 /// VBE (Bochs VGA Extension) state, matching Bochs `bx_vga_c::vbe`.
@@ -2960,19 +2914,19 @@ impl BxVgaC {
     }
 
     #[cfg(feature = "alloc")]
-    fn update_legacy_graphics(&mut self) -> Option<VgaGraphicsUpdate> {
+    fn refresh_legacy_graphics<S: DisplaySink>(&mut self, sink: &mut S) -> Refreshed {
         if self.vga_mem_updated == 0 {
-            return None;
+            return Refreshed::Unchanged;
         }
 
         let (width, height) = self.determine_screen_dimensions();
         if width == 0 || height == 0 {
-            return None;
+            return Refreshed::Unchanged;
         }
         // Bochs vgacore.cc update(): the graphics branch also bails out through
         // skip_update() once the dimensions are known.
         if self.skip_update() {
-            return None;
+            return Refreshed::Unchanged;
         }
         let dimension_changed =
             width != self.last_xres || height != self.last_yres || self.last_bpp > 8;
@@ -2983,6 +2937,13 @@ impl BxVgaC {
             self.last_fh = 0;
             self.last_bpp = 8;
             self.redraw_area(0, 0, width, height);
+            sink.dimension_update(Dimensions {
+                width,
+                height,
+                font_width: 0,
+                font_height: 0,
+                bits_per_pixel: 8,
+            });
         }
 
         // Bochs uses the per-frame latch here too (s.CRTC.start_addr).
@@ -3009,7 +2970,10 @@ impl BxVgaC {
             }
         };
         let shift = (self.graphics_regs[GFX_REG_GRAPHICS_MODE] >> 5) & 0x03;
-        let mut tiles = Vec::new();
+        // One tile's worth of pixels, reused across the frame. The tile size is
+        // a constant, so this is a fixed buffer rather than the vector of
+        // vectors a frame used to allocate.
+        let mut tile_rgba = [0u8; TILE_RGBA_BYTES];
 
         for yc in (0..height).step_by(VGA_Y_TILESIZE as usize) {
             let y_tile = yc / VGA_Y_TILESIZE;
@@ -3027,7 +2991,7 @@ impl BxVgaC {
 
                 let tile_width = VGA_X_TILESIZE.min(width - xc);
                 let tile_height = VGA_Y_TILESIZE.min(height - yc);
-                let mut rgba = vec![0u8; (tile_width * tile_height * 4) as usize];
+                let rgba = &mut tile_rgba[..(tile_width * tile_height * 4) as usize];
                 for r in 0..tile_height {
                     let mut y = yc + r;
                     // Bochs vgacore.cc update(): `if (s.y_doublescan) y >>= 1;`
@@ -3098,36 +3062,32 @@ impl BxVgaC {
                 if let Some(tile) = self.vga_tile_updated.get_mut(tile_index) {
                     *tile = false;
                 }
-                tiles.push(VgaGraphicsTile {
-                    x: xc,
-                    y: yc,
-                    width: tile_width,
-                    height: tile_height,
+                sink.graphics_tile_update(
                     rgba,
-                });
+                    TilePos {
+                        x: xc,
+                        y: yc,
+                        width: tile_width,
+                        height: tile_height,
+                    },
+                );
             }
         }
 
         self.vga_mem_updated = 0;
-        Some(VgaGraphicsUpdate {
-            dimension_changed,
-            width,
-            height,
-            bpp: 8,
-            tiles,
-        })
+        Refreshed::Frame
     }
 
     #[cfg(feature = "alloc")]
-    fn update_vbe_graphics(&mut self) -> Option<VgaGraphicsUpdate> {
+    fn refresh_vbe_graphics<S: DisplaySink>(&mut self, sink: &mut S) -> Refreshed {
         if self.vbe.enabled == 0 {
-            return None;
+            return Refreshed::Unchanged;
         }
 
         let width = self.vbe.xres as u32;
         let height = self.vbe.yres as u32;
         if width == 0 || height == 0 {
-            return None;
+            return Refreshed::Unchanged;
         }
 
         let dimension_changed = width != self.last_xres
@@ -3136,14 +3096,25 @@ impl BxVgaC {
         if dimension_changed {
             self.redraw_area(0, 0, width, height);
         } else if self.vga_mem_updated == 0 {
-            return None;
+            return Refreshed::Unchanged;
         }
 
         let vbe_mem_mask = self.vbe_memsize.saturating_sub(1);
         self.vbe.virtual_start &= vbe_mem_mask;
 
         let pitch = self.vbe.line_offset as u32;
-        let mut tiles = Vec::new();
+        // Ahead of the tiles: a front end sizes its surface before receiving
+        // pixels for it, which is the order the forwarding drain used.
+        if dimension_changed {
+            sink.dimension_update(Dimensions {
+                width,
+                height,
+                font_width: 0,
+                font_height: 0,
+                bits_per_pixel: self.vbe.bpp as u8,
+            });
+        }
+        let mut tile_rgba = [0u8; TILE_RGBA_BYTES];
 
         for yc in (0..height).step_by(VGA_Y_TILESIZE as usize) {
             let y_tile = yc / VGA_Y_TILESIZE;
@@ -3161,7 +3132,7 @@ impl BxVgaC {
 
                 let tile_width = VGA_X_TILESIZE.min(width - xc);
                 let tile_height = VGA_Y_TILESIZE.min(height - yc);
-                let mut rgba = vec![0u8; (tile_width * tile_height * 4) as usize];
+                let rgba = &mut tile_rgba[..(tile_width * tile_height * 4) as usize];
 
                 for r in 0..tile_height {
                     let y = yc + r;
@@ -3235,13 +3206,15 @@ impl BxVgaC {
                 if let Some(tile) = self.vga_tile_updated.get_mut(tile_index) {
                     *tile = false;
                 }
-                tiles.push(VgaGraphicsTile {
-                    x: xc,
-                    y: yc,
-                    width: tile_width,
-                    height: tile_height,
+                sink.graphics_tile_update(
                     rgba,
-                });
+                    TilePos {
+                        x: xc,
+                        y: yc,
+                        width: tile_width,
+                        height: tile_height,
+                    },
+                );
             }
         }
 
@@ -3254,13 +3227,7 @@ impl BxVgaC {
             self.last_fh = 0;
         }
 
-        Some(VgaGraphicsUpdate {
-            dimension_changed,
-            width,
-            height,
-            bpp: self.vbe.bpp,
-            tiles,
-        })
+        Refreshed::Frame
     }
 
     /// Vertical retrace: latch the frame's start address and re-anchor the
@@ -3385,10 +3352,55 @@ impl BxVgaC {
         &self.charmap[map & 1]
     }
 
-    #[cfg(feature = "alloc")]
-    pub(crate) fn update(&mut self) -> Option<VgaDisplayUpdate> {
+    /// Draw one frame into `sink` — Bochs `bx_vgacore_c::update()`.
+    ///
+    /// Upstream calls the front end from inside this function, and so does
+    /// this: the screen-clear request, the completed DAC writes, the character
+    /// generators and the pixels all reach the sink here, in Bochs's order,
+    /// instead of being stashed for a caller to drain and forward.
+    ///
+    /// One signature in every build (R0). Without `alloc` there is no VBE
+    /// backing store and no tile buffer, so only the text path can produce a
+    /// frame — which is what the no-alloc build did before, through a
+    /// separately-typed second entry point.
+    pub(crate) fn refresh<S: DisplaySink>(&mut self, sink: &mut S) -> Refreshed {
+        // Bochs vgacore.cc skip_update() calls bx_gui->clear_screen() for a
+        // pending sequencer clear even on frames it skips, so this is drained
+        // before any decision not to draw.
+        if core::mem::take(&mut self.pending_clear_screen) {
+            sink.clear_screen();
+        }
+
+        // Bochs publishes each completed DAC write through
+        // palette_change_common() before the frame that uses it.
+        if core::mem::take(&mut self.dac_any_dirty) {
+            for index in 0..PEL_COLOR_COUNT {
+                if !core::mem::take(&mut self.dac_dirty[index]) {
+                    continue;
+                }
+                let entry = self.pel_data[index];
+                let _redraw = sink.palette_change(
+                    index as u8,
+                    Rgb {
+                        red: entry[0] << DAC_SHIFT,
+                        green: entry[1] << DAC_SHIFT,
+                        blue: entry[2] << DAC_SHIFT,
+                    },
+                );
+            }
+        }
+
+        let drawn = self.refresh_frame(sink);
+        sink.flush();
+        drawn
+    }
+
+    /// The mode dispatch, split out so [`Self::refresh`] reads as the sequence
+    /// Bochs performs rather than as one long function.
+    fn refresh_frame<S: DisplaySink>(&mut self, sink: &mut S) -> Refreshed {
+        #[cfg(feature = "alloc")]
         if self.vbe.enabled != 0 {
-            return self.update_vbe_graphics().map(VgaDisplayUpdate::Graphics);
+            return self.refresh_vbe_graphics(sink);
         }
 
         let graphics_alpha = (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
@@ -3401,23 +3413,28 @@ impl BxVgaC {
                 || memory_mapping == VgaMemoryMapping::ColorText32k);
 
         if is_text_mode {
-            self.update_text_mode().map(VgaDisplayUpdate::Text)
-        } else {
-            self.update_legacy_graphics()
-                .map(VgaDisplayUpdate::Graphics)
+            return self.refresh_text_mode(sink);
+        }
+
+        #[cfg(feature = "alloc")]
+        {
+            self.refresh_legacy_graphics(sink)
+        }
+        // A planar graphics frame needs a tile buffer to convert into, which
+        // this build has no allocator for. The mode still runs — the guest's
+        // writes land in VRAM and the dirty bitmap tracks them — there is just
+        // nothing that can present it.
+        #[cfg(not(feature = "alloc"))]
+        {
+            Refreshed::Unchanged
         }
     }
 
-    #[cfg(not(feature = "alloc"))]
-    pub(crate) fn update(&mut self) -> Option<VgaUpdateResult> {
-        self.update_text_mode()
-    }
-
-    /// Update VGA display (matching vgacore.cc)
-    /// This processes text mode and prepares data for GUI update
-    /// Returns update result if an update is needed
-    /// Must be no_std compatible (only uses core + alloc)
-    fn update_text_mode(&mut self) -> Option<VgaUpdateResult> {
+    /// Draw a text frame — Bochs `bx_vgacore_c::update()`'s alphanumeric path.
+    ///
+    /// The one mode every build can present: text needs no conversion buffer,
+    /// so this is what a no-alloc machine draws.
+    fn refresh_text_mode<S: DisplaySink>(&mut self, sink: &mut S) -> Refreshed {
         // Check if we're in text mode (match Bochs `vgacore.cc` semantics).
         //
         // In Bochs, `s.graphics_ctrl.graphics_alpha` and `s.graphics_ctrl.memory_mapping`
@@ -3428,7 +3445,7 @@ impl BxVgaC {
         // Text mode when `graphics_alpha == 0`. Memory mapping selects which aperture
         // is active (B0000 vs B8000 for mono/color text).
         if !self.in_text_mode() {
-            return None;
+            return Refreshed::Unchanged;
         }
 
         // Bochs vgacore.cc update(): `if ((s.vga_mem_updated & 4) > 0) update_charmap();`
@@ -3442,18 +3459,16 @@ impl BxVgaC {
         // Bochs vgacore.cc update(): `if (skip_update()) return;` — no frame is
         // drawn while the display is disabled or a mode set is in progress.
         if self.skip_update() {
-            return None;
+            return Refreshed::Unchanged;
         }
-
-        // Keep a copy of the previous snapshot for the GUI diff.
-        // We'll update `self.text_snapshot` to the new state at the end of this call.
-        let old_snapshot = self.text_snapshot.clone();
 
         // The grid comes from the shared reader, so the frame drawn here and
         // any scrape of the same registers describe the same screen. The start
         // address is the per-frame latch, as in Bochs's renderers
         // (`tm_info.start_address = (s.CRTC.start_addr << 1)`).
-        let geometry = self.text_geometry()?;
+        let Some(geometry) = self.text_geometry() else {
+            return Refreshed::Unchanged;
+        };
         let start_address = geometry.start_address;
         let line_offset = geometry.line_offset;
         let cursor_address = geometry.cursor_address;
@@ -3524,20 +3539,6 @@ impl BxVgaC {
             actl_palette,
         };
 
-        // Always return update result if in text mode (original always calls text_update_common).
-        // The GUI will compare old/new to determine what actually changed.
-        let needs_update = self.vga_mem_updated > 0;
-
-        // Prepare new state for the GUI.
-        let new_buffer = self.text_buffer.clone();
-
-        // Update internal snapshot after preparing the return values.
-        if self.vga_mem_updated > 0 {
-            self.text_snapshot[..visible_size].copy_from_slice(&self.text_buffer[..visible_size]);
-            self.vga_mem_updated = 0;
-            self.text_dirty = false;
-        }
-
         // Dimension_update parameters (matching vgacore.cc)
         let c_width = geometry.char_width;
         let i_width = geometry.pixel_width;
@@ -3556,22 +3557,63 @@ impl BxVgaC {
             self.last_fw = c_width;
             self.last_fh = fh;
             self.last_bpp = 8;
+            sink.dimension_update(Dimensions {
+                width: i_width,
+                height: i_height,
+                font_width: c_width,
+                font_height: fh,
+                bits_per_pixel: 8,
+            });
         }
 
-        Some(VgaUpdateResult {
-            needs_update,
-            text_buffer: new_buffer,
-            text_snapshot: old_snapshot,
-            cursor_address,
-            tm_info,
-            dimension_changed,
-            iwidth: i_width,
-            iheight: i_height,
-            fheight: fh,
-            fwidth: c_width,
-            charmap_updated,
-        })
+        // Bochs vgacore.cc update_charmap() pushes both guest character
+        // generators before the text is drawn with them.
+        if charmap_updated {
+            sink.set_text_charmap(0, &self.charmap[0]);
+            sink.set_text_charmap(1, &self.charmap[1]);
+        }
+
+        // The snapshot is the previous frame's cells and the buffer is this
+        // frame's; the front end diffs them. Pushing before the snapshot
+        // advances is what removes the two 32 KiB copies this used to return.
+        sink.text_update(
+            &self.text_snapshot,
+            &self.text_buffer,
+            cursor_cell(cursor_address, &tm_info),
+            &tm_info,
+        );
+
+        // Bochs redraws unconditionally in text mode and lets the front end
+        // decide from the diff, so the frame above is always sent; only the
+        // internal snapshot advance is conditional.
+        if self.vga_mem_updated > 0 {
+            self.text_snapshot[..visible_size].copy_from_slice(&self.text_buffer[..visible_size]);
+            self.vga_mem_updated = 0;
+            self.text_dirty = false;
+        }
+
+        Refreshed::Frame
     }
+}
+
+/// Where the text cursor sits, in character cells, or `None` when it is
+/// disabled or parked outside the visible page.
+///
+/// Bochs signals the absent cursor with an out-of-range address and leaves
+/// every front end to recognise it. The magic number stops here instead.
+///
+/// `line_offset` divides safely: `text_geometry` substitutes the default row
+/// stride when the CRTC offset register reads zero, so a mode this is reached
+/// in never carries a zero.
+fn cursor_cell(cursor_address: u16, info: &VgaTextModeInfo) -> Option<CursorPos> {
+    if cursor_address >= 0x7fff {
+        return None;
+    }
+    let offset_from_start = cursor_address.saturating_sub(info.start_address);
+    Some(CursorPos {
+        col: u32::from((offset_from_start % info.line_offset) / 2),
+        row: u32::from(offset_from_start / info.line_offset),
+    })
 }
 
 /// VGA memory read handler (called from memory system)
@@ -5158,6 +5200,71 @@ fn validate_vga_snapshot_bar_base(base: u32, span: u32) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::iodev::device_api::WindowOffset;
+    use crate::iodev::display_sink::Redraw;
+
+    /// Records what a front end would receive, so a test asserts the frame that
+    /// reaches a display rather than an intermediate value on the way there.
+    #[derive(Default)]
+    struct RecordingSink {
+        dimensions: Option<Dimensions>,
+        tiles: alloc::vec::Vec<(TilePos, alloc::vec::Vec<u8>)>,
+        text_frames: usize,
+        cursor: Option<CursorPos>,
+        charmaps: alloc::vec::Vec<usize>,
+        palette: alloc::vec::Vec<(u8, Rgb)>,
+        clears: usize,
+        flushes: usize,
+    }
+
+    impl RecordingSink {
+        /// The tile whose top-left corner is at `(x, y)`.
+        fn tile_at(&self, x: u32, y: u32) -> &[u8] {
+            self.tiles
+                .iter()
+                .find(|(at, _)| at.x == x && at.y == y)
+                .map(|(_, rgba)| rgba.as_slice())
+                .expect("no tile at that position")
+        }
+    }
+
+    impl DisplaySink for RecordingSink {
+        fn dimension_update(&mut self, dims: Dimensions) {
+            self.dimensions = Some(dims);
+        }
+        fn text_update(
+            &mut self,
+            _previous: &[u8],
+            _current: &[u8],
+            cursor: Option<CursorPos>,
+            _info: &VgaTextModeInfo,
+        ) {
+            self.text_frames += 1;
+            self.cursor = cursor;
+        }
+        fn graphics_tile_update(&mut self, rgba: &[u8], at: TilePos) {
+            self.tiles.push((at, rgba.to_vec()));
+        }
+        fn palette_change(&mut self, index: u8, colour: Rgb) -> Redraw {
+            self.palette.push((index, colour));
+            Redraw::NotNeeded
+        }
+        fn set_text_charmap(&mut self, map: usize, _glyphs: &[u8]) {
+            self.charmaps.push(map);
+        }
+        fn clear_screen(&mut self) {
+            self.clears += 1;
+        }
+        fn flush(&mut self) {
+            self.flushes += 1;
+        }
+    }
+
+    /// Draw one frame and report everything the front end saw.
+    fn draw(vga: &mut BxVgaC) -> RecordingSink {
+        let mut sink = RecordingSink::default();
+        vga.refresh(&mut sink);
+        sink
+    }
     use crate::iodev::pci::PciDevice;
     #[cfg(feature = "std")]
     use crate::snapshot::SnapshotSection;
@@ -5545,18 +5652,10 @@ mod tests {
             &[0x11, 0x22, 0x33, 0x44],
         );
 
-        let Some(VgaDisplayUpdate::Graphics(update)) = vga.update() else {
-            panic!("expected VBE graphics update");
-        };
-        assert_eq!(update.width, 2);
-        assert_eq!(update.height, 2);
-        assert_eq!(update.bpp, 32);
-        let tile = update
-            .tiles
-            .iter()
-            .find(|tile| tile.x == 0 && tile.y == 0)
-            .expect("missing origin tile");
-        assert_eq!(&tile.rgba[0..4], &[0x33, 0x22, 0x11, 0xff]);
+        let sink = draw(&mut vga);
+        let dims = sink.dimensions.expect("a mode set announces its geometry");
+        assert_eq!((dims.width, dims.height, dims.bits_per_pixel), (2, 2, 32));
+        assert_eq!(&sink.tile_at(0, 0)[0..4], &[0x33, 0x22, 0x11, 0xff]);
     }
 
     #[test]
@@ -5681,20 +5780,20 @@ mod tests {
         vga.pel_data[5] = [0x3f, 0, 0];
         vga.lfb_write(WindowOffset(0), 1, &[5]);
 
-        let Some(VgaDisplayUpdate::Graphics(first)) = vga.update() else {
-            panic!("expected first graphics update");
-        };
-        assert_eq!(&first.tiles[0].rgba[0..4], &[0xfc, 0x00, 0x00, 0xff]);
+        let first = draw(&mut vga);
+        assert_eq!(&first.tile_at(0, 0)[0..4], &[0xfc, 0x00, 0x00, 0xff]);
 
         vga.write_port(VGA_PEL_ADDR_WRITE, 5, 1);
         vga.write_port(VGA_PEL_DATA, 0, 1);
         vga.write_port(VGA_PEL_DATA, 0x3f, 1);
         vga.write_port(VGA_PEL_DATA, 0, 1);
 
-        let Some(VgaDisplayUpdate::Graphics(second)) = vga.update() else {
-            panic!("expected palette-only graphics update");
-        };
-        assert_eq!(&second.tiles[0].rgba[0..4], &[0x00, 0xfc, 0x00, 0xff]);
+        let second = draw(&mut vga);
+        assert_eq!(&second.tile_at(0, 0)[0..4], &[0x00, 0xfc, 0x00, 0xff]);
+        assert!(
+            second.palette.iter().any(|&(index, _)| index == 5),
+            "a completed DAC write reaches the front end as well as the pixels"
+        );
     }
 
     #[test]
@@ -5720,15 +5819,8 @@ mod tests {
 
         vga.legacy_write(WindowOffset(0), 1, &[5]);
 
-        let Some(VgaDisplayUpdate::Graphics(update)) = vga.update() else {
-            panic!("expected legacy graphics update");
-        };
-        let tile = update
-            .tiles
-            .iter()
-            .find(|tile| tile.x == 0 && tile.y == 0)
-            .expect("missing origin tile");
-        assert_eq!(&tile.rgba[0..4], &[0xfc, 0x00, 0x00, 0xff]);
+        let sink = draw(&mut vga);
+        assert_eq!(&sink.tile_at(0, 0)[0..4], &[0xfc, 0x00, 0x00, 0xff]);
     }
     #[test]
     fn legacy_graphics_register_change_redraws_without_memory_write() {
@@ -5751,13 +5843,19 @@ mod tests {
         vga.crtc_regs[CRTC_MODE_CONTROL] = 0x40;
 
         vga.legacy_write(WindowOffset(0), 1, &[5]);
-        assert!(matches!(vga.update(), Some(VgaDisplayUpdate::Graphics(_))));
-        assert!(vga.update().is_none());
+        assert!(!draw(&mut vga).tiles.is_empty(), "the write produces a frame");
+        assert!(
+            draw(&mut vga).tiles.is_empty(),
+            "and nothing further until something changes again"
+        );
 
         vga.write_port(VGA_CRTC_INDEX, CRTC_OFFSET as u32, 1);
         vga.write_port(VGA_CRTC_DATA, 1, 1);
 
-        assert!(matches!(vga.update(), Some(VgaDisplayUpdate::Graphics(_))));
+        assert!(
+            !draw(&mut vga).tiles.is_empty(),
+            "a register change redraws with no memory write of its own"
+        );
     }
 
     #[test]
@@ -5779,15 +5877,8 @@ mod tests {
         assert!(wrapped_start < vga.vbe_memory.len());
         vga.vbe_memory[wrapped_start..wrapped_start + 4].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
 
-        let Some(VgaDisplayUpdate::Graphics(update)) = vga.update() else {
-            panic!("expected wrapped VBE graphics update");
-        };
-        let tile = update
-            .tiles
-            .iter()
-            .find(|tile| tile.x == 0 && tile.y == 0)
-            .expect("missing origin tile");
-        assert_eq!(&tile.rgba[0..4], &[0x33, 0x22, 0x11, 0xff]);
+        let sink = draw(&mut vga);
+        assert_eq!(&sink.tile_at(0, 0)[0..4], &[0x33, 0x22, 0x11, 0xff]);
     }
 
     // ---- Finding #5: write to 0x3CC (Misc Output *read* port) is ignored ----
@@ -5983,7 +6074,18 @@ mod tests {
         assert_eq!(vga.charmap_address2, 0x0000);
         assert_ne!(vga.vga_mem_updated & VGA_MEM_UPDATED_CHARMAP, 0);
 
-        vga.update_charmap();
+        // The frame carries both generators to the front end. Every path that
+        // presents a frame goes through this one refresh, so a guest that
+        // reprograms its font cannot render with stale glyphs on one front end
+        // and current ones on another — which is exactly what happened while
+        // the shared-framebuffer path kept its own copy of the forwarding.
+        let sink = draw(&mut vga);
+        assert_eq!(
+            sink.charmaps,
+            alloc::vec![0, 1],
+            "a dirty character generator reaches the display, both maps"
+        );
+
         assert_eq!(vga.charmap(0)[0], 0xA5, "plane-2 byte 0");
         assert_eq!(vga.charmap(0)[1], 0x3C, "plane-2 byte 1 (stride 4)");
         assert_eq!(

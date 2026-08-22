@@ -220,8 +220,16 @@ impl Display<'_, crate::iodev::vga::BxVgaC> {
     ///
     /// The pump a front end that owns the machine on its own thread calls once
     /// per frame; the `BxGui` path does the same thing through a trait object.
-    pub fn render_into(&mut self, framebuffer: &mut crate::gui::shared_display::SharedDisplay) {
-        super::run::render_vga_into(self.source, framebuffer);
+    ///
+    /// Reports whether the frame changed, which a caller may use to skip the
+    /// upload of a framebuffer it already has on screen. Ignoring it is
+    /// correct: the same buffer carries text written by other paths, so an
+    /// unconditional upload is never wrong, only sometimes wasteful.
+    pub fn render_into(
+        &mut self,
+        framebuffer: &mut crate::gui::shared_display::SharedDisplay,
+    ) -> crate::iodev::display_sink::Refreshed {
+        super::run::render_vga_into(self.source, framebuffer)
     }
 
     /// Make the next render redraw everything.

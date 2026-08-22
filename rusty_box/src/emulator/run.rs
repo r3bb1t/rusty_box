@@ -1,5 +1,3 @@
-#[cfg(feature = "alloc")]
-use crate::iodev::vga::VgaDisplayUpdate;
 use crate::{
     cpu::{
         cpu::CpuActivityState,
@@ -275,99 +273,22 @@ pub(crate) enum StopCause {
 
 impl<'a, T: Instrumentation> Emulator<T> {
     #[cfg(feature = "alloc")]
-    /// Update GUI with VGA text mode changes
+    /// Draw one VGA frame to the attached front end.
     ///
-    /// Call this periodically to refresh the display (matching vgacore.cc)
-    /// Uses VGA update() function to process text mode and get update data
+    /// Bochs `bx_vgacore_c::update()` calls the GUI directly; so does this, by
+    /// handing the card a sink over the `BxGui` this machine holds. What used
+    /// to live here — the clear-screen and palette drains, the charmap push,
+    /// the cursor arithmetic and the two shapes of frame — is inside the card
+    /// now, where upstream keeps it, and is shared with every other front end.
     pub fn update_gui(&mut self) {
-        if let Some(ref mut gui) = self.gui {
-            // Bochs vgacore.cc skip_update() calls bx_gui->clear_screen() for a
-            // pending sequencer clear-screen request even on frames it skips.
-            if self.device_manager.vga.take_pending_clear_screen() {
-                gui.clear_screen();
-            }
-            // Bochs vgacore.cc publishes each completed DAC write to the GUI via
-            // palette_change_common(). Drained here because the VGA cannot reach
-            // the GUI directly.
-            {
-                let changes: alloc::vec::Vec<(u8, u8, u8, u8)> =
-                    self.device_manager.vga.take_dac_palette_changes().collect();
-                for (index, red, green, blue) in changes {
-                    let _accepted = gui.palette_change(index, red, green, blue);
-                }
-            }
-            if let Some(update_result) = self.device_manager.vga.update() {
-                match update_result {
-                    VgaDisplayUpdate::Text(update_result) => {
-                        let cursor_x = if update_result.cursor_address < 0x7fff {
-                            let offset_from_start = update_result
-                                .cursor_address
-                                .saturating_sub(update_result.tm_info.start_address);
-                            (offset_from_start % update_result.tm_info.line_offset) / 2
-                        } else {
-                            0xffff
-                        };
-
-                        let cursor_y = if update_result.cursor_address < 0x7fff {
-                            let offset_from_start = update_result
-                                .cursor_address
-                                .saturating_sub(update_result.tm_info.start_address);
-                            (offset_from_start / update_result.tm_info.line_offset) as u32
-                        } else {
-                            0xffff
-                        };
-
-                        if update_result.dimension_changed {
-                            gui.dimension_update(
-                                update_result.iwidth,
-                                update_result.iheight,
-                                update_result.fheight,
-                                update_result.fwidth,
-                                8,
-                            );
-                        }
-
-                        // Bochs vgacore.cc update_charmap() pushes both guest
-                        // character generators to the GUI (set_text_charmap)
-                        // before the text is drawn with them.
-                        if update_result.charmap_updated {
-                            gui.set_text_charmap(0, self.device_manager.vga.charmap(0));
-                            gui.set_text_charmap(1, self.device_manager.vga.charmap(1));
-                        }
-
-                        gui.text_update(
-                            &update_result.text_snapshot,
-                            &update_result.text_buffer,
-                            cursor_x as u32,
-                            cursor_y,
-                            &update_result.tm_info,
-                        );
-                    }
-                    VgaDisplayUpdate::Graphics(update_result) => {
-                        if update_result.dimension_changed {
-                            gui.dimension_update(
-                                update_result.width,
-                                update_result.height,
-                                0,
-                                0,
-                                update_result.bpp as u32,
-                            );
-                        }
-                        for tile in update_result.tiles {
-                            gui.graphics_tile_update_rgba(
-                                &tile.rgba,
-                                tile.x,
-                                tile.y,
-                                tile.width,
-                                tile.height,
-                            );
-                        }
-                    }
-                }
-            }
-
-            gui.flush();
-        }
+        let Some(ref mut gui) = self.gui else {
+            return;
+        };
+        let mut sink = crate::gui::gui_trait::GuiSink::new(&mut **gui);
+        // Deliberately not consulted here: a `BxGui` presents whatever it was
+        // given when the refresh flushes, so this pump has nothing to decide.
+        // The buffer-rendering path does — see `Display::render_into`.
+        let _presented_unconditionally = self.device_manager.vga.refresh(&mut sink);
     }
 
     /// Drain pending host input (keyboard scancodes, mouse, serial) from the GUI
@@ -779,99 +700,16 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
 /// Render one VGA frame into a `SharedDisplay` framebuffer.
 ///
-/// The single-threaded equivalent of `update_gui()` — instead of going through
-/// the `BxGui` trait (which requires `Arc<Mutex<>>` for thread-safe sharing),
-/// it writes directly to the provided display. Ideal for WASM where the
-/// emulator and display are owned by the same event loop. Reached through
-/// [`crate::emulator::Display::render_into`].
+/// The same refresh `update_gui` performs, with the shared framebuffer as the
+/// sink instead of a `BxGui`. It used to be a second hand-maintained copy of
+/// that forwarding code, which is why it never forwarded the character
+/// generators: a guest that reprogrammed the font rendered with stale glyphs
+/// here and nowhere else. One pump, one sink, so the two cannot drift again.
+/// Reached through [`crate::emulator::Display::render_into`].
 #[cfg(feature = "alloc")]
 pub(crate) fn render_vga_into(
     vga: &mut crate::iodev::vga::BxVgaC,
     display: &mut crate::gui::shared_display::SharedDisplay,
-) {
-    {
-        #[cfg(debug_assertions)]
-        let dbg = {
-            static DBG_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-            DBG_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-        };
-
-        if let Some(update_result) = vga.update() {
-            match update_result {
-                VgaDisplayUpdate::Text(update_result) => {
-                    #[cfg(debug_assertions)]
-                    if dbg % 300 == 1 {
-                        let non_zero = update_result
-                            .text_buffer
-                            .iter()
-                            .filter(|&&b| b != 0)
-                            .count();
-                        let first_16: Vec<u8> =
-                            update_result.text_buffer.iter().take(32).copied().collect();
-                        tracing::trace!(
-                            "VGA update: dim_changed={}, needs_update={}, buf_non_zero={}, first_32={:02x?}, start_addr={}",
-                            update_result.dimension_changed,
-                            update_result.needs_update,
-                            non_zero,
-                            first_16,
-                            update_result.tm_info.start_address,
-                        );
-                    }
-                    let cursor_x = if update_result.cursor_address < 0x7fff {
-                        let offset_from_start = update_result
-                            .cursor_address
-                            .saturating_sub(update_result.tm_info.start_address);
-                        (offset_from_start % update_result.tm_info.line_offset) / 2
-                    } else {
-                        0xffff
-                    };
-
-                    let cursor_y = if update_result.cursor_address < 0x7fff {
-                        let offset_from_start = update_result
-                            .cursor_address
-                            .saturating_sub(update_result.tm_info.start_address);
-                        (offset_from_start / update_result.tm_info.line_offset) as u32
-                    } else {
-                        0xffff
-                    };
-
-                    if update_result.dimension_changed {
-                        display.resize(
-                            update_result
-                                .iwidth
-                                .checked_div(update_result.fwidth)
-                                .unwrap_or(update_result.iwidth),
-                            update_result
-                                .iheight
-                                .checked_div(update_result.fheight)
-                                .unwrap_or(update_result.iheight),
-                            update_result.fwidth,
-                            update_result.fheight,
-                        );
-                    }
-
-                    display.render_text_to_framebuffer(
-                        &update_result.text_buffer,
-                        cursor_x as u32,
-                        cursor_y,
-                        update_result.tm_info.cs_start,
-                        update_result.tm_info.cs_end,
-                        update_result.tm_info.line_graphics,
-                        update_result.tm_info.start_address as u32,
-                        update_result.tm_info.line_offset as u32,
-                        &update_result.tm_info.actl_palette,
-                    );
-                }
-                VgaDisplayUpdate::Graphics(update_result) => {
-                    if update_result.dimension_changed {
-                        display.resize_pixels(update_result.width, update_result.height);
-                    }
-                    for tile in update_result.tiles {
-                        display.blit_rgba_tile(tile.x, tile.y, tile.width, tile.height, &tile.rgba);
-                    }
-                }
-            }
-        }
-    }
-
+) -> crate::iodev::display_sink::Refreshed {
+    vga.refresh(display)
 }
