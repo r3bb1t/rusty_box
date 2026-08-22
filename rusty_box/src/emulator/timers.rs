@@ -270,7 +270,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
                     } else {
                         0
                     };
-                    self.device_manager.vga.vertical_timer(now_usec);
+                    self.device_manager
+                        .vga
+                        .vertical_timer(now_usec, current_ticks);
                 }
                 TimerOwner::PciIdeCh0 => {
                     for _ in 0..counts[entry] {

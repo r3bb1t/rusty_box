@@ -288,7 +288,14 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // Deliberately not consulted here: a `BxGui` presents whatever it was
         // given when the refresh flushes, so this pump has nothing to decide.
         // The buffer-rendering path does — see `Display::render_into`.
-        let _presented_unconditionally = self.device_manager.vga.refresh(&mut sink);
+        // Self-tracked: this engine executes every guest write itself, so the
+        // card's own tile bitmap is the complete record of what changed. A
+        // hypervisor engine, whose framebuffer window the guest writes without
+        // exiting, supplies its page bitmap here instead.
+        let _presented_unconditionally = self
+            .device_manager
+            .vga
+            .refresh(&mut sink, crate::iodev::vga_card::Dirt::SelfTracked);
     }
 
     /// Drain pending host input (keyboard scancodes, mouse, serial) from the GUI
@@ -708,8 +715,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
 /// Reached through [`crate::emulator::Display::render_into`].
 #[cfg(feature = "alloc")]
 pub(crate) fn render_vga_into(
-    vga: &mut crate::iodev::vga::VgaCore,
+    vga: &mut crate::iodev::vga_card::VgaCard<crate::iodev::vga_card::StdVga>,
     display: &mut crate::gui::shared_display::SharedDisplay,
 ) -> crate::iodev::display_sink::Refreshed {
-    vga.refresh(display)
+    vga.refresh(display, crate::iodev::vga_card::Dirt::SelfTracked)
 }

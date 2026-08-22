@@ -99,6 +99,8 @@ pub mod pit;
 pub mod device_api;
 /// Where a display adapter pushes a frame — the front-end contract.
 pub mod display_sink;
+/// A display adapter as a VGA core plus one extension.
+pub mod vga_card;
 pub mod ide;
 pub mod serial;
 pub(crate) mod wiring;

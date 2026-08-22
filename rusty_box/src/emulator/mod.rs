@@ -600,6 +600,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         self.device_manager.serial.after_restore_snapshot_v3()?;
         self.device_manager
             .vga
+            .core_mut()
             .rebuild_snapshot_v3_derived_state()?;
         self.validate_restored_irq_levels(&keyboard, &cmos, sci_level)?;
         self.sync_restored_event_levels();
@@ -1701,7 +1702,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Get VGA Graphics Register 6 (memory mapping control).
     pub fn peek_vga_gr6(&self) -> u8 {
-        self.device_manager.vga.graphics_regs[6]
+        self.device_manager.vga.core().graphics_regs[6]
     }
 
     /// Get CR3 (page directory base register) for page table walks.

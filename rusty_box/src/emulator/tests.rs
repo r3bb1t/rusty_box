@@ -2347,7 +2347,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     emu.initialize().unwrap();
 
                     let expected = pci_enabled && pci_vga;
-                    assert_eq!(emu.device_manager.vga.pci_enabled(), expected);
+                    assert_eq!(emu.device_manager.vga.core().pci_enabled(), expected);
                     assert_eq!(
                         emu.device_manager.vga.pci_read(0x04, 1),
                         if expected { 0x03 } else { 0xFFFF_FFFF }

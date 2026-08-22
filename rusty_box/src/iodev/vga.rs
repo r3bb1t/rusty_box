@@ -335,7 +335,7 @@ const VGA_WINDOW_VGA64K_END: BxPhyAddress = 0xAFFFF;
 /// routes on its own bases has to keep them in step with wherever the machine
 /// actually mapped it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VgaWindow {
+pub enum VgaWindow {
     /// The legacy `A0000-BFFFF` aperture — planar, latched, chain-4.
     Legacy,
     /// The linear framebuffer behind PCI BAR0.
@@ -353,7 +353,7 @@ impl VgaWindow {
     /// The inverse of [`Self::id`]. `None` for a window this adapter never
     /// minted a token for, which the machine cannot produce and a test can.
     #[inline]
-    fn from_id(window: crate::iodev::device_api::WindowId) -> Option<Self> {
+    pub(crate) fn from_id(window: crate::iodev::device_api::WindowId) -> Option<Self> {
         match window.0 {
             0 => Some(Self::Legacy),
             1 => Some(Self::Lfb),
@@ -845,6 +845,10 @@ impl Default for VgaCore {
 }
 
 impl VgaCore {
+    /// Video memory a standard VGA has — Bochs `bx_vgacore_c` allocates this
+    /// much when no extension asks for more.
+    pub const LEGACY_VRAM_BYTES: usize = VGA_MEM_SIZE;
+
     /// Create a new VGA controller
     pub(crate) fn new() -> Self {
         let vbe_memsize = 16 << 20;
@@ -3079,7 +3083,11 @@ impl VgaCore {
     }
 
     #[cfg(feature = "alloc")]
-    fn refresh_vbe_graphics<S: DisplaySink>(&mut self, sink: &mut S) -> Refreshed {
+    fn refresh_vbe_graphics<S: DisplaySink>(
+        &mut self,
+        sink: &mut S,
+        dirt: crate::iodev::vga_card::Dirt<'_>,
+    ) -> Refreshed {
         if self.vbe.enabled == 0 {
             return Refreshed::Unchanged;
         }
@@ -3095,7 +3103,11 @@ impl VgaCore {
             || self.vbe.bpp as u32 != self.last_bpp;
         if dimension_changed {
             self.redraw_area(0, 0, width, height);
-        } else if self.vga_mem_updated == 0 {
+        } else if self.vga_mem_updated == 0 && dirt.reports_nothing() {
+            // Both sources must be silent to skip the frame. Bailing out on the
+            // device's own bitmap alone would mean a hypervisor's page report
+            // never reached the tile loop below it, and the screen would freeze
+            // with nothing in the device to say why.
             return Refreshed::Unchanged;
         }
 
@@ -3116,22 +3128,36 @@ impl VgaCore {
         }
         let mut tile_rgba = [0u8; TILE_RGBA_BYTES];
 
+        let bytes_per_pixel = u64::from(self.vbe.bpp_multiplier.max(1));
         for yc in (0..height).step_by(VGA_Y_TILESIZE as usize) {
             let y_tile = yc / VGA_Y_TILESIZE;
             for xc in (0..width).step_by(VGA_X_TILESIZE as usize) {
                 let x_tile = xc / VGA_X_TILESIZE;
                 let tile_index = y_tile as usize * self.num_x_tiles as usize + x_tile as usize;
-                if !self
+                let tile_width = VGA_X_TILESIZE.min(width - xc);
+                let tile_height = VGA_Y_TILESIZE.min(height - yc);
+
+                // The union of what the device saw and what the hypervisor
+                // reported (REPLAN decision 11). Under the software engine the
+                // first term is the whole answer; under a hypervisor the
+                // framebuffer is host RAM the guest writes without exiting, so
+                // the device saw none of it and the page bitmap is.
+                let self_tracked = self
                     .vga_tile_updated
                     .get(tile_index)
                     .copied()
-                    .unwrap_or(false)
-                {
+                    .unwrap_or(false);
+                let page_tracked = !matches!(dirt, crate::iodev::vga_card::Dirt::SelfTracked)
+                    && (0..tile_height).any(|r| {
+                        let row = u64::from(self.vbe.virtual_start.wrapping_add((yc + r) * pitch))
+                            & u64::from(vbe_mem_mask);
+                        let start = row + u64::from(xc) * bytes_per_pixel;
+                        dirt.covers(start, start + u64::from(tile_width) * bytes_per_pixel)
+                    });
+                if !self_tracked && !page_tracked {
                     continue;
                 }
 
-                let tile_width = VGA_X_TILESIZE.min(width - xc);
-                let tile_height = VGA_Y_TILESIZE.min(height - yc);
                 let rgba = &mut tile_rgba[..(tile_width * tile_height * 4) as usize];
 
                 for r in 0..tile_height {
@@ -3363,7 +3389,11 @@ impl VgaCore {
     /// backing store and no tile buffer, so only the text path can produce a
     /// frame — which is what the no-alloc build did before, through a
     /// separately-typed second entry point.
-    pub(crate) fn refresh<S: DisplaySink>(&mut self, sink: &mut S) -> Refreshed {
+    pub(crate) fn refresh<S: DisplaySink>(
+        &mut self,
+        sink: &mut S,
+        dirt: crate::iodev::vga_card::Dirt<'_>,
+    ) -> Refreshed {
         // Bochs vgacore.cc skip_update() calls bx_gui->clear_screen() for a
         // pending sequencer clear even on frames it skips, so this is drained
         // before any decision not to draw.
@@ -3390,17 +3420,26 @@ impl VgaCore {
             }
         }
 
-        let drawn = self.refresh_frame(sink);
+        let drawn = self.refresh_frame(sink, dirt);
         sink.flush();
         drawn
     }
 
     /// The mode dispatch, split out so [`Self::refresh`] reads as the sequence
     /// Bochs performs rather than as one long function.
-    fn refresh_frame<S: DisplaySink>(&mut self, sink: &mut S) -> Refreshed {
+    fn refresh_frame<S: DisplaySink>(
+        &mut self,
+        sink: &mut S,
+        // Consulted by the framebuffer path only: the legacy aperture and the
+        // text plane are latched, plane-masked and chain-4 addressed, so their
+        // window can never be direct-mapped and never carries page-tracked
+        // dirt. Without an allocator there is no framebuffer path at all.
+        #[cfg_attr(not(feature = "alloc"), allow(unused_variables))]
+        dirt: crate::iodev::vga_card::Dirt<'_>,
+    ) -> Refreshed {
         #[cfg(feature = "alloc")]
         if self.vbe.enabled != 0 {
-            return self.refresh_vbe_graphics(sink);
+            return self.refresh_vbe_graphics(sink, dirt);
         }
 
         let graphics_alpha = (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
@@ -3681,19 +3720,23 @@ impl VgaCore {
         len: u32,
         data: &mut [u8],
     ) {
-        let base = VGA_WINDOW_GRAPHICS_BASE + at.get();
-        for (i, current_addr) in (base..(base + len as u64)).enumerate() {
-            if let Some(byte) = data.get_mut(i) {
-                #[cfg(feature = "alloc")]
-                {
-                    if self.vbe.enabled != 0 && self.vbe.bpp != VBE_DISPI_BPP_4 {
-                        *byte = self.vbe_mem_read_byte(current_addr);
-                        continue;
-                    }
-                }
-                *byte = vga_mem_read_byte(self, current_addr);
+        for (i, byte) in data.iter_mut().enumerate().take(len as usize) {
+            *byte = self.legacy_read_byte(at.get() + i as u64);
+        }
+    }
+
+    /// One byte of the legacy aperture — Bochs `bx_vgacore_c::mem_read`, whose
+    /// virtual is per byte because a card claims individual addresses. The
+    /// width-aware handlers are the register blocks, not video memory.
+    pub(crate) fn legacy_read_byte(&mut self, offset: u64) -> u8 {
+        let addr = VGA_WINDOW_GRAPHICS_BASE + offset;
+        #[cfg(feature = "alloc")]
+        {
+            if self.vbe.enabled != 0 && self.vbe.bpp != VBE_DISPI_BPP_4 {
+                return self.vbe_mem_read_byte(addr);
             }
         }
+        vga_mem_read_byte(self, addr)
     }
 
     /// Read from the linear framebuffer behind BAR0.
@@ -3744,19 +3787,58 @@ impl VgaCore {
         len: u32,
         data: &[u8],
     ) {
-        let base = VGA_WINDOW_GRAPHICS_BASE + at.get();
-        for (i, current_addr) in (base..(base + len as u64)).enumerate() {
-            if let Some(&value) = data.get(i) {
-                #[cfg(feature = "alloc")]
-                {
-                    if self.vbe.enabled != 0 && self.vbe.bpp != VBE_DISPI_BPP_4 {
-                        self.vbe_mem_write_byte(current_addr, value);
-                        continue;
-                    }
-                }
-                vga_mem_write_byte(self, current_addr, value);
+        for (i, &value) in data.iter().enumerate().take(len as usize) {
+            self.legacy_write_byte(at.get() + i as u64, value);
+        }
+    }
+
+    /// One byte of a video-memory window.
+    ///
+    /// The unit an extension is offered an access in, because that is the unit
+    /// Bochs offers one in: `bx_vgacore_c::mem_read` takes a single address and
+    /// the handler above it loops. Only the framebuffer windows are addressed
+    /// this way — a register block is width-aware and is never split.
+    pub(crate) fn window_read_byte(&mut self, window: VgaWindow, offset: u64) -> u8 {
+        match window {
+            VgaWindow::Legacy => self.legacy_read_byte(offset),
+            VgaWindow::Lfb => {
+                let mut byte = [0u8; 1];
+                self.lfb_read(crate::iodev::device_api::WindowOffset(offset), 1, &mut byte);
+                byte[0]
+            }
+            VgaWindow::Registers => {
+                let mut byte = [0u8; 1];
+                self.vbe_mmio_read(crate::iodev::device_api::WindowOffset(offset), 1, &mut byte);
+                byte[0]
             }
         }
+    }
+
+    /// The write half of [`Self::window_read_byte`].
+    pub(crate) fn window_write_byte(&mut self, window: VgaWindow, offset: u64, value: u8) {
+        match window {
+            VgaWindow::Legacy => self.legacy_write_byte(offset, value),
+            VgaWindow::Lfb => {
+                self.lfb_write(crate::iodev::device_api::WindowOffset(offset), 1, &[value])
+            }
+            VgaWindow::Registers => {
+                self.vbe_mmio_write(crate::iodev::device_api::WindowOffset(offset), 1, &[value])
+            }
+        }
+    }
+
+    /// One byte into the legacy aperture — the write half of
+    /// [`Self::legacy_read_byte`], and per byte for the same reason.
+    pub(crate) fn legacy_write_byte(&mut self, offset: u64, value: u8) {
+        let addr = VGA_WINDOW_GRAPHICS_BASE + offset;
+        #[cfg(feature = "alloc")]
+        {
+            if self.vbe.enabled != 0 && self.vbe.bpp != VBE_DISPI_BPP_4 {
+                self.vbe_mem_write_byte(addr, value);
+                return;
+            }
+        }
+        vga_mem_write_byte(self, addr, value);
     }
 
     /// Write to the linear framebuffer behind BAR0. Bochs vga.cc `mem_write`'s
@@ -5261,8 +5343,14 @@ mod tests {
 
     /// Draw one frame and report everything the front end saw.
     fn draw(vga: &mut VgaCore) -> RecordingSink {
+        draw_with(vga, crate::iodev::vga_card::Dirt::SelfTracked)
+    }
+
+    /// Draw one frame with a stated source of dirtiness — the hypervisor case,
+    /// where the device observed none of the guest's writes.
+    fn draw_with(vga: &mut VgaCore, dirt: crate::iodev::vga_card::Dirt<'_>) -> RecordingSink {
         let mut sink = RecordingSink::default();
-        vga.refresh(&mut sink);
+        vga.refresh(&mut sink, dirt);
         sink
     }
     use crate::iodev::pci::PciDevice;
@@ -5855,6 +5943,69 @@ mod tests {
         assert!(
             !draw(&mut vga).tiles.is_empty(),
             "a register change redraws with no memory write of its own"
+        );
+    }
+
+    /// A framebuffer window mapped as host RAM produces no exits, so the card
+    /// sees none of the guest's writes and its own tile bitmap stays clean. The
+    /// hypervisor's page bitmap is then the only record of what changed, and a
+    /// frame drawn from it must reach the front end anyway.
+    ///
+    /// This is the path that cannot be retrofitted: a refresh with nowhere to
+    /// receive a bitmap would present a stale screen forever under WHP or KVM,
+    /// with nothing in the device to indicate why.
+    #[test]
+    fn a_page_bitmap_selects_tiles_the_device_never_saw_written() {
+        let mut vga = VgaCore::new();
+        write_vbe(&mut vga, VBE_DISPI_INDEX_XRES, 2);
+        write_vbe(&mut vga, VBE_DISPI_INDEX_YRES, 2);
+        write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_32);
+        write_vbe(
+            &mut vga,
+            VBE_DISPI_INDEX_ENABLE,
+            VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED,
+        );
+        // The mode set marks everything dirty; take that frame first so what
+        // follows is only what the bitmap accounts for.
+        let _mode_set = draw(&mut vga);
+
+        // Write straight into video memory, exactly as a guest does through a
+        // direct-mapped window: no device path runs, so no tile is marked.
+        vga.vbe_memory[0..4].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        assert!(
+            draw(&mut vga).tiles.is_empty(),
+            "self-tracking cannot see a write the device never handled"
+        );
+
+        // The hypervisor reports page 0 dirty, which is where those bytes are.
+        let bitmap = [1u64];
+        let sink = draw_with(
+            &mut vga,
+            crate::iodev::vga_card::Dirt::Pages {
+                bitmap: &bitmap,
+                page_size: 4096,
+            },
+        );
+        assert_eq!(
+            &sink.tile_at(0, 0)[0..4],
+            &[0x33, 0x22, 0x11, 0xff],
+            "the page bitmap must produce the tile self-tracking missed"
+        );
+
+        // A bitmap reporting nothing dirty produces nothing, so the union does
+        // not simply redraw everything whenever a bitmap is supplied.
+        let clean = [0u64];
+        assert!(
+            draw_with(
+                &mut vga,
+                crate::iodev::vga_card::Dirt::Pages {
+                    bitmap: &clean,
+                    page_size: 4096,
+                },
+            )
+            .tiles
+            .is_empty(),
+            "a clean bitmap draws nothing"
         );
     }
 

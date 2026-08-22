@@ -45,7 +45,7 @@ use super::pit::{
 use super::serial::{BxSerialC, SerialTxDrain};
 use super::BxDevicesC;
 use super::device_api::{ChipsetEffect, MmioDevice, PioDevice, SmramControl};
-use super::vga::VgaCore;
+use super::vga_card::{StdVga, VgaCard};
 use super::wiring;
 use super::DevSlot;
 
@@ -264,7 +264,7 @@ pub struct DeviceManager {
     /// ATA/IDE Hard Drive Controller
     pub(crate) ide: super::ide::IdeSubsystem,
     /// VGA Display Controller
-    pub(crate) vga: VgaCore,
+    pub(crate) vga: VgaCard<StdVga>,
     /// I/O APIC (82093AA) — interrupt routing for APIC-based systems
     /// Bochs: `bx_ioapic_c *pluginIOAPIC` (iodev/iodev.h)
     pub(crate) ioapic: BxIoApic,
@@ -387,7 +387,7 @@ impl DeviceManager {
             keyboard: BxKeyboardC::new(),
             hpet: super::hpet::BxHpetC::new(),
             ide: super::ide::IdeSubsystem::new(),
-            vga: VgaCore::new(),
+            vga: VgaCard::with_extension(StdVga),
             ioapic: BxIoApic::new(),
             acpi: BxAcpiCtrl::new(),
             pci_bridge: BxPciBridge::new(),
@@ -802,7 +802,7 @@ impl DeviceManager {
             // PIIX4 ACPI controller
             BxAcpiCtrl::DEVFUNC => self.acpi.pci_read(address, io_len),
             // PCI VGA (returns 0xFFFFFFFF itself when pci_vga is off)
-            VgaCore::DEVFUNC => self.vga.pci_read(address, io_len),
+            VgaCard::<StdVga>::DEVFUNC => self.vga.pci_read(address, io_len),
             // Unpopulated devfunc: enumeration reads all-ones
             _ => 0xFFFF_FFFF,
         }
@@ -1578,7 +1578,7 @@ impl DeviceManager {
                             }
                         }
                     }
-                    VgaCore::DEVFUNC => {
+                    VgaCard::<StdVga>::DEVFUNC => {
                         let effects = pci_config_write(&mut self.vga, reg_addr, value, io_len);
                         if let Some(effects) = effects {
                             if effects.lfb || effects.mmio {
@@ -2732,7 +2732,7 @@ mod tests {
         assert_eq!(BxPiix3::DEVFUNC, PIIX3_ISA_BRIDGE);
         assert_eq!(BxPciIde::DEVFUNC, PIIX3_IDE);
         assert_eq!(BxAcpiCtrl::DEVFUNC, PIIX4_ACPI);
-        assert_eq!(VgaCore::DEVFUNC, PCI_VGA);
+        assert_eq!(VgaCard::<StdVga>::DEVFUNC, PCI_VGA);
 
         on_big_stack(|| {
             let mut dm = DeviceManager::new();
