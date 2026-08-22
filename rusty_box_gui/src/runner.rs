@@ -183,7 +183,7 @@ where
         emu.set_stop_flag(stop_flag);
     }
     // Apply the pre-boot VBE mode after reset (reset re-defaults the VGA, and
-    // BxVgaC::set_preferred_mode persists it across any later guest-triggered
+    // VgaCore::set_preferred_mode persists it across any later guest-triggered
     // reset). Raises the DISPI caps so the guest may select this resolution.
     if let Some(mode) = config.vga_mode {
         emu.display()

@@ -514,7 +514,7 @@ impl Default for VbeState {
 ///
 /// The decoder deliberately leaves the live handler identity committed at its
 /// existing bases.  The machine-level restore path must relocate the handlers
-/// atomically, then call [`BxVgaC::commit_snapshot_v3_mapping_target`].
+/// atomically, then call [`VgaCore::commit_snapshot_v3_mapping_target`].
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct VgaSnapshotRestoreTarget {
@@ -578,7 +578,7 @@ impl From<&VbeState> for VgaSnapshotVbeState {
 /// Every field and inherent method stays crate-private — the surface a caller
 /// gets is the role traits the adapter implements, and nothing else.
 #[derive(Debug)]
-pub struct BxVgaC {
+pub struct VgaCore {
     /// CRTC index register
     crtc_index: u8,
     /// CRTC registers (25 registers)
@@ -838,13 +838,13 @@ pub struct BxVgaC {
     pending_mmio_base: Option<u32>,
 }
 
-impl Default for BxVgaC {
+impl Default for VgaCore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl BxVgaC {
+impl VgaCore {
     /// Create a new VGA controller
     pub(crate) fn new() -> Self {
         let vbe_memsize = 16 << 20;
@@ -1129,7 +1129,7 @@ impl BxVgaC {
 }
 
 #[cfg(feature = "std")]
-impl crate::snapshot::SnapshotSection for BxVgaC {
+impl crate::snapshot::SnapshotSection for VgaCore {
     const TAG: u32 = crate::snapshot::SEC_VGA;
     type Restored = VgaSnapshotRestoreTarget;
 
@@ -1490,7 +1490,7 @@ impl crate::snapshot::SnapshotSection for BxVgaC {
 
 }
 
-impl BxVgaC {
+impl VgaCore {
     /// Returns the desired VGA BAR targets encoded in PCI configuration without
     /// changing handler registration or committing a queued relocation.
     #[cfg(feature = "std")]
@@ -3620,7 +3620,7 @@ fn cursor_cell(cursor_address: u16, info: &VgaTextModeInfo) -> Option<CursorPos>
 /// Based on bx_vgacore_c::mem_read / mem_read_handler in vgacore.cc
 /// Implements read mode 0 (return selected plane) and read mode 1 (color compare).
 /// Loads latch register on every read.
-impl BxVgaC {
+impl VgaCore {
     #[cfg(feature = "alloc")]
     fn vbe_mem_read_byte(&mut self, addr: BxPhyAddress) -> u8 {
         let offset = if addr >= self.vbe.base_address as BxPhyAddress {
@@ -3793,7 +3793,7 @@ impl BxVgaC {
 /// The adapter's three windows, each answering only what the machine routed to
 /// it. Replaces `is_mmio_addr`, which existed solely to re-derive this split
 /// from the physical address.
-impl crate::iodev::device_api::MmioDevice for BxVgaC {
+impl crate::iodev::device_api::MmioDevice for VgaCore {
     fn mmio_read(
         &mut self,
         window: crate::iodev::device_api::WindowId,
@@ -3832,7 +3832,7 @@ impl crate::iodev::device_api::MmioDevice for BxVgaC {
     }
 }
 
-fn vga_storage_get(vga: &BxVgaC, index: usize) -> u8 {
+fn vga_storage_get(vga: &VgaCore, index: usize) -> u8 {
     #[cfg(feature = "alloc")]
     if vga.vbe.enabled != 0 && vga.vbe.bpp == VBE_DISPI_BPP_4 {
         return vga.vbe_memory.get(index).copied().unwrap_or(0);
@@ -3841,7 +3841,7 @@ fn vga_storage_get(vga: &BxVgaC, index: usize) -> u8 {
     vga.vga_memory.get(index).copied().unwrap_or(0)
 }
 
-fn vga_storage_set(vga: &mut BxVgaC, index: usize, value: u8) {
+fn vga_storage_set(vga: &mut VgaCore, index: usize, value: u8) {
     #[cfg(feature = "alloc")]
     if vga.vbe.enabled != 0 && vga.vbe.bpp == VBE_DISPI_BPP_4 {
         if let Some(slot) = vga.vbe_memory.get_mut(index) {
@@ -3859,7 +3859,7 @@ fn vga_storage_set(vga: &mut BxVgaC, index: usize, value: u8) {
 }
 
 /// Read a single byte from VGA memory. Matches Bochs vgacore.cc `mem_read`.
-fn vga_mem_read_byte(vga: &mut BxVgaC, addr: BxPhyAddress) -> u8 {
+fn vga_mem_read_byte(vga: &mut VgaCore, addr: BxPhyAddress) -> u8 {
     let mut read_map_select = vga.graphics_regs[GFX_REG_READ_MAP_SELECT] & 0x03;
 
     // Window gating: compute offset from address (Bochs vgacore.cc)
@@ -3961,7 +3961,7 @@ fn vga_mem_read_byte(vga: &mut BxVgaC, addr: BxPhyAddress) -> u8 {
 }
 
 /// Write a single byte to VGA memory. Matches Bochs vgacore.cc `mem_write`.
-fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
+fn vga_mem_write_byte(vga: &mut VgaCore, addr: BxPhyAddress, value: u8) {
     let sequ_map_mask = vga.seq_regs[SEQ_REG_MAP_MASK] & 0x0F;
     let graphics_alpha = (vga.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
 
@@ -4524,7 +4524,7 @@ pub(crate) struct VgaBarChange {
     pub mmio: bool,
 }
 
-impl BxVgaC {
+impl VgaCore {
     /// Enable PCI presence (`1234:1111`, class `0x030000`) and seed the config
     /// space. Bochs vga.cc `init_pci_conf` + `init_bar_mem`. Config-gated
     /// (`[display] pci_vga`), off by default.
@@ -4569,7 +4569,7 @@ impl BxVgaC {
 
 }
 
-impl crate::iodev::pci::PciDevice for BxVgaC {
+impl crate::iodev::pci::PciDevice for VgaCore {
     const DEVFUNC: u8 = crate::iodev::pci::pci_device(2, 0);
     type WriteEffects = VgaBarChange;
 
@@ -4669,7 +4669,7 @@ impl crate::iodev::pci::PciDevice for BxVgaC {
 
 }
 
-impl BxVgaC {
+impl VgaCore {
     /// Inspect the LFB relocation awaiting memory-handler re-registration.
     pub(crate) fn peek_pending_lfb_relocate(&self) -> Option<(u32, u32)> {
         self.pending_lfb_relocate
@@ -5260,7 +5260,7 @@ mod tests {
     }
 
     /// Draw one frame and report everything the front end saw.
-    fn draw(vga: &mut BxVgaC) -> RecordingSink {
+    fn draw(vga: &mut VgaCore) -> RecordingSink {
         let mut sink = RecordingSink::default();
         vga.refresh(&mut sink);
         sink
@@ -5272,21 +5272,21 @@ mod tests {
     use std::io::Cursor;
 
 
-    fn write_vbe(vga: &mut BxVgaC, index: u16, value: u16) {
+    fn write_vbe(vga: &mut VgaCore, index: u16, value: u16) {
         vga.write_port(VBE_DISPI_IOPORT_INDEX, index as u32, 2);
         vga.write_port(VBE_DISPI_IOPORT_DATA, value as u32, 2);
     }
 
-    fn pci_vga() -> BxVgaC {
-        let mut vga = BxVgaC::new();
+    fn pci_vga() -> VgaCore {
+        let mut vga = VgaCore::new();
         vga.enable_pci();
         vga
     }
 
     /// A colour-text adapter whose CRTC describes `cols` columns of
     /// `char_height`-scanline cells over a `scan_lines`-line display.
-    fn text_mode_vga(cols: u8, char_height: u8, scan_lines: u16) -> BxVgaC {
-        let mut vga = BxVgaC::new();
+    fn text_mode_vga(cols: u8, char_height: u8, scan_lines: u16) -> VgaCore {
+        let mut vga = VgaCore::new();
         vga.graphics_regs[GFX_REG_MISC] =
             (VgaMemoryMapping::ColorText32k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
         vga.crtc_regs[CRTC_HORIZ_DISPLAY_END] = cols.saturating_sub(1);
@@ -5431,7 +5431,7 @@ mod tests {
 
     #[test]
     fn pci_disabled_is_invisible_to_enumeration() {
-        let vga = BxVgaC::new();
+        let vga = VgaCore::new();
         assert!(!vga.pci_enabled());
         assert_eq!(vga.pci_read(0x00, 4), 0xFFFF_FFFF);
         // Writes are ignored, no BAR change signalled.
@@ -5591,7 +5591,7 @@ mod tests {
 
     #[test]
     fn preferred_mode_raises_caps_reallocs_tiles_and_survives_reset() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         let default_x_tiles = vga.num_x_tiles;
 
         // 1920 exceeds the built-in 1600 cap, forcing a cap raise + tile regrow.
@@ -5621,7 +5621,7 @@ mod tests {
 
     #[test]
     fn preferred_mode_never_lowers_default_caps() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         let (dx, dy) = (vga.vbe.max_xres, vga.vbe.max_yres);
 
         // A small mode must not shrink the built-in capability ceiling.
@@ -5635,7 +5635,7 @@ mod tests {
 
     #[test]
     fn vbe_io_ports_program_mode_and_lfb_update_returns_rgba_tile() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
 
         write_vbe(&mut vga, VBE_DISPI_INDEX_XRES, 2);
         write_vbe(&mut vga, VBE_DISPI_INDEX_YRES, 2);
@@ -5660,7 +5660,7 @@ mod tests {
 
     #[test]
     fn vbe_4bpp_bank_write_offsets_legacy_vga_memory() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.seq_chain_four = true;
         vga.seq_odd_even_dis = true;
         vga.graphics_regs[GFX_REG_MISC] =
@@ -5681,7 +5681,7 @@ mod tests {
 
     #[test]
     fn vbe_4bpp_chain_four_bank_write_updates_vbe_backing() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.seq_chain_four = true;
         vga.seq_odd_even_dis = true;
         vga.graphics_regs[GFX_REG_MISC] =
@@ -5701,7 +5701,7 @@ mod tests {
 
     #[test]
     fn vbe_4bpp_planar_bank_write_is_addressable() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.seq_odd_even_dis = true;
         vga.seq_regs[SEQ_REG_MAP_MASK] = 0x01;
         vga.graphics_regs[GFX_REG_MISC] =
@@ -5725,7 +5725,7 @@ mod tests {
 
     #[test]
     fn vbe_4bpp_read_bank_is_independent_from_write_bank() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.seq_chain_four = true;
         vga.seq_odd_even_dis = true;
         vga.graphics_regs[GFX_REG_MISC] =
@@ -5750,7 +5750,7 @@ mod tests {
 
     #[test]
     fn disabling_vbe_clears_legacy_bank_offset() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.seq_chain_four = true;
         vga.seq_odd_even_dis = true;
         vga.graphics_regs[GFX_REG_MISC] =
@@ -5771,7 +5771,7 @@ mod tests {
 
     #[test]
     fn vbe_8bpp_dac_change_redraws_existing_tile() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
 
         write_vbe(&mut vga, VBE_DISPI_INDEX_XRES, 1);
         write_vbe(&mut vga, VBE_DISPI_INDEX_YRES, 1);
@@ -5798,7 +5798,7 @@ mod tests {
 
     #[test]
     fn legacy_chain_four_graphics_update_returns_palette_rgba_tile() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.vga_enabled = true;
         vga.video_enabled = true;
         vga.seq_regs[SEQ_REG_RESET] = 0x03;
@@ -5824,7 +5824,7 @@ mod tests {
     }
     #[test]
     fn legacy_graphics_register_change_redraws_without_memory_write() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.vga_enabled = true;
         vga.video_enabled = true;
         vga.seq_regs[SEQ_REG_RESET] = 0x03;
@@ -5860,7 +5860,7 @@ mod tests {
 
     #[test]
     fn vbe_virtual_offset_wraps_and_redraws() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
 
         write_vbe(&mut vga, VBE_DISPI_INDEX_XRES, 1);
         write_vbe(&mut vga, VBE_DISPI_INDEX_YRES, 1);
@@ -5886,7 +5886,7 @@ mod tests {
     // The real Misc Output write port is 0x3C2.
     #[test]
     fn misc_output_write_to_0x3cc_is_ignored() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
 
         // Program a known, distinctive Misc Output value via the real write
         // port (0x3C2). Keep color_emulation=1 so the color-mode ports stay
@@ -5914,7 +5914,7 @@ mod tests {
     // writes are no-ops (Bochs vgacore.cc write: `default:` case does nothing) ----
     #[test]
     fn sequencer_out_of_range_index_data_write_is_noop() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.seq_regs = [0x11, 0x22, 0x33, 0x44, 0x55];
 
         vga.write_port(VGA_SEQ_INDEX, 8, 1);
@@ -5931,7 +5931,7 @@ mod tests {
     // not an aliased register (Bochs vgacore.cc read: `case 0x22`) ----
     #[test]
     fn crtc_index_0x22_reads_back_graphics_latch() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         // Give CR2 (start horizontal blank) a sentinel value distinct from the
         // latch. With the old `& 0x1F` masking, index 0x22 aliased onto CR2.
         vga.crtc_regs[CRTC_START_HORIZ_BLANK] = 0xAB;
@@ -5955,7 +5955,7 @@ mod tests {
     // DATA writes are no-ops (Bochs vgacore.cc write: `default:` case does nothing) ----
     #[test]
     fn graphics_out_of_range_index_data_write_is_noop() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.graphics_regs = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
         vga.write_port(VGA_GRAPHICS_INDEX, 0x20, 1);
@@ -5972,7 +5972,7 @@ mod tests {
     fn word_read_of_crtc_returns_index_and_data() {
         // Bochs vgacore.cc read: a 16-bit access combines two byte reads,
         // low | high<<8 — inw(0x3D4) → index | data<<8.
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.write_port(VGA_CRTC_INDEX, CRTC_OVERFLOW as u32, 1);
         vga.crtc_regs[CRTC_OVERFLOW] = 0x5A;
         let word = vga.read_port(VGA_CRTC_INDEX, 2, 0);
@@ -5984,7 +5984,7 @@ mod tests {
     // read case 0x03ca returns it; read case 0x03db returns 0.
     #[test]
     fn feature_control_round_trips_via_3da_and_3ca() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         assert_eq!(vga.read_port(0x3CA, 1, 0), 0x00, "reset value is 0");
 
         vga.write_port(VGA_STATUS, 0xFF, 1);
@@ -6017,8 +6017,8 @@ mod tests {
     // 0x03c5). Reset register 0's falling edge also clears char-map select.
     #[test]
     fn sequencer_registers_mask_on_store_like_bochs() {
-        let mut vga = BxVgaC::new();
-        let write_seq = |vga: &mut BxVgaC, index: u32, value: u32| {
+        let mut vga = VgaCore::new();
+        let write_seq = |vga: &mut VgaCore, index: u32, value: u32| {
             vga.write_port(VGA_SEQ_INDEX, index, 1);
             vga.write_port(VGA_SEQ_DATA, value, 1);
         };
@@ -6054,7 +6054,7 @@ mod tests {
     // the two map offsets through charmap_offset[], gated on CRTC 9 being > 0.
     #[test]
     fn guest_charmap_extracts_plane_two_like_bochs() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
 
         // Two distinct glyph patterns at the plane-2 bytes for offsets
         // 0x0000 (map index 0) and 0x4000 (map index 1).
@@ -6114,8 +6114,8 @@ mod tests {
     // Bochs vgacore.cc write case 0x03c0 data-write mode: per-register bit masks.
     #[test]
     fn attribute_registers_mask_on_store_like_bochs() {
-        let mut vga = BxVgaC::new();
-        let write_attr = |vga: &mut BxVgaC, index: u32, value: u32| {
+        let mut vga = VgaCore::new();
+        let write_attr = |vga: &mut VgaCore, index: u32, value: u32| {
             // Address phase (flip-flop clear), then data phase.
             vga.attr_flip_flop = false;
             vga.write_port(VGA_ATTRIB_ADDR, index, 1);
@@ -6140,7 +6140,7 @@ mod tests {
     // Bochs vgacore.cc CRTC write case 0x09: y_doublescan = ((value & 0x9f) > 0).
     #[test]
     fn crtc_max_scan_line_derives_y_doublescan() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.write_port(VGA_CRTC_INDEX, CRTC_MAX_SCAN_LINE as u32, 1);
 
         // 0x00 -> no doubling.
@@ -6164,7 +6164,7 @@ mod tests {
     fn write_to_0x3c1_ignored_and_0x3c2_reads_zero() {
         // Bochs vgacore.cc: 0x3C1 (Attribute Data READ port) ignores writes;
         // 0x3C2 read (Input Status 0) returns 0, not 0xFF.
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
         vga.attr_index = 5;
         vga.attr_regs[5] = 0x11;
         vga.write_port(VGA_ATTRIB_DATA, 0xFF, 1);
@@ -6177,7 +6177,7 @@ mod tests {
     // CRTC indices 0x00-0x06 are dropped and a write to 0x07 updates only bit 4.
     #[test]
     fn crtc_write_protect_locks_registers_0_to_7() {
-        let mut vga = BxVgaC::new();
+        let mut vga = VgaCore::new();
 
         // Seed CR0..CR7 with distinct sentinel values while unprotected.
         for index in 0u32..=7 {
@@ -6347,13 +6347,13 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn vga_snapshot_rejects_oversized_pci_config_length() {
-        let source = BxVgaC::new();
+        let source = VgaCore::new();
         let mut saved = Vec::new();
         source.save_snapshot_v3(&mut saved).unwrap();
         // The PCI config length immediately follows the fixed 84-byte scalar prefix.
         saved[88..92].copy_from_slice(&257u32.to_le_bytes());
 
-        let mut restored = BxVgaC::new();
+        let mut restored = VgaCore::new();
         let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
         let error = restored.restore_snapshot_v3(&mut reader).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
@@ -6372,7 +6372,7 @@ mod tests {
 /// vertical-retrace timer is machine-owned and re-armed at the scheduler
 /// boundary from the CRTC timing, so the only capability this device takes
 /// from its context is the clock the retrace phase is measured against.
-impl crate::iodev::device_api::PioDevice for BxVgaC {
+impl crate::iodev::device_api::PioDevice for VgaCore {
     fn pio_read(
         &mut self,
         port: u16,
@@ -6398,7 +6398,7 @@ impl crate::iodev::device_api::PioDevice for BxVgaC {
 /// Bochs's `get_text_snapshot` hands the GUI the live text plane and the same
 /// grid the renderer used; this reports the same thing one cell at a time so a
 /// no-alloc caller can read a screen without a buffer.
-impl crate::emulator::DisplaySource for BxVgaC {
+impl crate::emulator::DisplaySource for VgaCore {
     fn resolution(&self) -> crate::emulator::Resolution {
         if let Some(geometry) = self.text_geometry() {
             return crate::emulator::Resolution::new(

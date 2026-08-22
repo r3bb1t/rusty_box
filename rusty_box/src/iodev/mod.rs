@@ -118,7 +118,7 @@ pub use pci_ide::BxPciIde;
 pub use pic::BxPicC;
 pub use pit::BxPitC;
 pub use serial::BxSerialC;
-// BxVgaC is pub(crate) - not exported outside the crate
+// VgaCore is pub(crate) - not exported outside the crate
 #[cfg(feature = "alloc")]
 pub use geforce::BxGeForceC;
 

@@ -215,7 +215,7 @@ impl<D: DisplaySource> ExactSizeIterator for RowChars<'_, D> {}
 /// Driving the VGA adapter, and diagnostics that only make sense for it — so
 /// neither is part of the role every adapter answers to.
 #[cfg(feature = "alloc")]
-impl Display<'_, crate::iodev::vga::BxVgaC> {
+impl Display<'_, crate::iodev::vga::VgaCore> {
     /// Render the current frame into a shared framebuffer.
     ///
     /// The pump a front end that owns the machine on its own thread calls once
@@ -278,7 +278,7 @@ impl<T: Instrumentation> Emulator<T> {
     /// The handle borrows the machine, so it is taken, used and dropped; a
     /// scrape between two `step_batch` calls sees the frame as it stood when
     /// the batch ended.
-    pub fn display(&mut self) -> Display<'_, crate::iodev::vga::BxVgaC> {
+    pub fn display(&mut self) -> Display<'_, crate::iodev::vga::VgaCore> {
         Display::new(&mut self.device_manager.vga)
     }
 }

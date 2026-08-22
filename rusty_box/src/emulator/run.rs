@@ -708,7 +708,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 /// Reached through [`crate::emulator::Display::render_into`].
 #[cfg(feature = "alloc")]
 pub(crate) fn render_vga_into(
-    vga: &mut crate::iodev::vga::BxVgaC,
+    vga: &mut crate::iodev::vga::VgaCore,
     display: &mut crate::gui::shared_display::SharedDisplay,
 ) -> crate::iodev::display_sink::Refreshed {
     vga.refresh(display)
