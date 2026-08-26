@@ -11,12 +11,10 @@
 use tracing::{debug, error, info};
 
 use crate::config::BxPhyAddress;
-#[cfg(feature = "std")]
-use std::io::{self, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
 };
 
 
@@ -2260,7 +2258,7 @@ impl BxLocalApic {
 
 #[cfg(feature = "std")]
 impl BxLocalApic {
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         if self.pending_ipi_len > PENDING_IPI_CAPACITY
             || self.pending_ipi_head >= PENDING_IPI_CAPACITY
             || self.pending_cpu_event_len > PENDING_CPU_EVENT_CAPACITY
@@ -2305,7 +2303,7 @@ impl BxLocalApic {
         checked_snapshot_len_add(len, 1)
     }
 
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.snapshot_v3_body_len()?;
         writer.write_u64(self.base_addr)?;
         writer.write_u8(self.mode as u8)?;
@@ -2403,10 +2401,10 @@ impl BxLocalApic {
         writer.write_bool(self.timer_deactivate_request)
     }
 
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<LocalApicSnapshotRestore> {
+        reader: &mut R,
+    ) -> SnapResult<LocalApicSnapshotRestore> {
         let base_addr = reader.read_u64()?;
         if base_addr & 0xfff != 0 {
             return Err(Self::snapshot_invalid("LAPIC base is not page aligned"));
@@ -2675,7 +2673,7 @@ impl BxLocalApic {
         Ok(restore)
     }
 
-    fn write_snapshot_handle<W: Write>(writer: &mut W, handle: Option<usize>) -> io::Result<()> {
+    fn write_snapshot_handle<W: SnapWrite>(writer: &mut W, handle: Option<usize>) -> SnapResult<()> {
         writer.write_bool(handle.is_some())?;
         if let Some(handle) = handle {
             writer.write_u64(u64::try_from(handle)
@@ -2684,7 +2682,7 @@ impl BxLocalApic {
         Ok(())
     }
 
-    fn read_snapshot_handle<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Option<usize>> {
+    fn read_snapshot_handle<R: SnapRead>(reader: &mut R) -> SnapResult<Option<usize>> {
         if !reader.read_bool()? {
             return Ok(None);
         }
@@ -2693,7 +2691,7 @@ impl BxLocalApic {
             .map_err(|_| Self::snapshot_invalid("LAPIC timer handle does not fit host"))
     }
 
-    fn read_snapshot_mode(raw: u8) -> io::Result<ApicMode> {
+    fn read_snapshot_mode(raw: u8) -> SnapResult<ApicMode> {
         match raw {
             0 => Ok(ApicMode::GloballyDisabled),
             1 => Ok(ApicMode::StateInvalid),
@@ -2708,7 +2706,7 @@ impl BxLocalApic {
         if combined == 7 { 1 } else { 2 << combined }
     }
 
-    fn validate_snapshot_lvt(index: usize, raw: u32) -> io::Result<()> {
+    fn validate_snapshot_lvt(index: usize, raw: u32) -> SnapResult<()> {
         let mask = *LVT_MASKS.get(index)
             .ok_or_else(|| Self::snapshot_invalid("LAPIC LVT index is invalid"))?;
         if raw & !mask != 0 || (index == LocalVectorTableEntry::Timer as usize && (raw >> 17) & 3 == 3) {
@@ -2720,14 +2718,14 @@ impl BxLocalApic {
         Ok(())
     }
 
-    fn validate_snapshot_icr(icr_lo: u32) -> io::Result<()> {
+    fn validate_snapshot_icr(icr_lo: u32) -> SnapResult<()> {
         if icr_lo & !0x000c_dfff != 0 || ((icr_lo >> 8) & 7) == ApicDeliveryMode::Reserved as u32 {
             return Err(Self::snapshot_invalid("LAPIC ICR encoding is invalid"));
         }
         Ok(())
     }
 
-    fn validate_snapshot_ipi(ipi: PendingIpi, bus_cpu_count: u32) -> io::Result<()> {
+    fn validate_snapshot_ipi(ipi: PendingIpi, bus_cpu_count: u32) -> SnapResult<()> {
         let wire_shorthand = ((ipi.lo_cmd >> 18) & 3) as u8;
         if ipi.shorthand > 3
             || ((ipi.lo_cmd >> 8) & 7) == ApicDeliveryMode::Reserved as u32
@@ -2745,8 +2743,8 @@ impl BxLocalApic {
         Ok(())
     }
 
-    fn snapshot_invalid(message: &'static str) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, message)
+    fn snapshot_invalid(message: &'static str) -> SnapError {
+        SnapError::Invalid(message)
     }
 }
 
@@ -2768,7 +2766,6 @@ mod tests {
     const INIT_VECTOR: u8 = 0;
     const NO_DESTINATION_SHORTHAND: u8 = 0;
 
-    use std::io::Cursor;
 
     use crate::snapshot::SnapshotReader;
 
@@ -2782,10 +2779,10 @@ mod tests {
         lapic
     }
 
-    fn restore_v3(source: &BxLocalApic, target: &mut BxLocalApic) -> std::io::Result<()> {
+    fn restore_v3(source: &BxLocalApic, target: &mut BxLocalApic) -> SnapResult<()> {
         let mut bytes = Vec::new();
         source.save_snapshot_v3_body(&mut bytes)?;
-        let mut reader = SnapshotReader::new(Cursor::new(bytes.clone()), bytes.len() as u64)?;
+        let mut reader = SnapshotReader::new(bytes.as_slice(), bytes.len() as u64)?;
         target.restore_snapshot_v3_body(&mut reader)?;
         reader.finish_exact()
     }

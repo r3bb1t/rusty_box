@@ -4,6 +4,9 @@
 use std::io::{self, Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
+pub(crate) use rusty_box_core::snap::{SnapError, SnapRead, SnapResult, SnapWrite, SnapshotSection};
+
+#[cfg(feature = "std")]
 use crate::{
     emulator::Emulator,
     memory::{BxMemC, MemorySnapshotGeometry, MemorySnapshotResidency},
@@ -30,10 +33,13 @@ pub(crate) const SNAPSHOT_V3_VERSION: u32 = 8;
 #[cfg(feature = "std")]
 pub(crate) const SNAPSHOT_SECTION_VERSION: u32 = 1;
 
+/// The section-length and item-count ceilings are the FORMAT's, so they live
+/// with the format's traits and are named here under the spellings this port
+/// already uses.
 #[cfg(feature = "std")]
-pub(crate) const MAX_SNAPSHOT_SECTION_LEN: u64 = 4 * 1024 * 1024 * 1024;
+pub(crate) use rusty_box_core::snap::MAX_SECTION_LEN as MAX_SNAPSHOT_SECTION_LEN;
 #[cfg(feature = "std")]
-pub(crate) const MAX_SNAPSHOT_COUNT: usize = 1 << 20;
+pub(crate) use rusty_box_core::snap::MAX_COUNT as MAX_SNAPSHOT_COUNT;
 #[cfg(feature = "std")]
 pub(crate) const MAX_SNAPSHOT_QUEUE_LEN: usize = 1 << 16;
 
@@ -91,131 +97,234 @@ fn invalid_snapshot(message: &'static str) -> Error {
     Error::new(ErrorKind::InvalidData, message)
 }
 
+/// The same rejection, said with context the container assembled — which
+/// device slot inside a shared section, which section of the stream. A device
+/// cannot phrase this: it does not know where in the container it sits.
+///
+/// The kind is the original's, so wrapping a truncation in context does not
+/// turn it into a malformed-data report.
 #[cfg(feature = "std")]
-fn checked_snapshot_section_len(len: u64) -> io::Result<u64> {
-    if len > MAX_SNAPSHOT_SECTION_LEN {
-        return Err(invalid_snapshot("snapshot length exceeds implementation bound"));
+fn snapshot_io_error_because(error: SnapError, message: String) -> Error {
+    Error::new(snapshot_io_error(error).kind(), message)
+}
+
+/// As above, for context added around an error that already crossed.
+#[cfg(feature = "std")]
+fn io_error_because(error: &Error, message: String) -> Error {
+    Error::new(error.kind(), message)
+}
+
+/// State a device rejected, stated as this container's own error.
+///
+/// Devices speak [`SnapError`] so they need no host; the container speaks
+/// `io::Error` because that is what a caller handed it a file for. This is the
+/// one place the two meet.
+///
+/// The kind distinction survives the crossing: a stream that simply ended is
+/// `UnexpectedEof`, which is what tells a caller "this file was cut short"
+/// rather than "this file is not a snapshot" — two different things to do
+/// about it. [`SnapError::Host`] normally never arrives here with anything to
+/// say, because the adapter that produced it parked the real host error and
+/// [`IoSink::host_result`] / [`IoSource::prefer_host`] put it back.
+#[cfg(feature = "std")]
+pub(crate) fn snapshot_io_error(error: SnapError) -> Error {
+    let kind = match error {
+        SnapError::Truncated => ErrorKind::UnexpectedEof,
+        SnapError::Host => ErrorKind::Other,
+        _ => ErrorKind::InvalidData,
+    };
+    Error::new(kind, error.to_string())
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn checked_snapshot_len_add(lhs: u64, rhs: u64) -> SnapResult<u64> {
+    rusty_box_core::snap::checked_len_add(lhs, rhs, MAX_SNAPSHOT_SECTION_LEN)
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn checked_snapshot_len_mul(lhs: u64, rhs: u64) -> SnapResult<u64> {
+    rusty_box_core::snap::checked_len_mul(lhs, rhs, MAX_SNAPSHOT_SECTION_LEN)
+}
+
+/// A host writer, seen as somewhere a snapshot body can go.
+///
+/// The host's own error is KEPT rather than folded into the opaque
+/// [`SnapError::Host`] that stands for it in the stream: "the disk is full" is
+/// the answer a caller wants, and `SnapError` is deliberately allocation-free
+/// and cannot carry it. The adapter parks it and hands it back at the boundary
+/// that speaks `io::Error`.
+#[cfg(feature = "std")]
+pub(crate) struct IoSink<W> {
+    inner: W,
+    host: Option<Error>,
+}
+
+#[cfg(feature = "std")]
+impl<W: Write> IoSink<W> {
+    pub(crate) fn new(inner: W) -> Self {
+        Self { inner, host: None }
     }
-    Ok(len)
+
+    /// Restate a snapshot outcome as a host one, preferring the host error this
+    /// sink parked over the `SnapError::Host` that merely marks where it was.
+    pub(crate) fn host_result(&mut self, outcome: SnapResult) -> io::Result<()> {
+        match (outcome, self.host.take()) {
+            (Ok(()), _) => Ok(()),
+            (Err(_), Some(host)) => Err(host),
+            (Err(error), None) => Err(snapshot_io_error(error)),
+        }
+    }
 }
 
 #[cfg(feature = "std")]
-pub(crate) fn checked_snapshot_len_add(lhs: u64, rhs: u64) -> io::Result<u64> {
-    lhs.checked_add(rhs)
-        .ok_or_else(|| invalid_snapshot("snapshot length addition overflows"))
-        .and_then(checked_snapshot_section_len)
+impl<W: Write> SnapWrite for IoSink<W> {
+    fn write_bytes(&mut self, bytes: &[u8]) -> SnapResult {
+        self.inner.write_all(bytes).map_err(|error| {
+            self.host.get_or_insert(error);
+            SnapError::Host
+        })
+    }
+}
+
+/// A host reader, seen as somewhere a snapshot body comes from. Same rule.
+#[cfg(feature = "std")]
+pub(crate) struct IoSource<R> {
+    inner: R,
+    host: Option<Error>,
 }
 
 #[cfg(feature = "std")]
-pub(crate) fn checked_snapshot_len_mul(lhs: u64, rhs: u64) -> io::Result<u64> {
-    lhs.checked_mul(rhs)
-        .ok_or_else(|| invalid_snapshot("snapshot length multiplication overflows"))
-        .and_then(checked_snapshot_section_len)
+impl<R: Read> IoSource<R> {
+    pub(crate) fn new(inner: R) -> Self {
+        Self { inner, host: None }
+    }
+
+    /// A parked host error is the true cause of any failure that reached here:
+    /// whatever context the container built around it says where the failure
+    /// was noticed, not what went wrong. Applied once, at the outermost
+    /// boundary, which is why the restore path can keep its own framing.
+    pub(crate) fn prefer_host(&mut self, outcome: io::Result<()>) -> io::Result<()> {
+        match (outcome, self.host.take()) {
+            (Err(_), Some(host)) => Err(host),
+            (other, _) => other,
+        }
+    }
+
+    /// Whether anything at all is left, which is how the container refuses a
+    /// stream with bytes after its last declared section.
+    pub(crate) fn at_end(&mut self) -> io::Result<bool> {
+        let mut trailing = [0u8; 1];
+        Ok(self.inner.read(&mut trailing)? == 0)
+    }
 }
 
-/// Little-endian primitive writes shared by the bounded codecs.
+/// A snapshot outcome, restated in the terms the container reports in.
+///
+/// One conversion site rather than a `map_err` spelled out at every device
+/// call, so the container's own `format!` context is what varies and the
+/// translation never does.
 #[cfg(feature = "std")]
-pub(crate) trait SnapshotWriteExt: Write {
-    fn write_u8(&mut self, value: u8) -> io::Result<()> { self.write_all(&[value]) }
-    fn write_bool(&mut self, value: bool) -> io::Result<()> { self.write_u8(u8::from(value)) }
-    fn write_u16(&mut self, value: u16) -> io::Result<()> { self.write_all(&value.to_le_bytes()) }
-    fn write_u32(&mut self, value: u32) -> io::Result<()> { self.write_all(&value.to_le_bytes()) }
-    fn write_u64(&mut self, value: u64) -> io::Result<()> { self.write_all(&value.to_le_bytes()) }
-    fn write_i64(&mut self, value: i64) -> io::Result<()> { self.write_all(&value.to_le_bytes()) }
-    fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> { self.write_all(bytes) }
+pub(crate) trait Restated<T> {
+    fn restated(self) -> io::Result<T>;
 }
+
 #[cfg(feature = "std")]
-impl<W: Write + ?Sized> SnapshotWriteExt for W {}
+impl<T> Restated<T> for SnapResult<T> {
+    #[inline]
+    fn restated(self) -> io::Result<T> {
+        self.map_err(snapshot_io_error)
+    }
+}
+
+#[cfg(feature = "std")]
+impl<R: Read> SnapRead for IoSource<R> {
+    fn read_bytes(&mut self, out: &mut [u8]) -> SnapResult {
+        self.inner.read_exact(out).map_err(|error| {
+            let truncated = error.kind() == ErrorKind::UnexpectedEof;
+            self.host.get_or_insert(error);
+            if truncated {
+                // A file that simply ended is a truncated snapshot, not a
+                // failing host: say which, and drop the host's phrasing for it.
+                self.host = None;
+                SnapError::Truncated
+            } else {
+                SnapError::Host
+            }
+        })
+    }
+}
 
 /// Reader limited to one section (or one nested CPU/LAPIC record).
+///
+/// The bound is the point: a device asked to fill itself from a section can
+/// only ever see that section's bytes, so a device that reads too far is
+/// refused rather than silently eating the next device's state.
 #[cfg(feature = "std")]
 pub(crate) struct SnapshotReader<R> { inner: R, remaining: u64 }
 #[cfg(feature = "std")]
-impl<R: Read> SnapshotReader<R> {
-    pub(crate) fn new(inner: R, remaining: u64) -> io::Result<Self> {
+impl<R: SnapRead> SnapshotReader<R> {
+    pub(crate) fn new(inner: R, remaining: u64) -> SnapResult<Self> {
         Self::new_with_limit(inner, remaining, MAX_SNAPSHOT_SECTION_LEN)
     }
 
-    fn new_with_limit(inner: R, remaining: u64, maximum: u64) -> io::Result<Self> {
+    fn new_with_limit(inner: R, remaining: u64, maximum: u64) -> SnapResult<Self> {
         if remaining > maximum {
-            return Err(invalid_snapshot("snapshot length exceeds implementation bound"));
+            return Err(SnapError::LengthOutOfRange);
         }
         Ok(Self { inner, remaining })
     }
-    pub(crate) fn read_u8(&mut self) -> io::Result<u8> { let mut b = [0; 1]; self.read_bytes(&mut b)?; Ok(b[0]) }
-    pub(crate) fn read_bool(&mut self) -> io::Result<bool> {
-        match self.read_u8()? { 0 => Ok(false), 1 => Ok(true), _ => Err(invalid_snapshot("snapshot boolean is not canonical")) }
-    }
-    pub(crate) fn read_u16(&mut self) -> io::Result<u16> { let mut b = [0; 2]; self.read_bytes(&mut b)?; Ok(u16::from_le_bytes(b)) }
-    pub(crate) fn read_u32(&mut self) -> io::Result<u32> { let mut b = [0; 4]; self.read_bytes(&mut b)?; Ok(u32::from_le_bytes(b)) }
-    pub(crate) fn read_u64(&mut self) -> io::Result<u64> { let mut b = [0; 8]; self.read_bytes(&mut b)?; Ok(u64::from_le_bytes(b)) }
-    pub(crate) fn read_i64(&mut self) -> io::Result<i64> { let mut b = [0; 8]; self.read_bytes(&mut b)?; Ok(i64::from_le_bytes(b)) }
-    pub(crate) fn read_count(&mut self, maximum: usize) -> io::Result<usize> {
-        let value = usize::try_from(self.read_u32()?).map_err(|_| invalid_snapshot("snapshot count does not fit usize"))?;
-        if value > maximum.min(MAX_SNAPSHOT_COUNT) { return Err(invalid_snapshot("snapshot count exceeds bound")); }
-        Ok(value)
-    }
-    pub(crate) fn read_len(&mut self, maximum: usize) -> io::Result<usize> {
-        let value = self.read_u64()?;
-        if value > u64::try_from(maximum).unwrap_or(u64::MAX).min(MAX_SNAPSHOT_SECTION_LEN) { return Err(invalid_snapshot("snapshot length exceeds bound")); }
-        usize::try_from(value).map_err(|_| invalid_snapshot("snapshot length does not fit usize"))
-    }
-    pub(crate) fn read_bytes(&mut self, bytes: &mut [u8]) -> io::Result<()> {
-        let len = u64::try_from(bytes.len()).map_err(|_| invalid_snapshot("snapshot byte length does not fit u64"))?;
-        if len > self.remaining { return Err(Error::new(ErrorKind::UnexpectedEof, "snapshot section is truncated")); }
-        self.inner.read_exact(bytes)?;
-        self.remaining -= len;
-        Ok(())
-    }
-    pub(crate) fn discard(&mut self) -> io::Result<()> {
+
+    /// Consume whatever this section still holds — how a section from a newer
+    /// writer, which this build does not know, is skipped rather than misread.
+    pub(crate) fn discard(&mut self) -> SnapResult {
         let mut scratch = [0u8; 64 * 1024];
         while self.remaining != 0 { let n = self.remaining.min(scratch.len() as u64) as usize; self.read_bytes(&mut scratch[..n])?; }
         Ok(())
     }
-    pub(crate) fn finish_exact(&self) -> io::Result<()> {
-        if self.remaining == 0 { Ok(()) } else { Err(invalid_snapshot("snapshot section has trailing bytes")) }
-    }
-}
-#[cfg(feature = "std")]
-impl<R: Read> Read for SnapshotReader<R> {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        if bytes.is_empty() || self.remaining == 0 { return Ok(0); }
-        let n = (self.remaining.min(bytes.len() as u64)) as usize;
-        let got = self.inner.read(&mut bytes[..n])?;
-        self.remaining -= got as u64;
-        Ok(got)
-    }
-}
 
+    /// A device must consume its section exactly. Bytes left over mean the
+    /// device and the writer disagree about the layout, which every later field
+    /// would decode from the wrong place.
+    pub(crate) fn finish_exact(&self) -> SnapResult {
+        if self.remaining == 0 { Ok(()) } else { Err(SnapError::TrailingBytes) }
+    }
+}
 #[cfg(feature = "std")]
-struct SectionWriter<'a, W: Write + ?Sized> { inner: &'a mut W, id: u32, remaining: u64 }
-#[cfg(feature = "std")]
-impl<W: Write + ?Sized> Write for SectionWriter<'_, W> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let len = u64::try_from(bytes.len()).map_err(|_| invalid_snapshot("snapshot write length does not fit u64"))?;
-        if len > self.remaining {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("snapshot section {} writer overran declared length", self.id),
-            ));
-        }
-        self.inner.write_all(bytes)?;
+impl<R: SnapRead> SnapRead for SnapshotReader<R> {
+    fn read_bytes(&mut self, bytes: &mut [u8]) -> SnapResult {
+        let len = u64::try_from(bytes.len()).map_err(|_| SnapError::LengthOutOfRange)?;
+        if len > self.remaining { return Err(SnapError::Truncated); }
+        self.inner.read_bytes(bytes)?;
         self.remaining -= len;
-        Ok(bytes.len())
+        Ok(())
     }
-    fn flush(&mut self) -> io::Result<()> { self.inner.flush() }
 }
 
 #[cfg(feature = "std")]
-fn write_section_with_limit<W: Write + ?Sized>(
+struct SectionWriter<'a, W> { inner: &'a mut W, id: u32, remaining: u64 }
+#[cfg(feature = "std")]
+impl<W: SnapWrite> SnapWrite for SectionWriter<'_, W> {
+    fn write_bytes(&mut self, bytes: &[u8]) -> SnapResult {
+        let len = u64::try_from(bytes.len()).map_err(|_| SnapError::LengthOutOfRange)?;
+        if len > self.remaining {
+            return Err(SnapError::Overran { section: self.id });
+        }
+        self.inner.write_bytes(bytes)?;
+        self.remaining -= len;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "std")]
+fn write_section_with_limit<W: SnapWrite>(
     writer: &mut W,
     id: u32,
     len: u64,
     maximum: u64,
-    body: impl FnOnce(&mut SectionWriter<'_, W>) -> io::Result<()>,
-) -> io::Result<()> {
+    body: impl FnOnce(&mut SectionWriter<'_, W>) -> SnapResult,
+) -> SnapResult {
     if len > maximum {
-        return Err(invalid_snapshot("snapshot length exceeds implementation bound"));
+        return Err(SnapError::LengthOutOfRange);
     }
     writer.write_u32(id)?;
     writer.write_u64(len)?;
@@ -224,85 +333,54 @@ fn write_section_with_limit<W: Write + ?Sized>(
     if section.remaining == 0 {
         Ok(())
     } else {
-        Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("snapshot section {id} writer under-ran declared length"),
-        ))
+        Err(SnapError::UnderRan { section: id })
     }
 }
 
 #[cfg(feature = "std")]
-fn write_section<W: Write + ?Sized>(
+fn write_section<W: SnapWrite>(
     writer: &mut W,
     id: u32,
     len: u64,
-    body: impl FnOnce(&mut SectionWriter<'_, W>) -> io::Result<()>,
-) -> io::Result<()> {
+    body: impl FnOnce(&mut SectionWriter<'_, W>) -> SnapResult,
+) -> SnapResult {
     write_section_with_limit(writer, id, len, MAX_SNAPSHOT_SECTION_LEN, body)
-}
-
-/// A device that owns exactly one section of the v3 stream.
-///
-/// The section tag travels with the device instead of with the call site, so a
-/// section body can never be written under another device's identity, and the
-/// declared length can never be computed from a different device than the one
-/// that fills it — the whole section is derived from a single `&D`.
-#[cfg(feature = "std")]
-pub(crate) trait SnapshotSection {
-    /// This device's identity in the v3 stream.
-    const TAG: u32;
-
-    /// What a restore hands back for the machine to act on. `()` means the
-    /// device's state is entirely its own: nothing outside it has to move.
-    type Restored;
-
-    /// The exact byte length [`Self::save_snapshot_v3`] will write. Validating
-    /// the state it would serialize is part of the answer, so an unserializable
-    /// device fails here rather than half-way through a section body.
-    fn snapshot_v3_len(&self) -> io::Result<u64>;
-
-    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()>;
-
-    fn restore_snapshot_v3<R: Read>(
-        &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<Self::Restored>;
 }
 
 /// Writes one device's whole section: its tag, its declared length, its body.
 #[cfg(feature = "std")]
-fn write_device_section<W: Write + ?Sized, D: SnapshotSection>(
+fn write_device_section<W: SnapWrite, D: SnapshotSection>(
     writer: &mut W,
     device: &D,
-) -> io::Result<()> {
-    write_section(writer, D::TAG, device.snapshot_v3_len()?, |section| {
-        device.save_snapshot_v3(section)
+) -> SnapResult {
+    write_section(writer, D::TAG, device.snapshot_len()?, |section| {
+        device.save(section)
     })
 }
 
 #[cfg(feature = "std")]
-fn memory_block_len(geometry: MemorySnapshotGeometry, block: u32) -> io::Result<u64> {
-    let start = u64::from(block).checked_mul(geometry.block_size).ok_or_else(|| invalid_snapshot("snapshot memory block offset overflows"))?;
-    if start >= geometry.guest_len { return Err(invalid_snapshot("snapshot memory block exceeds guest RAM")); }
+fn memory_block_len(geometry: MemorySnapshotGeometry, block: u32) -> SnapResult<u64> {
+    let start = u64::from(block).checked_mul(geometry.block_size).ok_or(SnapError::Invalid("snapshot memory block offset overflows"))?;
+    if start >= geometry.guest_len { return Err(SnapError::Invalid("snapshot memory block exceeds guest RAM")); }
     Ok((geometry.guest_len - start).min(geometry.block_size))
 }
 #[cfg(feature = "std")]
-fn memory_payload_len_for_geometry(geometry: MemorySnapshotGeometry) -> io::Result<u64> {
+fn memory_payload_len_for_geometry(geometry: MemorySnapshotGeometry) -> SnapResult<u64> {
     let descriptors = u64::from(geometry.num_blocks)
         .checked_mul(5)
-        .ok_or_else(|| invalid_snapshot("snapshot memory descriptor length overflows"))?;
+        .ok_or(SnapError::Invalid("snapshot memory descriptor length overflows"))?;
     44u64
         .checked_add(descriptors)
         .and_then(|len| len.checked_add(geometry.guest_len))
-        .ok_or_else(|| invalid_snapshot("snapshot memory payload length overflows"))
+        .ok_or(SnapError::Invalid("snapshot memory payload length overflows"))
 }
 
 #[cfg(feature = "std")]
-fn memory_payload_len(memory: &BxMemC) -> io::Result<u64> {
+fn memory_payload_len(memory: &BxMemC) -> SnapResult<u64> {
     memory_payload_len_for_geometry(memory.snapshot_geometry())
 }
 #[cfg(feature = "std")]
-fn save_memory<W: Write>(memory: &mut BxMemC, writer: &mut W) -> io::Result<()> {
+fn save_memory<W: SnapWrite>(memory: &mut BxMemC, writer: &mut W) -> SnapResult {
     let g = memory.snapshot_geometry();
     writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
     writer.write_u64(g.guest_len)?; writer.write_u64(g.host_ram_len)?; writer.write_u64(g.block_size)?;
@@ -317,62 +395,62 @@ fn save_memory<W: Write>(memory: &mut BxMemC, writer: &mut W) -> io::Result<()> 
     Ok(())
 }
 #[cfg(feature = "std")]
-fn restore_memory<R: Read>(memory: &mut BxMemC, reader: &mut SnapshotReader<R>) -> io::Result<()> {
-    if reader.read_u32()? != SNAPSHOT_SECTION_VERSION { return Err(invalid_snapshot("unsupported memory snapshot section version")); }
+fn restore_memory<R: SnapRead>(memory: &mut BxMemC, reader: &mut SnapshotReader<R>) -> SnapResult {
+    if reader.read_u32()? != SNAPSHOT_SECTION_VERSION { return Err(SnapError::Invalid("unsupported memory snapshot section version")); }
     let saved = MemorySnapshotGeometry {
         guest_len: reader.read_u64()?, host_ram_len: reader.read_u64()?, block_size: reader.read_u64()?,
         num_blocks: reader.read_u32()?, resident_capacity: reader.read_u32()?, used_blocks: reader.read_u32()?, next_swapout_guest_block: reader.read_u32()?,
     };
     let live = memory.snapshot_geometry();
-    let rounded = saved.guest_len.checked_add(saved.block_size.checked_sub(1).ok_or_else(|| invalid_snapshot("snapshot memory block size is zero"))?).ok_or_else(|| invalid_snapshot("snapshot memory geometry overflows"))? / saved.block_size;
-    if saved.guest_len != live.guest_len || saved.host_ram_len != live.host_ram_len || saved.block_size != live.block_size || saved.num_blocks != live.num_blocks || saved.resident_capacity != live.resident_capacity || rounded != u64::from(saved.num_blocks) || saved.used_blocks > saved.resident_capacity || saved.used_blocks > saved.num_blocks || (saved.num_blocks == 0 && saved.next_swapout_guest_block != 0) || (saved.num_blocks != 0 && saved.next_swapout_guest_block >= saved.num_blocks) { return Err(invalid_snapshot("snapshot memory geometry does not match machine")); }
-    let count = usize::try_from(saved.num_blocks).map_err(|_| invalid_snapshot("snapshot memory block count does not fit usize"))?;
-    let slots = usize::try_from(saved.resident_capacity).map_err(|_| invalid_snapshot("snapshot resident capacity does not fit usize"))?;
-    let mut map = Vec::new(); map.try_reserve_exact(count).map_err(|_| invalid_snapshot("unable to allocate snapshot memory descriptors"))?;
-    let mut seen = Vec::new(); seen.try_reserve_exact(slots).map_err(|_| invalid_snapshot("unable to allocate snapshot resident slots"))?; seen.resize(slots, false);
+    let rounded = saved.guest_len.checked_add(saved.block_size.checked_sub(1).ok_or(SnapError::Invalid("snapshot memory block size is zero"))?).ok_or(SnapError::Invalid("snapshot memory geometry overflows"))? / saved.block_size;
+    if saved.guest_len != live.guest_len || saved.host_ram_len != live.host_ram_len || saved.block_size != live.block_size || saved.num_blocks != live.num_blocks || saved.resident_capacity != live.resident_capacity || rounded != u64::from(saved.num_blocks) || saved.used_blocks > saved.resident_capacity || saved.used_blocks > saved.num_blocks || (saved.num_blocks == 0 && saved.next_swapout_guest_block != 0) || (saved.num_blocks != 0 && saved.next_swapout_guest_block >= saved.num_blocks) { return Err(SnapError::Invalid("snapshot memory geometry does not match machine")); }
+    let count = usize::try_from(saved.num_blocks).map_err(|_| SnapError::Invalid("snapshot memory block count does not fit usize"))?;
+    let slots = usize::try_from(saved.resident_capacity).map_err(|_| SnapError::Invalid("snapshot resident capacity does not fit usize"))?;
+    let mut map = Vec::new(); map.try_reserve_exact(count).map_err(|_| SnapError::Invalid("unable to allocate snapshot memory descriptors"))?;
+    let mut seen = Vec::new(); seen.try_reserve_exact(slots).map_err(|_| SnapError::Invalid("unable to allocate snapshot resident slots"))?; seen.resize(slots, false);
     let mut used = 0usize;
     for block in 0..saved.num_blocks {
         let tag = reader.read_u8()?; let slot = reader.read_u32()?;
         let residency = match (tag, slot) {
             (0, u32::MAX) => MemorySnapshotResidency::Swapped,
             (1, slot) => {
-                let index = usize::try_from(slot).map_err(|_| invalid_snapshot("snapshot resident slot does not fit usize"))?;
-                if index >= slots || seen[index] { return Err(invalid_snapshot("snapshot resident slot is invalid or duplicate")); }
-                let offset = u64::from(slot).checked_mul(saved.block_size).ok_or_else(|| invalid_snapshot("snapshot resident slot offset overflows"))?;
-                if offset.checked_add(memory_block_len(saved, block)?).ok_or_else(|| invalid_snapshot("snapshot resident slot extent overflows"))? > saved.host_ram_len { return Err(invalid_snapshot("snapshot resident slot exceeds host RAM")); }
+                let index = usize::try_from(slot).map_err(|_| SnapError::Invalid("snapshot resident slot does not fit usize"))?;
+                if index >= slots || seen[index] { return Err(SnapError::Invalid("snapshot resident slot is invalid or duplicate")); }
+                let offset = u64::from(slot).checked_mul(saved.block_size).ok_or(SnapError::Invalid("snapshot resident slot offset overflows"))?;
+                if offset.checked_add(memory_block_len(saved, block)?).ok_or(SnapError::Invalid("snapshot resident slot extent overflows"))? > saved.host_ram_len { return Err(SnapError::Invalid("snapshot resident slot exceeds host RAM")); }
                 seen[index] = true; used += 1; MemorySnapshotResidency::Resident { slot }
             }
-            _ => return Err(invalid_snapshot("snapshot memory residency tag is invalid")),
+            _ => return Err(SnapError::Invalid("snapshot memory residency tag is invalid")),
         };
         map.push(residency);
         memory.read_snapshot_block(block, residency, reader)?;
     }
-    if used != usize::try_from(saved.used_blocks).map_err(|_| invalid_snapshot("snapshot used count does not fit usize"))? || seen[..used].iter().any(|present| !present) { return Err(invalid_snapshot("snapshot memory residency count is inconsistent")); }
+    if used != usize::try_from(saved.used_blocks).map_err(|_| SnapError::Invalid("snapshot used count does not fit usize"))? || seen[..used].iter().any(|present| !present) { return Err(SnapError::Invalid("snapshot memory residency count is inconsistent")); }
     memory.finish_snapshot_restore(saved, &map)
 }
 
 #[cfg(feature = "std")]
-fn cpu_len<T: crate::cpu::instrumentation::Instrumentation>(emu: &Emulator<T>) -> io::Result<u64> {
-    let count = u32::try_from(emu.cpu_count()).map_err(|_| invalid_snapshot("CPU count does not fit snapshot"))?;
+fn cpu_len<T: crate::cpu::instrumentation::Instrumentation>(emu: &Emulator<T>) -> SnapResult<u64> {
+    let count = u32::try_from(emu.cpu_count()).map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?;
     let mut len = 8u64;
     for index in 0..count as usize { len = checked_snapshot_len_add(len, checked_snapshot_len_add(12, emu.cpu_ref(index).snapshot_v3_body_len()?)?)?; }
     Ok(len)
 }
 #[cfg(feature = "std")]
-fn save_cpus<T: crate::cpu::instrumentation::Instrumentation, W: Write>(emu: &Emulator<T>, writer: &mut W) -> io::Result<()> {
-    writer.write_u32(SNAPSHOT_SECTION_VERSION)?; writer.write_u32(u32::try_from(emu.cpu_count()).map_err(|_| invalid_snapshot("CPU count does not fit snapshot"))?)?;
+fn save_cpus<T: crate::cpu::instrumentation::Instrumentation, W: SnapWrite>(emu: &Emulator<T>, writer: &mut W) -> SnapResult {
+    writer.write_u32(SNAPSHOT_SECTION_VERSION)?; writer.write_u32(u32::try_from(emu.cpu_count()).map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?)?;
     for index in 0..emu.cpu_count() { let cpu = emu.cpu_ref(index); writer.write_u32(cpu.snapshot_cpu_id())?; writer.write_u64(cpu.snapshot_v3_body_len()?)?; cpu.save_snapshot_v3_body(writer)?; }
     Ok(())
 }
 #[cfg(feature = "std")]
-fn lapic_len<T: crate::cpu::instrumentation::Instrumentation>(emu: &Emulator<T>) -> io::Result<u64> {
+fn lapic_len<T: crate::cpu::instrumentation::Instrumentation>(emu: &Emulator<T>) -> SnapResult<u64> {
     let mut len = 8u64;
     for index in 0..emu.cpu_count() { len = checked_snapshot_len_add(len, checked_snapshot_len_add(12, emu.cpu_ref(index).lapic.snapshot_v3_body_len()?)?)?; }
     Ok(len)
 }
 #[cfg(feature = "std")]
-fn save_lapics<T: crate::cpu::instrumentation::Instrumentation, W: Write>(emu: &Emulator<T>, writer: &mut W) -> io::Result<()> {
-    writer.write_u32(SNAPSHOT_SECTION_VERSION)?; writer.write_u32(u32::try_from(emu.cpu_count()).map_err(|_| invalid_snapshot("CPU count does not fit snapshot"))?)?;
+fn save_lapics<T: crate::cpu::instrumentation::Instrumentation, W: SnapWrite>(emu: &Emulator<T>, writer: &mut W) -> SnapResult {
+    writer.write_u32(SNAPSHOT_SECTION_VERSION)?; writer.write_u32(u32::try_from(emu.cpu_count()).map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?)?;
     for index in 0..emu.cpu_count() { let cpu = emu.cpu_ref(index); writer.write_u32(cpu.snapshot_cpu_id())?; writer.write_u64(cpu.lapic.snapshot_v3_body_len()?)?; cpu.lapic.save_snapshot_v3_body(writer)?; }
     Ok(())
 }
@@ -380,7 +458,13 @@ fn save_lapics<T: crate::cpu::instrumentation::Instrumentation, W: Write>(emu: &
 #[cfg(feature = "std")]
 impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     pub fn save_snapshot<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
-        writer.write_all(SNAPSHOT_MAGIC)?; writer.write_u32(SNAPSHOT_V3_VERSION)?; writer.write_u32(SNAPSHOT_V3_SECTION_ORDER.len() as u32)?;
+        let mut sink = IoSink::new(writer);
+        let outcome = self.save_snapshot_body(&mut sink);
+        sink.host_result(outcome)
+    }
+
+    fn save_snapshot_body<W: SnapWrite>(&mut self, writer: &mut W) -> SnapResult {
+        writer.write_bytes(SNAPSHOT_MAGIC)?; writer.write_u32(SNAPSHOT_V3_VERSION)?; writer.write_u32(SNAPSHOT_V3_SECTION_ORDER.len() as u32)?;
         let memory_len = memory_payload_len(&self.memory)?;
         write_section_with_limit(writer, SEC_MEMORY, memory_len, memory_len, |s| save_memory(&mut self.memory, s))?;
         write_device_section(writer, &self.pc_system)?;
@@ -404,19 +488,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     }
 
     pub fn restore_snapshot<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
-        let result = self.restore_snapshot_inner(reader);
+        let mut source = IoSource::new(reader);
+        let result = self.restore_snapshot_inner(&mut source);
+        // A parked host error outranks whatever context was built around the
+        // opaque `SnapError::Host` that stood in for it.
+        let result = source.prefer_host(result);
         if result.is_err() {
             self.mark_snapshot_restore_failed();
         }
         result
     }
 
-    fn restore_snapshot_inner<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
-        let mut magic = [0u8; 8]; reader.read_exact(&mut magic)?;
+    fn restore_snapshot_inner<R: Read>(&mut self, reader: &mut IoSource<R>) -> io::Result<()> {
+        let mut magic = [0u8; 8]; reader.read_bytes(&mut magic).restated()?;
         if magic != *SNAPSHOT_MAGIC { return Err(invalid_snapshot("not a valid snapshot file")); }
-        let version = read_outer_u32(reader)?;
+        let version = reader.read_u32().restated()?;
         if version != SNAPSHOT_V3_VERSION { return Err(invalid_snapshot("snapshot version is not supported")); }
-        let count = usize::try_from(read_outer_u32(reader)?).map_err(|_| invalid_snapshot("snapshot section count does not fit usize"))?;
+        let count = usize::try_from(reader.read_u32().restated()?).map_err(|_| invalid_snapshot("snapshot section count does not fit usize"))?;
         if !(SNAPSHOT_V3_SECTION_ORDER.len()..=MAX_SNAPSHOT_COUNT).contains(&count) { return Err(invalid_snapshot("snapshot section count is invalid")); }
         let live_bmdma = self.device_manager.bmdma_ports_base;
         let live_pm = self.device_manager.pm_ports_base;
@@ -432,29 +520,30 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         let mut pci = None;
         let mut vga = None;
         for _ in 0..count {
-            let id = read_outer_u32(reader)?;
-            let len = read_outer_u64(reader)?;
+            let id = reader.read_u32().restated()?;
+            let len = reader.read_u64().restated()?;
             if expected == SNAPSHOT_V3_SECTION_ORDER.len() || id != SNAPSHOT_V3_SECTION_ORDER[expected] {
                 if SNAPSHOT_V3_SECTION_ORDER.contains(&id) { return Err(invalid_snapshot("snapshot known section is duplicate or out of order")); }
-                let mut extension = SnapshotReader::new(&mut *reader, len)?;
-                extension.discard()?;
+                let mut extension = SnapshotReader::new(&mut *reader, len).restated()?;
+                extension.discard().restated()?;
                 continue;
             }
             let mut section = if id == SEC_MEMORY {
                 SnapshotReader::new_with_limit(
                     &mut *reader,
                     len,
-                    memory_payload_len(&self.memory)?,
-                )?
+                    memory_payload_len(&self.memory).restated()?,
+                )
             } else {
-                SnapshotReader::new(&mut *reader, len)?
-            };
+                SnapshotReader::new(&mut *reader, len)
+            }
+            .restated()?;
             let decoded = (|| -> io::Result<()> {
                 match id {
-                    SEC_MEMORY => restore_memory(&mut self.memory, &mut section)?,
-                    SEC_PC_SYSTEM => self.pc_system.restore_snapshot_v3(&mut section)?,
+                    SEC_MEMORY => restore_memory(&mut self.memory, &mut section).restated()?,
+                    SEC_PC_SYSTEM => self.pc_system.restore(&mut section).restated()?,
                     SEC_PLATFORM => {
-                        if section.read_u32()? != SNAPSHOT_SECTION_VERSION {
+                        if section.read_u32().restated()? != SNAPSHOT_SECTION_VERSION {
                             return Err(invalid_snapshot(
                                 "unsupported platform snapshot section version",
                             ));
@@ -463,8 +552,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
                             .fw_cfg
                             .restore_snapshot_v3_body(&mut section)
                             .map_err(|error| {
-                                Error::new(
-                                    error.kind(),
+                                snapshot_io_error_because(
+                                    error,
                                     format!("fw_cfg platform state is invalid: {error}"),
                                 )
                             })?;
@@ -472,8 +561,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
                             self.devices
                                 .restore_snapshot_v3_body(&mut section)
                                 .map_err(|error| {
-                                    Error::new(
-                                        error.kind(),
+                                    snapshot_io_error_because(
+                                        error,
                                         format!("I/O platform state is invalid: {error}"),
                                     )
                                 })?,
@@ -482,77 +571,80 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
                             self.device_manager
                                 .restore_snapshot_v3_body(&mut section)
                                 .map_err(|error| {
-                                    Error::new(
-                                        error.kind(),
+                                    snapshot_io_error_because(
+                                        error,
                                         format!("device-manager platform state is invalid: {error}"),
                                     )
                                 })?,
                         );
                     }
-                    SEC_CPU => self.restore_cpus(&mut section)?,
-                    SEC_PIC => self.device_manager.pic.restore_snapshot_v3(&mut section)?,
+                    SEC_CPU => self.restore_cpus(&mut section).restated()?,
+                    SEC_PIC => self.device_manager.pic.restore(&mut section).restated()?,
                     SEC_PIT => {
-                        self.device_manager.pit.restore_snapshot_v3(&mut section)?;
+                        self.device_manager.pit.restore(&mut section).restated()?;
                         pit_decoded = true;
                     }
                     SEC_CMOS => {
-                        self.device_manager.cmos.restore_snapshot_v3(&mut section)?;
+                        self.device_manager.cmos.restore(&mut section).restated()?;
                         cmos_decoded = true;
                     }
-                    SEC_DMA => self.device_manager.dma.restore_snapshot_v3(&mut section)?,
+                    SEC_DMA => self.device_manager.dma.restore(&mut section).restated()?,
                     SEC_KEYBOARD => {
                         keyboard =
-                            Some(self.device_manager.keyboard.restore_snapshot_v3(&mut section)?);
+                            Some(self.device_manager.keyboard.restore(&mut section).restated()?);
                     }
-                    SEC_SERIAL => self.device_manager.serial.restore_snapshot_v3(&mut section)?,
-                    SEC_HARDDRV => self.device_manager.ide.drives.restore_snapshot_v3(&mut section)?,
+                    SEC_SERIAL => self.device_manager.serial.restore(&mut section).restated()?,
+                    SEC_HARDDRV => self.device_manager.ide.drives.restore(&mut section).restated()?,
                     SEC_PCI => {
-                        if section.read_u32()? != SNAPSHOT_SECTION_VERSION {
+                        if section.read_u32().restated()? != SNAPSHOT_SECTION_VERSION {
                             return Err(invalid_snapshot(
                                 "unsupported PCI snapshot section version",
                             ));
                         }
                         self.device_manager
                             .pci_bridge
-                            .restore_snapshot_v3_body(&mut section)?;
+                            .restore_snapshot_v3_body(&mut section)
+                            .restated()?;
                         self.device_manager
                             .pci2isa
-                            .restore_snapshot_v3_body(&mut section)?;
+                            .restore_snapshot_v3_body(&mut section)
+                            .restated()?;
                         pci = Some(
                             self.device_manager
                                 .ide.bus_master
-                                .restore_snapshot_v3_body(&mut section)?,
+                                .restore_snapshot_v3_body(&mut section)
+                                .restated()?,
                         );
                     }
                     SEC_ACPI => {
-                        acpi = Some(self.device_manager.acpi.restore_snapshot_v3(&mut section)?);
+                        acpi = Some(self.device_manager.acpi.restore(&mut section).restated()?);
                     }
                     SEC_VGA => {
-                        vga = Some(self.device_manager.vga.restore_snapshot_v3(&mut section)?);
+                        vga = Some(self.device_manager.vga.restore(&mut section).restated()?);
                     }
-                    SEC_IOAPIC => self.device_manager.ioapic.restore_snapshot_v3(&mut section)?,
-                    SEC_LAPIC => self.restore_lapics(&mut section)?,
-                    SEC_HPET => self.device_manager.hpet.restore_snapshot_v3(&mut section)?,
+                    SEC_IOAPIC => self.device_manager.ioapic.restore(&mut section).restated()?,
+                    SEC_LAPIC => self.restore_lapics(&mut section).restated()?,
+                    SEC_HPET => self.device_manager.hpet.restore(&mut section).restated()?,
                     _ => unreachable!(),
                 }
                 Ok(())
             })();
             decoded.map_err(|error| {
-                Error::new(
-                    error.kind(),
+                io_error_because(
+                    &error,
                     format!("snapshot section {id} could not be restored: {error}"),
                 )
             })?;
             section.finish_exact().map_err(|error| {
-                Error::new(
-                    error.kind(),
+                snapshot_io_error_because(
+                    error,
                     format!("snapshot section {id} was not consumed exactly: {error}"),
                 )
             })?;
             expected += 1;
         }
         if expected != SNAPSHOT_V3_SECTION_ORDER.len() { return Err(invalid_snapshot("snapshot is missing a required section")); }
-        let mut trailing = [0u8; 1]; if reader.read(&mut trailing)? != 0 { return Err(invalid_snapshot("snapshot has trailing bytes")); }
+        if !reader.at_end()? { return Err(invalid_snapshot("snapshot has trailing bytes")); }
         let platform = platform.ok_or_else(|| invalid_snapshot("snapshot platform section was not decoded"))?;
         if !pit_decoded { return Err(invalid_snapshot("snapshot PIT section was not decoded")); }
         if !cmos_decoded { return Err(invalid_snapshot("snapshot CMOS section was not decoded")); }
@@ -574,18 +666,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
             cpu.validate_snapshot_lapic_binding(
                 cpu.lapic.get_base(),
                 cpu.lapic.get_mode() as u64,
-            )?;
+            )
+            .restated()?;
         }
         let pit = self.device_manager.pit.post_restore_snapshot_v3();
         let cmos = self.device_manager.cmos.post_restore_snapshot_v3();
         self.memory.set_a20_mask(self.pc_system.a20_mask());
         self.invalidate_all_cpu_host_mappings();
-        self.validate_post_restore_handles(pit, cmos, keyboard, acpi)?;
-        self.device_manager.ide.bus_master.validate_snapshot_v3_timer_owners(&self.pc_system)?;
+        self.validate_post_restore_handles(pit, cmos, keyboard, acpi).restated()?;
+        self.device_manager.ide.bus_master.validate_snapshot_v3_timer_owners(&self.pc_system).restated()?;
         self.device_manager.serial.validate_snapshot_v3_timer_handles(
             |port, handle| self.pc_system.validate_timer_handle_owner(handle, TimerOwner::SerialFifo(port)),
             |port, handle| self.pc_system.validate_timer_handle_owner(handle, TimerOwner::SerialTx(port)),
-        )?;
+        ).restated()?;
         self.reanchor_slowdown_after_restore()?;
         if platform.desired_bmdma_base != pci.bmdma_base || platform.desired_pm_base != acpi.pm_base || platform.desired_sm_base != acpi.sm_base || platform.desired_vga_lfb_base != vga.lfb_base || platform.desired_vga_mmio_base != vga.mmio_base { return Err(invalid_snapshot("snapshot mapping targets disagree across sections")); }
         self.finish_snapshot_restore_v3(
@@ -593,21 +686,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         )
     }
 
-    fn restore_cpus<R: Read>(&mut self, section: &mut SnapshotReader<R>) -> io::Result<()> {
-        if section.read_u32()? != SNAPSHOT_SECTION_VERSION { return Err(invalid_snapshot("unsupported CPU snapshot section version")); }
-        let count = section.read_count(self.cpu_count())?; if count != self.cpu_count() { return Err(invalid_snapshot("snapshot CPU count does not match machine")); }
-        for index in 0..count { let id = section.read_u32()?; if id != self.cpu_ref(index).snapshot_cpu_id() { return Err(invalid_snapshot("snapshot CPU ID is not in configured order")); } let len = section.read_u64()?; let mut body = SnapshotReader::new(&mut *section, len)?; self.cpu_mut_at(index).restore_snapshot_v3_body(&mut body, id)?; body.finish_exact()?; }
+    fn restore_cpus<R: SnapRead>(&mut self, section: &mut SnapshotReader<R>) -> SnapResult {
+        if section.read_u32()? != SNAPSHOT_SECTION_VERSION { return Err(SnapError::Invalid("unsupported CPU snapshot section version")); }
+        let count = section.read_count(self.cpu_count())?; if count != self.cpu_count() { return Err(SnapError::Invalid("snapshot CPU count does not match machine")); }
+        for index in 0..count { let id = section.read_u32()?; if id != self.cpu_ref(index).snapshot_cpu_id() { return Err(SnapError::Invalid("snapshot CPU ID is not in configured order")); } let len = section.read_u64()?; let mut body = SnapshotReader::new(&mut *section, len)?; self.cpu_mut_at(index).restore_snapshot_v3_body(&mut body, id)?; body.finish_exact()?; }
         Ok(())
     }
 
-    fn restore_lapics<R: Read>(&mut self, section: &mut SnapshotReader<R>) -> io::Result<()> {
-        if section.read_u32()? != SNAPSHOT_SECTION_VERSION { return Err(invalid_snapshot("unsupported LAPIC snapshot section version")); }
-        let count = section.read_count(self.cpu_count())?; if count != self.cpu_count() { return Err(invalid_snapshot("snapshot LAPIC count does not match machine")); }
-        for index in 0..count { let id = section.read_u32()?; if id != self.cpu_ref(index).snapshot_cpu_id() { return Err(invalid_snapshot("snapshot LAPIC CPU ID is not in configured order")); } let len = section.read_u64()?; let mut body = SnapshotReader::new(&mut *section, len)?; let restored = self.cpu_mut_at(index).lapic.restore_snapshot_v3_body(&mut body)?; body.finish_exact()?; for handle in [restored.timer_handle, restored.vmx_timer_handle, restored.mwaitx_timer_handle].into_iter().flatten() { self.pc_system.validate_timer_handle_owner(handle, TimerOwner::Lapic(index))?; } }
+    fn restore_lapics<R: SnapRead>(&mut self, section: &mut SnapshotReader<R>) -> SnapResult {
+        if section.read_u32()? != SNAPSHOT_SECTION_VERSION { return Err(SnapError::Invalid("unsupported LAPIC snapshot section version")); }
+        let count = section.read_count(self.cpu_count())?; if count != self.cpu_count() { return Err(SnapError::Invalid("snapshot LAPIC count does not match machine")); }
+        for index in 0..count { let id = section.read_u32()?; if id != self.cpu_ref(index).snapshot_cpu_id() { return Err(SnapError::Invalid("snapshot LAPIC CPU ID is not in configured order")); } let len = section.read_u64()?; let mut body = SnapshotReader::new(&mut *section, len)?; let restored = self.cpu_mut_at(index).lapic.restore_snapshot_v3_body(&mut body)?; body.finish_exact()?; for handle in [restored.timer_handle, restored.vmx_timer_handle, restored.mwaitx_timer_handle].into_iter().flatten() { self.pc_system.validate_timer_handle_owner(handle, TimerOwner::Lapic(index))?; } }
         Ok(())
     }
 
-    fn validate_post_restore_handles(&self, pit: crate::iodev::pit::PitSnapshotRestoreState, cmos: crate::iodev::cmos::CmosSnapshotRestoreState, keyboard: crate::iodev::keyboard::KeyboardSnapshotRestore, acpi: crate::iodev::acpi::AcpiSnapshotRestore) -> io::Result<()> {
+    fn validate_post_restore_handles(&self, pit: crate::iodev::pit::PitSnapshotRestoreState, cmos: crate::iodev::cmos::CmosSnapshotRestoreState, keyboard: crate::iodev::keyboard::KeyboardSnapshotRestore, acpi: crate::iodev::acpi::AcpiSnapshotRestore) -> SnapResult {
         if let Some(handle) = pit.timer_handle { self.pc_system.validate_timer_handle_owner(handle, TimerOwner::Pit)?; }
         for (handle, owner) in [(cmos.periodic_timer_handle, TimerOwner::CmosPeriodic), (cmos.one_second_timer_handle, TimerOwner::CmosOneSecond), (cmos.uip_timer_handle, TimerOwner::CmosUip), (keyboard.timer_handle, TimerOwner::Keyboard), (acpi.overflow_timer_handle, TimerOwner::AcpiPmOverflow)] { if let Some(handle) = handle { self.pc_system.validate_timer_handle_owner(handle, owner)?; } }
         for (index, handle) in self.device_manager.hpet.timer_handles.iter().enumerate() { if let Some(handle) = handle { self.pc_system.validate_timer_handle_owner(*handle, TimerOwner::Hpet(index))?; } }
@@ -615,10 +708,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     }
 }
 
-#[cfg(feature = "std")]
-fn read_outer_u32<R: Read>(reader: &mut R) -> io::Result<u32> { let mut b = [0; 4]; reader.read_exact(&mut b)?; Ok(u32::from_le_bytes(b)) }
-#[cfg(feature = "std")]
-fn read_outer_u64<R: Read>(reader: &mut R) -> io::Result<u64> { let mut b = [0; 8]; reader.read_exact(&mut b)?; Ok(u64::from_le_bytes(b)) }
 
 #[cfg(all(test, feature = "std", feature = "alloc"))]
 mod tests {
@@ -800,19 +889,17 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         bytes: Vec<u8>,
     }
 
-    impl std::io::Write for SnapshotHeaderWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+    /// A sink that keeps the container header and then refuses, so a section
+    /// whose declared length exceeds what any host would hold can be observed
+    /// at the point it is declared rather than after 4 GiB of writing.
+    impl SnapWrite for SnapshotHeaderWriter {
+        fn write_bytes(&mut self, bytes: &[u8]) -> SnapResult {
             const HEADER_LEN: usize = 28;
             let remaining = HEADER_LEN.saturating_sub(self.bytes.len());
-            if remaining == 0 {
-                return Err(Error::new(ErrorKind::Other, "snapshot header captured"));
+            if bytes.len() > remaining {
+                return Err(SnapError::Host);
             }
-            let count = remaining.min(bytes.len());
-            self.bytes.extend_from_slice(&bytes[..count]);
-            Ok(count)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
+            self.bytes.extend_from_slice(bytes);
             Ok(())
         }
     }
@@ -883,7 +970,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         )
         .unwrap_err();
 
-        assert_eq!(write_error.kind(), ErrorKind::Other);
+        assert_eq!(write_error, SnapError::Host);
         assert_eq!(writer.bytes.len(), 28);
         assert_eq!(
             u32::from_le_bytes(writer.bytes[16..20].try_into().unwrap()),
@@ -894,13 +981,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             declared
         );
 
-        let mut empty = Cursor::new([]);
+        let mut empty: &[u8] = &[];
         let mut section =
             SnapshotReader::new_with_limit(&mut empty, declared, declared).unwrap();
-        assert_eq!(
-            section.read_u32().unwrap_err().kind(),
-            ErrorKind::UnexpectedEof
-        );
+        assert_eq!(section.read_u32().unwrap_err(), SnapError::Truncated);
     }
 
     #[test]
@@ -1457,7 +1541,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             assert_restore_error(
                 &oversized,
                 io::ErrorKind::InvalidData,
-                "length exceeds implementation bound",
+                "snapshot length is out of range",
             );
 
             let mut short_section = saved.clone();

@@ -11,6 +11,8 @@
 use crate::gui::BxGui;
 #[cfg(feature = "std")]
 use crate::pc_system::TimerOwner;
+#[cfg(feature = "std")]
+use crate::snapshot::Restated;
 #[cfg(feature = "alloc")]
 use crate::{
     cpu::builder::BxCpuBuilder, iodev::acpi_tables::AcpiTableGenerator, memory::MemoryError,
@@ -597,10 +599,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
             .device_manager
             .acpi
             .post_restore_snapshot_v3(self.pc_system.time_ticks());
-        self.device_manager.serial.after_restore_snapshot_v3()?;
+        self.device_manager.serial.after_restore_snapshot_v3().restated()?;
         self.device_manager
             .vga
-            .rebuild_snapshot_v3_derived_state()?;
+            .rebuild_snapshot_v3_derived_state()
+            .restated()?;
         self.validate_restored_irq_levels(&keyboard, &cmos, sci_level)?;
         self.sync_restored_event_levels();
         self.rebuild_cpu_masks_from_scan();
@@ -631,7 +634,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
             (false, None, None) => Ok(()),
             (true, Some(handle), Some(slot)) if slot == handle => {
                 self.pc_system
-                    .validate_timer_handle_owner(handle, TimerOwner::Slowdown)?;
+                    .validate_timer_handle_owner(handle, TimerOwner::Slowdown)
+                    .restated()?;
                 let emulated_now = self.pc_system.time_usec();
                 self.slowdown_timer
                     .initialize(handle, emulated_now, std::time::Instant::now());

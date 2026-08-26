@@ -14,28 +14,26 @@
 //! based on PIRQ routing registers. Each PIRQ can be mapped to any
 //! ISA IRQ or disabled (bit 7 = 1).
 
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
 use super::device_api::ChipsetEffect;
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
 };
 
 #[cfg(feature = "std")]
 const PIIX3_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0e];
 
 #[cfg(feature = "std")]
-fn invalid_piix3_snapshot(message: &'static str) -> io::Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_piix3_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
 fn validate_piix3_snapshot_identity(
     saved: &[u8; PCI_CONF_SIZE],
     live: &[u8; PCI_CONF_SIZE],
-) -> io::Result<()> {
+) -> SnapResult<()> {
     for index in PIIX3_SNAPSHOT_IDENTITY_BYTES {
         if saved[index] != live[index] {
             return Err(invalid_piix3_snapshot(
@@ -513,7 +511,7 @@ impl BxPiix3 {
     /// Exact byte count for this ISA bridge's contribution to the combined
     /// PCI payload. The enclosing PCI codec owns the section-version prefix.
     #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         let config_len = u64::try_from(PCI_CONF_SIZE)
             .map_err(|_| invalid_piix3_snapshot("PIIX3 config size does not fit u64"))?;
         let irq_cells = checked_snapshot_len_mul(4, 16)?;
@@ -532,7 +530,7 @@ impl BxPiix3 {
 
     /// Stream the mutable PIIX3 configuration, PIC-routing, and reset state.
     #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         writer.write_u8(self.devfunc)?;
         writer.write_bytes(&self.pci_conf)?;
         writer.write_u8(self.elcr1)?;
@@ -558,10 +556,10 @@ impl BxPiix3 {
     /// PCI interrupt edges. Those effects are restored once every component
     /// of the enclosing PCI section has validated.
     #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         let devfunc = reader.read_u8()?;
         let mut pci_conf = [0u8; PCI_CONF_SIZE];
         reader.read_bytes(&mut pci_conf)?;

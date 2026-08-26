@@ -22,12 +22,10 @@ use thiserror::Error;
 use crate::config::BxPhyAddress;
 use crate::cpu::ResetReason;
 
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -198,28 +196,28 @@ const TIMER_WIRE_FIXED_LEN: u64 = 17;
 const FIRED_OWNER_WIRE_LEN: u64 = TIMER_OWNER_WIRE_LEN + 4;
 
 #[cfg(feature = "std")]
-fn snapshot_invalid_data(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn snapshot_invalid_data(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn snapshot_usize_to_u32(value: usize) -> io::Result<u32> {
+fn snapshot_usize_to_u32(value: usize) -> SnapResult<u32> {
     u32::try_from(value).map_err(|_| snapshot_invalid_data("snapshot value does not fit in u32"))
 }
 
 #[cfg(feature = "std")]
-fn snapshot_usize_to_u64(value: usize) -> io::Result<u64> {
+fn snapshot_usize_to_u64(value: usize) -> SnapResult<u64> {
     u64::try_from(value).map_err(|_| snapshot_invalid_data("snapshot value does not fit in u64"))
 }
 
 #[cfg(feature = "std")]
-fn max_lapic_timer_owners() -> io::Result<usize> {
+fn max_lapic_timer_owners() -> SnapResult<usize> {
     usize::try_from(crate::params::BX_MAX_SMP_THREADS_SUPPORTED)
         .map_err(|_| snapshot_invalid_data("LAPIC timer capacity does not fit in usize"))
 }
 
 #[cfg(feature = "std")]
-fn timer_owner_wire_parts(owner: TimerOwner) -> io::Result<(u8, u32)> {
+fn timer_owner_wire_parts(owner: TimerOwner) -> SnapResult<(u8, u32)> {
     let fixed = |tag| Ok((tag, 0));
 
     match owner {
@@ -268,14 +266,14 @@ fn timer_owner_wire_parts(owner: TimerOwner) -> io::Result<(u8, u32)> {
 }
 
 #[cfg(feature = "std")]
-fn write_timer_owner<W: Write>(writer: &mut W, owner: TimerOwner) -> io::Result<()> {
+fn write_timer_owner<W: SnapWrite>(writer: &mut W, owner: TimerOwner) -> SnapResult<()> {
     let (tag, argument) = timer_owner_wire_parts(owner)?;
     writer.write_u8(tag)?;
     writer.write_u32(argument)
 }
 
 #[cfg(feature = "std")]
-fn read_timer_owner<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<TimerOwner> {
+fn read_timer_owner<R: SnapRead>(reader: &mut R) -> SnapResult<TimerOwner> {
     let tag = reader.read_u8()?;
     let argument = reader.read_u32()?;
 
@@ -344,7 +342,7 @@ fn read_timer_owner<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Timer
 }
 
 #[cfg(feature = "std")]
-fn validate_timer_id(id: &[u8; BX_MAX_TIMER_ID_LEN]) -> io::Result<()> {
+fn validate_timer_id(id: &[u8; BX_MAX_TIMER_ID_LEN]) -> SnapResult<()> {
     let mut terminated = false;
     for &byte in id {
         if byte == 0 {
@@ -383,7 +381,7 @@ fn validate_snapshot_state_fields(
     num_fired: usize,
     enable_a20: bool,
     a20_mask: BxPhyAddress,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     if ips == 0 {
         return Err(snapshot_invalid_data("configured IPS is zero"));
     }
@@ -1366,7 +1364,7 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
     ///
     /// The payload owns its section-version prefix and streams every timer
     /// slot, so the section writer never needs a staging buffer.
-    fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         self.validate_snapshot_v3_state()?;
 
         let mut len = 0u64;
@@ -1416,7 +1414,7 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
 
     /// Stream the complete v3 PC-system state, including all timer ownership
     /// and pending timer-dispatch work.
-    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.validate_snapshot_v3_state()?;
 
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
@@ -1465,10 +1463,10 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
     /// Callback topology is intentionally not represented here: device codecs
     /// retain their host anchors and validate their saved timer handles through
     /// `validate_timer_handle_owner` after this object has restored.
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         let section_version = reader.read_u32()?;
         if section_version != SNAPSHOT_SECTION_VERSION {
             return Err(snapshot_invalid_data("unsupported PC-system section version"));
@@ -1521,7 +1519,6 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
             *owner = read_timer_owner(reader)?;
             *count = reader.read_u32()?;
         }
-        reader.finish_exact()?;
 
         validate_snapshot_state_fields(
             ips,
@@ -1586,7 +1583,7 @@ impl BxPcSystemC {
         &self,
         handle: usize,
         expected: TimerOwner,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         timer_owner_wire_parts(expected)?;
         if handle >= self.num_timers {
             return Err(snapshot_invalid_data("timer handle is outside the registered range"));
@@ -1605,7 +1602,7 @@ impl BxPcSystemC {
     }
 
     #[cfg(feature = "std")]
-    fn validate_snapshot_v3_state(&self) -> io::Result<()> {
+    fn validate_snapshot_v3_state(&self) -> SnapResult<()> {
         validate_snapshot_state_fields(
             self.ips,
             self.curr_countdown,
@@ -1626,6 +1623,7 @@ impl BxPcSystemC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::{SnapError, SnapshotReader};
     #[cfg(feature = "std")]
     use crate::snapshot::SnapshotSection;
 
@@ -2031,7 +2029,6 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn snapshot_timer_owner_phase_roundtrip_rejects_owner_mismatch() {
-        use std::io::Cursor;
 
         let mut source = BxPcSystemC::new();
         source.initialize(1_000_000);
@@ -2045,13 +2042,13 @@ mod tests {
             .unwrap();
 
         let mut payload = Vec::new();
-        source.save_snapshot_v3(&mut payload).unwrap();
+        source.save(&mut payload).unwrap();
 
         let mut restored = BxPcSystemC::new();
         restored.initialize(1_000_000);
         let mut reader =
-            SnapshotReader::new(Cursor::new(payload.as_slice()), payload.len() as u64).unwrap();
-        restored.restore_snapshot_v3(&mut reader).unwrap();
+            SnapshotReader::new(payload.as_slice(), payload.len() as u64).unwrap();
+        restored.restore(&mut reader).unwrap();
 
         assert_eq!(restored.time_ticks(), source.time_ticks());
         assert_eq!(restored.next_timer_deadline_at(), Some(deadline));
@@ -2062,7 +2059,7 @@ mod tests {
         let mismatch = restored
             .validate_timer_handle_owner(handle, TimerOwner::CmosOneSecond)
             .unwrap_err();
-        assert_eq!(mismatch.kind(), ErrorKind::InvalidData);
+        assert!(matches!(mismatch, SnapError::Invalid(_)), "{mismatch:?}");
 
         restored.tickn(40);
         assert!(!restored.has_fired_timers());
@@ -2081,7 +2078,6 @@ mod tests {
         // a since-departed deadline until the next `countdown_event`. Saving
         // in that state — reached by every real long boot — must succeed and
         // round-trip, and the machine must still recompute correctly.
-        use std::io::Cursor;
 
         let mut source = BxPcSystemC::new();
         source.initialize(1_000_000);
@@ -2102,13 +2098,13 @@ mod tests {
         source.deactivate_timer(near).unwrap();
 
         let mut payload = Vec::new();
-        source.save_snapshot_v3(&mut payload).unwrap();
+        source.save(&mut payload).unwrap();
 
         let mut restored = BxPcSystemC::new();
         restored.initialize(1_000_000);
         let mut reader =
-            SnapshotReader::new(Cursor::new(payload.as_slice()), payload.len() as u64).unwrap();
-        restored.restore_snapshot_v3(&mut reader).unwrap();
+            SnapshotReader::new(payload.as_slice(), payload.len() as u64).unwrap();
+        restored.restore(&mut reader).unwrap();
         assert_eq!(restored.time_ticks(), source.time_ticks());
 
         // The stale countdown wakes early, fires nothing, and recomputes to

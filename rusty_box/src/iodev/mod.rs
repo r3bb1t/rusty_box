@@ -19,11 +19,9 @@
 use crate::ring_buffer::RingBuffer;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
-use crate::snapshot::{checked_snapshot_len_add, SnapshotReader, SnapshotWriteExt};
+use crate::snapshot::{checked_snapshot_len_add, SnapError, SnapRead, SnapResult, SnapWrite};
 
 
 /// Bounded retention for the port-0xE9 debug console when no host consumer
@@ -1295,12 +1293,12 @@ pub(crate) struct BxDevicesSnapshotRestore {
 }
 
 #[cfg(feature = "std")]
-fn invalid_bx_devices_snapshot(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_bx_devices_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn timer_request_snapshot_len(request: TimerRequest) -> io::Result<u64> {
+fn timer_request_snapshot_len(request: TimerRequest) -> SnapResult<u64> {
     match request {
         TimerRequest::Unchanged | TimerRequest::Deactivate => Ok(1),
         TimerRequest::Activate { .. } => checked_snapshot_len_add(1, 17),
@@ -1308,10 +1306,10 @@ fn timer_request_snapshot_len(request: TimerRequest) -> io::Result<u64> {
 }
 
 #[cfg(feature = "std")]
-fn write_timer_request_snapshot<W: Write>(
+fn write_timer_request_snapshot<W: SnapWrite>(
     writer: &mut W,
     request: TimerRequest,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     match request {
         TimerRequest::Unchanged => writer.write_u8(0),
         TimerRequest::Deactivate => writer.write_u8(1),
@@ -1329,9 +1327,9 @@ fn write_timer_request_snapshot<W: Write>(
 }
 
 #[cfg(feature = "std")]
-fn read_timer_request_snapshot<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> io::Result<TimerRequest> {
+fn read_timer_request_snapshot<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<TimerRequest> {
     match reader.read_u8()? {
         0 => Ok(TimerRequest::Unchanged),
         1 => Ok(TimerRequest::Deactivate),
@@ -1351,7 +1349,7 @@ impl BxDevicesC {
     /// Number of bytes emitted by the PLATFORM controller body. Handler
     /// topology, raw pointers, immutable timer configuration, and diagnostics
     /// intentionally stay live and are never part of this representation.
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         self.validate_snapshot_v3_state()?;
 
         let mut len = 1u64; // PCI enabled
@@ -1385,7 +1383,7 @@ impl BxDevicesC {
 
     /// Stream guest-visible controller continuation state without draining
     /// queues or serializing live handler/pointer topology.
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.validate_snapshot_v3_state()?;
 
         writer.write_bool(self.pci_enabled)?;
@@ -1420,10 +1418,10 @@ impl BxDevicesC {
     /// Decode controller state without touching handler registrations, raw
     /// pointers, timer frequency configuration, or diagnostics. Pending timer
     /// operations remain queued for the parent-owned scheduler boundary.
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<BxDevicesSnapshotRestore> {
+        reader: &mut R,
+    ) -> SnapResult<BxDevicesSnapshotRestore> {
         let live_pci_enabled = self.pci_enabled;
         let pci_enabled = reader.read_bool()?;
         if pci_enabled != live_pci_enabled {
@@ -1488,7 +1486,7 @@ impl BxDevicesC {
         })
     }
 
-    fn validate_snapshot_v3_state(&self) -> io::Result<()> {
+    fn validate_snapshot_v3_state(&self) -> SnapResult<()> {
         if self.port_e9_output.len() > PORT_E9_SNAPSHOT_CAPACITY
             || self.port80_output.len() > PORT80_SNAPSHOT_CAPACITY
         {

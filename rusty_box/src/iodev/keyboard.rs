@@ -151,12 +151,10 @@
 //! 0xFF: Reset (returns ACK + 0xAA + device ID 0x00)
 //! ```
 
-#[cfg(feature = "std")]
-use std::io::{Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, SnapshotReader, SnapshotWriteExt, SNAPSHOT_SECTION_VERSION,
+    bounds, checked_snapshot_len_add, SnapError, SnapRead, SnapResult, SnapWrite, SNAPSHOT_SECTION_VERSION,
 };
 
 // I/O Ports
@@ -2113,7 +2111,7 @@ impl BxKeyboardC {
 
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct KeyboardSnapshotRestore {
+pub struct KeyboardSnapshotRestore {
     pub(crate) led_status: u8,
     pub(crate) irq1_level: bool,
     pub(crate) irq12_level: bool,
@@ -2130,7 +2128,7 @@ impl crate::snapshot::SnapshotSection for BxKeyboardC {
     const TAG: u32 = crate::snapshot::SEC_KEYBOARD;
     type Restored = KeyboardSnapshotRestore;
 
-    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         validate_keyboard_ring(
             self.kbd_internal_buffer.head,
             self.kbd_internal_buffer.num_elements,
@@ -2177,11 +2175,11 @@ impl crate::snapshot::SnapshotSection for BxKeyboardC {
         )
     }
 
-    fn save_snapshot_v3<W: Write>(
+    fn save<W: SnapWrite>(
         &self,
         writer: &mut W,
-    ) -> std::io::Result<()> {
-        self.snapshot_v3_len()?;
+    ) -> SnapResult<()> {
+        self.snapshot_len()?;
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         save_keyboard_controller(writer, &self.kbd_controller)?;
         save_keyboard_ring(
@@ -2235,10 +2233,10 @@ impl crate::snapshot::SnapshotSection for BxKeyboardC {
         save_reset_request(writer, self.reset_requested)
     }
 
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> std::io::Result<KeyboardSnapshotRestore> {
+        reader: &mut R,
+    ) -> SnapResult<KeyboardSnapshotRestore> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(keyboard_snapshot_invalid(
                 "unsupported keyboard snapshot section version",
@@ -2348,12 +2346,12 @@ impl crate::snapshot::SnapshotSection for BxKeyboardC {
 }
 
 #[cfg(feature = "std")]
-fn keyboard_snapshot_invalid(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn keyboard_snapshot_invalid(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn keyboard_ring_capacity(capacity: usize) -> std::io::Result<usize> {
+fn keyboard_ring_capacity(capacity: usize) -> SnapResult<usize> {
     if capacity == 0 || capacity > bounds::MAX_SNAPSHOT_QUEUE_LEN {
         return Err(keyboard_snapshot_invalid(
             "keyboard ring capacity exceeds snapshot bounds",
@@ -2363,12 +2361,12 @@ fn keyboard_ring_capacity(capacity: usize) -> std::io::Result<usize> {
 }
 
 #[cfg(feature = "std")]
-fn controller_queue_capacity() -> std::io::Result<usize> {
+fn controller_queue_capacity() -> SnapResult<usize> {
     keyboard_ring_capacity(BX_KBD_CONTROLLER_QSIZE)
 }
 
 #[cfg(feature = "std")]
-fn validate_keyboard_ring(head: usize, count: usize, capacity: usize) -> std::io::Result<()> {
+fn validate_keyboard_ring(head: usize, count: usize, capacity: usize) -> SnapResult<()> {
     let capacity = keyboard_ring_capacity(capacity)?;
     if head >= capacity || count > capacity {
         return Err(keyboard_snapshot_invalid(
@@ -2379,7 +2377,7 @@ fn validate_keyboard_ring(head: usize, count: usize, capacity: usize) -> std::io
 }
 
 #[cfg(feature = "std")]
-fn keyboard_ring_index(head: usize, offset: usize, capacity: usize) -> std::io::Result<usize> {
+fn keyboard_ring_index(head: usize, offset: usize, capacity: usize) -> SnapResult<usize> {
     validate_keyboard_ring(head, offset, capacity)?;
     head.checked_add(offset)
         .map(|index| index % capacity)
@@ -2387,12 +2385,12 @@ fn keyboard_ring_index(head: usize, offset: usize, capacity: usize) -> std::io::
 }
 
 #[cfg(feature = "std")]
-fn save_keyboard_ring<W: Write + ?Sized>(
+fn save_keyboard_ring<W: SnapWrite>(
     writer: &mut W,
     buffer: &[u8],
     head: usize,
     count: usize,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     validate_keyboard_ring(head, count, buffer.len())?;
     writer.write_u32(
         u32::try_from(head)
@@ -2413,10 +2411,10 @@ fn save_keyboard_ring<W: Write + ?Sized>(
 }
 
 #[cfg(feature = "std")]
-fn restore_keyboard_ring<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_keyboard_ring<R: SnapRead>(
+    reader: &mut R,
     buffer: &mut [u8],
-) -> std::io::Result<(usize, usize)> {
+) -> SnapResult<(usize, usize)> {
     let capacity = keyboard_ring_capacity(buffer.len())?;
     let head = reader.read_count(capacity)?;
     let count = reader.read_count(capacity)?;
@@ -2433,7 +2431,7 @@ fn restore_keyboard_ring<R: Read>(
 }
 
 #[cfg(feature = "std")]
-fn validate_keyboard_controller(controller: &KbdController) -> std::io::Result<()> {
+fn validate_keyboard_controller(controller: &KbdController) -> SnapResult<()> {
     if controller.expecting_port60h > 1 || controller.expecting_mouse_parameter > 1 {
         return Err(keyboard_snapshot_invalid(
             "keyboard command parameter state is invalid",
@@ -2472,7 +2470,7 @@ fn validate_keyboard_controller(controller: &KbdController) -> std::io::Result<(
 fn validate_keyboard_timer_state(
     controller: &KbdController,
     timer_handle: Option<usize>,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     if controller.timer_pending == 1 && timer_handle.is_none() {
         return Err(keyboard_snapshot_invalid(
             "keyboard armed timer has no registered handle",
@@ -2482,7 +2480,7 @@ fn validate_keyboard_timer_state(
 }
 
 #[cfg(feature = "std")]
-fn validate_keyboard_buffer_state(buffer: &KbdInternalBuffer) -> std::io::Result<()> {
+fn validate_keyboard_buffer_state(buffer: &KbdInternalBuffer) -> SnapResult<()> {
     validate_keyboard_ring(buffer.head, buffer.num_elements, BX_KBD_ELEMENTS)?;
     if buffer.delay > TYPEMATIC_DELAY_MASK || buffer.repeat_rate > TYPEMATIC_RATE_MASK {
         return Err(keyboard_snapshot_invalid("keyboard typematic state is invalid"));
@@ -2502,7 +2500,7 @@ fn valid_mouse_mode(mode: u8) -> bool {
 }
 
 #[cfg(feature = "std")]
-fn validate_mouse_state(mouse: &MouseState) -> std::io::Result<()> {
+fn validate_mouse_state(mouse: &MouseState) -> SnapResult<()> {
     if !matches!(mouse.mouse_type, BX_MOUSE_TYPE_PS2 | BX_MOUSE_TYPE_IMPS2) {
         return Err(keyboard_snapshot_invalid("mouse type is invalid"));
     }
@@ -2520,10 +2518,10 @@ fn validate_mouse_state(mouse: &MouseState) -> std::io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn save_keyboard_controller<W: Write + ?Sized>(
+fn save_keyboard_controller<W: SnapWrite>(
     writer: &mut W,
     controller: &KbdController,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     validate_keyboard_controller(controller)?;
     writer.write_bool(controller.pare)?;
     writer.write_bool(controller.tim)?;
@@ -2554,9 +2552,9 @@ fn save_keyboard_controller<W: Write + ?Sized>(
 }
 
 #[cfg(feature = "std")]
-fn restore_keyboard_controller<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> std::io::Result<KbdController> {
+fn restore_keyboard_controller<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<KbdController> {
     let controller = KbdController {
         pare: reader.read_bool()?,
         tim: reader.read_bool()?,
@@ -2590,10 +2588,10 @@ fn restore_keyboard_controller<R: Read>(
 }
 
 #[cfg(feature = "std")]
-fn save_mouse_state<W: Write + ?Sized>(
+fn save_mouse_state<W: SnapWrite>(
     writer: &mut W,
     mouse: &MouseState,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     validate_mouse_state(mouse)?;
     writer.write_u8(mouse.mouse_type)?;
     writer.write_u8(mouse.sample_rate)?;
@@ -2611,9 +2609,9 @@ fn save_mouse_state<W: Write + ?Sized>(
 }
 
 #[cfg(feature = "std")]
-fn restore_mouse_state<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> std::io::Result<MouseState> {
+fn restore_mouse_state<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<MouseState> {
     let mouse = MouseState {
         mouse_type: reader.read_u8()?,
         sample_rate: reader.read_u8()?,
@@ -2634,10 +2632,10 @@ fn restore_mouse_state<R: Read>(
 }
 
 #[cfg(feature = "std")]
-fn save_reset_request<W: Write + ?Sized>(
+fn save_reset_request<W: SnapWrite>(
     writer: &mut W,
     reset: Option<crate::cpu::ResetReason>,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     let tag = match reset {
         None => 0,
         Some(crate::cpu::ResetReason::Software) => 10,
@@ -2651,9 +2649,9 @@ fn save_reset_request<W: Write + ?Sized>(
 }
 
 #[cfg(feature = "std")]
-fn restore_reset_request<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> std::io::Result<Option<crate::cpu::ResetReason>> {
+fn restore_reset_request<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<Option<crate::cpu::ResetReason>> {
     match reader.read_u8()? {
         0 => Ok(None),
         10 => Ok(Some(crate::cpu::ResetReason::Software)),

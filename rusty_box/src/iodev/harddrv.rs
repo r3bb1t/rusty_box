@@ -105,7 +105,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -5185,23 +5185,23 @@ struct SnapshotDriveState {
 }
 
 #[cfg(feature = "std")]
-fn snapshot_invalid(message: &'static str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+fn snapshot_invalid(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn snapshot_add_len(total: &mut u64, part: u64) -> std::io::Result<()> {
+fn snapshot_add_len(total: &mut u64, part: u64) -> SnapResult<()> {
     *total = checked_snapshot_len_add(*total, part)?;
     Ok(())
 }
 
 #[cfg(feature = "std")]
-fn snapshot_usize_to_u64(value: usize) -> std::io::Result<u64> {
+fn snapshot_usize_to_u64(value: usize) -> SnapResult<u64> {
     u64::try_from(value).map_err(|_| snapshot_invalid("ATA snapshot length does not fit u64"))
 }
 
 #[cfg(feature = "std")]
-fn snapshot_u64_to_usize(value: u64, maximum: usize) -> std::io::Result<usize> {
+fn snapshot_u64_to_usize(value: u64, maximum: usize) -> SnapResult<usize> {
     let value = usize::try_from(value)
         .map_err(|_| snapshot_invalid("ATA snapshot index does not fit usize"))?;
     if value > maximum {
@@ -5211,13 +5211,13 @@ fn snapshot_u64_to_usize(value: u64, maximum: usize) -> std::io::Result<usize> {
 }
 
 #[cfg(feature = "std")]
-fn snapshot_read_i32<R: Read>(reader: &mut SnapshotReader<R>) -> std::io::Result<i32> {
+fn snapshot_read_i32<R: SnapRead>(reader: &mut R) -> SnapResult<i32> {
     i32::try_from(reader.read_i64()?)
         .map_err(|_| snapshot_invalid("ATA snapshot signed value does not fit i32"))
 }
 
 #[cfg(feature = "std")]
-fn snapshot_device_type(value: u8) -> std::io::Result<DeviceType> {
+fn snapshot_device_type(value: u8) -> SnapResult<DeviceType> {
     match value {
         0 => Ok(DeviceType::None),
         1 => Ok(DeviceType::Disk),
@@ -5250,7 +5250,7 @@ fn snapshot_media_hash(bytes: &[u8]) -> u64 {
 fn snapshot_file_identity(
     metadata: &std::fs::Metadata,
     path: &str,
-) -> std::io::Result<(u8, u64, u64)> {
+) -> SnapResult<(u8, u64, u64)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -5272,7 +5272,7 @@ fn snapshot_file_identity(
 
 #[cfg(feature = "std")]
 impl SnapshotDriveState {
-    fn read<R: Read>(reader: &mut SnapshotReader<R>) -> std::io::Result<Self> {
+    fn read<R: SnapRead>(reader: &mut R) -> SnapResult<Self> {
         let status_bits = reader.read_u8()?;
         let status = AtaStatus::from_bits(status_bits)
             .ok_or_else(|| snapshot_invalid("ATA snapshot has invalid status flags"))?;
@@ -5357,7 +5357,7 @@ impl SnapshotDriveState {
         Ok(state)
     }
 
-    fn validate(&self) -> std::io::Result<()> {
+    fn validate(&self) -> SnapResult<()> {
         let controller = &self.controller;
         if controller.buffer_index > controller.buffer_size {
             return Err(snapshot_invalid("ATA snapshot buffer index exceeds buffer size"));
@@ -5463,7 +5463,7 @@ impl SnapshotDriveState {
 
 #[cfg(feature = "std")]
 impl AtaDrive {
-    fn snapshot_media_descriptor(&self) -> std::io::Result<SnapshotMediaDescriptor> {
+    fn snapshot_media_descriptor(&self) -> SnapResult<SnapshotMediaDescriptor> {
         #[cfg(feature = "alloc")]
         let owned = self.disk_data.as_deref();
         #[cfg(not(feature = "alloc"))]
@@ -5550,7 +5550,7 @@ impl AtaDrive {
         })
     }
 
-    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         let media = self.snapshot_media_descriptor()?;
         let mut len = 0;
         // Immutable drive identity: type, geometry, strings, and slot number.
@@ -5582,7 +5582,7 @@ impl AtaDrive {
         Ok(len)
     }
 
-    fn save_snapshot_v3<W: Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         let media = self.snapshot_media_descriptor()?;
         if usize::from(self.model_len) > self.model.len()
             || usize::from(self.serial_len) > self.serial.len()
@@ -5659,11 +5659,11 @@ impl AtaDrive {
         self.save_snapshot_media(writer, media)
     }
 
-    fn save_snapshot_media<W: Write + ?Sized>(
+    fn save_snapshot_media<W: SnapWrite>(
         &self,
         writer: &mut W,
         media: SnapshotMediaDescriptor,
-    ) -> std::io::Result<()> {
+    ) -> SnapResult<()> {
         writer.write_u8(media.tag)?;
         match media.tag {
             SNAPSHOT_MEDIA_NONE => Ok(()),
@@ -5700,10 +5700,10 @@ impl AtaDrive {
         }
     }
 
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> std::io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         let device_type = snapshot_device_type(reader.read_u8()?)?;
         let geometry = DriveGeometry {
             cylinders: reader.read_u32()?,
@@ -5762,10 +5762,10 @@ impl AtaDrive {
         Ok(())
     }
 
-    fn restore_snapshot_media<R: Read>(
+    fn restore_snapshot_media<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> std::io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         let saved_tag = reader.read_u8()?;
         let live = self.snapshot_media_descriptor()?;
         if saved_tag != live.tag {
@@ -5824,12 +5824,12 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
     type Restored = ();
 
     /// Exact payload length for the HARDDRV v3 section, including its version.
-    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         let mut len = 4u64;
         for channel in &self.channels {
             snapshot_add_len(&mut len, 6)?;
             for drive in &channel.drives {
-                snapshot_add_len(&mut len, drive.snapshot_v3_len()?)?;
+                snapshot_add_len(&mut len, drive.snapshot_len()?)?;
             }
         }
         // Seek-arm latches: presence bool per slot, plus 4 bytes when armed.
@@ -5842,10 +5842,10 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
     }
 
     /// Streams the complete HARDDRV v3 section without staging its fixed buffers or media.
-    fn save_snapshot_v3<W: Write>(
+    fn save<W: SnapWrite>(
         &self,
         writer: &mut W,
-    ) -> std::io::Result<()> {
+    ) -> SnapResult<()> {
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         for channel in &self.channels {
             if usize::from(channel.drive_select) >= channel.drives.len() {
@@ -5856,7 +5856,7 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
             writer.write_u8(channel.irq)?;
             writer.write_u8(channel.drive_select)?;
             for drive in &channel.drives {
-                drive.save_snapshot_v3(writer)?;
+                drive.save(writer)?;
             }
         }
         // Seek-arm latches, [channel][device] — drained right after every I/O
@@ -5877,10 +5877,10 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
     }
 
     /// Restores the HARDDRV v3 section while retaining the live media resources.
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> std::io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(snapshot_invalid("unsupported ATA snapshot section version"));
         }
@@ -5896,7 +5896,7 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
                 return Err(snapshot_invalid("ATA snapshot drive selection is out of range"));
             }
             for drive in &mut channel.drives {
-                drive.restore_snapshot_v3(reader)?;
+                drive.restore(reader)?;
             }
             channel.drive_select = drive_select;
         }
@@ -5916,10 +5916,11 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::{SnapError, SnapshotReader};
     use crate::snapshot::SnapshotSection;
     use std::{
         fs::{self, File},
-        io::{Cursor, ErrorKind, Read, Seek, SeekFrom, Write},
+        io::{Read, Seek, SeekFrom, Write},
     };
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
@@ -6526,9 +6527,9 @@ mod tests {
         hd.seek_timer(0b00, &mut pic, &mut pci_ide);
         assert_eq!(hd.read(0x1f0, 2, &mut pic, &mut pci_ide), 0x3131);
 
-        let saved_len = hd.snapshot_v3_len().unwrap();
+        let saved_len = hd.snapshot_len().unwrap();
         let mut saved = Vec::with_capacity(saved_len as usize);
-        hd.save_snapshot_v3(&mut saved).unwrap();
+        hd.save(&mut saved).unwrap();
         assert_eq!(saved.len() as u64, saved_len);
 
         let drive = &mut hd.channels[0].drives[0];
@@ -6538,8 +6539,8 @@ mod tests {
         drive.controller.buffer[..SECTOR_SIZE].fill(0);
         drive.disk_data.as_mut().unwrap().fill(0xff);
 
-        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
-        hd.restore_snapshot_v3(&mut reader).unwrap();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        hd.restore(&mut reader).unwrap();
         reader.finish_exact().unwrap();
 
         let drive = &hd.channels[0].drives[0];
@@ -6569,12 +6570,15 @@ mod tests {
         let mut source = BxHardDriveC::new();
         source.attach_disk_data_ref(0, 0, &SOURCE_MEDIA, 1, 1, 1);
         let mut saved = Vec::new();
-        source.save_snapshot_v3(&mut saved).unwrap();
+        source.save(&mut saved).unwrap();
 
         let mut target = BxHardDriveC::new();
         target.attach_disk_data_ref(0, 0, &DIFFERENT_MEDIA, 1, 1, 1);
         let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
-        let error = target.restore_snapshot_v3(&mut reader).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        let error = target.restore(&mut reader).unwrap_err();
+        assert!(
+            matches!(error, SnapError::Invalid(_)),
+            "a rejected device state names what was wrong: {error:?}"
+        );
     }
 }

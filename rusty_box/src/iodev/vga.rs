@@ -31,12 +31,10 @@ use crate::iodev::vga_card::VgaCard;
 #[cfg(feature = "alloc")]
 use crate::iodev::display_sink::TilePos;
 use crate::{config::BxPhyAddress, memory::BxMemC, Result};
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -785,7 +783,7 @@ impl Default for VbeState {
 /// atomically, then call [`VgaCore::commit_snapshot_v3_mapping_target`].
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct VgaSnapshotRestoreTarget {
+pub struct VgaSnapshotRestoreTarget {
     pub(crate) lfb_base: u32,
     pub(crate) mmio_base: u32,
 }
@@ -3949,12 +3947,12 @@ impl VgaCore {
 }
 
 #[cfg(feature = "std")]
-fn invalid_vga_snapshot(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_vga_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn snapshot_v3_usize_len(len: usize) -> io::Result<u64> {
+fn snapshot_v3_usize_len(len: usize) -> SnapResult<u64> {
     let len = u64::try_from(len)
         .map_err(|_| invalid_vga_snapshot("VGA buffer length does not fit u64"))?;
     if len > bounds::MAX_SNAPSHOT_SECTION_LEN {
@@ -3966,7 +3964,7 @@ fn snapshot_v3_usize_len(len: usize) -> io::Result<u64> {
 }
 
 #[cfg(feature = "std")]
-fn write_snapshot_u32_len<W: Write>(writer: &mut W, len: usize) -> io::Result<()> {
+fn write_snapshot_u32_len<W: SnapWrite>(writer: &mut W, len: usize) -> SnapResult<()> {
     let len = snapshot_v3_usize_len(len)?;
     writer.write_u32(
         u32::try_from(len)
@@ -3975,20 +3973,20 @@ fn write_snapshot_u32_len<W: Write>(writer: &mut W, len: usize) -> io::Result<()
 }
 
 #[cfg(feature = "std")]
-fn read_snapshot_u32_len<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn read_snapshot_u32_len<R: SnapRead>(
+    reader: &mut R,
     maximum: usize,
     _description: &'static str,
-) -> io::Result<usize> {
+) -> SnapResult<usize> {
     reader.read_count(maximum)
 }
 
 #[cfg(feature = "std")]
-fn read_snapshot_fixed_array<R: Read, const N: usize>(
-    reader: &mut SnapshotReader<R>,
+fn read_snapshot_fixed_array<R: SnapRead, const N: usize>(
+    reader: &mut R,
     bytes: &mut [u8; N],
     description: &'static str,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let len = read_snapshot_u32_len(reader, N, description)?;
     if len != N {
         return Err(invalid_vga_snapshot("VGA fixed-buffer length mismatch"));
@@ -4015,7 +4013,7 @@ fn vga_snapshot_bpp_is_valid(bpp: u16) -> bool {
 }
 
 #[cfg(feature = "std")]
-fn vga_snapshot_vbe_layout(bpp: u16, virtual_xres: u16) -> io::Result<(u8, u16)> {
+fn vga_snapshot_vbe_layout(bpp: u16, virtual_xres: u16) -> SnapResult<(u8, u16)> {
     let bpp_multiplier = match bpp {
         VBE_DISPI_BPP_4 | VBE_DISPI_BPP_8 => 1,
         VBE_DISPI_BPP_15 | VBE_DISPI_BPP_16 => 2,
@@ -4037,7 +4035,7 @@ fn vga_snapshot_vbe_layout(bpp: u16, virtual_xres: u16) -> io::Result<(u8, u16)>
 }
 
 #[cfg(feature = "std")]
-fn vga_snapshot_bank_offset(bank: u16, bank_granularity_kb: u16) -> io::Result<u32> {
+fn vga_snapshot_bank_offset(bank: u16, bank_granularity_kb: u16) -> SnapResult<u32> {
     u32::from(bank)
         .checked_mul(
             u32::from(bank_granularity_kb)
@@ -4048,7 +4046,7 @@ fn vga_snapshot_bank_offset(bank: u16, bank_granularity_kb: u16) -> io::Result<u
 }
 
 #[cfg(feature = "std")]
-fn validate_vga_snapshot_bar_base(base: u32, span: u32) -> io::Result<()> {
+fn validate_vga_snapshot_bar_base(base: u32, span: u32) -> SnapResult<()> {
     if span == 0 || !span.is_power_of_two() {
         return Err(invalid_vga_snapshot("VGA BAR span is invalid"));
     }
@@ -4063,6 +4061,7 @@ fn validate_vga_snapshot_bar_base(base: u32, span: u32) -> io::Result<()> {
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
+    use crate::snapshot::{SnapError, SnapshotReader};
     use crate::iodev::device_api::WindowOffset;
     use crate::iodev::display_sink::Redraw;
 
@@ -4174,7 +4173,6 @@ mod tests {
     #[cfg(feature = "std")]
     use crate::snapshot::SnapshotSection;
     #[cfg(feature = "std")]
-    use std::io::Cursor;
 
 
     /// Program one DISPI register the way a guest does — through the port hook
@@ -5235,8 +5233,8 @@ mod tests {
         source.core.write_port(VGA_PEL_DATA, 0x34, 1);
 
         let mut saved = Vec::new();
-        source.save_snapshot_v3(&mut saved).unwrap();
-        assert_eq!(source.snapshot_v3_len().unwrap(), saved.len() as u64);
+        source.save(&mut saved).unwrap();
+        assert_eq!(source.snapshot_len().unwrap(), saved.len() as u64);
 
         let mut restored = pci_vga();
         restored.pci_write(0x10, 0xD000_0000, 4);
@@ -5261,8 +5259,8 @@ mod tests {
         restored.core.last_bpp = 1;
         restored.core.vga_tile_updated.fill(false);
 
-        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
-        let target = restored.restore_snapshot_v3(&mut reader).unwrap();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        let target = restored.restore(&mut reader).unwrap();
         reader.finish_exact().unwrap();
 
         assert_eq!(
@@ -5321,14 +5319,17 @@ mod tests {
     fn vga_snapshot_rejects_oversized_pci_config_length() {
         let source = card();
         let mut saved = Vec::new();
-        source.save_snapshot_v3(&mut saved).unwrap();
+        source.save(&mut saved).unwrap();
         // The PCI config length immediately follows the fixed 84-byte scalar prefix.
         saved[88..92].copy_from_slice(&257u32.to_le_bytes());
 
         let mut restored = card();
-        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
-        let error = restored.restore_snapshot_v3(&mut reader).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        let error = restored.restore(&mut reader).unwrap_err();
+        assert!(
+            matches!(error, SnapError::Invalid(_)),
+            "a rejected device state names what was wrong: {error:?}"
+        );
     }
 }
 
@@ -5421,7 +5422,7 @@ impl VgaCard<StdVga> {
     /// Rebuilds parsed VGA state and invalidates all GUI-facing caches after a
     /// successful whole-machine snapshot restore.
     #[cfg(feature = "std")]
-    pub(crate) fn rebuild_snapshot_v3_derived_state(&mut self) -> io::Result<()> {
+    pub(crate) fn rebuild_snapshot_v3_derived_state(&mut self) -> SnapResult<()> {
         self.ext.validate_vbe_snapshot_state(&VgaSnapshotVbeState::from(&self.ext.vbe))?;
         self.validate_snapshot_v3_cache_topology()?;
 
@@ -5485,7 +5486,7 @@ impl VgaCard<StdVga> {
     }
 
     #[cfg(feature = "std")]
-    fn validate_snapshot_v3_source(&self) -> io::Result<()> {
+    fn validate_snapshot_v3_source(&self) -> SnapResult<()> {
         self.ext.validate_vbe_snapshot_state(&VgaSnapshotVbeState::from(&self.ext.vbe))?;
         self.validate_snapshot_v3_cache_topology()?;
         if snapshot_v3_usize_len(self.core.vbe_memory.len())?
@@ -5517,7 +5518,7 @@ impl VgaCard<StdVga> {
         vbe: &VgaSnapshotVbeState,
         pci_enabled: bool,
         target: VgaSnapshotRestoreTarget,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         if crtc_index > CRTC_INDEX_MASK {
             return Err(invalid_vga_snapshot("VGA CRTC index is out of range"));
         }
@@ -5551,7 +5552,7 @@ impl VgaCard<StdVga> {
     }
 
     #[cfg(feature = "std")]
-    fn validate_snapshot_v3_cache_topology(&self) -> io::Result<()> {
+    fn validate_snapshot_v3_cache_topology(&self) -> SnapResult<()> {
         let expected_x_tiles = (u32::from(self.ext.vbe.max_xres)
             .checked_add(VGA_X_TILESIZE - 1)
             .ok_or_else(|| invalid_vga_snapshot("VGA horizontal tile count overflows"))?)
@@ -5583,7 +5584,7 @@ impl crate::snapshot::SnapshotSection for VgaCard<StdVga> {
     type Restored = VgaSnapshotRestoreTarget;
 
     /// Returns the exact byte length of the standalone VGA v3 section payload.
-    fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         self.validate_snapshot_v3_source()?;
 
         let text_len = snapshot_v3_usize_len(VGA_TEXT_MEM_SIZE)?;
@@ -5625,7 +5626,7 @@ impl crate::snapshot::SnapshotSection for VgaCard<StdVga> {
     ///
     /// Fixed buffers are written straight to the destination; this method never
     /// creates a payload vector or a copy of the framebuffer.
-    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.validate_snapshot_v3_source()?;
 
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
@@ -5727,10 +5728,10 @@ impl crate::snapshot::SnapshotSection for VgaCard<StdVga> {
     /// Decoding never changes `vbe.base_address` or `mmio_base`, nor does it
     /// register a memory handler.  The caller must use the returned target only
     /// after the machine-level atomic relocation succeeds.
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<VgaSnapshotRestoreTarget> {
+        reader: &mut R,
+    ) -> SnapResult<VgaSnapshotRestoreTarget> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(invalid_vga_snapshot("unsupported VGA snapshot section version"));
         }
@@ -6365,7 +6366,7 @@ impl StdVga {
     }
 
     #[cfg(feature = "std")]
-    fn validate_vbe_snapshot_state(&self, vbe: &VgaSnapshotVbeState) -> io::Result<()> {
+    fn validate_vbe_snapshot_state(&self, vbe: &VgaSnapshotVbeState) -> SnapResult<()> {
         if self.vbe_memsize == 0 || !self.vbe_memsize.is_power_of_two() {
             return Err(invalid_vga_snapshot("VBE memory configuration is not a power of two"));
         }

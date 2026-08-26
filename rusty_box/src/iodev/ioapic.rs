@@ -28,12 +28,10 @@
 
 use crate::config::BxPhyAddress;
 use crate::memory::BxMemC;
-#[cfg(feature = "std")]
-use std::io::{Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -1016,7 +1014,7 @@ impl crate::snapshot::SnapshotSection for BxIoApic {
     const TAG: u32 = crate::snapshot::SEC_IOAPIC;
     type Restored = ();
 
-    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         validate_ioapic_snapshot_state(self)?;
         let routes = checked_snapshot_len_mul(24, 8)?;
         let queue = checked_snapshot_len_mul(
@@ -1029,11 +1027,11 @@ impl crate::snapshot::SnapshotSection for BxIoApic {
         checked_snapshot_len_add(queue_prefix, queue)
     }
 
-    fn save_snapshot_v3<W: Write>(
+    fn save<W: SnapWrite>(
         &self,
         writer: &mut W,
-    ) -> std::io::Result<()> {
-        self.snapshot_v3_len()?;
+    ) -> SnapResult<()> {
+        self.snapshot_len()?;
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         writer.write_bool(self.enabled)?;
         writer.write_u32(self.base_addr)?;
@@ -1059,10 +1057,10 @@ impl crate::snapshot::SnapshotSection for BxIoApic {
         Ok(())
     }
 
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> std::io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(ioapic_snapshot_invalid(
                 "unsupported IOAPIC snapshot section version",
@@ -1105,12 +1103,12 @@ impl crate::snapshot::SnapshotSection for BxIoApic {
 }
 
 #[cfg(feature = "std")]
-fn ioapic_snapshot_invalid(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn ioapic_snapshot_invalid(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn ioapic_queue_capacity() -> std::io::Result<usize> {
+fn ioapic_queue_capacity() -> SnapResult<usize> {
     if IOAPIC_PENDING_DELIVERY_CAPACITY > bounds::MAX_SNAPSHOT_QUEUE_LEN {
         return Err(ioapic_snapshot_invalid(
             "IOAPIC pending queue capacity exceeds snapshot bounds",
@@ -1137,7 +1135,7 @@ fn validate_ioapic_configuration(
     id: u32,
     intin: u32,
     irr: u32,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     let pin_mask = (1u32 << IOAPIC_NUM_PINS) - 1;
     if enabled != live.enabled || base_addr != live.base_addr {
         return Err(ioapic_snapshot_invalid(
@@ -1154,7 +1152,7 @@ fn validate_ioapic_configuration(
 }
 
 #[cfg(feature = "std")]
-fn validate_ioapic_route(lo: u32, hi: u32) -> std::io::Result<()> {
+fn validate_ioapic_route(lo: u32, hi: u32) -> SnapResult<()> {
     if lo & !0x0001_FFFF != 0 || hi & 0x00FF_FFFF != 0 {
         return Err(ioapic_snapshot_invalid(
             "IOAPIC redirection entry contains reserved bits",
@@ -1184,7 +1182,7 @@ fn validate_ioapic_route(lo: u32, hi: u32) -> std::io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn validate_ioapic_snapshot_state(ioapic: &BxIoApic) -> std::io::Result<()> {
+fn validate_ioapic_snapshot_state(ioapic: &BxIoApic) -> SnapResult<()> {
     validate_ioapic_configuration(
         ioapic,
         ioapic.enabled,
@@ -1212,7 +1210,7 @@ fn validate_ioapic_snapshot_state(ioapic: &BxIoApic) -> std::io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn validate_ioapic_delivery(delivery: PendingIoApicDelivery) -> std::io::Result<()> {
+fn validate_ioapic_delivery(delivery: PendingIoApicDelivery) -> SnapResult<()> {
     if usize::from(delivery.pin) >= IOAPIC_NUM_PINS
         || !valid_ioapic_delivery_mode(delivery.delivery_mode)
         || delivery.trigger_mode > 1
@@ -1229,10 +1227,10 @@ fn validate_ioapic_delivery(delivery: PendingIoApicDelivery) -> std::io::Result<
 }
 
 #[cfg(feature = "std")]
-fn save_ioapic_delivery<W: Write + ?Sized>(
+fn save_ioapic_delivery<W: SnapWrite>(
     writer: &mut W,
     delivery: PendingIoApicDelivery,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     validate_ioapic_delivery(delivery)?;
     writer.write_u8(delivery.pin)?;
     writer.write_u8(delivery.vector)?;
@@ -1244,9 +1242,9 @@ fn save_ioapic_delivery<W: Write + ?Sized>(
 }
 
 #[cfg(feature = "std")]
-fn restore_ioapic_delivery<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> std::io::Result<PendingIoApicDelivery> {
+fn restore_ioapic_delivery<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<PendingIoApicDelivery> {
     let delivery = PendingIoApicDelivery {
         pin: reader.read_u8()?,
         vector: reader.read_u8()?,

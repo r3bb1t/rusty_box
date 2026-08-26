@@ -13,28 +13,26 @@
 //! The host bridge is the root of the PCI bus and handles configuration
 //! space routing for all PCI devices.
 
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
 use super::device_api::{ChipsetEffect, SmramControl, PAM_AREAS};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
 };
 
 #[cfg(feature = "std")]
 const PCI_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0e];
 
 #[cfg(feature = "std")]
-fn invalid_pci_snapshot(message: &'static str) -> io::Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_pci_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
 fn validate_bridge_snapshot_identity(
     saved: &[u8; PCI_CONF_SIZE],
     live: &[u8; PCI_CONF_SIZE],
-) -> io::Result<()> {
+) -> SnapResult<()> {
     for index in PCI_SNAPSHOT_IDENTITY_BYTES {
         if saved[index] != live[index] {
             return Err(invalid_pci_snapshot(
@@ -471,7 +469,7 @@ impl BxPciBridge {
     /// Exact byte count for this bridge's contribution to the combined PCI
     /// payload. The enclosing PCI codec owns the section-version prefix.
     #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         let config_len = u64::try_from(PCI_CONF_SIZE)
             .map_err(|_| invalid_pci_snapshot("i440FX config size does not fit u64"))?;
         let drba_len = u64::try_from(self.drba.len())
@@ -489,7 +487,7 @@ impl BxPciBridge {
 
     /// Stream the mutable i440FX configuration and DRAM-detection state.
     #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         writer.write_bytes(&self.pci_conf)?;
         writer.write_bytes(&self.drba)?;
         writer.write_u8(self.dram_detect)
@@ -501,10 +499,10 @@ impl BxPciBridge {
     /// machine-level restore hook applies those only after the complete
     /// snapshot has been accepted.
     #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         let mut pci_conf = [0u8; PCI_CONF_SIZE];
         let mut drba = [0u8; 8];
         reader.read_bytes(&mut pci_conf)?;

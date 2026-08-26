@@ -158,7 +158,93 @@ pub trait SnapRead {
         self.read_bytes(&mut bytes)?;
         Ok(i64::from_le_bytes(bytes))
     }
+
+    /// Read how many items follow, refusing a count the reader could not
+    /// possibly satisfy.
+    ///
+    /// `maximum` is what this particular field can mean — a device's queue
+    /// capacity, a machine's CPU count — and [`MAX_COUNT`] bounds it again, so
+    /// a corrupt stream cannot make a caller loop billions of times before the
+    /// truncation is noticed. Both bounds apply; the tighter one wins.
+    #[inline]
+    fn read_count(&mut self, maximum: usize) -> SnapResult<usize> {
+        let value = usize::try_from(self.read_u32()?)
+            .map_err(|_| SnapError::Invalid("snapshot count does not fit usize"))?;
+        if value > maximum.min(MAX_COUNT) {
+            return Err(SnapError::Invalid("snapshot count exceeds bound"));
+        }
+        Ok(value)
+    }
+
+    /// Read a byte length, under the same two bounds as [`Self::read_count`]
+    /// with [`MAX_SECTION_LEN`] as the format's own ceiling.
+    #[inline]
+    fn read_len(&mut self, maximum: usize) -> SnapResult<usize> {
+        let value = self.read_u64()?;
+        if value > u64::try_from(maximum).unwrap_or(u64::MAX).min(MAX_SECTION_LEN) {
+            return Err(SnapError::Invalid("snapshot length exceeds bound"));
+        }
+        usize::try_from(value)
+            .map_err(|_| SnapError::Invalid("snapshot length does not fit usize"))
+    }
 }
+
+/// A reborrow writes wherever the thing it borrows writes.
+///
+/// Nesting one bounded writer inside another is how a section that contains
+/// records is written, and each level hands the next a `&mut` — without this
+/// the inner level would have to take the outer one by value and give it back.
+impl<T: SnapWrite + ?Sized> SnapWrite for &mut T {
+    #[inline]
+    fn write_bytes(&mut self, bytes: &[u8]) -> SnapResult {
+        (**self).write_bytes(bytes)
+    }
+}
+
+/// A reborrow reads wherever the thing it borrows reads, for the same reason.
+impl<T: SnapRead + ?Sized> SnapRead for &mut T {
+    #[inline]
+    fn read_bytes(&mut self, out: &mut [u8]) -> SnapResult {
+        (**self).read_bytes(out)
+    }
+}
+
+/// Bytes already in memory are a snapshot source: reading consumes from the
+/// front. This is the source a `no_std` machine restoring from a firmware
+/// volume has, and the one a test that just saved into a buffer wants back.
+impl SnapRead for &[u8] {
+    #[inline]
+    fn read_bytes(&mut self, out: &mut [u8]) -> SnapResult {
+        if out.len() > self.len() {
+            return Err(SnapError::Truncated);
+        }
+        let (head, tail) = self.split_at(out.len());
+        out.copy_from_slice(head);
+        *self = tail;
+        Ok(())
+    }
+}
+
+/// A growable buffer is a snapshot sink. Its only failure is the allocator's,
+/// which `push`-shaped growth reports by aborting, so this never returns `Err`.
+#[cfg(feature = "alloc")]
+impl SnapWrite for alloc::vec::Vec<u8> {
+    #[inline]
+    fn write_bytes(&mut self, bytes: &[u8]) -> SnapResult {
+        self.extend_from_slice(bytes);
+        Ok(())
+    }
+}
+
+/// The largest byte length any single section may declare.
+///
+/// A ceiling on what a stream can ask a reader to believe: without it a corrupt
+/// length turns straight into an allocation or a loop bound. It is a property
+/// of the format, not of a host, which is why it lives beside the traits.
+pub const MAX_SECTION_LEN: u64 = 4 * 1024 * 1024 * 1024;
+
+/// The largest item count any field may declare, under the same rule.
+pub const MAX_COUNT: usize = 1 << 20;
 
 /// A device that owns exactly one section of the snapshot stream.
 ///
@@ -310,6 +396,64 @@ mod tests {
         assert_eq!(
             buffer.read_bytes(&mut too_much),
             Err(SnapError::Truncated)
+        );
+    }
+
+    /// Saving into a buffer and reading it straight back is the round trip
+    /// every device test performs, so the two in-memory endpoints must agree.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_buffer_written_as_a_sink_reads_back_as_a_source() {
+        let mut sink = alloc::vec::Vec::new();
+        sink.write_u32(0xFEED_FACE).unwrap();
+        sink.write_bool(true).unwrap();
+
+        let mut source: &[u8] = &sink;
+        assert_eq!(source.read_u32().unwrap(), 0xFEED_FACE);
+        assert!(source.read_bool().unwrap());
+        assert_eq!(source.len(), 0, "a source is consumed as it is read");
+        assert_eq!(source.read_u8(), Err(SnapError::Truncated));
+    }
+
+    /// A count is bounded by what the field can mean AND by the format's own
+    /// ceiling, so a corrupt stream cannot make a caller loop billions of times
+    /// before the truncation it implies is noticed.
+    #[test]
+    fn a_count_is_refused_by_whichever_bound_is_tighter() {
+        let mut buffer = Buffer::default();
+        buffer.write_u32(4).unwrap();
+        buffer.write_u32(9).unwrap();
+        buffer.write_u32(u32::MAX).unwrap();
+
+        assert_eq!(buffer.read_count(8), Ok(4));
+        assert_eq!(
+            buffer.read_count(8),
+            Err(SnapError::Invalid("snapshot count exceeds bound")),
+            "the caller's own bound is the tighter one here"
+        );
+        assert_eq!(
+            buffer.read_count(usize::MAX),
+            Err(SnapError::Invalid("snapshot count exceeds bound")),
+            "MAX_COUNT still applies when the caller names no tighter bound"
+        );
+    }
+
+    /// The same rule for byte lengths, against [`MAX_SECTION_LEN`].
+    #[test]
+    fn a_length_is_refused_by_whichever_bound_is_tighter() {
+        let mut buffer = Buffer::default();
+        buffer.write_u64(16).unwrap();
+        buffer.write_u64(64).unwrap();
+        buffer.write_u64(MAX_SECTION_LEN + 1).unwrap();
+
+        assert_eq!(buffer.read_len(32), Ok(16));
+        assert_eq!(
+            buffer.read_len(32),
+            Err(SnapError::Invalid("snapshot length exceeds bound"))
+        );
+        assert_eq!(
+            buffer.read_len(usize::MAX),
+            Err(SnapError::Invalid("snapshot length exceeds bound"))
         );
     }
 

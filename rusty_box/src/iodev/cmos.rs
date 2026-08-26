@@ -30,13 +30,11 @@
 //! - 0x70: CMOS address register (write-only on most machines; reads return 0xFF)
 //! - 0x71: CMOS data register
 
-#[cfg(feature = "std")]
-use std::io::{self, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader,
-    SnapshotWriteExt, SNAPSHOT_SECTION_VERSION,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul,
+    SnapError, SnapRead, SnapResult, SnapWrite, SNAPSHOT_SECTION_VERSION,
 };
 
 /// CMOS I/O port addresses
@@ -1312,7 +1310,7 @@ impl crate::snapshot::SnapshotSection for BxCmosC {
     type Restored = ();
 
     /// Exact length of the versioned CMOS v3 section payload.
-    fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         let ram_len = u64::try_from(CMOS_SIZE)
             .map_err(|_| cmos_snapshot_invalid("CMOS RAM length does not fit u64"))?;
         if ram_len > bounds::MAX_SNAPSHOT_SECTION_LEN {
@@ -1345,7 +1343,7 @@ impl crate::snapshot::SnapshotSection for BxCmosC {
 
     /// Stream every mutable RTC register and timer-owner reference.  Live
     /// port registrations and host resources are intentionally not encoded.
-    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         validate_cmos_snapshot(
             &self.ram,
             self.address,
@@ -1372,10 +1370,10 @@ impl crate::snapshot::SnapshotSection for BxCmosC {
     /// Restore mutable RTC state without registering timers or raising/lowering
     /// IRQ8.  The machine validates the raw timer handles against its restored
     /// owner table and applies the final level only after full restoration.
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(cmos_snapshot_invalid("unsupported CMOS section version"));
         }
@@ -1402,7 +1400,6 @@ impl crate::snapshot::SnapshotSection for BxCmosC {
             timeval_change,
             periodic_interval_usec,
         )?;
-        reader.finish_exact()?;
 
         self.ram = ram;
         self.address = address;
@@ -1449,15 +1446,15 @@ impl BxCmosC {
 }
 
 #[cfg(feature = "std")]
-fn cmos_snapshot_invalid(message: &'static str) -> io::Error {
-    io::Error::new(ErrorKind::InvalidData, message)
+fn cmos_snapshot_invalid(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn write_cmos_snapshot_handle<W: Write>(
+fn write_cmos_snapshot_handle<W: SnapWrite>(
     writer: &mut W,
     handle: Option<usize>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     writer.write_bool(handle.is_some())?;
     if let Some(handle) = handle {
         writer.write_u64(
@@ -1469,9 +1466,9 @@ fn write_cmos_snapshot_handle<W: Write>(
 }
 
 #[cfg(feature = "std")]
-fn read_cmos_snapshot_handle<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> io::Result<Option<usize>> {
+fn read_cmos_snapshot_handle<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<Option<usize>> {
     if !reader.read_bool()? {
         return Ok(None);
     }
@@ -1487,7 +1484,7 @@ fn validate_cmos_snapshot(
     cmos_ext_mem_addr: u8,
     timeval_change: bool,
     periodic_interval_usec: u32,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     if address > 0x7F {
         return Err(cmos_snapshot_invalid("CMOS address is out of range"));
     }
@@ -1516,14 +1513,14 @@ fn validate_cmos_snapshot(
     Ok(())
 }
 #[cfg(feature = "std")]
-fn cmos_snapshot_register(ram: &[u8; CMOS_SIZE], address: u8) -> io::Result<u8> {
+fn cmos_snapshot_register(ram: &[u8; CMOS_SIZE], address: u8) -> SnapResult<u8> {
     ram.get(usize::from(address))
         .copied()
         .ok_or_else(|| cmos_snapshot_invalid("CMOS register address is out of range"))
 }
 
 #[cfg(feature = "std")]
-fn cmos_periodic_interval_usec(stat_a: u8) -> io::Result<u32> {
+fn cmos_periodic_interval_usec(stat_a: u8) -> SnapResult<u32> {
     let nibble = stat_a & 0x0F;
     let dcc = (stat_a >> 4) & 0x07;
     if nibble == 0 || (dcc & 0x06) == 0 {
@@ -1605,6 +1602,7 @@ impl crate::iodev::device_api::TimedDevice for BxCmosC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::SnapshotReader;
     #[cfg(feature = "std")]
     use crate::snapshot::SnapshotSection;
 
@@ -2156,7 +2154,6 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn snapshot_cmos_restore_rebuilds_timers_and_continues_time() {
-        use std::io::Cursor;
 
         use crate::pc_system::{BxPcSystemC, TimerOwner};
 
@@ -2202,24 +2199,24 @@ mod tests {
 
         let periodic_period_usec = source_cmos.periodic_deadline_usec();
         let mut pc_payload = Vec::new();
-        source_pc.save_snapshot_v3(&mut pc_payload).unwrap();
+        source_pc.save(&mut pc_payload).unwrap();
         let mut cmos_payload = Vec::new();
-        source_cmos.save_snapshot_v3(&mut cmos_payload).unwrap();
+        source_cmos.save(&mut cmos_payload).unwrap();
 
         let mut restored_pc = BxPcSystemC::new();
         restored_pc.initialize(1_000_000);
         let mut pc_reader =
-            SnapshotReader::new(Cursor::new(pc_payload.as_slice()), pc_payload.len() as u64)
+            SnapshotReader::new(pc_payload.as_slice(), pc_payload.len() as u64)
                 .unwrap();
-        restored_pc.restore_snapshot_v3(&mut pc_reader).unwrap();
+        restored_pc.restore(&mut pc_reader).unwrap();
 
         let mut restored_cmos = BxCmosC::new();
         let mut cmos_reader = SnapshotReader::new(
-            Cursor::new(cmos_payload.as_slice()),
+            cmos_payload.as_slice(),
             cmos_payload.len() as u64,
         )
         .unwrap();
-        restored_cmos.restore_snapshot_v3(&mut cmos_reader).unwrap();
+        restored_cmos.restore(&mut cmos_reader).unwrap();
         let restored_state = restored_cmos.post_restore_snapshot_v3();
 
         assert_eq!(restored_pc.time_ticks(), source_pc.time_ticks());

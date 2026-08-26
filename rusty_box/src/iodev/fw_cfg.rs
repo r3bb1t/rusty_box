@@ -9,12 +9,10 @@
 //! Reference: `cpp_orig/bochs/iodev/fw_cfg.cc` (700 lines)
 
 use crate::memory::BxMemC;
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
 };
 
 // ─── I/O Ports ──────────────────────────────────────────────────────────
@@ -304,7 +302,7 @@ impl BxFwCfg {
     /// The parent PLATFORM section owns the section-version prefix.  This
     /// component intentionally writes only its state body.
     #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         self.validate_snapshot_v3_state()?;
 
         let slot_bytes = checked_snapshot_len_mul(
@@ -327,7 +325,7 @@ impl BxFwCfg {
 
     /// Streams the PLATFORM fw_cfg component body without staging a payload.
     #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.validate_snapshot_v3_state()?;
 
         writer.write_u32(u32::from(self.slot_count))?;
@@ -360,10 +358,10 @@ impl BxFwCfg {
     /// stream; a later I/O error leaves the instance non-resumable, matching
     /// the parent snapshot restore contract.
     #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         let slot_count = reader.read_count(FW_CFG_MAX_ENTRIES)?;
         let data_used = reader.read_len(FW_CFG_DATA_POOL_SIZE)?;
         let cur_entry = reader.read_u16()?;
@@ -420,7 +418,7 @@ impl BxFwCfg {
     }
 
     #[cfg(feature = "std")]
-    fn validate_snapshot_v3_state(&self) -> io::Result<()> {
+    fn validate_snapshot_v3_state(&self) -> SnapResult<()> {
         let slot_count = usize::from(self.slot_count);
         let file_count = usize::from(self.file_count);
         if slot_count > FW_CFG_MAX_ENTRIES
@@ -913,8 +911,8 @@ impl BxFwCfg {
     }
 }
 #[cfg(feature = "std")]
-fn invalid_fw_cfg_snapshot(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_fw_cfg_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
@@ -923,7 +921,7 @@ fn validate_fw_cfg_slots(
     data_used: usize,
     cur_entry: u16,
     cur_offset: u32,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     if data_used > FW_CFG_DATA_POOL_SIZE {
         return Err(invalid_fw_cfg_snapshot("fw_cfg data pool exceeds capacity"));
     }
@@ -984,7 +982,7 @@ fn validate_fw_cfg_file_directory(
     file_count: usize,
     data_pool: &[u8; FW_CFG_DATA_POOL_SIZE],
     directory: &[u8; FW_CFG_FILE_DIRECTORY_SIZE],
-) -> io::Result<()> {
+) -> SnapResult<()> {
     if file_dir_len > FW_CFG_FILE_DIRECTORY_SIZE || file_count > FW_CFG_FILE_SLOTS {
         return Err(invalid_fw_cfg_snapshot("fw_cfg file directory exceeds capacity"));
     }
@@ -1106,6 +1104,7 @@ mod tests {
     const TEST_CPU_COUNT: u32 = 4;
 
     use super::*;
+    use crate::snapshot::SnapError;
 
     fn read_u16_entry(fw_cfg: &mut BxFwCfg, key: u16, mem: &mut BxMemC) -> u16 {
         fw_cfg.write_port(FW_CFG_IO_BASE, key as u32, SELECTOR_WRITE_BYTES, mem);
@@ -1178,7 +1177,6 @@ mod tests {
     fn platform_snapshot_resumes_fw_cfg_pio_and_partial_dma_address() {
         use crate::memory::{BxMemC, BxMemoryStubC};
         use crate::snapshot::SnapshotReader;
-        use std::io::{Cursor, ErrorKind};
 
         const MIB: usize = 1024 * 1024;
         const DESCRIPTOR: u64 = 2 * MIB as u64;
@@ -1225,7 +1223,7 @@ mod tests {
         source.save_snapshot_v3_body(&mut saved).unwrap();
 
         let mut restored = BxFwCfg::new();
-        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
         restored.restore_snapshot_v3_body(&mut reader).unwrap();
         reader.finish_exact().unwrap();
 
@@ -1251,8 +1249,11 @@ mod tests {
         let mut malformed = saved;
         malformed[40..42].copy_from_slice(&(data_used as u16).to_le_bytes());
         let malformed_len = malformed.len() as u64;
-        let mut reader = SnapshotReader::new(Cursor::new(malformed), malformed_len).unwrap();
+        let mut reader = SnapshotReader::new(malformed.as_slice(), malformed_len).unwrap();
         let error = restored.restore_snapshot_v3_body(&mut reader).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(
+            matches!(error, SnapError::Invalid(_)),
+            "a rejected device state names what was wrong: {error:?}"
+        );
     }
 }

@@ -14,12 +14,10 @@ use super::device_api::{
     DeviceCtx, DeviceKind, IoLen, IrqLine, PioDevice, TimedDevice, TimerKey,
 };
 use crate::ring_buffer::RingBuffer;
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -399,12 +397,12 @@ const SERIAL_SNAPSHOT_HEADER_LEN: u64 = 8;
 const SERIAL_SNAPSHOT_PORT_FIXED_LEN: u64 = 74;
 
 #[cfg(feature = "std")]
-fn invalid_serial_snapshot(message: &'static str) -> io::Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_serial_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn checked_serial_count(count: usize) -> io::Result<u32> {
+fn checked_serial_count(count: usize) -> SnapResult<u32> {
     if count > bounds::MAX_SNAPSHOT_QUEUE_LEN {
         return Err(invalid_serial_snapshot(
             "serial snapshot count exceeds implementation bound",
@@ -415,7 +413,7 @@ fn checked_serial_count(count: usize) -> io::Result<u32> {
 }
 
 #[cfg(feature = "std")]
-fn validate_serial_ring_len<const N: usize>(ring: &RingBuffer<u8, N>) -> io::Result<()> {
+fn validate_serial_ring_len<const N: usize>(ring: &RingBuffer<u8, N>) -> SnapResult<()> {
     if ring.len() > N.min(bounds::MAX_SNAPSHOT_QUEUE_LEN) {
         return Err(invalid_serial_snapshot(
             "serial snapshot ring length exceeds live capacity",
@@ -425,10 +423,10 @@ fn validate_serial_ring_len<const N: usize>(ring: &RingBuffer<u8, N>) -> io::Res
 }
 
 #[cfg(feature = "std")]
-fn write_serial_ring<W: Write, const N: usize>(
+fn write_serial_ring<W: SnapWrite, const N: usize>(
     writer: &mut W,
     ring: &RingBuffer<u8, N>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     validate_serial_ring_len(ring)?;
     writer.write_u32(checked_serial_count(ring.len())?)?;
     for byte in ring.iter() {
@@ -438,9 +436,9 @@ fn write_serial_ring<W: Write, const N: usize>(
 }
 
 #[cfg(feature = "std")]
-fn read_serial_ring<R: Read, const N: usize>(
-    reader: &mut SnapshotReader<R>,
-) -> io::Result<RingBuffer<u8, N>> {
+fn read_serial_ring<R: SnapRead, const N: usize>(
+    reader: &mut R,
+) -> SnapResult<RingBuffer<u8, N>> {
     let count = reader.read_count(N.min(bounds::MAX_SNAPSHOT_QUEUE_LEN))?;
     let mut ring = RingBuffer::new();
     for _ in 0..count {
@@ -450,7 +448,7 @@ fn read_serial_ring<R: Read, const N: usize>(
 }
 
 #[cfg(feature = "std")]
-fn write_optional_handle<W: Write>(writer: &mut W, handle: Option<usize>) -> io::Result<()> {
+fn write_optional_handle<W: SnapWrite>(writer: &mut W, handle: Option<usize>) -> SnapResult<()> {
     match handle {
         Some(handle) => {
             writer.write_bool(true)?;
@@ -464,7 +462,7 @@ fn write_optional_handle<W: Write>(writer: &mut W, handle: Option<usize>) -> io:
 }
 
 #[cfg(feature = "std")]
-fn read_optional_handle<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Option<usize>> {
+fn read_optional_handle<R: SnapRead>(reader: &mut R) -> SnapResult<Option<usize>> {
     if !reader.read_bool()? {
         return Ok(None);
     }
@@ -474,7 +472,7 @@ fn read_optional_handle<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<O
 }
 
 #[cfg(feature = "std")]
-fn write_optional_u64<W: Write>(writer: &mut W, value: Option<u64>) -> io::Result<()> {
+fn write_optional_u64<W: SnapWrite>(writer: &mut W, value: Option<u64>) -> SnapResult<()> {
     match value {
         Some(value) => {
             writer.write_bool(true)?;
@@ -485,7 +483,7 @@ fn write_optional_u64<W: Write>(writer: &mut W, value: Option<u64>) -> io::Resul
 }
 
 #[cfg(feature = "std")]
-fn read_optional_u64<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Option<u64>> {
+fn read_optional_u64<R: SnapRead>(reader: &mut R) -> SnapResult<Option<u64>> {
     if reader.read_bool()? {
         Ok(Some(reader.read_u64()?))
     } else {
@@ -503,7 +501,7 @@ fn validate_fifo_timeout_state(
     fifo_cntl: FifoControl,
     rx_fifo: &RingBuffer<u8, FIFO_SIZE>,
     fifo_timeout_delay_usec: Option<u64>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let Some(delay) = fifo_timeout_delay_usec else {
         return Ok(());
     };
@@ -530,7 +528,7 @@ fn validate_fifo_timeout_state(
 }
 
 #[cfg(feature = "std")]
-fn validate_serial_port_for_snapshot(port: &SerialPort) -> io::Result<()> {
+fn validate_serial_port_for_snapshot(port: &SerialPort) -> SnapResult<()> {
     validate_serial_ring_len(&port.rx_fifo)?;
     validate_serial_ring_len(&port.tx_fifo)?;
     validate_serial_ring_len(&port.tx_output)?;
@@ -566,7 +564,7 @@ fn validate_serial_port_for_snapshot(port: &SerialPort) -> io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn serial_port_snapshot_v3_len(port: &SerialPort) -> io::Result<u64> {
+fn serial_port_snapshot_v3_len(port: &SerialPort) -> SnapResult<u64> {
     validate_serial_port_for_snapshot(port)?;
     let rx_len = checked_snapshot_len_mul(
         u64::try_from(port.rx_fifo.len())
@@ -603,12 +601,12 @@ fn serial_port_snapshot_v3_len(port: &SerialPort) -> io::Result<u64> {
 }
 
 #[cfg(feature = "std")]
-fn save_serial_port_snapshot_v3<W: Write>(
+fn save_serial_port_snapshot_v3<W: SnapWrite>(
     port: &SerialPort,
     pending_irq_raise: bool,
     pending_irq_lower: bool,
     writer: &mut W,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     validate_serial_port_for_snapshot(port)?;
 
     writer.write_u16(port.base)?;
@@ -727,11 +725,11 @@ struct SerialPortSnapshot {
 
 #[cfg(feature = "std")]
 impl SerialPortSnapshot {
-    fn read<R: Read>(
-        reader: &mut SnapshotReader<R>,
+    fn read<R: SnapRead>(
+        reader: &mut R,
         expected_base: u16,
         expected_irq: u8,
-    ) -> io::Result<Self> {
+    ) -> SnapResult<Self> {
         let base = reader.read_u16()?;
         let irq = reader.read_u8()?;
         if base != expected_base || irq != expected_irq {
@@ -1958,7 +1956,7 @@ impl crate::snapshot::SnapshotSection for BxSerialC {
     type Restored = ();
 
     /// Encoded byte length of the complete SERIAL v3 section payload.
-    fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         if self.num_ports > self.ports.len() {
             return Err(invalid_serial_snapshot(
                 "serial live port count exceeds controller capacity",
@@ -1975,8 +1973,8 @@ impl crate::snapshot::SnapshotSection for BxSerialC {
 
     /// Streams the complete SERIAL v3 section payload without staging a
     /// payload buffer or changing host output/callback wiring.
-    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        self.snapshot_v3_len()?;
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
+        self.snapshot_len()?;
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         writer.write_u32(checked_serial_count(self.num_ports)?)?;
 
@@ -1999,10 +1997,10 @@ impl crate::snapshot::SnapshotSection for BxSerialC {
 
     /// Decodes the complete SERIAL v3 section payload. Timer owner validation
     /// and derived timing are deliberately deferred to the restore hooks.
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(invalid_serial_snapshot(
                 "serial snapshot section version is unsupported",
@@ -2034,7 +2032,7 @@ impl crate::snapshot::SnapshotSection for BxSerialC {
             *pending_irq_lower = restored_pending_irq_lower;
         }
 
-        reader.finish_exact()
+        Ok(())
     }
 
 }
@@ -2048,10 +2046,10 @@ impl BxSerialC {
         &self,
         mut validate_fifo: F,
         mut validate_tx: G,
-    ) -> io::Result<()>
+    ) -> SnapResult<()>
     where
-        F: FnMut(usize, usize) -> io::Result<()>,
-        G: FnMut(usize, usize) -> io::Result<()>,
+        F: FnMut(usize, usize) -> SnapResult<()>,
+        G: FnMut(usize, usize) -> SnapResult<()>,
     {
         if self.num_ports > self.ports.len() {
             return Err(invalid_serial_snapshot(
@@ -2071,7 +2069,7 @@ impl BxSerialC {
 
     /// Rebuilds deterministic UART timing once every section and timer owner
     /// has restored. It does not schedule timers or emit IRQ edges.
-    pub(crate) fn after_restore_snapshot_v3(&mut self) -> io::Result<()> {
+    pub(crate) fn after_restore_snapshot_v3(&mut self) -> SnapResult<()> {
         if self.num_ports > self.ports.len() {
             return Err(invalid_serial_snapshot(
                 "serial live port count exceeds controller capacity",
@@ -2204,6 +2202,7 @@ impl TimedDevice for BxSerialC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::{SnapError, SnapshotReader};
     #[cfg(feature = "std")]
     use crate::snapshot::SnapshotSection;
 
@@ -2215,7 +2214,7 @@ mod tests {
         // live state changes.
         let serial = BxSerialC::new(1);
         let mut saved = Vec::new();
-        serial.save_snapshot_v3(&mut saved).unwrap();
+        serial.save(&mut saved).unwrap();
 
         // Layout: header = version u32 + num_ports u32 (8 bytes); the first
         // port record starts with base u16 + irq u8 + 9 interrupt/pending
@@ -2227,8 +2226,11 @@ mod tests {
         let mut target = BxSerialC::new(1);
         let mut reader =
             SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
-        let error = target.restore_snapshot_v3(&mut reader).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        let error = target.restore(&mut reader).unwrap_err();
+        assert!(
+            matches!(error, SnapError::Invalid(_)),
+            "a rejected device state names what was wrong: {error:?}"
+        );
         assert!(
             error.to_string().contains("count exceeds bound"),
             "unexpected rejection: {error}"
@@ -2599,15 +2601,15 @@ mod tests {
         assert!(serial.pending_irq_lower[0]);
 
         let mut saved = Vec::new();
-        serial.save_snapshot_v3(&mut saved).unwrap();
-        assert_eq!(saved.len() as u64, serial.snapshot_v3_len().unwrap());
+        serial.save(&mut saved).unwrap();
+        assert_eq!(saved.len() as u64, serial.snapshot_len().unwrap());
 
         serial.reset();
         serial.write(base + REG_SCR, 0xff, 1);
         serial.receive_byte(0, 0xee);
 
         let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
-        serial.restore_snapshot_v3(&mut reader).unwrap();
+        serial.restore(&mut reader).unwrap();
         serial.after_restore_snapshot_v3().unwrap();
 
         assert_eq!(serial.fifo_timer_handle(0), Some(73));

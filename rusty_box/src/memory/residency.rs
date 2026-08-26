@@ -35,20 +35,29 @@ use core::ops::Range;
 use std::fs::File;
 #[cfg(feature = "std")]
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(feature = "std")]
+use crate::snapshot::{SnapError, SnapRead, SnapResult, SnapWrite};
 
 #[cfg(feature = "std")]
 const SNAPSHOT_IO_CHUNK: usize = 64 * 1024;
 
 #[cfg(feature = "std")]
 #[inline]
-pub(super) fn snapshot_invalid(message: &'static str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+pub(super) fn snapshot_invalid(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
+/// The overflow file — this machine's own swap store, not the caller's
+/// snapshot stream — would not complete an operation.
+///
+/// [`SnapError`] carries no `io::Error`, because it must be nameable without a
+/// host at all, so the host's phrasing does not survive. What does survive is
+/// the class: nothing is wrong with the snapshot, this host could not act on
+/// it. That is what separates it from [`SnapError::Invalid`], and it is what a
+/// caller decides on.
 #[cfg(feature = "std")]
-#[inline]
-fn snapshot_other(message: &'static str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, message)
+fn overflow_file_failed(_error: std::io::Error) -> SnapError {
+    SnapError::Host
 }
 
 #[inline]
@@ -531,7 +540,7 @@ impl Residency {
     /// The block count this geometry demands, recomputed from the guest length
     /// rather than read back from the field, so a restore validates the field
     /// instead of trusting it.
-    fn expected_num_blocks(&self) -> std::io::Result<usize> {
+    fn expected_num_blocks(&self) -> SnapResult<usize> {
         let last_byte = self
             .geometry
             .block_size
@@ -558,7 +567,7 @@ impl Residency {
 
     /// `logical_block_len`, but rejecting a block that is not part of guest RAM
     /// instead of answering zero — a snapshot descriptor naming one is corrupt.
-    pub(super) fn snapshot_logical_block_len(&self, guest_block: usize) -> std::io::Result<usize> {
+    pub(super) fn snapshot_logical_block_len(&self, guest_block: usize) -> SnapResult<usize> {
         if guest_block >= self.geometry.num_blocks {
             return Err(snapshot_invalid("snapshot guest block is out of range"));
         }
@@ -579,7 +588,7 @@ impl Residency {
         &self,
         slot: usize,
         logical_len: usize,
-    ) -> std::io::Result<usize> {
+    ) -> SnapResult<usize> {
         if slot >= self.resident_capacity() {
             return Err(snapshot_invalid("snapshot resident slot is out of range"));
         }
@@ -615,7 +624,7 @@ impl Residency {
     pub(super) fn snapshot_residency(
         &self,
         guest_block: usize,
-    ) -> std::io::Result<MemorySnapshotResidency> {
+    ) -> SnapResult<MemorySnapshotResidency> {
         let logical_len = self.snapshot_logical_block_len(guest_block)?;
         match self.blocks()[guest_block] {
             Block::SwappedOut => Ok(MemorySnapshotResidency::Swapped),
@@ -640,12 +649,12 @@ impl Residency {
     /// whatever the block size is, and so the file borrow is released around
     /// each caller-controlled write. Every chunk seeks by absolute guest-block
     /// offset, so releasing it cannot affect stream order.
-    pub(super) fn write_swapped_block<W: Write>(
+    pub(super) fn write_swapped_block<W: SnapWrite>(
         &mut self,
         guest_block: usize,
         logical_len: usize,
         out: &mut W,
-    ) -> std::io::Result<()> {
+    ) -> SnapResult<()> {
         let offset = guest_block
             .checked_mul(self.geometry.block_size)
             .ok_or_else(|| snapshot_invalid("snapshot overflow offset overflow"))?;
@@ -660,10 +669,13 @@ impl Residency {
                 let file = &mut self.overflow_file;
                 file.seek(SeekFrom::Start(u64::try_from(chunk_offset).map_err(
                     |_| snapshot_invalid("snapshot overflow offset conversion failed"),
-                )?))?;
+                )?))
+                .map_err(overflow_file_failed)?;
                 let mut read = 0;
                 while read != chunk_len {
-                    let count = file.read(&mut scratch[read..chunk_len])?;
+                    let count = file
+                        .read(&mut scratch[read..chunk_len])
+                        .map_err(overflow_file_failed)?;
                     if count == 0 {
                         // The file is sparse past its written extent; a block
                         // that was never evicted reads back as the zeros the
@@ -674,7 +686,7 @@ impl Residency {
                     read += count;
                 }
             }
-            out.write_all(&scratch[..chunk_len])?;
+            out.write_bytes(&scratch[..chunk_len])?;
             remaining -= chunk_len;
         }
         Ok(())
@@ -683,12 +695,12 @@ impl Residency {
     /// Restore a non-resident block into the overflow file. The block map
     /// itself stays untouched until `finish_snapshot_restore` has validated
     /// every descriptor and the whole transfer has succeeded.
-    pub(super) fn read_swapped_block<R: Read>(
+    pub(super) fn read_swapped_block<R: SnapRead>(
         &mut self,
         guest_block: usize,
         logical_len: usize,
         input: &mut R,
-    ) -> std::io::Result<()> {
+    ) -> SnapResult<()> {
         let offset = guest_block
             .checked_mul(self.geometry.block_size)
             .ok_or_else(|| snapshot_invalid("snapshot overflow offset overflow"))?;
@@ -696,7 +708,7 @@ impl Residency {
         let mut remaining = logical_len;
         while remaining != 0 {
             let chunk_len = remaining.min(scratch.len());
-            input.read_exact(&mut scratch[..chunk_len])?;
+            input.read_bytes(&mut scratch[..chunk_len])?;
             let chunk_offset = offset
                 .checked_add(logical_len - remaining)
                 .ok_or_else(|| snapshot_invalid("snapshot overflow offset overflow"))?;
@@ -704,8 +716,10 @@ impl Residency {
                 let file = &mut self.overflow_file;
                 file.seek(SeekFrom::Start(u64::try_from(chunk_offset).map_err(
                     |_| snapshot_invalid("snapshot overflow offset conversion failed"),
-                )?))?;
-                file.write_all(&scratch[..chunk_len])?;
+                )?))
+                .map_err(overflow_file_failed)?;
+                file.write_all(&scratch[..chunk_len])
+                    .map_err(overflow_file_failed)?;
             }
             remaining -= chunk_len;
         }
@@ -722,7 +736,7 @@ impl Residency {
         ram: &mut [u8],
         geometry: MemorySnapshotGeometry,
         saved_map: &[MemorySnapshotResidency],
-    ) -> std::io::Result<()> {
+    ) -> SnapResult<()> {
         let expected_num_blocks = self.expected_num_blocks()?;
         let resident_capacity = self.resident_capacity();
         if geometry.guest_len != self.geometry.guest_len as u64
@@ -759,7 +773,9 @@ impl Residency {
         let mut seen_slots = std::vec::Vec::new();
         seen_slots
             .try_reserve_exact(resident_capacity)
-            .map_err(|_| snapshot_other("unable to validate snapshot resident slots"))?;
+            // The stream is fine; this host would not give up the memory to
+            // check it. `SnapError::Host`, never `Invalid`.
+            .map_err(|_| SnapError::Host)?;
         seen_slots.resize(resident_capacity, false);
 
         let mut resident_count = 0usize;
@@ -785,7 +801,7 @@ impl Residency {
         }
 
         // Flush all transferred swapped bytes before changing ownership.
-        self.overflow_file.flush()?;
+        self.overflow_file.flush().map_err(overflow_file_failed)?;
 
         // A partial final guest block never makes physical tail bytes
         // architectural. Fully backed RAM can have no tail at all, so clear

@@ -651,27 +651,27 @@ impl BxMemC {
     pub(crate) fn snapshot_residency(
         &self,
         guest_block: u32,
-    ) -> std::io::Result<MemorySnapshotResidency> {
+    ) -> crate::snapshot::SnapResult<MemorySnapshotResidency> {
         self.inherited_memory_stub.snapshot_residency(guest_block)
     }
 
     #[cfg(feature = "std")]
-    pub(crate) fn write_snapshot_block<W: std::io::Write>(
+    pub(crate) fn write_snapshot_block<W: crate::snapshot::SnapWrite>(
         &mut self,
         guest_block: u32,
         out: &mut W,
-    ) -> std::io::Result<()> {
+    ) -> crate::snapshot::SnapResult {
         self.inherited_memory_stub
             .write_snapshot_block(guest_block, out)
     }
 
     #[cfg(feature = "std")]
-    pub(crate) fn read_snapshot_block<R: std::io::Read>(
+    pub(crate) fn read_snapshot_block<R: crate::snapshot::SnapRead>(
         &mut self,
         guest_block: u32,
         saved: MemorySnapshotResidency,
         input: &mut R,
-    ) -> std::io::Result<()> {
+    ) -> crate::snapshot::SnapResult {
         self.inherited_memory_stub
             .read_snapshot_block(guest_block, saved, input)
     }
@@ -681,7 +681,7 @@ impl BxMemC {
         &mut self,
         geometry: MemorySnapshotGeometry,
         saved_map: &[MemorySnapshotResidency],
-    ) -> std::io::Result<()> {
+    ) -> crate::snapshot::SnapResult {
         self.inherited_memory_stub
             .finish_snapshot_restore(geometry, saved_map)
     }
@@ -753,7 +753,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         memory_rusty_box::*, BxMemC, BxMemoryStubC, CpuMemoryPolicy, MemoryError,
         MemorySnapshotGeometry, MemorySnapshotResidency,
     };
-    use std::io::{self, Read, Seek, SeekFrom};
+    use std::io::{Seek, SeekFrom};
     use crate::Error;
 
     const MIB: usize = 1024 * 1024;
@@ -781,14 +781,16 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         remaining: usize,
     }
 
-    impl Read for ShortReader {
-        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-            let copied = self.remaining.min(out.len());
-            if copied != 0 {
-                out[..copied].fill(0xa5);
-                self.remaining -= copied;
+    /// A source that runs out part-way through a block, which is what a
+    /// truncated snapshot looks like to the block reader.
+    impl crate::snapshot::SnapRead for ShortReader {
+        fn read_bytes(&mut self, out: &mut [u8]) -> crate::snapshot::SnapResult {
+            if out.len() > self.remaining {
+                return Err(crate::snapshot::SnapError::Truncated);
             }
-            Ok(copied)
+            out.fill(0xa5);
+            self.remaining -= out.len();
+            Ok(())
         }
     }
 
@@ -955,11 +957,14 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .set_len((2 * MIB + 1) as u64)
             .unwrap();
         let mut image = tempfile::tempfile().unwrap();
-        for guest_block in 0..geometry.num_blocks {
-            source
-                .inherited_memory_stub
-                .write_snapshot_block(guest_block, &mut image)
-                .unwrap();
+        {
+            let mut sink = crate::snapshot::IoSink::new(&mut image);
+            for guest_block in 0..geometry.num_blocks {
+                source
+                    .inherited_memory_stub
+                    .write_snapshot_block(guest_block, &mut sink)
+                    .unwrap();
+            }
         }
         assert_eq!(image.metadata().unwrap().len(), (5 * MIB) as u64);
         image.seek(SeekFrom::Start(0)).unwrap();
@@ -973,11 +978,14 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .inherited_memory_stub
             .actual_vector_mut()[MIB..2 * MIB]
             .fill(0xa5);
-        for (guest_block, saved) in residency.iter().copied().enumerate() {
-            restored
-                .inherited_memory_stub
-                .read_snapshot_block(guest_block as u32, saved, &mut image)
-                .unwrap();
+        {
+            let mut stream = crate::snapshot::IoSource::new(&mut image);
+            for (guest_block, saved) in residency.iter().copied().enumerate() {
+                restored
+                    .inherited_memory_stub
+                    .read_snapshot_block(guest_block as u32, saved, &mut stream)
+                    .unwrap();
+            }
         }
         restored
             .inherited_memory_stub
@@ -1027,7 +1035,10 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .inherited_memory_stub
             .finish_snapshot_restore(malformed, &residency)
             .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            matches!(error, crate::snapshot::SnapError::Invalid(_)),
+            "a rejected geometry names what was wrong: {error:?}"
+        );
         assert_eq!(memory.inherited_memory_stub.snapshot_geometry(), geometry);
         assert_eq!(snapshot_map(&memory).1, residency);
     }
@@ -1044,13 +1055,14 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         ];
         let mut duplicate_geometry = geometry;
         duplicate_geometry.used_blocks = 2;
-        assert_eq!(
-            memory
-                .inherited_memory_stub
-                .finish_snapshot_restore(duplicate_geometry, &duplicate_slots)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidData
+        assert!(
+            matches!(
+                memory
+                    .inherited_memory_stub
+                    .finish_snapshot_restore(duplicate_geometry, &duplicate_slots)
+                    .unwrap_err(),
+                crate::snapshot::SnapError::Invalid(_)
+            )
         );
         assert_eq!(snapshot_map(&memory).1, before);
 
@@ -1060,13 +1072,14 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             MemorySnapshotResidency::Swapped,
             MemorySnapshotResidency::Swapped,
         ];
-        assert_eq!(
-            memory
-                .inherited_memory_stub
-                .finish_snapshot_restore(geometry, &used_count_mismatch)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidData
+        assert!(
+            matches!(
+                memory
+                    .inherited_memory_stub
+                    .finish_snapshot_restore(geometry, &used_count_mismatch)
+                    .unwrap_err(),
+                crate::snapshot::SnapError::Invalid(_)
+            )
         );
         assert_eq!(snapshot_map(&memory).1, before);
     }
@@ -1087,13 +1100,14 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             MemorySnapshotResidency::Swapped,
         ];
 
-        assert_eq!(
-            memory
-                .inherited_memory_stub
-                .finish_snapshot_restore(geometry, &sparse_map)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidData
+        assert!(
+            matches!(
+                memory
+                    .inherited_memory_stub
+                    .finish_snapshot_restore(geometry, &sparse_map)
+                    .unwrap_err(),
+                crate::snapshot::SnapError::Invalid(_)
+            )
         );
         assert_eq!(snapshot_map(&memory).1, before);
     }
@@ -1109,7 +1123,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .inherited_memory_stub
             .read_snapshot_block(0, MemorySnapshotResidency::Swapped, &mut input)
             .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(error, crate::snapshot::SnapError::Truncated);
         assert_eq!(memory.inherited_memory_stub.snapshot_geometry(), geometry);
         assert_eq!(snapshot_map(&memory).1, before);
     }

@@ -23,10 +23,10 @@ use crate::{
     Result,
 };
 #[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
+use std::io::{Error, ErrorKind};
 
 #[cfg(feature = "std")]
-use crate::snapshot::{checked_snapshot_len_add, SnapshotReader, SnapshotWriteExt};
+use crate::snapshot::{checked_snapshot_len_add, SnapError, SnapRead, SnapResult, SnapWrite};
 
 
 use super::acpi::BxAcpiCtrl;
@@ -1753,12 +1753,12 @@ impl SystemControlPort {
 }
 
 #[cfg(feature = "std")]
-fn invalid_platform_snapshot(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_platform_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn validate_snapshot_io_base(base: u32, alignment: u32, span: u32) -> io::Result<()> {
+fn validate_snapshot_io_base(base: u32, alignment: u32, span: u32) -> SnapResult<()> {
     if base == 0 {
         return Ok(());
     }
@@ -1783,7 +1783,7 @@ fn validate_snapshot_io_base(base: u32, alignment: u32, span: u32) -> io::Result
 }
 
 #[cfg(feature = "std")]
-fn validate_snapshot_memory_bar(base: u32, size: u32) -> io::Result<()> {
+fn validate_snapshot_memory_bar(base: u32, size: u32) -> SnapResult<()> {
     if base == 0 {
         return Ok(());
     }
@@ -1803,7 +1803,7 @@ fn validate_snapshot_mapping_flag(
     pending: bool,
     committed: u32,
     desired: u32,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     if pending != (committed != desired) {
         return Err(invalid_platform_snapshot(
             "snapshot mapping flag and bases are incoherent",
@@ -1815,7 +1815,7 @@ fn validate_snapshot_mapping_flag(
 #[cfg(feature = "std")]
 impl SystemControlPort {
     /// Number of bytes emitted by the PLATFORM port-92 component body.
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         self.validate_snapshot_v3_state()?;
         checked_snapshot_len_add(4, u64::from(self.reset_request.is_some()))
     }
@@ -1823,7 +1823,7 @@ impl SystemControlPort {
     /// Stream the desired A20 state, its pending boundary bit, and a pending
     /// reset request. This is state capture only; it never updates the
     /// machine-wide A20 view or executes a reset.
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.validate_snapshot_v3_state()?;
 
         writer.write_u8(self.value)?;
@@ -1840,10 +1840,10 @@ impl SystemControlPort {
 
     /// Decode port-92 continuation state without applying the desired A20
     /// value or consuming the pending reset request.
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         let value = reader.read_u8()?;
         let a20_gate = reader.read_bool()?;
         let a20_change_pending = reader.read_bool()?;
@@ -1867,7 +1867,7 @@ impl SystemControlPort {
         Ok(())
     }
 
-    fn validate_snapshot_v3_state(&self) -> io::Result<()> {
+    fn validate_snapshot_v3_state(&self) -> SnapResult<()> {
         if matches!(self.reset_request, Some(ResetReason::Hardware)) {
             return Err(invalid_platform_snapshot(
                 "port 92h cannot carry a hardware reset request",
@@ -1884,7 +1884,7 @@ impl DeviceManager {
     /// Dynamic port and memory registrations remain live topology. This body
     /// instead records their saved committed identities, desired targets, and
     /// the exact deferred effects that the parent must resume in order.
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         let desired_vga = self.vga.snapshot_v3_mapping_target();
         let committed_vga = self.vga.snapshot_v3_committed_mapping_target();
         self.validate_snapshot_v3_state(desired_vga, committed_vga)?;
@@ -1899,7 +1899,7 @@ impl DeviceManager {
     /// Stream deferred mapping/routing state. No device codec is nested here:
     /// fw_cfg, PCI/ACPI/VGA, and the other device families own their own
     /// section bodies.
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         let desired_vga = self.vga.snapshot_v3_mapping_target();
         let committed_vga = self.vga.snapshot_v3_committed_mapping_target();
         self.validate_snapshot_v3_state(desired_vga, committed_vga)?;
@@ -1928,10 +1928,10 @@ impl DeviceManager {
     /// registrations. The returned targets are committed only after the
     /// machine-level decoder has cross-validated every device section and
     /// relocated the captured live topology.
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<PlatformSnapshotRestore> {
+        reader: &mut R,
+    ) -> SnapResult<PlatformSnapshotRestore> {
         self.port92.restore_snapshot_v3_body(reader)?;
         let pci_conf_addr = reader.read_u32()?;
         let mut pending = PendingPlatformWork::empty();
@@ -1987,7 +1987,7 @@ impl DeviceManager {
         &self,
         desired_vga: super::vga::VgaSnapshotRestoreTarget,
         committed_vga: super::vga::VgaSnapshotRestoreTarget,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         self.port92.validate_snapshot_v3_state()?;
         if self.acpi.pm_ports_registered != (self.pm_ports_base != 0)
             || self.acpi.sm_ports_registered != (self.sm_ports_base != 0)
@@ -2026,7 +2026,7 @@ impl DeviceManager {
         desired_vga_lfb: u32,
         desired_vga_mmio: u32,
         vga_lfb_size: u32,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         validate_snapshot_io_base(desired_bmdma, 16, 16)?;
         validate_snapshot_io_base(u32::from(committed_bmdma), 16, 16)?;
         validate_snapshot_io_base(desired_pm, 64, 64)?;
@@ -3227,7 +3227,6 @@ mod tests {
         on_big_stack(|| {
             use crate::memory::{BxMemC, BxMemoryStubC};
             use crate::snapshot::SnapshotReader;
-            use std::io::Cursor;
 
             let mut source = DeviceManager::new();
             source.port92.write(0x01);
@@ -3254,7 +3253,7 @@ mod tests {
             assert_eq!(io.read_handlers[0x0511].slot, DevSlot::FW_CFG);
 
             let mut reader =
-                SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
+                SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
             let restored = target.restore_snapshot_v3_body(&mut reader).unwrap();
             reader.finish_exact().unwrap();
 

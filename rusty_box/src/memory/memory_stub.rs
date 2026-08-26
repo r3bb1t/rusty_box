@@ -16,7 +16,7 @@ use crate::memory::memory_rusty_box::{
 };
 
 #[cfg(feature = "std")]
-use std::io::{Read, Write};
+use crate::snapshot::{SnapRead, SnapResult, SnapWrite};
 
 const BX_MEM_VECTOR_ALIGN: usize = 4096;
 
@@ -25,7 +25,7 @@ const BX_MEM_VECTOR_ALIGN: usize = 4096;
 /// unrepresentable index the same way.
 #[cfg(feature = "std")]
 #[inline]
-fn guest_block_index(guest_block: u32) -> std::io::Result<usize> {
+fn guest_block_index(guest_block: u32) -> SnapResult<usize> {
     usize::try_from(guest_block)
         .map_err(|_| snapshot_invalid("snapshot guest block conversion failed"))
 }
@@ -426,7 +426,7 @@ impl BxMemoryStubC {
     /// allocation. The map bounds the slot within the resident region; this
     /// only shifts that offset to where the region begins.
     #[cfg(feature = "std")]
-    fn snapshot_resident_block(&self, slot: usize, len: usize) -> std::io::Result<&[u8]> {
+    fn snapshot_resident_block(&self, slot: usize, len: usize) -> SnapResult<&[u8]> {
         let offset = self.residency.snapshot_slot_offset(slot, len)?;
         let start = self
             .vector_offset
@@ -440,7 +440,7 @@ impl BxMemoryStubC {
         &mut self,
         slot: usize,
         len: usize,
-    ) -> std::io::Result<&mut [u8]> {
+    ) -> SnapResult<&mut [u8]> {
         let offset = self.residency.snapshot_slot_offset(slot, len)?;
         let start = self
             .vector_offset
@@ -460,24 +460,24 @@ impl BxMemoryStubC {
     pub(super) fn snapshot_residency(
         &self,
         guest_block: u32,
-    ) -> std::io::Result<MemorySnapshotResidency> {
+    ) -> SnapResult<MemorySnapshotResidency> {
         self.residency.snapshot_residency(guest_block_index(guest_block)?)
     }
 
     /// Stream one logical guest block in GPA order without changing residency.
     #[cfg(feature = "std")]
-    pub(super) fn write_snapshot_block<W: Write>(
+    pub(super) fn write_snapshot_block<W: SnapWrite>(
         &mut self,
         guest_block: u32,
         out: &mut W,
-    ) -> std::io::Result<()> {
+    ) -> SnapResult<()> {
         let guest_block = guest_block_index(guest_block)?;
         let logical_len = self.residency.snapshot_logical_block_len(guest_block)?;
         match self.residency.snapshot_residency(guest_block)? {
             MemorySnapshotResidency::Resident { slot } => {
                 let slot = usize::try_from(slot)
                     .map_err(|_| snapshot_invalid("snapshot resident slot conversion failed"))?;
-                out.write_all(self.snapshot_resident_block(slot, logical_len)?)
+                out.write_bytes(self.snapshot_resident_block(slot, logical_len)?)
             }
             MemorySnapshotResidency::Swapped => {
                 self.residency
@@ -491,19 +491,19 @@ impl BxMemoryStubC {
     /// The block map itself remains untouched until `finish_snapshot_restore`
     /// has validated all descriptors and the complete transfer succeeds.
     #[cfg(feature = "std")]
-    pub(super) fn read_snapshot_block<R: Read>(
+    pub(super) fn read_snapshot_block<R: SnapRead>(
         &mut self,
         guest_block: u32,
         saved: MemorySnapshotResidency,
         input: &mut R,
-    ) -> std::io::Result<()> {
+    ) -> SnapResult<()> {
         let guest_block = guest_block_index(guest_block)?;
         let logical_len = self.residency.snapshot_logical_block_len(guest_block)?;
         match saved {
             MemorySnapshotResidency::Resident { slot } => {
                 let slot = usize::try_from(slot)
                     .map_err(|_| snapshot_invalid("snapshot resident slot conversion failed"))?;
-                input.read_exact(self.snapshot_resident_block_mut(slot, logical_len)?)
+                input.read_bytes(self.snapshot_resident_block_mut(slot, logical_len)?)
             }
             MemorySnapshotResidency::Swapped => {
                 self.residency
@@ -518,7 +518,7 @@ impl BxMemoryStubC {
         &mut self,
         geometry: MemorySnapshotGeometry,
         saved_map: &[MemorySnapshotResidency],
-    ) -> std::io::Result<()> {
+    ) -> SnapResult<()> {
         let parts = self.resident_parts();
         parts
             .map

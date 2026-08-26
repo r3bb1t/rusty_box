@@ -17,9 +17,7 @@
 
 use crate::config::BxPhyAddress;
 #[cfg(feature = "std")]
-use crate::snapshot::{checked_snapshot_len_add, SnapshotReader, SnapshotWriteExt};
-#[cfg(feature = "std")]
-use std::io::{self, Read, Write};
+use crate::snapshot::{checked_snapshot_len_add, SnapError, SnapRead, SnapResult, SnapWrite};
 
 /// Bochs hpet.cc `HPET_BASE`.
 pub(crate) const HPET_BASE: BxPhyAddress = 0xFED0_0000;
@@ -754,7 +752,7 @@ impl crate::snapshot::SnapshotSection for BxHpetC {
     type Restored = ();
 
     /// Byte length of the HPET snapshot section (fixed layout).
-    fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         // Bochs hpet.cc register_state(): config, isr, hpet_counter, plus
         // per-timer {config, cmp, fsb, period}. version u32 + 3 × u64 +
         // HPET_NUM_TIMERS × 4 × u64.
@@ -771,7 +769,7 @@ impl crate::snapshot::SnapshotSection for BxHpetC {
     /// reference exactly as Bochs does. The comparator pc-system timers are
     /// re-registered by `register_timer_owners`, so their handles are not part
     /// of the format; the pending queue is always empty at a snapshot boundary.
-    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         debug_assert!(
             !self.has_pending_work(),
             "HPET snapshot taken with side effects still queued"
@@ -795,13 +793,12 @@ impl crate::snapshot::SnapshotSection for BxHpetC {
     /// the omitted reference/last_checked fields start at zero; rusty_box
     /// restores in place, so it zeroes them explicitly to reproduce Bochs's
     /// counter-restore behavior exactly.
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         if reader.read_u32()? != HPET_SNAPSHOT_VERSION {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(SnapError::Invalid(
                 "unsupported HPET snapshot section version",
             ));
         }
@@ -1062,8 +1059,8 @@ mod tests {
             .collect();
 
         let mut blob = Vec::new();
-        hpet.save_snapshot_v3(&mut blob).unwrap();
-        assert_eq!(blob.len() as u64, hpet.snapshot_v3_len().unwrap());
+        hpet.save(&mut blob).unwrap();
+        assert_eq!(blob.len() as u64, hpet.snapshot_len().unwrap());
 
         let mut restored = BxHpetC::new();
         restored.reset();
@@ -1075,7 +1072,7 @@ mod tests {
 
         let mut reader =
             crate::snapshot::SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
-        restored.restore_snapshot_v3(&mut reader).unwrap();
+        restored.restore(&mut reader).unwrap();
         reader.finish_exact().unwrap();
 
         // Bochs register_state fields round-trip exactly.

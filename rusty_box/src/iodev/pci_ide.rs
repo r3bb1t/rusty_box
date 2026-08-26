@@ -11,15 +11,13 @@
 //! - Physical Region Descriptor (PRD) table processing
 //! - Timer-driven DMA transfers (Bochs pci_ide.cc)
 
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::{
     pc_system::{BxPcSystemC, TimerOwner},
     snapshot::{
-        bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader,
-        SnapshotWriteExt,
+        bounds, checked_snapshot_len_add, checked_snapshot_len_mul,
+        SnapError, SnapRead, SnapResult, SnapWrite,
     },
 };
 
@@ -27,15 +25,15 @@ use crate::{
 const PCI_IDE_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0e];
 
 #[cfg(feature = "std")]
-fn invalid_pci_ide_snapshot(message: &'static str) -> io::Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_pci_ide_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
 fn validate_pci_ide_snapshot_identity(
     saved: &[u8; PCI_CONF_SIZE],
     live: &[u8; PCI_CONF_SIZE],
-) -> io::Result<()> {
+) -> SnapResult<()> {
     for index in PCI_IDE_SNAPSHOT_IDENTITY_BYTES {
         if saved[index] != live[index] {
             return Err(invalid_pci_ide_snapshot(
@@ -184,10 +182,10 @@ pub(crate) struct PciIdeSnapshotTopology {
 }
 
 #[cfg(feature = "std")]
-fn write_bmdma_snapshot_state<W: Write>(
+fn write_bmdma_snapshot_state<W: SnapWrite>(
     writer: &mut W,
     state: &BmDmaChannel,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     writer.write_bool(state.cmd_ssbm)?;
     writer.write_bool(state.cmd_rwcon)?;
     writer.write_u8(state.status)?;
@@ -211,9 +209,9 @@ fn write_bmdma_snapshot_state<W: Write>(
 }
 
 #[cfg(feature = "std")]
-fn read_bmdma_snapshot_state<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> io::Result<BmDmaSnapshotState> {
+fn read_bmdma_snapshot_state<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<BmDmaSnapshotState> {
     let cmd_ssbm = reader.read_bool()?;
     let cmd_rwcon = reader.read_bool()?;
     let status = reader.read_u8()?;
@@ -256,7 +254,7 @@ fn read_bmdma_snapshot_state<R: Read>(
 }
 
 #[cfg(feature = "std")]
-fn validate_bmdma_snapshot_state(state: &BmDmaSnapshotState) -> io::Result<()> {
+fn validate_bmdma_snapshot_state(state: &BmDmaSnapshotState) -> SnapResult<()> {
     if (state.status & !0x67) != 0 {
         return Err(invalid_pci_ide_snapshot(
             "BM-DMA status contains reserved bits",
@@ -281,7 +279,7 @@ fn validate_bmdma_snapshot_state(state: &BmDmaSnapshotState) -> io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn validate_pending_bmdma_timer(request: Option<u32>) -> io::Result<()> {
+fn validate_pending_bmdma_timer(request: Option<u32>) -> SnapResult<()> {
     if matches!(request, Some(delay) if delay != 1) {
         return Err(invalid_pci_ide_snapshot(
             "BM-DMA deferred timer request delay is invalid",
@@ -291,11 +289,11 @@ fn validate_pending_bmdma_timer(request: Option<u32>) -> io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn write_pending_bmdma_timer<W: Write>(
+fn write_pending_bmdma_timer<W: SnapWrite>(
     writer: &mut W,
     owner: u8,
     request: Option<u32>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     validate_pending_bmdma_timer(request)?;
     writer.write_u8(owner)?;
     writer.write_bool(request.is_some())?;
@@ -303,10 +301,10 @@ fn write_pending_bmdma_timer<W: Write>(
 }
 
 #[cfg(feature = "std")]
-fn read_pending_bmdma_timer<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn read_pending_bmdma_timer<R: SnapRead>(
+    reader: &mut R,
     expected_owner: u8,
-) -> io::Result<Option<u32>> {
+) -> SnapResult<Option<u32>> {
     if reader.read_u8()? != expected_owner {
         return Err(invalid_pci_ide_snapshot(
             "BM-DMA deferred timer request has the wrong owner",
@@ -681,7 +679,7 @@ impl BxPciIde {
     /// Exact byte count for this controller's contribution to the combined
     /// PCI payload. The enclosing PCI codec owns the section-version prefix.
     #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         let config_len = u64::try_from(PCI_CONF_SIZE)
             .map_err(|_| invalid_pci_ide_snapshot("PCI IDE config size does not fit u64"))?;
         let mut channel_state_len = checked_snapshot_len_add(1, 1)?;
@@ -714,7 +712,7 @@ impl BxPciIde {
 
     /// Stream PCI IDE state, including both fixed BM-DMA bounce buffers.
     #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         writer.write_bytes(&self.pci_conf)?;
         writer.write_u32(self.bmdma_base)?;
         for channel in &self.bmdma {
@@ -732,10 +730,10 @@ impl BxPciIde {
     /// I/O base. The parent atomically relocates that live range to the
     /// returned desired base only after all snapshot sections validate.
     #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<PciIdeSnapshotTopology> {
+        reader: &mut R,
+    ) -> SnapResult<PciIdeSnapshotTopology> {
         let mut pci_conf = [0u8; PCI_CONF_SIZE];
         reader.read_bytes(&mut pci_conf)?;
         let desired_bmdma_base = reader.read_u32()?;
@@ -806,7 +804,7 @@ impl BxPciIde {
     pub(crate) fn validate_snapshot_v3_timer_owners(
         &self,
         pc_system: &BxPcSystemC,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         for (channel, owner) in self
             .bmdma
             .iter()
@@ -825,8 +823,8 @@ impl BxPciIde {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::SnapshotReader;
     use super::super::pci::PciDevice;
-    use std::io::Cursor;
 
 
     #[test]
@@ -983,7 +981,7 @@ mod tests {
         channel.buffer[..64].fill(0);
         ide.pending_timer_arm = [None; 2];
 
-        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
         let topology = ide.restore_snapshot_v3_body(&mut reader).unwrap();
         reader.finish_exact().unwrap();
 

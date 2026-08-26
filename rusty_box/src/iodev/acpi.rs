@@ -19,12 +19,10 @@
 
 use bitflags::bitflags;
 
-#[cfg(feature = "std")]
-use std::io::{self, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -238,7 +236,7 @@ pub struct BxAcpiCtrl {
 /// relocates from the live PM/SM I/O ranges before committing these bases.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AcpiSnapshotRestore {
+pub struct AcpiSnapshotRestore {
     pub(crate) pm_base: u32,
     pub(crate) sm_base: u32,
     pub(crate) overflow_timer_handle: Option<usize>,
@@ -252,12 +250,12 @@ impl Default for BxAcpiCtrl {
 
 impl BxAcpiCtrl {
     #[cfg(feature = "std")]
-    fn invalid_snapshot_v3(message: &'static str) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, message)
+    fn invalid_snapshot_v3(message: &'static str) -> SnapError {
+        SnapError::Invalid(message)
     }
 
     #[cfg(feature = "std")]
-    fn validate_snapshot_v3_pci_identity(pci_conf: &[u8; PCI_CONF_SIZE]) -> io::Result<()> {
+    fn validate_snapshot_v3_pci_identity(pci_conf: &[u8; PCI_CONF_SIZE]) -> SnapResult<()> {
         const PIIX4_PM_IDENTITY: [(usize, u8); 8] = [
             (0x00, 0x86),
             (0x01, 0x80),
@@ -284,7 +282,7 @@ impl BxAcpiCtrl {
         pm_base: u32,
         sm_base: u32,
         pci_conf: &[u8; PCI_CONF_SIZE],
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         let pmbar = u32::from_le_bytes([
             pci_conf[0x40],
             pci_conf[0x41],
@@ -337,7 +335,7 @@ impl BxAcpiCtrl {
         pci_conf: &[u8; PCI_CONF_SIZE],
         pm_base: u32,
         sm_base: u32,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         const PM_STATUS_MASK: u16 = 0x8731;
         const PM_ENABLE_MASK: u16 = 0x0521;
         const PM_CONTROL_MASK: u16 = 0x3C07;
@@ -381,7 +379,7 @@ impl crate::snapshot::SnapshotSection for BxAcpiCtrl {
     type Restored = AcpiSnapshotRestore;
 
     /// Exact byte count for the single-section ACPI v3 payload.
-    fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         self.validate_snapshot_v3_state(
             self.devfunc,
             self.uefi_enabled,
@@ -447,8 +445,8 @@ impl crate::snapshot::SnapshotSection for BxAcpiCtrl {
     }
 
     /// Stream all serializable ACPI state into a versioned v3 section payload.
-    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        self.snapshot_v3_len()?;
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
+        self.snapshot_len()?;
 
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         writer.write_u8(self.devfunc)?;
@@ -485,10 +483,10 @@ impl crate::snapshot::SnapshotSection for BxAcpiCtrl {
     ///
     /// PM/SM bases and the raw timer slot are returned for parent-owned
     /// validation and atomic topology relocation.
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<AcpiSnapshotRestore> {
+        reader: &mut R,
+    ) -> SnapResult<AcpiSnapshotRestore> {
         let section_version = reader.read_u32()?;
         if section_version != SNAPSHOT_SECTION_VERSION {
             return Err(Self::invalid_snapshot_v3(
@@ -529,7 +527,6 @@ impl crate::snapshot::SnapshotSection for BxAcpiCtrl {
         let irq9_level = reader.read_bool()?;
         let pm_base = reader.read_u32()?;
         let sm_base = reader.read_u32()?;
-        reader.finish_exact()?;
 
         self.validate_snapshot_v3_state(
             devfunc,

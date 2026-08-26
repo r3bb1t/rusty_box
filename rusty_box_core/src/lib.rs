@@ -32,5 +32,7 @@ pub mod time;
 pub use float::FloatExt;
 pub use reset::ResetReason;
 pub use ring_buffer::RingBuffer;
-pub use snap::{SnapError, SnapRead, SnapResult, SnapWrite, SnapshotSection};
+pub use snap::{
+    SnapError, SnapRead, SnapResult, SnapWrite, SnapshotSection, MAX_COUNT, MAX_SECTION_LEN,
+};
 pub use time::{ClockHz, HostClock, HostInstant, MicrosPhase, TimeOverflow, VmClock, VmDuration, VmInstant};

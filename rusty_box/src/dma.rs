@@ -26,12 +26,10 @@
 //!      non-autoinit channels, and files the HRQ deassert (Bochs
 //!      dma.cc raise_HLDA: `bx_pc_system.set_HRQ(0)`)
 use crate::memory::BxMemC;
-#[cfg(feature = "std")]
-use std::io::{Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -913,7 +911,7 @@ impl crate::snapshot::SnapshotSection for BxDmaC {
     const TAG: u32 = crate::snapshot::SEC_DMA;
     type Restored = ();
 
-    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         for controller in &self.s {
             validate_dma_controller(controller)?;
         }
@@ -926,11 +924,11 @@ impl crate::snapshot::SnapshotSection for BxDmaC {
         checked_snapshot_len_add(prefix_and_controllers, tail)
     }
 
-    fn save_snapshot_v3<W: Write>(
+    fn save<W: SnapWrite>(
         &self,
         writer: &mut W,
-    ) -> std::io::Result<()> {
-        self.snapshot_v3_len()?;
+    ) -> SnapResult<()> {
+        self.snapshot_len()?;
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
 
         for controller in &self.s {
@@ -946,10 +944,10 @@ impl crate::snapshot::SnapshotSection for BxDmaC {
         Ok(())
     }
 
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> std::io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(dma_snapshot_invalid("unsupported DMA snapshot section version"));
         }
@@ -998,12 +996,12 @@ impl crate::snapshot::SnapshotSection for BxDmaC {
 }
 
 #[cfg(feature = "std")]
-fn dma_snapshot_invalid(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn dma_snapshot_invalid(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn validate_dma_controller(controller: &Dma8237) -> std::io::Result<()> {
+fn validate_dma_controller(controller: &Dma8237) -> SnapResult<()> {
     if controller.ctrl_disabled != (controller.command_reg & 0x04 != 0) {
         return Err(dma_snapshot_invalid(
             "DMA disabled flag disagrees with command register",
@@ -1022,10 +1020,10 @@ fn validate_dma_controller(controller: &Dma8237) -> std::io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn save_dma_controller<W: Write + ?Sized>(
+fn save_dma_controller<W: SnapWrite>(
     writer: &mut W,
     controller: &Dma8237,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     validate_dma_controller(controller)?;
     for value in &controller.drq {
         writer.write_bool(*value)?;
@@ -1057,9 +1055,9 @@ fn save_dma_controller<W: Write + ?Sized>(
 }
 
 #[cfg(feature = "std")]
-fn restore_dma_controller<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> std::io::Result<Dma8237> {
+fn restore_dma_controller<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<Dma8237> {
     let mut controller = Dma8237::new();
     for value in &mut controller.drq {
         *value = reader.read_bool()?;
@@ -1095,6 +1093,7 @@ fn restore_dma_controller<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::{SnapError, SnapshotReader};
     #[cfg(feature = "std")]
     use crate::snapshot::SnapshotSection;
 
@@ -1290,12 +1289,12 @@ mod tests {
         source.s[0].chan[0].current_address = 0x1234;
         source.s[0].chan[0].current_count = 0x5678;
         let mut saved = Vec::new();
-        source.save_snapshot_v3(&mut saved).unwrap();
+        source.save(&mut saved).unwrap();
 
         let mut restored = BxDmaC::new();
         restored.init();
         let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
-        restored.restore_snapshot_v3(&mut reader).unwrap();
+        restored.restore(&mut reader).unwrap();
         reader.finish_exact().unwrap();
         assert_eq!(restored.s[0].chan[0].current_address, 0x1234);
         assert_eq!(restored.s[0].chan[0].current_count, 0x5678);
@@ -1305,8 +1304,11 @@ mod tests {
         let mut target = BxDmaC::new();
         target.init();
         let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
-        let error = target.restore_snapshot_v3(&mut reader).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        let error = target.restore(&mut reader).unwrap_err();
+        assert!(
+            matches!(error, SnapError::Invalid(_)),
+            "a rejected device state names what was wrong: {error:?}"
+        );
         assert!(error.to_string().contains("ownership"));
     }
     #[test]

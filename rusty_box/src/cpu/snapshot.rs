@@ -1,10 +1,9 @@
 //! CPU state save/restore for the snapshot mechanism.
 //! This file lives in cpu/ so it has pub(super) access to BxCpuC fields.
 
-use std::io::{self, Error, ErrorKind, Read, Write};
 
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
 };
 
 use super::{
@@ -22,7 +21,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Exact byte count for one CPU body in the v3 CPU section. The enclosing
     /// CPU section owns its version and per-record `{ cpu_id, state_len }`
     /// framing, so this method deliberately has neither.
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         let vmm_count = u64::try_from(self.vmm.len())
             .map_err(|_| snapshot_invalid("vector register count does not fit u64"))?;
         let generic_msr_count = u64::try_from(self.msrs.len())
@@ -49,7 +48,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         &self,
         lapic_base: u64,
         lapic_mode: u64,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         if self.msr.apicbase & !0xfff != lapic_base
             || (self.msr.apicbase >> 10) & 3 != lapic_mode
         {
@@ -63,10 +62,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Streams one architectural CPU record. Host mappings, TLBs, decode
     /// caches, instruction handlers, instrumentation, and diagnostics stay
     /// live and are rebuilt by the machine-level post-restore phase.
-    pub(crate) fn save_snapshot_v3_body<W: Write + ?Sized>(
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(
         &self,
         writer: &mut W,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         if self.vmm.len() > bounds::MAX_SNAPSHOT_COUNT
             || self.msrs.len() > bounds::MAX_SNAPSHOT_COUNT
         {
@@ -235,11 +234,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// does not invalidate caches or wire handlers; those machine-wide hooks
     /// run only after every section succeeds. It does rebuild CPU-local
     /// derived state from the decoded architectural inputs.
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
+        reader: &mut R,
         expected_cpu_id: u32,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         if self.bx_cpuid != expected_cpu_id {
             return Err(snapshot_invalid("CPU record does not match configured CPU ID"));
         }
@@ -513,33 +512,34 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     }
 }
 
+/// A sink that keeps only the length of what was written to it.
+///
+/// The CPU body's declared length is derived by encoding it once against this,
+/// so the figure cannot disagree with what [`BxCpuC::save_snapshot_v3_body`]
+/// actually writes — the two are the same code path.
 #[derive(Default)]
 struct SnapshotLenWriter {
     len: u64,
 }
 
-impl Write for SnapshotLenWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+impl SnapWrite for SnapshotLenWriter {
+    fn write_bytes(&mut self, bytes: &[u8]) -> SnapResult {
         let bytes_len = u64::try_from(bytes.len())
             .map_err(|_| snapshot_invalid("encoded CPU length does not fit u64"))?;
         self.len = checked_snapshot_len_add(self.len, bytes_len)?;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
 
-fn snapshot_invalid(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn snapshot_invalid(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
-fn write_i32<W: Write + ?Sized>(writer: &mut W, value: i32) -> io::Result<()> {
+fn write_i32<W: SnapWrite>(writer: &mut W, value: i32) -> SnapResult<()> {
     writer.write_u32(u32::from_le_bytes(value.to_le_bytes()))
 }
 
-fn read_i32<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<i32> {
+fn read_i32<R: SnapRead>(reader: &mut R) -> SnapResult<i32> {
     Ok(i32::from_le_bytes(reader.read_u32()?.to_le_bytes()))
 }
 
@@ -553,7 +553,7 @@ fn cpu_mode_to_wire(mode: CpuMode) -> u32 {
     }
 }
 
-fn cpu_mode_from_wire(value: u32) -> io::Result<CpuMode> {
+fn cpu_mode_from_wire(value: u32) -> SnapResult<CpuMode> {
     match value {
         0 => Ok(CpuMode::Ia32Real),
         1 => Ok(CpuMode::Ia32V8086),
@@ -575,7 +575,7 @@ fn activity_state_to_wire(state: CpuActivityState) -> u32 {
     }
 }
 
-fn activity_state_from_wire(value: u32) -> io::Result<CpuActivityState> {
+fn activity_state_from_wire(value: u32) -> SnapResult<CpuActivityState> {
     match value {
         0 => Ok(CpuActivityState::Active),
         1 => Ok(CpuActivityState::Hlt),
@@ -587,7 +587,7 @@ fn activity_state_from_wire(value: u32) -> io::Result<CpuActivityState> {
     }
 }
 
-fn validate_last_exception_type(value: i32) -> io::Result<()> {
+fn validate_last_exception_type(value: i32) -> SnapResult<()> {
     if matches!(value, -1 | 0 | 1 | 2 | 10) {
         Ok(())
     } else {
@@ -601,7 +601,7 @@ fn validate_mode_state(
     efer: BxEfer,
     eflags: EFlags,
     sregs: &[BxSegmentReg; 6],
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let pe = cr0.contains(BxCr0::PE);
     let lma = efer.contains(BxEfer::LMA);
     let vm = eflags.contains(EFlags::VM);
@@ -640,7 +640,7 @@ fn is_canonical_to_width(address: u64, width: u32) -> bool {
 
 use super::descriptor::{BxGlobalSegmentReg, BxSegmentReg};
 
-fn write_v3_seg_reg<W: Write + ?Sized>(writer: &mut W, seg: &BxSegmentReg) -> io::Result<()> {
+fn write_v3_seg_reg<W: SnapWrite>(writer: &mut W, seg: &BxSegmentReg) -> SnapResult<()> {
     writer.write_u16(seg.selector.value)?;
     writer.write_u16(seg.selector.index)?;
     writer.write_u16(seg.selector.ti)?;
@@ -658,10 +658,10 @@ fn write_v3_seg_reg<W: Write + ?Sized>(writer: &mut W, seg: &BxSegmentReg) -> io
     writer.write_bool(seg.cache.u.segment_avl())
 }
 
-fn read_v3_seg_reg<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn read_v3_seg_reg<R: SnapRead>(
+    reader: &mut R,
     seg: &mut BxSegmentReg,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let selector_value = reader.read_u16()?;
     let selector_index = reader.read_u16()?;
     let selector_ti = reader.read_u16()?;
@@ -714,27 +714,27 @@ fn read_v3_seg_reg<R: Read>(
     Ok(())
 }
 
-fn write_v3_global_seg<W: Write + ?Sized>(
+fn write_v3_global_seg<W: SnapWrite>(
     writer: &mut W,
     seg: &BxGlobalSegmentReg,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     writer.write_u64(seg.base)?;
     writer.write_u16(seg.limit)
 }
 
-fn read_v3_global_seg<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn read_v3_global_seg<R: SnapRead>(
+    reader: &mut R,
     seg: &mut BxGlobalSegmentReg,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     seg.base = reader.read_u64()?;
     seg.limit = reader.read_u16()?;
     Ok(())
 }
 
-fn save_v3_fixed_msrs<W: Write + ?Sized>(
+fn save_v3_fixed_msrs<W: SnapWrite>(
     writer: &mut W,
     msr: &super::cpu::BxRegsMsr,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     writer.write_u64(msr.apicbase)?;
     writer.write_u64(msr.star)?;
     writer.write_u64(msr.lstar)?;
@@ -780,11 +780,11 @@ fn save_v3_fixed_msrs<W: Write + ?Sized>(
     writer.write_u32(msr.ia32_spec_ctrl)
 }
 
-fn restore_v3_fixed_msrs<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_v3_fixed_msrs<R: SnapRead>(
+    reader: &mut R,
     msr: &mut super::cpu::BxRegsMsr,
     ia32_xss_suppmask: u32,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     msr.apicbase = reader.read_u64()?;
     msr.star = reader.read_u64()?;
     msr.lstar = reader.read_u64()?;
@@ -835,12 +835,12 @@ fn restore_v3_fixed_msrs<R: Read>(
     Ok(())
 }
 
-fn restore_v3_uintr<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_v3_uintr<R: SnapRead>(
+    reader: &mut R,
     uintr: &mut super::cpu::Uintr,
     supports_uintr: bool,
     linaddr_width: u8,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let ui_handler = reader.read_u64()?;
     let stack_adjust = reader.read_u64()?;
     let uinv = reader.read_u32()?;
@@ -879,10 +879,10 @@ fn restore_v3_uintr<R: Read>(
     Ok(())
 }
 
-fn write_v3_amx<W: Write + ?Sized>(
+fn write_v3_amx<W: SnapWrite>(
     writer: &mut W,
     amx: Option<&super::avx::AMX>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     match amx {
         Some(amx) => {
             writer.write_bool(true)?;
@@ -901,10 +901,10 @@ fn write_v3_amx<W: Write + ?Sized>(
     }
 }
 
-fn restore_v3_amx<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_v3_amx<R: SnapRead>(
+    reader: &mut R,
     amx: &mut Option<alloc::boxed::Box<super::avx::AMX>>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let has_amx = reader.read_bool()?;
     if has_amx != amx.is_some() {
         return Err(snapshot_invalid("AMX capability does not match snapshot"));
@@ -951,10 +951,10 @@ macro_rules! read_v3_fields {
     };
 }
 
-fn save_v3_vmcs_cache<W: Write + ?Sized>(
+fn save_v3_vmcs_cache<W: SnapWrite>(
     writer: &mut W,
     vm: &super::vmx::VmcsCache,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     write_v3_fields!(writer;
         write_bool(vm.launched),
         write_u64(vm.host_cr0), write_u64(vm.host_cr3), write_u64(vm.host_cr4),
@@ -1065,10 +1065,10 @@ fn save_v3_vmcs_cache<W: Write + ?Sized>(
     Ok(())
 }
 
-fn restore_v3_vmcs_cache<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_v3_vmcs_cache<R: SnapRead>(
+    reader: &mut R,
     vm: &mut super::vmx::VmcsCache,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     read_v3_fields!(reader, vm;
         read_bool => launched,
         read_u64 => host_cr0, read_u64 => host_cr3, read_u64 => host_cr4,
@@ -1191,7 +1191,7 @@ fn validate_vmx_state(
     in_vmx_guest: bool,
     in_smm_vmx: bool,
     in_smm_vmx_guest: bool,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let invalid_ptr = super::vmx::BX_INVALID_VMCSPTR;
     if vmcs_memtype > 8
         || vmcsptr != invalid_ptr && vmcsptr & 0x0fff != 0
@@ -1205,10 +1205,10 @@ fn validate_vmx_state(
     Ok(())
 }
 
-fn save_v3_vmcb_cache<W: Write + ?Sized>(
+fn save_v3_vmcb_cache<W: SnapWrite>(
     writer: &mut W,
     vmcb: &super::svm::VmcbCache,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     for seg in &vmcb.host_state.sregs {
         write_v3_seg_reg(writer, seg)?;
     }
@@ -1240,10 +1240,10 @@ fn save_v3_vmcb_cache<W: Write + ?Sized>(
     Ok(())
 }
 
-fn restore_v3_vmcb_cache<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_v3_vmcb_cache<R: SnapRead>(
+    reader: &mut R,
     vmcb: &mut super::svm::VmcbCache,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     for seg in &mut vmcb.host_state.sregs {
         read_v3_seg_reg(reader, seg)?;
     }
@@ -1301,8 +1301,6 @@ fn restore_v3_vmcb_cache<R: Read>(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::crregs::{BxCr0, BxEfer};
     use crate::cpu::decoder::BxSegregs;
@@ -1360,7 +1358,7 @@ mod tests {
         // host topology: it must exist before a with-VMCB snapshot decodes.
         restored.vmcb = Some(VmcbCache::default());
         let mut reader =
-            SnapshotReader::new(Cursor::new(blob.clone()), blob.len() as u64).unwrap();
+            SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
         restored
             .restore_snapshot_v3_body(&mut reader, cpu.snapshot_cpu_id())
             .unwrap();
@@ -1415,7 +1413,7 @@ mod tests {
         let mut restored = BxCpuBuilder::new().build().unwrap();
         restored.reset(ResetReason::Hardware);
         let mut reader =
-            SnapshotReader::new(Cursor::new(blob.clone()), blob.len() as u64).unwrap();
+            SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
         restored
             .restore_snapshot_v3_body(&mut reader, cpu.snapshot_cpu_id())
             .unwrap();
@@ -1426,7 +1424,7 @@ mod tests {
         mismatched.reset(ResetReason::Hardware);
         mismatched.vmcb = Some(VmcbCache::default());
         let mut reader =
-            SnapshotReader::new(Cursor::new(blob.clone()), blob.len() as u64).unwrap();
+            SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
         let error = mismatched
             .restore_snapshot_v3_body(&mut reader, cpu.snapshot_cpu_id())
             .unwrap_err();
@@ -1475,7 +1473,7 @@ mod tests {
         restored.wr_pkey = [0; 16];
         restored.fetch_mode_mask = Default::default();
         restored.alignment_check_mask = 0;
-        let mut reader = SnapshotReader::new(Cursor::new(bytes.clone()), bytes.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(bytes.as_slice(), bytes.len() as u64).unwrap();
         restored
             .restore_snapshot_v3_body(&mut reader, source.snapshot_cpu_id())
             .unwrap();

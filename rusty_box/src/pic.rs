@@ -1027,10 +1027,9 @@ impl crate::snapshot::SnapshotSection for BxPicC {
     const TAG: u32 = crate::snapshot::SEC_PIC;
     type Restored = ();
 
-    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+    fn snapshot_len(&self) -> crate::snapshot::SnapResult<u64> {
         if self.num_ioapic_forwards > PIC_IOAPIC_FORWARD_CAPACITY {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(crate::snapshot::SnapError::Invalid(
                 "PIC forwarding queue exceeds capacity",
             ));
         }
@@ -1040,22 +1039,18 @@ impl crate::snapshot::SnapshotSection for BxPicC {
         )?;
         let queue = crate::snapshot::checked_snapshot_len_mul(
             u64::try_from(self.num_ioapic_forwards).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "PIC forwarding count does not fit",
-                )
+                crate::snapshot::SnapError::Invalid("PIC forwarding count does not fit")
             })?,
             2,
         )?;
         crate::snapshot::checked_snapshot_len_add(fixed, queue)
     }
 
-    fn save_snapshot_v3<W: std::io::Write>(
+    fn save<W: crate::snapshot::SnapWrite>(
         &self,
         writer: &mut W,
-    ) -> std::io::Result<()> {
-        use crate::snapshot::SnapshotWriteExt;
-        self.snapshot_v3_len()?;
+    ) -> crate::snapshot::SnapResult {
+        self.snapshot_len()?;
         writer.write_u32(crate::snapshot::SNAPSHOT_SECTION_VERSION)?;
         for chip in [&self.master, &self.slave] {
             writer.write_bool(chip.master)?;
@@ -1082,7 +1077,7 @@ impl crate::snapshot::SnapshotSection for BxPicC {
         }
         writer.write_bool(self.irq_pending)?;
         writer.write_bool(self.irq_cleared)?;
-        writer.write_u32(u32::try_from(self.num_ioapic_forwards).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "PIC forwarding count does not fit"))?)?;
+        writer.write_u32(u32::try_from(self.num_ioapic_forwards).map_err(|_| crate::snapshot::SnapError::Invalid("PIC forwarding count does not fit"))?)?;
         for &(irq, level) in self.ioapic_forwards.iter().take(self.num_ioapic_forwards) {
             writer.write_u8(irq)?;
             writer.write_bool(level)?;
@@ -1090,17 +1085,17 @@ impl crate::snapshot::SnapshotSection for BxPicC {
         Ok(())
     }
 
-    fn restore_snapshot_v3<R: std::io::Read>(
+    fn restore<R: crate::snapshot::SnapRead>(
         &mut self,
-        reader: &mut crate::snapshot::SnapshotReader<R>,
-    ) -> std::io::Result<()> {
+        reader: &mut R,
+    ) -> crate::snapshot::SnapResult {
         if reader.read_u32()? != crate::snapshot::SNAPSHOT_SECTION_VERSION {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported PIC snapshot section version"));
+            return Err(crate::snapshot::SnapError::Invalid("unsupported PIC snapshot section version"));
         }
         let mut chips = [self.master.clone(), self.slave.clone()];
         for (index, chip) in chips.iter_mut().enumerate() {
             let master = reader.read_bool()?;
-            if master != (index == 0) { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "PIC chip topology does not match")); }
+            if master != (index == 0) { return Err(crate::snapshot::SnapError::Invalid("PIC chip topology does not match")); }
             chip.master = master;
             chip.interrupt_offset = reader.read_u8()?;
             chip.sfnm = reader.read_bool()?;
@@ -1129,8 +1124,7 @@ impl crate::snapshot::SnapshotSection for BxPicC {
                 matches!(chip.init.byte_expected, 0 | 3 | 4)
             };
             if chip.irq > 7 || chip.lowest_priority > 7 || !init_phase_valid {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
+                return Err(crate::snapshot::SnapError::Invalid(
                     "PIC state is malformed",
                 ));
             }
@@ -1141,7 +1135,7 @@ impl crate::snapshot::SnapshotSection for BxPicC {
         let mut forwards = [(0, false); PIC_IOAPIC_FORWARD_CAPACITY];
         for entry in forwards.iter_mut().take(count) {
             let irq = reader.read_u8()?;
-            if irq >= 16 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "PIC forwarding IRQ is invalid")); }
+            if irq >= 16 { return Err(crate::snapshot::SnapError::Invalid("PIC forwarding IRQ is invalid")); }
             *entry = (irq, reader.read_bool()?);
         }
         self.master = chips[0].clone();

@@ -17,13 +17,11 @@
 //! bit 1 = speaker data enable, bit 4 = refresh clock divided by 2 (derived
 //! from the microsecond clock), bit 5 = counter 2 OUT.
 
-#[cfg(feature = "std")]
-use std::io::{self, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader,
-    SnapshotWriteExt, SNAPSHOT_SECTION_VERSION,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul,
+    SnapError, SnapRead, SnapResult, SnapWrite, SNAPSHOT_SECTION_VERSION,
 };
 
 /// PIT I/O port addresses
@@ -1465,7 +1463,7 @@ impl crate::snapshot::SnapshotSection for BxPitC {
     type Restored = ();
 
     /// Exact length of the versioned PIT v3 section payload.
-    fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         const COUNTER_LEN: u64 = 33;
         if PIT_NUM_COUNTERS > bounds::MAX_SNAPSHOT_COUNT {
             return Err(pit_snapshot_invalid("PIT counter count exceeds implementation bound"));
@@ -1494,7 +1492,7 @@ impl crate::snapshot::SnapshotSection for BxPitC {
 
     /// Stream all mutable PIT counter and phase state.  Registered handlers,
     /// host-time anchors, and the configured instruction rate remain live.
-    fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         validate_pit_phase(
             self.ips,
             self.usec_remainder,
@@ -1521,10 +1519,10 @@ impl crate::snapshot::SnapshotSection for BxPitC {
     /// Restore mutable PIT state without touching its callback topology or
     /// generating IRQ0 edges.  PC-system owner validation is intentionally
     /// deferred until its full timer table has been restored.
-    fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(pit_snapshot_invalid("unsupported PIT section version"));
         }
@@ -1553,7 +1551,6 @@ impl crate::snapshot::SnapshotSection for BxPitC {
             return Err(pit_snapshot_invalid("PIT realtime configuration does not match"));
         }
         validate_pit_phase(self.ips, usec_remainder, pit_usec_accumulator)?;
-        reader.finish_exact()?;
 
         self.counters = counters;
         self.total_ticks = total_ticks;
@@ -1589,15 +1586,15 @@ impl BxPitC {
 }
 
 #[cfg(feature = "std")]
-fn pit_snapshot_invalid(message: &'static str) -> io::Error {
-    io::Error::new(ErrorKind::InvalidData, message)
+fn pit_snapshot_invalid(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn write_snapshot_handle<W: Write>(
+fn write_snapshot_handle<W: SnapWrite>(
     writer: &mut W,
     handle: Option<usize>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     writer.write_bool(handle.is_some())?;
     if let Some(handle) = handle {
         writer.write_u64(
@@ -1609,9 +1606,9 @@ fn write_snapshot_handle<W: Write>(
 }
 
 #[cfg(feature = "std")]
-fn read_snapshot_handle<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> io::Result<Option<usize>> {
+fn read_snapshot_handle<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<Option<usize>> {
     if !reader.read_bool()? {
         return Ok(None);
     }
@@ -1621,7 +1618,7 @@ fn read_snapshot_handle<R: Read>(
 }
 
 #[cfg(feature = "std")]
-fn write_pit_counter<W: Write>(writer: &mut W, counter: &PitCounter) -> io::Result<()> {
+fn write_pit_counter<W: SnapWrite>(writer: &mut W, counter: &PitCounter) -> SnapResult<()> {
     writer.write_u8(counter.mode)?;
     writer.write_u16(counter.inlatch)?;
     writer.write_u16(counter.count)?;
@@ -1648,10 +1645,10 @@ fn write_pit_counter<W: Write>(writer: &mut W, counter: &PitCounter) -> io::Resu
 }
 
 #[cfg(feature = "std")]
-fn read_pit_counter<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn read_pit_counter<R: SnapRead>(
+    reader: &mut R,
     counter: &mut PitCounter,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     counter.mode = reader.read_u8()?;
     counter.inlatch = reader.read_u16()?;
     counter.count = reader.read_u16()?;
@@ -1689,7 +1686,7 @@ fn rw_state_wire(state: RWState) -> u8 {
 }
 
 #[cfg(feature = "std")]
-fn rw_state_from_wire(value: u8) -> io::Result<RWState> {
+fn rw_state_from_wire(value: u8) -> SnapResult<RWState> {
     match value {
         0 => Ok(RWState::LsByte),
         1 => Ok(RWState::MsByte),
@@ -1700,7 +1697,7 @@ fn rw_state_from_wire(value: u8) -> io::Result<RWState> {
 }
 
 #[cfg(feature = "std")]
-fn validate_pit_counter(counter: &PitCounter) -> io::Result<()> {
+fn validate_pit_counter(counter: &PitCounter) -> SnapResult<()> {
     if counter.mode > 5 {
         return Err(pit_snapshot_invalid("PIT mode is out of range"));
     }
@@ -1725,7 +1722,7 @@ fn validate_pit_phase(
     ips: u64,
     usec_remainder: u128,
     pit_usec_accumulator: u128,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     if (ips == 0 && usec_remainder != 0) || (ips != 0 && usec_remainder >= u128::from(ips)) {
         return Err(pit_snapshot_invalid("PIT icount remainder is invalid"));
     }
