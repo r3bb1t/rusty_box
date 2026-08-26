@@ -97,7 +97,7 @@ impl Dirt<'_> {
         not(feature = "alloc"),
         allow(
             dead_code,
-            reason = "the only in-tree consumer is the framebuffer tile loop,                       which needs a conversion buffer and so an allocator"
+            reason = "the framebuffer tile loop is the only consumer, and it needs an allocator"
         )
     )]
     pub(crate) fn covers(&self, start: u64, end: u64) -> bool {
@@ -436,6 +436,83 @@ pub use super::vga::StdVga;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Counts what a front end was told, which is all a fall-through test needs
+    /// to compare: two cards agree when they say the same things in the same
+    /// order.
+    #[derive(Default, PartialEq, Eq, Debug)]
+    struct FrameLog {
+        dimensions: Option<super::super::display_sink::Dimensions>,
+        text_frames: usize,
+        tiles: usize,
+        cursor: Option<super::super::display_sink::CursorPos>,
+    }
+
+    impl DisplaySink for FrameLog {
+        fn dimension_update(&mut self, dims: super::super::display_sink::Dimensions) {
+            self.dimensions = Some(dims);
+        }
+        fn text_update(
+            &mut self,
+            _previous: &[u8],
+            _current: &[u8],
+            cursor: Option<super::super::display_sink::CursorPos>,
+            _info: &super::super::vga::VgaTextModeInfo,
+        ) {
+            self.text_frames += 1;
+            self.cursor = cursor;
+        }
+        fn graphics_tile_update(
+            &mut self,
+            _rgba: &[u8],
+            _at: super::super::display_sink::TilePos,
+        ) {
+            self.tiles += 1;
+        }
+        fn palette_change(
+            &mut self,
+            _index: u8,
+            _colour: super::super::display_sink::Rgb,
+        ) -> super::super::display_sink::Redraw {
+            super::super::display_sink::Redraw::NotNeeded
+        }
+        fn set_text_charmap(&mut self, _map: usize, _glyphs: &[u8]) {}
+        fn clear_screen(&mut self) {}
+        fn flush(&mut self) {}
+    }
+
+    /// A card in a legacy text mode draws through its core, so a GeForce and a
+    /// plain VGA must produce byte-identical frames.
+    ///
+    /// This is what a fall-through hook is FOR, and it is the property the whole
+    /// composition rests on: `bx_geforce_c::update()` calls
+    /// `bx_vgacore_c::update()` when the extended scanout is off, and a card
+    /// that quietly diverged there would show a different console for no reason
+    /// a guest could see. Asserting it against a second implementor is the only
+    /// way to know the defaults are real rather than merely compiling.
+    #[test]
+    fn a_geforce_in_a_legacy_mode_draws_exactly_what_a_plain_vga_draws() {
+        use super::super::geforce::{BxGeForceC, GeForceModel};
+
+        fn text_frame<E: VgaExtension>(mut card: VgaCard<E>) -> FrameLog {
+            // Mode 3: 80x25 colour text, which neither card extends.
+            card.core.init_text_mode3();
+            let mut log = FrameLog::default();
+            card.refresh(&mut log, Dirt::SelfTracked);
+            log
+        }
+
+        let plain = text_frame(VgaCard::with_extension(StdVga::new()));
+        let nvidia = text_frame(VgaCard::with_extension(BxGeForceC::new(
+            GeForceModel::GeForce3,
+        )));
+
+        assert_eq!(
+            plain, nvidia,
+            "a card that changes nothing about a mode must change nothing about the frame"
+        );
+        assert_eq!(plain.text_frames, 1, "and both must actually have drawn one");
+    }
 
     /// A page-tracked window reports a tile dirty when any page overlapping it
     /// is set, and only then. This is the arithmetic a hypervisor frame rests
