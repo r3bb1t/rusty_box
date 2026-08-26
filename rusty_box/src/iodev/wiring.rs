@@ -24,7 +24,7 @@ pub(crate) fn with_device_ctx<R>(
     now_ticks: u64,
     f: impl FnOnce(&mut DeviceCtx<'_>) -> R,
 ) -> R {
-    let ips = pc_system.ips();
+    let clock = pc_system.clock_at(now_ticks);
     let mut irq = PicIrqSink { pic };
     let mut timers = WheelTimerService {
         pc_system,
@@ -32,8 +32,7 @@ pub(crate) fn with_device_ctx<R>(
         now_ticks,
     };
     let mut ctx = DeviceCtx {
-        now_ticks,
-        ips,
+        clock,
         irq: &mut irq,
         timers: &mut timers,
     };

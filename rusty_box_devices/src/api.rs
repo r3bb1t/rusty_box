@@ -13,6 +13,8 @@
 //! Everything here is `no_std` and allocation-free: the context borrows, it
 //! never owns, and the trait objects are `&mut dyn` rather than boxed.
 
+use rusty_box_core::time::VmClock;
+
 /// An ISA interrupt line (IRQ0-15) — Bochs `DEV_pic_raise_irq` line numbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IrqLine(pub u8);
@@ -287,12 +289,19 @@ pub trait TimerService {
 /// Borrowed, never owned: the dispatcher builds one from disjoint machine
 /// fields for the duration of a single device call.
 pub struct DeviceCtx<'a> {
-    /// Emulated time at the access, in scheduler ticks. Bochs devices read
-    /// `bx_pc_system.time_ticks()` for the same purpose.
-    pub now_ticks: u64,
-    /// Emulated instructions per second — Bochs `bx_pc_system.m_ips`. A device
-    /// that converts between ticks and wall-clock microseconds needs it.
-    pub ips: u64,
+    /// Emulated time at the access: a reading and the rate it advances at, as
+    /// one value. Bochs devices read `bx_pc_system.time_ticks()` and divide by
+    /// `bx_pc_system.m_ips` wherever they need microseconds, each site picking
+    /// its own rounding; here the rate travels with the reading, so the
+    /// conversion is a named function on the clock and cannot be spelled two
+    /// ways (R4, R5).
+    ///
+    /// It is also the seam a hypervisor needs. Instructions-per-second is a
+    /// software-engine notion — under a real hypervisor nothing counts
+    /// instructions — but a tick with a stated rate is something both engines
+    /// can produce, which is why devices are handed one instead of the two
+    /// numbers they used to divide for themselves.
+    pub clock: VmClock,
     pub irq: &'a mut dyn IrqSink,
     pub timers: &'a mut dyn TimerService,
 }

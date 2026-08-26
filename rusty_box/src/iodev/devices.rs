@@ -2204,6 +2204,15 @@ impl DeviceManager {
 
 #[cfg(test)]
 mod tests {
+
+    /// A tick reading under a stated rate, which is what a device is handed
+    /// now instead of a bare instruction count.
+    fn clock_at(ticks: u64) -> rusty_box_core::time::VmClock {
+        rusty_box_core::time::VmClock::new(
+            rusty_box_core::time::VmInstant::from_ticks(ticks),
+            rusty_box_core::time::ClockHz::new(1_000_000).unwrap(),
+        )
+    }
     /// The hit a guest access `offset` bytes into VGA's BAR2 register window
     /// must produce. Asserting the routed window and offset is asserting what
     /// the access does; a bare "some region covers this address" is not.
@@ -2221,8 +2230,7 @@ mod tests {
         let mut irq = crate::iodev::wiring::PicIrqSink { pic };
         let mut timers = crate::iodev::wiring::NullTimerService;
         let mut ctx = crate::iodev::device_api::DeviceCtx {
-            now_ticks: 0,
-            ips: 1_000_000,
+            clock: clock_at(0),
             irq: &mut irq,
             timers: &mut timers,
         };
@@ -2295,9 +2303,9 @@ mod tests {
         let mut pic = BxPicC::new();
 
         // Program counter 0: mode 2 (rate generator), count 10.
-        pit.write(PIT_CONTROL, 0x34, 1, 0);
-        pit.write(PIT_COUNTER0, 10, 1, 0);
-        pit.write(PIT_COUNTER0, 0, 1, 0);
+        pit.write(PIT_CONTROL, 0x34, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 10, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 0, 1, clock_at(0));
         assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 0);
 
         // Ticks 1..=10 (pit82c54.cc clock_all domain): OUT pulses LOW.
@@ -2328,13 +2336,13 @@ mod tests {
         let mut pic = BxPicC::new();
 
         // Mode 0 control word forces OUT low (power-on OUT is high).
-        pit.write(PIT_CONTROL, 0x30, 1, 0);
+        pit.write(PIT_CONTROL, 0x30, 1, clock_at(0));
         assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 0);
         assert_eq!(pic.master.irq_in[0], 0);
 
         // Count 5: terminal count at tick 6 → OUT high → IRQ0 raised.
-        pit.write(PIT_COUNTER0, 5, 1, 0);
-        pit.write(PIT_COUNTER0, 0, 1, 0);
+        pit.write(PIT_COUNTER0, 5, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 0, 1, clock_at(0));
         pit.clock_pit_ticks(6);
         assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 1);
         assert_eq!(pic.master.irq_in[0], 1);
@@ -2343,7 +2351,7 @@ mod tests {
         // A new mode 0 control word forces OUT high→low: the PIC must see
         // the lower (line drops, IRR bit cleared) purely from the
         // control-word write.
-        pit.write(PIT_CONTROL, 0x30, 1, 0);
+        pit.write(PIT_CONTROL, 0x30, 1, clock_at(0));
         assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 0);
         assert_eq!(pic.master.irq_in[0], 0);
         assert_eq!(pic.master.irr & 0x01, 0);

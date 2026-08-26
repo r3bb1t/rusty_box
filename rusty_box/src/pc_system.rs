@@ -20,6 +20,7 @@ use bitflags::bitflags;
 use thiserror::Error;
 
 use crate::config::BxPhyAddress;
+use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
 use crate::cpu::ResetReason;
 
 
@@ -654,6 +655,29 @@ impl BxPcSystemC {
     pub fn ips(&self) -> u64 {
         self.ips
     }
+
+    /// The rate emulated time advances at.
+    ///
+    /// Non-zero by construction, which is the whole reason the type exists:
+    /// every conversion divides by it, and configuration reaches this field
+    /// from outside. A machine configured with zero would divide by it here
+    /// rather than inside a device, so the fallback is stated once — Bochs's
+    /// own `cpu.ips` default — instead of at each of the sites that used to
+    /// carry the raw number.
+    pub(crate) fn rate(&self) -> ClockHz {
+        ClockHz::new(self.ips).unwrap_or(ClockHz::BOCHS_DEFAULT)
+    }
+
+    /// Emulated time as a device is handed it: a reading, and the rate it
+    /// advances at, as one value.
+    ///
+    /// The single place the two are married (R5). Before, seven call sites
+    /// each paired `time_ticks()` with `ips()` by hand, and every device that
+    /// wanted microseconds divided for itself.
+    pub(crate) fn clock_at(&self, now_ticks: u64) -> VmClock {
+        VmClock::new(VmInstant::from_ticks(now_ticks), self.rate())
+    }
+
 
     // ========================================================================
     // Timer tick mechanism — matches Bochs pc_system.h

@@ -31,6 +31,7 @@ use crate::display::card::VgaCard;
 #[cfg(feature = "alloc")]
 use crate::display::sink::TilePos;
 use crate::api::BxPhyAddress;
+use rusty_box_core::time::VmClock;
 
 #[cfg(feature = "std")]
 use rusty_box_core::snap::{
@@ -1469,17 +1470,16 @@ impl VgaCore {
         }
     }
 
-    /// Get current time in microseconds from icount.
-    /// Returns a monotonically increasing value based on instructions executed.
-    fn current_usec(&self, icount: u64) -> u64 {
+    /// Emulated microseconds at the access, for the retrace computation.
+    ///
+    /// The conversion is the clock's own — the card no longer keeps a rate to
+    /// divide by. `has_icount_sync` still gates it: until the machine has told
+    /// the card its rate, Bochs reports no elapsed time and so does this.
+    fn current_usec(&self, clock: VmClock) -> u64 {
         if !self.has_icount_sync {
             return 0;
         }
-        if self.ips > 0 {
-            (icount as u128 * 1_000_000 / self.ips as u128) as u64
-        } else {
-            0
-        }
+        clock.micros()
     }
 
     /// Initialize VGA to standard text mode 3 (80x25 color text).
@@ -1589,7 +1589,7 @@ impl VgaCore {
     }
 
     /// Read from I/O port
-    pub(crate) fn read_port(&mut self, port: u16, io_len: u8, icount: u64) -> u32 {
+    pub(crate) fn read_port(&mut self, port: u16, io_len: u8, clock: VmClock) -> u32 {
         // Bochs vgacore.cc: port gating based on color_emulation
         if (0x3B0..=0x3BF).contains(&port) && self.misc_color_emulation {
             return 0xFF; // mono ports disabled in color mode
@@ -1601,8 +1601,8 @@ impl VgaCore {
         // (low | high<<8) — e.g. inw(0x3D4) returns index | data<<8. The VBE
         // dispi ports return their full 16-bit value and must not be split.
         if io_len == 2 && port != VBE_DISPI_IOPORT_INDEX && port != VBE_DISPI_IOPORT_DATA {
-            let lo = self.read_port(port, 1, icount);
-            let hi = self.read_port(port.wrapping_add(1), 1, icount);
+            let lo = self.read_port(port, 1, clock);
+            let hi = self.read_port(port.wrapping_add(1), 1, clock);
             return lo | (hi << 8);
         }
         match port {
@@ -1630,7 +1630,7 @@ impl VgaCore {
                     //   display_usec %= s.vtotal_usec;
                     // The anchor is re-set at each vertical retrace by
                     // vertical_timer(), phase-locking the waveform to the frame.
-                    let time_usec = self.current_usec(icount);
+                    let time_usec = self.current_usec(clock);
                     let display_usec = time_usec.wrapping_sub(self.display_start_usec)
                         % self.vtotal_usec as u64;
                     let mut r = 0u8;
@@ -4086,6 +4086,15 @@ mod tests {
     use crate::api::WindowOffset;
     use crate::display::sink::Redraw;
 
+    /// A tick reading under a stated rate — what the card is handed now
+    /// instead of a bare instruction count it would divide for itself.
+    fn clock_at(ticks: u64) -> VmClock {
+        VmClock::new(
+            rusty_box_core::time::VmInstant::from_ticks(ticks),
+            rusty_box_core::time::ClockHz::BOCHS_DEFAULT,
+        )
+    }
+
     /// Records what a front end would receive, so a test asserts the frame that
     /// reaches a display rather than an intermediate value on the way there.
     #[derive(Default)]
@@ -4969,7 +4978,7 @@ mod tests {
             "0x3CC write must not flip color/mono emulation"
         );
         // Read path at 0x3CC is unaffected and still reflects the programmed value.
-        assert_eq!(vga.read_port(VGA_MISC_OUTPUT, 1, 0), 0xAB);
+        assert_eq!(vga.read_port(VGA_MISC_OUTPUT, 1, clock_at(0)), 0xAB);
     }
 
     // ---- Finding #6a: Sequencer index is stored unmasked; out-of-range DATA
@@ -5006,7 +5015,7 @@ mod tests {
             "CRTC index must be masked with 0x3F, not 0x1F"
         );
 
-        let data = vga.read_port(VGA_CRTC_DATA, 1, 0);
+        let data = vga.read_port(VGA_CRTC_DATA, 1, clock_at(0));
         assert_eq!(
             data, 0x33,
             "0x3D5 must read back latch[read_map_select], not CR2"
@@ -5037,7 +5046,7 @@ mod tests {
         let mut vga = VgaCore::new();
         vga.write_port(VGA_CRTC_INDEX, CRTC_OVERFLOW as u32, 1);
         vga.crtc_regs[CRTC_OVERFLOW] = 0x5A;
-        let word = vga.read_port(VGA_CRTC_INDEX, 2, 0);
+        let word = vga.read_port(VGA_CRTC_INDEX, 2, clock_at(0));
         assert_eq!(word & 0xFF, CRTC_OVERFLOW as u32, "low byte = index reg");
         assert_eq!((word >> 8) & 0xFF, 0x5A, "high byte = data reg");
     }
@@ -5047,11 +5056,11 @@ mod tests {
     #[test]
     fn feature_control_round_trips_via_3da_and_3ca() {
         let mut vga = VgaCore::new();
-        assert_eq!(vga.read_port(0x3CA, 1, 0), 0x00, "reset value is 0");
+        assert_eq!(vga.read_port(0x3CA, 1, clock_at(0)), 0x00, "reset value is 0");
 
         vga.write_port(VGA_STATUS, 0xFF, 1);
         assert_eq!(
-            vga.read_port(0x3CA, 1, 0),
+            vga.read_port(0x3CA, 1, clock_at(0)),
             0x08,
             "only bit 3 of a 0x3DA write is retained"
         );
@@ -5061,17 +5070,17 @@ mod tests {
         // misc_output.color_emulation is set — so it must NOT clear the value.
         vga.write_port(VGA_STATUS_MONO, 0x00, 1);
         assert_eq!(
-            vga.read_port(0x3CA, 1, 0),
+            vga.read_port(0x3CA, 1, clock_at(0)),
             0x08,
             "mono-port write must be ignored in color emulation mode"
         );
 
         // Writing 0 through the active (color) port does clear it.
         vga.write_port(VGA_STATUS, 0x00, 1);
-        assert_eq!(vga.read_port(0x3CA, 1, 0), 0x00);
+        assert_eq!(vga.read_port(0x3CA, 1, clock_at(0)), 0x00);
 
         // 0x3DB is the high byte of a 16-bit read from 0x3DA: Bochs returns 0.
-        assert_eq!(vga.read_port(0x3DB, 1, 0), 0x00);
+        assert_eq!(vga.read_port(0x3DB, 1, clock_at(0)), 0x00);
     }
 
     // Bochs vgacore.cc keeps sequencer registers as decomposed fields, so a
@@ -5231,7 +5240,7 @@ mod tests {
         vga.attr_regs[5] = 0x11;
         vga.write_port(VGA_ATTRIB_DATA, 0xFF, 1);
         assert_eq!(vga.attr_regs[5], 0x11, "0x3C1 write must not modify attr regs");
-        assert_eq!(vga.read_port(VGA_MISC_OUTPUT_WRITE, 1, 0), 0x00, "0x3C2 read = 0");
+        assert_eq!(vga.read_port(VGA_MISC_OUTPUT_WRITE, 1, clock_at(0)), 0x00, "0x3C2 read = 0");
     }
 
     // ---- Finding #7: CR11 bit 7 write-protects CRTC registers 0-7 ----
@@ -5397,12 +5406,12 @@ mod tests {
         assert_eq!(value, [0xB2], "VBE backing memory must survive restore");
 
         restored.core.write_port(VGA_DAC_STATE, 0x4D, 1);
-        assert_eq!(restored.core.read_port(VGA_PEL_DATA, 1, 0), 0x12);
-        assert_eq!(restored.core.read_port(VGA_PEL_DATA, 1, 0), 0x23);
-        assert_eq!(restored.core.read_port(VGA_PEL_DATA, 1, 0), 0x34);
+        assert_eq!(restored.core.read_port(VGA_PEL_DATA, 1, clock_at(0)), 0x12);
+        assert_eq!(restored.core.read_port(VGA_PEL_DATA, 1, clock_at(0)), 0x23);
+        assert_eq!(restored.core.read_port(VGA_PEL_DATA, 1, clock_at(0)), 0x34);
         restored.core.write_port(VGA_CRTC_INDEX, 0x22, 1);
-        assert_eq!(restored.core.read_port(VGA_CRTC_DATA, 1, 0), 0x33);
-        assert_eq!(restored.core.read_port(VGA_STATUS, 1, 0), 0xA9);
+        assert_eq!(restored.core.read_port(VGA_CRTC_DATA, 1, clock_at(0)), 0x33);
+        assert_eq!(restored.core.read_port(VGA_STATUS, 1, clock_at(0)), 0xA9);
 
         write_vbe(&mut restored, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
         read_vram(&mut restored, VgaWindow::Legacy, 0x24, &mut value);
@@ -5448,7 +5457,7 @@ impl crate::api::PioDevice for VgaCore {
         len: crate::api::IoLen,
         ctx: &mut crate::api::DeviceCtx<'_>,
     ) -> u32 {
-        self.read_port(port, len.bytes(), ctx.now_ticks)
+        self.read_port(port, len.bytes(), ctx.clock)
     }
 
     fn pio_write(

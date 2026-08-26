@@ -307,8 +307,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
                     // emulator context, so the queued IRQ edges and the
                     // comparator re-arm drain immediately.
                     for _ in 0..counts[entry] {
-                        let ips = self.pc_system.ips();
-                        self.device_manager.hpet.set_now(current_ticks, ips);
+                        let clock = self.pc_system.clock_at(current_ticks);
+                        self.device_manager.hpet.set_now(clock);
                         self.device_manager.hpet.timer_fired(index);
                         self.drain_hpet_pending();
                     }
@@ -349,15 +349,14 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         ..
                     } = self.device_manager;
                     let mut irq = crate::iodev::wiring::PicIrqSink { pic };
-                    let pc_system_ips = self.pc_system.ips();
+                    let clock = self.pc_system.clock_at(current_ticks);
                     let mut timers = crate::iodev::wiring::WheelTimerService {
                         pc_system: &mut self.pc_system,
                         handles,
                         now_ticks: current_ticks,
                     };
                     let mut ctx = crate::iodev::device_api::DeviceCtx {
-                        now_ticks: current_ticks,
-                        ips: pc_system_ips,
+                        clock,
                         irq: &mut irq,
                         timers: &mut timers,
                     };
@@ -486,15 +485,14 @@ impl<'a, T: Instrumentation> Emulator<T> {
             ..
         } = self.device_manager;
         let mut irq = crate::iodev::wiring::PicIrqSink { pic };
-        let pc_system_ips = self.pc_system.ips();
+        let clock = self.pc_system.clock_at(current_ticks);
         let mut timers = crate::iodev::wiring::WheelTimerService {
             pc_system: &mut self.pc_system,
             handles,
             now_ticks: current_ticks,
         };
         let mut ctx = crate::iodev::device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
+            clock,
             irq: &mut irq,
             timers: &mut timers,
         };
@@ -503,7 +501,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
     /// Service the 8042's continuous serial-delay timer through the device API.
     fn fire_keyboard_timer(&mut self, fires: u32, current_ticks: u64) {
-        let pc_system_ips = self.pc_system.ips();
+        let clock = self.pc_system.clock_at(current_ticks);
         let crate::iodev::devices::DeviceManager {
             ref mut keyboard,
             ref mut pic,
@@ -516,8 +514,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             now_ticks: current_ticks,
         };
         let mut ctx = crate::iodev::device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
+            clock,
             irq: &mut irq,
             timers: &mut timers,
         };
@@ -531,7 +528,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             crate::iodev::pit::BxPitC::EVENT_TIMER_LOCAL,
             self.device_manager.pit.timer_handle,
         );
-        let pc_system_ips = self.pc_system.ips();
+        let clock = self.pc_system.clock_at(current_ticks);
         let crate::iodev::devices::DeviceManager {
             ref mut pit,
             ref mut pic,
@@ -544,8 +541,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             now_ticks: current_ticks,
         };
         let mut ctx = crate::iodev::device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
+            clock,
             irq: &mut irq,
             timers: &mut timers,
         };
@@ -578,15 +574,14 @@ impl<'a, T: Instrumentation> Emulator<T> {
             ..
         } = self.device_manager;
         let mut irq = crate::iodev::wiring::PicIrqSink { pic };
-        let pc_system_ips = self.pc_system.ips();
+        let clock = self.pc_system.clock_at(current_ticks);
         let mut timers = crate::iodev::wiring::WheelTimerService {
             pc_system: &mut self.pc_system,
             handles,
             now_ticks: current_ticks,
         };
         let mut ctx = crate::iodev::device_api::DeviceCtx {
-            now_ticks: current_ticks,
-            ips: pc_system_ips,
+            clock,
             irq: &mut irq,
             timers: &mut timers,
         };

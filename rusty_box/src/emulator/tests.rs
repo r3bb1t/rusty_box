@@ -573,13 +573,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // Divisor 100 → ~84 us period.
                 emu.device_manager
                     .pit
-                    .write(crate::iodev::pit::PIT_CONTROL, 0x34, 1, 0);
+                    .write(crate::iodev::pit::PIT_CONTROL, 0x34, 1, crate::iodev::pit::test_clock_at(0));
                 emu.device_manager
                     .pit
-                    .write(crate::iodev::pit::PIT_COUNTER0, 100, 1, 0);
+                    .write(crate::iodev::pit::PIT_COUNTER0, 100, 1, crate::iodev::pit::test_clock_at(0));
                 emu.device_manager
                     .pit
-                    .write(crate::iodev::pit::PIT_COUNTER0, 0, 1, 0);
+                    .write(crate::iodev::pit::PIT_COUNTER0, 0, 1, crate::iodev::pit::test_clock_at(0));
 
                 let now = emu.pc_system.time_ticks();
                 let delay = emu.device_manager.pit.next_event_usec();
@@ -700,13 +700,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // PIT counter 0, mode 2, divisor 100 (~84 us period).
                 emu.device_manager
                     .pit
-                    .write(crate::iodev::pit::PIT_CONTROL, 0x34, 1, 0);
+                    .write(crate::iodev::pit::PIT_CONTROL, 0x34, 1, crate::iodev::pit::test_clock_at(0));
                 emu.device_manager
                     .pit
-                    .write(crate::iodev::pit::PIT_COUNTER0, 100, 1, 0);
+                    .write(crate::iodev::pit::PIT_COUNTER0, 100, 1, crate::iodev::pit::test_clock_at(0));
                 emu.device_manager
                     .pit
-                    .write(crate::iodev::pit::PIT_COUNTER0, 0, 1, 0);
+                    .write(crate::iodev::pit::PIT_COUNTER0, 0, 1, crate::iodev::pit::test_clock_at(0));
                 let now = emu.pc_system.time_ticks();
                 let delay = emu.device_manager.pit.next_event_usec();
                 emu.devices

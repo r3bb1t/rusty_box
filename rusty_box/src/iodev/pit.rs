@@ -18,6 +18,7 @@
 //! from the microsecond clock), bit 5 = counter 2 OUT.
 
 
+use rusty_box_core::time::VmClock;
 #[cfg(feature = "std")]
 use crate::snapshot::{
     bounds, checked_snapshot_len_add, checked_snapshot_len_mul,
@@ -874,6 +875,16 @@ impl Default for BxPitC {
     }
 }
 
+/// A tick reading under a stated rate, for tests outside this module that
+/// drive the PIT directly.
+#[cfg(test)]
+pub(crate) fn test_clock_at(ticks: u64) -> VmClock {
+    VmClock::new(
+        rusty_box_core::time::VmInstant::from_ticks(ticks),
+        rusty_box_core::time::ClockHz::BOCHS_DEFAULT,
+    )
+}
+
 impl BxPitC {
     /// Create a new PIT controller in power-on state (Bochs bx_pit_c
     /// constructor + init()).
@@ -1094,18 +1105,15 @@ impl BxPitC {
     /// precision that keeps small gaps (~13 instructions per PIT tick at 15M
     /// IPS) from losing counter movement lives in total_usec + the exact
     /// pit_usec_accumulator, not a per-sync fractional carry.
-    pub fn sync_to_icount(&mut self, icount: u64) {
+    pub fn sync_to_icount(&mut self, clock: VmClock) {
         #[cfg(feature = "std")]
         if self.realtime_last.is_some() {
             self.sync_to_realtime();
-            self.icount_at_last_sync = icount;
+            self.icount_at_last_sync = clock.now().ticks();
             self.usec_remainder = 0;
             return;
         }
 
-        if self.ips == 0 {
-            return;
-        }
 
         // Bochs pit.cc keeps a SINGLE time cursor (`s.last_usec`): every sync —
         // the timer callback and every port access — advances the counters to
@@ -1117,12 +1125,14 @@ impl BxPitC {
         // freezing the PIT until wall time caught up. That freeze is what made
         // Linux `check_timer()` see zero IRQ0 ticks and panic
         // "IO-APIC + timer doesn't work!".
-        self.icount_at_last_sync = icount;
-        let scaled = u128::from(icount) * u128::from(USEC_PER_SECOND);
-        let target_usec = (scaled / u128::from(self.ips)) as u64;
-        self.usec_remainder = scaled % u128::from(self.ips);
-        if target_usec > self.total_usec {
-            self.advance_by_usec(target_usec - self.total_usec);
+        self.icount_at_last_sync = clock.now().ticks();
+        // `micros_phase` is this conversion and its carry, together: the
+        // discarded remainder is snapshot state, so the whole point is that
+        // the division and the modulo cannot disagree about the divisor.
+        let phase = clock.micros_phase();
+        self.usec_remainder = phase.remainder;
+        if phase.micros > self.total_usec {
+            self.advance_by_usec(phase.micros - self.total_usec);
         }
     }
 
@@ -1131,20 +1141,16 @@ impl BxPitC {
     /// The conversion is cumulative (`floor(system_ticks * 1_000_000 / IPS)`)
     /// like `BxPcSystemC::time_usec_at_ticks`, rather than a per-callback
     /// relative conversion that could lose fractional microseconds.
-    pub(crate) fn sync_to_system_ticks(&mut self, system_ticks: u64, ips: u64) {
+    pub(crate) fn sync_to_system_ticks(&mut self, clock: VmClock) {
         #[cfg(feature = "std")]
         if self.realtime_last.is_some() {
             self.sync_to_realtime();
             return;
         }
 
-        if ips == 0 {
-            return;
-        }
-
-        let target_usec = ((u128::from(system_ticks) * u128::from(USEC_PER_SECOND))
-            / u128::from(ips))
-        .min(u128::from(u64::MAX)) as u64;
+        // `VmClock::micros` IS this conversion — cumulative floor against the
+        // clock's own rate — so the PIT no longer divides for itself.
+        let target_usec = clock.micros();
         if target_usec > self.total_usec {
             self.advance_by_usec(target_usec - self.total_usec);
         }
@@ -1153,11 +1159,7 @@ impl BxPitC {
     /// Service the PIT's one-shot owner callback without borrowing the PC
     /// system or PIC. The dispatcher consumes the IRQ replay data and arms
     /// `rearm_usec` as the next absolute owner deadline.
-    pub(crate) fn timer_callback(
-        &mut self,
-        system_ticks: u64,
-        ips: u64,
-    ) -> PitTimerCallback {
+    pub(crate) fn timer_callback(&mut self, clock: VmClock) -> PitTimerCallback {
         #[cfg(feature = "std")]
         if self.realtime_last.is_some() {
             if let Some(remaining) = self.host_remaining_usec() {
@@ -1171,7 +1173,7 @@ impl BxPitC {
             }
         }
 
-        self.sync_to_system_ticks(system_ticks, ips);
+        self.sync_to_system_ticks(clock);
         let (irq0_transitions, irq0_level) = self.drain_irq0_events();
         PitTimerCallback {
             irq0_transitions,
@@ -1252,11 +1254,11 @@ impl BxPitC {
     }
 
     /// Read from PIT I/O port — Bochs pit.cc bx_pit_c::read
-    pub fn read(&mut self, port: u16, _io_len: u8, icount: u64) -> u32 {
+    pub fn read(&mut self, port: u16, _io_len: u8, clock: VmClock) -> u32 {
         // Bochs pit.cc bx_pit_c::read runs handle_timer() (periodic to
         // "now") before reading any register, so the guest observes the
         // counter state as of the current instruction.
-        self.sync_to_icount(icount);
+        self.sync_to_icount(clock);
         match port {
             PIT_COUNTER0 => self.counters[0].read() as u32,
             PIT_COUNTER1 => self.counters[1].read() as u32,
@@ -1288,12 +1290,12 @@ impl BxPitC {
     }
 
     /// Write to PIT I/O port — Bochs pit.cc bx_pit_c::write
-    pub fn write(&mut self, port: u16, value: u32, _io_len: u8, icount: u64) {
+    pub fn write(&mut self, port: u16, value: u32, _io_len: u8, clock: VmClock) {
         // Bochs pit.cc bx_pit_c::write: periodic(time_passed32) runs BEFORE
         // s.timer.write(...) — the counters advance to "now" under the OLD
         // programming, then the write is applied. This holds for all of
         // 0x40-0x43 and 0x61.
-        self.sync_to_icount(icount);
+        self.sync_to_icount(clock);
         let value = value as u8;
         match port {
             PIT_COUNTER0 => self.counters[0].write(value),
@@ -1744,7 +1746,7 @@ impl crate::iodev::device_api::PioDevice for BxPitC {
         // Bochs pit.cc runs handle_timer() before reading a register, which
         // can clock counter 0's OUT pin — so the read itself can produce an
         // IRQ0 edge that must reach the PIC before the guest resumes.
-        let value = self.read(port, len.bytes(), ctx.now_ticks);
+        let value = self.read(port, len.bytes(), ctx.clock);
         self.drain_irq0(ctx);
         self.arm_next_event(ctx);
         value
@@ -1757,7 +1759,7 @@ impl crate::iodev::device_api::PioDevice for BxPitC {
         len: crate::iodev::device_api::IoLen,
         ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
     ) {
-        self.write(port, value, len.bytes(), ctx.now_ticks);
+        self.write(port, value, len.bytes(), ctx.clock);
         self.drain_irq0(ctx);
         self.arm_next_event(ctx);
     }
@@ -1773,8 +1775,7 @@ impl crate::iodev::device_api::TimedDevice for BxPitC {
         _fires: u32,
         ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
     ) {
-        let ips = ctx.ips;
-        let callback = self.timer_callback(ctx.now_ticks, ips);
+        let callback = self.timer_callback(ctx.clock);
         if self.irq_enabled {
             let was_high = ctx.irq.level(crate::iodev::device_api::IrqLine(0));
             let rising = Self::replay_irq0(callback.irq0_transitions, callback.irq0_level, ctx);
@@ -1796,6 +1797,52 @@ impl crate::iodev::device_api::TimedDevice for BxPitC {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tick reading under a stated rate, which is what a device is handed
+    /// now instead of a bare instruction count.
+    fn clock_at(ticks: u64) -> VmClock {
+        VmClock::new(
+            rusty_box_core::time::VmInstant::from_ticks(ticks),
+            rusty_box_core::time::ClockHz::new(1_000_000).unwrap(),
+        )
+    }
+
+    /// The phase the PIT carries is the one it always carried.
+    ///
+    /// `usec_remainder` is snapshot state: it is written into the v3 stream and
+    /// validated against the rate on restore, so a conversion that agreed about
+    /// the microseconds but disagreed about the discarded remainder would
+    /// produce a machine that restores into a PIT phase it was never in — and
+    /// nothing about the counters would look wrong until the guest missed a
+    /// tick. This transcribes the arithmetic the device did for itself, and
+    /// asserts the clock's `micros_phase` is the same value at both halves.
+    #[test]
+    fn the_carried_phase_matches_the_division_it_replaced() {
+        for &hz in &[1_000_000u64, 3, 15_000_000, 50_000_000, 300_000_000] {
+            for &ticks in &[0u64, 1, 7, 999_999, 1_000_000, 123_456_789] {
+                let scaled = u128::from(ticks) * u128::from(USEC_PER_SECOND);
+                let expected_micros = (scaled / u128::from(hz)) as u64;
+                let expected_remainder = scaled % u128::from(hz);
+
+                let clock = VmClock::new(
+                    rusty_box_core::time::VmInstant::from_ticks(ticks),
+                    rusty_box_core::time::ClockHz::new(hz).unwrap(),
+                );
+                let phase = clock.micros_phase();
+                assert_eq!(
+                    (phase.micros, phase.remainder),
+                    (expected_micros, expected_remainder),
+                    "hz={hz} ticks={ticks}"
+                );
+
+                // And what the device actually stores, through the real path.
+                let mut pit = BxPitC::new();
+                pit.init_icount_sync(0, hz);
+                pit.sync_to_icount(clock);
+                assert_eq!(pit.usec_remainder, expected_remainder, "hz={hz} ticks={ticks}");
+            }
+        }
+    }
 
     /// Drive the counters by an exact number of PIT input clocks — the
     /// pit82c54.cc clock_all tick domain (after the usec→tick conversion).
@@ -1850,7 +1897,7 @@ mod tests {
         let mut pit = BxPitC::new();
 
         // Configure counter 0 for mode 2 (rate generator), low-high access
-        pit.write(PIT_CONTROL, 0x34, 1, 0); // Counter 0, low-high, mode 2
+        pit.write(PIT_CONTROL, 0x34, 1, clock_at(0)); // Counter 0, low-high, mode 2
 
         // After control word: count_written=false, first_pass=true
         assert!(!pit.counters[0].count_written);
@@ -1860,8 +1907,8 @@ mod tests {
         assert_eq!(pit.drain_irq0_events(), (0, true));
 
         // Write count value 10
-        pit.write(PIT_COUNTER0, 10, 1, 0); // Low byte
-        pit.write(PIT_COUNTER0, 0, 1, 0); // High byte
+        pit.write(PIT_COUNTER0, 10, 1, clock_at(0)); // Low byte
+        pit.write(PIT_COUNTER0, 0, 1, clock_at(0)); // High byte
 
         // After full write: count_written=true
         assert!(pit.counters[0].count_written);
@@ -1904,14 +1951,14 @@ mod tests {
         let mut pit = usec_locked_pit();
 
         // Program counter 0: mode 2, LSB/MSB, count 100 (at icount 0)
-        pit.write(PIT_CONTROL, 0x34, 1, 0);
-        pit.write(PIT_COUNTER0, 100, 1, 0);
-        pit.write(PIT_COUNTER0, 0, 1, 0);
+        pit.write(PIT_CONTROL, 0x34, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 100, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 0, 1, clock_at(0));
 
         // Write to port 0x61 (GATE2) at icount 51 (= 51 usec) — the write
         // handler must first advance the counters:
         // ticks = floor(51 * 1193181 / 1e6) = 60 → 1 reload + 59 decrements.
-        pit.write(PIT_SYSTEM_CONTROL_B, 0x01, 1, 51);
+        pit.write(PIT_SYSTEM_CONTROL_B, 0x01, 1, clock_at(51));
         assert_eq!(
             pit.counters[0].count, 41,
             "port 0x61 write must sync counters to now first"
@@ -1920,7 +1967,7 @@ mod tests {
         // Write a new LSB to counter 0 itself at icount 76 — cumulative
         // ticks = floor(76 * 1193181 / 1e6) = 90, so 30 more decrements
         // must elapse under the old count before the (partial) write applies.
-        pit.write(PIT_COUNTER0, 200, 1, 76);
+        pit.write(PIT_COUNTER0, 200, 1, clock_at(76));
         assert_eq!(
             pit.counters[0].count, 11,
             "count-register write must sync counters to now first"
@@ -1937,9 +1984,9 @@ mod tests {
         // by 2*cycles in the bulk path.
         let mut pit = BxPitC::new();
 
-        pit.write(PIT_CONTROL, 0x36, 1, 0); // Counter 0, low-high, mode 3
-        pit.write(PIT_COUNTER0, 0xE8, 1, 0); // 1000 & 0xFF
-        pit.write(PIT_COUNTER0, 0x03, 1, 0); // 1000 >> 8
+        pit.write(PIT_CONTROL, 0x36, 1, clock_at(0)); // Counter 0, low-high, mode 3
+        pit.write(PIT_COUNTER0, 0xE8, 1, clock_at(0)); // 1000 & 0xFF
+        pit.write(PIT_COUNTER0, 0x03, 1, clock_at(0)); // 1000 >> 8
 
         // Tick 1: reload → count = 1000, next change at half-period
         advance_ticks(&mut pit, 1);
@@ -1962,9 +2009,9 @@ mod tests {
         // counters while the caller still consumed the ticks.
         let mut pit = BxPitC::new();
 
-        pit.write(PIT_CONTROL, 0x35, 1, 0); // Counter 0, low-high, mode 2, BCD
-        pit.write(PIT_COUNTER0, 0x00, 1, 0); // BCD 100 LSB
-        pit.write(PIT_COUNTER0, 0x01, 1, 0); // BCD 100 MSB
+        pit.write(PIT_CONTROL, 0x35, 1, clock_at(0)); // Counter 0, low-high, mode 2, BCD
+        pit.write(PIT_COUNTER0, 0x00, 1, clock_at(0)); // BCD 100 LSB
+        pit.write(PIT_COUNTER0, 0x01, 1, clock_at(0)); // BCD 100 MSB
 
         // Tick 1: reload → count = 0x0100 (BCD 100)
         advance_ticks(&mut pit, 1);
@@ -1988,31 +2035,31 @@ mod tests {
         let mut pit = usec_locked_pit();
 
         // Power-on: GATE2=1, OUT2=1, speaker off, usec=0 → 0b0010_0001
-        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, 0), 0x21);
+        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, clock_at(0)), 0x21);
         // Repeated read without time passing: identical (no per-read toggle)
-        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, 0), 0x21);
+        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, clock_at(0)), 0x21);
 
         // Write bits 1/2/3 set, bit 0 clear: GATE2 drops, speaker data on;
         // bits 2/3 must NOT be echoed back.
-        pit.write(PIT_SYSTEM_CONTROL_B, 0x0E, 1, 0);
+        pit.write(PIT_SYSTEM_CONTROL_B, 0x0E, 1, clock_at(0));
         assert!(pit.speaker_data_on);
         assert!(!pit.counters[2].gate);
         // Counter 2 is mode 4 (power-on) → speaker_level = data_on && OUT2
         assert!(pit.speaker_level);
-        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, 0), 0x22);
+        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, clock_at(0)), 0x22);
 
         // Advance virtual time past 15 usec (18 ticks ≈ 15.09 usec) → the
         // refresh bit (bit 4) flips because it derives from the usec clock.
-        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, 18) & 0x10, 0x10);
+        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, clock_at(18)) & 0x10, 0x10);
         // ... and stays put when read again with no time elapsed.
-        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, 18) & 0x10, 0x10);
+        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, clock_at(18)) & 0x10, 0x10);
     }
 
     #[test]
     fn port43_read_returns_zero() {
         // Finding #32b: Bochs pit82c54.cc read(CONTROL_ADDRESS) returns 0.
         let mut pit = BxPitC::new();
-        assert_eq!(pit.read(PIT_CONTROL, 1, 0), 0);
+        assert_eq!(pit.read(PIT_CONTROL, 1, clock_at(0)), 0);
     }
 
     #[test]
@@ -2020,10 +2067,10 @@ mod tests {
         // Finding #32a: Bochs pit82c54.cc reset is empty — counters keep
         // their programming across a guest reset.
         let mut pit = BxPitC::new();
-        pit.write(PIT_CONTROL, 0x34, 1, 0);
-        pit.write(PIT_COUNTER0, 100, 1, 0);
-        pit.write(PIT_COUNTER0, 0, 1, 0);
-        pit.write(PIT_SYSTEM_CONTROL_B, 0x02, 1, 0); // speaker_data_on
+        pit.write(PIT_CONTROL, 0x34, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 100, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 0, 1, clock_at(0));
+        pit.write(PIT_SYSTEM_CONTROL_B, 0x02, 1, clock_at(0)); // speaker_data_on
         advance_ticks(&mut pit, 11);
         let count_before = pit.counters[0].count;
 
@@ -2045,7 +2092,7 @@ mod tests {
         let mut pit = BxPitC::new();
         assert!(pit.counters[0].output); // power-on OUT=1
 
-        pit.write(PIT_CONTROL, 0x30, 1, 0); // Counter 0, low-high, mode 0 → OUT low
+        pit.write(PIT_CONTROL, 0x30, 1, clock_at(0)); // Counter 0, low-high, mode 0 → OUT low
         assert!(!pit.counters[0].output);
         assert_eq!(
             pit.drain_irq0_events(),
@@ -2054,17 +2101,17 @@ mod tests {
         );
 
         // Reprogramming to a mode with initial OUT high transitions back.
-        pit.write(PIT_CONTROL, 0x34, 1, 0);
+        pit.write(PIT_CONTROL, 0x34, 1, clock_at(0));
         assert_eq!(pit.drain_irq0_events(), (1, true));
     }
 
     #[test]
     fn mode0_terminal_count_raises_out_level() {
         let mut pit = BxPitC::new();
-        pit.write(PIT_CONTROL, 0x30, 1, 0); // mode 0 → OUT low
+        pit.write(PIT_CONTROL, 0x30, 1, clock_at(0)); // mode 0 → OUT low
         assert_eq!(pit.drain_irq0_events(), (1, false));
-        pit.write(PIT_COUNTER0, 5, 1, 0);
-        pit.write(PIT_COUNTER0, 0, 1, 0);
+        pit.write(PIT_COUNTER0, 5, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 0, 1, clock_at(0));
 
         // Tick 1 loads the count; ticks 2..=6 count 5→0; OUT goes HIGH at
         // terminal count and STAYS high (level, not pulse).
@@ -2085,9 +2132,9 @@ mod tests {
         // ticks (~9.1 Hz square wave) instead of real hardware's 32768
         // (~18.2 Hz). Reproduced Bochs quirk.
         let mut pit = BxPitC::new();
-        pit.write(PIT_CONTROL, 0x36, 1, 0); // Counter 0, low-high, mode 3
-        pit.write(PIT_COUNTER0, 0, 1, 0);
-        pit.write(PIT_COUNTER0, 0, 1, 0); // count 0 (= 0x10000 on real HW)
+        pit.write(PIT_CONTROL, 0x36, 1, clock_at(0)); // Counter 0, low-high, mode 3
+        pit.write(PIT_COUNTER0, 0, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 0, 1, clock_at(0)); // count 0 (= 0x10000 on real HW)
 
         // Tick 1: reload — the quirk schedules the next OUT change 0xFFFF
         // ticks out (18.2 Hz behavior would be 0x7FFF/0x8000).
@@ -2115,25 +2162,25 @@ mod tests {
         // the "Undefined output" error path and returns 0 WITHOUT clearing
         // any latch, so every subsequent read also returns 0.
         let mut pit = usec_locked_pit();
-        pit.write(PIT_CONTROL, 0x34, 1, 0); // Counter 0, low-high, mode 2
-        pit.write(PIT_COUNTER0, 0x34, 1, 0);
-        pit.write(PIT_COUNTER0, 0x12, 1, 0);
-        pit.sync_to_icount(5);
+        pit.write(PIT_CONTROL, 0x34, 1, clock_at(0)); // Counter 0, low-high, mode 2
+        pit.write(PIT_COUNTER0, 0x34, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 0x12, 1, clock_at(0));
+        pit.sync_to_icount(clock_at(5));
 
         // Latch the count, read only the LSB (read_state → MSByte_multiple)
-        pit.write(PIT_CONTROL, 0x00, 1, 5);
-        let lsb = pit.read(PIT_COUNTER0, 1, 5);
+        pit.write(PIT_CONTROL, 0x00, 1, clock_at(5));
+        let lsb = pit.read(PIT_COUNTER0, 1, clock_at(5));
         assert_eq!(lsb, (pit.counters[0].outlatch & 0xFF) as u32);
         assert!(pit.counters[0].count_msb_latched);
 
         // READ_BACK latch status for counter 0 (bit5=1: no count latch,
         // bit4=0: latch status, bit1: select counter 0)
-        pit.write(PIT_CONTROL, 0xE2, 1, 5);
+        pit.write(PIT_CONTROL, 0xE2, 1, clock_at(5));
         assert!(pit.counters[0].status_latched);
 
         // Bochs error path: returns 0 and clears nothing — forever.
-        assert_eq!(pit.read(PIT_COUNTER0, 1, 5), 0);
-        assert_eq!(pit.read(PIT_COUNTER0, 1, 5), 0);
+        assert_eq!(pit.read(PIT_COUNTER0, 1, clock_at(5)), 0);
+        assert_eq!(pit.read(PIT_COUNTER0, 1, clock_at(5)), 0);
         assert!(pit.counters[0].status_latched);
         assert!(pit.counters[0].count_msb_latched);
     }
@@ -2143,16 +2190,16 @@ mod tests {
         // Bochs pit82c54.cc read: reading a latched LSB in LSByte_multiple
         // advances read_state to MSByte_multiple (and back on the MSB).
         let mut pit = usec_locked_pit();
-        pit.write(PIT_CONTROL, 0x34, 1, 0);
-        pit.write(PIT_COUNTER0, 0x34, 1, 0);
-        pit.write(PIT_COUNTER0, 0x12, 1, 0);
-        pit.sync_to_icount(3);
+        pit.write(PIT_CONTROL, 0x34, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 0x34, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 0x12, 1, clock_at(0));
+        pit.sync_to_icount(clock_at(3));
 
-        pit.write(PIT_CONTROL, 0x00, 1, 3); // latch counter 0
+        pit.write(PIT_CONTROL, 0x00, 1, clock_at(3)); // latch counter 0
         let outlatch = pit.counters[0].outlatch;
-        assert_eq!(pit.read(PIT_COUNTER0, 1, 3), (outlatch & 0xFF) as u32);
+        assert_eq!(pit.read(PIT_COUNTER0, 1, clock_at(3)), (outlatch & 0xFF) as u32);
         assert_eq!(pit.counters[0].read_state, RWState::MsByteMultiple);
-        assert_eq!(pit.read(PIT_COUNTER0, 1, 3), (outlatch >> 8) as u32);
+        assert_eq!(pit.read(PIT_COUNTER0, 1, clock_at(3)), (outlatch >> 8) as u32);
         assert_eq!(pit.counters[0].read_state, RWState::LsByteMultiple);
     }
 
@@ -2203,7 +2250,7 @@ mod tests {
 
         let before = pit.total_ticks;
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let _ = pit.read(PIT_COUNTER0, 1, 1_000);
+        let _ = pit.read(PIT_COUNTER0, 1, clock_at(1_000));
 
         assert!(
             pit.total_ticks > before,
@@ -2240,25 +2287,25 @@ mod tests {
         pit.init_icount_sync(0, IPS);
 
         // Counter 0, mode 2 (rate generator), divisor 100.
-        pit.write(PIT_CONTROL, 0x34, 1, 0);
-        pit.write(PIT_COUNTER0, 100, 1, 0);
-        pit.write(PIT_COUNTER0, 0, 1, 0);
+        pit.write(PIT_CONTROL, 0x34, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 100, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 0, 1, clock_at(0));
         let _ = pit.drain_irq0_events();
 
         // Advance ~1000 us purely through the timer-callback (tick) path.
-        let early = pit.timer_callback(1_000, IPS).irq0_transitions
+        let early = pit.timer_callback(clock_at(1_000)).irq0_transitions
             + pit.drain_irq0_events().0;
         assert!(early > 0, "PIT must tick via the timer path");
 
         // A guest reads a PIT port at the same emulated time. This must NOT
         // re-apply the 1000 us already consumed by the timer path.
-        let _ = pit.read(PIT_COUNTER0, 1, 1_000);
+        let _ = pit.read(PIT_COUNTER0, 1, clock_at(1_000));
         let _ = pit.drain_irq0_events();
 
         // Continue the tick path; the PIT must keep generating IRQ0 edges.
         let mut later = 0u32;
         for tick in 1_001..=2_000 {
-            later += pit.timer_callback(tick, IPS).irq0_transitions;
+            later += pit.timer_callback(clock_at(tick)).irq0_transitions;
             later += pit.drain_irq0_events().0;
         }
         assert!(
@@ -2276,9 +2323,9 @@ mod tests {
 
         // Counter 0, LSB/MSB, mode 0. Programming drives OUT low. Its load
         // and terminal-count phases both remain exact owner deadlines.
-        pit.write(PIT_CONTROL, 0x30, 1, 0);
-        pit.write(PIT_COUNTER0, 1, 1, 0);
-        pit.write(PIT_COUNTER0, 0, 1, 0);
+        pit.write(PIT_CONTROL, 0x30, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 1, 1, clock_at(0));
+        pit.write(PIT_COUNTER0, 0, 1, clock_at(0));
         let _ = pit.drain_irq0_events();
         assert_eq!(pit.next_event_usec(), Some(1));
 
@@ -2287,7 +2334,7 @@ mod tests {
         let mut fired_at_usec = None;
         for current_usec in 1..=4 {
             let callback =
-                pit.timer_callback(current_usec, u64::from(USEC_PER_SECOND));
+                pit.timer_callback(clock_at(current_usec));
             transitions += callback.irq0_transitions;
             final_level = callback.irq0_level;
             if callback.irq0_transitions != 0 {
@@ -2311,7 +2358,7 @@ mod tests {
         let before_usec = pit.total_usec;
         let before_ticks = pit.total_ticks;
         let before_event = pit.counters[0].next_change_time;
-        let callback = pit.timer_callback(1_000_000, u64::from(USEC_PER_SECOND));
+        let callback = pit.timer_callback(clock_at(1_000_000));
 
         assert!(
             callback.rearm_usec.is_some_and(|delay| delay > 0),

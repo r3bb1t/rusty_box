@@ -1370,8 +1370,8 @@ impl crate::iodev::device_api::PioDevice for BxAcpiCtrl {
         len: crate::iodev::device_api::IoLen,
         ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
     ) -> u32 {
-        let value = self.read(port, len.bytes(), ctx.now_ticks);
-        let delay = self.overflow_delay_usec(ctx.now_ticks);
+        let value = self.read(port, len.bytes(), ctx.clock.now().ticks());
+        let delay = self.overflow_delay_usec(ctx.clock.now().ticks());
         self.drain_effects(ctx, delay);
         value
     }
@@ -1383,8 +1383,8 @@ impl crate::iodev::device_api::PioDevice for BxAcpiCtrl {
         len: crate::iodev::device_api::IoLen,
         ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
     ) {
-        self.write(port, value, len.bytes(), ctx.now_ticks);
-        let delay = self.overflow_delay_usec(ctx.now_ticks);
+        self.write(port, value, len.bytes(), ctx.clock.now().ticks());
+        let delay = self.overflow_delay_usec(ctx.clock.now().ticks());
         self.drain_effects(ctx, delay);
     }
 }
@@ -1401,7 +1401,7 @@ impl crate::iodev::device_api::TimedDevice for BxAcpiCtrl {
     ) {
         let mut delay = None;
         for _ in 0..fires {
-            delay = self.overflow_timer(ctx.now_ticks);
+            delay = self.overflow_timer(ctx.clock.now().ticks());
         }
         self.drain_effects(ctx, delay);
     }
