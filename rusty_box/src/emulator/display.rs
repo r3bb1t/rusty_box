@@ -13,9 +13,20 @@ use crate::cpu::instrumentation::Instrumentation;
 
 use super::Emulator;
 
-/// What a display device is lives with the device models; the handle below
-/// borrows a machine, so it stays here and is generic over the role.
-pub use rusty_box_devices::display::{DisplaySource, Resolution, TextGrid, TextPos};
+/// The display vocabulary, re-exported deliberately rather than as a shim.
+///
+/// A display model lives in `rusty_box_devices`, but [`Emulator::display`]
+/// *returns* one of its types, so the signature would otherwise oblige every
+/// caller to add a dependency on that crate just to name what this one already
+/// handed them. A facade is the crate keeping its public API self-contained.
+///
+/// This is the only re-export of its kind. In-crate code says
+/// `rusty_box_devices::…` outright, so a reader of a device file can see that
+/// it is reaching across a boundary.
+pub use rusty_box_devices::display::{
+    card::{StdVga, VgaCard},
+    DisplaySource, Resolution, TextGrid, TextPos,
+};
 
 /// A machine's display, borrowed for as long as the handle lives.
 pub struct Display<'m, D: DisplaySource> {
@@ -165,7 +176,7 @@ impl<D: DisplaySource> ExactSizeIterator for RowChars<'_, D> {}
 /// Driving the VGA adapter, and diagnostics that only make sense for it — so
 /// neither is part of the role every adapter answers to.
 #[cfg(feature = "alloc")]
-impl Display<'_, crate::iodev::vga_card::VgaCard<crate::iodev::vga_card::StdVga>> {
+impl Display<'_, VgaCard<StdVga>> {
     /// Render the current frame into a shared framebuffer.
     ///
     /// The pump a front end that owns the machine on its own thread calls once
@@ -178,7 +189,7 @@ impl Display<'_, crate::iodev::vga_card::VgaCard<crate::iodev::vga_card::StdVga>
     pub fn render_into(
         &mut self,
         framebuffer: &mut crate::gui::shared_display::SharedDisplay,
-    ) -> crate::iodev::display_sink::Refreshed {
+    ) -> rusty_box_devices::display::sink::Refreshed {
         super::run::render_vga_into(self.source, framebuffer)
     }
 
@@ -230,7 +241,7 @@ impl<T: Instrumentation> Emulator<T> {
     /// the batch ended.
     pub fn display(
         &mut self,
-    ) -> Display<'_, crate::iodev::vga_card::VgaCard<crate::iodev::vga_card::StdVga>> {
+    ) -> Display<'_, VgaCard<StdVga>> {
         Display::new(&mut self.device_manager.vga)
     }
 }

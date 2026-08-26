@@ -14,7 +14,7 @@
 //! based on PIRQ routing registers. Each PIRQ can be mapped to any
 //! ISA IRQ or disabled (bit 7 = 1).
 
-use super::device_api::ChipsetEffect;
+use rusty_box_devices::api::ChipsetEffect;
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
@@ -136,7 +136,7 @@ impl BxPiix3 {
     /// Bochs: bx_piix3_c::init() (pci2isa.cc)
     pub fn new() -> Self {
         let mut bridge = Self {
-            devfunc: super::pci::pci_device(1, 0), // 0x08
+            devfunc: rusty_box_devices::pci::pci_device(1, 0), // 0x08
             pci_conf: [0; PCI_CONF_SIZE],
             elcr1: 0,
             elcr2: 0,
@@ -296,8 +296,8 @@ impl BxPiix3 {
 
 // ─── PCI Configuration Space ─────────────────────────────────────────────
 
-impl super::pci::PciDevice for BxPiix3 {
-    const DEVFUNC: u8 = super::pci::pci_device(1, 0);
+impl rusty_box_devices::pci::PciDevice for BxPiix3 {
+    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 0);
     type WriteEffects = Piix3WriteEffects;
 
     /// Read from PCI configuration space.
@@ -583,7 +583,7 @@ impl BxPiix3 {
             _ => return Err(invalid_piix3_snapshot("snapshot PIIX3 reset reason is invalid")),
         };
 
-        let expected_devfunc = super::pci::pci_device(1, 0);
+        let expected_devfunc = rusty_box_devices::pci::pci_device(1, 0);
         if self.devfunc != expected_devfunc || devfunc != self.devfunc {
             return Err(invalid_piix3_snapshot(
                 "snapshot PIIX3 device/function does not match live topology",
@@ -636,7 +636,7 @@ impl BxPiix3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::pci::PciDevice;
+    use rusty_box_devices::pci::PciDevice;
 
     #[test]
     fn test_piix3_new() {

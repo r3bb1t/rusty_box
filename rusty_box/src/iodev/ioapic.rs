@@ -1411,15 +1411,15 @@ impl BxIoApic {
 /// multiple of 1024 — `IOAPIC_BASE_ADDR | ((value & 0x3f) << 10)`, Bochs
 /// pci2isa.cc case 0x80 — so the offset and the physical address agree on
 /// every bit the decode looks at.
-impl crate::iodev::device_api::MmioDevice for BxIoApic {
+impl rusty_box_devices::api::MmioDevice for BxIoApic {
     #[inline]
     fn mmio_read(
         &mut self,
-        _window: crate::iodev::device_api::WindowId,
-        at: crate::iodev::device_api::WindowOffset,
+        _window: rusty_box_devices::api::WindowId,
+        at: rusty_box_devices::api::WindowOffset,
         len: u32,
         data: &mut [u8],
-        _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        _ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         let _claimed = BxIoApic::mem_read(self, at.get(), len, data);
     }
@@ -1427,11 +1427,11 @@ impl crate::iodev::device_api::MmioDevice for BxIoApic {
     #[inline]
     fn mmio_write(
         &mut self,
-        _window: crate::iodev::device_api::WindowId,
-        at: crate::iodev::device_api::WindowOffset,
+        _window: rusty_box_devices::api::WindowId,
+        at: rusty_box_devices::api::WindowOffset,
         len: u32,
         data: &[u8],
-        _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        _ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         let _claimed = BxIoApic::mem_write(self, at.get(), len, data);
     }

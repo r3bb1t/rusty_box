@@ -816,15 +816,15 @@ impl crate::snapshot::SnapshotSection for BxHpetC {
 /// `& 0x3ff` and the window is the 1 KiB block at the fixed, 1 KiB-aligned
 /// [`HPET_BASE`], so the offset and the physical address agree on every bit the
 /// decode looks at.
-impl crate::iodev::device_api::MmioDevice for BxHpetC {
+impl rusty_box_devices::api::MmioDevice for BxHpetC {
     #[inline]
     fn mmio_read(
         &mut self,
-        _window: crate::iodev::device_api::WindowId,
-        at: crate::iodev::device_api::WindowOffset,
+        _window: rusty_box_devices::api::WindowId,
+        at: rusty_box_devices::api::WindowOffset,
         len: u32,
         data: &mut [u8],
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         self.set_now(ctx.clock);
         self.mem_read(at.get(), len, data);
@@ -833,11 +833,11 @@ impl crate::iodev::device_api::MmioDevice for BxHpetC {
     #[inline]
     fn mmio_write(
         &mut self,
-        _window: crate::iodev::device_api::WindowId,
-        at: crate::iodev::device_api::WindowOffset,
+        _window: rusty_box_devices::api::WindowId,
+        at: rusty_box_devices::api::WindowOffset,
         len: u32,
         data: &[u8],
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         self.set_now(ctx.clock);
         self.mem_write(at.get(), len, data);

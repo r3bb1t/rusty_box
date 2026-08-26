@@ -41,7 +41,7 @@ mod builder;
 pub use builder::{AtaSlot, BootDevice, BootOrder, BuildError, DiskGeometry, MachineBuilder};
 mod display;
 pub use display::{
-    Display, DisplaySource, Resolution, RowChars, TextGrid, TextPos, TextView,
+    Display, DisplaySource, Resolution, RowChars, StdVga, TextGrid, TextPos, TextView, VgaCard,
 };
 
 pub mod cpu_store;
@@ -570,12 +570,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
         live_bmdma: u16,
         live_pm: u16,
         live_sm: u16,
-        live_vga: crate::iodev::vga::VgaSnapshotRestoreTarget,
+        live_vga: rusty_box_devices::display::vga::VgaSnapshotRestoreTarget,
         platform: crate::iodev::devices::PlatformSnapshotRestore,
         keyboard: crate::iodev::keyboard::KeyboardSnapshotRestore,
         cmos: crate::iodev::cmos::CmosSnapshotRestoreState,
         acpi: crate::iodev::acpi::AcpiSnapshotRestore,
-        vga: crate::iodev::vga::VgaSnapshotRestoreTarget,
+        vga: rusty_box_devices::display::vga::VgaSnapshotRestoreTarget,
         pci: crate::iodev::pci_ide::PciIdeSnapshotTopology,
     ) -> std::io::Result<()> {
         self.device_manager

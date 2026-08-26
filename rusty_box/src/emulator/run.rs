@@ -295,7 +295,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         let _presented_unconditionally = self
             .device_manager
             .vga
-            .refresh(&mut sink, crate::iodev::vga_card::Dirt::SelfTracked);
+            .refresh(&mut sink, rusty_box_devices::display::card::Dirt::SelfTracked);
     }
 
     /// Drain pending host input (keyboard scancodes, mouse, serial) from the GUI
@@ -715,8 +715,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
 /// Reached through [`crate::emulator::Display::render_into`].
 #[cfg(feature = "alloc")]
 pub(crate) fn render_vga_into(
-    vga: &mut crate::iodev::vga_card::VgaCard<crate::iodev::vga_card::StdVga>,
+    vga: &mut rusty_box_devices::display::card::VgaCard<rusty_box_devices::display::card::StdVga>,
     display: &mut crate::gui::shared_display::SharedDisplay,
-) -> crate::iodev::display_sink::Refreshed {
-    vga.refresh(display, crate::iodev::vga_card::Dirt::SelfTracked)
+) -> rusty_box_devices::display::sink::Refreshed {
+    vga.refresh(display, rusty_box_devices::display::card::Dirt::SelfTracked)
 }

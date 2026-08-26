@@ -1087,9 +1087,9 @@ impl BxCmosC {
     pub(crate) const UIP_TIMER_LOCAL: u16 = 2;
 
     #[inline]
-    const fn timer_key(local: u16) -> crate::iodev::device_api::TimerKey {
-        crate::iodev::device_api::TimerKey {
-            device: crate::iodev::device_api::DeviceKind::Cmos,
+    const fn timer_key(local: u16) -> rusty_box_devices::api::TimerKey {
+        rusty_box_devices::api::TimerKey {
+            device: rusty_box_devices::api::DeviceKind::Cmos,
             local,
         }
     }
@@ -1099,7 +1099,7 @@ impl BxCmosC {
     /// The periodic and one-second timers are continuous (Bochs cmos.cc
     /// activate_timer with continuous = 1); the UIP pulse is a one-shot.
     fn apply_timer_sync(
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
         sync: CmosTimerSync,
     ) {
         for (local, action, continuous) in [
@@ -1122,12 +1122,12 @@ impl BxCmosC {
     /// Deliver the IRQ8 transition a read or timer fire produced. Bochs
     /// cmos.cc lowers on a status-register read and raises when an enabled
     /// interrupt condition latches.
-    fn drain_irq8(&mut self, ctx: &mut crate::iodev::device_api::DeviceCtx<'_>) {
+    fn drain_irq8(&mut self, ctx: &mut rusty_box_devices::api::DeviceCtx<'_>) {
         if self.check_irq8_lower() {
-            ctx.irq.lower(crate::iodev::device_api::IrqLine(8));
+            ctx.irq.lower(rusty_box_devices::api::IrqLine(8));
         }
         if self.check_irq8() {
-            ctx.irq.raise(crate::iodev::device_api::IrqLine(8));
+            ctx.irq.raise(rusty_box_devices::api::IrqLine(8));
         }
     }
 
@@ -1536,12 +1536,12 @@ fn cmos_periodic_interval_usec(stat_a: u8) -> SnapResult<u32> {
 
 // ─── Device-API conversion ───────────────────────────────────────────────────
 
-impl crate::iodev::device_api::PioDevice for BxCmosC {
+impl rusty_box_devices::api::PioDevice for BxCmosC {
     fn pio_read(
         &mut self,
         port: u16,
-        len: crate::iodev::device_api::IoLen,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) -> u32 {
         let value = self.read(port, len.bytes());
         self.drain_irq8(ctx);
@@ -1552,8 +1552,8 @@ impl crate::iodev::device_api::PioDevice for BxCmosC {
         &mut self,
         port: u16,
         value: u32,
-        len: crate::iodev::device_api::IoLen,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         let sync = self.write(port, value, len.bytes());
         Self::apply_timer_sync(ctx, sync);
@@ -1561,12 +1561,12 @@ impl crate::iodev::device_api::PioDevice for BxCmosC {
     }
 }
 
-impl crate::iodev::device_api::TimedDevice for BxCmosC {
+impl rusty_box_devices::api::TimedDevice for BxCmosC {
     fn timer_fired(
         &mut self,
         local: u16,
         fires: u32,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         match local {
             Self::PERIODIC_TIMER_LOCAL => {

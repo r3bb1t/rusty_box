@@ -729,7 +729,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         params::BxParams,
     };
     use crate::iodev::devices::PendingPlatformWork;
-    use crate::iodev::pci::PciDevice;
+    use rusty_box_devices::pci::PciDevice;
     use std::io::Cursor;
 
     /// Every section-owning device claims a distinct tag, and every tag it
@@ -748,7 +748,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             <crate::iodev::serial::BxSerialC as SnapshotSection>::TAG,
             <crate::iodev::harddrv::BxHardDriveC as SnapshotSection>::TAG,
             <crate::iodev::acpi::BxAcpiCtrl as SnapshotSection>::TAG,
-            <crate::iodev::vga_card::VgaCard<crate::iodev::vga_card::StdVga> as SnapshotSection>::TAG,
+            <rusty_box_devices::display::card::VgaCard<rusty_box_devices::display::card::StdVga> as SnapshotSection>::TAG,
             <crate::iodev::ioapic::BxIoApic as SnapshotSection>::TAG,
             <crate::iodev::hpet::BxHpetC as SnapshotSection>::TAG,
         ];
@@ -1366,7 +1366,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             // landed in — routing the framebuffer through the token of the
             // legacy aperture would hand the card an LFB offset to decode as
             // planar memory.
-            let routes = |base: u64, window: crate::iodev::vga::VgaWindow, at: u64| {
+            let routes = |base: u64, window: rusty_box_devices::display::vga::VgaWindow, at: u64| {
                 (
                     base,
                     restored.memory.mmio.lookup(base),
@@ -1377,11 +1377,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 )
             };
             for (base, actual, expected) in [
-                routes(0xA_0000, crate::iodev::vga::VgaWindow::Legacy, 0),
-                routes(u64::from(LFB) + 0x24, crate::iodev::vga::VgaWindow::Lfb, 0x24),
+                routes(0xA_0000, rusty_box_devices::display::vga::VgaWindow::Legacy, 0),
+                routes(u64::from(LFB) + 0x24, rusty_box_devices::display::vga::VgaWindow::Lfb, 0x24),
                 routes(
                     u64::from(MMIO) + 0x500,
-                    crate::iodev::vga::VgaWindow::Registers,
+                    rusty_box_devices::display::vga::VgaWindow::Registers,
                     0x500,
                 ),
             ] {

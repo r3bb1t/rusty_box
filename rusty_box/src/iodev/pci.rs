@@ -13,7 +13,8 @@
 //! The host bridge is the root of the PCI bus and handles configuration
 //! space routing for all PCI devices.
 
-use super::device_api::{ChipsetEffect, SmramControl, PAM_AREAS};
+use rusty_box_devices::api::{ChipsetEffect, SmramControl, PAM_AREAS};
+use rusty_box_devices::pci::{pci_device, PciDevice};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
@@ -50,9 +51,7 @@ pub const PCI_CONFIG_ADDR: u16 = 0x0CF8;
 /// PCI configuration data port (base — also 0xCF9, 0xCFA, 0xCFB)
 pub const PCI_CONFIG_DATA: u16 = 0x0CFC;
 
-/// The config-space role a device implements, and the devfunc encoding, are
-/// the device side of this bus and live with the device models.
-pub use rusty_box_devices::pci::{pci_device, PciDevice};
+
 
 /// Deferred memory-subsystem updates a host-bridge config-space write
 /// requires. Bochs applies PAM/SMRAM to the memory object synchronously

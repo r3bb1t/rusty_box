@@ -965,7 +965,7 @@ mod tests {
         // VGA's legacy aperture owns 0xa0000-0xbffff, exactly as the machine
         // registers it. The map stores the owner's token, so no device
         // instance is needed to establish who the range belongs to.
-        let vga_id = crate::iodev::DevSlot::VGA.mmio_window_token(crate::iodev::vga::VgaWindow::Legacy.id());
+        let vga_id = crate::iodev::DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Legacy.id());
         machine
             .memory_mut()
             .register_memory_handlers(vga_id, 0xA0000, 0xBFFFF)
@@ -1012,7 +1012,7 @@ mod tests {
                 .read_physical_page(CpuMemoryPolicy::default(), 0xafefc, 4, &mut via_vga,)
                 .expect("non-SMM read resolves"),
             crate::memory::PhysAccess::Mmio(crate::memory::mmio_map::MmioHit {
-                token: crate::iodev::DevSlot::VGA.mmio_window_token(crate::iodev::vga::VgaWindow::Legacy.id()),
+                token: crate::iodev::DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Legacy.id()),
                 offset: 0xafefc - 0xa0000,
             }),
             "outside SMM the save area is the VGA window's, not DRAM's"
@@ -1048,7 +1048,7 @@ mod tests {
                 .read_physical_page(CpuMemoryPolicy::device(), 0xafefc, 4, &mut via_device)
                 .expect("device read with SMRAM open"),
             crate::memory::PhysAccess::Mmio(crate::memory::mmio_map::MmioHit {
-                token: crate::iodev::DevSlot::VGA.mmio_window_token(crate::iodev::vga::VgaWindow::Legacy.id()),
+                token: crate::iodev::DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Legacy.id()),
                 offset: 0xafefc - 0xa0000,
             }),
             "a device access must never see SMRAM (Bochs memory.cc cpu != NULL)"

@@ -647,9 +647,9 @@ impl BxAcpiCtrl {
     /// state, so the store is described here and performed by the chipset.
     pub(crate) fn take_pending_effect(
         &mut self,
-    ) -> Option<crate::iodev::device_api::ChipsetEffect> {
+    ) -> Option<rusty_box_devices::api::ChipsetEffect> {
         core::mem::take(&mut self.suspend_to_ram_pending).then_some(
-            crate::iodev::device_api::ChipsetEffect::CmosByte {
+            rusty_box_devices::api::ChipsetEffect::CmosByte {
                 index: 0x0F,
                 value: 0xFE,
             },
@@ -875,9 +875,9 @@ impl BxAcpiCtrl {
     pub(crate) const OVERFLOW_TIMER_LOCAL: u16 = 0;
 
     #[inline]
-    const fn overflow_timer_key() -> crate::iodev::device_api::TimerKey {
-        crate::iodev::device_api::TimerKey {
-            device: crate::iodev::device_api::DeviceKind::Acpi,
+    const fn overflow_timer_key() -> rusty_box_devices::api::TimerKey {
+        rusty_box_devices::api::TimerKey {
+            device: rusty_box_devices::api::DeviceKind::Acpi,
             local: Self::OVERFLOW_TIMER_LOCAL,
         }
     }
@@ -889,11 +889,11 @@ impl BxAcpiCtrl {
     /// interrupt and timer capabilities directly rather than being latched.
     fn drain_effects(
         &mut self,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
         delay_usec: Option<u64>,
     ) {
         ctx.irq
-            .set_level(crate::iodev::device_api::IrqLine(9), self.irq9_level);
+            .set_level(rusty_box_devices::api::IrqLine(9), self.irq9_level);
         match delay_usec {
             Some(delay) => ctx.timers.arm_oneshot_usec(Self::overflow_timer_key(), delay),
             None => ctx.timers.cancel(Self::overflow_timer_key()),
@@ -1193,8 +1193,8 @@ impl BxAcpiCtrl {
 
 // ─── PCI Configuration Space ─────────────────────────────────────────────
 
-impl crate::iodev::pci::PciDevice for BxAcpiCtrl {
-    const DEVFUNC: u8 = crate::iodev::pci::pci_device(1, 3);
+impl rusty_box_devices::pci::PciDevice for BxAcpiCtrl {
+    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 3);
     type WriteEffects = AcpiWriteEffects;
 
     /// Write to PCI configuration space.
@@ -1363,12 +1363,12 @@ fn muldiv64(a: u64, b: u32, c: u32) -> u64 {
 
 // ─── Device-API conversion ───────────────────────────────────────────────────
 
-impl crate::iodev::device_api::PioDevice for BxAcpiCtrl {
+impl rusty_box_devices::api::PioDevice for BxAcpiCtrl {
     fn pio_read(
         &mut self,
         port: u16,
-        len: crate::iodev::device_api::IoLen,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) -> u32 {
         let value = self.read(port, len.bytes(), ctx.clock.now().ticks());
         let delay = self.overflow_delay_usec(ctx.clock.now().ticks());
@@ -1380,8 +1380,8 @@ impl crate::iodev::device_api::PioDevice for BxAcpiCtrl {
         &mut self,
         port: u16,
         value: u32,
-        len: crate::iodev::device_api::IoLen,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         self.write(port, value, len.bytes(), ctx.clock.now().ticks());
         let delay = self.overflow_delay_usec(ctx.clock.now().ticks());
@@ -1389,7 +1389,7 @@ impl crate::iodev::device_api::PioDevice for BxAcpiCtrl {
     }
 }
 
-impl crate::iodev::device_api::TimedDevice for BxAcpiCtrl {
+impl rusty_box_devices::api::TimedDevice for BxAcpiCtrl {
     /// The PM clock is free-running, so a coalesced expiry is serviced once
     /// per elapsed period — Bochs acpi.cc re-arms from inside the callback and
     /// each pass re-predicts the next overflow.
@@ -1397,7 +1397,7 @@ impl crate::iodev::device_api::TimedDevice for BxAcpiCtrl {
         &mut self,
         _local: u16,
         fires: u32,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         let mut delay = None;
         for _ in 0..fires {
@@ -1412,7 +1412,7 @@ impl crate::iodev::device_api::TimedDevice for BxAcpiCtrl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iodev::pci::PciDevice;
+    use rusty_box_devices::pci::PciDevice;
 
     /// A power button is a request the guest may refuse, and the guest says
     /// whether it wants to hear about it by setting `PWRBTN_EN`. Pressing it

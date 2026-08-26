@@ -35,7 +35,8 @@ use super::dma::BxDmaC;
 use super::fw_cfg::BxFwCfg;
 use super::ioapic::BxIoApic;
 use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT};
-use super::pci::{BxPciBridge, PciDevice};
+use super::pci::BxPciBridge;
+use rusty_box_devices::pci::PciDevice;
 use super::pci2isa::BxPiix3;
 use super::pci_ide::BxPciIde;
 use super::pic::{BxPicC, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA};
@@ -44,8 +45,8 @@ use super::pit::{
 };
 use super::serial::{BxSerialC, SerialTxDrain};
 use super::BxDevicesC;
-use super::device_api::{ChipsetEffect, MmioDevice, PioDevice, SmramControl};
-use super::vga_card::{StdVga, VgaCard};
+use rusty_box_devices::api::{ChipsetEffect, MmioDevice, PioDevice, SmramControl};
+use rusty_box_devices::display::card::{StdVga, VgaCard};
 use super::wiring;
 use super::DevSlot;
 
@@ -423,7 +424,7 @@ impl DeviceManager {
     /// Bochs has `bx_vgacore_c::init` call the bus itself, which is why its
     /// display model cannot be built without one.
     fn install_display(
-        vga: &crate::iodev::vga_card::VgaCard<crate::iodev::vga::StdVga>,
+        vga: &rusty_box_devices::display::card::VgaCard<rusty_box_devices::display::vga::StdVga>,
         io: &mut BxDevicesC,
         mem: &mut BxMemC,
     ) -> Result<()> {
@@ -1052,7 +1053,7 @@ impl DeviceManager {
         &mut self,
         mem: &mut crate::memory::BxMemC,
     ) -> Result<bool> {
-        use crate::iodev::vga::{VgaWindow, PCI_VGA_MMIO_SIZE};
+        use rusty_box_devices::display::vga::{VgaWindow, PCI_VGA_MMIO_SIZE};
         let mut changed = false;
 
         if let Some((old_base, new_base)) = self.vga.peek_pending_lfb_relocate() {
@@ -2012,8 +2013,8 @@ impl DeviceManager {
 
     fn validate_snapshot_v3_state(
         &self,
-        desired_vga: super::vga::VgaSnapshotRestoreTarget,
-        committed_vga: super::vga::VgaSnapshotRestoreTarget,
+        desired_vga: rusty_box_devices::display::vga::VgaSnapshotRestoreTarget,
+        committed_vga: rusty_box_devices::display::vga::VgaSnapshotRestoreTarget,
     ) -> SnapResult<()> {
         self.port92.validate_snapshot_v3_state()?;
         if self.acpi.pm_ports_registered != (self.pm_ports_base != 0)
@@ -2064,11 +2065,11 @@ impl DeviceManager {
         validate_snapshot_memory_bar(committed_vga_lfb, vga_lfb_size)?;
         validate_snapshot_memory_bar(
             desired_vga_mmio,
-            super::vga::PCI_VGA_MMIO_SIZE,
+            rusty_box_devices::display::vga::PCI_VGA_MMIO_SIZE,
         )?;
         validate_snapshot_memory_bar(
             committed_vga_mmio,
-            super::vga::PCI_VGA_MMIO_SIZE,
+            rusty_box_devices::display::vga::PCI_VGA_MMIO_SIZE,
         )?;
 
         validate_snapshot_mapping_flag(
@@ -2110,11 +2111,11 @@ impl DeviceManager {
         live_bmdma: u16,
         live_pm: u16,
         live_sm: u16,
-        live_vga: super::vga::VgaSnapshotRestoreTarget,
+        live_vga: rusty_box_devices::display::vga::VgaSnapshotRestoreTarget,
         platform: PlatformSnapshotRestore,
         pci: super::pci_ide::PciIdeSnapshotTopology,
         acpi: super::acpi::AcpiSnapshotRestore,
-        vga: super::vga::VgaSnapshotRestoreTarget,
+        vga: rusty_box_devices::display::vga::VgaSnapshotRestoreTarget,
     ) -> Result<()> {
         if self.bmdma_ports_base != live_bmdma
             || self.pm_ports_base != live_pm
@@ -2172,8 +2173,8 @@ impl DeviceManager {
         // `reregister_vga_bars` mints: the token is what names the window an
         // access landed in, so sharing one across the framebuffer and the
         // register block would route an LFB access into the legacy aperture.
-        let lfb_id = DevSlot::VGA.mmio_window_token(super::vga::VgaWindow::Lfb.id());
-        let registers_id = DevSlot::VGA.mmio_window_token(super::vga::VgaWindow::Registers.id());
+        let lfb_id = DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Lfb.id());
+        let registers_id = DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Registers.id());
         let lfb_size = u64::from(self.vga.lfb_size());
         let old_lfb = (live_vga.lfb_base != 0).then_some((
             u64::from(live_vga.lfb_base),
@@ -2186,11 +2187,11 @@ impl DeviceManager {
         mem.relocate_memory_handlers(lfb_id, old_lfb, new_lfb)?;
         let old_mmio = (live_vga.mmio_base != 0).then_some((
             u64::from(live_vga.mmio_base),
-            u64::from(live_vga.mmio_base) + u64::from(super::vga::PCI_VGA_MMIO_SIZE) - 1,
+            u64::from(live_vga.mmio_base) + u64::from(rusty_box_devices::display::vga::PCI_VGA_MMIO_SIZE) - 1,
         ));
         let new_mmio = (vga.mmio_base != 0).then_some((
             u64::from(vga.mmio_base),
-            u64::from(vga.mmio_base) + u64::from(super::vga::PCI_VGA_MMIO_SIZE) - 1,
+            u64::from(vga.mmio_base) + u64::from(rusty_box_devices::display::vga::PCI_VGA_MMIO_SIZE) - 1,
         ));
         mem.relocate_memory_handlers(registers_id, old_mmio, new_mmio)?;
         self.vga.commit_snapshot_v3_mapping_target(vga);
@@ -2218,7 +2219,7 @@ mod tests {
     /// the access does; a bare "some region covers this address" is not.
     fn vga_registers_at(offset: u64) -> crate::memory::mmio_map::MmioHit {
         crate::memory::mmio_map::MmioHit {
-            token: DevSlot::VGA.mmio_window_token(crate::iodev::vga::VgaWindow::Registers.id()),
+            token: DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Registers.id()),
             offset,
         }
     }
@@ -2229,7 +2230,7 @@ mod tests {
     fn drain_pit_irq0_for_test(pit: &mut BxPitC, pic: &mut BxPicC) -> u32 {
         let mut irq = crate::iodev::wiring::PicIrqSink { pic };
         let mut timers = crate::iodev::wiring::NullTimerService;
-        let mut ctx = crate::iodev::device_api::DeviceCtx {
+        let mut ctx = rusty_box_devices::api::DeviceCtx {
             clock: clock_at(0),
             irq: &mut irq,
             timers: &mut timers,

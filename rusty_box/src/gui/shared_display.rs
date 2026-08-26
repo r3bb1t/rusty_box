@@ -385,7 +385,7 @@ impl SharedDisplay {
         text: &[u8],
         cursor_x: u32,
         cursor_y: u32,
-        tm_info: &crate::iodev::vga::VgaTextModeInfo,
+        tm_info: &rusty_box_devices::display::vga::VgaTextModeInfo,
     ) {
         self.render_text_to_framebuffer(
             text,
@@ -578,7 +578,7 @@ mod tests {
         let mut text = vec![0u8; (shared.screen_cols * shared.screen_rows * 2) as usize];
         text[0] = b'A';
         text[1] = 0x07;
-        let tm_info = crate::iodev::vga::VgaTextModeInfo {
+        let tm_info = rusty_box_devices::display::vga::VgaTextModeInfo {
             start_address: 0,
             cs_start: 14,
             cs_end: 15,
@@ -604,8 +604,8 @@ mod tests {
 /// unused; and it sizes in character cells, so a text-mode dimension change is
 /// divided down here. Both are this front end's business, which is the point of
 /// the sink taking the card's vocabulary rather than any one front end's.
-impl crate::iodev::display_sink::DisplaySink for SharedDisplay {
-    fn dimension_update(&mut self, dims: crate::iodev::display_sink::Dimensions) {
+impl rusty_box_devices::display::sink::DisplaySink for SharedDisplay {
+    fn dimension_update(&mut self, dims: rusty_box_devices::display::sink::Dimensions) {
         if dims.font_width == 0 || dims.font_height == 0 {
             self.resize_pixels(dims.width, dims.height);
         } else {
@@ -622,8 +622,8 @@ impl crate::iodev::display_sink::DisplaySink for SharedDisplay {
         &mut self,
         _previous: &[u8],
         current: &[u8],
-        cursor: Option<crate::iodev::display_sink::CursorPos>,
-        info: &crate::iodev::vga::VgaTextModeInfo,
+        cursor: Option<rusty_box_devices::display::sink::CursorPos>,
+        info: &rusty_box_devices::display::vga::VgaTextModeInfo,
     ) {
         let (cursor_x, cursor_y) = match cursor {
             Some(at) => (at.col, at.row),
@@ -642,19 +642,19 @@ impl crate::iodev::display_sink::DisplaySink for SharedDisplay {
         );
     }
 
-    fn graphics_tile_update(&mut self, rgba: &[u8], at: crate::iodev::display_sink::TilePos) {
+    fn graphics_tile_update(&mut self, rgba: &[u8], at: rusty_box_devices::display::sink::TilePos) {
         self.blit_rgba_tile(at.x, at.y, at.width, at.height, rgba);
     }
 
     fn palette_change(
         &mut self,
         _index: u8,
-        _colour: crate::iodev::display_sink::Rgb,
-    ) -> crate::iodev::display_sink::Redraw {
+        _colour: rusty_box_devices::display::sink::Rgb,
+    ) -> rusty_box_devices::display::sink::Redraw {
         // Tiles arrive already converted to RGBA, and text carries its
         // attribute palette in `VgaTextModeInfo`, so this front end holds no
         // DAC table for a change to invalidate.
-        crate::iodev::display_sink::Redraw::NotNeeded
+        rusty_box_devices::display::sink::Redraw::NotNeeded
     }
 
     fn set_text_charmap(&mut self, map: usize, glyphs: &[u8]) {

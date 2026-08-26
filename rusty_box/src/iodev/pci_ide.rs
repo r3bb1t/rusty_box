@@ -425,12 +425,12 @@ impl BxPciIde {
     /// Arm the bus-master callbacks this access produced. Tick-denominated:
     /// Bochs pci_ide.cc schedules the engine one tick out, and routing that
     /// through microseconds would round it away.
-    pub(crate) fn drain_bmdma_timers(&mut self, ctx: &mut crate::iodev::device_api::DeviceCtx<'_>) {
+    pub(crate) fn drain_bmdma_timers(&mut self, ctx: &mut rusty_box_devices::api::DeviceCtx<'_>) {
         for channel in 0..2usize {
             if let Some(delay_ticks) = self.take_pending_timer_arm(channel) {
                 ctx.timers.arm_oneshot_ticks(
-                    crate::iodev::device_api::TimerKey {
-                        device: crate::iodev::device_api::DeviceKind::Ide,
+                    rusty_box_devices::api::TimerKey {
+                        device: rusty_box_devices::api::DeviceKind::Ide,
                         local: Self::bmdma_timer_local(channel),
                     },
                     u64::from(delay_ticks),
@@ -574,8 +574,8 @@ impl BxPciIde {
 
 // ─── PCI Configuration Space ─────────────────────────────────────────────
 
-impl super::pci::PciDevice for BxPciIde {
-    const DEVFUNC: u8 = super::pci::pci_device(1, 1);
+impl rusty_box_devices::pci::PciDevice for BxPciIde {
+    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 1);
     type WriteEffects = PciIdeWriteEffects;
 
     /// Write to PCI configuration space.
@@ -824,7 +824,7 @@ impl BxPciIde {
 mod tests {
     use super::*;
     use crate::snapshot::SnapshotReader;
-    use super::super::pci::PciDevice;
+    use rusty_box_devices::pci::PciDevice;
 
 
     #[test]

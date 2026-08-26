@@ -1186,9 +1186,9 @@ impl BxPitC {
     pub(crate) const EVENT_TIMER_LOCAL: u16 = 0;
 
     #[inline]
-    const fn event_timer_key() -> crate::iodev::device_api::TimerKey {
-        crate::iodev::device_api::TimerKey {
-            device: crate::iodev::device_api::DeviceKind::Pit,
+    const fn event_timer_key() -> rusty_box_devices::api::TimerKey {
+        rusty_box_devices::api::TimerKey {
+            device: rusty_box_devices::api::DeviceKind::Pit,
             local: Self::EVENT_TIMER_LOCAL,
         }
     }
@@ -1202,7 +1202,7 @@ impl BxPitC {
     fn replay_irq0(
         transitions: u32,
         level: bool,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) -> u32 {
         if transitions == 0 {
             return 0;
@@ -1212,7 +1212,7 @@ impl BxPitC {
         let mut lvl = if replay % 2 == 1 { level } else { !level };
         for _ in 0..replay {
             ctx.irq
-                .set_level(crate::iodev::device_api::IrqLine(0), lvl);
+                .set_level(rusty_box_devices::api::IrqLine(0), lvl);
             lvl = !lvl;
         }
         if level {
@@ -1228,12 +1228,12 @@ impl BxPitC {
     /// With `irq_enabled` clear (HPET legacy mode) Bochs pit.cc consumes the
     /// transitions but never reaches the PIC, so they are dropped here too.
     /// Returns the number of rising edges applied to the PIC.
-    pub(crate) fn drain_irq0(&mut self, ctx: &mut crate::iodev::device_api::DeviceCtx<'_>) -> u32 {
+    pub(crate) fn drain_irq0(&mut self, ctx: &mut rusty_box_devices::api::DeviceCtx<'_>) -> u32 {
         let (transitions, level) = self.drain_irq0_events();
         if !self.irq_enabled {
             return 0;
         }
-        let was_high = ctx.irq.level(crate::iodev::device_api::IrqLine(0));
+        let was_high = ctx.irq.level(rusty_box_devices::api::IrqLine(0));
         let rising = Self::replay_irq0(transitions, level, ctx);
         if rising > 0 {
             self.diag_fires += u64::from(rising);
@@ -1246,7 +1246,7 @@ impl BxPitC {
     }
 
     /// Publish the next one-shot deadline for the PIT's own timer.
-    fn arm_next_event(&mut self, ctx: &mut crate::iodev::device_api::DeviceCtx<'_>) {
+    fn arm_next_event(&mut self, ctx: &mut rusty_box_devices::api::DeviceCtx<'_>) {
         match self.next_event_usec() {
             Some(delay) => ctx.timers.arm_oneshot_usec(Self::event_timer_key(), delay),
             None => ctx.timers.cancel(Self::event_timer_key()),
@@ -1736,12 +1736,12 @@ fn validate_pit_phase(
 
 // ─── Device-API conversion ───────────────────────────────────────────────────
 
-impl crate::iodev::device_api::PioDevice for BxPitC {
+impl rusty_box_devices::api::PioDevice for BxPitC {
     fn pio_read(
         &mut self,
         port: u16,
-        len: crate::iodev::device_api::IoLen,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) -> u32 {
         // Bochs pit.cc runs handle_timer() before reading a register, which
         // can clock counter 0's OUT pin — so the read itself can produce an
@@ -1756,8 +1756,8 @@ impl crate::iodev::device_api::PioDevice for BxPitC {
         &mut self,
         port: u16,
         value: u32,
-        len: crate::iodev::device_api::IoLen,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         self.write(port, value, len.bytes(), ctx.clock);
         self.drain_irq0(ctx);
@@ -1765,7 +1765,7 @@ impl crate::iodev::device_api::PioDevice for BxPitC {
     }
 }
 
-impl crate::iodev::device_api::TimedDevice for BxPitC {
+impl rusty_box_devices::api::TimedDevice for BxPitC {
     /// `fires` is ignored: the callback re-synchronises the counters to the
     /// current tick, so a coalesced expiry is caught up in one pass rather
     /// than by replaying each period (Bochs pit.cc handle_timer).
@@ -1773,11 +1773,11 @@ impl crate::iodev::device_api::TimedDevice for BxPitC {
         &mut self,
         _local: u16,
         _fires: u32,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         let callback = self.timer_callback(ctx.clock);
         if self.irq_enabled {
-            let was_high = ctx.irq.level(crate::iodev::device_api::IrqLine(0));
+            let was_high = ctx.irq.level(rusty_box_devices::api::IrqLine(0));
             let rising = Self::replay_irq0(callback.irq0_transitions, callback.irq0_level, ctx);
             if rising > 0 {
                 self.diag_fires += u64::from(rising);

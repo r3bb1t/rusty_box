@@ -6,7 +6,7 @@
 
 use alloc::{boxed::Box, vec::Vec};
 
-use crate::iodev::display_sink::{CursorPos, Dimensions, DisplaySink, Redraw, Rgb, TilePos};
+use rusty_box_devices::display::sink::{CursorPos, Dimensions, DisplaySink, Redraw, Rgb, TilePos};
 
 /// Display mode for the GUI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +17,10 @@ pub enum DisplayMode {
     Sim,
 }
 
-pub use crate::iodev::vga::VgaTextModeInfo;
+/// Facade: [`BxGui::text_update`] takes one of these, so a front end
+/// implementing this trait must be able to name it without depending on the
+/// device crate directly.
+pub use rusty_box_devices::display::vga::VgaTextModeInfo;
 
 /// GUI trait - all GUI implementations must provide these methods
 ///

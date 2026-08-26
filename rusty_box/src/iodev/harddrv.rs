@@ -2201,13 +2201,13 @@ impl BxHardDriveC {
     /// Arm the seek deadlines this access produced. Bochs harddrv.cc
     /// `start_seek` calls `activate_timer` inline, so the deadline belongs to
     /// the instruction that issued the command.
-    pub(crate) fn drain_seek_timers(&mut self, ctx: &mut crate::iodev::device_api::DeviceCtx<'_>) {
+    pub(crate) fn drain_seek_timers(&mut self, ctx: &mut rusty_box_devices::api::DeviceCtx<'_>) {
         for channel in 0..2usize {
             for device in 0..2usize {
                 if let Some(seek_usec) = self.take_pending_seek_arm(channel, device) {
                     ctx.timers.arm_oneshot_usec(
-                        crate::iodev::device_api::TimerKey {
-                            device: crate::iodev::device_api::DeviceKind::Ide,
+                        rusty_box_devices::api::TimerKey {
+                            device: rusty_box_devices::api::DeviceKind::Ide,
                             local: Self::seek_timer_local(channel, device),
                         },
                         u64::from(seek_usec),

@@ -2668,13 +2668,13 @@ fn restore_reset_request<R: SnapRead>(
 impl BxKeyboardC {
     /// IRQ lines the 8042 drives — Bochs keyboard.cc raises IRQ1 for the
     /// keyboard stream and IRQ12 for the auxiliary (mouse) stream.
-    const IRQ_KEYBOARD: crate::iodev::device_api::IrqLine =
-        crate::iodev::device_api::IrqLine(1);
-    const IRQ_AUX: crate::iodev::device_api::IrqLine = crate::iodev::device_api::IrqLine(12);
+    const IRQ_KEYBOARD: rusty_box_devices::api::IrqLine =
+        rusty_box_devices::api::IrqLine(1);
+    const IRQ_AUX: rusty_box_devices::api::IrqLine = rusty_box_devices::api::IrqLine(12);
 
     /// Raise whichever streams the controller latched, from the mask its
     /// periodic callback returns.
-    fn raise_latched(&mut self, irq_mask: u8, ctx: &mut crate::iodev::device_api::DeviceCtx<'_>) {
+    fn raise_latched(&mut self, irq_mask: u8, ctx: &mut rusty_box_devices::api::DeviceCtx<'_>) {
         if irq_mask & 0x01 != 0 {
             ctx.irq.raise(Self::IRQ_KEYBOARD);
         }
@@ -2684,12 +2684,12 @@ impl BxKeyboardC {
     }
 }
 
-impl crate::iodev::device_api::PioDevice for BxKeyboardC {
+impl rusty_box_devices::api::PioDevice for BxKeyboardC {
     fn pio_read(
         &mut self,
         port: u16,
-        len: crate::iodev::device_api::IoLen,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) -> u32 {
         if port != KBD_DATA_PORT {
             return self.read(port, len.bytes());
@@ -2699,7 +2699,7 @@ impl crate::iodev::device_api::PioDevice for BxKeyboardC {
         // for whichever stream owned the byte).
         let result = self.read_data_port_for_device_manager();
         if let Some(irq) = result.irq_to_lower {
-            ctx.irq.lower(crate::iodev::device_api::IrqLine(irq));
+            ctx.irq.lower(rusty_box_devices::api::IrqLine(irq));
         }
         result.value
     }
@@ -2708,8 +2708,8 @@ impl crate::iodev::device_api::PioDevice for BxKeyboardC {
         &mut self,
         port: u16,
         value: u32,
-        len: crate::iodev::device_api::IoLen,
-        _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        len: rusty_box_devices::api::IoLen,
+        _ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         // A command write only queues work; the controller's periodic timer
         // delivers whatever interrupts it produces.
@@ -2717,7 +2717,7 @@ impl crate::iodev::device_api::PioDevice for BxKeyboardC {
     }
 }
 
-impl crate::iodev::device_api::TimedDevice for BxKeyboardC {
+impl rusty_box_devices::api::TimedDevice for BxKeyboardC {
     /// The 8042's serial-delay timer is continuous (Bochs keyboard.cc init),
     /// so it is never re-armed here — the scheduler reloads the period — and
     /// each elapsed period runs one `periodic(1)` pass.
@@ -2725,7 +2725,7 @@ impl crate::iodev::device_api::TimedDevice for BxKeyboardC {
         &mut self,
         _local: u16,
         fires: u32,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         for _ in 0..fires {
             let irq_mask = self.timer_callback();

@@ -10,7 +10,7 @@
 //!   COM3: 0x3E8-0x3EF, IRQ 4
 //!   COM4: 0x2E8-0x2EF, IRQ 3
 
-use super::device_api::{
+use rusty_box_devices::api::{
     DeviceCtx, DeviceKind, IoLen, IrqLine, PioDevice, TimedDevice, TimerKey,
 };
 use crate::ring_buffer::RingBuffer;

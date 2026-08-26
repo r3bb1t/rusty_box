@@ -355,12 +355,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         handles,
                         now_ticks: current_ticks,
                     };
-                    let mut ctx = crate::iodev::device_api::DeviceCtx {
+                    let mut ctx = rusty_box_devices::api::DeviceCtx {
                         clock,
                         irq: &mut irq,
                         timers: &mut timers,
                     };
-                    crate::iodev::device_api::TimedDevice::timer_fired(
+                    rusty_box_devices::api::TimedDevice::timer_fired(
                         acpi,
                         crate::iodev::acpi::BxAcpiCtrl::OVERFLOW_TIMER_LOCAL,
                         counts[entry],
@@ -466,7 +466,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         current_ticks: u64,
         action: impl FnOnce(
             &mut crate::iodev::serial::BxSerialC,
-            &mut crate::iodev::device_api::DeviceCtx<'_>,
+            &mut rusty_box_devices::api::DeviceCtx<'_>,
         ) -> R,
     ) -> R {
         let mut handles = crate::iodev::wiring::TimerHandles::default();
@@ -491,7 +491,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             handles,
             now_ticks: current_ticks,
         };
-        let mut ctx = crate::iodev::device_api::DeviceCtx {
+        let mut ctx = rusty_box_devices::api::DeviceCtx {
             clock,
             irq: &mut irq,
             timers: &mut timers,
@@ -513,12 +513,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
             handles: crate::iodev::wiring::TimerHandles::default(),
             now_ticks: current_ticks,
         };
-        let mut ctx = crate::iodev::device_api::DeviceCtx {
+        let mut ctx = rusty_box_devices::api::DeviceCtx {
             clock,
             irq: &mut irq,
             timers: &mut timers,
         };
-        crate::iodev::device_api::TimedDevice::timer_fired(keyboard, 0, fires, &mut ctx);
+        rusty_box_devices::api::TimedDevice::timer_fired(keyboard, 0, fires, &mut ctx);
     }
 
     /// Service one expiry of the PIT's event timer through the device API.
@@ -540,12 +540,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
             handles,
             now_ticks: current_ticks,
         };
-        let mut ctx = crate::iodev::device_api::DeviceCtx {
+        let mut ctx = rusty_box_devices::api::DeviceCtx {
             clock,
             irq: &mut irq,
             timers: &mut timers,
         };
-        crate::iodev::device_api::TimedDevice::timer_fired(
+        rusty_box_devices::api::TimedDevice::timer_fired(
             pit,
             crate::iodev::pit::BxPitC::EVENT_TIMER_LOCAL,
             1,
@@ -580,18 +580,18 @@ impl<'a, T: Instrumentation> Emulator<T> {
             handles,
             now_ticks: current_ticks,
         };
-        let mut ctx = crate::iodev::device_api::DeviceCtx {
+        let mut ctx = rusty_box_devices::api::DeviceCtx {
             clock,
             irq: &mut irq,
             timers: &mut timers,
         };
-        crate::iodev::device_api::TimedDevice::timer_fired(cmos, local, fires, &mut ctx);
+        rusty_box_devices::api::TimedDevice::timer_fired(cmos, local, fires, &mut ctx);
     }
 
     /// Service one expiry of a UART timer.
     fn fire_serial_timer(&mut self, port_index: usize, local: u16, fires: u32, current_ticks: u64) {
         self.with_serial_ctx(port_index, current_ticks, |serial, ctx| {
-            crate::iodev::device_api::TimedDevice::timer_fired(serial, local, fires, ctx)
+            rusty_box_devices::api::TimedDevice::timer_fired(serial, local, fires, ctx)
         });
     }
 

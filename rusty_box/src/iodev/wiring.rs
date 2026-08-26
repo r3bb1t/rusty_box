@@ -1,12 +1,12 @@
 //! Machine-side implementations of the device-facing capability traits.
 //!
-//! [`device_api`](super::device_api) states what a device may ask for; this
+//! [`device_api`](rusty_box_devices::api) states what a device may ask for; this
 //! module supplies it from the machine's own parts. The split matters: the
 //! device models depend only on the traits, so they never name the PIC or the
 //! timer wheel, while these adapters are the single place that knows how a
 //! request reaches real hardware state.
 
-use super::device_api::{DeviceCtx, IrqLine, IrqSink, TimerKey, TimerService};
+use rusty_box_devices::api::{DeviceCtx, IrqLine, IrqSink, TimerKey, TimerService};
 use crate::pc_system::BxPcSystemC;
 use crate::pic::BxPicC;
 
@@ -91,7 +91,7 @@ impl TimerHandles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iodev::device_api::DeviceKind;
+    use rusty_box_devices::api::DeviceKind;
     use crate::pc_system::TimerOwner;
 
     /// A device arming a timer mid-batch must anchor the deadline at the tick

@@ -1,5 +1,8 @@
-/// A guest physical address, defined once beside the device API that names it
-/// most, and re-exported here under the spelling this crate uses.
+/// A guest physical address.
+///
+/// Facade: defined once, beside the device API that names it most, and
+/// re-exported here under the spelling this crate has always used — it appears
+/// throughout this crate's own public memory and CPU surface.
 pub use rusty_box_devices::api::BxPhyAddress;
 
 pub type BxAddress = u64;

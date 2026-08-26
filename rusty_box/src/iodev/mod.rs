@@ -78,7 +78,6 @@ pub mod acpi;
 #[cfg(feature = "alloc")]
 pub mod acpi_tables;
 pub mod cmos;
-pub use rusty_box_devices::display::ddc;
 pub mod devices;
 pub use crate::dma;
 pub mod fw_cfg;
@@ -91,21 +90,10 @@ pub mod pci;
 pub mod pci2isa;
 pub mod pci_ide;
 pub use crate::pic;
-#[cfg(feature = "alloc")]
-pub use rusty_box_devices::display::geforce;
 pub mod pit;
-/// The device API, and every display model, live in `rusty_box_devices` — a
-/// crate with no CPU, no emulator and no host in scope. They are named here
-/// under the paths this crate has always used.
-pub use rusty_box_devices::api as device_api;
-/// Where a display adapter pushes a frame — the front-end contract.
-pub use rusty_box_devices::display::sink as display_sink;
-/// A display adapter as a VGA core plus one extension.
-pub use rusty_box_devices::display::card as vga_card;
 pub mod ide;
 pub mod serial;
 pub(crate) mod wiring;
-pub use rusty_box_devices::display::vga;
 
 // Re-export device types for convenience
 pub use acpi::BxAcpiCtrl;
@@ -123,7 +111,12 @@ pub use pit::BxPitC;
 pub use serial::BxSerialC;
 // VgaCore is pub(crate) - not exported outside the crate
 #[cfg(feature = "alloc")]
-pub use geforce::BxGeForceC;
+/// The NV card, named beside its siblings in this namespace even though
+/// nothing in this crate wires it yet — being ported ahead of its wiring is
+/// what it is for, and dropping it from the list because of that is how a
+/// ported-ahead model quietly stops existing.
+#[cfg(feature = "alloc")]
+pub use rusty_box_devices::display::geforce::BxGeForceC;
 
 /// The port tables span the whole port space twice, so this struct's size is
 /// multiplied by 131072. Pinned here so a future field addition is a
@@ -305,7 +298,7 @@ impl DevSlot {
     /// back on an access, which is the whole of what it knows about devices.
     #[inline]
     pub(crate) const fn mmio_token(self) -> crate::memory::mmio_map::MmioToken {
-        self.mmio_window_token(device_api::WindowId::FIRST)
+        self.mmio_window_token(rusty_box_devices::api::WindowId::FIRST)
     }
 
     /// The token for one of this device's windows.
@@ -319,7 +312,7 @@ impl DevSlot {
     #[inline]
     pub(crate) const fn mmio_window_token(
         self,
-        window: device_api::WindowId,
+        window: rusty_box_devices::api::WindowId,
     ) -> crate::memory::mmio_map::MmioToken {
         crate::memory::mmio_map::MmioToken((self.0 as u16) | ((window.0 as u16) << 8))
     }
@@ -335,8 +328,8 @@ impl DevSlot {
     #[inline]
     pub(crate) const fn window_from_mmio_token(
         token: crate::memory::mmio_map::MmioToken,
-    ) -> device_api::WindowId {
-        device_api::WindowId((token.0 >> 8) as u8)
+    ) -> rusty_box_devices::api::WindowId {
+        rusty_box_devices::api::WindowId((token.0 >> 8) as u8)
     }
 
     /// Human-readable name, for diagnostics and registration logging.
@@ -726,7 +719,7 @@ impl BxDevicesC {
         // claimed port, a width the registration allows, and a width with an
         // architectural encoding — one outside {1,2,4} can never be issued, so
         // the default handler answers it.
-        let handler_width = device_api::IoLen::from_bytes(io_len)
+        let handler_width = rusty_box_devices::api::IoLen::from_bytes(io_len)
             .filter(|_| !slot.is_none() && (entry.mask & len_mask) != 0);
 
         let value = if let Some(width) = handler_width {
@@ -792,7 +785,7 @@ impl BxDevicesC {
         let slot = entry.slot;
         let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
         // See `inp`.
-        let handler_width = device_api::IoLen::from_bytes(io_len)
+        let handler_width = rusty_box_devices::api::IoLen::from_bytes(io_len)
             .filter(|_| !slot.is_none() && (entry.mask & len_mask) != 0);
 
         if let Some(width) = handler_width {
@@ -858,7 +851,7 @@ impl BxDevicesC {
     ) -> bool {
         let slot = DevSlot::from_mmio_token(hit.token);
         let window = DevSlot::window_from_mmio_token(hit.token);
-        let at = device_api::WindowOffset(hit.offset);
+        let at = rusty_box_devices::api::WindowOffset(hit.offset);
         match dm.bind_mmio(slot) {
             Some(bound) => {
                 wiring::with_device_ctx(
@@ -892,7 +885,7 @@ impl BxDevicesC {
     ) -> bool {
         let slot = DevSlot::from_mmio_token(hit.token);
         let window = DevSlot::window_from_mmio_token(hit.token);
-        let at = device_api::WindowOffset(hit.offset);
+        let at = rusty_box_devices::api::WindowOffset(hit.offset);
         match dm.bind_mmio(slot) {
             Some(bound) => {
                 wiring::with_device_ctx(
@@ -1514,7 +1507,7 @@ impl BxDevicesC {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::pci::PciDevice;
+    use rusty_box_devices::pci::PciDevice;
 
     /// BxDevicesC is ~1.5MB due to [IoHandlerEntry; 65536] x2.
     /// Allocate on heap to avoid test stack overflow.
@@ -1567,7 +1560,7 @@ mod tests {
             let first = dm.pci_bridge.smram_effect();
             assert_eq!(
                 first,
-                device_api::ChipsetEffect::Smram(device_api::SmramControl::Enable {
+                rusty_box_devices::api::ChipsetEffect::Smram(rusty_box_devices::api::SmramControl::Enable {
                     dopen: true,
                     dcls: false
                 })
@@ -1575,17 +1568,17 @@ mod tests {
             assert_eq!(first, dm.pci_bridge.smram_effect(), "producer must be pure");
 
             // Every PAM area is described, not just the ones that changed.
-            let device_api::ChipsetEffect::ShadowRam(areas) = dm.pci_bridge.shadow_ram_effect()
+            let rusty_box_devices::api::ChipsetEffect::ShadowRam(areas) = dm.pci_bridge.shadow_ram_effect()
             else {
                 panic!("the bridge must describe shadow RAM as such")
             };
-            assert_eq!(areas.len(), device_api::PAM_AREAS);
+            assert_eq!(areas.len(), rusty_box_devices::api::PAM_AREAS);
 
             // The ACPI suspend-to-ram store is a request, taken once.
             dm.acpi.suspend_to_ram_pending = true;
             assert_eq!(
                 dm.acpi.take_pending_effect(),
-                Some(device_api::ChipsetEffect::CmosByte {
+                Some(rusty_box_devices::api::ChipsetEffect::CmosByte {
                     index: 0x0F,
                     value: 0xFE
                 })
@@ -1615,8 +1608,8 @@ mod tests {
             // device, not merely be accepted. IOREGSEL is the cleanest witness:
             // an unconditional register that reads back what was written,
             // needing no mode programming first.
-            const IOREGSEL: device_api::WindowOffset = device_api::WindowOffset(0);
-            let window = device_api::WindowId::FIRST;
+            const IOREGSEL: rusty_box_devices::api::WindowOffset = rusty_box_devices::api::WindowOffset(0);
+            let window = rusty_box_devices::api::WindowId::FIRST;
             let bound = dm
                 .bind_mmio(DevSlot::IOAPIC)
                 .expect("the I/O APIC slot must map a device");
