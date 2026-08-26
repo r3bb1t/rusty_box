@@ -71,6 +71,10 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // Zero, and structurally so: the crate carries `#![forbid(unsafe_code)]`,
     // which the workspace lint table backs with a `deny` any new crate inherits.
     ("rusty_box_core/src", 0),
+    // Zero, and structurally so, for the same reason as core: the crate carries
+    // `#![forbid(unsafe_code)]`. A device model has no business with raw memory
+    // — it is handed what it may touch.
+    ("rusty_box_devices/src", 0),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. Zero, permanently: thread
 /// safety is derived from ownership, and `Emulator`'s `const` assertion in
@@ -276,6 +280,36 @@ const MATRIX: &[Step] = &[
             "--release",
             "-p",
             "rusty_box_core",
+            "--target",
+            "x86_64-unknown-none",
+        ],
+        envs: &[],
+        stdout_marker: None,
+    },
+    // The device models, under the same rule and for the same reason: their
+    // whole claim is that they need no host and no execution engine, and a
+    // build that proves it has to happen without one in the room.
+    Step {
+        name: "devices tests (no_std + no_alloc)",
+        args: &["test", "--release", "-p", "rusty_box_devices"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        name: "devices tests (std)",
+        args: &["test", "--release", "-p", "rusty_box_devices", "--features", "std"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        name: "devices bare-metal target check",
+        args: &[
+            "check",
+            "--release",
+            "-p",
+            "rusty_box_devices",
+            "--features",
+            "alloc",
             "--target",
             "x86_64-unknown-none",
         ],

@@ -78,7 +78,7 @@ pub mod acpi;
 #[cfg(feature = "alloc")]
 pub mod acpi_tables;
 pub mod cmos;
-pub mod ddc;
+pub use rusty_box_devices::display::ddc;
 pub mod devices;
 pub use crate::dma;
 pub mod fw_cfg;
@@ -92,17 +92,20 @@ pub mod pci2isa;
 pub mod pci_ide;
 pub use crate::pic;
 #[cfg(feature = "alloc")]
-pub mod geforce;
+pub use rusty_box_devices::display::geforce;
 pub mod pit;
-pub mod device_api;
+/// The device API, and every display model, live in `rusty_box_devices` — a
+/// crate with no CPU, no emulator and no host in scope. They are named here
+/// under the paths this crate has always used.
+pub use rusty_box_devices::api as device_api;
 /// Where a display adapter pushes a frame — the front-end contract.
-pub mod display_sink;
+pub use rusty_box_devices::display::sink as display_sink;
 /// A display adapter as a VGA core plus one extension.
-pub mod vga_card;
+pub use rusty_box_devices::display::card as vga_card;
 pub mod ide;
 pub mod serial;
 pub(crate) mod wiring;
-pub mod vga;
+pub use rusty_box_devices::display::vga;
 
 // Re-export device types for convenience
 pub use acpi::BxAcpiCtrl;

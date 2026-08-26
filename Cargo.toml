@@ -1,5 +1,5 @@
 [workspace]
-members = ["rusty_box_core", "rusty_box", "rusty_box_decoder", "rusty_box_gui", "rusty_box_bximage", "rusty_box_android", "xtask", "examples/rusty_box_web", "examples/rusty_box_uefi", "examples/no_alloc_smoke"]
+members = ["rusty_box_core", "rusty_box_devices", "rusty_box", "rusty_box_decoder", "rusty_box_gui", "rusty_box_bximage", "rusty_box_android", "xtask", "examples/rusty_box_web", "examples/rusty_box_uefi", "examples/no_alloc_smoke"]
 default-members = ["rusty_box"]
 resolver = "2"
 
@@ -13,6 +13,7 @@ homepage = "https://github.com/r3bb1t/rusty_box"
 
 [workspace.dependencies]
 rusty_box_core = { path = "rusty_box_core", version = "0.0.3" }
+rusty_box_devices = { path = "rusty_box_devices", version = "0.0.3" }
 tracing = { version = "0.1", default-features = false, features = ["max_level_trace", "release_max_level_info"] }
 thiserror = { version = "2", default-features = false }
 clap = { version = "4.6", features = ["derive"] }

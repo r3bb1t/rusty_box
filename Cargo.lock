@@ -3702,6 +3702,7 @@ dependencies = [
  "paste",
  "rusty_box_core",
  "rusty_box_decoder",
+ "rusty_box_devices",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -3744,6 +3745,14 @@ dependencies = [
  "bitflags 2.13.1",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rusty_box_devices"
+version = "0.0.3"
+dependencies = [
+ "rusty_box_core",
+ "tracing",
 ]
 
 [[package]]

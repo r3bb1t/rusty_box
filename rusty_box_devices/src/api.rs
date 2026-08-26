@@ -80,6 +80,13 @@ impl WindowOffset {
     }
 }
 
+/// A guest physical address.
+///
+/// A plain `u64` for now. Unit J gives guest addresses a type of their own, at
+/// which point this alias is where that change lands; `rusty_box` re-exports
+/// this one rather than keeping a second definition of the same thing.
+pub type BxPhyAddress = u64;
+
 /// One I/O port a device answers on, as the device states it.
 ///
 /// Bochs has each device call `DEV_register_ioread_handler` on the bus from

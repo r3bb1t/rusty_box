@@ -1,5 +1,6 @@
-// pub type BxPhyAddress = u64;
-pub type BxPhyAddress = u64;
+/// A guest physical address, defined once beside the device API that names it
+/// most, and re-exported here under the spelling this crate uses.
+pub use rusty_box_devices::api::BxPhyAddress;
 
 pub type BxAddress = u64;
 

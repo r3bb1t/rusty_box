@@ -21,7 +21,7 @@
 //! copying every tile across an FFI boundary each frame would be the wrong
 //! shape even where it is possible.
 
-use super::vga::VgaTextModeInfo;
+use crate::display::vga::VgaTextModeInfo;
 
 /// The geometry a mode change announces — Bochs `dimension_update`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -12,7 +12,6 @@
 
 #[cfg(not(feature = "std"))]
 use rusty_box_core::FloatExt;
-#[cfg(not(feature = "std"))]
 use alloc::vec;
 use alloc::{boxed::Box, vec::Vec};
 
@@ -3825,7 +3824,7 @@ impl BxGeForceC {
 /// `bx_vgacore_c::update()`. Wiring the NV path is its own work; this proves
 /// the seam carries a second card whose state and windows are nothing like the
 /// first one's.
-impl crate::iodev::vga_card::VgaExtension for BxGeForceC {
+impl crate::display::card::VgaExtension for BxGeForceC {
     /// What the CORE must allocate, which is not the same as what the card has.
     ///
     /// The core renders only the legacy modes for this card — the NV scanout is
@@ -3835,7 +3834,7 @@ impl crate::iodev::vga_card::VgaExtension for BxGeForceC {
     /// When the NV scanout is wired the two become one buffer, which is what
     /// the core-owns-VRAM rule is for.
     fn vga_vram_bytes(&self) -> u32 {
-        crate::iodev::vga::VgaCore::LEGACY_VRAM_BYTES as u32
+        crate::display::vga::VgaCore::LEGACY_VRAM_BYTES as u32
     }
 
     fn vga_max_resolution(&self) -> (u32, u32) {
@@ -3846,31 +3845,31 @@ impl crate::iodev::vga_card::VgaExtension for BxGeForceC {
 
     /// Video memory reads land in the NV framebuffer, which the chip addresses
     /// linearly rather than through the planar core.
-    fn vga_mem_read(&mut self, cx: &mut crate::iodev::vga_card::MemCtx<'_>) -> Option<u8> {
+    fn vga_mem_read(&mut self, cx: &mut crate::display::card::MemCtx<'_>) -> Option<u8> {
         match cx.window() {
             // The legacy aperture stays the core's: a GeForce in a text mode is
             // a standard VGA, latches and plane masks included.
-            crate::iodev::vga::VgaWindow::Legacy => None,
-            crate::iodev::vga::VgaWindow::Lfb => {
+            crate::display::vga::VgaWindow::Legacy => None,
+            crate::display::vga::VgaWindow::Lfb => {
                 let at = cx.offset().get() as u32 & self.memsize_mask;
                 Some(self.vram_read8(at))
             }
-            crate::iodev::vga::VgaWindow::Registers => None,
+            crate::display::vga::VgaWindow::Registers => None,
         }
     }
 
     fn vga_mem_write(
         &mut self,
-        cx: &mut crate::iodev::vga_card::MemCtx<'_>,
+        cx: &mut crate::display::card::MemCtx<'_>,
         value: u8,
-    ) -> crate::iodev::vga_card::Written {
+    ) -> crate::display::card::Written {
         match cx.window() {
-            crate::iodev::vga::VgaWindow::Lfb => {
+            crate::display::vga::VgaWindow::Lfb => {
                 let at = cx.offset().get() as u32 & self.memsize_mask;
                 self.vram_write8(at, value);
-                crate::iodev::vga_card::Written::Done
+                crate::display::card::Written::Done
             }
-            _ => crate::iodev::vga_card::Written::FallThrough,
+            _ => crate::display::card::Written::FallThrough,
         }
     }
 
@@ -3878,36 +3877,36 @@ impl crate::iodev::vga_card::VgaExtension for BxGeForceC {
     /// reason register windows are offered whole rather than a byte at a time.
     fn vga_regs_read(
         &mut self,
-        cx: &mut crate::iodev::vga_card::MemCtx<'_>,
+        cx: &mut crate::display::card::MemCtx<'_>,
         len: u32,
         data: &mut [u8],
-    ) -> crate::iodev::vga_card::Written {
-        if cx.window() != crate::iodev::vga::VgaWindow::Registers || len != 4 {
-            return crate::iodev::vga_card::Written::FallThrough;
+    ) -> crate::display::card::Written {
+        if cx.window() != crate::display::vga::VgaWindow::Registers || len != 4 {
+            return crate::display::card::Written::FallThrough;
         }
         let value = self.register_read32(cx.offset().get() as u32);
         data[..4].copy_from_slice(&value.to_le_bytes());
-        crate::iodev::vga_card::Written::Done
+        crate::display::card::Written::Done
     }
 
     fn vga_regs_write(
         &mut self,
-        cx: &mut crate::iodev::vga_card::MemCtx<'_>,
+        cx: &mut crate::display::card::MemCtx<'_>,
         len: u32,
         data: &[u8],
-    ) -> crate::iodev::vga_card::Written {
-        if cx.window() != crate::iodev::vga::VgaWindow::Registers || len != 4 {
-            return crate::iodev::vga_card::Written::FallThrough;
+    ) -> crate::display::card::Written {
+        if cx.window() != crate::display::vga::VgaWindow::Registers || len != 4 {
+            return crate::display::card::Written::FallThrough;
         }
         let mut bytes = [0u8; 4];
         bytes.copy_from_slice(&data[..4]);
         self.register_write32(cx.offset().get() as u32, u32::from_le_bytes(bytes));
-        crate::iodev::vga_card::Written::Done
+        crate::display::card::Written::Done
     }
 
     /// Bochs `bx_geforce_c::reset` resets the NV chip; the core has already
     /// reset itself by the time this runs.
-    fn vga_reset(&mut self, cx: &mut crate::iodev::vga_card::ResetCtx<'_>) {
+    fn vga_reset(&mut self, cx: &mut crate::display::card::ResetCtx<'_>) {
         let _ = cx;
         self.reset();
     }

@@ -246,6 +246,30 @@ pub const MAX_SECTION_LEN: u64 = 4 * 1024 * 1024 * 1024;
 /// The largest item count any field may declare, under the same rule.
 pub const MAX_COUNT: usize = 1 << 20;
 
+/// The version every device's section body carries as its first `u32`.
+///
+/// A device checks it before decoding a byte, so a body written by a build
+/// that laid its state out differently is refused rather than misread. It is
+/// the format's, not any one device's, which is why every device reads the
+/// same constant.
+pub const SECTION_VERSION: u32 = 1;
+
+/// [`checked_len_add`] against the format's own ceiling.
+///
+/// Section lengths are almost always bounded by [`MAX_SECTION_LEN`] and by
+/// nothing tighter, so a device says what it is adding and not, every time,
+/// which ceiling it is adding under.
+#[inline]
+pub fn checked_section_len_add(lhs: u64, rhs: u64) -> SnapResult<u64> {
+    checked_len_add(lhs, rhs, MAX_SECTION_LEN)
+}
+
+/// [`checked_len_mul`] against the format's own ceiling.
+#[inline]
+pub fn checked_section_len_mul(lhs: u64, rhs: u64) -> SnapResult<u64> {
+    checked_len_mul(lhs, rhs, MAX_SECTION_LEN)
+}
+
 /// A device that owns exactly one section of the snapshot stream.
 ///
 /// The tag travels with the device rather than with the call site, so a body

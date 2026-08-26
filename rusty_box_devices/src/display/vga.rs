@@ -25,34 +25,42 @@
 #[cfg(feature = "alloc")]
 use alloc::{string::String, vec, vec::Vec};
 
-use crate::iodev::display_sink::{CursorPos, Dimensions, DisplaySink, Refreshed, Rgb};
-use crate::iodev::vga_card::VgaCard;
+use crate::display::sink::{CursorPos, Dimensions, DisplaySink, Refreshed, Rgb};
+use crate::display::card::VgaCard;
 /// Only the graphics paths place tiles, and they need a buffer to convert into.
 #[cfg(feature = "alloc")]
-use crate::iodev::display_sink::TilePos;
-use crate::config::BxPhyAddress;
+use crate::display::sink::TilePos;
+use crate::api::BxPhyAddress;
 
 #[cfg(feature = "std")]
-use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
-    SNAPSHOT_SECTION_VERSION,
+use rusty_box_core::snap::{
+    checked_section_len_add, checked_section_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
+    MAX_COUNT, MAX_SECTION_LEN, SECTION_VERSION,
 };
+
+/// This adapter's identity in the snapshot stream.
+///
+/// The tag lives with the device, which is what stops a body being written
+/// under another device's identity — see `SnapshotSection`. The container
+/// names it from here rather than keeping its own copy.
+#[cfg(feature = "std")]
+pub const SEC_VGA: u32 = 24;
 
 
 /// VGA text mode information
 #[derive(Debug, Clone)]
 pub struct VgaTextModeInfo {
-    pub(crate) start_address: u16,
-    pub(crate) cs_start: u8,
-    pub(crate) cs_end: u8,
-    pub(crate) line_offset: u16,
-    pub(crate) line_compare: u16,
-    pub(crate) h_panning: u8,
-    pub(crate) v_panning: u8,
-    pub(crate) line_graphics: bool,
-    pub(crate) split_hpanning: bool,
-    pub(crate) blink_flags: u8,
-    pub(crate) actl_palette: [u8; 16],
+    pub start_address: u16,
+    pub cs_start: u8,
+    pub cs_end: u8,
+    pub line_offset: u16,
+    pub line_compare: u16,
+    pub h_panning: u8,
+    pub v_panning: u8,
+    pub line_graphics: bool,
+    pub split_hpanning: bool,
+    pub blink_flags: u8,
+    pub actl_palette: [u8; 16],
 }
 
 /// VGA text mode memory base address
@@ -183,7 +191,7 @@ const VGA_Y_TILESIZE: u32 = 24;
 const TILE_RGBA_BYTES: usize = (VGA_X_TILESIZE * VGA_Y_TILESIZE * 4) as usize;
 
 /// QEMU-compatible MMIO BAR2 size (4KB)
-pub(crate) const PCI_VGA_MMIO_SIZE: u32 = 0x1000;
+pub const PCI_VGA_MMIO_SIZE: u32 = 0x1000;
 /// Offset within BAR2 MMIO for Bochs VBE extension registers
 const PCI_VGA_BOCHS_OFFSET: u32 = 0x500;
 /// Size of the Bochs VBE extension register region within BAR2
@@ -343,14 +351,14 @@ pub enum VgaWindow {
 
 impl VgaWindow {
     #[inline]
-    pub(crate) const fn id(self) -> crate::iodev::device_api::WindowId {
-        crate::iodev::device_api::WindowId(self as u8)
+    pub const fn id(self) -> crate::api::WindowId {
+        crate::api::WindowId(self as u8)
     }
 
     /// The inverse of [`Self::id`]. `None` for a window this adapter never
     /// minted a token for, which the machine cannot produce and a test can.
     #[inline]
-    pub(crate) fn from_id(window: crate::iodev::device_api::WindowId) -> Option<Self> {
+    pub(crate) fn from_id(window: crate::api::WindowId) -> Option<Self> {
         match window.0 {
             0 => Some(Self::Legacy),
             1 => Some(Self::Lfb),
@@ -447,7 +455,7 @@ pub struct StdVga {
     /// DDC monitor (EDID over I2C via VBE_DISPI register 0xB) — Bochs vga.h
     /// `bx_ddc_c ddc`. Its I2C state is not snapshotted; Bochs persists only
     /// `vbe.ddc_enabled` (vga.cc `register_state`).
-    pub(crate) ddc: crate::iodev::ddc::BxDdcC,
+    pub(crate) ddc: crate::display::ddc::BxDdcC,
     /// PCI configuration space (256 bytes). Only meaningful when `pci_enabled`.
     /// Bochs bx_vga_c::pci_conf. Mirrors `init_pci_conf(0x1234,0x1111,0,0x030000,0,0)`.
     pub(crate) pci_conf: [u8; 256],
@@ -495,12 +503,12 @@ impl StdVga {
         // BAR2 = VBE MMIO, 32-bit non-prefetchable memory, base 0 until assigned.
     }
 
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             vbe: VbeState::default(),
             // Bochs vga.cc: 16 MB of VBE memory unless configured otherwise.
             vbe_memsize: 16 << 20,
-            ddc: crate::iodev::ddc::BxDdcC::new(),
+            ddc: crate::display::ddc::BxDdcC::new(),
             pci_conf: [0u8; 256],
             pci_enabled: false,
             mmio_base: 0,
@@ -510,12 +518,12 @@ impl StdVga {
     }
 }
 
-impl crate::iodev::vga_card::VgaExtension for StdVga {
+impl crate::display::card::VgaExtension for StdVga {
     fn vga_vram_bytes(&self) -> u32 {
         self.vbe_memsize
     }
 
-    fn vga_apply_preferred_mode(&mut self, cx: &mut crate::iodev::vga_card::ResetCtx<'_>) {
+    fn vga_apply_preferred_mode(&mut self, cx: &mut crate::display::card::ResetCtx<'_>) {
         self.apply_preferred_mode(cx.core());
     }
 
@@ -529,7 +537,7 @@ impl crate::iodev::vga_card::VgaExtension for StdVga {
     #[cfg(feature = "alloc")]
     fn vga_refresh<S: DisplaySink>(
         &mut self,
-        cx: &mut crate::iodev::vga_card::RefreshCtx<'_, S>,
+        cx: &mut crate::display::card::RefreshCtx<'_, S>,
     ) -> Option<Refreshed> {
         if self.vbe.enabled == 0 {
             return None;
@@ -541,7 +549,7 @@ impl crate::iodev::vga_card::VgaExtension for StdVga {
     /// Once DISPI is enabled at a depth other than 4bpp, video memory is the
     /// linear framebuffer and the planar core no longer answers for it. Bochs
     /// `bx_vga_c::mem_read` makes the same test before deferring to its base.
-    fn vga_mem_read(&mut self, cx: &mut crate::iodev::vga_card::MemCtx<'_>) -> Option<u8> {
+    fn vga_mem_read(&mut self, cx: &mut crate::display::card::MemCtx<'_>) -> Option<u8> {
         #[cfg(feature = "alloc")]
         {
             if self.vbe.enabled != 0 && self.vbe.bpp != VBE_DISPI_BPP_4 {
@@ -565,9 +573,9 @@ impl crate::iodev::vga_card::VgaExtension for StdVga {
 
     fn vga_mem_write(
         &mut self,
-        cx: &mut crate::iodev::vga_card::MemCtx<'_>,
+        cx: &mut crate::display::card::MemCtx<'_>,
         value: u8,
-    ) -> crate::iodev::vga_card::Written {
+    ) -> crate::display::card::Written {
         #[cfg(feature = "alloc")]
         {
             if self.vbe.enabled != 0 && self.vbe.bpp != VBE_DISPI_BPP_4 {
@@ -575,14 +583,14 @@ impl crate::iodev::vga_card::VgaExtension for StdVga {
                 let addr = match cx.window() {
                     VgaWindow::Legacy => VGA_WINDOW_GRAPHICS_BASE + offset,
                     VgaWindow::Lfb => self.vbe.base_address as BxPhyAddress + offset,
-                    VgaWindow::Registers => return crate::iodev::vga_card::Written::FallThrough,
+                    VgaWindow::Registers => return crate::display::card::Written::FallThrough,
                 };
                 self.vbe_mem_write_byte(cx.core(), addr, value);
-                return crate::iodev::vga_card::Written::Done;
+                return crate::display::card::Written::Done;
             }
         }
         let _ = (cx, value);
-        crate::iodev::vga_card::Written::FallThrough
+        crate::display::card::Written::FallThrough
     }
 
     /// BAR2 is this card's register block — Bochs `bx_vga_c`'s
@@ -590,33 +598,33 @@ impl crate::iodev::vga_card::VgaExtension for StdVga {
     /// to the access width, so it is never split into bytes.
     fn vga_regs_read(
         &mut self,
-        cx: &mut crate::iodev::vga_card::MemCtx<'_>,
+        cx: &mut crate::display::card::MemCtx<'_>,
         len: u32,
         data: &mut [u8],
-    ) -> crate::iodev::vga_card::Written {
+    ) -> crate::display::card::Written {
         if cx.window() != VgaWindow::Registers {
-            return crate::iodev::vga_card::Written::FallThrough;
+            return crate::display::card::Written::FallThrough;
         }
         self.vbe_mmio_read(cx.offset(), len, data);
-        crate::iodev::vga_card::Written::Done
+        crate::display::card::Written::Done
     }
 
     fn vga_regs_write(
         &mut self,
-        cx: &mut crate::iodev::vga_card::MemCtx<'_>,
+        cx: &mut crate::display::card::MemCtx<'_>,
         len: u32,
         data: &[u8],
-    ) -> crate::iodev::vga_card::Written {
+    ) -> crate::display::card::Written {
         if cx.window() != VgaWindow::Registers {
-            return crate::iodev::vga_card::Written::FallThrough;
+            return crate::display::card::Written::FallThrough;
         }
         let at = cx.offset();
         self.vbe_mmio_write(cx.core(), at, len, data);
-        crate::iodev::vga_card::Written::Done
+        crate::display::card::Written::Done
     }
 
     /// The DISPI index and data ports — Bochs vga.cc, not vgacore.cc.
-    fn vga_pio_read(&mut self, cx: &mut crate::iodev::vga_card::PortCtx<'_>) -> Option<u32> {
+    fn vga_pio_read(&mut self, cx: &mut crate::display::card::PortCtx<'_>) -> Option<u32> {
         match cx.port() {
             VBE_DISPI_IOPORT_INDEX => Some(u32::from(self.vbe.curindex)),
             VBE_DISPI_IOPORT_DATA => Some(u32::from(self.vbe_read_index(self.vbe.curindex))),
@@ -626,20 +634,20 @@ impl crate::iodev::vga_card::VgaExtension for StdVga {
 
     fn vga_pio_write(
         &mut self,
-        cx: &mut crate::iodev::vga_card::PortCtx<'_>,
+        cx: &mut crate::display::card::PortCtx<'_>,
         value: u32,
-    ) -> crate::iodev::vga_card::Written {
+    ) -> crate::display::card::Written {
         match cx.port() {
             VBE_DISPI_IOPORT_INDEX => {
                 self.vbe.curindex = value as u16;
-                crate::iodev::vga_card::Written::Done
+                crate::display::card::Written::Done
             }
             VBE_DISPI_IOPORT_DATA => {
                 let index = self.vbe.curindex;
                 self.vbe_write_index(cx.core(), index, value as u16);
-                crate::iodev::vga_card::Written::Done
+                crate::display::card::Written::Done
             }
-            _ => crate::iodev::vga_card::Written::FallThrough,
+            _ => crate::display::card::Written::FallThrough,
         }
     }
 
@@ -647,10 +655,10 @@ impl crate::iodev::vga_card::VgaExtension for StdVga {
     /// the CRTC is the authority and the core answers.
     fn vga_resolution(
         &self,
-        _cx: &crate::iodev::vga_card::CoreRef<'_>,
-    ) -> Option<crate::emulator::Resolution> {
+        _cx: &crate::display::card::CoreRef<'_>,
+    ) -> Option<crate::display::Resolution> {
         (self.vbe.enabled != 0).then(|| {
-            crate::emulator::Resolution::new(u32::from(self.vbe.xres), u32::from(self.vbe.yres))
+            crate::display::Resolution::new(u32::from(self.vbe.xres), u32::from(self.vbe.yres))
         })
     }
 
@@ -659,15 +667,15 @@ impl crate::iodev::vga_card::VgaExtension for StdVga {
     /// for.
     fn vga_windows(
         &self,
-        out: &mut crate::iodev::device_api::WindowDecls,
-    ) -> crate::iodev::device_api::Declared {
+        out: &mut crate::api::WindowDecls,
+    ) -> crate::api::Declared {
         // Without an allocator there is no framebuffer to answer for — the
         // DISPI backing store is the one part of this card that needs one — so
         // the card declares only what it can serve.
         #[cfg(feature = "alloc")]
         {
             let base = u64::from(self.vbe.base_address);
-            return out.push(crate::iodev::device_api::WindowDecl {
+            return out.push(crate::api::WindowDecl {
                 id: VgaWindow::Lfb.id(),
                 base,
                 end: base + u64::from(self.vbe_memsize) - 1,
@@ -676,14 +684,14 @@ impl crate::iodev::vga_card::VgaExtension for StdVga {
         #[cfg(not(feature = "alloc"))]
         {
             let _ = out;
-            crate::iodev::device_api::Declared::Accepted
+            crate::api::Declared::Accepted
         }
     }
 
     /// Bochs `bx_vga_c::reset` runs after `bx_vgacore_c::reset`, keeping the
     /// BARs and the committed framebuffer base: they describe where the machine
     /// mapped the card, which a guest reset does not undo.
-    fn vga_reset(&mut self, cx: &mut crate::iodev::vga_card::ResetCtx<'_>) {
+    fn vga_reset(&mut self, cx: &mut crate::display::card::ResetCtx<'_>) {
         let pci_enabled = self.pci_enabled;
         let pci_conf = self.pci_conf;
         let mmio_base = self.mmio_base;
@@ -793,8 +801,8 @@ impl Default for VbeState {
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VgaSnapshotRestoreTarget {
-    pub(crate) lfb_base: u32,
-    pub(crate) mmio_base: u32,
+    pub lfb_base: u32,
+    pub mmio_base: u32,
 }
 
 #[cfg(feature = "std")]
@@ -849,7 +857,7 @@ impl From<&VbeState> for VgaSnapshotVbeState {
 /// VGA controller state.
 ///
 /// Public only as an identity: it names the adapter a `StandardPc` machine
-/// drives, so [`crate::emulator::Display`] can be spelled without erasing it.
+/// drives, so [`crate::display::Display`] can be spelled without erasing it.
 /// Every field and inherent method stays crate-private — the surface a caller
 /// gets is the role traits the adapter implements, and nothing else.
 #[derive(Debug)]
@@ -871,7 +879,7 @@ pub struct VgaCore {
     /// Graphics controller index
     graphics_index: u8,
     /// Graphics controller registers
-    pub(crate) graphics_regs: [u8; 9],
+    pub graphics_regs: [u8; 9],
     /// Status register value
     status_reg: u8,
     /// Misc output register
@@ -1296,8 +1304,8 @@ impl VgaCore {
     ///
     /// Stated rather than registered: a display model that called the I/O bus
     /// from its own `init` would need the bus to exist before the model does.
-    pub(crate) const PORTS: &'static [super::device_api::PortDecl] = {
-        use super::device_api::PortDecl;
+    pub(crate) const PORTS: &'static [crate::api::PortDecl] = {
+        use crate::api::PortDecl;
         const fn p(port: u16, name: &'static str) -> PortDecl {
             PortDecl {
                 port,
@@ -1335,8 +1343,8 @@ impl VgaCore {
 
     /// The physical window the core answers on, independent of any card: the
     /// legacy aperture Bochs registers in `bx_vgacore_c::init`.
-    pub(crate) fn core_window() -> super::device_api::WindowDecl {
-        super::device_api::WindowDecl {
+    pub(crate) fn core_window() -> crate::api::WindowDecl {
+        crate::api::WindowDecl {
             id: VgaWindow::Legacy.id(),
             base: VGA_WINDOW_GRAPHICS_BASE as u64,
             end: VGA_WINDOW_GRAPHICS_END as u64,
@@ -3072,7 +3080,7 @@ impl VgaCore {
     /// *routing* decision it used to serve is gone.
     pub(crate) fn legacy_read(
         &mut self,
-        at: crate::iodev::device_api::WindowOffset,
+        at: crate::api::WindowOffset,
         len: u32,
         data: &mut [u8],
     ) {
@@ -3101,7 +3109,7 @@ impl VgaCore {
     /// mapped that nothing can serve.
     pub(crate) fn lfb_read(
         &mut self,
-        at: crate::iodev::device_api::WindowOffset,
+        at: crate::api::WindowOffset,
         len: u32,
         data: &mut [u8],
     ) {
@@ -3130,7 +3138,7 @@ impl VgaCore {
     /// memory support.
     pub(crate) fn legacy_write(
         &mut self,
-        at: crate::iodev::device_api::WindowOffset,
+        at: crate::api::WindowOffset,
         len: u32,
         data: &[u8],
     ) {
@@ -3150,7 +3158,7 @@ impl VgaCore {
             VgaWindow::Legacy => self.legacy_read_byte(offset),
             VgaWindow::Lfb => {
                 let mut byte = [0u8; 1];
-                self.lfb_read(crate::iodev::device_api::WindowOffset(offset), 1, &mut byte);
+                self.lfb_read(crate::api::WindowOffset(offset), 1, &mut byte);
                 byte[0]
             }
             // The card owns its register block; a core with no extension has
@@ -3164,7 +3172,7 @@ impl VgaCore {
         match window {
             VgaWindow::Legacy => self.legacy_write_byte(offset, value),
             VgaWindow::Lfb => {
-                self.lfb_write(crate::iodev::device_api::WindowOffset(offset), 1, &[value])
+                self.lfb_write(crate::api::WindowOffset(offset), 1, &[value])
             }
             VgaWindow::Registers => {}
         }
@@ -3183,7 +3191,7 @@ impl VgaCore {
     /// Present in every build for the reason [`Self::lfb_read`] gives.
     pub(crate) fn lfb_write(
         &mut self,
-        at: crate::iodev::device_api::WindowOffset,
+        at: crate::api::WindowOffset,
         len: u32,
         data: &[u8],
     ) {
@@ -3208,14 +3216,14 @@ impl VgaCore {
 /// The adapter's three windows, each answering only what the machine routed to
 /// it. Replaces `is_mmio_addr`, which existed solely to re-derive this split
 /// from the physical address.
-impl crate::iodev::device_api::MmioDevice for VgaCore {
+impl crate::api::MmioDevice for VgaCore {
     fn mmio_read(
         &mut self,
-        window: crate::iodev::device_api::WindowId,
-        at: crate::iodev::device_api::WindowOffset,
+        window: crate::api::WindowId,
+        at: crate::api::WindowOffset,
         len: u32,
         data: &mut [u8],
-        _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        _ctx: &mut crate::api::DeviceCtx<'_>,
     ) {
         match VgaWindow::from_id(window) {
             Some(VgaWindow::Legacy) => self.legacy_read(at, len, data),
@@ -3230,11 +3238,11 @@ impl crate::iodev::device_api::MmioDevice for VgaCore {
 
     fn mmio_write(
         &mut self,
-        window: crate::iodev::device_api::WindowId,
-        at: crate::iodev::device_api::WindowOffset,
+        window: crate::api::WindowId,
+        at: crate::api::WindowOffset,
         len: u32,
         data: &[u8],
-        _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        _ctx: &mut crate::api::DeviceCtx<'_>,
     ) {
         match VgaWindow::from_id(window) {
             Some(VgaWindow::Legacy) => self.legacy_write(at, len, data),
@@ -3936,7 +3944,7 @@ fn vga_mem_write_byte(vga: &mut VgaCore, addr: BxPhyAddress, value: u8) {
 /// Result of a PCI config write: which BAR (if any) queued a new base for
 /// transactional memory-handler relocation.
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct VgaBarChange {
+pub struct VgaBarChange {
     pub lfb: bool,
     pub mmio: bool,
 }
@@ -3968,7 +3976,7 @@ fn invalid_vga_snapshot(message: &'static str) -> SnapError {
 fn snapshot_v3_usize_len(len: usize) -> SnapResult<u64> {
     let len = u64::try_from(len)
         .map_err(|_| invalid_vga_snapshot("VGA buffer length does not fit u64"))?;
-    if len > bounds::MAX_SNAPSHOT_SECTION_LEN {
+    if len > MAX_SECTION_LEN {
         return Err(invalid_vga_snapshot(
             "VGA buffer length exceeds snapshot section bound",
         ));
@@ -4074,9 +4082,9 @@ fn validate_vga_snapshot_bar_base(base: u32, span: u32) -> SnapResult<()> {
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
-    use crate::snapshot::{SnapError, SnapshotReader};
-    use crate::iodev::device_api::WindowOffset;
-    use crate::iodev::display_sink::Redraw;
+    use rusty_box_core::snap::SnapError;
+    use crate::api::WindowOffset;
+    use crate::display::sink::Redraw;
 
     /// Records what a front end would receive, so a test asserts the frame that
     /// reaches a display rather than an intermediate value on the way there.
@@ -4137,14 +4145,14 @@ mod tests {
 
     /// Draw one frame and report everything the front end saw.
     fn draw(vga: &mut VgaCard<StdVga>) -> RecordingSink {
-        draw_with(vga, crate::iodev::vga_card::Dirt::SelfTracked)
+        draw_with(vga, crate::display::card::Dirt::SelfTracked)
     }
 
     /// Draw one frame with a stated source of dirtiness — the hypervisor case,
     /// where the device observed none of the guest's writes.
     fn draw_with(
         vga: &mut VgaCard<StdVga>,
-        dirt: crate::iodev::vga_card::Dirt<'_>,
+        dirt: crate::display::card::Dirt<'_>,
     ) -> RecordingSink {
         let mut sink = RecordingSink::default();
         vga.refresh(&mut sink, dirt);
@@ -4203,13 +4211,13 @@ mod tests {
     /// tries, it is told — never silently truncated.
     #[test]
     fn a_card_that_declares_too_many_windows_is_refused() {
-        use crate::iodev::device_api::{Declared, WindowDecl, WindowDecls, MAX_DEVICE_WINDOWS};
+        use crate::api::{Declared, WindowDecl, WindowDecls, MAX_DEVICE_WINDOWS};
 
         let mut decls = WindowDecls::new();
         for index in 0..MAX_DEVICE_WINDOWS {
             assert_eq!(
                 decls.push(WindowDecl {
-                    id: crate::iodev::device_api::WindowId(index as u8),
+                    id: crate::api::WindowId(index as u8),
                     base: 0,
                     end: 0,
                 }),
@@ -4218,7 +4226,7 @@ mod tests {
         }
         assert_eq!(
             decls.push(WindowDecl {
-                id: crate::iodev::device_api::WindowId(9),
+                id: crate::api::WindowId(9),
                 base: 0,
                 end: 0,
             }),
@@ -4231,7 +4239,7 @@ mod tests {
     /// byte at a time, falling through to the core when it declines. Poking
     /// `core.legacy_write` instead would skip whichever half owns the mode.
     fn write_vram(vga: &mut VgaCard<StdVga>, window: VgaWindow, offset: u64, bytes: &[u8]) {
-        use crate::iodev::vga_card::{MemCtx, VgaExtension, Written};
+        use crate::display::card::{MemCtx, VgaExtension, Written};
         for (i, &byte) in bytes.iter().enumerate() {
             let at = offset + i as u64;
             let mut cx = MemCtx::new(&mut vga.core, window, WindowOffset(at));
@@ -4243,7 +4251,7 @@ mod tests {
 
     /// The read half of [`write_vram`].
     fn read_vram(vga: &mut VgaCard<StdVga>, window: VgaWindow, offset: u64, out: &mut [u8]) {
-        use crate::iodev::vga_card::{MemCtx, VgaExtension};
+        use crate::display::card::{MemCtx, VgaExtension};
         for (i, slot) in out.iter_mut().enumerate() {
             let at = offset + i as u64;
             let mut cx = MemCtx::new(&mut vga.core, window, WindowOffset(at));
@@ -4253,16 +4261,16 @@ mod tests {
             };
         }
     }
-    use crate::iodev::pci::PciDevice;
+    use crate::pci::PciDevice;
     #[cfg(feature = "std")]
-    use crate::snapshot::SnapshotSection;
+    use rusty_box_core::snap::SnapshotSection;
     #[cfg(feature = "std")]
 
 
     /// Program one DISPI register the way a guest does — through the port hook
     /// the card claims, not by poking its state.
     fn write_vbe(vga: &mut VgaCard<StdVga>, index: u16, value: u16) {
-        use crate::iodev::vga_card::{PortCtx, VgaExtension};
+        use crate::display::card::{PortCtx, VgaExtension};
         for (port, value) in [
             (VBE_DISPI_IOPORT_INDEX, u32::from(index)),
             (VBE_DISPI_IOPORT_DATA, u32::from(value)),
@@ -4382,7 +4390,7 @@ mod tests {
     /// guest wrote, at the grid the CRTC describes — not a fixed 80x25 one.
     #[test]
     fn the_display_role_reads_the_guest_text_plane() {
-        use crate::emulator::{DisplaySource, TextPos};
+        use crate::display::{DisplaySource, TextPos};
 
         let mut vga = text_mode_vga(80, 8, 400);
         // "OK" at row 2, column 4 of the displayed page, char/attribute pairs.
@@ -4398,14 +4406,14 @@ mod tests {
         assert_eq!(vga.text_char(TextPos::new(2, 4)), 'O');
         assert_eq!(vga.text_char(TextPos::new(2, 5)), 'K');
         assert_eq!(vga.text_char(TextPos::new(2, 6)), ' ');
-        assert_eq!(vga.resolution(), crate::emulator::Resolution::new(720, 400));
+        assert_eq!(vga.resolution(), crate::display::Resolution::new(720, 400));
     }
 
     /// The cursor's cell is reported in grid coordinates, which is what a
     /// caller reading the screen can act on.
     #[test]
     fn the_display_role_reports_the_cursor_cell() {
-        use crate::emulator::{DisplaySource, TextPos};
+        use crate::display::{DisplaySource, TextPos};
 
         let mut vga = text_mode_vga(80, 8, 400);
         let cell = 30u16 * 80 + 7;
@@ -4884,7 +4892,7 @@ mod tests {
         let bitmap = [1u64];
         let sink = draw_with(
             &mut vga,
-            crate::iodev::vga_card::Dirt::Pages {
+            crate::display::card::Dirt::Pages {
                 bitmap: &bitmap,
                 page_size: 4096,
             },
@@ -4901,7 +4909,7 @@ mod tests {
         assert!(
             draw_with(
                 &mut vga,
-                crate::iodev::vga_card::Dirt::Pages {
+                crate::display::card::Dirt::Pages {
                     bitmap: &clean,
                     page_size: 4096,
                 },
@@ -5343,9 +5351,13 @@ mod tests {
         restored.core.last_bpp = 1;
         restored.core.vga_tile_updated.fill(false);
 
-        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        let mut reader: &[u8] = saved.as_slice();
         let target = restored.restore(&mut reader).unwrap();
-        reader.finish_exact().unwrap();
+        assert!(
+            reader.is_empty(),
+            "the card consumed its whole section, exactly — the container asserts \
+             this too, but only a device knows what its own body should span"
+        );
 
         assert_eq!(
             restored.snapshot_v3_committed_mapping_target(),
@@ -5408,7 +5420,7 @@ mod tests {
         saved[88..92].copy_from_slice(&257u32.to_le_bytes());
 
         let mut restored = card();
-        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        let mut reader: &[u8] = saved.as_slice();
         let error = restored.restore(&mut reader).unwrap_err();
         assert!(
             matches!(error, SnapError::Invalid(_)),
@@ -5429,12 +5441,12 @@ mod tests {
 /// vertical-retrace timer is machine-owned and re-armed at the scheduler
 /// boundary from the CRTC timing, so the only capability this device takes
 /// from its context is the clock the retrace phase is measured against.
-impl crate::iodev::device_api::PioDevice for VgaCore {
+impl crate::api::PioDevice for VgaCore {
     fn pio_read(
         &mut self,
         port: u16,
-        len: crate::iodev::device_api::IoLen,
-        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        len: crate::api::IoLen,
+        ctx: &mut crate::api::DeviceCtx<'_>,
     ) -> u32 {
         self.read_port(port, len.bytes(), ctx.now_ticks)
     }
@@ -5443,8 +5455,8 @@ impl crate::iodev::device_api::PioDevice for VgaCore {
         &mut self,
         port: u16,
         value: u32,
-        len: crate::iodev::device_api::IoLen,
-        _ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        len: crate::api::IoLen,
+        _ctx: &mut crate::api::DeviceCtx<'_>,
     ) {
         self.write_port(port, value, len.bytes());
     }
@@ -5455,19 +5467,19 @@ impl crate::iodev::device_api::PioDevice for VgaCore {
 /// Bochs's `get_text_snapshot` hands the GUI the live text plane and the same
 /// grid the renderer used; this reports the same thing one cell at a time so a
 /// no-alloc caller can read a screen without a buffer.
-impl crate::emulator::DisplaySource for VgaCore {
-    fn resolution(&self) -> crate::emulator::Resolution {
+impl crate::display::DisplaySource for VgaCore {
+    fn resolution(&self) -> crate::display::Resolution {
         if let Some(geometry) = self.text_geometry() {
-            return crate::emulator::Resolution::new(
+            return crate::display::Resolution::new(
                 geometry.pixel_width,
                 geometry.pixel_height,
             );
         }
         let (width, height) = self.determine_screen_dimensions();
-        crate::emulator::Resolution::new(width, height)
+        crate::display::Resolution::new(width, height)
     }
 
-    fn text_grid(&self) -> Option<crate::emulator::TextGrid> {
+    fn text_grid(&self) -> Option<crate::display::TextGrid> {
         let geometry = self.text_geometry()?;
         let cursor = if geometry.cursor_address == VgaTextGeometry::CURSOR_OFF
             || geometry.line_offset == 0
@@ -5475,19 +5487,19 @@ impl crate::emulator::DisplaySource for VgaCore {
             None
         } else {
             let from_start = geometry.cursor_address.saturating_sub(geometry.start_address);
-            Some(crate::emulator::TextPos::new(
+            Some(crate::display::TextPos::new(
                 usize::from(from_start / geometry.line_offset),
                 usize::from((from_start % geometry.line_offset) / BYTES_PER_CHAR as u16),
             ))
         };
-        Some(crate::emulator::TextGrid {
+        Some(crate::display::TextGrid {
             rows: geometry.rows,
             cols: geometry.cols,
             cursor,
         })
     }
 
-    fn text_char(&self, pos: crate::emulator::TextPos) -> char {
+    fn text_char(&self, pos: crate::display::TextPos) -> char {
         let Some(geometry) = self.text_geometry() else {
             return ' ';
         };
@@ -5506,7 +5518,7 @@ impl VgaCard<StdVga> {
     /// Rebuilds parsed VGA state and invalidates all GUI-facing caches after a
     /// successful whole-machine snapshot restore.
     #[cfg(feature = "std")]
-    pub(crate) fn rebuild_snapshot_v3_derived_state(&mut self) -> SnapResult<()> {
+    pub fn rebuild_snapshot_v3_derived_state(&mut self) -> SnapResult<()> {
         self.ext.validate_vbe_snapshot_state(&VgaSnapshotVbeState::from(&self.ext.vbe))?;
         self.validate_snapshot_v3_cache_topology()?;
 
@@ -5580,7 +5592,7 @@ impl VgaCard<StdVga> {
                 "live VBE backing storage does not match configured size",
             ));
         }
-        if self.core.pel_data.len() > bounds::MAX_SNAPSHOT_COUNT {
+        if self.core.pel_data.len() > MAX_COUNT {
             return Err(invalid_vga_snapshot("VGA palette exceeds snapshot count bound"));
         }
         Ok(())
@@ -5663,8 +5675,8 @@ impl VgaCard<StdVga> {
 }
 
 #[cfg(feature = "std")]
-impl crate::snapshot::SnapshotSection for VgaCard<StdVga> {
-    const TAG: u32 = crate::snapshot::SEC_VGA;
+impl rusty_box_core::snap::SnapshotSection for VgaCard<StdVga> {
+    const TAG: u32 = SEC_VGA;
     type Restored = VgaSnapshotRestoreTarget;
 
     /// Returns the exact byte length of the standalone VGA v3 section payload.
@@ -5674,7 +5686,7 @@ impl crate::snapshot::SnapshotSection for VgaCard<StdVga> {
         let text_len = snapshot_v3_usize_len(VGA_TEXT_MEM_SIZE)?;
         let planar_len = snapshot_v3_usize_len(VGA_MEM_SIZE)?;
         let pci_len = snapshot_v3_usize_len(self.ext.pci_conf.len())?;
-        let palette_len = checked_snapshot_len_mul(
+        let palette_len = checked_section_len_mul(
             snapshot_v3_usize_len(self.core.pel_data.len())?,
             snapshot_v3_usize_len(usize::from(PEL_CYCLES_PER_COLOR))?,
         )?;
@@ -5684,7 +5696,7 @@ impl crate::snapshot::SnapshotSection for VgaCard<StdVga> {
         // 90 = 84 + feature_control (u8) + y_doublescan (bool)
         //         + charmap_address1/2 (2 x u16). The extracted charmap buffers
         //         are derived from planar memory and re-extracted on restore.
-        let mut len = checked_snapshot_len_add(4, 90)?;
+        let mut len = checked_section_len_add(4, 90)?;
         for array_len in [
             pci_len,
             snapshot_v3_usize_len(self.core.crtc_regs.len())?,
@@ -5696,14 +5708,14 @@ impl crate::snapshot::SnapshotSection for VgaCard<StdVga> {
             snapshot_v3_usize_len(self.core.latch.len())?,
             planar_len,
         ] {
-            len = checked_snapshot_len_add(len, 4)?;
-            len = checked_snapshot_len_add(len, array_len)?;
+            len = checked_section_len_add(len, 4)?;
+            len = checked_section_len_add(len, array_len)?;
         }
 
         // VBE backing storage is configured, not guest-sized, but its length is
         // encoded as u64 to prevent a format-dependent host-size conversion.
-        len = checked_snapshot_len_add(len, 8)?;
-        checked_snapshot_len_add(len, vbe_len)
+        len = checked_section_len_add(len, 8)?;
+        checked_section_len_add(len, vbe_len)
     }
 
     /// Streams the complete standalone VGA v3 section, including its version.
@@ -5713,7 +5725,7 @@ impl crate::snapshot::SnapshotSection for VgaCard<StdVga> {
     fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.validate_snapshot_v3_source()?;
 
-        writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+        writer.write_u32(SECTION_VERSION)?;
         writer.write_u8(self.core.crtc_index)?;
         writer.write_u8(self.core.attr_index)?;
         writer.write_bool(self.core.attr_flip_flop)?;
@@ -5787,7 +5799,7 @@ impl crate::snapshot::SnapshotSection for VgaCard<StdVga> {
         write_snapshot_u32_len(writer, self.core.text_memory.len())?;
         writer.write_bytes(&self.core.text_memory)?;
 
-        let palette_len = checked_snapshot_len_mul(
+        let palette_len = checked_section_len_mul(
             snapshot_v3_usize_len(self.core.pel_data.len())?,
             snapshot_v3_usize_len(usize::from(PEL_CYCLES_PER_COLOR))?,
         )?;
@@ -5816,7 +5828,7 @@ impl crate::snapshot::SnapshotSection for VgaCard<StdVga> {
         &mut self,
         reader: &mut R,
     ) -> SnapResult<VgaSnapshotRestoreTarget> {
-        if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
+        if reader.read_u32()? != SECTION_VERSION {
             return Err(invalid_vga_snapshot("unsupported VGA snapshot section version"));
         }
 
@@ -6092,7 +6104,7 @@ impl StdVga {
     /// Matches Bochs `bx_vga_c::vbe_mmio_read_handler`.
     pub(crate) fn vbe_mmio_read(
         &mut self,
-        at: crate::iodev::device_api::WindowOffset,
+        at: crate::api::WindowOffset,
         len: u32,
         data: &mut [u8],
     ) {
@@ -6132,7 +6144,7 @@ impl StdVga {
     /// Matches Bochs `bx_vga_c::vbe_mmio_write_handler`.
     pub(crate) fn vbe_mmio_write(
         &mut self, core: &mut VgaCore,
-        at: crate::iodev::device_api::WindowOffset,
+        at: crate::api::WindowOffset,
         len: u32,
         data: &[u8],
     ) {
@@ -6593,7 +6605,7 @@ impl StdVga {
     fn refresh_vbe_graphics<S: DisplaySink>(
         &mut self, core: &mut VgaCore,
         sink: &mut S,
-        dirt: crate::iodev::vga_card::Dirt<'_>,
+        dirt: crate::display::card::Dirt<'_>,
     ) -> Refreshed {
         if self.vbe.enabled == 0 {
             return Refreshed::Unchanged;
@@ -6654,7 +6666,7 @@ impl StdVga {
                     .get(tile_index)
                     .copied()
                     .unwrap_or(false);
-                let page_tracked = !matches!(dirt, crate::iodev::vga_card::Dirt::SelfTracked)
+                let page_tracked = !matches!(dirt, crate::display::card::Dirt::SelfTracked)
                     && (0..tile_height).any(|r| {
                         let row = u64::from(self.vbe.virtual_start.wrapping_add((yc + r) * pitch))
                             & u64::from(vbe_mem_mask);
@@ -6772,7 +6784,7 @@ impl StdVga {
     }
 
     /// Whether the VGA is registered as a PCI device.
-    pub(crate) fn pci_enabled(&self) -> bool {
+    pub fn pci_enabled(&self) -> bool {
         self.pci_enabled
     }
 
@@ -6853,8 +6865,8 @@ impl StdVga {
     }
 }
 
-impl crate::iodev::pci::PciDevice for StdVga {
-    const DEVFUNC: u8 = crate::iodev::pci::pci_device(2, 0);
+impl crate::pci::PciDevice for StdVga {
+    const DEVFUNC: u8 = crate::pci::pci_device(2, 0);
     type WriteEffects = VgaBarChange;
 
     /// Read the PCI config space. Reads back `0xFFFFFFFF` (no device) when PCI is
