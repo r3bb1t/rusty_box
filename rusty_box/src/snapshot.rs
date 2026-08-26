@@ -659,7 +659,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             <crate::iodev::serial::BxSerialC as SnapshotSection>::TAG,
             <crate::iodev::harddrv::BxHardDriveC as SnapshotSection>::TAG,
             <crate::iodev::acpi::BxAcpiCtrl as SnapshotSection>::TAG,
-            <crate::iodev::vga::VgaCore as SnapshotSection>::TAG,
+            <crate::iodev::vga_card::VgaCard<crate::iodev::vga_card::StdVga> as SnapshotSection>::TAG,
             <crate::iodev::ioapic::BxIoApic as SnapshotSection>::TAG,
             <crate::iodev::hpet::BxHpetC as SnapshotSection>::TAG,
         ];

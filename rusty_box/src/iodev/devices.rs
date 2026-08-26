@@ -387,7 +387,7 @@ impl DeviceManager {
             keyboard: BxKeyboardC::new(),
             hpet: super::hpet::BxHpetC::new(),
             ide: super::ide::IdeSubsystem::new(),
-            vga: VgaCard::with_extension(StdVga),
+            vga: VgaCard::with_extension(StdVga::new()),
             ioapic: BxIoApic::new(),
             acpi: BxAcpiCtrl::new(),
             pci_bridge: BxPciBridge::new(),

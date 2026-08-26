@@ -600,7 +600,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
         self.device_manager.serial.after_restore_snapshot_v3()?;
         self.device_manager
             .vga
-            .core_mut()
             .rebuild_snapshot_v3_derived_state()?;
         self.validate_restored_irq_levels(&keyboard, &cmos, sci_level)?;
         self.sync_restored_event_levels();

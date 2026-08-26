@@ -76,6 +76,10 @@ impl Dirt<'_> {
     /// clean tile bitmap would never look at a page bitmap at all, which is
     /// the retrofit hazard in miniature. `SelfTracked` reports nothing because
     /// the device's own bitmap already is the answer.
+    #[cfg_attr(
+        not(feature = "alloc"),
+        allow(dead_code, reason = "consulted by the framebuffer frame, which needs an allocator")
+    )]
     pub(crate) fn reports_nothing(&self) -> bool {
         match self {
             Self::SelfTracked => true,
@@ -196,6 +200,47 @@ impl<'a, S: DisplaySink> RefreshCtx<'a, S> {
     }
 }
 
+/// A port access the extension is offered before the core sees it.
+pub struct PortCtx<'a> {
+    core: &'a mut VgaCore,
+    port: u16,
+    len: u8,
+}
+
+impl<'a> PortCtx<'a> {
+    pub(crate) fn new(core: &'a mut VgaCore, port: u16, len: u8) -> Self {
+        Self { core, port, len }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Access width in bytes, as the guest issued it.
+    pub fn width(&self) -> u8 {
+        self.len
+    }
+
+    pub fn core(&mut self) -> &mut VgaCore {
+        self.core
+    }
+}
+
+/// The core, for a hook that only reads it.
+pub struct CoreRef<'a> {
+    core: &'a VgaCore,
+}
+
+impl<'a> CoreRef<'a> {
+    pub(crate) fn new(core: &'a VgaCore) -> Self {
+        Self { core }
+    }
+
+    pub fn core(&self) -> &VgaCore {
+        self.core
+    }
+}
+
 /// A vertical retrace the extension is offered.
 pub struct TimingCtx<'a> {
     core: &'a mut VgaCore,
@@ -217,6 +262,35 @@ impl<'a> TimingCtx<'a> {
     /// belongs to its own unit.
     pub fn icount(&self) -> u64 {
         self.icount
+    }
+}
+
+/// Initialisation, where a card registers windows and ports of its own.
+pub struct InitCtx<'a> {
+    core: &'a mut VgaCore,
+    io: &'a mut super::BxDevicesC,
+    mem: &'a mut crate::memory::BxMemC,
+}
+
+impl<'a> InitCtx<'a> {
+    pub(crate) fn new(
+        core: &'a mut VgaCore,
+        io: &'a mut super::BxDevicesC,
+        mem: &'a mut crate::memory::BxMemC,
+    ) -> Self {
+        Self { core, io, mem }
+    }
+
+    pub fn core(&mut self) -> &mut VgaCore {
+        self.core
+    }
+
+    pub fn io(&mut self) -> &mut super::BxDevicesC {
+        self.io
+    }
+
+    pub fn memory(&mut self) -> &mut crate::memory::BxMemC {
+        self.mem
     }
 }
 
@@ -244,8 +318,19 @@ pub trait VgaExtension {
     /// allocates it once from this size — upstream inverts that, letting each
     /// subclass allocate into the base's pointer, which is where its
     /// double-free class of bug lives.
-    fn vga_vram_bytes(&self) -> usize {
-        VgaCore::LEGACY_VRAM_BYTES
+    fn vga_vram_bytes(&self) -> u32 {
+        VgaCore::LEGACY_VRAM_BYTES as u32
+    }
+
+    /// The largest picture this card can ever display, in pixels.
+    ///
+    /// Asked before the core is built, because the core sizes its dirty-tile
+    /// grid for it and the stride is baked into every tile index. Bochs
+    /// `bx_vgacore_c::init` likewise reads the `s.max_xres`/`max_yres` its
+    /// derived class has already set. A card with no extended modes never
+    /// exceeds the standard VGA's own maximum.
+    fn vga_max_resolution(&self) -> (u32, u32) {
+        (VgaCore::LEGACY_MAX_XRES, VgaCore::LEGACY_MAX_YRES)
     }
 
     /// Offered a read before the core serves it. `None` falls through.
@@ -268,6 +353,56 @@ pub trait VgaExtension {
         None
     }
 
+    /// Offered a whole register-window access before the core serves it.
+    ///
+    /// The width-aware family, mirroring upstream's `*_mmio_read_handler`
+    /// against its per-byte `mem_read`: a register block decodes an address to
+    /// a register and formats the result to the access width, so it is never
+    /// split into bytes. A card's own BAR window is claimed here.
+    fn vga_regs_read(&mut self, cx: &mut MemCtx<'_>, len: u32, data: &mut [u8]) -> Written {
+        let _ = (cx, len, data);
+        Written::FallThrough
+    }
+
+    /// The write half of [`Self::vga_regs_read`].
+    fn vga_regs_write(&mut self, cx: &mut MemCtx<'_>, len: u32, data: &[u8]) -> Written {
+        let _ = (cx, len, data);
+        Written::FallThrough
+    }
+
+    /// Offered a port read before the core serves it. `None` falls through.
+    ///
+    /// Ports are a different bus from memory: the Bochs VBE index and data
+    /// registers live at `0x01CE`/`0x01CF`, which the core knows nothing about.
+    fn vga_pio_read(&mut self, cx: &mut PortCtx<'_>) -> Option<u32> {
+        let _ = cx;
+        None
+    }
+
+    /// Offered a port write before the core performs it.
+    fn vga_pio_write(&mut self, cx: &mut PortCtx<'_>, value: u32) -> Written {
+        let _ = (cx, value);
+        Written::FallThrough
+    }
+
+    /// Offered the displayed picture size before the core reports the CRTC's.
+    ///
+    /// A card driving its own scanout is the authority on its geometry; Bochs
+    /// `bx_vga_c` answers from the VBE registers whenever the extension is
+    /// enabled and from the CRTC otherwise.
+    fn vga_resolution(&self, cx: &CoreRef<'_>) -> Option<crate::emulator::Resolution> {
+        let _ = cx;
+        None
+    }
+
+    /// Register whatever the card owns that the core does not — Bochs
+    /// `bx_vgacore_c::init` calls `init_vga_extension()` for exactly this, and
+    /// a linear framebuffer is the card's window, at the card's base.
+    fn vga_init(&mut self, cx: &mut InitCtx<'_>) -> crate::Result<()> {
+        let _ = cx;
+        Ok(())
+    }
+
     /// Offered each vertical retrace, after the core has latched its own frame
     /// state.
     fn vga_vertical_timer(&mut self, cx: &mut TimingCtx<'_>) {
@@ -278,19 +413,25 @@ pub trait VgaExtension {
     fn vga_reset(&mut self, cx: &mut ResetCtx<'_>) {
         let _ = cx;
     }
+
+    /// Adopt the mode the machine prefers, if the card can express it.
+    ///
+    /// Bochs vga.cc raises the DISPI capability registers to cover a configured
+    /// mode, so a guest querying the maximum sees one large enough to ask for
+    /// it. A card with no mode registers has nothing to raise.
+    fn vga_apply_preferred_mode(&mut self, cx: &mut ResetCtx<'_>) {
+        let _ = cx;
+    }
 }
 
 /// A plain VGA with the Bochs VBE extension — Bochs `bx_vga_c`.
 ///
-/// Every hook falls through today because the VBE state still lives in the
-/// core, where this port's merged `BxVgaC` kept it. Moving it here is the next
-/// step of this unit and is what makes the name true; until then this is the
-/// card identity the machine names, and the composition it names it through is
-/// already the final one.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct StdVga;
-
-impl VgaExtension for StdVga {}
+/// Defined beside the VGA core rather than here: the DISPI register file and
+/// the PCI config space are ~900 lines that read core registers on nearly every
+/// path, and keeping them in one module lets that stay ordinary field access
+/// instead of a widened visibility. The *type* split — what a machine and a
+/// foreign card see — is complete either way.
+pub use super::vga::StdVga;
 
 #[cfg(test)]
 mod tests {
@@ -365,17 +506,20 @@ mod tests {
 /// both `bx_vgacore_c` subclasses upstream.
 #[derive(Debug, Default)]
 pub struct VgaCard<E: VgaExtension = StdVga> {
-    core: VgaCore,
-    ext: E,
+    /// Crate-visible because the v3 snapshot section, which describes the whole
+    /// card, is written beside the state it serialises.
+    pub(crate) core: VgaCore,
+    pub(crate) ext: E,
 }
 
 impl<E: VgaExtension> VgaCard<E> {
     /// Build a card around a given extension.
     pub(crate) fn with_extension(ext: E) -> Self {
-        Self {
-            core: VgaCore::new(),
-            ext,
-        }
+        let mut core = VgaCore::new();
+        let (max_xres, max_yres) = ext.vga_max_resolution();
+        core.size_tile_grid_for(max_xres, max_yres);
+        core.size_vram(ext.vga_vram_bytes());
+        Self { core, ext }
     }
 
     /// The standard VGA underneath.
@@ -391,9 +535,6 @@ impl<E: VgaExtension> VgaCard<E> {
         not(feature = "alloc"),
         allow(dead_code, reason = "consulted by the snapshot rebuild, which needs std")
     )]
-    pub(crate) fn core_mut(&mut self) -> &mut VgaCore {
-        &mut self.core
-    }
 
     /// Draw one frame — the core's pump, with the extension offered it first.
     ///
@@ -405,17 +546,29 @@ impl<E: VgaExtension> VgaCard<E> {
         allow(dead_code, reason = "called by the front ends, which need an allocator")
     )]
     pub(crate) fn refresh<S: DisplaySink>(&mut self, sink: &mut S, dirt: Dirt<'_>) -> Refreshed {
+        // Owed to the front end whichever half draws the pixels, so it happens
+        // before the extension is offered the frame at all.
+        self.core.drain_frame_preamble(sink);
+
         let mut cx = RefreshCtx::new(&mut self.core, sink, dirt);
-        if let Some(drawn) = self.ext.vga_refresh(&mut cx) {
-            return drawn;
-        }
-        self.core.refresh(sink, dirt)
+        let drawn = match self.ext.vga_refresh(&mut cx) {
+            Some(drawn) => drawn,
+            None => self.core.refresh(sink),
+        };
+        sink.flush();
+        drawn
     }
 
     /// Reset the card — core first, exactly as a C++ destructor-ordered base
     /// call would, then the extension over the state that leaves.
     pub(crate) fn reset(&mut self) {
         self.core.reset();
+        // The core's reset rebuilds it from scratch, including a dirty-tile grid
+        // sized for a plain VGA. The grid follows the card's largest mode, so it
+        // is re-sized here for the same reason it is sized at construction.
+        let (max_xres, max_yres) = self.ext.vga_max_resolution();
+        self.core.size_tile_grid_for(max_xres, max_yres);
+        self.core.size_vram(self.ext.vga_vram_bytes());
         self.ext.vga_reset(&mut ResetCtx::new(&mut self.core));
     }
 
@@ -442,11 +595,13 @@ impl<E: VgaExtension> VgaCard<E> {
         io: &mut super::BxDevicesC,
         mem: &mut crate::memory::BxMemC,
     ) -> crate::Result<()> {
-        self.core.init(io, mem)
+        self.core.init(io, mem)?;
+        self.ext.vga_init(&mut InitCtx::new(&mut self.core, io, mem))
     }
 
     pub(crate) fn set_preferred_mode(&mut self, xres: u16, yres: u16, bpp: u16) {
         self.core.set_preferred_mode(xres, yres, bpp);
+        self.ext.vga_apply_preferred_mode(&mut ResetCtx::new(&mut self.core));
     }
 
     pub(crate) fn set_icount_sync(&mut self, ips: u64) {
@@ -473,29 +628,11 @@ impl<E: VgaExtension> VgaCard<E> {
         self.core.vertical_period_usec()
     }
 
-    pub(crate) fn enable_pci(&mut self) {
-        self.core.enable_pci();
-    }
 
-    pub(crate) fn lfb_size(&self) -> u32 {
-        self.core.lfb_size()
-    }
 
-    pub(crate) fn peek_pending_lfb_relocate(&self) -> Option<(u32, u32)> {
-        self.core.peek_pending_lfb_relocate()
-    }
 
-    pub(crate) fn commit_pending_lfb_relocate(&mut self) -> Option<(u32, u32)> {
-        self.core.commit_pending_lfb_relocate()
-    }
 
-    pub(crate) fn peek_pending_mmio_relocate(&self) -> Option<(u32, u32)> {
-        self.core.peek_pending_mmio_relocate()
-    }
 
-    pub(crate) fn commit_pending_mmio_relocate(&mut self) -> Option<(u32, u32)> {
-        self.core.commit_pending_mmio_relocate()
-    }
 
     #[cfg_attr(
         not(feature = "alloc"),
@@ -515,25 +652,8 @@ impl<E: VgaExtension> VgaCard<E> {
         self.core.scan_all_text_memory()
     }
 
-    #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_mapping_target(&self) -> super::vga::VgaSnapshotRestoreTarget {
-        self.core.snapshot_v3_mapping_target()
-    }
 
-    #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_committed_mapping_target(
-        &self,
-    ) -> super::vga::VgaSnapshotRestoreTarget {
-        self.core.snapshot_v3_committed_mapping_target()
-    }
 
-    #[cfg(feature = "std")]
-    pub(crate) fn commit_snapshot_v3_mapping_target(
-        &mut self,
-        target: super::vga::VgaSnapshotRestoreTarget,
-    ) {
-        self.core.commit_snapshot_v3_mapping_target(target);
-    }
 }
 
 impl<E: VgaExtension> super::device_api::PioDevice for VgaCard<E> {
@@ -543,6 +663,10 @@ impl<E: VgaExtension> super::device_api::PioDevice for VgaCard<E> {
         len: super::device_api::IoLen,
         ctx: &mut super::device_api::DeviceCtx<'_>,
     ) -> u32 {
+        let mut offered = PortCtx::new(&mut self.core, port, len.bytes());
+        if let Some(value) = self.ext.vga_pio_read(&mut offered) {
+            return value;
+        }
         super::device_api::PioDevice::pio_read(&mut self.core, port, len, ctx)
     }
 
@@ -553,6 +677,10 @@ impl<E: VgaExtension> super::device_api::PioDevice for VgaCard<E> {
         len: super::device_api::IoLen,
         ctx: &mut super::device_api::DeviceCtx<'_>,
     ) {
+        let mut offered = PortCtx::new(&mut self.core, port, len.bytes());
+        if self.ext.vga_pio_write(&mut offered, value) == Written::Done {
+            return;
+        }
         super::device_api::PioDevice::pio_write(&mut self.core, port, value, len, ctx);
     }
 }
@@ -593,13 +721,16 @@ impl<E: VgaExtension> super::device_api::MmioDevice for VgaCard<E> {
                     };
                 }
             }
-            _ => super::device_api::MmioDevice::mmio_read(
-                &mut self.core,
-                window,
-                at,
-                len,
-                data,
-                ctx,
+            Some(vga_window) => {
+                let mut offered = MemCtx::new(&mut self.core, vga_window, at);
+                if self.ext.vga_regs_read(&mut offered, len, data) == Written::FallThrough {
+                    super::device_api::MmioDevice::mmio_read(
+                        &mut self.core, window, at, len, data, ctx,
+                    );
+                }
+            }
+            None => super::device_api::MmioDevice::mmio_read(
+                &mut self.core, window, at, len, data, ctx,
             ),
         }
     }
@@ -623,13 +754,16 @@ impl<E: VgaExtension> super::device_api::MmioDevice for VgaCard<E> {
                     }
                 }
             }
-            _ => super::device_api::MmioDevice::mmio_write(
-                &mut self.core,
-                window,
-                at,
-                len,
-                data,
-                ctx,
+            Some(vga_window) => {
+                let mut offered = MemCtx::new(&mut self.core, vga_window, at);
+                if self.ext.vga_regs_write(&mut offered, len, data) == Written::FallThrough {
+                    super::device_api::MmioDevice::mmio_write(
+                        &mut self.core, window, at, len, data, ctx,
+                    );
+                }
+            }
+            None => super::device_api::MmioDevice::mmio_write(
+                &mut self.core, window, at, len, data, ctx,
             ),
         }
     }
@@ -637,7 +771,9 @@ impl<E: VgaExtension> super::device_api::MmioDevice for VgaCard<E> {
 
 impl<E: VgaExtension> crate::emulator::DisplaySource for VgaCard<E> {
     fn resolution(&self) -> crate::emulator::Resolution {
-        self.core.resolution()
+        self.ext
+            .vga_resolution(&CoreRef::new(&self.core))
+            .unwrap_or_else(|| self.core.resolution())
     }
 
     fn text_grid(&self) -> Option<crate::emulator::TextGrid> {
@@ -649,36 +785,65 @@ impl<E: VgaExtension> crate::emulator::DisplaySource for VgaCard<E> {
     }
 }
 
-impl<E: VgaExtension> super::pci::PciDevice for VgaCard<E> {
-    const DEVFUNC: u8 = <VgaCore as super::pci::PciDevice>::DEVFUNC;
-    type WriteEffects = <VgaCore as super::pci::PciDevice>::WriteEffects;
+impl super::pci::PciDevice for VgaCard<StdVga> {
+    const DEVFUNC: u8 = <StdVga as super::pci::PciDevice>::DEVFUNC;
+    type WriteEffects = <StdVga as super::pci::PciDevice>::WriteEffects;
 
     fn pci_read(&self, address: u8, io_len: u8) -> u32 {
-        self.core.pci_read(address, io_len)
+        self.ext.pci_read(address, io_len)
     }
 
     fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> Self::WriteEffects {
-        self.core.pci_write(address, value, io_len)
+        self.ext.pci_write(address, value, io_len)
     }
 }
 
-#[cfg(feature = "std")]
-impl<E: VgaExtension> crate::snapshot::SnapshotSection for VgaCard<E> {
-    const TAG: u32 = <VgaCore as crate::snapshot::SnapshotSection>::TAG;
-    type Restored = <VgaCore as crate::snapshot::SnapshotSection>::Restored;
 
-    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
-        self.core.snapshot_v3_len()
+/// The PCI/BAR surface, which belongs to the card that has one. A machine
+/// holding a different card reaches its own; there is no generic answer,
+/// because upstream gives each card its own config space.
+impl VgaCard<StdVga> {
+    pub(crate) fn enable_pci(&mut self) {
+        self.ext.enable_pci();
     }
 
-    fn save_snapshot_v3<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        self.core.save_snapshot_v3(writer)
+    pub(crate) fn lfb_size(&self) -> u32 {
+        self.ext.lfb_size()
     }
 
-    fn restore_snapshot_v3<R: std::io::Read>(
+    pub(crate) fn peek_pending_lfb_relocate(&self) -> Option<(u32, u32)> {
+        self.ext.peek_pending_lfb_relocate()
+    }
+
+    pub(crate) fn commit_pending_lfb_relocate(&mut self) -> Option<(u32, u32)> {
+        self.ext.commit_pending_lfb_relocate()
+    }
+
+    pub(crate) fn peek_pending_mmio_relocate(&self) -> Option<(u32, u32)> {
+        self.ext.peek_pending_mmio_relocate()
+    }
+
+    pub(crate) fn commit_pending_mmio_relocate(&mut self) -> Option<(u32, u32)> {
+        self.ext.commit_pending_mmio_relocate()
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_v3_mapping_target(&self) -> super::vga::VgaSnapshotRestoreTarget {
+        self.ext.snapshot_v3_mapping_target()
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_v3_committed_mapping_target(
+        &self,
+    ) -> super::vga::VgaSnapshotRestoreTarget {
+        self.ext.snapshot_v3_committed_mapping_target()
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn commit_snapshot_v3_mapping_target(
         &mut self,
-        reader: &mut crate::snapshot::SnapshotReader<R>,
-    ) -> std::io::Result<Self::Restored> {
-        self.core.restore_snapshot_v3(reader)
+        target: super::vga::VgaSnapshotRestoreTarget,
+    ) {
+        self.ext.commit_snapshot_v3_mapping_target(target);
     }
 }
