@@ -30,7 +30,7 @@ use crate::iodev::vga_card::VgaCard;
 /// Only the graphics paths place tiles, and they need a buffer to convert into.
 #[cfg(feature = "alloc")]
 use crate::iodev::display_sink::TilePos;
-use crate::{config::BxPhyAddress, memory::BxMemC, Result};
+use crate::config::BxPhyAddress;
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
@@ -38,8 +38,6 @@ use crate::snapshot::{
     SNAPSHOT_SECTION_VERSION,
 };
 
-
-use super::BxDevicesC;
 
 /// VGA text mode information
 #[derive(Debug, Clone)]
@@ -659,16 +657,27 @@ impl crate::iodev::vga_card::VgaExtension for StdVga {
     /// The linear framebuffer is the card's window, at the card's base — Bochs
     /// registers it from `bx_vga_c`, which is what `init_vga_extension()` is
     /// for.
-    fn vga_init(&mut self, cx: &mut crate::iodev::vga_card::InitCtx<'_>) -> crate::Result<()> {
+    fn vga_windows(
+        &self,
+        out: &mut crate::iodev::device_api::WindowDecls,
+    ) -> crate::iodev::device_api::Declared {
+        // Without an allocator there is no framebuffer to answer for — the
+        // DISPI backing store is the one part of this card that needs one — so
+        // the card declares only what it can serve.
         #[cfg(feature = "alloc")]
         {
-            let begin = self.vbe.base_address as BxPhyAddress;
-            let end = begin + self.vbe_memsize as BxPhyAddress - 1;
-            let lfb = crate::iodev::DevSlot::VGA.mmio_window_token(VgaWindow::Lfb.id());
-            cx.memory().register_memory_handlers(lfb, begin, end)?;
+            let base = u64::from(self.vbe.base_address);
+            return out.push(crate::iodev::device_api::WindowDecl {
+                id: VgaWindow::Lfb.id(),
+                base,
+                end: base + u64::from(self.vbe_memsize) - 1,
+            });
         }
-        let _ = cx;
-        Ok(())
+        #[cfg(not(feature = "alloc"))]
+        {
+            let _ = out;
+            crate::iodev::device_api::Declared::Accepted
+        }
     }
 
     /// Bochs `bx_vga_c::reset` runs after `bx_vgacore_c::reset`, keeping the
@@ -1281,55 +1290,59 @@ impl VgaCore {
         vga
     }
 
-    /// Initialize VGA device
-    pub(crate) fn init(&mut self, io: &mut BxDevicesC, mem: &mut BxMemC) -> Result<()> {
-        tracing::debug!("Initializing VGA text mode");
-
-        // Register I/O port handlers
-        use super::DevSlot;
-
-        // All VGA write handlers use mask 0x3 (byte+word) matching Bochs vgacore.cc.
-        // Word writes are split into two byte writes in write_port().
-
-        // Register all VGA ports with DevSlot::VGA
-        let vga_ports: &[(u16, &str)] = &[
-            (VGA_CRTC_INDEX_MONO, "VGA CRTC Index (mono)"),
-            (VGA_CRTC_DATA_MONO, "VGA CRTC Data (mono)"),
-            (VGA_CRTC_INDEX, "VGA CRTC Index"),
-            (VGA_CRTC_DATA, "VGA CRTC Data"),
-            (VGA_STATUS, "VGA Status"),
-            (VGA_STATUS_MONO, "VGA Status (mono)"),
-            (VGA_ATTRIB_ADDR, "VGA Attribute Address"),
-            (VGA_ATTRIB_DATA, "VGA Attribute Data"),
-            (VGA_SEQ_INDEX, "VGA Sequencer Index"),
-            (VGA_SEQ_DATA, "VGA Sequencer Data"),
-            (VGA_GRAPHICS_INDEX, "VGA Graphics Index"),
-            (VGA_GRAPHICS_DATA, "VGA Graphics Data"),
-            (VGA_MISC_OUTPUT, "VGA Misc Output Read"),
-            (VGA_MISC_OUTPUT_WRITE, "VGA Misc Output Write"),
-            (VGA_ENABLE, "VGA Enable"),
-            (VGA_PEL_MASK, "VGA PEL Mask"),
-            (VGA_DAC_STATE, "VGA DAC State"),
-            (VGA_PEL_ADDR_WRITE, "VGA PEL Address Write"),
-            (VGA_PEL_DATA, "VGA PEL Data"),
-            (VBE_DISPI_IOPORT_INDEX, "Bochs VBE Index"),
-            (VBE_DISPI_IOPORT_DATA, "Bochs VBE Data"),
-            (0x3CA, "VGA EGA Compat"),
-            (0x3CB, "VGA EGA Compat"),
-            (0x3CD, "VGA EGA Compat"),
-        ];
-        for &(port, name) in vga_ports {
-            io.register_io_handler(DevSlot::VGA, port, name, 0x3);
+    /// The ports this adapter answers on, as Bochs `bx_vgacore_c::init`
+    /// registers them — byte and word (`mask` 0x3), word writes split into two
+    /// byte writes in `write_port`.
+    ///
+    /// Stated rather than registered: a display model that called the I/O bus
+    /// from its own `init` would need the bus to exist before the model does.
+    pub(crate) const PORTS: &'static [super::device_api::PortDecl] = {
+        use super::device_api::PortDecl;
+        const fn p(port: u16, name: &'static str) -> PortDecl {
+            PortDecl {
+                port,
+                name,
+                widths: 0x3,
+            }
         }
+        &[
+            p(VGA_CRTC_INDEX_MONO, "VGA CRTC Index (mono)"),
+            p(VGA_CRTC_DATA_MONO, "VGA CRTC Data (mono)"),
+            p(VGA_CRTC_INDEX, "VGA CRTC Index"),
+            p(VGA_CRTC_DATA, "VGA CRTC Data"),
+            p(VGA_STATUS, "VGA Status"),
+            p(VGA_STATUS_MONO, "VGA Status (mono)"),
+            p(VGA_ATTRIB_ADDR, "VGA Attribute Address"),
+            p(VGA_ATTRIB_DATA, "VGA Attribute Data"),
+            p(VGA_SEQ_INDEX, "VGA Sequencer Index"),
+            p(VGA_SEQ_DATA, "VGA Sequencer Data"),
+            p(VGA_GRAPHICS_INDEX, "VGA Graphics Index"),
+            p(VGA_GRAPHICS_DATA, "VGA Graphics Data"),
+            p(VGA_MISC_OUTPUT, "VGA Misc Output Read"),
+            p(VGA_MISC_OUTPUT_WRITE, "VGA Misc Output Write"),
+            p(VGA_ENABLE, "VGA Enable"),
+            p(VGA_PEL_MASK, "VGA PEL Mask"),
+            p(VGA_DAC_STATE, "VGA DAC State"),
+            p(VGA_PEL_ADDR_WRITE, "VGA PEL Address Write"),
+            p(VGA_PEL_DATA, "VGA PEL Data"),
+            p(VBE_DISPI_IOPORT_INDEX, "Bochs VBE Index"),
+            p(VBE_DISPI_IOPORT_DATA, "Bochs VBE Data"),
+            p(0x3CA, "VGA EGA Compat"),
+            p(0x3CB, "VGA EGA Compat"),
+            p(0x3CD, "VGA EGA Compat"),
+        ]
+    };
 
-        // Register memory handlers for VGA memory range (0xA0000-0xBFFFF)
-        // This matches DEV_register_memory_handlers in vgacore.cc line 177
-        let legacy = crate::iodev::DevSlot::VGA.mmio_window_token(VgaWindow::Legacy.id());
-        mem.register_memory_handlers(legacy, VGA_WINDOW_GRAPHICS_BASE, VGA_WINDOW_GRAPHICS_END)?;
-
-        tracing::debug!("VGA initialized (80x25 text mode)");
-        Ok(())
+    /// The physical window the core answers on, independent of any card: the
+    /// legacy aperture Bochs registers in `bx_vgacore_c::init`.
+    pub(crate) fn core_window() -> super::device_api::WindowDecl {
+        super::device_api::WindowDecl {
+            id: VgaWindow::Legacy.id(),
+            base: VGA_WINDOW_GRAPHICS_BASE as u64,
+            end: VGA_WINDOW_GRAPHICS_END as u64,
+        }
     }
+
 
     /// Reset the standard VGA — Bochs `bx_vgacore_c::reset`, which the card's
     /// own reset calls before doing its half.
@@ -4141,6 +4154,77 @@ mod tests {
     /// A card, as the machine holds one.
     fn card() -> VgaCard<StdVga> {
         VgaCard::with_extension(StdVga::new())
+    }
+
+    /// A card answers where it says it answers.
+    ///
+    /// The declaration is the only thing the machine maps, so a window the card
+    /// forgets to declare is an aperture the guest writes into with nothing
+    /// behind it — and a mode the card does not support looks exactly the same
+    /// from inside the guest. Both ranges are checked against Bochs: the legacy
+    /// aperture `bx_vgacore_c::init` registers, and the framebuffer
+    /// `bx_vga_c::init_vga_extension` registers at the card's own base.
+    #[test]
+    fn the_windows_a_card_declares_are_the_ones_it_answers_on() {
+        let vga = card();
+        let declared: Vec<_> = vga.windows().unwrap().as_slice().into_iter().collect();
+
+        assert_eq!(
+            declared[0].id,
+            VgaWindow::Legacy.id(),
+            "the core's aperture is declared first, as Bochs registers it first"
+        );
+        assert_eq!((declared[0].base, declared[0].end), (0xA_0000, 0xB_FFFF));
+
+        assert_eq!(declared.len(), 2, "core aperture plus the card's framebuffer");
+        assert_eq!(declared[1].id, VgaWindow::Lfb.id());
+        assert_eq!(
+            declared[1].base,
+            u64::from(vga.ext.vbe.base_address),
+            "the framebuffer window follows the card's base, not a constant"
+        );
+        assert_eq!(
+            declared[1].end - declared[1].base + 1,
+            u64::from(vga.ext.vbe_memsize),
+            "and spans exactly the memory the card reports"
+        );
+
+        // Every declared window is one the card will actually be handed back.
+        for decl in vga.windows().unwrap().as_slice() {
+            assert!(
+                VgaWindow::from_id(decl.id).is_some(),
+                "declared window {:?} is not one this card routes on",
+                decl.id
+            );
+        }
+    }
+
+    /// A card may not declare more windows than the bound allows, and if it
+    /// tries, it is told — never silently truncated.
+    #[test]
+    fn a_card_that_declares_too_many_windows_is_refused() {
+        use crate::iodev::device_api::{Declared, WindowDecl, WindowDecls, MAX_DEVICE_WINDOWS};
+
+        let mut decls = WindowDecls::new();
+        for index in 0..MAX_DEVICE_WINDOWS {
+            assert_eq!(
+                decls.push(WindowDecl {
+                    id: crate::iodev::device_api::WindowId(index as u8),
+                    base: 0,
+                    end: 0,
+                }),
+                Declared::Accepted
+            );
+        }
+        assert_eq!(
+            decls.push(WindowDecl {
+                id: crate::iodev::device_api::WindowId(9),
+                base: 0,
+                end: 0,
+            }),
+            Declared::NoRoom
+        );
+        assert_eq!(decls.as_slice().len(), MAX_DEVICE_WINDOWS);
     }
 
     /// Write video memory the way a guest access does — offered to the card a

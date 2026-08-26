@@ -417,6 +417,32 @@ impl DeviceManager {
     /// 5. VGA (line 254-256)
     /// 6. Keyboard (line 262)
     /// 7. Hard drive (line 275-277)
+    /// Put the display's declared ports and windows onto the two buses.
+    ///
+    /// The device says what it answers on; this is the only code that maps it.
+    /// Bochs has `bx_vgacore_c::init` call the bus itself, which is why its
+    /// display model cannot be built without one.
+    fn install_display(
+        vga: &crate::iodev::vga_card::VgaCard<crate::iodev::vga::StdVga>,
+        io: &mut BxDevicesC,
+        mem: &mut BxMemC,
+    ) -> Result<()> {
+        for decl in vga.ports() {
+            io.register_io_handler(DevSlot::VGA, decl.port, decl.name, decl.widths);
+        }
+        let windows = vga.windows().map_err(|_| {
+            crate::memory::MemoryError::Internal("display declares more windows than a device may")
+        })?;
+        for decl in windows.as_slice() {
+            mem.register_memory_handlers(
+                DevSlot::VGA.mmio_window_token(decl.id),
+                decl.base as crate::config::BxPhyAddress,
+                decl.end as crate::config::BxPhyAddress,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn init(&mut self, io: &mut BxDevicesC, mem: &mut BxMemC) -> Result<()> {
         tracing::debug!("Initializing device manager");
 
@@ -429,8 +455,9 @@ impl DeviceManager {
         self.pic.init();
         // 4. PIT
         self.pit.init();
-        // 5. VGA
-        self.vga.init(io, mem)?;
+        // 5. VGA — the display states what it answers on and the set does the
+        // registering, so the model itself never names either bus.
+        Self::install_display(&self.vga, io, mem)?;
         // 6. Keyboard
         self.keyboard.init();
         // 7. Hard drive

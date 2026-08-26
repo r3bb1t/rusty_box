@@ -80,6 +80,122 @@ impl WindowOffset {
     }
 }
 
+/// One I/O port a device answers on, as the device states it.
+///
+/// Bochs has each device call `DEV_register_ioread_handler` on the bus from
+/// inside its own `init` (vgacore.cc `bx_vgacore_c::init`). Stating it as data
+/// instead is what lets a device model be built without a bus to call: the set
+/// that owns the bus reads the declaration and does the registering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortDecl {
+    pub port: u16,
+    /// Diagnostic name, as Bochs passes to the same call.
+    pub name: &'static str,
+    /// Bochs's `mask`: which access widths this port decodes (1 = byte,
+    /// 2 = word, 4 = dword), OR-ed.
+    pub widths: u8,
+}
+
+/// One physical-address window a device answers on, as the device states it.
+///
+/// The window carries the [`WindowId`] the device will be handed back on every
+/// access, so the name a device routes on and the range the machine maps are
+/// declared in one place and cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowDecl {
+    pub id: WindowId,
+    pub base: u64,
+    /// Last byte in the window, inclusive — Bochs `register_memory_handlers`
+    /// takes `end_addr` the same way.
+    pub end: u64,
+}
+
+/// How many windows one device may declare.
+///
+/// Three is what the busiest model here needs (a display's legacy aperture, its
+/// framebuffer and its register block); the fourth is slack. A device that
+/// wanted more would be telling us the bound is wrong, which is why
+/// [`WindowDecls::push`] reports rather than drops.
+pub const MAX_DEVICE_WINDOWS: usize = 4;
+
+/// Whether a declaration was taken.
+///
+/// A dropped window is a whole aperture the guest writes into and nothing
+/// answers — silent, and indistinguishable from a mode the card does not
+/// support. So the answer is a value the caller must read (R0), not a `bool`
+/// that reads the same either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a window that was not taken is an aperture nothing answers"]
+pub enum Declared {
+    Accepted,
+    /// The device declared more windows than [`MAX_DEVICE_WINDOWS`] allows.
+    NoRoom,
+}
+
+/// The windows a device declares, gathered without an allocator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowDecls {
+    decls: [Option<WindowDecl>; MAX_DEVICE_WINDOWS],
+    len: usize,
+}
+
+impl WindowDecls {
+    pub const fn new() -> Self {
+        Self {
+            decls: [None; MAX_DEVICE_WINDOWS],
+            len: 0,
+        }
+    }
+
+    pub fn push(&mut self, decl: WindowDecl) -> Declared {
+        match self.decls.get_mut(self.len) {
+            Some(slot) => {
+                *slot = Some(decl);
+                self.len += 1;
+                Declared::Accepted
+            }
+            None => Declared::NoRoom,
+        }
+    }
+
+    /// Every window declared, in the order the device declared it. Bochs
+    /// registers in call order and a later range wins an overlap, so the order
+    /// is part of what a device is saying.
+    pub fn as_slice(&self) -> WindowSlice<'_> {
+        WindowSlice {
+            decls: &self.decls[..self.len],
+        }
+    }
+}
+
+/// A borrowed run of declared windows.
+///
+/// A named type rather than `&[Option<WindowDecl>]` (R0): the `Option` is this
+/// container's storage, not something a reader should have to unwrap.
+#[derive(Debug, Clone, Copy)]
+pub struct WindowSlice<'a> {
+    decls: &'a [Option<WindowDecl>],
+}
+
+impl<'a> IntoIterator for WindowSlice<'a> {
+    type Item = WindowDecl;
+    type IntoIter = core::iter::Flatten<core::iter::Copied<core::slice::Iter<'a, Option<WindowDecl>>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.decls.iter().copied().flatten()
+    }
+}
+
+impl WindowSlice<'_> {
+    pub fn len(&self) -> usize {
+        self.decls.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.decls.is_empty()
+    }
+}
+
 /// Identifies one timer owned by one device.
 ///
 /// `local` is the device's own index for the timer, so a device owning several

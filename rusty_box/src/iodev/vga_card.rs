@@ -29,7 +29,7 @@
 //! over the sink — and must stay that way (R8). In-tree cards are selected by
 //! type, so a defaulted hook that falls through monomorphises to nothing.
 
-use super::device_api::WindowOffset;
+use super::device_api::{Declared, WindowDecls, WindowOffset};
 use super::display_sink::{DisplaySink, Refreshed};
 use super::vga::{VgaCore, VgaWindow};
 
@@ -265,35 +265,6 @@ impl<'a> TimingCtx<'a> {
     }
 }
 
-/// Initialisation, where a card registers windows and ports of its own.
-pub struct InitCtx<'a> {
-    core: &'a mut VgaCore,
-    io: &'a mut super::BxDevicesC,
-    mem: &'a mut crate::memory::BxMemC,
-}
-
-impl<'a> InitCtx<'a> {
-    pub(crate) fn new(
-        core: &'a mut VgaCore,
-        io: &'a mut super::BxDevicesC,
-        mem: &'a mut crate::memory::BxMemC,
-    ) -> Self {
-        Self { core, io, mem }
-    }
-
-    pub fn core(&mut self) -> &mut VgaCore {
-        self.core
-    }
-
-    pub fn io(&mut self) -> &mut super::BxDevicesC {
-        self.io
-    }
-
-    pub fn memory(&mut self) -> &mut crate::memory::BxMemC {
-        self.mem
-    }
-}
-
 /// A reset the extension is offered after the core has reset itself.
 pub struct ResetCtx<'a> {
     core: &'a mut VgaCore,
@@ -395,12 +366,16 @@ pub trait VgaExtension {
         None
     }
 
-    /// Register whatever the card owns that the core does not — Bochs
+    /// Declare whatever windows the card owns that the core does not — Bochs
     /// `bx_vgacore_c::init` calls `init_vga_extension()` for exactly this, and
     /// a linear framebuffer is the card's window, at the card's base.
-    fn vga_init(&mut self, cx: &mut InitCtx<'_>) -> crate::Result<()> {
-        let _ = cx;
-        Ok(())
+    ///
+    /// The card states them; it does not map them. A model that registered its
+    /// own windows would need the memory bus to exist before the model does,
+    /// which is the coupling that keeps a device out of a bus-free crate.
+    fn vga_windows(&self, out: &mut WindowDecls) -> Declared {
+        let _ = out;
+        Declared::Accepted
     }
 
     /// Offered each vertical retrace, after the core has latched its own frame
@@ -667,13 +642,26 @@ impl<E: VgaExtension> VgaCard<E> {
 /// changes behaviour, so none is a hook; a card that wants a say in one gets it
 /// through the hooks on [`VgaExtension`], which these call.
 impl<E: VgaExtension> VgaCard<E> {
-    pub(crate) fn init(
-        &mut self,
-        io: &mut super::BxDevicesC,
-        mem: &mut crate::memory::BxMemC,
-    ) -> crate::Result<()> {
-        self.core.init(io, mem)?;
-        self.ext.vga_init(&mut InitCtx::new(&mut self.core, io, mem))
+    /// Every port this card answers on. The core's set is fixed; no card in
+    /// this tree adds to it, so a card that wanted to would be adding a hook,
+    /// not changing this.
+    pub(crate) fn ports(&self) -> &'static [super::device_api::PortDecl] {
+        VgaCore::PORTS
+    }
+
+    /// Every physical window this card answers on: the core's legacy aperture
+    /// first, then whatever the card adds, in that order — Bochs registers in
+    /// the same order and a later range wins an overlap.
+    pub(crate) fn windows(&self) -> Result<WindowDecls, Declared> {
+        let mut decls = WindowDecls::new();
+        match decls.push(VgaCore::core_window()) {
+            Declared::Accepted => {}
+            refused => return Err(refused),
+        }
+        match self.ext.vga_windows(&mut decls) {
+            Declared::Accepted => Ok(decls),
+            refused => Err(refused),
+        }
     }
 
     pub(crate) fn set_preferred_mode(&mut self, xres: u16, yres: u16, bpp: u16) {
