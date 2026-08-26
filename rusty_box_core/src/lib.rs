@@ -26,9 +26,11 @@ extern crate std;
 pub mod float;
 pub mod reset;
 pub mod ring_buffer;
+pub mod snap;
 pub mod time;
 
 pub use float::FloatExt;
 pub use reset::ResetReason;
 pub use ring_buffer::RingBuffer;
+pub use snap::{SnapError, SnapRead, SnapResult, SnapWrite, SnapshotSection};
 pub use time::{ClockHz, HostClock, HostInstant, MicrosPhase, TimeOverflow, VmClock, VmDuration, VmInstant};
