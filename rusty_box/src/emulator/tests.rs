@@ -1140,13 +1140,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rcx, COUNT);
                 let timer = emu
                     .pc_system
-                    .register_timer(
-                        TimerOwner::Keyboard,
-                        COUNT + 1,
-                        false,
-                        true,
-                        "REP deadline",
-                    )
+                    .register_timer(TimerOwner::Keyboard, COUNT, false, true, "REP deadline")
                     .unwrap();
                 let ticks_before = emu.pc_system.time_ticks();
 
@@ -1154,12 +1148,14 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let executed = emu.run_cpu_batch(1).unwrap();
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
 
-                // The trace executes REP INSW plus the following parking jump.
-                // The REP contributes exactly COUNT retirements, and the batch
-                // reports Bochs icount units (retired instructions, including
-                // repeat() iterations) — not handler dispatches.
+                // A batch budget of one is one DISPATCH, and the REP is that
+                // dispatch, so the parking jump behind it is never reached. The
+                // REP itself retires COUNT times — the batch reports Bochs
+                // icount units (retired instructions, `repeat()` iterations
+                // included), not dispatches, which is why one dispatch reports
+                // sixty-four.
                 assert_eq!(executed, retired);
-                assert_eq!(retired, COUNT + 1);
+                assert_eq!(retired, COUNT);
                 assert_eq!(emu.pc_system.time_ticks() - ticks_before, retired);
                 assert_eq!(
                     emu.pc_system.timer_countdown(timer),
@@ -3176,9 +3172,17 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let elapsed = emu.run_cpu_batch(quantum).unwrap();
                 let ap_delta = emu.cpu_ref(AP_INDEX).icount - before;
 
+                // The halted peer is credited its quantum and the running AP
+                // its own ticks; machine time is the two averaged over the
+                // round, which is the property under test. Asserting the
+                // average directly rather than `elapsed < ap_delta`: the
+                // strict inequality only held while the AP was over-credited
+                // one tick per trace for its end-of-trace marker, so it was
+                // testing the miscount rather than the averaging.
                 assert!(elapsed >= quantum);
-                assert!(
-                    elapsed < ap_delta,
+                assert_eq!(
+                    elapsed,
+                    (quantum + ap_delta) / 2,
                     "elapsed ticks {elapsed} were not averaged with the halted peer quantum; AP delta was {ap_delta}"
                 );
                 assert_eq!(

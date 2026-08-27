@@ -929,7 +929,8 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Execute starting at `begin`. Every limit is optional — pass `None`
     /// for "no limit". Returns when:
     /// - RIP reaches `until` (if set)
-    /// - `count` instructions executed (if set)
+    /// - `count` instructions have retired (if set) — exactly that many, not
+    ///   approximately: a run with a count does not take the throughput path
     /// - `timeout` wall-clock elapsed (if set, std-only)
     /// - `emu_stop`/`StopHandle::stop` was called
     /// - CPU enters HLT/MWAIT with no pending interrupts
@@ -970,6 +971,16 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         let watching_addresses = until.is_some() || !self.exit_set.is_empty();
         let stride = if watching_addresses { 1 } else { BATCH };
 
+        // A limit the caller can count has to be honoured exactly, whatever its
+        // size. `step_batch` treats its argument as one INNER batch and then
+        // keeps running whole batches until a 15 ms wall-clock budget is spent,
+        // so a caller asking for thirteen instructions gets however many
+        // thirteen-instruction batches fit in 15 ms — a different number on a
+        // loaded machine than on an idle one. `step_exactly` runs the count and
+        // returns. `step_one` was moved off `step_batch` for this reason; the
+        // count here is the same promise at a larger size.
+        let bounded = watching_addresses || count.is_some();
+
         loop {
             if self.stop_flag.load(Ordering::Relaxed) {
                 return Ok(EmuStopReason::Stopped);
@@ -989,7 +1000,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
                 Some(c) => stride.min(c - executed),
                 None => stride,
             };
-            let outcome = if watching_addresses {
+            let outcome = if bounded {
                 self.step_exactly(budget)?
             } else {
                 self.step_batch(budget)?

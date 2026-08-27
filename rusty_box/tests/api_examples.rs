@@ -481,6 +481,72 @@ fn an_exit_address_ends_a_run_before_the_instruction_budget_does() {
     );
 }
 
+/// An instruction count is a count. A caller sizing a run by it — a test, a
+/// single step, a debugger stepping over a loop body — gets the number it
+/// asked for, and gets it again on a machine that is busy with something else.
+#[test]
+fn a_run_bounded_by_an_instruction_count_retires_exactly_that_many() {
+    let mut machine =
+        Emulator::new_with_mode(small_config(), CpuSetupMode::FlatLong64).expect("machine");
+
+    // Sixteen one-byte NOPs. Nothing here ends a run on its own, so whatever
+    // stops it is the budget.
+    machine.mem_write(CODE, &[0x90; 16]).expect("write code");
+    machine.reg_write(X86Reg::Rsp, 0x0010_0000);
+
+    for count in [1u64, 3, 7] {
+        machine.reg_write(X86Reg::Rip, CODE);
+        machine
+            .emu_start(CODE, None, None, Some(count))
+            .expect("emu_start");
+        assert_eq!(
+            machine.reg_read(X86Reg::Rip),
+            CODE + count,
+            "a run of {count} one-byte instructions must land {count} bytes on"
+        );
+    }
+}
+
+/// An instruction count counts guest instructions, across control transfers
+/// that make the decoder start a new trace.
+///
+/// A `call` and a `ret` each end one and begin another, and the marker this
+/// port puts at a trace's end is not something the guest executed — so a run
+/// of thirteen instructions through a subroutine must land where thirteen
+/// instructions land, not eleven.
+#[test]
+fn an_instruction_count_is_not_spent_on_trace_boundaries() {
+    const SUB: u64 = CODE + 0x20;
+    let mut machine =
+        Emulator::new_with_mode(small_config(), CpuSetupMode::FlatLong64).expect("machine");
+    machine.reg_write(X86Reg::Rsp, 0x0030_0000);
+    // mov rcx,2 ; call SUB ; dec rcx ; jnz back-to-the-call
+    let mut main = Vec::new();
+    main.extend_from_slice(&[0x48, 0xC7, 0xC1, 0x02, 0x00, 0x00, 0x00]);
+    main.push(0xE8);
+    main.extend_from_slice(&((SUB - (CODE + 0x0C)) as u32).to_le_bytes());
+    main.extend_from_slice(&[0x48, 0xFF, 0xC9]);
+    main.extend_from_slice(&[0x75, 0xF6]);
+    machine.mem_write(CODE, &main).expect("main");
+    // SUB: mov rdx,1 ; ret
+    machine
+        .mem_write(SUB, &[0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00, 0xC3])
+        .expect("sub");
+
+    // Two turns of the loop: mov rcx, then twice (call, mov rdx, ret, dec,
+    // jnz) — one instruction each, four trace boundaries between them.
+    machine
+        .emu_start(CODE, None, None, Some(11))
+        .expect("emu_start");
+    assert_eq!(machine.reg_read(X86Reg::Rcx), 0, "the loop ran to completion");
+    assert_eq!(machine.reg_read(X86Reg::Rdx), 1, "the subroutine ran");
+    assert_eq!(
+        machine.cpu_snapshot().icount,
+        11,
+        "eleven guest instructions, and nothing else, were counted"
+    );
+}
+
 // ── Instrumentation ─────────────────────────────────────────────────────────
 
 #[cfg(feature = "instrumentation")]

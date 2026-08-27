@@ -2453,14 +2453,30 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
                 // Bochs cpu.cc — prev_rip = RIP AFTER execution ("commit new RIP")
                 self.prev_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
-                // Bochs cpu.cc — icount++
-                self.icount += 1;
-                #[cfg(feature = "profiling")]
-                {
-                    self.perf_instructions += 1;
+                // Bochs cpu.cc — icount++, but only for a guest instruction.
+                //
+                // The end-of-trace marker is not one. Bochs puts it in a trace
+                // only when handler chaining is compiled in, and its shipped
+                // configuration does not compile it in (config.h.in
+                // `BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS 0`), so upstream's
+                // `tlen` holds nothing but real instructions and its `icount`
+                // counts nothing but real instructions. This port keeps the
+                // marker because its trace linking needs an mpool slot to hang
+                // a link on, and keeps upstream's count by not charging for it.
+                //
+                // Charging for it was guest-VISIBLE, not merely a reporting
+                // error: `cpu_ticks()` is `icount + tick_surplus` and is the
+                // machine's time source, so a phantom tick per trace made every
+                // device deadline arrive early — around a tenth of them, at the
+                // trace lengths this decoder produces.
+                if opcode != super::decoder::Opcode::InsertedOpcode {
+                    self.icount += 1;
+                    #[cfg(feature = "profiling")]
+                    {
+                        self.perf_instructions += 1;
+                    }
+                    iteration += 1;
                 }
-
-                iteration += 1;
 
                 // Check async events (matching C++ line 215: if (async_event) break;)
                 // When async_event is set (branch taken, exception, HLT, etc.), we MUST
