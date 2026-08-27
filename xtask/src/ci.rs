@@ -81,7 +81,7 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // in `sys/windows.rs`, which is the only file that lifts the workspace's
     // `deny(unsafe_code)`, and each block names the invariant it rests on. A
     // rise means either a new platform call or unsafe that escaped the seam.
-    ("rusty_box_whp/src", 30),
+    ("rusty_box_whp/src", 31),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. Zero, permanently: thread
 /// safety is derived from ownership, and `Emulator`'s `const` assertion in

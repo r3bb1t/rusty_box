@@ -124,6 +124,84 @@ impl PendingInterruption {
     }
 }
 
+/// The `WHV_INTERRUPT_TYPE` values, transcribed from the SDK's
+/// `WinHvPlatformDefs.h`.
+///
+/// Note what is absent: there is no ExtINT. An 8259 living in host userspace
+/// therefore has no way to express "the PIC is asserting INTR" through
+/// [`InterruptRequest`]; its vectors must reach the guest another way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InterruptKind {
+    Fixed,
+    LowestPriority,
+    Nmi,
+    Init,
+    Sipi,
+    LocalInt1,
+}
+
+impl InterruptKind {
+    const fn as_field(self) -> u64 {
+        match self {
+            Self::Fixed => 0,
+            Self::LowestPriority => 1,
+            Self::Nmi => 4,
+            Self::Init => 5,
+            Self::Sipi => 6,
+            Self::LocalInt1 => 9,
+        }
+    }
+}
+
+/// How the destination field names its target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DestinationMode {
+    Physical,
+    Logical,
+}
+
+/// Edge or level, as the interrupt's source drives it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TriggerMode {
+    Edge,
+    Level,
+}
+
+/// An interrupt handed to the partition's emulated APIC, rather than injected
+/// straight into a processor.
+///
+/// This is the delivery path that exists only when the hypervisor emulates a
+/// local APIC; with [`crate::LocalApicMode::None`] there is no APIC to accept
+/// it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InterruptRequest {
+    pub kind: InterruptKind,
+    pub destination_mode: DestinationMode,
+    pub trigger_mode: TriggerMode,
+    /// The APIC ID, or the logical destination, depending on
+    /// `destination_mode`.
+    pub destination: u32,
+    pub vector: u32,
+}
+
+impl InterruptRequest {
+    /// The packed control word, laid out as `WHV_INTERRUPT_CONTROL`: type in
+    /// bits 0..8, destination mode in 8..12, trigger mode in 12..16 and the
+    /// target VTL — always zero here — in 16..24.
+    #[must_use]
+    pub const fn control_word(self) -> u64 {
+        let destination_mode = match self.destination_mode {
+            DestinationMode::Physical => 0,
+            DestinationMode::Logical => 1,
+        };
+        let trigger_mode = match self.trigger_mode {
+            TriggerMode::Edge => 0,
+            TriggerMode::Level => 1,
+        };
+        self.kind.as_field() | destination_mode << 8 | trigger_mode << 12
+    }
+}
+
 /// Bit positions within `WHV_INTERNAL_ACTIVITY_REGISTER`.
 mod activity_bit {
     pub(super) const STARTUP_SUSPEND: u32 = 0;
@@ -335,6 +413,26 @@ mod tests {
         assert_eq!(word >> 1 & 0b111, 3, "type Exception");
         assert_eq!(word >> 4 & 1, 1, "deliver error code");
         assert_eq!(word >> 32, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn an_interrupt_request_packs_its_three_fields_where_the_platform_reads_them() {
+        let request = InterruptRequest {
+            kind: InterruptKind::Fixed,
+            destination_mode: DestinationMode::Physical,
+            trigger_mode: TriggerMode::Edge,
+            destination: 0,
+            vector: 0x40,
+        };
+        assert_eq!(request.control_word(), 0, "every field's zero is the SDK's own");
+
+        let nmi_logical_level = InterruptRequest {
+            kind: InterruptKind::Nmi,
+            destination_mode: DestinationMode::Logical,
+            trigger_mode: TriggerMode::Level,
+            ..request
+        };
+        assert_eq!(nmi_logical_level.control_word(), 4 | 1 << 8 | 1 << 12);
     }
 
     #[test]

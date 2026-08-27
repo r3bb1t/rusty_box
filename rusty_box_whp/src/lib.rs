@@ -42,12 +42,14 @@ mod vcpu;
 pub use caps::{capabilities, hypervisor_present, Capabilities, ExtendedVmExits, Features};
 pub use error::{WhpError, WhpErrorKind, WhpResult};
 pub use partition::{
-    Canceller, HostPages, LateProperty, LocalApicMode, Partition, PartitionConfig, PAGE_SIZE,
+    Canceller, HostPages, InterruptRequester, LateProperty, LocalApicMode, Partition,
+    PartitionConfig, PAGE_SIZE,
 };
 pub use sys::{GpaPerms, GvaTranslation};
 pub use vcpu::{
-    AccessType, CpuidAccess, Exit, ExitReason, InternalActivity, InterruptionType, IoPortAccess,
-    MemoryAccess, MsrAccess, PendingInterruption, Reg, SegmentRegister, VpContext,
+    AccessType, CpuidAccess, DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind,
+    InterruptRequest, InterruptionType, IoPortAccess, MemoryAccess, MsrAccess,
+    PendingInterruption, Reg, SegmentRegister, TriggerMode, VpContext,
 };
 
 /// A partition handle is a plain integer and the pages behind a mapping are
@@ -61,6 +63,7 @@ const _: () = {
     assert_send::<Partition>();
     assert_send::<PartitionConfig>();
     assert_send::<HostPages>();
-    // The one value meant to cross threads while a processor runs.
+    // The two values meant to cross threads while a processor runs.
     assert_send_sync::<Canceller>();
+    assert_send_sync::<InterruptRequester>();
 };

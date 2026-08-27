@@ -25,8 +25,8 @@ use windows_sys::Win32::System::Hypervisor::*;
 use crate::error::{WhpError, WhpResult};
 use crate::sys::{CapabilityCode, GpaPerms, GvaTranslation, PropertyCode, RawPartition};
 use crate::vcpu::{
-    AccessType, CpuidAccess, Exit, ExitReason, IoPortAccess, MemoryAccess, MsrAccess, Reg,
-    SegmentRegister, VpContext,
+    AccessType, CpuidAccess, Exit, ExitReason, InterruptRequest, IoPortAccess, MemoryAccess,
+    MsrAccess, Reg, SegmentRegister, VpContext,
 };
 
 /// `WHvCapabilityCodePhysicalAddressWidth`, which the SDK header defines but
@@ -373,6 +373,23 @@ pub(crate) fn cancel_vp(partition: RawPartition, index: u32) -> WhpResult<()> {
     check(
         unsafe { WHvCancelRunVirtualProcessor(partition.get(), index, 0) },
         "WHvCancelRunVirtualProcessor",
+    )
+}
+
+pub(crate) fn request_interrupt(
+    partition: RawPartition,
+    request: InterruptRequest,
+) -> WhpResult<()> {
+    let control = WHV_INTERRUPT_CONTROL {
+        _bitfield: request.control_word(),
+        Destination: request.destination,
+        Vector: request.vector,
+    };
+    let size = core::mem::size_of::<WHV_INTERRUPT_CONTROL>() as u32;
+    // SAFETY: `control` is live for the call and `size` is its exact width.
+    check(
+        unsafe { WHvRequestInterrupt(partition.get(), &control, size) },
+        "WHvRequestInterrupt",
     )
 }
 

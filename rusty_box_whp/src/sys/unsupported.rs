@@ -12,7 +12,7 @@
 
 use crate::error::{WhpError, WhpResult};
 use crate::sys::{CapabilityCode, GpaPerms, GvaTranslation, PropertyCode, RawPartition};
-use crate::vcpu::{Exit, Reg, SegmentRegister};
+use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister};
 
 /// The name every refusal below carries, since on this target the platform
 /// itself is what is missing rather than any particular call.
@@ -86,6 +86,13 @@ pub(crate) fn run_vp(_partition: RawPartition, _index: u32) -> WhpResult<Exit> {
 }
 
 pub(crate) fn cancel_vp(_partition: RawPartition, _index: u32) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub(crate) fn request_interrupt(
+    _partition: RawPartition,
+    _request: InterruptRequest,
+) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }
 

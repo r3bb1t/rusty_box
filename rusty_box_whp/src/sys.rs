@@ -5,7 +5,7 @@
 //! caller ever carries a `cfg` — the selection happens once, here.
 
 use crate::error::{WhpError, WhpResult};
-use crate::vcpu::{Exit, Reg, SegmentRegister};
+use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister};
 
 #[cfg(windows)]
 #[path = "sys/windows.rs"]
@@ -100,8 +100,9 @@ pub struct GvaTranslation {
 
 pub(crate) use imp::{
     cancel_vp, capability, create_partition, create_vp, delete_partition, delete_vp,
-    dirty_bitmap, get_words, hypervisor_present, map_gpa, run_vp, set_cpuid_exit_list,
-    set_property, set_segments, set_words, setup, translate_gva, unmap_gpa,
+    dirty_bitmap, get_words, hypervisor_present, map_gpa, request_interrupt, run_vp,
+    set_cpuid_exit_list, set_property, set_segments, set_words, setup, translate_gva,
+    unmap_gpa,
 };
 
 /// Every function `imp` must provide, stated once so the two implementations
@@ -122,6 +123,7 @@ const _IMP_IS_COMPLETE: ImpSignatures = ImpSignatures {
     delete_vp: imp::delete_vp,
     run_vp: imp::run_vp,
     cancel_vp: imp::cancel_vp,
+    request_interrupt: imp::request_interrupt,
     get_words: imp::get_words,
     set_words: imp::set_words,
     set_segments: imp::set_segments,
@@ -151,6 +153,7 @@ struct ImpSignatures {
     delete_vp: fn(RawPartition, u32),
     run_vp: fn(RawPartition, u32) -> WhpResult<Exit>,
     cancel_vp: fn(RawPartition, u32) -> WhpResult<()>,
+    request_interrupt: fn(RawPartition, InterruptRequest) -> WhpResult<()>,
     get_words: fn(RawPartition, u32, &[Reg], &mut [u64]) -> WhpResult<()>,
     set_words: fn(RawPartition, u32, &[Reg], &[u64]) -> WhpResult<()>,
     set_segments: fn(RawPartition, u32, &[Reg], &[SegmentRegister]) -> WhpResult<()>,

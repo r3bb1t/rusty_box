@@ -19,9 +19,9 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use rusty_box_whp::{
-    capabilities, hypervisor_present, Exit, ExitReason, GpaPerms, HostPages,
-    InterruptionType, LateProperty, LocalApicMode, Partition, PartitionConfig, PendingInterruption,
-    Reg, SegmentRegister, WhpResult, PAGE_SIZE,
+    capabilities, hypervisor_present, DestinationMode, Exit, ExitReason, GpaPerms, HostPages,
+    InterruptKind, InterruptRequest, InterruptionType, LateProperty, LocalApicMode, Partition,
+    PartitionConfig, PendingInterruption, Reg, SegmentRegister, TriggerMode, WhpResult, PAGE_SIZE,
 };
 
 /// The guest-physical map every experiment shares.
@@ -103,6 +103,7 @@ fn main() {
     push(q7_cpuid_and_late_properties(caps.supported_exits.cpuid), Q7);
     push(q8_cancel_stickiness(), Q8);
     push(q9_mapping_churn(), Q9);
+    push(q10_wake_under_an_emulated_apic(caps.features.local_apic_emulation), Q10);
 
     println!("== answers ==");
     for finding in &findings {
@@ -128,6 +129,9 @@ const Q8: &str = "Q8  Is WHvCancelRunVirtualProcessor sticky when the processor 
                   running?";
 const Q9: &str = "Q9  How many separate mappings does a partition tolerate, and what\n    \
                   does each cost?";
+const Q10: &str = "Q10 Under LocalApicEmulationMode::XApic — the mode a guest with a real\n    \
+                   kernel needs — can the host still wake a halted processor, and by\n    \
+                   which route?";
 
 // ---------------------------------------------------------------- fixtures
 
@@ -437,15 +441,7 @@ fn q2_instruction_bytes_and_translation() -> WhpResult<Finding> {
 fn q3_halt_resume() -> WhpResult<Finding> {
     let mut guest = Guest::new(|_| Ok(()))?;
     guest.load(HALT_THEN_MARK)?;
-    {
-        let ram = guest.partition.bytes_at_mut(layout::RAM).expect("RAM is mapped");
-        let handler = layout::HANDLER as usize;
-        ram[handler..handler + HANDLER.len()].copy_from_slice(HANDLER);
-        // Real-mode interrupt vector 0x40: offset then segment, four bytes in.
-        let vector = 4 * 0x40;
-        ram[vector..vector + 2].copy_from_slice(&(layout::HANDLER as u16).to_le_bytes());
-        ram[vector + 2..vector + 4].copy_from_slice(&0u16.to_le_bytes());
-    }
+    install_handler(&mut guest, 0x40)?;
 
     let halted = guest.run()?;
     if !matches!(halted.reason, ExitReason::Halt) {
@@ -855,6 +851,360 @@ fn q8_cancel_stickiness() -> WhpResult<Finding> {
         }
     );
     Ok(Finding { question: Q8, answer, detail })
+}
+
+/// The two routes a host has for getting a vector into a guest.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wake {
+    /// `WHvRegisterPendingInterruption` — straight into the processor, past
+    /// any APIC the hypervisor is emulating.
+    Inject,
+    /// `WHvRequestInterrupt` — handed to the emulated APIC to arbitrate.
+    ApicRequest,
+}
+
+/// One run that was guaranteed to return.
+struct Rescued {
+    exit: Exit,
+    /// True when the processor did not leave on its own and a cancel from
+    /// another thread had to bring it out.
+    rescued: bool,
+}
+
+/// Run the processor with a guarantee that this returns.
+///
+/// A halted processor whose hypervisor owns the APIC may never come back out
+/// of `WHvRunVirtualProcessor` at all, so every run in this experiment needs a
+/// way out — including the run that is merely *expected* to halt, because
+/// whether it halts is part of what is being measured.
+///
+/// The rescue is told when the run ended rather than always sleeping out its
+/// timeout, and that matters: this platform latches a cancel (see Q8), so a
+/// rescue firing after a run had already finished would abort the *next* one
+/// and make every later result read as "never woke".
+fn run_with_rescue(guest: &mut Guest, after: Duration) -> WhpResult<Rescued> {
+    let canceller = guest.partition.canceller(0);
+    let (finished, wait_for_finish) = std::sync::mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        let rescue = scope.spawn(move || match wait_for_finish.recv_timeout(after) {
+            Ok(()) => Ok(false),
+            Err(_) => canceller.cancel().map(|()| true),
+        });
+        let exit = guest.run();
+        match finished.send(()) {
+            // An error here means the rescue had already timed out and
+            // cancelled; the exit reason shows that, so there is nothing to
+            // report separately.
+            Ok(()) | Err(_) => {}
+        }
+        let rescued = rescue.join().expect("the rescue thread did not panic")?;
+        Ok(Rescued { exit: exit?, rescued })
+    })
+}
+
+/// What one wake attempt did.
+struct Woke {
+    /// Whether the partition would take the APIC mode at all.
+    configured: Result<(), String>,
+    /// Whether the delivery call itself was accepted.
+    delivered: Result<(), String>,
+    /// `None` when the processor never woke and the rescue had to end the run.
+    exit: Option<ExitReason>,
+    handler_ran: bool,
+}
+
+/// Try to wake a halted real-mode guest with vector 0x40 and report what
+/// happened, never blocking: a processor that does not wake would otherwise
+/// leave `WHvRunVirtualProcessor` inside the hypervisor forever.
+fn wake_attempt(apic: LocalApicMode, how: Wake) -> WhpResult<Woke> {
+    /// Long enough that a delivery which works has certainly happened, short
+    /// enough that a probe of ten experiments stays quick.
+    const RESCUE_AFTER: Duration = Duration::from_millis(300);
+    /// The vector the guest has an interrupt handler for.
+    const VECTOR: u16 = 0x40;
+
+    let mut configured = Ok(());
+    let mut guest = Guest::new(|config| {
+        if let Err(err) = config.local_apic(apic) {
+            configured = Err(err.to_string());
+        }
+        Ok(())
+    })?;
+    if let Err(why) = configured {
+        return Ok(Woke {
+            configured: Err(why),
+            delivered: Err("not attempted".into()),
+            exit: None,
+            handler_ran: false,
+        });
+    }
+
+    guest.load(HALT_THEN_MARK)?;
+    install_handler(&mut guest, VECTOR)?;
+
+    let halted = run_with_rescue(&mut guest, RESCUE_AFTER)?;
+    if !matches!(halted.exit.reason, ExitReason::Halt) {
+        let why = if halted.rescued {
+            "the run NEVER RETURNED on its own — with this APIC mode the \
+             hypervisor parks a halted processor instead of exiting"
+                .to_owned()
+        } else {
+            format!("the guest never halted: {:?}", halted.exit.reason)
+        };
+        return Ok(Woke {
+            configured: Ok(()),
+            delivered: Err(why),
+            exit: Some(halted.exit.reason),
+            handler_ran: false,
+        });
+    }
+
+    let delivered = match how {
+        Wake::Inject => guest.partition.inject(0, PendingInterruption {
+            kind: InterruptionType::Interrupt,
+            vector: VECTOR,
+            error_code: None,
+        }),
+        Wake::ApicRequest => guest.partition.request_interrupt(InterruptRequest {
+            kind: InterruptKind::Fixed,
+            destination_mode: DestinationMode::Physical,
+            trigger_mode: TriggerMode::Edge,
+            // The boot processor's APIC ID.
+            destination: 0,
+            vector: u32::from(VECTOR),
+        }),
+    };
+    if let Err(err) = delivered {
+        return Ok(Woke {
+            configured: Ok(()),
+            delivered: Err(err.to_string()),
+            exit: None,
+            handler_ran: false,
+        });
+    }
+
+    let after_delivery = run_with_rescue(&mut guest, RESCUE_AFTER)?;
+    Ok(Woke {
+        configured: Ok(()),
+        delivered: Ok(()),
+        exit: (!after_delivery.rescued).then_some(after_delivery.exit.reason),
+        handler_ran: guest.peek(layout::MARKER) == 0xA5,
+    })
+}
+
+/// Put the real-mode handler and its interrupt-vector entry in low memory.
+fn install_handler(guest: &mut Guest, vector: u16) -> WhpResult<()> {
+    let ram = guest.partition.bytes_at_mut(layout::RAM).expect("RAM is mapped");
+    let handler = layout::HANDLER as usize;
+    ram[handler..handler + HANDLER.len()].copy_from_slice(HANDLER);
+    // A real-mode vector is four bytes: offset then segment.
+    let entry = 4 * usize::from(vector);
+    ram[entry..entry + 2].copy_from_slice(&(layout::HANDLER as u16).to_le_bytes());
+    ram[entry + 2..entry + 4].copy_from_slice(&0u16.to_le_bytes());
+    Ok(())
+}
+
+fn q10_wake_under_an_emulated_apic(host_emulates_apic: bool) -> WhpResult<Finding> {
+    if !host_emulates_apic {
+        return Ok(Finding {
+            question: Q10,
+            answer: "N/A — this host does not offer local APIC emulation".into(),
+            detail: String::new(),
+        });
+    }
+
+    let mut detail = String::new();
+
+    // First: does a halted processor come back out at all? Under `None` it
+    // does (Q3), and that is what makes stop-then-inject possible there.
+    let stops = wake_attempt(LocalApicMode::XApic, Wake::Inject)?;
+    let parks = matches!(&stops.delivered, Err(why) if why.contains("NEVER RETURNED"));
+    let _ = writeln!(
+        detail,
+        "XApic, stop-then-inject: {}",
+        match (&stops.configured, &stops.delivered, &stops.exit) {
+            (Err(why), _, _) => format!("the mode itself was refused ({why})"),
+            (_, Err(why), _) => why.clone(),
+            (_, _, None) => "never woke".to_owned(),
+            (_, _, Some(reason)) => format!("woke to {reason:?}"),
+        }
+    );
+    if parks {
+        let _ = writeln!(
+            detail,
+            "  => `WHvRegisterPendingInterruption` is UNREACHABLE in this mode: it is a\n  \
+             \x20  register write, which needs a stopped processor, and the processor\n  \
+             \x20  never stops. Only a partition-level call can deliver here."
+        );
+    }
+
+    // So the only route left is a partition-level delivery from another thread
+    // while the run is in progress. That is the whole question for a machine
+    // whose 8259 lives in host userspace.
+    //
+    // Two deliveries, because one alone cannot be read. A `Fixed` vector is
+    // what an 8259's output becomes, but this guest is in real mode and has
+    // never enabled its own APIC, so the APIC is entitled to drop it — a
+    // failure there would say nothing about the platform. An `Nmi` is not
+    // gated by the APIC's software-enable, so it tests the mechanism itself.
+    // Whether the handler ran is the measurement; whether the run returned is
+    // not, because this guest halts a second time after its handler returns
+    // and a second halt parks the processor exactly like the first. Reporting
+    // only the run's fate would read as a failure when the delivery worked.
+    let describe = |woke: &Woke| {
+        let handler = if woke.handler_ran { "the handler RAN" } else { "the handler did NOT run" };
+        match (&woke.delivered, &woke.exit) {
+            (Err(why), _) => format!("delivery refused: {why}"),
+            (_, None) => format!("{handler}; the run then parked again and was rescued"),
+            (_, Some(reason)) => format!("{handler}; the run returned {reason:?}"),
+        }
+    };
+    let during = wake_during_run(LocalApicMode::XApic, InterruptKind::Fixed, 0x40, 0x40)?;
+    let _ = writeln!(detail, "XApic, Fixed vector 0x40 mid-run:  {}", describe(&during));
+    // A real-mode NMI lands on interrupt vector 2, but the request itself
+    // carries no vector — an NMI has none, and sending one is rejected as an
+    // invalid argument.
+    let nmi = wake_during_run(LocalApicMode::XApic, InterruptKind::Nmi, 2, 0)?;
+    let _ = writeln!(detail, "XApic, NMI mid-run:                {}", describe(&nmi));
+    if nmi.handler_ran && !during.handler_ran {
+        let _ = writeln!(
+            detail,
+            "  => the mechanism WORKS; the Fixed vector was dropped by the guest's own\n  \
+             \x20  APIC, which a real-mode guest never enabled. A kernel that enables it\n  \
+             \x20  would receive the vector."
+        );
+    }
+
+    // The control: the same partition-level call with no APIC to accept it.
+    // Without this, a refusal above would not be evidence of anything.
+    let control = wake_attempt(LocalApicMode::None, Wake::ApicRequest)?;
+    let _ = writeln!(
+        detail,
+        "None + WHvRequestInterrupt (control): {}",
+        match &control.delivered {
+            Err(why) => format!("refused, as it should be — {why}"),
+            Ok(()) => "ACCEPTED, which it should not be with no APIC present".to_owned(),
+        }
+    );
+
+    let answer = if !parks {
+        "INCONCLUSIVE — see the detail; the guest did not reach its halt."
+            .to_owned()
+    } else if during.handler_ran {
+        "YES, but only from another thread. A halted processor does not leave \
+         `WHvRunVirtualProcessor` under XApic, so direct injection can never \
+         be applied; `WHvRequestInterrupt` issued while the run is in progress \
+         wakes it and the handler runs. A userspace 8259 must deliver across \
+         threads, not between runs."
+            .to_owned()
+    } else if nmi.handler_ran {
+        "YES, from another thread, and the delivery MECHANISM is proven: a \
+         mid-run NMI wakes the parked processor and its handler runs. The \
+         Fixed vector was dropped by the guest's own APIC, which a real-mode \
+         guest never enables — not by the platform. A halted processor never \
+         leaves `WHvRunVirtualProcessor` under XApic, so direct injection is \
+         unreachable and a userspace 8259 must deliver across threads."
+            .to_owned()
+    } else if nmi.delivered.is_err() {
+        "PARTLY ANSWERED. A halted processor never leaves \
+         `WHvRunVirtualProcessor` under XApic, so direct injection is \
+         unreachable — that much is settled. Whether a mid-run request can \
+         wake it is NOT: the Fixed vector this guest's own disabled APIC was \
+         entitled to drop, and the NMI meant to bypass that gate was refused \
+         outright. Deciding it needs a guest that enables its LAPIC, which \
+         real mode cannot reach."
+            .to_owned()
+    } else {
+        "NO. A halted processor never leaves `WHvRunVirtualProcessor` under \
+         XApic, and neither a mid-run Fixed vector NOR an NMI — which no APIC \
+         mask can gate — woke it. Stage one of the Alpine plan is not viable \
+         on this host; it needs LocalApicEmulationMode::None with our own \
+         LAPIC behind the shadow CPU."
+            .to_owned()
+    };
+    Ok(Finding { question: Q10, answer, detail })
+}
+
+/// Deliver through the emulated APIC from another thread WHILE the processor
+/// runs, which is the only shape available once a halt stops producing an exit.
+///
+/// `kind` decides what is being tested. A `Fixed` vector is what an 8259's
+/// output would become — but it is gated by the guest's own APIC, which a
+/// real-mode guest has never enabled, so a `Fixed` delivery that does not
+/// arrive proves nothing about the platform. `Nmi` is not gated by the APIC's
+/// software-enable at all, so it separates "the platform cannot deliver
+/// mid-run" from "this guest's APIC is switched off".
+fn wake_during_run(
+    apic: LocalApicMode,
+    kind: InterruptKind,
+    ivt_vector: u16,
+    sent_vector: u32,
+) -> WhpResult<Woke> {
+    /// Long enough for the guest to have reached its `hlt`.
+    const DELIVER_AFTER: Duration = Duration::from_millis(50);
+    /// Long enough after that for a delivery which works to have landed.
+    const RESCUE_AFTER: Duration = Duration::from_millis(400);
+
+    let mut configured = Ok(());
+    let mut guest = Guest::new(|config| {
+        if let Err(err) = config.local_apic(apic) {
+            configured = Err(err.to_string());
+        }
+        Ok(())
+    })?;
+    if let Err(why) = configured {
+        return Ok(Woke {
+            configured: Err(why),
+            delivered: Err("not attempted".into()),
+            exit: None,
+            handler_ran: false,
+        });
+    }
+    guest.load(HALT_THEN_MARK)?;
+    install_handler(&mut guest, ivt_vector)?;
+
+    let requester = guest.partition.interrupt_requester();
+    let canceller = guest.partition.canceller(0);
+    let (finished, wait_for_finish) = std::sync::mpsc::channel::<()>();
+
+    let outcome = std::thread::scope(|scope| {
+        let helper = scope.spawn(move || {
+            std::thread::sleep(DELIVER_AFTER);
+            let delivered = requester.request(InterruptRequest {
+                kind,
+                destination_mode: DestinationMode::Physical,
+                trigger_mode: TriggerMode::Edge,
+                destination: 0,
+                vector: sent_vector,
+            });
+            // Whether the run then ends on its own is the measurement; the
+            // rescue only guarantees this function returns.
+            let rescued = match wait_for_finish.recv_timeout(RESCUE_AFTER) {
+                Ok(()) => false,
+                Err(_) => {
+                    canceller.cancel()?;
+                    true
+                }
+            };
+            Ok::<_, rusty_box_whp::WhpError>((delivered, rescued))
+        });
+        let exit = guest.run();
+        match finished.send(()) {
+            // As in `run_with_rescue`: an error means the rescue already
+            // fired, which the exit reason shows.
+            Ok(()) | Err(_) => {}
+        }
+        let (delivered, rescued) = helper.join().expect("the helper thread did not panic")?;
+        Ok::<_, rusty_box_whp::WhpError>((exit?, delivered, rescued))
+    });
+    let (exit, delivered, rescued) = outcome?;
+
+    Ok(Woke {
+        configured: Ok(()),
+        delivered: delivered.map_err(|err| err.to_string()),
+        exit: (!rescued).then_some(exit.reason),
+        handler_ran: guest.peek(layout::MARKER) == 0xA5,
+    })
 }
 
 fn q9_mapping_churn() -> WhpResult<Finding> {

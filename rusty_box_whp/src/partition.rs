@@ -18,7 +18,9 @@
 
 use crate::error::{WhpError, WhpResult};
 use crate::sys::{self, GpaPerms, GvaTranslation, PropertyCode, RawPartition};
-use crate::vcpu::{Exit, InternalActivity, PendingInterruption, Reg, SegmentRegister};
+use crate::vcpu::{
+    Exit, InternalActivity, InterruptRequest, PendingInterruption, Reg, SegmentRegister,
+};
 
 /// Guest-physical pages are 4 KiB, and every WHP range must start and end on
 /// one.
@@ -336,6 +338,17 @@ impl Partition {
         Canceller { handle: self.handle.0, index }
     }
 
+    /// A handle that can deliver an interrupt through the emulated APIC from
+    /// another thread while a processor is running.
+    ///
+    /// Carries the same lifetime obligation as [`Partition::canceller`]. See
+    /// [`InterruptRequester`] for why this capability has to exist separately
+    /// from [`Partition::inject`].
+    #[must_use]
+    pub fn interrupt_requester(&self) -> InterruptRequester {
+        InterruptRequester { handle: self.handle.0 }
+    }
+
     /// The permissions a mapped range currently carries.
     #[must_use]
     pub fn perms_at(&self, gpa: u64) -> Option<GpaPerms> {
@@ -445,13 +458,25 @@ impl Partition {
         sys::set_segments(self.handle.0, index, regs, segments)
     }
 
-    /// Hand the guest an interrupt, NMI or exception to take at its next
-    /// opportunity.
+    /// Hand a processor an interrupt, NMI or exception to take at its next
+    /// opportunity, bypassing any emulated APIC.
     ///
     /// # Errors
     /// As [`Partition::read_regs`].
     pub fn inject(&self, index: u32, event: PendingInterruption) -> WhpResult<()> {
         self.write_reg(index, Reg::PendingInterruption, event.as_word())
+    }
+
+    /// Hand the partition's emulated APIC an interrupt to arbitrate and
+    /// deliver, rather than injecting it into one processor.
+    ///
+    /// Only meaningful when the partition was configured with an APIC; with
+    /// [`LocalApicMode::None`] there is nothing to accept the request.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the platform refuses.
+    pub fn request_interrupt(&self, request: InterruptRequest) -> WhpResult<()> {
+        sys::request_interrupt(self.handle.0, request)
     }
 
     /// Why a processor is not executing.
@@ -502,10 +527,11 @@ impl Partition {
     }
 }
 
-/// The one thing this crate lets another thread do to a running processor.
+/// One of the two things this crate lets another thread do to a running
+/// processor.
 ///
 /// See [`Partition::canceller`] for the lifetime obligation that comes with
-/// holding one.
+/// holding one; it applies equally to [`InterruptRequester`].
 #[derive(Clone, Copy, Debug)]
 pub struct Canceller {
     handle: RawPartition,
@@ -520,6 +546,35 @@ impl Canceller {
     /// [`crate::WhpErrorKind::Platform`] if the platform refuses.
     pub fn cancel(&self) -> WhpResult<()> {
         sys::cancel_vp(self.handle, self.index)
+    }
+}
+
+/// The other: hand the partition's emulated APIC an interrupt while a
+/// processor is running.
+///
+/// This exists because it is the ONLY delivery route available when the
+/// hypervisor emulates the APIC. In that mode a halted processor does not
+/// leave `WHvRunVirtualProcessor` at all, so there is no moment at which the
+/// running thread could stop and inject; the vector has to arrive from
+/// somewhere else while the run is in progress.
+///
+/// `WHvRequestInterrupt` addresses the partition rather than a stopped
+/// processor's registers, which is what makes it safe to call from another
+/// thread — unlike [`Partition::inject`], whose register write requires the
+/// processor to be stopped.
+#[derive(Clone, Copy, Debug)]
+pub struct InterruptRequester {
+    handle: RawPartition,
+}
+
+impl InterruptRequester {
+    /// Deliver an interrupt through the emulated APIC.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the platform refuses — which it
+    /// does with `ERROR_HV_OPERATION_DENIED` when the partition has no APIC.
+    pub fn request(&self, request: InterruptRequest) -> WhpResult<()> {
+        sys::request_interrupt(self.handle, request)
     }
 }
 
