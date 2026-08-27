@@ -17,6 +17,9 @@
 //! - **HardDrive (ATA/IDE)**: Hard disk controller
 
 use crate::ring_buffer::RingBuffer;
+// In scope for the dispatch below: `PioTarget`/`MmioTarget` answer as devices,
+// so the verbs reach them through the trait rather than through a vtable.
+use rusty_box_devices::api::{MmioDevice, PioDevice};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
@@ -585,9 +588,16 @@ impl BxDevicesC {
         core::mem::take(&mut self.scheduler_boundary_requested)
     }
 
-    /// Drain every fixed device timer request after raw I/O borrows are gone.
+    /// Take the timer work a boundary was asked for, and clear the request that
+    /// asked for it.
+    ///
+    /// The latch and the table are one announcement — "I queued timer work,
+    /// service a boundary" — so the boundary that services them takes both at
+    /// once. Separating the two lets the latch be cleared by a caller that
+    /// answers only half of it (R5).
     #[inline]
-    pub(crate) fn take_timer_requests(&mut self) -> TimerRequestTable {
+    pub(crate) fn take_boundary_timer_requests(&mut self) -> TimerRequestTable {
+        self.scheduler_boundary_requested = false;
         core::mem::take(&mut self.timer_requests)
     }
 
@@ -732,7 +742,7 @@ impl BxDevicesC {
                 // disjoint by construction — `bind_pio` answers for exactly the
                 // converted slots — so neither path can shadow the other.
                 let mut routed = None;
-                if let Some(bound) = dm.bind_pio(slot, port) {
+                if let Some(mut bound) = dm.bind_pio(slot, port) {
                     routed = Some(wiring::with_device_ctx(
                         bound.irq,
                         pc_system,
@@ -786,7 +796,7 @@ impl BxDevicesC {
             {
                 // See `inp` on why the two paths cannot overlap.
                 let mut routed = false;
-                if let Some(bound) = dm.bind_pio(slot, port) {
+                if let Some(mut bound) = dm.bind_pio(slot, port) {
                     wiring::with_device_ctx(
                         bound.irq,
                         pc_system,
@@ -847,7 +857,7 @@ impl BxDevicesC {
             return true;
         }
         match dm.bind_mmio(slot) {
-            Some(bound) => {
+            Some(mut bound) => {
                 wiring::with_device_ctx(
                     bound.irq,
                     pc_system,
@@ -886,7 +896,7 @@ impl BxDevicesC {
             return true;
         }
         match dm.bind_mmio(slot) {
-            Some(bound) => {
+            Some(mut bound) => {
                 wiring::with_device_ctx(
                     bound.irq,
                     pc_system,
@@ -1815,9 +1825,11 @@ mod tests {
             },
         );
 
-        assert!(devices.take_scheduler_boundary_requested());
-        assert!(!devices.take_scheduler_boundary_requested());
-        let requests = devices.take_timer_requests();
+        let requests = devices.take_boundary_timer_requests();
+        assert!(
+            !devices.take_scheduler_boundary_requested(),
+            "taking the queued work must answer the request that announced it"
+        );
         assert_eq!(
             requests.get(DeviceTimerOwner::PciIdeCh0),
             TimerRequest::Deactivate
@@ -1832,7 +1844,7 @@ mod tests {
         );
         assert_eq!(
             devices
-                .take_timer_requests()
+                .take_boundary_timer_requests()
                 .get(DeviceTimerOwner::PciIdeCh0),
             TimerRequest::Unchanged
         );
@@ -1857,7 +1869,7 @@ mod tests {
         assert!(!devices.take_scheduler_boundary_requested());
         assert_eq!(
             devices
-                .take_timer_requests()
+                .take_boundary_timer_requests()
                 .get(DeviceTimerOwner::PciIdeCh0),
             TimerRequest::Unchanged
         );
@@ -1910,7 +1922,7 @@ mod tests {
             // The 8042 timer is continuous (Bochs keyboard.cc): keyboard port
             // I/O must not produce one-shot owner timer requests.
             assert_eq!(
-                io.take_timer_requests().get(DeviceTimerOwner::Keyboard),
+                io.take_boundary_timer_requests().get(DeviceTimerOwner::Keyboard),
                 TimerRequest::Unchanged
             );
         });

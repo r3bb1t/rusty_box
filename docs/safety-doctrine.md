@@ -177,12 +177,34 @@ is the mechanical half for type-level claims.
 
 ## The named erasure/exemption registry
 
-Kept complete on purpose — an exemption not listed here is a violation:
+Kept complete on purpose — an exemption not listed here is a violation. Counted, not
+recalled: `dyn` in `rusty_box/src` is 43 occurrences, and every one of them is below.
+
+**Sanctioned — a user's closure has no type to name, so erasure is the only form:**
+
+- Hook storage `Box<dyn FnMut…>` — `cpu/instrumentation/{hooks,registry}.rs`, alloc-gated.
+- The user MMIO registry `Box<dyn FnMut…>` — `memory/mmio.rs`, reached from
+  `cpu/access.rs` behind an `is_empty()` guard and exposed as `Emulator::mmio_map`.
+  Alloc-gated.
+- `AnyDisk::Custom(Box<dyn BlockDevice + Send>)` — the reserved shape for a user disk
+  backend (P7). Not built yet; listed so it is not re-litigated when it is.
+
+**Tolerated, each with the unit that removes it — a `dyn` here is debt, not design:**
+
+- `Box<dyn BxGui>` / `&mut dyn BxGui` — `emulator/mod.rs`, `emulator/builder.rs`,
+  `gui/gui_trait.rs`. The display leaves the machine as a `DisplaySink` (REPLAN unit B/H2).
+- `Box<dyn Fn()>` in `BxGui::headerbar_bitmap` and its three implementations — dies with
+  the same seam.
+- `&mut dyn CpuAccess` — `cpu/instrumentation/ctx.rs`. Load-bearing today: because
+  `HookCtx` erases the whole context, dispatch has to move the tracer out of the registry
+  rather than hold it beside `ExecCtx`. Making `HookCtx` generic is its own unit.
+- `&mut dyn IrqSink` / `&mut dyn TimerService` in `rusty_box_devices`'s `DeviceCtx` — the
+  fabric and the timer wheel live in `rusty_box`, so the devices crate has no concrete type
+  to name until they move (unit L).
+
+**Not erasure, but exempted from R0 by name:**
 
 - `ExecCtx::slice_parts` — internal 6-tuple destructure (R0 scope note).
-- `AnyDisk::Custom(Box<dyn BlockDevice + Send>)` and sibling `Any*` variants — alloc-gated
-  user-backend erasure (R8).
-- Hook storage `Box<dyn FnMut…>` — alloc-gated closure erasure (R8).
 - `static_cell` — the one `unsafe` dependency for no_alloc placement (R1), outside this tree.
 - no-alloc `Emulator` is `!Send` — documented caller-outlives contract (R6).
 

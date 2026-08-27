@@ -45,10 +45,89 @@ use super::pit::{
 };
 use super::serial::{BxSerialC, SerialTxDrain};
 use super::BxDevicesC;
-use rusty_box_devices::api::{ChipsetEffect, MmioDevice, PioDevice, SmramControl};
+use rusty_box_devices::api::{
+    ChipsetEffect, DeviceCtx, IoLen, MmioDevice, PioDevice, SmramControl, WindowId, WindowOffset,
+};
 use rusty_box_devices::display::card::{StdVga, VgaCard};
 use super::wiring;
 use super::DevSlot;
+
+/// Whichever port-mapped device a slot named, borrowed out of the manager.
+///
+/// A machine's device set is closed — these are the slots this chipset has —
+/// so the choice among them is an enum and the dispatch is an exhaustive match
+/// (R5, R8). Adding a device is then a compile error at every site that routes
+/// one, which is the property a trait object cannot offer: it would accept the
+/// new device silently and leave the sites that must learn about it unchanged.
+pub(crate) enum PioTarget<'a> {
+    Serial(&'a mut BxSerialC),
+    Acpi(&'a mut BxAcpiCtrl),
+    Cmos(&'a mut BxCmosC),
+    Pit(&'a mut BxPitC),
+    Keyboard(&'a mut BxKeyboardC),
+    Vga(&'a mut VgaCard<StdVga>),
+}
+
+impl PioDevice for PioTarget<'_> {
+    fn pio_read(&mut self, port: u16, len: IoLen, ctx: &mut DeviceCtx<'_>) -> u32 {
+        match self {
+            Self::Serial(device) => device.pio_read(port, len, ctx),
+            Self::Acpi(device) => device.pio_read(port, len, ctx),
+            Self::Cmos(device) => device.pio_read(port, len, ctx),
+            Self::Pit(device) => device.pio_read(port, len, ctx),
+            Self::Keyboard(device) => device.pio_read(port, len, ctx),
+            Self::Vga(device) => device.pio_read(port, len, ctx),
+        }
+    }
+
+    fn pio_write(&mut self, port: u16, value: u32, len: IoLen, ctx: &mut DeviceCtx<'_>) {
+        match self {
+            Self::Serial(device) => device.pio_write(port, value, len, ctx),
+            Self::Acpi(device) => device.pio_write(port, value, len, ctx),
+            Self::Cmos(device) => device.pio_write(port, value, len, ctx),
+            Self::Pit(device) => device.pio_write(port, value, len, ctx),
+            Self::Keyboard(device) => device.pio_write(port, value, len, ctx),
+            Self::Vga(device) => device.pio_write(port, value, len, ctx),
+        }
+    }
+}
+
+/// Whichever memory-mapped device a token named — the memory-side twin of
+/// [`PioTarget`], closed for the same reason.
+pub(crate) enum MmioTarget<'a> {
+    Vga(&'a mut VgaCard<StdVga>),
+    Hpet(&'a mut super::hpet::BxHpetC),
+}
+
+impl MmioDevice for MmioTarget<'_> {
+    fn mmio_read(
+        &mut self,
+        window: WindowId,
+        at: WindowOffset,
+        len: u32,
+        data: &mut [u8],
+        ctx: &mut DeviceCtx<'_>,
+    ) {
+        match self {
+            Self::Vga(device) => device.mmio_read(window, at, len, data, ctx),
+            Self::Hpet(device) => device.mmio_read(window, at, len, data, ctx),
+        }
+    }
+
+    fn mmio_write(
+        &mut self,
+        window: WindowId,
+        at: WindowOffset,
+        len: u32,
+        data: &[u8],
+        ctx: &mut DeviceCtx<'_>,
+    ) {
+        match self {
+            Self::Vga(device) => device.mmio_write(window, at, len, data, ctx),
+            Self::Hpet(device) => device.mmio_write(window, at, len, data, ctx),
+        }
+    }
+}
 
 /// One port-mapped device bound to the machine parts its context is built from.
 ///
@@ -57,7 +136,7 @@ use super::DevSlot;
 /// to see the split, and the only place that can perform it is the manager
 /// itself.
 pub(crate) struct PioBinding<'a> {
-    pub(crate) device: &'a mut dyn PioDevice,
+    pub(crate) device: PioTarget<'a>,
     pub(crate) irq: &'a mut IrqFabric,
     pub(crate) handles: wiring::TimerHandles,
 }
@@ -65,7 +144,7 @@ pub(crate) struct PioBinding<'a> {
 /// One memory-mapped device bound to the machine parts its context is built
 /// from — the memory-side twin of [`PioBinding`], split for the same reason.
 pub(crate) struct MmioBinding<'a> {
-    pub(crate) device: &'a mut dyn MmioDevice,
+    pub(crate) device: MmioTarget<'a>,
     pub(crate) irq: &'a mut IrqFabric,
     pub(crate) handles: wiring::TimerHandles,
 }
@@ -1375,7 +1454,7 @@ impl DeviceManager {
             ..
         } = *self;
         let mut handles = wiring::TimerHandles::default();
-        let device: &mut dyn PioDevice = match slot {
+        let device = match slot {
             DevSlot::SERIAL => {
                 if let Some(index) = serial.port_index_for_address(port) {
                     handles.set(
@@ -1387,29 +1466,29 @@ impl DeviceManager {
                         serial.tx_timer_handle(index),
                     );
                 }
-                serial
+                PioTarget::Serial(serial)
             }
             DevSlot::ACPI => {
                 handles.set(BxAcpiCtrl::OVERFLOW_TIMER_LOCAL, acpi.overflow_timer_handle);
-                acpi
+                PioTarget::Acpi(acpi)
             }
             DevSlot::CMOS => {
                 handles.set(BxCmosC::PERIODIC_TIMER_LOCAL, cmos.periodic_timer_handle);
                 handles.set(BxCmosC::ONE_SECOND_TIMER_LOCAL, cmos.one_second_timer_handle);
                 handles.set(BxCmosC::UIP_TIMER_LOCAL, cmos.uip_timer_handle);
-                cmos
+                PioTarget::Cmos(cmos)
             }
             DevSlot::PIT => {
                 handles.set(BxPitC::EVENT_TIMER_LOCAL, pit.timer_handle);
-                pit
+                PioTarget::Pit(pit)
             }
             // The 8042's timer is continuous and registered by the machine, so
             // the device never arms it itself and its context carries none.
-            DevSlot::KEYBOARD => keyboard,
+            DevSlot::KEYBOARD => PioTarget::Keyboard(keyboard),
             // The VGA's vertical-retrace timer is likewise machine-owned and
             // re-armed at the scheduler boundary from the CRTC timing, so a
             // port write never arms it from in here.
-            DevSlot::VGA => vga,
+            DevSlot::VGA => PioTarget::Vga(vga),
             _ => return None,
         };
         Some(PioBinding {
@@ -1440,9 +1519,9 @@ impl DeviceManager {
             ..
         } = *self;
         let handles = wiring::TimerHandles::default();
-        let device: &mut dyn MmioDevice = match slot {
-            DevSlot::VGA => vga,
-            DevSlot::HPET => hpet,
+        let device = match slot {
+            DevSlot::VGA => MmioTarget::Vga(vga),
+            DevSlot::HPET => MmioTarget::Hpet(hpet),
             _ => return None,
         };
         Some(MmioBinding {

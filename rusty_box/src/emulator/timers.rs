@@ -672,8 +672,11 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// been cleared. Phase 2 owns the already registered IDE channels; later
     /// owners retain their table slots until Phase 3 registers their handles.
     pub(crate) fn drain_device_timer_requests(&mut self) {
-        let _boundary_requested = self.devices.take_scheduler_boundary_requested();
-        let requests = self.devices.take_timer_requests();
+        // I/O raises the boundary request to say it queued timer work, and this
+        // is the boundary that services it — so the request is answered here,
+        // not dropped. Nothing can raise it between the two halves: a device
+        // timer callback reaches `request_timer`, never the port bus.
+        let requests = self.devices.take_boundary_timer_requests();
         let owners = [
             (
                 DeviceTimerOwner::Pit,

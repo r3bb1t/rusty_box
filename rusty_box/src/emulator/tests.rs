@@ -2184,7 +2184,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                     // The pre-reset PIT request is gone (the post-reset rearm
                     // drained its own requests inside reset()).
-                    let table = emu.devices.take_timer_requests();
+                    let table = emu.devices.take_boundary_timer_requests();
                     assert_eq!(
                         table.get(DeviceTimerOwner::Pit),
                         TimerRequest::Unchanged,
