@@ -1311,7 +1311,6 @@ mod tests {
     use crate::cpu::crregs::{BxCr0, BxEfer};
     use crate::cpu::decoder::BxSegregs;
     use crate::cpu::eflags::EFlags;
-    use crate::cpu::svm::VmcbCache;
     use crate::cpu::CpuModel;
     use crate::cpu::ResetReason;
     use super::CpuMode;

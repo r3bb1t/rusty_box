@@ -25,6 +25,7 @@ pub mod error;
 pub use error::{CpuError, Result};
 
 pub(crate) mod api_bridge;
+pub mod arch_state;
 
 pub(super) mod access;
 pub(super) mod aes;

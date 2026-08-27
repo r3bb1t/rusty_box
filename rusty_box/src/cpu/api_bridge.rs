@@ -9,6 +9,7 @@
 //! - `Emulator::cpu_snapshot`
 //! - `Emulator::setup_cpu_mode` (and friends)
 
+use super::arch_state::{SegmentAttributeParts, SegmentAttributes, SegmentState};
 use super::decoder::BxSegregs;
 use super::instrumentation::X86Reg;
 use super::BxCpuC;
@@ -151,44 +152,73 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         limit: u32,
         size: SegmentSize,
     ) {
-        let idx = match reg {
-            X86Reg::Es => BxSegregs::Es as usize,
-            X86Reg::Cs => BxSegregs::Cs as usize,
-            X86Reg::Ss => BxSegregs::Ss as usize,
-            X86Reg::Ds => BxSegregs::Ds as usize,
-            X86Reg::Fs => BxSegregs::Fs as usize,
-            X86Reg::Gs => BxSegregs::Gs as usize,
+        let seg = match reg {
+            X86Reg::Es => BxSegregs::Es,
+            X86Reg::Cs => BxSegregs::Cs,
+            X86Reg::Ss => BxSegregs::Ss,
+            X86Reg::Ds => BxSegregs::Ds,
+            X86Reg::Fs => BxSegregs::Fs,
+            X86Reg::Gs => BxSegregs::Gs,
             _ => return,
         };
-        let s = &mut self.sregs[idx];
-        s.selector.value = selector;
-        s.selector.rpl = (selector & 0x3) as u8;
-        s.selector.ti = ((selector >> 2) & 1) as u16;
-        s.selector.index = selector >> 3;
-        s.cache.valid = super::descriptor::SEG_VALID_CACHE;
-        s.cache.segment = true;
-        s.cache.p = true;
-        // DPL follows RPL for the flat-setup path.
-        s.cache.dpl = s.selector.rpl;
-        // type: code=0xB (exec/read/accessed), data=0x3 (read/write/accessed)
-        s.cache.r#type = if matches!(reg, X86Reg::Cs) { 0xB } else { 0x3 };
-        s.cache.u.set_segment_base(base);
-        s.cache.u.set_segment_limit_scaled(limit);
         // Granularity is not free to choose: Bochs cpu.cc `reset` leaves real
         // mode's 0xFFFF segments byte-granular because a 20-bit field holds
         // them, and claiming G on one describes a segment no descriptor could
         // have produced.
-        s.cache.u.set_segment_g(ScaledLimit::of(limit).page_granular);
-        s.cache.u.set_segment_d_b(size.d_b());
-        s.cache.u.set_segment_l(size.long64());
-        s.cache.u.set_segment_avl(false);
+        let scaled = ScaledLimit::of(limit);
+        let state = SegmentState {
+            selector,
+            base,
+            limit: scaled.field,
+            attributes: SegmentAttributes::new(SegmentAttributeParts {
+                // code = 0xB (exec/read/accessed), data = 0x3 (read/write/accessed)
+                kind: if matches!(reg, X86Reg::Cs) { 0xB } else { 0x3 },
+                // DPL follows RPL for the flat-setup path.
+                dpl: (selector & 0x3) as u8,
+                code_or_data: true,
+                present: true,
+                available: false,
+                long: size.long64(),
+                default_big: size.d_b(),
+                granular: scaled.page_granular,
+            }),
+        };
+        self.load_segment(seg, &state);
+    }
 
-        if idx == BxSegregs::Cs as usize {
+    /// Load one segment register and everything the processor derives from it.
+    ///
+    /// The ONE place a segment is written outside the guest's own
+    /// `load_seg_reg` (Bochs segment_ctrl_pro.cc), which this mirrors: the
+    /// public setup path and an imported architectural state both arrive here,
+    /// so neither can acquire a derived-state bug the other does not have
+    /// (R5). Loading a segment is not a write to a cache — CS decides the
+    /// fetch-mode mask, the prefetch window and whether alignment checking
+    /// applies, and SS owns the stack window.
+    pub(crate) fn load_segment(&mut self, seg: BxSegregs, state: &SegmentState) {
+        let idx = seg as usize;
+        {
+            let s = &mut self.sregs[idx];
+            super::segment_ctrl_pro::parse_selector(state.selector, &mut s.selector);
+            s.cache.valid = super::descriptor::SEG_VALID_CACHE;
+            s.cache.segment = state.attributes.is_code_or_data();
+            s.cache.p = state.attributes.is_present();
+            s.cache.dpl = state.attributes.dpl();
+            s.cache.r#type = state.attributes.kind();
+            s.cache.u.set_segment_base(state.base);
+            s.cache.u.set_segment_limit_scaled(state.scaled_limit());
+            s.cache.u.set_segment_g(state.attributes.is_granular());
+            s.cache.u.set_segment_d_b(state.attributes.is_default_big());
+            s.cache.u.set_segment_l(state.attributes.is_long());
+            s.cache.u.set_segment_avl(state.attributes.is_available());
+        }
+
+        if seg == BxSegregs::Cs {
             self.invalidate_prefetch_q();
             self.update_fetch_mode_mask();
             self.handle_alignment_check();
         }
-        if idx == BxSegregs::Ss as usize {
+        if seg == BxSegregs::Ss {
             self.invalidate_stack_cache();
         }
     }
