@@ -23,12 +23,17 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod engine;
 pub mod float;
 pub mod reset;
 pub mod ring_buffer;
 pub mod snap;
 pub mod time;
 
+pub use engine::{
+    EngineCaps, EngineFault, EngineFaultKind, GpaOverlap, GpaPerms, GpaPlan, GpaPlanError,
+    GpaWindow, HostOffset, VpIndex, GUEST_PAGE,
+};
 pub use float::FloatExt;
 pub use reset::ResetReason;
 pub use ring_buffer::RingBuffer;

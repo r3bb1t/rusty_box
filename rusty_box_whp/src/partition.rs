@@ -17,14 +17,18 @@
 //! measuring is what the probe is meant to prevent.
 
 use crate::error::{WhpError, WhpResult};
-use crate::sys::{self, GpaPerms, GvaTranslation, PropertyCode, RawPartition};
+use rusty_box_core::GpaPerms;
+
+use crate::sys::{self, GvaTranslation, PropertyCode, RawPartition};
 use crate::vcpu::{
     Exit, InternalActivity, InterruptRequest, PendingInterruption, Reg, SegmentRegister,
 };
 
 /// Guest-physical pages are 4 KiB, and every WHP range must start and end on
-/// one.
-pub const PAGE_SIZE: usize = 4096;
+/// one. Derived from core's [`rusty_box_core::GUEST_PAGE`] rather than restated,
+/// so a window this crate accepts and a window a plan describes cannot disagree
+/// about what a page is.
+pub const PAGE_SIZE: usize = rusty_box_core::GUEST_PAGE as usize;
 
 /// Which local-APIC model the partition presents, if any.
 ///

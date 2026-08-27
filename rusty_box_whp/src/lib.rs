@@ -45,7 +45,13 @@ pub use partition::{
     Canceller, HostPages, InterruptRequester, LateProperty, LocalApicMode, Partition,
     PartitionConfig, PAGE_SIZE,
 };
-pub use sys::{GpaPerms, GvaTranslation};
+pub use sys::GvaTranslation;
+
+/// Re-exported so a caller mapping memory into a partition need not also name
+/// the core crate. It is core's type, not this crate's: a permission on a
+/// guest-physical window means the same thing to every engine, and the WHP
+/// flags are one encoding of it rather than its definition.
+pub use rusty_box_core::GpaPerms;
 pub use vcpu::{
     AccessType, CpuidAccess, DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind,
     InterruptRequest, InterruptionType, IoPortAccess, MemoryAccess, MsrAccess,

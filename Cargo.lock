@@ -3814,6 +3814,7 @@ dependencies = [
 name = "rusty_box_whp"
 version = "0.0.3"
 dependencies = [
+ "rusty_box_core",
  "tracing",
  "windows-sys 0.61.2",
 ]

@@ -4,6 +4,8 @@
 //! Rust. The two implementations expose the identical function set, so no
 //! caller ever carries a `cfg` — the selection happens once, here.
 
+use rusty_box_core::GpaPerms;
+
 use crate::error::{WhpError, WhpResult};
 use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister};
 
@@ -59,33 +61,6 @@ pub(crate) enum PropertyCode {
     ExtendedVmExits,
     SeparateSecurityDomain,
     LocalApicEmulationMode,
-}
-
-/// Guest-physical permissions for one mapped window.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct GpaPerms {
-    /// Guest reads are served from host memory.
-    pub read: bool,
-    /// Guest writes are served from host memory. With this clear and `read`
-    /// set, a write becomes a `MemoryAccess` exit — the shape a shadowed ROM
-    /// or a write-ignored PAM region needs.
-    pub write: bool,
-    /// Guest instruction fetches are served from host memory.
-    pub execute: bool,
-    /// The hypervisor records which pages the guest wrote, readable back with
-    /// [`crate::Partition::dirty_pages`].
-    pub track_dirty: bool,
-}
-
-impl GpaPerms {
-    /// Ordinary guest RAM.
-    pub const RWX: Self = Self { read: true, write: true, execute: true, track_dirty: false };
-    /// A shadowed ROM, or a PAM region the chipset has made read-only: reads
-    /// and fetches run at full speed, writes exit.
-    pub const RX: Self = Self { read: true, write: false, execute: true, track_dirty: false };
-    /// Guest RAM whose writes are being tracked for an incremental snapshot.
-    pub const RWX_TRACKED: Self =
-        Self { read: true, write: true, execute: true, track_dirty: true };
 }
 
 /// How far a `WHvTranslateGva` got.
