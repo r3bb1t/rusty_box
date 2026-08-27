@@ -202,6 +202,15 @@ recalled: `dyn` in `rusty_box/src` is 43 occurrences, and every one of them is b
   fabric and the timer wheel live in `rusty_box`, so the devices crate has no concrete type
   to name until they move (unit L).
 
+**Sealed by signature rather than by a private supertrait:**
+
+- `SliceEngine` — public, because it bounds `Emulator`'s engine parameter, and
+  implementable only inside this crate, because its arguments (`BxCpuC`'s
+  siblings via `PcIo`, and `SliceRequest`, whose fields are crate-private) are.
+  The seal is deliberate: an engine needs the machine's insides, and a backend
+  crate stays a host-FFI leaf that this crate adapts. Per the per-trait sealing
+  policy, that keeps the trait free to gain methods.
+
 **Not erasure, but exempted from R0 by name:**
 
 - `ExecCtx::slice_parts` — internal 6-tuple destructure (R0 scope note).

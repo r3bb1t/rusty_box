@@ -6,11 +6,11 @@ use crate::{
     pc_system::TimerOwner, Result,
 };
 
-use super::Emulator;
+use super::{Emulator, SliceEngine};
 #[cfg(feature = "std")]
 use super::SLOWDOWN_QUANTUM_USEC;
 
-impl<'a, T: Instrumentation> Emulator<T> {
+impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Give every device that needs one a slot in the timer wheel, and hand
     /// each device its handle.
     ///

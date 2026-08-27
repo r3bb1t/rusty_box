@@ -11,7 +11,7 @@
 
 use crate::cpu::instrumentation::Instrumentation;
 
-use super::Emulator;
+use super::{Emulator, SliceEngine};
 
 /// The display vocabulary, re-exported deliberately rather than as a shim.
 ///
@@ -233,7 +233,7 @@ impl Display<'_, VgaCard<StdVga>> {
     }
 }
 
-impl<T: Instrumentation> Emulator<T> {
+impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Read this machine's screen.
     ///
     /// The handle borrows the machine, so it is taken, used and dropped; a

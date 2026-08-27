@@ -25,7 +25,7 @@ use crate::cpu::{cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentatio
 
 /// One bounded stretch of guest execution, as the machine asks for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SliceRequest {
+pub struct SliceRequest {
     /// Guest instructions this stretch may retire.
     pub(crate) instructions: u64,
     /// Whether that count is a ceiling the engine may not exceed, or merely a
@@ -53,7 +53,16 @@ pub(crate) struct SliceRequest {
 /// Not dyn-compatible and deliberately so (R8): a machine knows its engine at
 /// compile time, and monomorphising is what keeps the interpreter's slice entry
 /// as direct as it was before there was an engine at all.
-pub(crate) trait SliceEngine<T: Instrumentation> {
+///
+/// Public because it bounds `Emulator`'s engine parameter, and sealed by that
+/// same signature: `BxCpuC` and [`PcIo`] are this crate's, so only this crate
+/// can write an implementation. That is the intended shape rather than an
+/// oversight — an engine needs the machine's insides, and a backend crate stays
+/// a thin host-FFI leaf that this crate adapts, exchanging architectural state
+/// through `VcpuArchState` rather than reaching into a processor directly.
+/// Sealing also keeps the trait free to gain methods (doctrine's per-trait
+/// sealing policy); `caps()` is the first one waiting.
+pub trait SliceEngine<T: Instrumentation> {
     /// Run `cpu` against `io` for the stretch `request` describes, and report
     /// how many instructions it retired.
     ///
@@ -76,7 +85,7 @@ pub(crate) trait SliceEngine<T: Instrumentation> {
 /// that partition and is not stateless — which is exactly why the machine holds
 /// an engine value rather than calling free functions.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct SoftwareEngine;
+pub struct SoftwareEngine;
 
 impl<T: Instrumentation> SliceEngine<T> for SoftwareEngine {
     #[inline]

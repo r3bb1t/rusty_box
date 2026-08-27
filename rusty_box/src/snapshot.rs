@@ -8,7 +8,7 @@ pub(crate) use rusty_box_core::snap::{SnapError, SnapRead, SnapResult, SnapWrite
 
 #[cfg(feature = "std")]
 use crate::{
-    emulator::Emulator,
+    emulator::{Emulator, SliceEngine},
     memory::{BxMemC, MemorySnapshotGeometry, MemorySnapshotResidency},
     pc_system::TimerOwner,
 };
@@ -430,33 +430,33 @@ fn restore_memory<R: SnapRead>(memory: &mut BxMemC, reader: &mut SnapshotReader<
 }
 
 #[cfg(feature = "std")]
-fn cpu_len<T: crate::cpu::instrumentation::Instrumentation>(emu: &Emulator<T>) -> SnapResult<u64> {
+fn cpu_len<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>>(emu: &Emulator<T, E>) -> SnapResult<u64> {
     let count = u32::try_from(emu.cpu_count()).map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?;
     let mut len = 8u64;
     for index in 0..count as usize { len = checked_snapshot_len_add(len, checked_snapshot_len_add(12, emu.cpu_ref(index).snapshot_v3_body_len()?)?)?; }
     Ok(len)
 }
 #[cfg(feature = "std")]
-fn save_cpus<T: crate::cpu::instrumentation::Instrumentation, W: SnapWrite>(emu: &Emulator<T>, writer: &mut W) -> SnapResult {
+fn save_cpus<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>, W: SnapWrite>(emu: &Emulator<T, E>, writer: &mut W) -> SnapResult {
     writer.write_u32(SNAPSHOT_SECTION_VERSION)?; writer.write_u32(u32::try_from(emu.cpu_count()).map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?)?;
     for index in 0..emu.cpu_count() { let cpu = emu.cpu_ref(index); writer.write_u32(cpu.snapshot_cpu_id())?; writer.write_u64(cpu.snapshot_v3_body_len()?)?; cpu.save_snapshot_v3_body(writer)?; }
     Ok(())
 }
 #[cfg(feature = "std")]
-fn lapic_len<T: crate::cpu::instrumentation::Instrumentation>(emu: &Emulator<T>) -> SnapResult<u64> {
+fn lapic_len<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>>(emu: &Emulator<T, E>) -> SnapResult<u64> {
     let mut len = 8u64;
     for index in 0..emu.cpu_count() { len = checked_snapshot_len_add(len, checked_snapshot_len_add(12, emu.cpu_ref(index).lapic.snapshot_v3_body_len()?)?)?; }
     Ok(len)
 }
 #[cfg(feature = "std")]
-fn save_lapics<T: crate::cpu::instrumentation::Instrumentation, W: SnapWrite>(emu: &Emulator<T>, writer: &mut W) -> SnapResult {
+fn save_lapics<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>, W: SnapWrite>(emu: &Emulator<T, E>, writer: &mut W) -> SnapResult {
     writer.write_u32(SNAPSHOT_SECTION_VERSION)?; writer.write_u32(u32::try_from(emu.cpu_count()).map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?)?;
     for index in 0..emu.cpu_count() { let cpu = emu.cpu_ref(index); writer.write_u32(cpu.snapshot_cpu_id())?; writer.write_u64(cpu.lapic.snapshot_v3_body_len()?)?; cpu.lapic.save_snapshot_v3_body(writer)?; }
     Ok(())
 }
 
 #[cfg(feature = "std")]
-impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     pub fn save_snapshot<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
         let mut sink = IoSink::new(writer);
         let outcome = self.save_snapshot_body(&mut sink);

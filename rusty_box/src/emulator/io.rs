@@ -25,7 +25,7 @@ use crate::{
 };
 
 /// Everything a processor executes against, borrowed from one machine.
-pub(crate) struct PcIo<'a> {
+pub struct PcIo<'a> {
     /// Guest memory, including the routing that decides which accesses are
     /// served from RAM and which belong to a device.
     pub(crate) memory: &'a mut BxMemC,

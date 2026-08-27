@@ -47,12 +47,14 @@ pub use display::{
 pub mod cpu_store;
 use cpu_store::CpuStore;
 pub(crate) mod engine;
-pub(crate) use engine::{SliceEngine, SliceRequest, SoftwareEngine};
+pub use engine::{SliceEngine, SliceRequest, SoftwareEngine};
 pub(crate) mod io;
-pub(crate) use io::PcIo;
+pub use io::PcIo;
 mod interactive;
 mod run;
-pub use run::{BatchOutcome, Keyboard, Mouse, Power, PowerState, StopReason};
+pub use run::{
+    BatchOutcome, Keyboard, Mouse, Power, PowerState, Progress, RunBudget, StopReason,
+};
 pub(crate) use run::StopCause;
 mod scheduler;
 mod timers;
@@ -424,15 +426,15 @@ impl Default for SlowdownTimerState {
 /// vector; the only way to get one is to build one.
 ///
 /// ```no_run
-/// use rusty_box::emulator::{EmulatorConfig, MachineBuilder};
+/// use rusty_box::emulator::{EmulatorConfig, MachineBuilder, RunBudget};
 ///
 /// # fn main() -> rusty_box::Result<()> {
 /// # let bios_data: &[u8] = &[];
 /// let mut machine = MachineBuilder::new(EmulatorConfig::default())
 ///     .bios(bios_data)
 ///     .build()?;
-/// let outcome = machine.step_batch(100_000)?;
-/// println!("{} instructions, stopped: {:?}", outcome.executed, outcome.stop);
+/// let outcome = machine.step(RunBudget::Instructions(100_000))?;
+/// println!("{:?}, stopped: {:?}", outcome.progress, outcome.stop);
 /// # Ok(())
 /// # }
 /// ```
@@ -440,12 +442,12 @@ impl Default for SlowdownTimerState {
 /// The memory backing is intentionally not publicly replaceable:
 ///
 /// ```compile_fail
-/// use rusty_box::emulator::{EmulatorConfig, MachineBuilder};
+/// use rusty_box::emulator::{EmulatorConfig, MachineBuilder, RunBudget};
 ///
 /// let mut machine = MachineBuilder::new(EmulatorConfig::default()).build().unwrap();
 /// let _ = &mut machine.memory;
 /// ```
-pub struct Emulator<T: Instrumentation = ()> {
+pub struct Emulator<T: Instrumentation = (), E = SoftwareEngine> {
     /// Every CPU this machine has, boot processor at index 0 — Bochs
     /// `bx_cpu_array`. Each stays at a stable address for its own cached host
     /// mappings.
@@ -465,9 +467,14 @@ pub struct Emulator<T: Instrumentation = ()> {
     ///
     /// A value rather than a free function because an engine backed by a
     /// hypervisor owns a partition, and the machine has to keep it alive for as
-    /// long as it keeps its processors. This build's engine is this port's own
-    /// interpreter, which needs no state of its own.
-    engine: SoftwareEngine,
+    /// long as it keeps its processors.
+    ///
+    /// A parameter rather than a build-wide alias — the shape the CPU store
+    /// uses — because two machines in one process may run on different engines:
+    /// the mixed-engine gate boots one guest under this port's interpreter and
+    /// another on the host's hypervisor, side by side. Defaulted, so every
+    /// existing `Emulator<T>` still names the interpreter.
+    engine: E,
     /// Memory subsystem
     pub(crate) memory: BxMemC,
     /// Device controller (I/O port handlers). Crate-private (doctrine R3):
@@ -574,7 +581,7 @@ fn every_machine_field_is_accounted_for<T: Instrumentation>(machine: Emulator<T>
     } = machine;
 }
 
-impl<'a, T: Instrumentation> Emulator<T> {
+impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// How many processors this machine has, boot processor included.
     ///
     /// Fixed at construction from the configured topology; a guest cannot
@@ -834,11 +841,14 @@ impl Emulator<()> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, T: Instrumentation> Emulator<T> {
+impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Construct an uninitialised machine whose sole processor carries
     /// `tracer`. One tracer instance cannot be shared, so this shape is
     /// uniprocessor; `MachineBuilder` is what enforces that.
-    pub(crate) fn with_tracer(config: EmulatorConfig, tracer: T) -> Result<Box<Self>> {
+    pub(crate) fn with_tracer(config: EmulatorConfig, tracer: T) -> Result<Box<Self>>
+    where
+        E: Default,
+    {
         let requested = config.cpu_params.cpu_count();
         if requested > 1 {
             return Err(BuildError::InstrumentedSmp { requested }.into());
@@ -857,7 +867,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
     pub(crate) fn with_tracer_factory(
         config: EmulatorConfig,
         make_tracer: fn() -> T,
-    ) -> Result<Box<Self>> {
+    ) -> Result<Box<Self>>
+    where
+        E: Default,
+    {
         Self::new_inner(config, move || {
             Ok(BxCpuBuilder::new().build_with_tracer(make_tracer())?)
         })
@@ -866,6 +879,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     fn new_inner<F>(config: EmulatorConfig, mut build_cpu: F) -> Result<Box<Self>>
     where
         F: FnMut() -> Result<alloc::boxed::Box<BxCpuC<T>>>,
+        E: Default,
     {
         let topology = config.cpu_params.cpu_topology();
         let cpu_count = config.cpu_params.cpu_count();
@@ -889,7 +903,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
     fn new_from_parts(
         config: EmulatorConfig,
         cpus: cpu_store::OwnedCpus<T>,
-    ) -> Result<Box<Self>> {
+    ) -> Result<Box<Self>>
+    where
+        E: Default,
+    {
         let pc_system = BxPcSystemC::new();
         let mem_stub = BxMemoryStubC::create_and_init(
             config.memory.guest_bytes(),
@@ -909,7 +926,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         }
         unsafe {
             core::ptr::addr_of_mut!((*ptr).cpus).write(cpus);
-            core::ptr::addr_of_mut!((*ptr).engine).write(SoftwareEngine);
+            core::ptr::addr_of_mut!((*ptr).engine).write(E::default());
             core::ptr::addr_of_mut!((*ptr).memory).write(memory);
             core::ptr::addr_of_mut!((*ptr).devices).write(devices);
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
@@ -936,7 +953,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     }
 }
 
-impl<'a, T: Instrumentation> Emulator<T> {
+impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     #[cfg(not(feature = "alloc"))]
     /// Construct a machine inside caller-provided storage.
     ///
@@ -953,7 +970,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
         cpus: &'static mut [&'static mut BxCpuC<T>],
         mem_stub: BxMemoryStubC,
         config: EmulatorConfig,
-    ) -> Result<&'a mut Self> {
+    ) -> Result<&'a mut Self>
+    where
+        E: Default,
+    {
         let topology = config.cpu_params.cpu_topology();
         let configured_cpu_count = config.cpu_params.cpu_count() as usize;
         if cpus.len() < configured_cpu_count {
@@ -982,7 +1002,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // would have to be built on the stack and moved.
         unsafe {
             core::ptr::addr_of_mut!((*ptr).cpus).write(cpus);
-            core::ptr::addr_of_mut!((*ptr).engine).write(SoftwareEngine);
+            core::ptr::addr_of_mut!((*ptr).engine).write(E::default());
             core::ptr::addr_of_mut!((*ptr).memory).write(memory);
             core::ptr::addr_of_mut!((*ptr).devices).write(devices);
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
@@ -1870,7 +1890,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     }
 }
 
-impl<T: Instrumentation> Emulator<T> {
+impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Dump comprehensive diagnostic state (for Alpine debugging).
     #[cfg(all(feature = "std", debug_assertions))]
     pub fn dump_alpine_diag(&mut self) {
