@@ -13,6 +13,7 @@ use crate::{cpu::CpuError, Error};
 use alloc::vec::Vec;
 
 use super::{Emulator, ResetReason};
+use crate::memory::plan::{MemoryPlan, MemoryPlanError};
 // Only the direct-Linux-boot path below reaches a CPU through the store, and
 // that path needs an allocator.
 #[cfg(feature = "alloc")]
@@ -665,6 +666,29 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// Zero means a deadline is due now. It shares its computation with the
     /// scheduler's own deadline cap, so the two cannot disagree about when the
     /// next event is.
+    /// The machine's guest-physical map, as an execution engine would install
+    /// it.
+    ///
+    /// The complement of stepping: `step_batch` asks the machine to run, this
+    /// asks it where its memory *is*. An engine that executes the guest on real
+    /// hardware needs the whole map up front rather than one address at a time,
+    /// and re-derives it whenever the chipset moves something — a shadow-RAM
+    /// flip, a relocated BAR.
+    ///
+    /// A range absent from the map is not a hole in the guest's address space.
+    /// It is a range this machine services itself: device MMIO, the local APIC
+    /// page, the video aperture, unbacked memory. An engine leaves the guest on
+    /// such an access and hands it back.
+    ///
+    /// # Errors
+    /// [`MemoryPlanError::PartiallyResident`] when the machine was built with
+    /// less host memory than guest memory. There is no stable map in that
+    /// regime: the residency map moves guest blocks between host slots as the
+    /// guest touches them.
+    pub fn memory_plan(&self) -> core::result::Result<MemoryPlan, MemoryPlanError> {
+        MemoryPlan::derive(&self.memory)
+    }
+
     pub fn ticks_to_next_timer_deadline(&self) -> Option<u64> {
         self.pc_system.ticks_to_next_timer_deadline()
     }

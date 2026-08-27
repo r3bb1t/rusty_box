@@ -6,6 +6,7 @@ pub mod misc_mem;
 pub mod mmio;
 pub mod mmio_map;
 pub mod permissions;
+pub(crate) mod plan;
 mod residency;
 
 #[cfg(test)]

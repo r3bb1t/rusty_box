@@ -19,6 +19,7 @@ use rusty_box::emulator::{
     MemorySize, PowerState, StopReason,
 };
 use rusty_box::gui::NoGui;
+use rusty_box::{GpaPerms, GpaPlan, HostOffset, MemoryPlanError};
 use rusty_box::iodev::scancodes::BxKey;
 
 /// A machine the tests can build without any file on disk: a small guest, and
@@ -64,6 +65,82 @@ fn a_machine_is_assembled_by_the_builder_and_starts_at_its_reset_vector() {
 fn a_machine_with_no_firmware_still_builds() {
     let machine = MachineBuilder::new(small_config()).build().expect("build");
     assert_eq!(machine.ticks(), 0);
+}
+
+// ── Where the machine's memory is ───────────────────────────────────────────
+
+/// The complement of stepping. An execution engine that runs the guest on real
+/// hardware cannot ask "where does THIS address live" per access — it installs
+/// the whole map once and re-installs it when the chipset moves something.
+///
+/// What the map asserts here is guest-visible: low RAM is directly readable and
+/// writable at the start of the allocation, the video aperture is NOT (the VGA
+/// model answers it), and the firmware is readable but not writable.
+#[test]
+fn a_machine_states_where_its_guest_memory_lives() {
+    let bios = vec![0xF4u8; HALT_BIOS_BYTES];
+    let machine = MachineBuilder::new(small_config())
+        .gui(NoGui::new())
+        .bios(&bios)
+        .build()
+        .expect("build");
+
+    let derived = machine.memory_plan().expect("a fully resident machine has a map");
+    let plan = GpaPlan::new(derived.windows()).expect("derive produces a valid plan");
+
+    let low = plan.window_at(0x1000).expect("the first megabyte is guest RAM");
+    assert_eq!(low.gpa, 0, "low RAM starts at guest-physical zero");
+    assert_eq!(low.host, HostOffset::ZERO, "and at the start of the allocation");
+    assert_eq!(low.perms, GpaPerms::RWX);
+
+    assert!(
+        plan.window_at(0x000A_8000).is_none(),
+        "the video aperture is the VGA model's to answer, not the engine's"
+    );
+    assert!(
+        plan.window_at(0xFEE0_0000).is_none(),
+        "the local APIC page belongs to a processor, not to memory"
+    );
+
+    let firmware = plan
+        .window_at(0xFFFF_FFF0)
+        .expect("the reset vector must be fetchable");
+    assert_eq!(
+        firmware.perms,
+        GpaPerms::RX,
+        "firmware is readable and executable, and a write to it must leave the engine"
+    );
+}
+
+/// The PCI hole is never RAM, whatever the guest was given. A machine with
+/// more than 3 GiB gets a SECOND window at 4 GiB pointing a gigabyte lower in
+/// the allocation, which cannot be exercised here — reaching that arm means
+/// owning three gigabytes — so it is pinned by a unit test on the derivation
+/// instead.
+#[test]
+fn the_pci_hole_is_never_guest_ram() {
+    let machine = MachineBuilder::new(small_config()).build().expect("build");
+    let derived = machine.memory_plan().expect("a fully resident machine has a map");
+    let plan = GpaPlan::new(derived.windows()).expect("derive produces a valid plan");
+    assert!(plan.window_at(0xC000_0000).is_none());
+}
+
+/// A machine given less host memory than guest memory has no lasting map: the
+/// residency map moves guest blocks between host slots as the guest touches
+/// them. Saying so is better than handing an engine a map that stops being
+/// true.
+#[test]
+fn a_partially_resident_machine_reports_that_it_has_no_stable_map() {
+    let config = EmulatorConfig {
+        memory: MemorySize::partially_resident(64 * 1024 * 1024, 8 * 1024 * 1024),
+        ..EmulatorConfig::default()
+    };
+    let machine = MachineBuilder::new(config).build().expect("build");
+    let refused = machine
+        .memory_plan()
+        .err()
+        .expect("a swapping machine must not claim to have a stable map");
+    assert_eq!(refused, MemoryPlanError::PartiallyResident);
 }
 
 /// Guest size and host size are one value, so a machine cannot be given more

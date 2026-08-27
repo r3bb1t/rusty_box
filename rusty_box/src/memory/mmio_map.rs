@@ -86,6 +86,46 @@ impl MmioRegion {
     }
 }
 
+/// One mapped region, as a caller outside this module sees it.
+///
+/// The same `end`-is-inclusive convention as Bochs and as the storage above,
+/// carried out rather than silently converted: a caller that wants a
+/// half-open range should say so at its own boundary.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct MappedRegion {
+    pub begin: BxPhyAddress,
+    /// Inclusive.
+    pub end: BxPhyAddress,
+    pub token: MmioToken,
+}
+
+/// The mapped regions, in table order.
+///
+/// A named type rather than an `impl Iterator` return (R0), so the shape of
+/// what a caller stores does not change when the storage does.
+pub(crate) struct MmioRegions<'a> {
+    slots: core::slice::Iter<'a, Option<MmioRegion>>,
+}
+
+impl Iterator for MmioRegions<'_> {
+    type Item = MappedRegion;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // The table is sparse — an unmap leaves a hole rather than compacting
+        // — so skipping empties is the iteration, not an optimisation.
+        for slot in self.slots.by_ref() {
+            if let Some(region) = slot {
+                return Some(MappedRegion {
+                    begin: region.begin,
+                    end: region.end,
+                    token: region.token,
+                });
+            }
+        }
+        None
+    }
+}
+
 /// The mapped MMIO regions.
 #[derive(Debug)]
 pub(crate) struct MmioMap {
@@ -105,6 +145,17 @@ impl Default for MmioMap {
 }
 
 impl MmioMap {
+    /// Every region currently mapped.
+    ///
+    /// `lookup` answers "who owns this address"; this answers "what is claimed
+    /// at all", which is the question a guest-physical map asks. A plan states
+    /// what an execution engine may map directly, and a registered region is
+    /// precisely what it may not — so the whole set is needed at once, not one
+    /// address at a time.
+    pub(crate) fn regions(&self) -> MmioRegions<'_> {
+        MmioRegions { slots: self.regions.iter() }
+    }
+
     pub(crate) const fn new() -> Self {
         Self {
             regions: [None; MAX_DEVICE_MMIO_REGIONS],
