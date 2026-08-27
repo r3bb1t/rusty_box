@@ -848,10 +848,12 @@ mod tests {
         fn ctx<'a>(&'a mut self, cpu: &'a mut BxCpuC) -> ExecCtx<'a, ()> {
             ExecCtx::new(
                 cpu,
-                &mut self.memory,
-                &mut self.devices,
-                &mut self.device_manager,
-                &mut self.pc_system,
+                crate::emulator::PcIo::new(
+                    &mut self.memory,
+                    &mut self.devices,
+                    &mut self.device_manager,
+                    &mut self.pc_system,
+                ),
             )
         }
     }

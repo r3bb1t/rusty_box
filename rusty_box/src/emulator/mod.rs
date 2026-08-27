@@ -21,7 +21,7 @@ use crate::{
     cpu::{
         cpu::CpuActivityState,
         instrumentation::{ExitSet, Instrumentation},
-        BxCpuC, CpuidFreq, ResetReason,
+        BxCpuC, CpuidFreq, ResetReason, Result as CpuResult,
     },
     iodev::{
         devices::{DeviceManager, SystemControlPort},
@@ -46,6 +46,10 @@ pub use display::{
 
 pub mod cpu_store;
 use cpu_store::CpuStore;
+pub(crate) mod engine;
+pub(crate) use engine::{SliceEngine, SliceRequest, SoftwareEngine};
+pub(crate) mod io;
+pub(crate) use io::PcIo;
 mod interactive;
 mod run;
 pub use run::{BatchOutcome, Keyboard, Mouse, Power, PowerState, StopReason};
@@ -457,6 +461,13 @@ pub struct Emulator<T: Instrumentation = ()> {
     /// `T` appears only inside the store, so a parameter would need a
     /// `PhantomData` to justify itself.
     cpus: cpu_store::MachineCpus<T>,
+    /// What executes guest instructions on those processors.
+    ///
+    /// A value rather than a free function because an engine backed by a
+    /// hypervisor owns a partition, and the machine has to keep it alive for as
+    /// long as it keeps its processors. This build's engine is this port's own
+    /// interpreter, which needs no state of its own.
+    engine: SoftwareEngine,
     /// Memory subsystem
     pub(crate) memory: BxMemC,
     /// Device controller (I/O port handlers). Crate-private (doctrine R3):
@@ -519,6 +530,50 @@ pub struct Emulator<T: Instrumentation = ()> {
     pub(crate) stop_cause: StopCause,
 }
 
+/// Every field of a machine, named once, so that adding one cannot be silent.
+///
+/// A machine is built by writing its fields one at a time into uninitialised
+/// storage — it holds tens of megabytes of fixed arrays, so a `Self { .. }`
+/// literal would have to be assembled on the stack and moved. The cost of that
+/// is a hole in the compiler's coverage: a new field is simply never written,
+/// and nothing says so. Adding one to the struct above without touching this
+/// destructure is a compile error, and the fix is the same in both cases —
+/// write it in *both* constructors, `new_from_parts` and `init_at`.
+///
+/// Never called. It exists to be type-checked, which is also why it can take a
+/// machine by value without the stack cost that shape would otherwise imply.
+#[allow(dead_code, reason = "type-checked, never called — see the doc comment")]
+fn every_machine_field_is_accounted_for<T: Instrumentation>(machine: Emulator<T>) {
+    // No `..`: that is the whole mechanism. Each field is named and discarded,
+    // and a field the struct gains but this pattern does not name is an error.
+    let Emulator {
+        cpus: _,
+        engine: _,
+        memory: _,
+        devices: _,
+        device_manager: _,
+        pc_system: _,
+        runnable_mask: _,
+        lapic_work_mask: _,
+        smp_tick_remainder: _,
+        batch_advanced_pc_system: _,
+        #[cfg(feature = "std")]
+            slowdown_timer: _,
+        config: _,
+        initialized: _,
+        snapshot_restore_failed: _,
+        #[cfg(feature = "alloc")]
+            gui: _,
+        #[cfg(feature = "std")]
+            bios_output_file: _,
+        exit_set: _,
+        vga_vertical_timer_handle: _,
+        vga_vertical_period_usec: _,
+        stop_flag: _,
+        stop_cause: _,
+    } = machine;
+}
+
 impl<'a, T: Instrumentation> Emulator<T> {
     /// How many processors this machine has, boot processor included.
     ///
@@ -556,10 +611,35 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // system stay independently live — the disjointness `ExecCtx` rests on.
         crate::cpu::exec_ctx::ExecCtx::new(
             cpus.get_mut(index),
+            PcIo::new(memory, devices, device_manager, pc_system),
+        )
+    }
+
+    /// Run one processor for one bounded stretch of guest execution.
+    ///
+    /// The machine decides *which* processor runs and *for how long* — that is
+    /// the Bochs round-robin, and it is the same whichever engine executes the
+    /// instructions. What varies is only how the stretch is carried out, which
+    /// is why this hands the processor and the machine's parts to
+    /// [`SliceEngine`] rather than executing anything itself.
+    #[inline]
+    pub(crate) fn run_slice(&mut self, index: usize, request: SliceRequest) -> CpuResult<u64> {
+        let Self {
+            engine,
+            cpus,
             memory,
             devices,
             device_manager,
             pc_system,
+            ..
+        } = self;
+        // Six disjoint fields, so the engine, the processor and the parts are
+        // all live at once — the property `ExecCtx` is built on, stated one
+        // level up (R3).
+        engine.run_slice(
+            cpus.get_mut(index),
+            PcIo::new(memory, devices, device_manager, pc_system),
+            request,
         )
     }
 
@@ -829,6 +909,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         }
         unsafe {
             core::ptr::addr_of_mut!((*ptr).cpus).write(cpus);
+            core::ptr::addr_of_mut!((*ptr).engine).write(SoftwareEngine);
             core::ptr::addr_of_mut!((*ptr).memory).write(memory);
             core::ptr::addr_of_mut!((*ptr).devices).write(devices);
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
@@ -901,6 +982,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // would have to be built on the stack and moved.
         unsafe {
             core::ptr::addr_of_mut!((*ptr).cpus).write(cpus);
+            core::ptr::addr_of_mut!((*ptr).engine).write(SoftwareEngine);
             core::ptr::addr_of_mut!((*ptr).memory).write(memory);
             core::ptr::addr_of_mut!((*ptr).devices).write(devices);
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);

@@ -9,7 +9,7 @@ use crate::{
 };
 
 
-use super::{CpuMask, Emulator, BOCHS_APIC_BUS_ID_MASK};
+use super::{CpuMask, Emulator, SliceRequest, BOCHS_APIC_BUS_ID_MASK};
 
 impl<'a, T: Instrumentation> Emulator<T> {
     /// Invalidate every host pointer and decoded trace before memory backing
@@ -251,21 +251,22 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 }
 
                 let ticks_before = self.cpu_ref(cpu_index).cpu_ticks();
-                // One borrow of the machine hands the slice its CPU, memory,
-                // devices, device models and PC system at once. Scoped to the
-                // call, so the bookkeeping below can use `self` again.
-                let slice_result = {
-                    let mut ctx = self.exec_ctx(cpu_index);
-                    if smp {
-                        ctx.cpu_run_trace_slice(
-                            per_cpu_batch,
-                            strict_smp_deadline,
-                            cpu_count as u64,
-                        )
-                    } else {
-                        ctx.cpu_loop_n_slice(per_cpu_batch, strict_up_deadline, 1)
-                    }
-                };
+                // One borrow of the machine hands the engine this processor
+                // and the parts it may touch. Scoped to the call, so the
+                // bookkeeping below can use `self` again.
+                //
+                // An SMP round returns after one trace so the next processor
+                // can have the machine, and credits a full round with one
+                // tick; a uniprocessor has neither to do.
+                let slice_result = self.run_slice(
+                    cpu_index,
+                    SliceRequest {
+                        instructions: per_cpu_batch,
+                        strict: if smp { strict_smp_deadline } else { strict_up_deadline },
+                        tick_denominator: if smp { cpu_count as u64 } else { 1 },
+                        yield_after_one_trace: smp,
+                    },
+                );
 
                 let boundary_requested =
                     self.cpu_mut_at(cpu_index).take_scheduler_boundary_request();

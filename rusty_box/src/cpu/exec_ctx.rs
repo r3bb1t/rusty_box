@@ -24,6 +24,7 @@ use core::ops::{Deref, DerefMut};
 
 use super::{cpu::BxCpuC, instrumentation::Instrumentation};
 use crate::{
+    emulator::PcIo,
     iodev::{devices::DeviceManager, BxDevicesC},
     memory::BxMemC,
     pc_system::BxPcSystemC,
@@ -60,14 +61,19 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
     /// is a wild pointer. Deriving them at assembly rather than storing them
     /// on the CPU is what makes a stale base unrepresentable — there is no
     /// window in which a context holds bases from a different memory.
+    ///
+    /// The machine parts arrive as one [`PcIo`] because they are one loan: what
+    /// this pairs with a processor is the same group an execution engine that
+    /// runs the guest on hardware borrows, and the two must not be able to
+    /// disagree about what it contains.
     #[inline]
-    pub(crate) fn new(
-        cpu: &'a mut BxCpuC<T>,
-        memory: &'a mut BxMemC,
-        devices: &'a mut BxDevicesC,
-        device_manager: &'a mut DeviceManager,
-        pc_system: &'a mut BxPcSystemC,
-    ) -> Self {
+    pub(crate) fn new(cpu: &'a mut BxCpuC<T>, io: PcIo<'a>) -> Self {
+        let PcIo {
+            memory,
+            devices,
+            device_manager,
+            pc_system,
+        } = io;
         let (mem_host_base, mem_host_len) = memory.identity_guest_base();
         let (mem_alloc_base, _alloc_len) = memory.allocation_span();
         Self {
@@ -194,10 +200,12 @@ impl TestMachine {
         self.cpu.a20_mask = self.memory.a20_mask();
         ExecCtx::new(
             &mut self.cpu,
-            &mut self.memory,
-            &mut self.devices,
-            &mut self.device_manager,
-            &mut self.pc_system,
+            PcIo::new(
+                &mut self.memory,
+                &mut self.devices,
+                &mut self.device_manager,
+                &mut self.pc_system,
+            ),
         )
     }
 
@@ -233,10 +241,7 @@ pub(crate) fn exec_with<T: Instrumentation, R>(
     let mut pc_system = BxPcSystemC::new();
     let mut ctx = ExecCtx::new(
         cpu,
-        memory,
-        &mut devices,
-        &mut device_manager,
-        &mut pc_system,
+        PcIo::new(memory, &mut devices, &mut device_manager, &mut pc_system),
     );
     f(&mut ctx)
 }
