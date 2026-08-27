@@ -4060,6 +4060,125 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
+    /// A real-mode guest whose every interrupt vector has its OWN handler,
+    /// each writing its vector number to one byte.
+    ///
+    /// The distinctness is the point. A fixture that points every vector at a
+    /// single handler cannot tell an interrupt from a fault — any exception
+    /// lands in the same place and looks like success — so a test built on one
+    /// proves nothing about delivery. Here the marker names exactly which
+    /// vector was taken.
+    #[cfg(feature = "alloc")]
+    fn machine_reporting_which_vector_it_takes() -> alloc::boxed::Box<Emulator<()>> {
+        let mut emu =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::RealMode).unwrap();
+
+        // Every vector: `mov byte [MARKER], v` then `iret`, eight bytes apart.
+        let mut stubs = [0u8; 256 * VECTOR_STUB_STRIDE as usize];
+        for (vector, stub) in stubs.chunks_exact_mut(VECTOR_STUB_STRIDE as usize).enumerate() {
+            stub[..5].copy_from_slice(&[
+                0xC6,
+                0x06,
+                VECTOR_MARKER as u8,
+                (VECTOR_MARKER >> 8) as u8,
+                vector as u8,
+            ]);
+            stub[5] = 0xCF;
+        }
+        emu.virt_write(VECTOR_STUBS, &stubs).unwrap();
+
+        let mut ivt = [0u8; 4 * 256];
+        for (vector, entry) in ivt.chunks_exact_mut(4).enumerate() {
+            let offset = VECTOR_STUBS as u16 + vector as u16 * VECTOR_STUB_STRIDE as u16;
+            entry[..2].copy_from_slice(&offset.to_le_bytes());
+            entry[2..].copy_from_slice(&0u16.to_le_bytes());
+        }
+        emu.virt_write(0, &ivt).unwrap();
+
+        // `mov byte [RAN_MARKER], 0x5A` then `jmp $`. The store proves the
+        // guest executed what was loaded; the spin keeps it somewhere known so
+        // that any later change of control flow is visible.
+        emu.virt_write(
+            VECTOR_TEST_CODE,
+            &[0xC6, 0x06, RAN_MARKER as u8, (RAN_MARKER >> 8) as u8, GUEST_RAN, 0xEB, 0xFE],
+        )
+        .unwrap();
+        emu.virt_write(RAN_MARKER, &[0x00]).unwrap();
+        // Nothing has been taken yet.
+        emu.virt_write(VECTOR_MARKER, &[NO_VECTOR_TAKEN]).unwrap();
+
+        emu.reg_write(X86Reg::Rip, VECTOR_TEST_CODE);
+        emu.reg_write(X86Reg::Rflags, 0x0202);
+        emu
+    }
+
+    const VECTOR_STUBS: u64 = 0x2000;
+    const VECTOR_STUB_STRIDE: u64 = 8;
+    const VECTOR_TEST_CODE: u64 = 0x1000;
+    const VECTOR_MARKER: u64 = 0x0800;
+    /// A second byte, so "the guest ran" and "a vector was taken" cannot be
+    /// confused for one another — the failure that made an earlier version of
+    /// this fixture read an invalid-opcode fault as a successful delivery.
+    const RAN_MARKER: u64 = 0x0801;
+    const GUEST_RAN: u8 = 0x5A;
+    /// Distinct from every real vector number.
+    const NO_VECTOR_TAKEN: u8 = 0xFF;
+
+    #[cfg(feature = "alloc")]
+    fn vector_taken(emu: &mut Emulator<()>) -> u8 {
+        let mut marker = [0u8; 1];
+        emu.virt_read(VECTOR_MARKER, &mut marker).unwrap();
+        marker[0]
+    }
+
+    /// A real-mode machine runs the code it was given, at the address it was
+    /// given, and faults nowhere.
+    ///
+    /// This did not hold until `setup_real_mode` reloaded the segments.
+    /// `CpuSetupMode::RealMode` used only to enable A20 and IF, on the grounds
+    /// that reset already leaves the processor in real mode — true, but reset
+    /// also leaves CS at selector 0xF000 base 0xFFFF0000. A caller loading code
+    /// low and setting RIP therefore fetched from the top of the ROM aperture,
+    /// which is filled with 0xFF, and `FF FF` is an invalid opcode: the guest
+    /// took #UD on its first instruction and executed nothing it was given.
+    ///
+    /// Two markers, deliberately. One says the guest ran; the other says which
+    /// vector, if any, was taken. Collapsing them into one is what let an
+    /// earlier version of this fixture read that invalid-opcode fault as a
+    /// successful interrupt delivery.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_real_mode_machine_runs_the_code_it_was_given() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut emu = machine_reporting_which_vector_it_takes();
+                emu.run_cpu_batch(64).unwrap();
+
+                let mut ran = [0u8; 1];
+                emu.virt_read(RAN_MARKER, &mut ran).unwrap();
+                assert_eq!(
+                    ran[0], GUEST_RAN,
+                    "the guest must execute the store it was given, at the address \
+                     it was loaded at"
+                );
+                assert_eq!(
+                    vector_taken(&mut emu),
+                    NO_VECTOR_TAKEN,
+                    "and it must reach no interrupt vector on the way — a fault \
+                     here means the segments are not where the caller put them"
+                );
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rip),
+                    VECTOR_TEST_CODE + 5,
+                    "and it must end on its own spin, not somewhere else"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[cfg(feature = "instrumentation")]
     #[test]
     fn rep_insw_respects_configured_page_write_permissions() {

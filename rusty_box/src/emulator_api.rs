@@ -1103,9 +1103,27 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         }
     }
 
-    /// Real mode (default after reset). Ensures A20 enabled and EFLAGS sane.
+    /// Real mode with every segment based at zero, A20 enabled and EFLAGS
+    /// sane — a machine where an address a caller loads code at is the address
+    /// the guest fetches from.
+    ///
+    /// Reset alone is not enough, and the difference is not cosmetic. The
+    /// architectural power-on value of CS is selector 0xF000 with base
+    /// 0xFFFF0000, so a caller that loads code low and sets RIP fetches from
+    /// the top of the ROM aperture instead. That aperture is filled with 0xFF,
+    /// and `FF FF` is an invalid opcode, so such a guest takes #UD on its very
+    /// first instruction and never executes a byte of what was loaded — while
+    /// looking, from the outside, like a guest that ran and vectored somewhere.
+    /// Every documented use of this mode (MBR, DOS binaries, real-mode
+    /// shellcode) loads low, so the reset CS is wrong for all of them.
     fn setup_real_mode(&mut self) -> Result<()> {
-        // Reset already puts us in real mode; just enable A20 and IF.
+        // Selector 0, base 0, the 64 KiB limit real mode gives every segment.
+        // 16-bit code, not long — this is what makes an offset an address.
+        self.cpu_mut()
+            .set_seg_for_api(X86Reg::Cs, 0, 0, 0xFFFF, true, false);
+        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
+            self.cpu_mut().set_seg_for_api(reg, 0, 0, 0xFFFF, false, false);
+        }
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
         self.cpu_mut().set_rflags_for_api(0x0000_0202); // IF=1, bit1 reserved=1
         Ok(())

@@ -125,6 +125,38 @@ fn the_pci_hole_is_never_guest_ram() {
     assert!(plan.window_at(0xC000_0000).is_none());
 }
 
+/// `CpuSetupMode::RealMode` gives a machine whose segments are based at zero,
+/// so an address a caller loads code at is the address the guest fetches from.
+///
+/// Reset alone does not: it leaves CS at selector 0xF000, base 0xFFFF0000, and
+/// a guest set up that way fetches from the ROM aperture — filled with 0xFF,
+/// which is an invalid opcode — and takes #UD before executing anything the
+/// caller wrote. Every documented use of this mode loads low, so the setup
+/// reloads the segments.
+#[test]
+fn a_real_mode_machine_fetches_from_where_the_caller_loaded_code() {
+    const CODE: u64 = 0x1000;
+    const MARK: u64 = 0x0800;
+
+    // The CPU-only facade: a processor in a chosen mode with memory behind it,
+    // and no firmware or devices to get in the way.
+    let mut machine =
+        Emulator::new_with_mode(small_config(), CpuSetupMode::RealMode).expect("build");
+
+    // mov byte [MARK], 0x5A ; jmp $
+    machine
+        .virt_write(CODE, &[0xC6, 0x06, MARK as u8, (MARK >> 8) as u8, 0x5A, 0xEB, 0xFE])
+        .expect("load");
+    machine.reg_write(X86Reg::Rip, CODE);
+
+    machine.step_batch(32).expect("step");
+
+    let mut mark = [0u8; 1];
+    machine.virt_read(MARK, &mut mark).expect("read back");
+    assert_eq!(mark[0], 0x5A, "the guest ran the store it was given");
+    assert_eq!(machine.reg_read(X86Reg::Rip), CODE + 5, "and reached its own spin");
+}
+
 /// A machine given less host memory than guest memory has no lasting map: the
 /// residency map moves guest blocks between host slots as the guest touches
 /// them. Saying so is better than handing an engine a map that stops being
