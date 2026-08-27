@@ -1001,34 +1001,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         }
 
-        self.cr0.set32(val_32);
-
-        // Bochs crregs.cc — mode change handlers (BEFORE TLB flush)
-        // Note: Bochs calls handleCpuModeChange here, but our code has historically
-        // only called update_fetch_mode_mask. Adding the full handler set caused
-        // Alpine to break (cpu_mode transitions to LongCompat too early before
-        // far JMP loads 64-bit CS). Keep the full Bochs-matching set but ensure
-        // correct ordering.
-        self.handle_alignment_check();
-        self.handle_cpu_mode_change();
-        self.handle_fpu_mmx_mode_change();
-        self.handle_sse_mode_change();
-        self.handle_avx_mode_change();
-
-        // Bochs crregs.cc SetCR0: when PG, WP, or PE changes, both flush
-        // the TLB AND recompute the pkey mapping (set_PKeys depends on
-        // WP — WP=0 disables the SYS-write protection part of the
-        // table). Bochs gates both in the same `(oldCR0 ^ val) & PG_WP_PE`
-        // check so any of the three triggers both side-effects.
-        if (old_cr0 & 0x80010001) != (val_32 & 0x80010001) {
-            self.tlb_flush();
-            let pkru = self.pkru;
-            let pkrs = self.pkrs;
-            self.set_pkeys(pkru, pkrs);
-        }
-
-        // Bochs crregs.cc
-        self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
+        self.commit_cr0_write(val_32);
 
         // BOCHS BX_INSTR_TLB_CNTRL with MovCr0 kind
         #[cfg(feature = "instrumentation")]
@@ -1291,7 +1264,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 );
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
-            self.tlb_flush();
+            // Bochs runs the flush here, inside the check block and therefore
+            // before the intercept below — an intercepted write flushes even
+            // though its value never lands.
+            self.flush_tlb_for_cr4_change(val_32);
         }
 
         // Bochs SetCR4 (crregs.cc): SVM CR4 write intercept fires
@@ -1301,30 +1277,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.svm_vmexit(super::svm::SvmVmexit::Cr4Write as i32, 0, 0);
         }
 
-        self.cr4.set_val(val_32);
+        self.commit_cr4_value(val_32);
 
-        // Bochs crregs.cc — mode change handlers after CR4 write
-        self.handle_fpu_mmx_mode_change();
-        self.handle_sse_mode_change();
-        self.handle_avx_mode_change();
-
-        // Bochs crregs.cc SetCR4: set_PKeys() is called unconditionally
-        // at the end of the routine. The pkey allow-mask depends on
-        // CR4.PKE and CR4.PKS, but Bochs recomputes always to keep the
-        // tail of SetCR4 free of conditional branches.
-        let pkru = self.pkru;
-        let pkrs = self.pkrs;
-        self.set_pkeys(pkru, pkrs);
-
-        // BOCHS BX_INSTR_TLB_CNTRL with MovCr4 kind
+        // BOCHS BX_INSTR_TLB_CNTRL with MovCr4 kind. Outside the shared commit
+        // because it reports a guest instruction: a host writing CR4 through
+        // the machine's API has not executed `MOV CR4`, and telling a tracer
+        // otherwise would put an instruction in its record that never ran.
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
             self.instrumentation
                 .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr4 { new_value: val_32 });
         }
-
-        // Bochs: update linaddr_width based on LA57 (5-level paging support)
-        self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
 
         Ok(())
     }
@@ -1791,6 +1754,111 @@ mod tests {
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Everything writing CR4 does to the rest of the processor.
+    ///
+    /// Bochs crregs.cc `SetCR4` from its `FLUSH_TLB_MASK` block onward. The
+    /// checks that can fault stay with the caller, because only an executing
+    /// guest can be handed a fault; what is here must happen whoever wrote the
+    /// register — the guest through `MOV CR4`, or a host through the machine's
+    /// API. One statement of it, so the two cannot drift (R5).
+    ///
+    /// It lives on the processor rather than on an execution context because
+    /// none of it reaches the machine: a stale translation is dropped from this
+    /// processor's own TLB, and the rest is this processor's own state.
+    ///
+    /// The flush is computed from the OLD CR4 and runs before the new value
+    /// lands, which is Bochs's own ordering.
+    pub(super) fn commit_cr4_write(&mut self, val: u64) {
+        self.flush_tlb_for_cr4_change(val);
+        self.commit_cr4_value(val);
+    }
+
+    /// Drop cached translations if the new CR4 changes how one is formed.
+    ///
+    /// Bochs crregs.h `BX_CR4_FLUSH_TLB_MASK`, flushed from inside `SetCR4`'s
+    /// own check block — which is BEFORE the SVM write intercept, so an
+    /// intercepted write still flushes. Separate from the value write for that
+    /// reason alone: the guest path has a `VMEXIT` between the two.
+    pub(super) fn flush_tlb_for_cr4_change(&mut self, val: u64) {
+        const FLUSH_TLB_MASK: BxCr4 = BxCr4::PSE
+            .union(BxCr4::PAE)
+            .union(BxCr4::PGE)
+            .union(BxCr4::LA57)
+            .union(BxCr4::PCIDE)
+            .union(BxCr4::SMEP)
+            .union(BxCr4::SMAP)
+            .union(BxCr4::PKE)
+            .union(BxCr4::CET)
+            .union(BxCr4::PKS)
+            .union(BxCr4::LASS);
+        if self
+            .cr4
+            .symmetric_difference(BxCr4::from_bits_retain(val))
+            .intersects(FLUSH_TLB_MASK)
+        {
+            self.tlb_flush();
+        }
+    }
+
+    /// The CR4 write itself and the state it re-derives, after any flush.
+    pub(super) fn commit_cr4_value(&mut self, val: u64) {
+        self.cr4.set_val(val);
+
+        // Bochs crregs.cc — mode change handlers after CR4 write
+        self.handle_fpu_mmx_mode_change();
+        self.handle_sse_mode_change();
+        self.handle_avx_mode_change();
+
+        // Bochs crregs.cc SetCR4: set_PKeys() is called unconditionally
+        // at the end of the routine. The pkey allow-mask depends on
+        // CR4.PKE and CR4.PKS, but Bochs recomputes always to keep the
+        // tail of SetCR4 free of conditional branches.
+        let pkru = self.pkru;
+        let pkrs = self.pkrs;
+        self.set_pkeys(pkru, pkrs);
+
+        // Bochs: update linaddr_width based on LA57 (5-level paging support)
+        self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
+    }
+
+    /// Everything writing CR0 does to the rest of the processor.
+    ///
+    /// Bochs crregs.cc `SetCR0` from the register write onward, for the same
+    /// reason as [`Self::commit_cr4_write`]: the checks belong to whoever can
+    /// fault, the consequences belong to the register.
+    ///
+    /// CR0.TS and CR0.EM gate x87, MMX and SSE decoding through
+    /// `fetch_mode_mask`, and `handle_cpu_mode_change` does NOT recompute
+    /// those — it ends at `handle_avx_mode_change`, which touches only the
+    /// AVX, opmask and EVEX bits. Both handlers are therefore named here
+    /// rather than assumed.
+    pub(super) fn commit_cr0_write(&mut self, val_32: u32) {
+        let old_cr0 = self.cr0.get32();
+        self.cr0.set32(val_32);
+
+        // Bochs crregs.cc — mode change handlers (BEFORE TLB flush)
+        self.handle_alignment_check();
+        self.handle_cpu_mode_change();
+        self.handle_fpu_mmx_mode_change();
+        self.handle_sse_mode_change();
+        self.handle_avx_mode_change();
+
+        // Bochs crregs.cc SetCR0: when PG, WP, or PE changes, both flush
+        // the TLB AND recompute the pkey mapping (set_PKeys depends on
+        // WP — WP=0 disables the SYS-write protection part of the
+        // table). Bochs gates both in the same `(oldCR0 ^ val) & PG_WP_PE`
+        // check so any of the three triggers both side-effects.
+        if (old_cr0 & 0x80010001) != (val_32 & 0x80010001) {
+            self.tlb_flush();
+            let pkru = self.pkru;
+            let pkrs = self.pkrs;
+            self.set_pkeys(pkru, pkrs);
+        }
+
+        // Bochs crregs.cc
+        self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
+    }
+
     pub(super) fn xsave_xrestor_init(&mut self) {
         //self
     }

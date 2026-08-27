@@ -270,17 +270,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.cr4.get()
     }
 
-    /// CR4 controls SSE and AVX readiness through OSFXSR and OSXSAVE, and the
-    /// icache state gate reads that readiness out of `fetch_mode_mask`. Refresh
-    /// it here for the same reason `set_cr4` does after a guest `MOV CR4`:
-    /// leaving it stale would let the gate admit an AVX instruction the guest
-    /// has just disabled, or reject one it has just enabled.
+    /// Write CR4 and everything that follows from it.
+    ///
+    /// The checks a guest `MOV CR4` performs are deliberately absent — an API
+    /// caller states the register it wants and cannot be handed a fault — but
+    /// the consequences are not optional. CR4 decides SSE and AVX readiness
+    /// through OSFXSR and OSXSAVE, which the icache state gate reads out of
+    /// `fetch_mode_mask`; eleven of its bits change how a linear address
+    /// translates, so cached translations must go; PKE and PKS change the
+    /// protection-key mask; LA57 changes the width of a linear address.
+    /// [`Self::commit_cr4_write`] is the one statement of all of it, shared
+    /// with the guest's own path (R5).
     #[inline]
     pub(crate) fn set_cr4_raw_for_api(&mut self, v: u32) {
-        self.cr4.set32(v);
-        self.handle_fpu_mmx_mode_change();
-        self.handle_sse_mode_change();
-        self.handle_avx_mode_change();
+        self.commit_cr4_write(u64::from(v));
     }
 
     /// CR8 is not modeled as a dedicated field — it's sourced from the
@@ -300,22 +303,29 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     // ── CR0 / CR3 raw writes (for `reg_write`) ─────────────────────────
 
-    /// Write CR0 without BOCHS-level checks. Used by `reg_write` where
-    /// the caller has taken responsibility for validity.
+    /// Write CR0 without the checks a guest `MOV CR0` performs, and with every
+    /// consequence it has.
     ///
-    /// CR0.TS and CR0.EM feed the SSE/AVX readiness bits that the icache state
-    /// gate reads out of `fetch_mode_mask`, and `update_fetch_mode_mask` alone
-    /// would not refresh them — it deliberately preserves the FPU/SSE/AVX bits
-    /// and only recomputes D_B and LONG64. They stay correct here because
-    /// `handle_cpu_mode_change` ends by calling `handle_avx_mode_change`.
+    /// The validity of the value is the caller's; what follows from it is not.
+    /// CR0.TS and CR0.EM gate x87, MMX and SSE in the icache state gate, and
+    /// `handle_cpu_mode_change` does not recompute those — it ends at
+    /// `handle_avx_mode_change`, which touches only the AVX, opmask and EVEX
+    /// bits. PG, WP and PE additionally invalidate cached translations and the
+    /// protection-key mask. [`Self::commit_cr0_write`] states all of it once,
+    /// shared with the guest's own path (R5).
     #[inline]
     pub(crate) fn set_cr0_raw_for_api(&mut self, v: u32) {
-        self.cr0.set32(v);
-        self.handle_alignment_check();
-        self.handle_cpu_mode_change();
-        self.update_fetch_mode_mask();
+        self.commit_cr0_write(v);
     }
 
+    /// Write CR3 and drop every cached translation.
+    ///
+    /// Bochs crregs.cc `SetCR3` flushes non-global entries only, because a
+    /// guest reload of CR3 is architecturally defined to preserve global
+    /// pages. This flushes all of them: over-invalidation costs a re-walk and
+    /// cannot be observed by the guest, and an API caller writing CR3 is
+    /// usually installing a whole new address space rather than performing the
+    /// architectural reload.
     #[inline]
     pub(crate) fn set_cr3_raw_for_api(&mut self, v: u64) {
         self.cr3 = v;
@@ -349,9 +359,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.dr7.get32() as u64
     }
 
+    /// Write DR7 and drop every cached translation.
+    ///
+    /// Bochs crregs.cc `MOV_DdRd` flushes the TLB after a DR7 write, because
+    /// an entry cached while a breakpoint was disabled would keep serving
+    /// accesses that must now be checked against it. Arming a data breakpoint
+    /// through the API has to reach the guest the same way arming one from
+    /// inside it does.
     #[inline]
     pub(crate) fn set_dr7_for_api(&mut self, v: u64) {
         self.dr7.set32(v as u32);
+        self.tlb_flush();
     }
 
     // ── Descriptor tables ─────────────────────────────────────────────
@@ -426,9 +444,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(crate) fn efer_for_api(&self) -> u64 {
         self.efer.get32() as u64
     }
+    /// Write EFER whole, including LMA, and recompute the processor's mode.
+    ///
+    /// This is the register-level write, not the MSR one: a caller stating
+    /// EFER through `reg_write` is describing a processor, so LMA is theirs to
+    /// set. `WRMSR` cannot do that, and `write_msr_for_api` keeps the
+    /// architectural rule instead.
+    ///
+    /// EFER.LMA is what `handle_cpu_mode_change` reads to choose between
+    /// 64-bit and compatibility mode, so writing it without recomputing leaves
+    /// `cpu_mode` describing a processor that no longer exists — the same
+    /// shape of defect as a segment written without its derived state.
     #[inline]
     pub(crate) fn set_efer_for_api(&mut self, v: u64) {
         self.efer.set32(v as u32);
+        self.handle_cpu_mode_change();
     }
 
     // ── CPL / icount ──────────────────────────────────────────────────
@@ -503,7 +533,25 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             BX_MSR_FMASK => self.msr.fmask = val as u32,
             BX_MSR_KERNELGSBASE => self.msr.kernelgsbase = val,
             BX_MSR_TSC_AUX => self.msr.tsc_aux = val as u32,
-            BX_MSR_EFER => self.efer.set32(val as u32),
+            // Bochs crregs.cc `SetEFER`: reserved bits are refused, and LMA is
+            // NOT the writer's to set — it tracks CR0.PG and EFER.LME, so a
+            // `WRMSR` preserves whatever it already was. Writing the register
+            // whole is `reg_write(Efer, …)`; this is the MSR, and an MSR write
+            // through the API must mean what the guest's `WRMSR` means.
+            BX_MSR_EFER => {
+                let val32 = val as u32;
+                if (val32 & !self.efer_suppmask) != 0 {
+                    return Err(super::CpuError::UnsupportedCpuOperation {
+                        operation: "WRMSR EFER: reserved bits set for this processor",
+                    });
+                }
+                use super::crregs::BxEfer;
+                self.efer = BxEfer::from_bits_truncate(
+                    (val32 & self.efer_suppmask & !BxEfer::LMA.bits())
+                        | (self.efer.get32() & BxEfer::LMA.bits()),
+                );
+                self.handle_cpu_mode_change();
+            }
             BX_MSR_FSBASE => self.set_msr_fsbase(val),
             BX_MSR_GSBASE => self.set_msr_gsbase(val),
             _ => return Err(super::CpuError::UnimplementedInstruction),
@@ -1198,5 +1246,122 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
         self.instrumentation.tracer = tracer;
         action
+    }
+}
+
+/// A host writing a control register must leave the processor in the state the
+/// guest would have left it in.
+///
+/// These are the registers whose write does more than store a number, driven
+/// the way `Emulator::reg_write` and `Emulator::msr_write` drive them. Each
+/// assertion is something the guest can tell apart — which instructions it may
+/// execute, how wide a linear address is, what `RDMSR` returns.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::crregs::{BxCr0, BxCr4, BxEfer};
+    use crate::cpu::exec_ctx::TestMachine;
+    use crate::cpu::msr::BX_MSR_EFER;
+    use crate::cpu::opcodes_table::FetchModeMask;
+    use crate::cpu::ResetReason;
+
+    /// CR0.TS and CR0.EM are what make x87, MMX and SSE unavailable. A host
+    /// setting them has to close the same doors a guest `MOV CR0` closes, or
+    /// the processor keeps executing instructions it should now refuse.
+    #[test]
+    fn setting_cr0_ts_through_the_api_makes_x87_and_sse_unavailable() {
+        let mut machine = TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+
+        // SSE additionally needs the OS to have said it can save the state,
+        // so enable OSFXSR first — through the API, which is also what proves
+        // the CR4 path refreshes the gate.
+        cpu.api_reg_write(X86Reg::Cr4, u64::from(BxCr4::OSFXSR.bits()));
+        assert!(cpu.fetch_mode_mask.contains(FetchModeMask::FPU_MMX_OK));
+        assert!(cpu.fetch_mode_mask.contains(FetchModeMask::SSE_OK));
+
+        let with_ts = u64::from(cpu.cr0.get32() | BxCr0::TS.bits());
+        cpu.api_reg_write(X86Reg::Cr0, with_ts);
+        assert!(
+            !cpu.fetch_mode_mask.contains(FetchModeMask::FPU_MMX_OK),
+            "CR0.TS must make x87 and MMX unavailable"
+        );
+        assert!(
+            !cpu.fetch_mode_mask.contains(FetchModeMask::SSE_OK),
+            "CR0.TS must make SSE unavailable"
+        );
+
+        let without_ts = u64::from(cpu.cr0.get32() & !BxCr0::TS.bits());
+        cpu.api_reg_write(X86Reg::Cr0, without_ts);
+        assert!(cpu.fetch_mode_mask.contains(FetchModeMask::FPU_MMX_OK));
+        assert!(cpu.fetch_mode_mask.contains(FetchModeMask::SSE_OK));
+
+        // CR0.EM closes the same doors by a different route.
+        let with_em = u64::from(cpu.cr0.get32() | BxCr0::EM.bits());
+        cpu.api_reg_write(X86Reg::Cr0, with_em);
+        assert!(!cpu.fetch_mode_mask.contains(FetchModeMask::FPU_MMX_OK));
+        assert!(!cpu.fetch_mode_mask.contains(FetchModeMask::SSE_OK));
+    }
+
+    /// CR4.LA57 decides how many bits of a linear address the processor
+    /// actually uses, which decides which addresses are canonical — so a
+    /// mis-tracked width is a `#GP` the guest either takes or escapes wrongly.
+    #[test]
+    fn writing_cr4_through_the_api_retracks_the_linear_address_width() {
+        let mut machine = TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+        assert_eq!(cpu.linaddr_width, 48, "four-level paging by default");
+
+        cpu.api_reg_write(X86Reg::Cr4, u64::from(BxCr4::LA57.bits()));
+        assert_eq!(cpu.linaddr_width, 57, "CR4.LA57 widens the linear address");
+
+        cpu.api_reg_write(X86Reg::Cr4, 0);
+        assert_eq!(cpu.linaddr_width, 48, "and clearing it narrows again");
+    }
+
+    /// `WRMSR` cannot set EFER.LMA — the processor owns that bit, and derives
+    /// it from CR0.PG and EFER.LME. Writing the register whole is a different
+    /// act, available to a host that is describing a processor rather than
+    /// executing inside one, and only there does LMA come from the caller.
+    #[test]
+    fn an_efer_msr_write_leaves_lma_alone_and_a_register_write_does_not() {
+        let mut machine = TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+
+        // Describe a processor already in long mode.
+        cpu.api_reg_write(X86Reg::Efer, u64::from((BxEfer::LME | BxEfer::LMA).bits()));
+        assert!(cpu.efer.lma(), "a register write states LMA");
+        assert!(cpu.efer.lme());
+
+        // A guest clearing LME by `WRMSR` does not thereby leave long mode.
+        cpu.write_msr_for_api(BX_MSR_EFER, 0)
+            .expect("EFER accepts a value with no reserved bits");
+        assert!(
+            cpu.efer.lma(),
+            "WRMSR must not clear LMA — it is the processor's, not the writer's"
+        );
+        assert!(!cpu.efer.lme(), "everything else the WRMSR wrote does land");
+
+        // And the register write can take it away again.
+        cpu.api_reg_write(X86Reg::Efer, 0);
+        assert!(!cpu.efer.lma());
+    }
+
+    /// A value with bits this processor does not implement is refused, the way
+    /// the guest's own `WRMSR` refuses it with `#GP(0)`. A host cannot be
+    /// handed a fault, so it is handed the refusal instead — silently masking
+    /// the bits would leave the caller believing a processor it does not have.
+    #[test]
+    fn an_efer_msr_write_refuses_bits_this_processor_does_not_implement() {
+        let mut machine = TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+
+        let unsupported = !u64::from(cpu.efer_suppmask) & 0xFFFF_FFFF;
+        assert_ne!(unsupported, 0, "some EFER bit must be unimplemented");
+        assert!(cpu.write_msr_for_api(BX_MSR_EFER, unsupported).is_err());
     }
 }
