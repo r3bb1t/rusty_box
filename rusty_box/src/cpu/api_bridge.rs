@@ -26,6 +26,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.eflags = super::eflags::EFlags::from_bits_retain(v as u32);
         // Keep lazy store in sync when API callers rewrite the full flags word.
         self.set_eflags_oszapc(v as u32);
+        // A write to EFLAGS moves IF, and IF is what gates external interrupts
+        // — Bochs flag_ctrl_pro.cc calls `handleInterruptMaskChange` from every
+        // path that can change it, `STI` included. Omitting it here made the
+        // API's IF a lie: reset leaves IF clear, which masks the pending-INTR
+        // event, so a caller that set IF through this setter still had the
+        // event masked. `signal_event` then never armed the boundary check and
+        // the machine could not take an external interrupt at all, however
+        // correctly the controller asserted it.
+        self.handle_interrupt_mask_change();
     }
 
     // ── Segment selectors (raw) ────────────────────────────────────────

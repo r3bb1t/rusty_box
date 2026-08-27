@@ -4179,6 +4179,102 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
+    /// An ISA line raised on the interrupt fabric is armed, asserted, and
+    /// acknowledged by the processor.
+    ///
+    /// Each link is asserted separately, so a regression names the one that
+    /// broke rather than reporting only that nothing happened. Two of these
+    /// assertions are the ones that caught real defects: `async_event` being
+    /// armed is what a public IF write failed to do until `set_rflags_for_api`
+    /// called `handle_interrupt_mask_change`, and the acknowledge is what
+    /// proves the vector left the controller rather than being dropped.
+    ///
+    /// It deliberately stops at the acknowledge. Whether the guest then
+    /// ENTERS its handler is not asserted here, because on this fixture it
+    /// does not: the vector is acknowledged and IF is cleared — delivery
+    /// begins — and yet the processor resumes at the interrupted instruction
+    /// with the handler unrun. That is its own investigation, and claiming it
+    /// works would be worse than leaving it open.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_raised_isa_line_is_armed_asserted_and_acknowledged() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut emu = machine_reporting_which_vector_it_takes();
+                assert_eq!(
+                    vector_taken(&mut emu),
+                    NO_VECTOR_TAKEN,
+                    "nothing may be taken before the line is raised"
+                );
+
+                // Bochs pic.cc reset: the master's offset is 0x08, so IRQ0 is
+                // INT 08h. Read it from the controller rather than restating
+                // it, so the assertion follows the device.
+                let expected = emu.device_manager.irq.pic().master.interrupt_offset;
+                // The 8259 comes out of reset with every line masked, and a
+                // masked line raises no INTR however loudly the device shouts.
+                // A real machine's BIOS clears this; this test is the BIOS.
+                emu.device_manager.irq.pic_mut().master.imr = 0xFE;
+                emu.device_manager
+                    .irq
+                    .raise(rusty_box_devices::api::IrqLine(0));
+                emu.sync_event_flags();
+
+                assert!(
+                    emu.device_manager.irq.int_pin_asserted(),
+                    "an unmasked raised line must assert the controller's INTR pin"
+                );
+                assert_ne!(
+                    emu.cpu().pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
+                    0,
+                    "and that pin must reach the processor as a pending interrupt"
+                );
+                assert_ne!(
+                    emu.cpu().async_event,
+                    0,
+                    "and an unmasked pending event must arm the boundary check, \
+                     or the CPU loop never looks"
+                );
+                assert_ne!(
+                    emu.reg_read(X86Reg::Rflags) & 0x200,
+                    0,
+                    "and interrupts must be enabled, or nothing is deliverable"
+                );
+
+                emu.run_cpu_batch(64).unwrap();
+
+                // The processor accepted it: the 8259 saw an INTA, so the
+                // vector left the controller and entered the CPU.
+                assert_eq!(
+                    emu.device_manager.irq.pic().master.isr & 1,
+                    1,
+                    "IRQ0 must be acknowledged into the in-service register"
+                );
+                assert_eq!(
+                    emu.device_manager.irq.pic().master.irr & 1,
+                    0,
+                    "and leave the request register once acknowledged"
+                );
+                assert_eq!(
+                    emu.cpu().pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
+                    0,
+                    "and the processor's pending-interrupt event must be consumed"
+                );
+                // Taking an interrupt clears IF, which re-masks the IF-gated
+                // events — the observable proof that delivery began rather
+                // than the event being dropped.
+                assert_ne!(
+                    emu.cpu().event_mask & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
+                    0,
+                    "and delivery must clear IF, re-masking the IF-gated events"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[cfg(feature = "instrumentation")]
     #[test]
     fn rep_insw_respects_configured_page_write_permissions() {
