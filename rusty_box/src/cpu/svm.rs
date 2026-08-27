@@ -333,6 +333,22 @@ pub struct VmcbCache {
     pub ctrls: SvmControls,
 }
 
+/// What the PAUSE intercept filter decided about one `PAUSE`.
+///
+/// Bochs svm.cc SvmInterceptPause distinguishes three outcomes, and they were
+/// carried here as `Option<bool>` with a comment on each arm saying which was
+/// which. Naming them is the difference between reading the code and decoding
+/// it (R2).
+enum PauseFilterVerdict {
+    /// The gap since the previous `PAUSE` exceeded the threshold: suppress
+    /// this one and reload the counter from the guest's VMCB.
+    ReloadCounter,
+    /// The counter had room: suppress this one and count it down.
+    Suppress,
+    /// No filter, or the counter is exhausted — take the #VMEXIT.
+    Exit,
+}
+
 /// Check if a specific SVM intercept bit is set.
 /// intercept_bitnum values are SVM_INTERCEPT0_*, SVM_INTERCEPT1_*, SVM_INTERCEPT2_*.
 #[inline]
@@ -373,6 +389,18 @@ use super::{
     exception::InterruptType,
     segment_ctrl_pro::parse_selector,
 };
+
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Whether this processor model implements SVM.
+    ///
+    /// The one place that asks, so the answer cannot be stored somewhere a
+    /// second time and disagree with itself. It decides whether a snapshot
+    /// carries a VMCB block, and whether any of the SVM paths below are
+    /// reachable at all: `VMRUN` on a model without it raises #UD.
+    pub(crate) fn svm_supported(&self) -> bool {
+        self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaSvm)
+    }
+}
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =====================================================================
@@ -644,7 +672,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let cr4 = self.cr4;
         let pat_msr = self.msr.pat;
 
-        let vmcb = self.vmcb.get_or_insert_with(VmcbCache::default);
+        let vmcb = &mut self.vmcb;
         for n in 0..4 {
             vmcb.host_state.sregs[n] = sregs[n].clone();
         }
@@ -670,12 +698,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn svm_exit_load_host_state(&mut self) {
         self.tsc_offset = 0;
 
-        let host_state = self
-            .vmcb
-            .as_ref()
-            .expect("vmcb must exist during VMEXIT")
-            .host_state
-            .clone();
+        let host_state = self.vmcb.host_state.clone();
 
         for n in 0..4 {
             self.sregs[n] = host_state.sregs[n].clone();
@@ -753,14 +776,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let inhibit = self.interrupts_inhibited(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS);
         self.vmcb_write8(SVM_CONTROL_INTERRUPT_SHADOW, inhibit as u8);
 
-        let nested_paging = self.vmcb.as_ref().map_or(false, |v| v.ctrls.nested_paging);
+        let nested_paging = self.vmcb.ctrls.nested_paging;
         if nested_paging {
             self.vmcb_write64(SVM_GUEST_PAT, self.msr.pat.U64());
         }
 
         // Save virtual interrupt state
-        let vmcb = self.vmcb.as_mut().expect("vmcb must exist");
-        let v_tpr = vmcb.ctrls.v_tpr;
+        let v_tpr = self.vmcb.ctrls.v_tpr;
         self.vmcb_write8(SVM_CONTROL_VTPR, v_tpr);
         let virq_pending = (self.pending_event & BX_EVENT_SVM_VIRQ_PENDING) != 0;
         self.vmcb_write8(SVM_CONTROL_VIRQ, virq_pending as u8);
@@ -823,7 +845,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
 
         // Store into VMCB cache
-        let vmcb = self.vmcb.get_or_insert_with(VmcbCache::default);
+        let vmcb = &mut self.vmcb;
         vmcb.ctrls.cr_rd_ctrl = cr_rd_ctrl;
         vmcb.ctrls.cr_wr_ctrl = cr_wr_ctrl;
         vmcb.ctrls.dr_rd_ctrl = dr_rd_ctrl;
@@ -1017,7 +1039,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.set_eflags_internal(guest_eflags);
 
         // Nested paging: load guest PAT
-        let nested = self.vmcb.as_ref().map_or(false, |v| v.ctrls.nested_paging);
+        let nested = self.vmcb.ctrls.nested_paging;
         if nested {
             self.msr.pat.set_U64(guest_pat);
         }
@@ -1083,14 +1105,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.vmcb_write64(SVM_CONTROL64_EXITINFO2, exitinfo2);
 
         // Clean up event injection field
-        let eventinj = self.vmcb.as_ref().map_or(0, |v| v.ctrls.eventinj);
+        let eventinj = self.vmcb.ctrls.eventinj;
         self.vmcb_write32(SVM_CONTROL32_EVENT_INJECTION, eventinj & !0x8000_0000);
 
         // If exiting during event delivery, save the interrupted event info
         if self.in_event {
-            let vmcb = self.vmcb.as_ref().expect("vmcb must exist");
-            let exitintinfo = vmcb.ctrls.exitintinfo;
-            let error_code = vmcb.ctrls.exitintinfo_error_code;
+            let exitintinfo = self.vmcb.ctrls.exitintinfo;
+            let error_code = self.vmcb.ctrls.exitintinfo_error_code;
             self.vmcb_write32(SVM_CONTROL32_EXITINTINFO, exitintinfo | 0x8000_0000);
             self.vmcb_write32(SVM_CONTROL32_EXITINTINFO_ERROR_CODE, error_code);
             self.in_event = false;
@@ -1128,10 +1149,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs svm.cc SvmInjectEvents()
     fn svm_inject_events(&mut self) -> bool {
         let eventinj = self.vmcb_read32(SVM_CONTROL32_EVENT_INJECTION);
-        {
-            let vmcb = self.vmcb.as_mut().expect("vmcb must exist");
-            vmcb.ctrls.eventinj = eventinj;
-        }
+        self.vmcb.ctrls.eventinj = eventinj;
         if (eventinj & 0x8000_0000) == 0 {
             return true; // No event to inject
         }
@@ -1192,11 +1210,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         );
 
         // Record exit int info for nested event tracking
-        {
-            let vmcb = self.vmcb.as_mut().expect("vmcb must exist");
-            vmcb.ctrls.exitintinfo = eventinj & !0x8000_0000;
-            vmcb.ctrls.exitintinfo_error_code = error_code as u32;
-        }
+        self.vmcb.ctrls.exitintinfo = eventinj & !0x8000_0000;
+        self.vmcb.ctrls.exitintinfo_error_code = u32::from(error_code);
 
         // Deliver the interrupt (this may unwind via CpuLoopRestart on exception)
         let nmi_vector = if int_type as u8 == InterruptType::Nmi as u8 {
@@ -1228,20 +1243,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// sites identically.
     #[inline]
     pub(super) fn svm_intercept_check(&self, intercept_bitnum: u32) -> bool {
-        match &self.vmcb {
-            Some(vmcb) => svm_intercept(&vmcb.ctrls, intercept_bitnum),
-            None => false,
-        }
+        svm_intercept(&self.vmcb.ctrls, intercept_bitnum)
     }
     /// Check if a CR-read intercept is set for register `idx`.
     /// Bochs svm.h SVM_CR_READ_INTERCEPTED.
     #[inline]
     pub(super) fn svm_cr_read_intercepted(&self, idx: u8) -> bool {
         debug_assert!(idx < 16);
-        match &self.vmcb {
-            Some(vmcb) => (vmcb.ctrls.cr_rd_ctrl & (1u16 << idx)) != 0,
-            None => false,
-        }
+        (self.vmcb.ctrls.cr_rd_ctrl & (1u16 << idx)) != 0
     }
 
     /// Check if a CR-write intercept is set for register `idx`.
@@ -1249,10 +1258,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     #[inline]
     pub(super) fn svm_cr_write_intercepted(&self, idx: u8) -> bool {
         debug_assert!(idx < 16);
-        match &self.vmcb {
-            Some(vmcb) => (vmcb.ctrls.cr_wr_ctrl & (1u16 << idx)) != 0,
-            None => false,
-        }
+        (self.vmcb.ctrls.cr_wr_ctrl & (1u16 << idx)) != 0
     }
 
     /// Check if a DR-read intercept is set for register `idx`.
@@ -1260,10 +1266,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     #[inline]
     pub(super) fn svm_dr_read_intercepted(&self, idx: u8) -> bool {
         debug_assert!(idx < 16);
-        match &self.vmcb {
-            Some(vmcb) => (vmcb.ctrls.dr_rd_ctrl & (1u16 << idx)) != 0,
-            None => false,
-        }
+        (self.vmcb.ctrls.dr_rd_ctrl & (1u16 << idx)) != 0
     }
 
     /// Check if a DR-write intercept is set for register `idx`.
@@ -1271,19 +1274,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     #[inline]
     pub(super) fn svm_dr_write_intercepted(&self, idx: u8) -> bool {
         debug_assert!(idx < 16);
-        match &self.vmcb {
-            Some(vmcb) => (vmcb.ctrls.dr_wr_ctrl & (1u16 << idx)) != 0,
-            None => false,
-        }
+        (self.vmcb.ctrls.dr_wr_ctrl & (1u16 << idx)) != 0
     }
 
     /// Check if an exception is intercepted by SVM.
     #[inline]
     fn svm_exception_intercept_check(&self, vector: u32) -> bool {
-        match &self.vmcb {
-            Some(vmcb) => svm_exception_intercepted(&vmcb.ctrls, vector),
-            None => false,
-        }
+        svm_exception_intercepted(&self.vmcb.ctrls, vector)
     }
 
     /// SVM exception intercept handler.
@@ -1302,14 +1299,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if !self.svm_exception_intercept_check(vector as u32) {
             // Not intercepted — record IDT vectoring information for future VMEXIT
-            if let Some(vmcb) = self.vmcb.as_mut() {
-                vmcb.ctrls.exitintinfo_error_code = errcode as u32;
-                let mut info = vector as u32 | (InterruptType::HardwareException as u32) << 8;
-                if errcode_valid {
-                    info |= 1 << 11;
-                }
-                vmcb.ctrls.exitintinfo = info;
+            self.vmcb.ctrls.exitintinfo_error_code = u32::from(errcode);
+            let mut info = u32::from(vector) | (InterruptType::HardwareException as u32) << 8;
+            if errcode_valid {
+                info |= 1 << 11;
             }
+            self.vmcb.ctrls.exitintinfo = info;
             return Ok(());
         }
 
@@ -1364,7 +1359,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
 
         if msr_map_offset >= 0 {
-            let msrpm_base = self.vmcb.as_ref().map_or(0, |v| v.ctrls.msrpm_base);
+            let msrpm_base = self.vmcb.ctrls.msrpm_base;
             let msr_bitmap_addr = msrpm_base + msr_map_offset as u64;
             let msr_offset = (msr & 0x1fff) * 2 + op;
 
@@ -1402,7 +1397,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         // Read two IOPM bitmap bytes to cover cross-bit accesses (Bochs uses
         // single physical reads since read_physical_byte can't cross 4K).
-        let iopm_base = self.vmcb.as_ref().map_or(0, |v| v.ctrls.iopm_base);
+        let iopm_base = self.vmcb.ctrls.iopm_base;
         let bit_addr = iopm_base + (port as u64 / 8);
         let b0 = self.read_physical_byte(bit_addr);
         let b1 = self.read_physical_byte(bit_addr + 1);
@@ -1496,44 +1491,35 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let currtime = self.system_ticks();
 
         // Pause filter logic — check if we should suppress the VMEXIT
-        let should_suppress = if let Some(vmcb) = self.vmcb.as_mut() {
-            let has_filter =
-                vmcb.ctrls.pause_filter_threshold > 0 || vmcb.ctrls.pause_filter_count > 0;
-            if has_filter {
-                let time_from_last = currtime.wrapping_sub(vmcb.ctrls.last_pause_time);
-                vmcb.ctrls.last_pause_time = currtime;
-                if vmcb.ctrls.pause_filter_threshold > 0
-                    && time_from_last > vmcb.ctrls.pause_filter_threshold as u64
-                {
-                    // Gap exceeds threshold — reset counter from VMCB
-                    Some(true) // signal: reset counter
-                } else if vmcb.ctrls.pause_filter_count > 0 {
-                    vmcb.ctrls.pause_filter_count -= 1;
-                    Some(false) // suppressed, no reset needed
-                } else {
-                    None // counter exhausted, do VMEXIT
-                }
-            } else {
-                None // no filter, do VMEXIT
-            }
+        let vmcb = &mut self.vmcb;
+        let has_filter = vmcb.ctrls.pause_filter_threshold > 0 || vmcb.ctrls.pause_filter_count > 0;
+        let verdict = if !has_filter {
+            PauseFilterVerdict::Exit
         } else {
-            None
+            let time_from_last = currtime.wrapping_sub(vmcb.ctrls.last_pause_time);
+            vmcb.ctrls.last_pause_time = currtime;
+            if vmcb.ctrls.pause_filter_threshold > 0
+                && time_from_last > u64::from(vmcb.ctrls.pause_filter_threshold)
+            {
+                PauseFilterVerdict::ReloadCounter
+            } else if vmcb.ctrls.pause_filter_count > 0 {
+                vmcb.ctrls.pause_filter_count -= 1;
+                PauseFilterVerdict::Suppress
+            } else {
+                PauseFilterVerdict::Exit
+            }
         };
 
-        match should_suppress {
-            Some(true) => {
+        match verdict {
+            PauseFilterVerdict::ReloadCounter => {
                 // Reset counter from VMCB physical memory
                 let count = self.vmcb_read16(SVM_CONTROL16_PAUSE_FILTER_COUNT);
-                if let Some(vmcb) = self.vmcb.as_mut() {
-                    vmcb.ctrls.pause_filter_count = count;
-                }
-                return Ok(());
+                self.vmcb.ctrls.pause_filter_count = count;
+                Ok(())
             }
-            Some(false) => return Ok(()), // suppressed
-            None => {}                    // fall through to VMEXIT
+            PauseFilterVerdict::Suppress => Ok(()),
+            PauseFilterVerdict::Exit => self.svm_vmexit(SvmVmexit::Pause as i32, 0, 0),
         }
-
-        self.svm_vmexit(SvmVmexit::Pause as i32, 0, 0)
     }
 
     /// VM_CR MSR update handler.

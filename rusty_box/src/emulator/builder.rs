@@ -789,6 +789,7 @@ mod tests {
     #[test]
     fn a_tracer_factory_gives_every_processor_its_own() {
         on_a_big_stack(|| {
+            #[derive(Default)]
             struct PerCpuTracer;
             impl Instrumentation for PerCpuTracer {}
 

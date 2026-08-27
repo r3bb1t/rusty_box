@@ -13,7 +13,49 @@ use super::{
     decoder::{BxSegregs, Instruction},
 };
 
-use crate::{config::BxPhyAddress, cpu::rusty_box::MemoryAccessType};
+use crate::{
+    config::BxPhyAddress,
+    convert::usize_from_u32,
+    cpu::rusty_box::MemoryAccessType,
+};
+
+/// How much of a REP the direct-bulk path may do in one go, proved before any
+/// mutation and stated in both units the callers need.
+///
+/// `elements` is a `u32` because `bytes` is, and a string element is at least
+/// one byte wide: a count too large for a `u32` would have failed the byte
+/// check first. Carrying it as a `usize` and converting back at each use is
+/// what put a `usize::try_from(..).expect(..)` on every FastRep handler —
+/// roughly thirty panics that could not fire, on the emulator's hottest bulk
+/// path.
+#[derive(Clone, Copy)]
+struct BulkSpan {
+    /// String elements the span covers, in the same type as the guest's ECX.
+    elements: u32,
+    /// Bytes those elements occupy.
+    bytes: u32,
+}
+
+/// A proved MOVS chunk: where to copy from, where to, and how much.
+///
+/// Named fields rather than a five-tuple, because two of the five are raw
+/// pointers of opposite direction and the remaining three are all integers —
+/// a positional swap between them would compile.
+struct RepMovsChunk {
+    source: *const u8,
+    destination: *mut u8,
+    /// Physical address of the destination, for the code-write check.
+    destination_paddr: BxPhyAddress,
+    span: BulkSpan,
+}
+
+/// A proved STOS chunk.
+struct RepStosChunk {
+    destination: *mut u8,
+    /// Physical address of the destination, for the code-write check.
+    destination_paddr: BxPhyAddress,
+    span: BulkSpan,
+}
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -30,7 +72,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         source_remaining: Option<usize>,
         destination_remaining: usize,
         element_size: usize,
-    ) -> Option<(usize, u32)> {
+    ) -> Option<BulkSpan> {
         let source_elements = source_remaining
             .unwrap_or(usize::MAX)
             .checked_div(element_size)?;
@@ -42,7 +84,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             .min(event_elements);
         let bytes = elements.checked_mul(element_size)?;
         let bytes = u32::try_from(bytes).ok()?;
-        (elements != 0).then_some((elements, bytes))
+        // An element is at least one byte, so `elements <= bytes` and the byte
+        // check above has already settled this one. Narrowing here rather than
+        // at each use is what lets the count travel as the `u32` the guest's
+        // count register is.
+        let elements = u32::try_from(elements).ok()?;
+        (elements != 0).then_some(BulkSpan { elements, bytes })
     }
 
     /// Check the complete canonical/LASS span before a direct 64-bit bulk access.
@@ -73,7 +120,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         destination_offset: u32,
         guest_count: u32,
         element_size: usize,
-    ) -> super::Result<Option<(*const u8, *mut u8, BxPhyAddress, usize, u32)>> {
+    ) -> super::Result<Option<RepMovsChunk>> {
         if !self.direct_rep_bulk_allowed(false) || self.get_df() || self.async_event != 0 {
             return Ok(None);
         }
@@ -91,7 +138,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let Some(guest_count) = usize::try_from(guest_count).ok() else {
             return Ok(None);
         };
-        let Some((elements, bytes)) = self.fast_rep_elements(
+        let Some(span) = self.fast_rep_elements(
             guest_count,
             Some(source_remaining),
             destination_remaining,
@@ -99,19 +146,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         ) else {
             return Ok(None);
         };
-        if !self.read_virtual_checks(source_seg as usize, source_offset, bytes)
-            || !self.write_virtual_checks(BxSegregs::Es as usize, destination_offset, bytes)
-            || self.smc_range_has_cached_code(destination_paddr, bytes)
+        if !self.read_virtual_checks(source_seg as usize, source_offset, span.bytes)
+            || !self.write_virtual_checks(BxSegregs::Es as usize, destination_offset, span.bytes)
+            || self.smc_range_has_cached_code(destination_paddr, span.bytes)
         {
             return Ok(None);
         }
-        Ok(Some((
-            source_ptr,
-            destination_ptr,
+        Ok(Some(RepMovsChunk {
+            source: source_ptr,
+            destination: destination_ptr,
             destination_paddr,
-            elements,
-            bytes,
-        )))
+            span,
+        }))
     }
 
     /// Prove a complete 32-bit-address STOS direct-transfer chunk before mutation.
@@ -121,7 +167,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         destination_offset: u32,
         guest_count: u32,
         element_size: usize,
-    ) -> super::Result<Option<(*mut u8, BxPhyAddress, usize, u32)>> {
+    ) -> super::Result<Option<RepStosChunk>> {
         if !self.direct_rep_bulk_allowed(false) || self.get_df() || self.async_event != 0 {
             return Ok(None);
         }
@@ -135,17 +181,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let Some(guest_count) = usize::try_from(guest_count).ok() else {
             return Ok(None);
         };
-        let Some((elements, bytes)) =
+        let Some(span) =
             self.fast_rep_elements(guest_count, None, destination_remaining, element_size)
         else {
             return Ok(None);
         };
-        if !self.write_virtual_checks(BxSegregs::Es as usize, destination_offset, bytes)
-            || self.smc_range_has_cached_code(destination_paddr, bytes)
+        if !self.write_virtual_checks(BxSegregs::Es as usize, destination_offset, span.bytes)
+            || self.smc_range_has_cached_code(destination_paddr, span.bytes)
         {
             return Ok(None);
         }
-        Ok(Some((destination_ptr, destination_paddr, elements, bytes)))
+        Ok(Some(RepStosChunk {
+            destination: destination_ptr,
+            destination_paddr,
+            span,
+        }))
     }
 
     /// Prove a complete 64-bit-address MOVS direct-transfer chunk before mutation.
@@ -157,7 +207,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         destination_offset: u64,
         guest_count: u64,
         element_size: usize,
-    ) -> super::Result<Option<(*const u8, *mut u8, BxPhyAddress, usize, u32)>> {
+    ) -> super::Result<Option<RepMovsChunk>> {
         if !self.direct_rep_bulk_allowed(false) || self.get_df() || self.async_event != 0 {
             return Ok(None);
         }
@@ -172,7 +222,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(None);
         };
         let guest_count = usize::try_from(guest_count).unwrap_or(usize::MAX);
-        let Some((elements, bytes)) = self.fast_rep_elements(
+        let Some(span) = self.fast_rep_elements(
             guest_count,
             Some(source_remaining),
             destination_remaining,
@@ -180,19 +230,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         ) else {
             return Ok(None);
         };
-        if !self.fast_rep_span64(source_laddr, bytes, MemoryAccessType::Read)
-            || !self.fast_rep_span64(destination_laddr, bytes, MemoryAccessType::Write)
-            || self.smc_range_has_cached_code(destination_paddr, bytes)
+        if !self.fast_rep_span64(source_laddr, span.bytes, MemoryAccessType::Read)
+            || !self.fast_rep_span64(destination_laddr, span.bytes, MemoryAccessType::Write)
+            || self.smc_range_has_cached_code(destination_paddr, span.bytes)
         {
             return Ok(None);
         }
-        Ok(Some((
-            source_ptr,
-            destination_ptr,
+        Ok(Some(RepMovsChunk {
+            source: source_ptr,
+            destination: destination_ptr,
             destination_paddr,
-            elements,
-            bytes,
-        )))
+            span,
+        }))
     }
 
     /// Prove a complete 64-bit-address STOS direct-transfer chunk before mutation.
@@ -202,7 +251,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         destination_offset: u64,
         guest_count: u64,
         element_size: usize,
-    ) -> super::Result<Option<(*mut u8, BxPhyAddress, usize, u32)>> {
+    ) -> super::Result<Option<RepStosChunk>> {
         if !self.direct_rep_bulk_allowed(false) || self.get_df() || self.async_event != 0 {
             return Ok(None);
         }
@@ -213,17 +262,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(None);
         };
         let guest_count = usize::try_from(guest_count).unwrap_or(usize::MAX);
-        let Some((elements, bytes)) =
+        let Some(span) =
             self.fast_rep_elements(guest_count, None, destination_remaining, element_size)
         else {
             return Ok(None);
         };
-        if !self.fast_rep_span64(destination_laddr, bytes, MemoryAccessType::Write)
-            || self.smc_range_has_cached_code(destination_paddr, bytes)
+        if !self.fast_rep_span64(destination_laddr, span.bytes, MemoryAccessType::Write)
+            || self.smc_range_has_cached_code(destination_paddr, span.bytes)
         {
             return Ok(None);
         }
-        Ok(Some((destination_ptr, destination_paddr, elements, bytes)))
+        Ok(Some(RepStosChunk {
+            destination: destination_ptr,
+            destination_paddr,
+            span,
+        }))
     }
 
     // =========================================================================
@@ -1366,20 +1419,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while ecx != 0 && !df {
             let esi = self.esi();
             let edi = self.edi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 1)?
-            else {
+            let Some(chunk) = self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 1)? else {
                 break;
             };
-            forward_byte_copy(src_ptr, dst_ptr, elements);
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rsi(esi.wrapping_add(bytes) as u64);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rsi(u64::from(esi.wrapping_add(bytes)));
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
@@ -1427,24 +1478,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while ecx != 0 && !df {
             let esi = self.esi();
             let edi = self.edi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 2)?
-            else {
+            let Some(chunk) = self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 2)? else {
                 break;
             };
-            forward_byte_copy(
-                src_ptr,
-                dst_ptr,
-                usize::try_from(bytes).expect("u32 fits usize"),
-            );
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rsi(esi.wrapping_add(bytes) as u64);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rsi(u64::from(esi.wrapping_add(bytes)));
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
@@ -1492,24 +1537,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while ecx != 0 && !df {
             let esi = self.esi();
             let edi = self.edi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 4)?
-            else {
+            let Some(chunk) = self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 4)? else {
                 break;
             };
-            forward_byte_copy(
-                src_ptr,
-                dst_ptr,
-                usize::try_from(bytes).expect("u32 fits usize"),
-            );
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rsi(esi.wrapping_add(bytes) as u64);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rsi(u64::from(esi.wrapping_add(bytes)));
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
@@ -1556,19 +1595,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while ecx != 0 && !df {
             let edi = self.edi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos32_chunk(edi, ecx, 1)?
-            else {
+            let Some(chunk) = self.fast_rep_stos32_chunk(edi, ecx, 1)? else {
                 break;
             };
-            host_fill_bytes(dst_ptr, al, usize::try_from(bytes).expect("u32 fits usize"));
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            let BulkSpan { elements, bytes } = chunk.span;
+            host_fill_bytes(chunk.destination, al, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
@@ -1615,27 +1652,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while ecx != 0 && !df {
             let edi = self.edi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos32_chunk(edi, ecx, 2)?
-            else {
+            let Some(chunk) = self.fast_rep_stos32_chunk(edi, ecx, 2)? else {
                 break;
             };
+            let BulkSpan { elements, bytes } = chunk.span;
             let dst_slice = unsafe {
-                super::access::host_slice_mut_u16(
-                    dst_ptr,
-                    usize::try_from(elements).expect("u32 fits usize"),
-                )
+                super::access::host_slice_mut_u16(chunk.destination, usize_from_u32(elements))
             };
-            for word in dst_slice.iter_mut() {
-                *word = ax;
-            }
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            dst_slice.fill(ax);
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
@@ -1682,27 +1712,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while ecx != 0 && !df {
             let edi = self.edi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos32_chunk(edi, ecx, 4)?
-            else {
+            let Some(chunk) = self.fast_rep_stos32_chunk(edi, ecx, 4)? else {
                 break;
             };
+            let BulkSpan { elements, bytes } = chunk.span;
             let dst_slice = unsafe {
-                super::access::host_slice_mut_u32(
-                    dst_ptr,
-                    usize::try_from(elements).expect("u32 fits usize"),
-                )
+                super::access::host_slice_mut_u32(chunk.destination, usize_from_u32(elements))
             };
-            for dword in dst_slice.iter_mut() {
-                *dword = eax;
-            }
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            dst_slice.fill(eax);
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
@@ -2658,20 +2681,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 1)?
-            else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 1)? else {
                 break;
             };
-            forward_byte_copy(src_ptr, dst_ptr, elements);
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rsi(rsi.wrapping_add(u64::from(bytes)));
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
@@ -2730,24 +2751,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 2)?
-            else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 2)? else {
                 break;
             };
-            forward_byte_copy(
-                src_ptr,
-                dst_ptr,
-                usize::try_from(bytes).expect("u32 fits usize"),
-            );
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rsi(rsi.wrapping_add(u64::from(bytes)));
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
@@ -2806,24 +2821,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 4)?
-            else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 4)? else {
                 break;
             };
-            forward_byte_copy(
-                src_ptr,
-                dst_ptr,
-                usize::try_from(bytes).expect("u32 fits usize"),
-            );
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rsi(rsi.wrapping_add(u64::from(bytes)));
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
@@ -2881,19 +2890,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos64_chunk(rdi, rcx, 1)?
-            else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 1)? else {
                 break;
             };
-            host_fill_bytes(dst_ptr, al, usize::try_from(bytes).expect("u32 fits usize"));
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            let BulkSpan { elements, bytes } = chunk.span;
+            host_fill_bytes(chunk.destination, al, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
@@ -2949,27 +2956,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos64_chunk(rdi, rcx, 2)?
-            else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 2)? else {
                 break;
             };
+            let BulkSpan { elements, bytes } = chunk.span;
             let dst_slice = unsafe {
-                super::access::host_slice_mut_u16(
-                    dst_ptr,
-                    elements,
-                )
+                super::access::host_slice_mut_u16(chunk.destination, usize_from_u32(elements))
             };
-            for word in dst_slice.iter_mut() {
-                *word = ax;
-            }
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            dst_slice.fill(ax);
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
@@ -3025,27 +3025,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos64_chunk(rdi, rcx, 4)?
-            else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 4)? else {
                 break;
             };
+            let BulkSpan { elements, bytes } = chunk.span;
             let dst_slice = unsafe {
-                super::access::host_slice_mut_u32(
-                    dst_ptr,
-                    elements,
-                )
+                super::access::host_slice_mut_u32(chunk.destination, usize_from_u32(elements))
             };
-            for dword in dst_slice.iter_mut() {
-                *dword = eax;
-            }
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            dst_slice.fill(eax);
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
@@ -3603,24 +3596,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 8)?
-            else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 8)? else {
                 break;
             };
-            forward_byte_copy(
-                src_ptr,
-                dst_ptr,
-                usize::try_from(bytes).expect("u32 fits usize"),
-            );
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rsi(rsi.wrapping_add(u64::from(bytes)));
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
@@ -3677,27 +3664,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos64_chunk(rdi, rcx, 8)?
-            else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 8)? else {
                 break;
             };
+            let BulkSpan { elements, bytes } = chunk.span;
             let dst_slice = unsafe {
-                super::access::host_slice_mut_u64(
-                    dst_ptr,
-                    elements,
-                )
+                super::access::host_slice_mut_u64(chunk.destination, usize_from_u32(elements))
             };
-            for qword in dst_slice.iter_mut() {
-                *qword = rax;
-            }
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            dst_slice.fill(rax);
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }

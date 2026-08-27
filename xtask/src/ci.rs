@@ -106,6 +106,24 @@ const UNSAFE_IMPL_SEND_BASELINE: usize = 0;
 // forwarder with no callers.
 const BLANKET_DEAD_CODE_BASELINE: usize = 70;
 
+/// `.unwrap()` / `.expect(…)` outside test code, across every library crate.
+/// Zero, and it is to stay zero: a library that panics on a condition it could
+/// have returned is a library its caller cannot contain.
+///
+/// The rule is about WHERE, not about the call. Inside `#[cfg(test)]`, a
+/// fixture that cannot be built should fail loudly and immediately — so the
+/// scan stops at a file's first `#[cfg(test)]` line, skips whole test files,
+/// and skips doc comments, whose examples are tests too.
+///
+/// 52 -> 0. Every one of the 52 was a claim about a value, and none of them
+/// paid for itself: the largest group, 37 in `cpu/string.rs`, asserted at run
+/// time that a page-bounded count fits a `u32` — which the byte-length check
+/// beside it had already established. Four in `iodev/{hpet,ioapic}.rs` said
+/// "len checked" about a length nobody had checked, one line below the slice
+/// index that would have panicked first. Five in `cpu/svm.rs` stood in for a
+/// CPU model's SVM capability, which CPUID already answers.
+const PRODUCTION_PANIC_BASELINE: usize = 0;
+
 /// Count occurrences of a bare `unsafe` token per crate, comment lines
 /// stripped, against the ratchet baselines.
 fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
@@ -143,11 +161,124 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
         trimmed.starts_with("#![allow") && trimmed.contains("dead_code")
     }
 
+    /// Whether a file is entirely test code, by the naming this tree uses for
+    /// one: `tests.rs`, or `<subject>_tests.rs`. Such a file carries no
+    /// `#[cfg(test)]` of its own — the `mod` that declares it does.
+    fn is_test_file(path: &std::path::Path) -> bool {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem == "tests" || stem.ends_with("_tests"))
+    }
+
+    /// Whether `line` is a `#[cfg(test)]` / `#[cfg(all(test, …))]` attribute.
+    fn is_cfg_test_attr(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("#[cfg(test)") || trimmed.starts_with("#[cfg(all(test")
+    }
+
+    /// A line with string literals blanked out, so brace counting is not
+    /// thrown off by a `{` inside one. Handles `\"` escapes; a raw string
+    /// carrying an unbalanced brace would still fool it, and there are none.
+    fn without_strings(code: &str) -> String {
+        let mut out = String::with_capacity(code.len());
+        let mut in_string = false;
+        let mut escaped = false;
+        for ch in code.chars() {
+            match (in_string, escaped, ch) {
+                (false, _, '"') => {
+                    in_string = true;
+                    out.push(' ');
+                }
+                (false, _, c) => out.push(c),
+                (true, true, _) => {
+                    escaped = false;
+                    out.push(' ');
+                }
+                (true, false, '\\') => {
+                    escaped = true;
+                    out.push(' ');
+                }
+                (true, false, '"') => {
+                    in_string = false;
+                    out.push(' ');
+                }
+                (true, false, _) => out.push(' '),
+            }
+        }
+        out
+    }
+
+    /// `.unwrap()` / `.expect(` in the production part of one file.
+    ///
+    /// Test code is skipped wherever it is, not merely from a file's first
+    /// `#[cfg(test)]` onwards. That distinction is the whole difficulty: the
+    /// gate sits on an inline `mod tests {` in most files, but on a plain
+    /// `mod tests;` DECLARATION in `memory/mod.rs`, and on a bare struct
+    /// forty lines further down the same file. Stopping at the first one seen
+    /// skips the rest of the file and reports a tree that is clean because it
+    /// was not looked at.
+    ///
+    /// So a `#[cfg(test)]` starts a skipped region only when the item it gates
+    /// opens a block, and that region ends when the braces close it. A gated
+    /// declaration or statement — anything ending in `;` — skips nothing.
+    ///
+    /// Doc comments are skipped throughout: `///` examples are compiled and
+    /// run as tests, and `unwrap` is how an example says "assume this worked".
+    fn production_panics(text: &str) -> usize {
+        let mut n = 0;
+        let mut depth: i32 = 0;
+        // Depth the innermost `#[cfg(test)]` item was opened at, if any.
+        let mut test_region: Option<i32> = None;
+        // A `#[cfg(test)]` has been seen and its item not yet identified.
+        let mut pending_gate = false;
+
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            let is_doc_or_comment = trimmed.starts_with("//");
+            let code = if is_doc_or_comment {
+                String::new()
+            } else {
+                without_strings(line.split("//").next().unwrap_or(""))
+            };
+            let opens = code.matches('{').count() as i32;
+            let closes = code.matches('}').count() as i32;
+
+            if !is_doc_or_comment && is_cfg_test_attr(line) {
+                pending_gate = true;
+            } else if pending_gate && !code.trim().is_empty() && !trimmed.starts_with("#[") {
+                if opens > closes {
+                    // The gated item opens a block: skip until it closes.
+                    test_region = test_region.or(Some(depth));
+                    pending_gate = false;
+                } else if code.trim_end().ends_with(';') {
+                    // A declaration or statement — `mod tests;`, a `use`. It
+                    // gates one line and nothing follows it into a block.
+                    pending_gate = false;
+                }
+                // Otherwise the item's signature is still open across lines
+                // (a multi-line `fn` header); keep looking for its brace.
+            }
+
+            if test_region.is_none() && !is_doc_or_comment {
+                n += code.matches(".unwrap()").count() + code.matches(".expect(").count();
+            }
+
+            depth += opens - closes;
+            if let Some(started_at) = test_region {
+                if depth <= started_at {
+                    test_region = None;
+                }
+            }
+        }
+        n
+    }
+
     fn scan_dir(
         dir: &std::path::Path,
         unsafe_tokens: &mut usize,
         unsafe_impl_send: &mut usize,
         blanket_dead_code: &mut usize,
+        panics: &mut usize,
     ) -> Result<(), String> {
         let entries = std::fs::read_dir(dir)
             .map_err(|err| format!("doctrine ratchets: read_dir {}: {err}", dir.display()))?;
@@ -156,11 +287,14 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
                 entry.map_err(|err| format!("doctrine ratchets: dir entry: {err}"))?;
             let path = entry.path();
             if path.is_dir() {
-                scan_dir(&path, unsafe_tokens, unsafe_impl_send, blanket_dead_code)?;
+                scan_dir(&path, unsafe_tokens, unsafe_impl_send, blanket_dead_code, panics)?;
             } else if path.extension().is_some_and(|e| e == "rs") {
                 let text = std::fs::read_to_string(&path).map_err(|err| {
                     format!("doctrine ratchets: read {}: {err}", path.display())
                 })?;
+                if !is_test_file(&path) {
+                    *panics += production_panics(&text);
+                }
                 // One per FILE, not per line: a file may carry several inner
                 // attributes, and what is being counted is files whose dead
                 // code is invisible.
@@ -187,11 +321,29 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
 
     let mut total_impl_send = 0usize;
     let mut total_blanket_dead_code = 0usize;
+    let mut total_panics = 0usize;
     for (rel, baseline) in UNSAFE_TOKEN_BASELINES {
         let mut tokens = 0usize;
         let mut impl_send = 0usize;
         let mut blanket_dead_code = 0usize;
-        scan_dir(&root.join(rel), &mut tokens, &mut impl_send, &mut blanket_dead_code)?;
+        let mut panics = 0usize;
+        scan_dir(
+            &root.join(rel),
+            &mut tokens,
+            &mut impl_send,
+            &mut blanket_dead_code,
+            &mut panics,
+        )?;
+        if panics > PRODUCTION_PANIC_BASELINE {
+            return Err(format!(
+                "doctrine ratchets: {rel} has {panics} `.unwrap()`/`.expect(…)` outside test \
+                 code, baseline is {PRODUCTION_PANIC_BASELINE}. A library crate returns its \
+                 failures; it does not abort its caller's process. If the value truly cannot \
+                 be absent, say so in a type — the 52 removed to reach this baseline were all \
+                 claims some nearby code had already proved."
+            ));
+        }
+        total_panics += panics;
         if *rel == "rusty_box/src" {
             total_impl_send = impl_send;
             total_blanket_dead_code = blanket_dead_code;
@@ -232,6 +384,7 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
         );
     }
 
+    println!("    production `.unwrap()`/`.expect(…)`: {total_panics}");
     println!(
         "<== doctrine ratchets ok ({:.1}s)",
         started.elapsed().as_secs_f32()

@@ -218,12 +218,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         writer.write_bool(self.svm_gif)?;
         writer.write_u64(self.vmcbptr)?;
         writer.write_u32(self.vmcb_memtype)?;
-        match &self.vmcb {
-            Some(vmcb) => {
-                writer.write_bool(true)?;
-                save_v3_vmcb_cache(writer, vmcb)?;
-            }
-            None => writer.write_bool(false)?,
+        // Whether the stream carries a VMCB block is a fact about the CPU
+        // MODEL, so it is read from the model rather than from a second copy
+        // kept beside the cache. The wire layout is unchanged: the flag, then
+        // the block when it is set.
+        let has_vmcb = self.svm_supported();
+        writer.write_bool(has_vmcb)?;
+        if has_vmcb {
+            save_v3_vmcb_cache(writer, &self.vmcb)?;
         }
 
         Ok(())
@@ -484,7 +486,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if vmcb_memtype > 8 || self.in_svm_guest && !has_vmcb {
             return Err(snapshot_invalid("SVM state is invalid"));
         }
-        if has_vmcb != self.vmcb.is_some() {
+        // A second line behind the whole-ISA capability check above, which
+        // normally rejects a cross-model image first. It is kept because it
+        // guards this field specifically: it is what makes reading the VMCB
+        // block conditional on the same answer that wrote it.
+        if has_vmcb != self.svm_supported() {
             return Err(snapshot_invalid("SVM capability does not match snapshot"));
         }
         if vmcbptr != 0 && vmcbptr & 0xfff != 0 {
@@ -492,8 +498,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
         self.vmcbptr = vmcbptr;
         self.vmcb_memtype = vmcb_memtype;
-        if let Some(vmcb) = &mut self.vmcb {
-            restore_v3_vmcb_cache(reader, vmcb)?;
+        if has_vmcb {
+            restore_v3_vmcb_cache(reader, &mut self.vmcb)?;
         }
 
         // These fields are caches derived by normal CR/mode writes.  They are
@@ -1306,15 +1312,21 @@ mod tests {
     use crate::cpu::decoder::BxSegregs;
     use crate::cpu::eflags::EFlags;
     use crate::cpu::svm::VmcbCache;
+    use crate::cpu::CpuModel;
     use crate::cpu::ResetReason;
     use super::CpuMode;
     use crate::snapshot::SnapshotReader;
 
-    /// Round-trip the virtualization (VMX/SVM) state through a CPU snapshot.
-    /// The tail assertions (VMCB pause fields) double as a lockstep check:
-    /// any save/restore misalignment earlier in the blob corrupts them.
+    /// Round-trip the VMX state through a CPU snapshot, on a model that has
+    /// VMX. The tail assertions double as a lockstep check: any save/restore
+    /// misalignment earlier in the blob corrupts them.
+    ///
+    /// VMX and SVM are tested apart because no processor has both, and the
+    /// restore now says so: a machine claiming to be an SVM guest on a model
+    /// without SVM is refused. One test setting both flags was describing a
+    /// processor that cannot exist.
     #[test]
-    fn snapshot_round_trips_virtualization_state() {
+    fn snapshot_round_trips_vmx_state() {
         let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
 
@@ -1322,14 +1334,8 @@ mod tests {
         cpu.in_vmx_guest = true;
         cpu.in_smm_vmx = true;
         cpu.in_smm_vmx_guest = true;
-        cpu.in_svm_guest = true;
-        cpu.svm_gif = false;
         cpu.vmcsptr = 0x0012_3000;
         cpu.vmxonptr = 0x0056_7000;
-        cpu.vmcbptr = 0x009A_B000;
-        cpu.vmcb_host_offset = Some(0xDEAD_BEEF); // must NOT survive a restore
-        cpu.msr.svm_hsave_pa = 0x00DE_F000;
-        cpu.msr.svm_vm_cr = 0x2;
 
         cpu.vmcs.launched = true;
         cpu.vmcs.host_cr0 = 0x8000_0031; // first serialized u64 field
@@ -1337,28 +1343,12 @@ mod tests {
         cpu.vmcs.exit_reason = 0x77;
         cpu.vmcs.exit_qualification = 0xABCD_EF01;
 
-        let mut vmcb = VmcbCache::default();
-        vmcb.ctrls.intercept_vector[1] = 0xAA55;
-        vmcb.ctrls.ncr3 = 0x0004_2000;
-        vmcb.ctrls.v_tpr = 0x0F;
-        vmcb.ctrls.nested_paging = true;
-        vmcb.ctrls.pause_filter_count = 0x1111;
-        vmcb.ctrls.pause_filter_threshold = 0x2222;
-        vmcb.ctrls.last_pause_time = 0x3333_4444_5555_6666;
-        vmcb.host_state.rax = 0x7777_8888;
-        vmcb.host_state.eflags = 0x0000_0202;
-        cpu.vmcb = Some(vmcb);
-
         let mut blob = Vec::new();
         cpu.save_snapshot_v3_body(&mut blob).unwrap();
 
         let mut restored = BxCpuBuilder::new().build().unwrap();
         restored.reset(ResetReason::Hardware);
-        // The v3 codec treats the live VMCB cache allocation as immutable
-        // host topology: it must exist before a with-VMCB snapshot decodes.
-        restored.vmcb = Some(VmcbCache::default());
-        let mut reader =
-            SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
         restored
             .restore_snapshot_v3_body(&mut reader, cpu.snapshot_cpu_id())
             .unwrap();
@@ -1368,10 +1358,58 @@ mod tests {
         assert!(restored.in_vmx_guest);
         assert!(restored.in_smm_vmx);
         assert!(restored.in_smm_vmx_guest);
-        assert!(restored.in_svm_guest);
-        assert!(!restored.svm_gif);
         assert_eq!(restored.vmcsptr, 0x0012_3000);
         assert_eq!(restored.vmxonptr, 0x0056_7000);
+
+        assert!(restored.vmcs.launched);
+        assert_eq!(restored.vmcs.host_cr0, 0x8000_0031);
+        assert_eq!(restored.vmcs.guest_cs_selector, 0x1234);
+        assert_eq!(restored.vmcs.exit_reason, 0x77);
+        assert_eq!(restored.vmcs.exit_qualification, 0xABCD_EF01);
+    }
+
+    /// Round-trip the SVM state, including the VMCB cache, on a model that
+    /// has SVM. The tail assertions (VMCB pause fields) are the lockstep
+    /// check for this blob.
+    #[test]
+    fn snapshot_round_trips_svm_state_including_the_vmcb_cache() {
+        let mut cpu = BxCpuBuilder::new_with_model(CpuModel::amd_ryzen())
+            .build()
+            .unwrap();
+        cpu.reset(ResetReason::Hardware);
+
+        cpu.in_svm_guest = true;
+        cpu.svm_gif = false;
+        cpu.vmcbptr = 0x009A_B000;
+        cpu.vmcb_host_offset = Some(0xDEAD_BEEF); // must NOT survive a restore
+        cpu.msr.svm_hsave_pa = 0x00DE_F000;
+        cpu.msr.svm_vm_cr = 0x2;
+
+        cpu.vmcb.ctrls.intercept_vector[1] = 0xAA55;
+        cpu.vmcb.ctrls.ncr3 = 0x0004_2000;
+        cpu.vmcb.ctrls.v_tpr = 0x0F;
+        cpu.vmcb.ctrls.nested_paging = true;
+        cpu.vmcb.ctrls.pause_filter_count = 0x1111;
+        cpu.vmcb.ctrls.pause_filter_threshold = 0x2222;
+        cpu.vmcb.ctrls.last_pause_time = 0x3333_4444_5555_6666;
+        cpu.vmcb.host_state.rax = 0x7777_8888;
+        cpu.vmcb.host_state.eflags = 0x0000_0202;
+
+        let mut blob = Vec::new();
+        cpu.save_snapshot_v3_body(&mut blob).unwrap();
+
+        let mut restored = BxCpuBuilder::new_with_model(CpuModel::amd_ryzen())
+            .build()
+            .unwrap();
+        restored.reset(ResetReason::Hardware);
+        let mut reader = SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
+        restored
+            .restore_snapshot_v3_body(&mut reader, cpu.snapshot_cpu_id())
+            .unwrap();
+        reader.finish_exact().unwrap();
+
+        assert!(restored.in_svm_guest);
+        assert!(!restored.svm_gif);
         assert_eq!(restored.vmcbptr, 0x009A_B000);
         assert_eq!(
             restored.vmcb_host_offset, None,
@@ -1380,13 +1418,7 @@ mod tests {
         assert_eq!(restored.msr.svm_hsave_pa, 0x00DE_F000);
         assert_eq!(restored.msr.svm_vm_cr, 0x2);
 
-        assert!(restored.vmcs.launched);
-        assert_eq!(restored.vmcs.host_cr0, 0x8000_0031);
-        assert_eq!(restored.vmcs.guest_cs_selector, 0x1234);
-        assert_eq!(restored.vmcs.exit_reason, 0x77);
-        assert_eq!(restored.vmcs.exit_qualification, 0xABCD_EF01);
-
-        let vmcb = restored.vmcb.as_ref().expect("VMCB cache must round-trip");
+        let vmcb = &restored.vmcb;
         assert_eq!(vmcb.ctrls.intercept_vector[1], 0xAA55);
         assert_eq!(vmcb.ctrls.ncr3, 0x0004_2000);
         assert_eq!(vmcb.ctrls.v_tpr, 0x0F);
@@ -1398,39 +1430,56 @@ mod tests {
         assert_eq!(vmcb.ctrls.last_pause_time, 0x3333_4444_5555_6666);
     }
 
-    /// The live VMCB cache allocation is host topology, not guest state: a
-    /// no-VMCB snapshot restores into a no-VMCB CPU and is rejected by a
-    /// VMCB-carrying CPU instead of silently dropping the live allocation.
+    /// Whether a snapshot carries a VMCB block is the CPU MODEL's answer, so
+    /// a stream written by a model without SVM restores into another such
+    /// model and is refused by one with SVM — rather than being read as
+    /// though the block were there.
+    ///
+    /// This is the real scenario the check exists for: carrying an image
+    /// between machines. It used to be staged by assigning the cache field
+    /// directly, which tested the field rather than the capability, and could
+    /// pass while the capability check was reading the wrong thing.
     #[test]
-    fn snapshot_round_trips_absent_vmcb() {
+    fn a_snapshot_from_a_model_without_svm_is_refused_by_a_model_with_it() {
         let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
-        assert!(cpu.vmcb.is_none());
+        assert!(
+            !cpu.svm_supported(),
+            "Skylake-X is the no-SVM side of this test"
+        );
 
         let mut blob = Vec::new();
         cpu.save_snapshot_v3_body(&mut blob).unwrap();
 
         let mut restored = BxCpuBuilder::new().build().unwrap();
         restored.reset(ResetReason::Hardware);
-        let mut reader =
-            SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
         restored
             .restore_snapshot_v3_body(&mut reader, cpu.snapshot_cpu_id())
             .unwrap();
         reader.finish_exact().unwrap();
-        assert!(restored.vmcb.is_none());
 
-        let mut mismatched = BxCpuBuilder::new().build().unwrap();
+        let mut mismatched = BxCpuBuilder::new_with_model(CpuModel::amd_ryzen())
+            .build()
+            .unwrap();
         mismatched.reset(ResetReason::Hardware);
-        mismatched.vmcb = Some(VmcbCache::default());
-        let mut reader =
-            SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
+        assert!(
+            mismatched.svm_supported(),
+            "Ryzen is the SVM side of this test"
+        );
+        let mut reader = SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
         let error = mismatched
             .restore_snapshot_v3_body(&mut reader, cpu.snapshot_cpu_id())
             .unwrap_err();
+        // The whole-ISA capability check fires first, and that is the one
+        // that matters: what must not happen is the image loading. Asserting
+        // the SVM-specific message instead would pin which guard wins rather
+        // than the property, and would go green if the SVM guard were the
+        // only one left.
         assert!(
-            error.to_string().contains("SVM capability does not match"),
-            "unexpected rejection: {error}"
+            error.to_string().contains("differs from snapshot")
+                || error.to_string().contains("SVM capability does not match"),
+            "a cross-model image must be refused, not read: {error}"
         );
     }
 

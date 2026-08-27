@@ -963,7 +963,7 @@ mod tests {
         ap.in_svm_guest = true;
         let mut vmcb = crate::cpu::svm::VmcbCache::default();
         vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_SMI;
-        ap.vmcb = Some(vmcb);
+        ap.vmcb = vmcb;
 
         ap.deliver_smi();
         let exited = bus.ctx(&mut ap).handle_async_event();
@@ -990,7 +990,7 @@ mod tests {
         ap.in_svm_guest = true;
         let mut vmcb = crate::cpu::svm::VmcbCache::default();
         vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_INIT;
-        ap.vmcb = Some(vmcb);
+        ap.vmcb = vmcb;
 
         ap.deliver_init();
         let exited = bus.ctx(&mut ap).handle_async_event();

@@ -552,7 +552,13 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     pub(super) vmcb_host_offset: Option<usize>,
     pub(super) vmcb_memtype: BxMemType,
 
-    pub(super) vmcb: Option<VmcbCache>,
+    /// The processor's copy of the guest VMCB's host-state and control areas.
+    ///
+    /// Always present, as in Bochs cpu.h. A model without SVM simply never
+    /// reads it: whether SVM exists is a question for [`Self::svm_supported`],
+    /// which asks CPUID, rather than a second answer stored here that two
+    /// places could disagree about.
+    pub(super) vmcb: VmcbCache,
 
     pub(super) in_event: bool,
 
@@ -1865,8 +1871,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// every guest timer — it compiles clean and only the tick-conservation
     /// assertion in emulator/tests.rs catches it.
     #[inline]
-    pub(super) fn tickn_fastrep(&mut self, n: usize) {
-        if self.pc_system.countdown_would_expire_after(n as u32) {
+    /// `n` is a `u32` because the countdown is: taking a `usize` and casting
+    /// it down here would have truncated a large count into a small one
+    /// silently, and the callers all hold a page-bounded `u32` already.
+    pub(super) fn tickn_fastrep(&mut self, n: u32) {
+        if self.pc_system.countdown_would_expire_after(n) {
             self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
         }
     }
@@ -3246,19 +3255,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     );
                     match current_mapping {
                         Ok(Some(range)) => {
-                            let available = range.len();
+                            // Taking the minimum in the window's own type is
+                            // what removes the question of whether the result
+                            // fits back into it. The clamp cannot decide the
+                            // outcome: a block that long would still lose to
+                            // `page_remaining`, which is at most a page.
+                            let available = u32::try_from(range.len()).unwrap_or(u32::MAX);
                             let page_remaining =
-                                self.eip_page_window_size.saturating_sub(page_offset) as usize;
+                                self.eip_page_window_size.saturating_sub(page_offset);
                             let fetch_len = available.min(page_remaining);
                             if fetch_len != 0 {
                                 self.p_addr_fetch_page = current_p_addr;
                                 self.eip_page_bias = 0u64.wrapping_sub(self.rip());
-                                self.eip_page_window_size = fetch_len
-                                    .try_into()
-                                    .expect("resident block length exceeds u32");
+                                self.eip_page_window_size = fetch_len;
                                 self.eip_fetch_window = Some(super::tlb::FetchWindow {
                                     start: range.start,
-                                    len: fetch_len,
+                                    len: crate::convert::usize_from_u32(fetch_len),
                                 });
                             } else {
                                 self.eip_fetch_window = None;

@@ -1280,13 +1280,20 @@ impl BxIoApic {
         }
 
         // Bochs: (ioapic.cc)
+        // A buffer shorter than the declared length is rejected like every
+        // other malformed access above: `len` is the caller's claim about the
+        // access, `data` is what it actually brought, and only the second can
+        // be read.
         if len == 4 {
-            let value = u32::from_ne_bytes(
-                data[..4]
-                    .try_into()
-                    .expect("IOAPIC write: data too short for 4-byte access"),
-            );
-            self.write_aligned(addr, value)
+            let Some(bytes) = data.first_chunk::<4>() else {
+                tracing::error!(
+                    "IOAPIC: 4-byte write at {:#x} carrying only {} bytes",
+                    addr,
+                    data.len()
+                );
+                return ServiceRequest::NotNeeded;
+            };
+            self.write_aligned(addr, u32::from_ne_bytes(*bytes))
         } else {
             // Non-4-byte writes: only accepted at IOREGSEL offset (0x00)
             let data_offset = (addr & 0xFF) as u32;
@@ -1299,13 +1306,20 @@ impl BxIoApic {
                 return ServiceRequest::NotNeeded;
             }
 
-            let value = match len {
-                2 => u16::from_ne_bytes(
-                    data[..2]
-                        .try_into()
-                        .expect("IOAPIC write: data too short for 2-byte access"),
-                ) as u32,
-                1 => data[0] as u32,
+            // Bochs ioapic.cc zero-extends a narrow IOREGSEL write, so both
+            // arms widen with `From` rather than casting.
+            let value = match (len, data.first_chunk::<2>(), data.first()) {
+                (2, Some(bytes), _) => u32::from(u16::from_ne_bytes(*bytes)),
+                (1, _, Some(&byte)) => u32::from(byte),
+                (1 | 2, _, _) => {
+                    tracing::error!(
+                        "IOAPIC: {}-byte write at {:#x} carrying only {} bytes",
+                        len,
+                        addr,
+                        data.len()
+                    );
+                    return ServiceRequest::NotNeeded;
+                }
                 _ => {
                     tracing::error!("IOAPIC: unsupported write len={} at addr={:#x}", len, addr);
                     return ServiceRequest::NotNeeded;

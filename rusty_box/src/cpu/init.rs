@@ -87,11 +87,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // permanently `None` by construction, so AMX is unsupported and no init is
         // required.
 
-        self.vmcb = if self.bx_cpuid_support_isa_extension(X86Feature::IsaSvm) {
-            Some(VmcbCache::default())
-        } else {
-            None
-        };
+        // Bochs cpu.h keeps `vmcb` as a plain member, so a model without SVM
+        // has a zeroed block nothing reads rather than an absence every
+        // caller has to answer for. Whether the model has SVM is `CPUID`'s to
+        // say, and `svm_supported` is the one place that asks.
+        self.vmcb = VmcbCache::default();
 
         self.init_msrs();
 

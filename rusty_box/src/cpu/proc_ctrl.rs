@@ -1,6 +1,7 @@
 #![allow(unused_variables)]
 #![allow(unused_unsafe)]
 
+use crate::convert::u64_from_usize;
 use crate::cpu::BxCpuC;
 
 /// Pack one `IA32_VMX_*_CTLS` capability MSR: allowed-1 (what a guest MAY set)
@@ -3377,9 +3378,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 }
             }
         }
-        for (i, chunk) in buf.chunks_exact(8).enumerate() {
-            let val = u64::from_le_bytes(chunk.try_into().unwrap());
-            self.v_write_qword(seg, base.wrapping_add((i * 8) as u64), val)?;
+        // Chunking into fixed-size arrays hands `from_le_bytes` what it wants
+        // directly, where `chunks_exact` produced slices whose known length
+        // had to be re-established at run time.
+        let (qwords, _) = buf.as_chunks::<8>();
+        for (i, qword) in qwords.iter().enumerate() {
+            let val = u64::from_le_bytes(*qword);
+            self.v_write_qword(seg, base.wrapping_add(u64_from_usize(i * 8)), val)?;
         }
         Ok(())
     }
@@ -3438,14 +3443,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
         for (tile_idx, tile) in tiles.iter().enumerate() {
             for (row_idx, row) in tile.chunks_exact(super::avx::BX_TILE_ROW_BYTES).enumerate() {
-                let off = base.wrapping_add(
-                    ((tile_idx * super::avx::BX_TILE_MAX_ROWS + row_idx)
-                        * super::avx::BX_TILE_ROW_BYTES) as u64,
-                );
+                let off = base.wrapping_add(u64_from_usize(
+                    (tile_idx * super::avx::BX_TILE_MAX_ROWS + row_idx)
+                        * super::avx::BX_TILE_ROW_BYTES,
+                ));
                 // 64-byte row → 8 qwords.
-                for (q, chunk) in row.chunks_exact(8).enumerate() {
-                    let val = u64::from_le_bytes(chunk.try_into().unwrap());
-                    self.v_write_qword(seg, off.wrapping_add((q * 8) as u64), val)?;
+                let (qwords, _) = row.as_chunks::<8>();
+                for (q, qword) in qwords.iter().enumerate() {
+                    let val = u64::from_le_bytes(*qword);
+                    self.v_write_qword(seg, off.wrapping_add(u64_from_usize(q * 8)), val)?;
                 }
             }
         }

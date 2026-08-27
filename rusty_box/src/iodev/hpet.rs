@@ -504,16 +504,42 @@ impl BxHpetC {
     }
 
     /// Memory-system dispatch entry (Bochs static `hpet_write`).
+    /// A write whose buffer is shorter than the length it declares is
+    /// rejected like every other malformed access here, rather than taken on
+    /// trust. `len` is the caller's claim about the access; `data` is what it
+    /// actually brought, and only the second can be read.
     pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) {
         match len {
             4 if addr & 0x3 == 0 => {
-                let value = u32::from_le_bytes(data[..4].try_into().expect("len checked"));
-                self.write_aligned(addr, value, true);
+                let Some(bytes) = data.first_chunk::<4>() else {
+                    tracing::error!(
+                        "HPET: 4-byte write at {:#x} carrying only {} bytes",
+                        addr,
+                        data.len()
+                    );
+                    return;
+                };
+                self.write_aligned(addr, u32::from_le_bytes(*bytes), true);
             }
             8 if addr & 0x7 == 0 => {
-                let value = u64::from_le_bytes(data[..8].try_into().expect("len checked"));
-                self.write_aligned(addr, value as u32, false);
-                self.write_aligned(addr + 4, (value >> 32) as u32, true);
+                let Some(bytes) = data.first_chunk::<8>() else {
+                    tracing::error!(
+                        "HPET: 8-byte write at {:#x} carrying only {} bytes",
+                        addr,
+                        data.len()
+                    );
+                    return;
+                };
+                // Bochs hpet.cc splits a 64-bit write into its two dwords,
+                // arming only on the upper one so a comparator sees the whole
+                // value before it re-arms. Reading each dword straight out of
+                // the buffer says that plainly, where assembling a u64 and
+                // shifting it back apart spends two truncating casts to end
+                // up in the same place.
+                let low = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                let high = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                self.write_aligned(addr, low, false);
+                self.write_aligned(addr + 4, high, true);
             }
             _ => {
                 tracing::error!("HPET: unsupported write at {:#x} len={}", addr, len);

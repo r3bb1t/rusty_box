@@ -234,6 +234,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     #[cfg(feature = "instrumentation")]
     #[test]
     fn instrumented_constructor_applies_configured_cpuid_frequency() {
+        #[derive(Default)]
         struct NoopTracer;
         impl crate::cpu::instrumentation::Instrumentation for NoopTracer {}
 
@@ -4738,7 +4739,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     #[cfg(feature = "instrumentation")]
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     struct Phase6RepeatTrace(std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
 
     #[cfg(feature = "instrumentation")]

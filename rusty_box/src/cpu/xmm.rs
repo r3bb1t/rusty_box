@@ -23,10 +23,16 @@ pub(super) const MXCSR_MASK: u32 = 0x0000_FFBF; // Valid bits mask (no bit 6 DAZ
 macro_rules! packed_reg_accessors {
     // Unsigned integer accessor
     (uint $name:ident, $setter:ident, $ty:ty, $width:expr) => {
+        /// Element `i` of the register.
+        ///
+        /// Chunking the fixed array yields elements directly, so the only
+        /// thing that can go wrong is `i` naming an element that does not
+        /// exist — which is the real precondition. Slicing and converting
+        /// stated that as two failures, one of which could not happen.
         #[inline(always)]
         pub fn $name(&self, i: usize) -> $ty {
-            let s = i * $width;
-            <$ty>::from_le_bytes(self.bytes[s..s + $width].try_into().unwrap())
+            let (elements, _) = self.bytes.as_chunks::<$width>();
+            <$ty>::from_le_bytes(elements[i])
         }
         #[inline(always)]
         pub fn $setter(&mut self, i: usize, v: $ty) {
@@ -47,10 +53,11 @@ macro_rules! packed_reg_accessors {
     };
     // Float accessor
     (float $name:ident, $setter:ident, $fty:ty, $width:expr) => {
+        /// Element `i` of the register.
         #[inline(always)]
         pub fn $name(&self, i: usize) -> $fty {
-            let s = i * $width;
-            <$fty>::from_le_bytes(self.bytes[s..s + $width].try_into().unwrap())
+            let (elements, _) = self.bytes.as_chunks::<$width>();
+            <$fty>::from_le_bytes(elements[i])
         }
         #[inline(always)]
         pub fn $setter(&mut self, i: usize, v: $fty) {

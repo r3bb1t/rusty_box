@@ -498,8 +498,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(crate) fn fpu_write_st(&mut self, index: usize, val: [u8; 10]) {
         use super::softfloat3e::softfloat_types::ExtFloat80;
         let phys = (self.the_i387.tos as usize + index) & 7;
-        let signif = u64::from_le_bytes(val[..8].try_into().unwrap());
-        let sign_exp = u16::from_le_bytes(val[8..10].try_into().unwrap());
+        // Ten bytes by type: eight of significand then two of sign-and-
+        // exponent, the layout `fpu_read_st` writes. Constant indices into a
+        // fixed array are checked when this compiles, where slicing and
+        // converting deferred the same question to run time and answered it
+        // with a panic that could not fire.
+        let signif = u64::from_le_bytes([
+            val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+        ]);
+        let sign_exp = u16::from_le_bytes([val[8], val[9]]);
         self.the_i387.st_space[phys] = ExtFloat80 { signif, sign_exp };
     }
 
@@ -1104,7 +1111,7 @@ where
     let mut off: usize = 0;
     while off < buf.len() {
         let va = start_va.wrapping_add(off as u64);
-        let page_off = usize::try_from(va & 0xFFF).expect("page offset fits usize");
+        let page_off = crate::convert::page_offset(va);
         let chunk = (0x1000 - page_off).min(buf.len() - off);
         let Some(pa) = translate(ctx, va) else {
             return false;
@@ -1149,14 +1156,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// to execute the transition, skip it, stop the loop, or both.
     #[cfg(feature = "instrumentation")]
     pub(crate) fn fire_pre_syscall(&mut self) -> InstrAction {
-        let Some(mut tracer) = self.instrumentation.tracer.take() else {
-            return InstrAction::Continue;
-        };
+        // The hook wants `&mut` on the whole processor, and the tracer lives
+        // inside the processor — so it is moved out for the call and put back
+        // after. `Instrumentation: Default` is what lets a real tracer sit in
+        // the slot meanwhile instead of an absence every reader would have to
+        // answer for.
+        let mut tracer = core::mem::take(&mut self.instrumentation.tracer);
         let action = {
             let mut ctx = HookCtx::new(self);
             tracer.pre_syscall(&mut ctx)
         };
-        self.instrumentation.tracer = Some(tracer);
+        self.instrumentation.tracer = tracer;
         action
     }
 }

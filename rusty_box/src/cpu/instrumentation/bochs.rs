@@ -73,7 +73,15 @@ use crate::cpu::decoder::Instruction;
 /// living inside those CPUs cannot then borrow from anything shorter. Every
 /// tracer already qualifies: `()` trivially, and the hook registry's closures
 /// carry `Send + 'static` by their own bounds.
-pub trait Instrumentation: 'static {
+///
+/// `Default` because a hook runs with `&mut` access to the whole processor
+/// and the tracer lives inside the processor, so dispatching one has to move
+/// the tracer out for the duration and put it back after. Being able to leave
+/// a default in the slot is what makes that window hold a real tracer rather
+/// than an absence every reader would have to answer for — which is what
+/// `Emulator::instrumentation` used to answer with a panic. If your tracer
+/// owns something it cannot make a default of, hold it in an `Option` field.
+pub trait Instrumentation: Default + 'static {
     /// Declare which hook categories this implementation uses.
     /// The CPU skips dispatch for categories not in the returned mask.
     fn active_hooks(&self) -> HookMask {

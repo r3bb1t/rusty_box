@@ -6,6 +6,20 @@
 use super::decoder::{BxSegregs, Instruction};
 use crate::cpu::rusty_box::MemoryAccessType;
 
+/// The running FastRep count, as the countdown probe wants it.
+///
+/// Saturating is the conservative direction and not a papered-over failure:
+/// `tickn_fastrep` asks only whether the PC-system countdown would expire
+/// after `n` iterations, so a saturated count answers "yes, certainly", which
+/// ends the bulk run and hands the rest to the scalar path. Under-reporting
+/// would be the harmful direction, and this cannot do that. In practice a
+/// chunk is capped at one page and at CX, so the count never approaches the
+/// ceiling at all.
+#[inline]
+fn fastrep_budget(iterations: usize) -> u32 {
+    u32::try_from(iterations).unwrap_or(u32::MAX)
+}
+
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // I/O Privilege Check — Bochs io.cc
@@ -631,7 +645,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.tick_surplus += transferred.saturating_sub(1) as u64;
                 fastrep_iterations += transferred;
                 event_words_remaining -= transferred;
-                self.tickn_fastrep(fastrep_iterations);
+                self.tickn_fastrep(fastrep_budget(fastrep_iterations));
                 if cx == 0 {
                     return Ok(());
                 }
@@ -778,7 +792,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.tick_surplus += transferred.saturating_sub(1) as u64;
                 fastrep_iterations += transferred;
                 event_words_remaining -= transferred;
-                self.tickn_fastrep(fastrep_iterations);
+                self.tickn_fastrep(fastrep_budget(fastrep_iterations));
                 if ecx == 0 {
                     self.set_rcx(ecx as u64);
                     return Ok(());
@@ -1228,7 +1242,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.tick_surplus += transferred.saturating_sub(1) as u64;
                 fastrep_iterations += transferred;
                 event_words_remaining -= transferred;
-                self.tickn_fastrep(fastrep_iterations);
+                self.tickn_fastrep(fastrep_budget(fastrep_iterations));
                 if rcx == 0 {
                     return Ok(());
                 }

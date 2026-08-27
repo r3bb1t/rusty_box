@@ -66,6 +66,7 @@ pub enum Level {
 
 // Always available: core emulation modules (no alloc needed)
 pub mod config;
+pub(crate) mod convert;
 pub mod cpu;
 mod crc;
 pub mod error;

@@ -1110,8 +1110,7 @@ impl AtaDrive {
         let mut buf_offset = 0;
 
         // In-memory path — try disk_data_ref first (no borrow conflict since it's &'static).
-        if self.disk_data_ref.is_some() {
-            let data = self.disk_data_ref.unwrap();
+        if let Some(data) = self.disk_data_ref {
             for _ in 0..sector_count {
                 let lba = self.current_lba();
                 let Some(disk_offset) = Self::memory_disk_offset(lba) else {
@@ -1154,7 +1153,12 @@ impl AtaDrive {
                 let Some(disk_offset) = Self::memory_disk_offset(lba) else {
                     return false;
                 };
-                let data = self.disk_data.as_ref().unwrap();
+                // Re-borrowed each iteration because the loop mutates `self`
+                // between them; a read with no image behind it fails the same
+                // way a short one does.
+                let Some(data) = self.disk_data.as_ref() else {
+                    return false;
+                };
 
                 if disk_offset + SECTOR_SIZE > data.len() {
                     return false;
@@ -1254,7 +1258,12 @@ impl AtaDrive {
                 let Some(disk_offset) = Self::memory_disk_offset(lba) else {
                     return false;
                 };
-                let data = self.disk_data.as_mut().unwrap();
+                // Re-borrowed each iteration because the loop mutates `self`
+                // between them; a write with no image behind it fails the
+                // same way one past the end does.
+                let Some(data) = self.disk_data.as_mut() else {
+                    return false;
+                };
 
                 if disk_offset + SECTOR_SIZE > data.len() {
                     return false;

@@ -285,23 +285,13 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     }
 
     /// Direct typed reference to the installed tracer. Zero-cost field access.
-    /// Panics only if called while a hook is mid-dispatch (the tracer is
-    /// temporarily taken for borrow-splitting) — user code can't observe this.
     pub fn instrumentation(&self) -> &T {
-        self.cpu()
-            .instrumentation
-            .tracer
-            .as_ref()
-            .expect("tracer absent only during hook dispatch")
+        &self.cpu().instrumentation.tracer
     }
 
     /// Mutable reference to the installed tracer.
     pub fn instrumentation_mut(&mut self) -> &mut T {
-        self.cpu_mut()
-            .instrumentation
-            .tracer
-            .as_mut()
-            .expect("tracer absent only during hook dispatch")
+        &mut self.cpu_mut().instrumentation.tracer
     }
 
     /// Recompute the active hook mask from the tracer's `active_hooks()`.
