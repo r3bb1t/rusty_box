@@ -84,6 +84,7 @@ pub mod fw_cfg;
 pub mod harddrv;
 pub mod hpet;
 pub mod ioapic;
+pub mod irq;
 pub mod keyboard;
 pub mod scancodes;
 pub mod pci;
@@ -102,6 +103,7 @@ pub use dma::BxDmaC;
 pub use fw_cfg::BxFwCfg;
 pub use harddrv::BxHardDriveC;
 pub use ioapic::BxIoApic;
+pub use irq::IrqFabric;
 pub use keyboard::BxKeyboardC;
 pub use pci::BxPciBridge;
 pub use pci2isa::BxPiix3;
@@ -613,10 +615,11 @@ impl BxDevicesC {
     /// final physical interrupt level.
     #[inline]
     fn take_pic_level_after_dispatch(dm: &mut devices::DeviceManager) -> Option<bool> {
-        let changed = dm.pic.irq_pending || dm.pic.irq_cleared;
-        dm.pic.irq_pending = false;
-        dm.pic.irq_cleared = false;
-        changed.then(|| dm.pic.has_interrupt())
+        let pic = dm.irq.pic_mut();
+        let changed = pic.irq_pending || pic.irq_cleared;
+        pic.irq_pending = false;
+        pic.irq_cleared = false;
+        changed.then(|| pic.has_interrupt())
     }
 
     /// Register a read handler for a specific I/O port
@@ -731,7 +734,7 @@ impl BxDevicesC {
                 let mut routed = None;
                 if let Some(bound) = dm.bind_pio(slot, port) {
                     routed = Some(wiring::with_device_ctx(
-                        bound.pic,
+                        bound.irq,
                         pc_system,
                         bound.handles,
                         current_ticks,
@@ -742,17 +745,8 @@ impl BxDevicesC {
                     Some(value) => value,
                     None => Self::dispatch_read(dm, slot, port, io_len),
                 };
-                let (fwds, count) = dm.pic.take_ioapic_forwards();
                 if let Some(level) = dm.dma.take_hrq_request() {
                     self.hrq_level = Some(level);
-                }
-                let devices::DeviceManager {
-                    ref mut pic,
-                    ref mut ioapic,
-                    ..
-                } = *dm;
-                for &(irq, level) in &fwds[..count] {
-                    ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
                 }
                 if let Some(level) = Self::take_pic_level_after_dispatch(dm) {
                     self.pic_intr_level = Some(level);
@@ -794,7 +788,7 @@ impl BxDevicesC {
                 let mut routed = false;
                 if let Some(bound) = dm.bind_pio(slot, port) {
                     wiring::with_device_ctx(
-                        bound.pic,
+                        bound.irq,
                         pc_system,
                         bound.handles,
                         current_ticks,
@@ -809,13 +803,8 @@ impl BxDevicesC {
                 // The IDE controller arms its own seek and bus-master
                 // deadlines, still anchored to this OUT.
                 Self::drain_ide_timers(dm, pc_system, current_ticks);
-                let (fwds, count) = dm.pic.take_ioapic_forwards();
                 if let Some(level) = dm.dma.take_hrq_request() {
                     self.hrq_level = Some(level);
-                }
-                let devices::DeviceManager { pic, ioapic, .. } = dm;
-                for &(irq, level) in &fwds[..count] {
-                    ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
                 }
                 if let Some(level) = Self::take_pic_level_after_dispatch(dm) {
                     self.pic_intr_level = Some(level);
@@ -852,10 +841,15 @@ impl BxDevicesC {
         let slot = DevSlot::from_mmio_token(hit.token);
         let window = DevSlot::window_from_mmio_token(hit.token);
         let at = rusty_box_devices::api::WindowOffset(hit.offset);
+        // The interrupt fabric answers for its own window — see `bind_mmio`.
+        if slot == DevSlot::IOAPIC {
+            dm.irq.mmio_read(at.get(), len, data);
+            return true;
+        }
         match dm.bind_mmio(slot) {
             Some(bound) => {
                 wiring::with_device_ctx(
-                    bound.pic,
+                    bound.irq,
                     pc_system,
                     bound.handles,
                     now_ticks,
@@ -886,10 +880,15 @@ impl BxDevicesC {
         let slot = DevSlot::from_mmio_token(hit.token);
         let window = DevSlot::window_from_mmio_token(hit.token);
         let at = rusty_box_devices::api::WindowOffset(hit.offset);
+        // The interrupt fabric answers for its own window — see `bind_mmio`.
+        if slot == DevSlot::IOAPIC {
+            dm.irq.mmio_write(at.get(), len, data);
+            return true;
+        }
         match dm.bind_mmio(slot) {
             Some(bound) => {
                 wiring::with_device_ctx(
-                    bound.pic,
+                    bound.irq,
                     pc_system,
                     bound.handles,
                     now_ticks,
@@ -940,22 +939,11 @@ impl BxDevicesC {
             let result = {
                 let devices::DeviceManager {
                     ref mut ide,
-                    ref mut pic,
+                    ref mut irq,
                     ..
                 } = *dm;
-                ide.bulk_read_data(port, io_len, buf, pic)
+                ide.bulk_read_data(port, io_len, buf, irq)
             };
-            {
-                let (fwds, count) = dm.pic.take_ioapic_forwards();
-                let devices::DeviceManager {
-                    ref mut pic,
-                    ref mut ioapic,
-                    ..
-                } = *dm;
-                for &(irq, level) in &fwds[..count] {
-                    ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
-                }
-            }
             if let Some(level) = Self::take_pic_level_after_dispatch(dm) {
                 self.pic_intr_level = Some(level);
             }
@@ -1191,11 +1179,11 @@ impl BxDevicesC {
         }
         let devices::DeviceManager {
             ref mut ide,
-            ref mut pic,
+            ref mut irq,
             ..
         } = *dm;
         let (harddrv, pci_ide, _scratch) = ide.split();
-        wiring::with_device_ctx(pic, pc_system, handles, current_ticks, |ctx| {
+        wiring::with_device_ctx(irq, pc_system, handles, current_ticks, |ctx| {
             harddrv.drain_seek_timers(ctx);
             pci_ide.drain_bmdma_timers(ctx);
         });
@@ -1218,11 +1206,11 @@ impl BxDevicesC {
         io_len: u8,
     ) -> u32 {
         match slot {
-            DevSlot::PIC => dm.pic.read(port, io_len),
+            DevSlot::PIC => dm.irq.pic_mut().read(port, io_len),
             DevSlot::DMA => dm.dma.read(port, io_len),
             DevSlot::IDE => {
-                let devices::DeviceManager { ide, pic, .. } = dm;
-                ide.read(port, io_len, pic)
+                let devices::DeviceManager { ide, irq, .. } = dm;
+                ide.read(port, io_len, irq)
             }
             DevSlot::PORT92 => dm.port92_read(port, io_len),
             DevSlot::PCI => dm.pci_read(port, io_len),
@@ -1251,11 +1239,11 @@ impl BxDevicesC {
         mem: &mut crate::memory::BxMemC,
     ) {
         match slot {
-            DevSlot::PIC => dm.pic.write(port, value, io_len),
+            DevSlot::PIC => dm.irq.pic_mut().write(port, value, io_len),
             DevSlot::DMA => dm.dma.write(port, value, io_len),
             DevSlot::IDE => {
-                let devices::DeviceManager { ide, pic, .. } = dm;
-                ide.write(port, value, io_len, pic)
+                let devices::DeviceManager { ide, irq, .. } = dm;
+                ide.write(port, value, io_len, irq)
             }
             DevSlot::PORT92 => dm.port92_write(port, value, io_len),
             DevSlot::PCI => dm.pci_write(port, value, io_len),
@@ -1607,32 +1595,39 @@ mod tests {
             // Writing through the slot the map would report must land in the
             // device, not merely be accepted. IOREGSEL is the cleanest witness:
             // an unconditional register that reads back what was written,
-            // needing no mode programming first.
-            const IOREGSEL: rusty_box_devices::api::WindowOffset = rusty_box_devices::api::WindowOffset(0);
-            let window = rusty_box_devices::api::WindowId::FIRST;
-            let bound = dm
-                .bind_mmio(DevSlot::IOAPIC)
-                .expect("the I/O APIC slot must map a device");
-            wiring::with_device_ctx(bound.pic, &mut pc_system, bound.handles, 0, |ctx| {
-                bound
-                    .device
-                    .mmio_write(window, IOREGSEL, 4, &0x12u32.to_ne_bytes(), ctx)
-            });
+            // needing no mode programming first. Driven through the bus entry
+            // points, so the routing under test is the one a guest store takes.
+            let mut io = boxed_devices();
+            let ioregsel = crate::memory::mmio_map::MmioHit {
+                token: DevSlot::IOAPIC.mmio_token(),
+                offset: 0,
+            };
+            assert!(io.mmio_write(
+                ioregsel,
+                4,
+                &0x12u32.to_ne_bytes(),
+                0,
+                &mut pc_system,
+                &mut dm
+            ));
 
             let mut readback = [0u8; 4];
-            let bound = dm.bind_mmio(DevSlot::IOAPIC).expect("still bound");
-            wiring::with_device_ctx(bound.pic, &mut pc_system, bound.handles, 0, |ctx| {
-                bound.device.mmio_read(window, IOREGSEL, 4, &mut readback, ctx)
-            });
+            assert!(io.mmio_read(ioregsel, 4, &mut readback, 0, &mut pc_system, &mut dm));
             assert_eq!(
                 u32::from_ne_bytes(readback),
                 0x12,
                 "the value must come back from the device that took it"
             );
 
-            // The other memory-mapped slots bind too, and a port-only one does not.
+            // The other memory-mapped slots bind too, and a port-only one does
+            // not. The I/O APIC is deliberately absent: it belongs to the
+            // interrupt fabric, which answers for its window itself.
             assert!(dm.bind_mmio(DevSlot::VGA).is_some());
             assert!(dm.bind_mmio(DevSlot::HPET).is_some());
+            assert!(
+                dm.bind_mmio(DevSlot::IOAPIC).is_none(),
+                "an interrupt controller is not a device on the bus it implements"
+            );
             assert!(
                 dm.bind_mmio(DevSlot::SERIAL).is_none(),
                 "a slot with no physical range must not bind a memory device"
@@ -1877,9 +1872,10 @@ mod tests {
             // A clear notification followed by a later assertion can coexist
             // before the raw I/O borrow is released. The transport must
             // publish the final physical pin, not replay those edges in order.
-            dm.pic.irq_cleared = true;
-            dm.pic.irq_pending = true;
-            dm.pic.master.int_pin = true;
+            let pic = dm.irq.pic_mut();
+            pic.irq_cleared = true;
+            pic.irq_pending = true;
+            pic.master.int_pin = true;
 
             io.register_io_read_handler(DevSlot::PIC, 0x20, "PIC", 0x1);
             let _ = io.inp(0x20, 1, 91, &mut pc_system, &mut dm);
@@ -1903,14 +1899,14 @@ mod tests {
             let irq_mask = dm.keyboard.timer_callback();
             assert_eq!(irq_mask & 0x01, 0x01);
             let delivered = u32::from(dm.keyboard.kbd_controller.kbd_output_buffer);
-            dm.pic.raise_irq(1);
-            assert_ne!(dm.pic.master.irq_in[1], 0);
+            dm.irq.raise(rusty_box_devices::api::IrqLine(1));
+            assert_ne!(dm.irq.pic().master.irq_in[1], 0);
 
             io.set_timer_ips(1_000_000);
             io.register_io_read_handler(DevSlot::KEYBOARD, keyboard::KBD_DATA_PORT, "Keyboard", 0x1);
             assert_eq!(io.inp(keyboard::KBD_DATA_PORT, 1, 77, &mut pc_system, &mut dm), delivered);
 
-            assert_eq!(dm.pic.master.irq_in[1], 0);
+            assert_eq!(dm.irq.pic().master.irq_in[1], 0);
             // The 8042 timer is continuous (Bochs keyboard.cc): keyboard port
             // I/O must not produce one-shot owner timer requests.
             assert_eq!(

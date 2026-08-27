@@ -117,13 +117,58 @@
 //! PCI-to-ISA bridge (Bochs `iodev/pci2isa.cc`), which stores `elcr1`/`elcr2`
 //! and forwards mode changes here via [`BxPicC::set_mode`].
 
+use crate::iodev::irq::IoApicEdge;
+
 /// PIC I/O port addresses
 pub const PIC_MASTER_CMD: u16 = 0x0020;
 pub const PIC_MASTER_DATA: u16 = 0x0021;
 pub const PIC_SLAVE_CMD: u16 = 0x00A0;
 pub const PIC_SLAVE_DATA: u16 = 0x00A1;
 
+/// How many unforwarded edges a pre-fabric snapshot could carry.
+///
+/// The 8259 no longer queues anything — [`IrqFabric`](crate::iodev::irq::IrqFabric)
+/// forwards inside the raising call — but the v3 section still carries the
+/// queue's length, so the bound the writer honoured is still the bound the
+/// reader must enforce.
 const PIC_IOAPIC_FORWARD_CAPACITY: usize = 256;
+
+/// One I/O APIC pin edge the 8259 recorded but had not yet forwarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IoApicPinEdge {
+    pub pin: u8,
+    pub level: bool,
+}
+
+/// Edges a snapshot written before the interrupt fabric left undelivered.
+///
+/// Such a snapshot could be taken between an 8259 edge and the scheduler
+/// boundary that forwarded it, so the I/O APIC state it carries predates those
+/// edges. Nothing produces this any more, and it is empty for every snapshot
+/// this build writes — but an older image still has to land correctly, so the
+/// PIC section reports what it read and the machine drives the pins once the
+/// I/O APIC section has restored too.
+#[derive(Debug, Clone, Copy)]
+pub struct DeferredIoApicEdges {
+    edges: [IoApicPinEdge; PIC_IOAPIC_FORWARD_CAPACITY],
+    len: usize,
+}
+
+impl Default for DeferredIoApicEdges {
+    fn default() -> Self {
+        Self {
+            edges: [IoApicPinEdge::default(); PIC_IOAPIC_FORWARD_CAPACITY],
+            len: 0,
+        }
+    }
+}
+
+impl DeferredIoApicEdges {
+    #[inline]
+    pub fn as_slice(&self) -> &[IoApicPinEdge] {
+        &self.edges[..self.len]
+    }
+}
 
 /// Action returned by `Pic8259State::service()`.
 ///
@@ -345,11 +390,6 @@ pub struct BxPicC {
     /// Flag: set when PIC wants to clear the pending interrupt signal.
     /// The emulator reads and clears this, removing BX_EVENT_PENDING_INTR from the CPU.
     pub(crate) irq_cleared: bool,
-    /// IOAPIC forwarding queue: (irq, level) pairs from raise_irq/lower_irq,
-    /// drained at the central scheduler boundary.
-    pub(crate) ioapic_forwards: [(u8, bool); PIC_IOAPIC_FORWARD_CAPACITY],
-    /// Number of pending IOAPIC forwarding entries.
-    pub(crate) num_ioapic_forwards: usize,
 }
 
 impl Default for BxPicC {
@@ -380,8 +420,6 @@ impl BxPicC {
             slave,
             irq_pending: false,
             irq_cleared: false,
-            ioapic_forwards: [(0, false); PIC_IOAPIC_FORWARD_CAPACITY],
-            num_ioapic_forwards: 0,
         }
     }
 
@@ -401,25 +439,6 @@ impl BxPicC {
     #[inline]
     fn clear_intr(&mut self) {
         self.irq_cleared = true;
-    }
-
-    /// Enqueue an IOAPIC forward.
-    #[inline]
-    fn enqueue_ioapic_forward(&mut self, irq: u8, level: bool) {
-        if self.num_ioapic_forwards < self.ioapic_forwards.len() {
-            self.ioapic_forwards[self.num_ioapic_forwards] = (irq, level);
-            self.num_ioapic_forwards += 1;
-        }
-    }
-
-    /// Drain all pending IOAPIC forwards, returning a copy of the queue.
-    /// Resets the internal queue to empty.
-    pub(crate) fn take_ioapic_forwards(
-        &mut self,
-    ) -> ([(u8, bool); PIC_IOAPIC_FORWARD_CAPACITY], usize) {
-        let result = (self.ioapic_forwards, self.num_ioapic_forwards);
-        self.num_ioapic_forwards = 0;
-        result
     }
 
     /// Initialize the PIC (called during device init)
@@ -495,9 +514,23 @@ impl BxPicC {
         } else {
             let action = self.slave.service();
             match action {
-                PicServiceAction::RaiseCascade => self.raise_irq(2),
-                PicServiceAction::LowerCascade => self.lower_irq(2),
+                PicServiceAction::RaiseCascade => self.set_cascade_line(true),
+                PicServiceAction::LowerCascade => self.set_cascade_line(false),
                 _ => {}
+            }
+        }
+    }
+
+    /// Drive the master's IRQ2 from the slave's INT pin — Bochs pic.cc
+    /// `service_pic` cascade path.
+    ///
+    /// The one line change that never leaves the 8259 pair: IRQ2 is the
+    /// cascade, so it has no I/O APIC pin and pic.cc skips it when forwarding.
+    fn set_cascade_line(&mut self, level: bool) {
+        match self.set_irq_level(2, level) {
+            IoApicEdge::NotCrossed => {}
+            IoApicEdge::Crossed => {
+                tracing::error!("8259 cascade reported an I/O APIC edge on IRQ2")
             }
         }
     }
@@ -830,11 +863,12 @@ impl BxPicC {
     /// was not already asserted. For edge-triggered IRQs, the device must
     /// call `lower_irq` first to create a new edge.
     ///
-    /// An edge that the IOAPIC must also see is queued on the way out (Bochs
-    /// pic.cc forwards synchronously); the machine drains it with
-    /// [`Self::take_ioapic_forwards`] once the PIC borrow ends.
+    /// The 8259 cannot reach the I/O APIC from here — it is a sibling of this
+    /// controller, not a part of it — so the edge Bochs forwards inline is
+    /// returned instead, and [`IrqFabric`](crate::iodev::irq::IrqFabric)
+    /// delivers it in the same call.
     #[inline]
-    pub fn raise_irq(&mut self, irq_no: u8) {
+    pub(crate) fn raise_irq(&mut self, irq_no: u8) -> IoApicEdge {
         if irq_no < 8 {
             // Master PIC — Bochs pic.cc
             self.master.irq_in[irq_no as usize] = 1;
@@ -843,7 +877,7 @@ impl BxPicC {
                 self.service_pic_dispatch(true);
                 // Bochs pic.cc: forward to IOAPIC on LOW→HIGH edge
                 if irq_no != 2 {
-                    self.enqueue_ioapic_forward(irq_no, true);
+                    return IoApicEdge::Crossed;
                 }
             }
         } else if irq_no < 16 {
@@ -854,11 +888,12 @@ impl BxPicC {
                 self.slave.irr |= 1 << slave_irq;
                 self.service_pic_dispatch(false);
                 // Bochs pic.cc: forward to IOAPIC
-                self.enqueue_ioapic_forward(irq_no, true);
+                return IoApicEdge::Crossed;
             } else if irq_no == 15 {
                 // IRQ 15 raise while slave IRR bit 7 already set — IOAPIC skipped!
             }
         }
+        IoApicEdge::NotCrossed
     }
 
     /// Read the restored input line level of one IRQ (Bochs pic.h `IRQ_in`).
@@ -879,17 +914,17 @@ impl BxPicC {
 
     /// Lower an IRQ line (Bochs `bx_pic_c::lower_irq`)
     ///
-    /// Clears the IRQ assertion flag and the IRR bit. The IOAPIC edge is
-    /// queued, exactly as in [`Self::raise_irq`].
+    /// Clears the IRQ assertion flag and the IRR bit. The I/O APIC edge is
+    /// reported, exactly as in [`Self::raise_irq`].
     #[inline]
-    pub fn lower_irq(&mut self, irq_no: u8) {
+    pub(crate) fn lower_irq(&mut self, irq_no: u8) -> IoApicEdge {
         if irq_no < 8 {
             if self.master.irq_in[irq_no as usize] != 0 {
                 self.master.irq_in[irq_no as usize] = 0;
                 self.master.irr &= !(1 << irq_no);
                 // Bochs pic.cc: forward to IOAPIC
                 if irq_no != 2 {
-                    self.enqueue_ioapic_forward(irq_no, false);
+                    return IoApicEdge::Crossed;
                 }
             }
         } else if irq_no < 16 {
@@ -898,15 +933,16 @@ impl BxPicC {
                 self.slave.irq_in[slave_irq as usize] = 0;
                 self.slave.irr &= !(1 << slave_irq);
                 // Bochs pic.cc: forward to IOAPIC
-                self.enqueue_ioapic_forward(irq_no, false);
+                return IoApicEdge::Crossed;
             }
         }
+        IoApicEdge::NotCrossed
     }
 
     /// Set IRQ level — raise or lower based on level (Bochs `bx_pic_c::set_irq_level`)
     ///
     /// Convenience wrapper used by devices that track IRQ state as a bool.
-    pub fn set_irq_level(&mut self, irq_no: u8, level: bool) {
+    pub(crate) fn set_irq_level(&mut self, irq_no: u8, level: bool) -> IoApicEdge {
         if level {
             self.raise_irq(irq_no)
         } else {
@@ -1025,25 +1061,13 @@ impl BxPicC {
 #[cfg(feature = "std")]
 impl crate::snapshot::SnapshotSection for BxPicC {
     const TAG: u32 = crate::snapshot::SEC_PIC;
-    type Restored = ();
+    type Restored = DeferredIoApicEdges;
 
     fn snapshot_len(&self) -> crate::snapshot::SnapResult<u64> {
-        if self.num_ioapic_forwards > PIC_IOAPIC_FORWARD_CAPACITY {
-            return Err(crate::snapshot::SnapError::Invalid(
-                "PIC forwarding queue exceeds capacity",
-            ));
-        }
-        let fixed = crate::snapshot::checked_snapshot_len_add(
-            4 + 2 * 28 + 2,
-            4,
-        )?;
-        let queue = crate::snapshot::checked_snapshot_len_mul(
-            u64::try_from(self.num_ioapic_forwards).map_err(|_| {
-                crate::snapshot::SnapError::Invalid("PIC forwarding count does not fit")
-            })?,
-            2,
-        )?;
-        crate::snapshot::checked_snapshot_len_add(fixed, queue)
+        // Fixed body, then the v3 forwarding-queue length — always zero now
+        // that the fabric forwards inside the raising call, and kept only so
+        // the section layout does not move under existing images.
+        crate::snapshot::checked_snapshot_len_add(4 + 2 * 28 + 2, 4)
     }
 
     fn save<W: crate::snapshot::SnapWrite>(
@@ -1077,18 +1101,16 @@ impl crate::snapshot::SnapshotSection for BxPicC {
         }
         writer.write_bool(self.irq_pending)?;
         writer.write_bool(self.irq_cleared)?;
-        writer.write_u32(u32::try_from(self.num_ioapic_forwards).map_err(|_| crate::snapshot::SnapError::Invalid("PIC forwarding count does not fit"))?)?;
-        for &(irq, level) in self.ioapic_forwards.iter().take(self.num_ioapic_forwards) {
-            writer.write_u8(irq)?;
-            writer.write_bool(level)?;
-        }
-        Ok(())
+        // The v3 forwarding-queue length. It is zero by construction: an edge
+        // reaches the I/O APIC before the call that produced it returns, so
+        // there is never a moment at which one is outstanding.
+        writer.write_u32(0)
     }
 
     fn restore<R: crate::snapshot::SnapRead>(
         &mut self,
         reader: &mut R,
-    ) -> crate::snapshot::SnapResult {
+    ) -> crate::snapshot::SnapResult<DeferredIoApicEdges> {
         if reader.read_u32()? != crate::snapshot::SNAPSHOT_SECTION_VERSION {
             return Err(crate::snapshot::SnapError::Invalid("unsupported PIC snapshot section version"));
         }
@@ -1131,20 +1153,27 @@ impl crate::snapshot::SnapshotSection for BxPicC {
         }
         let irq_pending = reader.read_bool()?;
         let irq_cleared = reader.read_bool()?;
-        let count = reader.read_count(PIC_IOAPIC_FORWARD_CAPACITY)?;
-        let mut forwards = [(0, false); PIC_IOAPIC_FORWARD_CAPACITY];
-        for entry in forwards.iter_mut().take(count) {
-            let irq = reader.read_u8()?;
-            if irq >= 16 { return Err(crate::snapshot::SnapError::Invalid("PIC forwarding IRQ is invalid")); }
-            *entry = (irq, reader.read_bool()?);
+        let mut deferred = DeferredIoApicEdges {
+            len: reader.read_count(PIC_IOAPIC_FORWARD_CAPACITY)?,
+            ..DeferredIoApicEdges::default()
+        };
+        for entry in deferred.edges.iter_mut().take(deferred.len) {
+            let pin = reader.read_u8()?;
+            if pin >= 16 {
+                return Err(crate::snapshot::SnapError::Invalid(
+                    "PIC forwarding IRQ is invalid",
+                ));
+            }
+            *entry = IoApicPinEdge {
+                pin,
+                level: reader.read_bool()?,
+            };
         }
         self.master = chips[0].clone();
         self.slave = chips[1].clone();
         self.irq_pending = irq_pending;
         self.irq_cleared = irq_cleared;
-        self.ioapic_forwards = forwards;
-        self.num_ioapic_forwards = count;
-        Ok(())
+        Ok(deferred)
     }
 }
 

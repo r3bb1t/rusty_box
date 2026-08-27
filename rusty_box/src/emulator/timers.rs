@@ -2,9 +2,7 @@ use crate::{
     cpu::{
         instrumentation::Instrumentation,
     },
-    iodev::{
-        devices::DeviceManager, DeviceTimerOwner, TimerRequest,
-    },
+    iodev::{DeviceTimerOwner, TimerRequest},
     pc_system::TimerOwner, Result,
 };
 
@@ -290,9 +288,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
                     // Bochs harddrv.cc seek_timer — one-shot; the seek deadline
                     // completes the read command (DRQ/IRQ or BM-DMA start).
                     for _ in 0..counts[entry] {
-                        let crate::iodev::devices::DeviceManager { ide, pic, .. } =
+                        let crate::iodev::devices::DeviceManager { ide, irq, .. } =
                             &mut self.device_manager;
-                        ide.seek_timer(param as u8, pic);
+                        ide.seek_timer(param as u8, irq);
                     }
                 }
                 // The PIT replays its own OUT transitions onto IRQ0 and re-arms
@@ -345,26 +343,22 @@ impl<'a, T: Instrumentation> Emulator<T> {
                     );
                     let crate::iodev::devices::DeviceManager {
                         ref mut acpi,
-                        ref mut pic,
+                        ref mut irq,
                         ..
                     } = self.device_manager;
-                    let mut irq = crate::iodev::wiring::PicIrqSink { pic };
-                    let clock = self.pc_system.clock_at(current_ticks);
-                    let mut timers = crate::iodev::wiring::WheelTimerService {
-                        pc_system: &mut self.pc_system,
+                    crate::iodev::wiring::with_device_ctx(
+                        irq,
+                        &mut self.pc_system,
                         handles,
-                        now_ticks: current_ticks,
-                    };
-                    let mut ctx = rusty_box_devices::api::DeviceCtx {
-                        clock,
-                        irq: &mut irq,
-                        timers: &mut timers,
-                    };
-                    rusty_box_devices::api::TimedDevice::timer_fired(
-                        acpi,
-                        crate::iodev::acpi::BxAcpiCtrl::OVERFLOW_TIMER_LOCAL,
-                        counts[entry],
-                        &mut ctx,
+                        current_ticks,
+                        |ctx| {
+                            rusty_box_devices::api::TimedDevice::timer_fired(
+                                acpi,
+                                crate::iodev::acpi::BxAcpiCtrl::OVERFLOW_TIMER_LOCAL,
+                                counts[entry],
+                                ctx,
+                            )
+                        },
                     );
                 }
                 // Both UART timers run through the device API: the device
@@ -420,15 +414,6 @@ impl<'a, T: Instrumentation> Emulator<T> {
             }
         }
 
-        let (fwds, forward_count) = self.device_manager.pic.take_ioapic_forwards();
-        let DeviceManager {
-            ref mut pic,
-            ref mut ioapic,
-            ..
-        } = self.device_manager;
-        for &(irq, level) in &fwds[..forward_count] {
-            ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
-        }
     }
 
     /// Keep the VGA vertical-retrace timer armed at the current display period.
@@ -481,44 +466,32 @@ impl<'a, T: Instrumentation> Emulator<T> {
 
         let crate::iodev::devices::DeviceManager {
             ref mut serial,
-            ref mut pic,
+            ref mut irq,
             ..
         } = self.device_manager;
-        let mut irq = crate::iodev::wiring::PicIrqSink { pic };
-        let clock = self.pc_system.clock_at(current_ticks);
-        let mut timers = crate::iodev::wiring::WheelTimerService {
-            pc_system: &mut self.pc_system,
+        crate::iodev::wiring::with_device_ctx(
+            irq,
+            &mut self.pc_system,
             handles,
-            now_ticks: current_ticks,
-        };
-        let mut ctx = rusty_box_devices::api::DeviceCtx {
-            clock,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        action(serial, &mut ctx)
+            current_ticks,
+            |ctx| action(serial, ctx),
+        )
     }
 
     /// Service the 8042's continuous serial-delay timer through the device API.
     fn fire_keyboard_timer(&mut self, fires: u32, current_ticks: u64) {
-        let clock = self.pc_system.clock_at(current_ticks);
         let crate::iodev::devices::DeviceManager {
             ref mut keyboard,
-            ref mut pic,
+            ref mut irq,
             ..
         } = self.device_manager;
-        let mut irq = crate::iodev::wiring::PicIrqSink { pic };
-        let mut timers = crate::iodev::wiring::WheelTimerService {
-            pc_system: &mut self.pc_system,
-            handles: crate::iodev::wiring::TimerHandles::default(),
-            now_ticks: current_ticks,
-        };
-        let mut ctx = rusty_box_devices::api::DeviceCtx {
-            clock,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        rusty_box_devices::api::TimedDevice::timer_fired(keyboard, 0, fires, &mut ctx);
+        crate::iodev::wiring::with_device_ctx(
+            irq,
+            &mut self.pc_system,
+            crate::iodev::wiring::TimerHandles::default(),
+            current_ticks,
+            |ctx| rusty_box_devices::api::TimedDevice::timer_fired(keyboard, 0, fires, ctx),
+        );
     }
 
     /// Service one expiry of the PIT's event timer through the device API.
@@ -528,28 +501,24 @@ impl<'a, T: Instrumentation> Emulator<T> {
             crate::iodev::pit::BxPitC::EVENT_TIMER_LOCAL,
             self.device_manager.pit.timer_handle,
         );
-        let clock = self.pc_system.clock_at(current_ticks);
         let crate::iodev::devices::DeviceManager {
             ref mut pit,
-            ref mut pic,
+            ref mut irq,
             ..
         } = self.device_manager;
-        let mut irq = crate::iodev::wiring::PicIrqSink { pic };
-        let mut timers = crate::iodev::wiring::WheelTimerService {
-            pc_system: &mut self.pc_system,
+        crate::iodev::wiring::with_device_ctx(
+            irq,
+            &mut self.pc_system,
             handles,
-            now_ticks: current_ticks,
-        };
-        let mut ctx = rusty_box_devices::api::DeviceCtx {
-            clock,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        rusty_box_devices::api::TimedDevice::timer_fired(
-            pit,
-            crate::iodev::pit::BxPitC::EVENT_TIMER_LOCAL,
-            1,
-            &mut ctx,
+            current_ticks,
+            |ctx| {
+                rusty_box_devices::api::TimedDevice::timer_fired(
+                    pit,
+                    crate::iodev::pit::BxPitC::EVENT_TIMER_LOCAL,
+                    1,
+                    ctx,
+                )
+            },
         );
     }
 
@@ -570,22 +539,16 @@ impl<'a, T: Instrumentation> Emulator<T> {
         );
         let crate::iodev::devices::DeviceManager {
             ref mut cmos,
-            ref mut pic,
+            ref mut irq,
             ..
         } = self.device_manager;
-        let mut irq = crate::iodev::wiring::PicIrqSink { pic };
-        let clock = self.pc_system.clock_at(current_ticks);
-        let mut timers = crate::iodev::wiring::WheelTimerService {
-            pc_system: &mut self.pc_system,
+        crate::iodev::wiring::with_device_ctx(
+            irq,
+            &mut self.pc_system,
             handles,
-            now_ticks: current_ticks,
-        };
-        let mut ctx = rusty_box_devices::api::DeviceCtx {
-            clock,
-            irq: &mut irq,
-            timers: &mut timers,
-        };
-        rusty_box_devices::api::TimedDevice::timer_fired(cmos, local, fires, &mut ctx);
+            current_ticks,
+            |ctx| rusty_box_devices::api::TimedDevice::timer_fired(cmos, local, fires, ctx),
+        );
     }
 
     /// Service one expiry of a UART timer.
@@ -623,11 +586,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
             if route < 16 {
                 // Bochs DEV_pic_raise_irq/DEV_pic_lower_irq: the legacy PIC
                 // call also forwards the edge to the IOAPIC pin.
-                if level {
-                    self.device_manager.pic.raise_irq(route);
-                } else {
-                    self.device_manager.pic.lower_irq(route);
-                }
+                self.device_manager
+                    .irq
+                    .set_isa_level(rusty_box_devices::api::IrqLine(route), level);
             } else if route < 24 {
                 // GSI 16..23 exist only as IOAPIC pins here. PERMANENTLY
                 // RATIFIED Bochs deviation (user decision 2026-07-25) — this
@@ -642,12 +603,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 // host crash) and delivers only the architecturally correct
                 // IOAPIC pin. Per CLAUDE.md, correctness trumps Bochs
                 // literalness for a buggy/non-safe construct.
-                let DeviceManager {
-                    ref mut pic,
-                    ref mut ioapic,
-                    ..
-                } = self.device_manager;
-                ioapic.set_irq_level(route, level, Some(&mut *pic), None);
+                self.device_manager.irq.set_ioapic_pin(route, level);
             } else {
                 tracing::error!("HPET: interrupt route {route} beyond IOAPIC pins");
             }

@@ -33,13 +33,13 @@ use super::acpi::BxAcpiCtrl;
 use super::cmos::{BxCmosC, CMOS_ADDR, CMOS_DATA};
 use super::dma::BxDmaC;
 use super::fw_cfg::BxFwCfg;
-use super::ioapic::BxIoApic;
+use super::irq::IrqFabric;
 use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT};
 use super::pci::BxPciBridge;
 use rusty_box_devices::pci::PciDevice;
 use super::pci2isa::BxPiix3;
 use super::pci_ide::BxPciIde;
-use super::pic::{BxPicC, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA};
+use super::pic::{PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA};
 use super::pit::{
     BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_SYSTEM_CONTROL_B,
 };
@@ -58,7 +58,7 @@ use super::DevSlot;
 /// itself.
 pub(crate) struct PioBinding<'a> {
     pub(crate) device: &'a mut dyn PioDevice,
-    pub(crate) pic: &'a mut BxPicC,
+    pub(crate) irq: &'a mut IrqFabric,
     pub(crate) handles: wiring::TimerHandles,
 }
 
@@ -66,7 +66,7 @@ pub(crate) struct PioBinding<'a> {
 /// from — the memory-side twin of [`PioBinding`], split for the same reason.
 pub(crate) struct MmioBinding<'a> {
     pub(crate) device: &'a mut dyn MmioDevice,
-    pub(crate) pic: &'a mut BxPicC,
+    pub(crate) irq: &'a mut IrqFabric,
     pub(crate) handles: wiring::TimerHandles,
 }
 
@@ -250,8 +250,10 @@ pub(crate) struct PlatformSnapshotRestore {
 /// reset, and I/O port registration. This mirrors Bochs' `bx_devices_c`.
 #[derive(Debug)]
 pub struct DeviceManager {
-    /// 8259 PIC (Programmable Interrupt Controller)
-    pub(crate) pic: BxPicC,
+    /// The 8259 pair and the I/O APIC, as one part — Bochs pic.cc forwards
+    /// between them inside every line change, which is only expressible if one
+    /// owner holds both.
+    pub(crate) irq: IrqFabric,
     /// 8254 PIT (Programmable Interval Timer)
     pub(crate) pit: BxPitC,
     /// CMOS/RTC
@@ -266,9 +268,6 @@ pub struct DeviceManager {
     pub(crate) ide: super::ide::IdeSubsystem,
     /// VGA Display Controller
     pub(crate) vga: VgaCard<StdVga>,
-    /// I/O APIC (82093AA) — interrupt routing for APIC-based systems
-    /// Bochs: `bx_ioapic_c *pluginIOAPIC` (iodev/iodev.h)
-    pub(crate) ioapic: BxIoApic,
     /// PIIX4 ACPI Power Management controller
     /// Bochs: `bx_acpi_ctrl_c *pluginACPIController` (iodev/iodev.h)
     pub(crate) acpi: BxAcpiCtrl,
@@ -302,10 +301,6 @@ pub struct DeviceManager {
     /// emulator drains this in `rearm_device_timers_after_hardware_reset`
     /// (transient — set and consumed within a single reset, never snapshotted).
     pub(crate) cmos_reset_timer_sync: Option<super::cmos::CmosTimerSync>,
-    /// Diagnostic: iac() calls
-    pub diag_iac_count: u64,
-    /// Diagnostic: iac vector histogram [0..256]
-    pub diag_vector_hist: [u32; 256],
     /// I/O base the BM-DMA ports are currently registered at (0 = none).
     /// Lets a BAR4 move unregister the old range first, matching Bochs
     /// devices.cc pci_write_handler_common BAR remapping.
@@ -381,7 +376,7 @@ impl DeviceManager {
     /// Create a new device manager with all devices.
     pub fn new() -> Self {
         Self {
-            pic: BxPicC::new(),
+            irq: IrqFabric::new(),
             pit: BxPitC::new(),
             cmos: BxCmosC::new(),
             dma: BxDmaC::new(),
@@ -389,7 +384,6 @@ impl DeviceManager {
             hpet: super::hpet::BxHpetC::new(),
             ide: super::ide::IdeSubsystem::new(),
             vga: VgaCard::with_extension(StdVga::new()),
-            ioapic: BxIoApic::new(),
             acpi: BxAcpiCtrl::new(),
             pci_bridge: BxPciBridge::new(),
             pci2isa: BxPiix3::new(),
@@ -399,8 +393,6 @@ impl DeviceManager {
             pending: PendingPlatformWork::empty(),
             bios_1meg_access_pending: None,
             cmos_reset_timer_sync: None,
-            diag_iac_count: 0,
-            diag_vector_hist: [0; 256],
             bmdma_ports_base: 0,
             pm_ports_base: 0,
             sm_ports_base: 0,
@@ -453,7 +445,7 @@ impl DeviceManager {
         // 2. DMA
         self.dma.init();
         // 3. PIC
-        self.pic.init();
+        self.irq.pic_mut().init();
         // 4. PIT
         self.pit.init();
         // 5. VGA — the display states what it answers on and the set does the
@@ -464,7 +456,7 @@ impl DeviceManager {
         // 7. Hard drive
         self.ide.drives.init();
         // 8. I/O APIC (Bochs: pluginIOAPIC->init() in devices.cc)
-        self.ioapic.init(mem)?;
+        self.irq.ioapic_mut().init(mem)?;
         // 8b. HPET (Bochs: PLUGTYPE_STANDARD hpet plugin — hpet.cc init()
         // registers the fixed MMIO window; the rombios32 ACPI builder then
         // probes 0xFED00000 for the 0x8086 vendor id).
@@ -506,7 +498,7 @@ impl DeviceManager {
     pub fn reset(&mut self, reset_type: ResetReason) -> Result<()> {
         tracing::debug!("Device manager reset: {:?}", reset_type);
 
-        self.pic.reset();
+        self.irq.pic_mut().reset();
         // Deliberate no-op: Bochs pit82c54.cc reset(type) is empty — the
         // PIT counters keep their programming across a guest reset.
         self.pit.reset();
@@ -519,7 +511,7 @@ impl DeviceManager {
         self.ide.drives.reset();
         self.vga.reset();
         self.serial.reset();
-        self.ioapic.reset();
+        self.irq.ioapic_mut().reset();
         // Bochs hpet.cc reset(): comparators stop, state clears, and the
         // PIT/RTC pins re-enable (queued; the emulator drains after reset).
         self.hpet.reset();
@@ -1036,7 +1028,10 @@ impl DeviceManager {
             ChipsetEffect::IoApicEnable {
                 enabled,
                 base_offset,
-            } => self.ioapic.set_enabled_with_mem(enabled, base_offset, mem),
+            } => self
+                .irq
+                .ioapic_mut()
+                .set_enabled_with_mem(enabled, base_offset, mem),
             // Bochs DEV_cmos_set_reg — one device storing into another.
             ChipsetEffect::CmosByte { index, value } => {
                 match self.cmos.ram.get_mut(usize::from(index)) {
@@ -1103,7 +1098,7 @@ impl DeviceManager {
         }
         let DeviceManager {
             ref mut ide,
-            ref mut pic,
+            ref mut irq,
             ..
         } = *self;
         let (harddrv, pci_ide, ide_scratch) = ide.split();
@@ -1148,7 +1143,7 @@ impl DeviceManager {
                     channel as u8,
                     ide_scratch,
                     &mut sector_size,
-                    pic,
+                    irq,
                     pci_ide,
                 ) {
                     let top = pci_ide.bmdma[channel].buffer_top;
@@ -1164,7 +1159,7 @@ impl DeviceManager {
             }
             if count > 0 {
                 // Drive ran dry mid-PRD: abort (pci_ide.cc timer).
-                harddrv.bmdma_complete(channel as u8, pic, pci_ide);
+                harddrv.bmdma_complete(channel as u8, irq, pci_ide);
                 return;
             }
             let idx = pci_ide.bmdma[channel].buffer_idx;
@@ -1179,12 +1174,12 @@ impl DeviceManager {
                         "BM-DMA read ch={channel}: guest write accepted {copied}/{} bytes",
                         payload.len()
                     );
-                    harddrv.bmdma_abort(channel as u8, pic, pci_ide);
+                    harddrv.bmdma_abort(channel as u8, irq, pci_ide);
                     return;
                 }
                 Err(error) => {
                     tracing::error!("BM-DMA read ch={channel}: guest write failed: {error:?}");
-                    harddrv.bmdma_abort(channel as u8, pic, pci_ide);
+                    harddrv.bmdma_abort(channel as u8, irq, pci_ide);
                     return;
                 }
             }
@@ -1212,7 +1207,7 @@ impl DeviceManager {
                 let idx = pci_ide.bmdma[channel].buffer_idx;
                 ide_scratch[..512]
                     .copy_from_slice(&pci_ide.bmdma[channel].buffer[idx..idx + 512]);
-                if harddrv.bmdma_write_sector(channel as u8, &ide_scratch[..512], pic, pci_ide) {
+                if harddrv.bmdma_write_sector(channel as u8, &ide_scratch[..512], irq, pci_ide) {
                     pci_ide.bmdma[channel].buffer_idx += 512;
                     count -= 512;
                 } else {
@@ -1221,7 +1216,7 @@ impl DeviceManager {
             }
             if count >= 512 {
                 // Drive refused a sector mid-PRD: abort (pci_ide.cc timer).
-                harddrv.bmdma_complete(channel as u8, pic, pci_ide);
+                harddrv.bmdma_complete(channel as u8, irq, pci_ide);
                 return;
             }
         }
@@ -1231,7 +1226,7 @@ impl DeviceManager {
             pci_ide.bmdma[channel].status &= !0x01;
             pci_ide.bmdma[channel].status |= 0x04;
             pci_ide.bmdma[channel].prd_current = 0;
-            harddrv.bmdma_complete(channel as u8, pic, pci_ide);
+            harddrv.bmdma_complete(channel as u8, irq, pci_ide);
         } else {
             // Compact residue to the buffer start and move to the next PRD
             // (pci_ide.cc timer: memmove + prd_current += 8 + re-arm).
@@ -1257,65 +1252,14 @@ impl DeviceManager {
         }
     }
 
-    /// Replay pending PIT counter-0 OUT transitions into the PIC as IRQ0
-    /// raise/lower calls — Bochs pit.cc bx_pit_c::irq_handler (raise_irq(0)
-    /// on OUT 0→1, lower_irq(0) on 1→0), which Bochs invokes synchronously
-    /// from pit82c54.cc set_OUT on every transition (clocking, count
-    /// writes, control-word writes, GATE changes alike).
-    ///
-    /// rusty_box records the transitions on the counter and replays them
-    /// here, at the same points Bochs runs periodic()/timer.write(): after
-    /// every PIT port access and every device tick. The CPU never executes
-    /// between the recorded transitions, so replaying them back-to-back is
-    /// observably identical to Bochs's immediate callbacks.
-    ///
-    /// Transitions strictly alternate (set_OUT fires only on an actual
-    /// change), so the sequence is fully determined by (count, final
-    /// level). Replay is capped at the last three transitions: with no CPU
-    /// execution in between, each additional leading lower/raise pair is
-    /// idempotent for the PIC IRR/irq_in state and for the IOAPIC forward
-    /// consumers (repeated edge deliveries re-set the same LAPIC IRR bit).
-    ///
-    /// Returns the number of IRQ0 rising edges in the full (uncapped)
-    /// sequence, for diagnostics.
-    pub(crate) fn replay_pit_irq0_events(
-        transitions: u32,
-        level: bool,
-        pic: &mut BxPicC,
-    ) -> u32 {
-        if transitions == 0 {
-            return 0;
-        }
-        let replay = transitions.min(3);
-        // The k-th replayed level, ending at `level`, alternating backwards.
-        let mut lvl = if replay % 2 == 1 { level } else { !level };
-        for _ in 0..replay {
-            if lvl {
-                pic.raise_irq(0);
-            } else {
-                pic.lower_irq(0);
-            }
-            lvl = !lvl;
-        }
-        if level {
-            transitions.div_ceil(2)
-        } else {
-            transitions / 2
-        }
-    }
-
-
     /// Check if an interrupt is pending
     pub fn has_interrupt(&self) -> bool {
-        self.pic.has_interrupt()
+        self.irq.int_pin_asserted()
     }
 
     /// Acknowledge interrupt and get vector
     pub fn iac(&mut self) -> u8 {
-        self.diag_iac_count += 1;
-        let vector = self.pic.iac();
-        self.diag_vector_hist[vector as usize] += 1;
-        vector
+        self.irq.acknowledge()
     }
 
     /// Get A20 state from keyboard controller
@@ -1326,19 +1270,20 @@ impl DeviceManager {
     #[cfg(feature = "alloc")]
     /// Get PIC diagnostic string
     pub fn pic_diag(&self) -> String {
+        let pic = self.irq.pic();
         format!(
             "ISR={:#04x} IRR={:#04x} IMR={:#04x} int_pin={} irq_in[0]={} master_offset={:#04x} slave_offset={:#04x} master_auto_eoi={} slave_auto_eoi={} master_edge_level={:#04x} slave_edge_level={:#04x}",
-            self.pic.master.isr,
-            self.pic.master.irr,
-            self.pic.master.imr,
-            self.pic.master.int_pin,
-            self.pic.master.irq_in[0],
-            self.pic.master.interrupt_offset,
-            self.pic.slave.interrupt_offset,
-            self.pic.master.auto_eoi,
-            self.pic.slave.auto_eoi,
-            self.pic.master.edge_level,
-            self.pic.slave.edge_level,
+            pic.master.isr,
+            pic.master.irr,
+            pic.master.imr,
+            pic.master.int_pin,
+            pic.master.irq_in[0],
+            pic.master.interrupt_offset,
+            pic.slave.interrupt_offset,
+            pic.master.auto_eoi,
+            pic.slave.auto_eoi,
+            pic.master.edge_level,
+            pic.slave.edge_level,
         )
     }
 
@@ -1369,6 +1314,7 @@ impl DeviceManager {
     /// Get full interrupt chain diagnostic summary (for end-of-run reporting)
     pub fn interrupt_chain_diag(&self) -> String {
         let c0 = &self.pit.counters[0];
+        let pic = self.irq.pic();
         format!(
             "PIT: pit_fires={} irq0_latched={} irq0_already_high={}\n\
              PIT counter0: mode={:?} inlatch={} count={} count_written={} gate={} output={} first_pass={}\n\
@@ -1379,22 +1325,22 @@ impl DeviceManager {
             self.pit.diag_fires,
             self.pit.diag_irq0_latched, self.pit.diag_irq0_already_high,
             c0.mode, c0.inlatch, c0.count, c0.count_written, c0.gate, c0.output, c0.first_pass,
-            self.pic.master.isr, self.pic.master.irr, self.pic.master.imr,
-            self.pic.master.int_pin,
-            self.pic.master.irq_in[0], self.pic.master.irq_in[1],
-            self.pic.master.irq_in[2], self.pic.master.irq_in[3],
-            self.pic.master.irq_in[4], self.pic.master.irq_in[5],
-            self.pic.master.irq_in[6], self.pic.master.irq_in[7],
-            self.pic.slave.isr, self.pic.slave.irr, self.pic.slave.imr,
-            self.pic.slave.int_pin,
-            self.pic.slave.irq_in[0], self.pic.slave.irq_in[1],
-            self.pic.slave.irq_in[2], self.pic.slave.irq_in[3],
-            self.pic.slave.irq_in[4], self.pic.slave.irq_in[5],
-            self.pic.slave.irq_in[6], self.pic.slave.irq_in[7],
-            self.pic.master.interrupt_offset, self.pic.slave.interrupt_offset,
-            self.diag_iac_count,
-            self.diag_vector_hist[0x20], self.diag_vector_hist[0x21],
-            self.diag_vector_hist[0x08], self.diag_vector_hist[0x2E],
+            pic.master.isr, pic.master.irr, pic.master.imr,
+            pic.master.int_pin,
+            pic.master.irq_in[0], pic.master.irq_in[1],
+            pic.master.irq_in[2], pic.master.irq_in[3],
+            pic.master.irq_in[4], pic.master.irq_in[5],
+            pic.master.irq_in[6], pic.master.irq_in[7],
+            pic.slave.isr, pic.slave.irr, pic.slave.imr,
+            pic.slave.int_pin,
+            pic.slave.irq_in[0], pic.slave.irq_in[1],
+            pic.slave.irq_in[2], pic.slave.irq_in[3],
+            pic.slave.irq_in[4], pic.slave.irq_in[5],
+            pic.slave.irq_in[6], pic.slave.irq_in[7],
+            pic.master.interrupt_offset, pic.slave.interrupt_offset,
+            self.irq.acknowledge_count(),
+            self.irq.vectors_acknowledged(0x20), self.irq.vectors_acknowledged(0x21),
+            self.irq.vectors_acknowledged(0x08), self.irq.vectors_acknowledged(0x2E),
         )
     }
 
@@ -1419,7 +1365,7 @@ impl DeviceManager {
     /// not bind, which is most accesses.
     pub(crate) fn bind_pio(&mut self, slot: DevSlot, port: u16) -> Option<PioBinding<'_>> {
         let Self {
-            ref mut pic,
+            ref mut irq,
             ref mut pit,
             ref mut cmos,
             ref mut keyboard,
@@ -1468,7 +1414,7 @@ impl DeviceManager {
         };
         Some(PioBinding {
             device,
-            pic,
+            irq,
             handles,
         })
     }
@@ -1480,24 +1426,28 @@ impl DeviceManager {
     /// controller and timer slots, because Bochs devices reached through memory
     /// drive both from inside the access — hpet.cc arms a comparator and raises
     /// its interrupt within the write that programmed it.
+    ///
+    /// The I/O APIC is deliberately absent: it is part of the interrupt fabric,
+    /// so it cannot be handed a device context built over the fabric that holds
+    /// it. Its window is answered by [`IrqFabric::mmio_write`] instead, the way
+    /// the 8259's ports are — an interrupt controller is not a device on the
+    /// bus it implements.
     pub(crate) fn bind_mmio(&mut self, slot: DevSlot) -> Option<MmioBinding<'_>> {
         let Self {
-            ref mut pic,
+            ref mut irq,
             ref mut vga,
-            ref mut ioapic,
             ref mut hpet,
             ..
         } = *self;
         let handles = wiring::TimerHandles::default();
         let device: &mut dyn MmioDevice = match slot {
             DevSlot::VGA => vga,
-            DevSlot::IOAPIC => ioapic,
             DevSlot::HPET => hpet,
             _ => return None,
         };
         Some(MmioBinding {
             device,
-            pic,
+            irq,
             handles,
         })
     }
@@ -1632,11 +1582,13 @@ impl DeviceManager {
                 // edge/level trigger mode to the 8259 whose ELCR changed.
                 if self.pci2isa.elcr1_changed {
                     self.pci2isa.elcr1_changed = false;
-                    self.pic.set_mode(true, self.pci2isa.elcr1);
+                    let elcr1 = self.pci2isa.elcr1;
+                    self.irq.pic_mut().set_mode(true, elcr1);
                 }
                 if self.pci2isa.elcr2_changed {
                     self.pci2isa.elcr2_changed = false;
-                    self.pic.set_mode(false, self.pci2isa.elcr2);
+                    let elcr2 = self.pci2isa.elcr2;
+                    self.irq.pic_mut().set_mode(false, elcr2);
                 }
             }
             _ => {
@@ -2128,18 +2080,17 @@ impl DeviceManager {
             )));
         }
 
-        if (!self.pci2isa.elcr1_changed
-            && self.pic.master.edge_level != self.pci2isa.elcr1)
-            || (!self.pci2isa.elcr2_changed
-                && self.pic.slave.edge_level != self.pci2isa.elcr2)
+        let (elcr1, elcr2) = (self.pci2isa.elcr1, self.pci2isa.elcr2);
+        if (!self.pci2isa.elcr1_changed && self.irq.pic().master.edge_level != elcr1)
+            || (!self.pci2isa.elcr2_changed && self.irq.pic().slave.edge_level != elcr2)
         {
             return Err(crate::Error::Io(Error::new(
                 ErrorKind::InvalidData,
                 "snapshot PIIX and PIC trigger modes disagree",
             )));
         }
-        self.pic.set_mode(true, self.pci2isa.elcr1);
-        self.pic.set_mode(false, self.pci2isa.elcr2);
+        self.irq.pic_mut().set_mode(true, elcr1);
+        self.irq.pic_mut().set_mode(false, elcr2);
         self.pci2isa.elcr1_changed = false;
         self.pci2isa.elcr2_changed = false;
 
@@ -2227,12 +2178,11 @@ mod tests {
     /// Drive the PIT's own IRQ0 drain through the device API, with no
     /// scheduler attached — the behaviour under test is the PIC edge
     /// sequence, not timer arming.
-    fn drain_pit_irq0_for_test(pit: &mut BxPitC, pic: &mut BxPicC) -> u32 {
-        let mut irq = crate::iodev::wiring::PicIrqSink { pic };
+    fn drain_pit_irq0_for_test(pit: &mut BxPitC, irq: &mut IrqFabric) -> u32 {
         let mut timers = crate::iodev::wiring::NullTimerService;
         let mut ctx = rusty_box_devices::api::DeviceCtx {
             clock: clock_at(0),
-            irq: &mut irq,
+            irq,
             timers: &mut timers,
         };
         pit.drain_irq0(&mut ctx)
@@ -2301,31 +2251,31 @@ mod tests {
         // pit.cc irq_handler: raise on 0→1, lower on 1→0) — not a
         // synthesized lower+raise pulse.
         let mut pit = BxPitC::new();
-        let mut pic = BxPicC::new();
+        let mut irq = IrqFabric::new();
 
         // Program counter 0: mode 2 (rate generator), count 10.
         pit.write(PIT_CONTROL, 0x34, 1, clock_at(0));
         pit.write(PIT_COUNTER0, 10, 1, clock_at(0));
         pit.write(PIT_COUNTER0, 0, 1, clock_at(0));
-        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 0);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut irq), 0);
 
         // Ticks 1..=10 (pit82c54.cc clock_all domain): OUT pulses LOW.
         pit.clock_pit_ticks(10);
-        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 0);
-        assert_eq!(pic.master.irq_in[0], 0);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut irq), 0);
+        assert_eq!(irq.pic().master.irq_in[0], 0);
 
         // Tick 11: reload → OUT HIGH → IRQ0 raised and latched.
         pit.clock_pit_ticks(1);
-        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 1);
-        assert_eq!(pic.master.irq_in[0], 1);
-        assert_ne!(pic.master.irr & 0x01, 0);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut irq), 1);
+        assert_eq!(irq.pic().master.irq_in[0], 1);
+        assert_ne!(irq.pic().master.irr & 0x01, 0);
 
         // A full period in one batch: lower then raise (in order), ending
         // with the line high and a fresh edge latched.
         pit.clock_pit_ticks(10);
-        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 1);
-        assert_eq!(pic.master.irq_in[0], 1);
-        assert_ne!(pic.master.irr & 0x01, 0);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut irq), 1);
+        assert_eq!(irq.pic().master.irq_in[0], 1);
+        assert_ne!(irq.pic().master.irr & 0x01, 0);
     }
 
     #[test]
@@ -2334,28 +2284,28 @@ mod tests {
         // reach the PIC (Bochs pit82c54.cc write_ctrl's set_OUT invokes the
         // out_handler on any transition).
         let mut pit = BxPitC::new();
-        let mut pic = BxPicC::new();
+        let mut irq = IrqFabric::new();
 
         // Mode 0 control word forces OUT low (power-on OUT is high).
         pit.write(PIT_CONTROL, 0x30, 1, clock_at(0));
-        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 0);
-        assert_eq!(pic.master.irq_in[0], 0);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut irq), 0);
+        assert_eq!(irq.pic().master.irq_in[0], 0);
 
         // Count 5: terminal count at tick 6 → OUT high → IRQ0 raised.
         pit.write(PIT_COUNTER0, 5, 1, clock_at(0));
         pit.write(PIT_COUNTER0, 0, 1, clock_at(0));
         pit.clock_pit_ticks(6);
-        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 1);
-        assert_eq!(pic.master.irq_in[0], 1);
-        assert_ne!(pic.master.irr & 0x01, 0);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut irq), 1);
+        assert_eq!(irq.pic().master.irq_in[0], 1);
+        assert_ne!(irq.pic().master.irr & 0x01, 0);
 
         // A new mode 0 control word forces OUT high→low: the PIC must see
         // the lower (line drops, IRR bit cleared) purely from the
         // control-word write.
         pit.write(PIT_CONTROL, 0x30, 1, clock_at(0));
-        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 0);
-        assert_eq!(pic.master.irq_in[0], 0);
-        assert_eq!(pic.master.irr & 0x01, 0);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut irq), 0);
+        assert_eq!(irq.pic().master.irq_in[0], 0);
+        assert_eq!(irq.pic().master.irr & 0x01, 0);
     }
 
     // DeviceManager is large (VGA text buffers etc.); build it on a big stack,
@@ -2582,15 +2532,15 @@ mod tests {
             {
                 let DeviceManager {
                     ref mut ide,
-                    ref mut pic,
+                    ref mut irq,
                     ..
                 } = dm;
-                ide.write(0x1F2, 2, 1, pic); // sector count
-                ide.write(0x1F3, 0, 1, pic); // LBA 7:0
-                ide.write(0x1F4, 0, 1, pic); // LBA 15:8
-                ide.write(0x1F5, 0, 1, pic); // LBA 23:16
-                ide.write(0x1F6, 0xE0, 1, pic); // LBA mode, drive 0
-                ide.write(0x1F7, 0xC8, 1, pic); // READ DMA
+                ide.write(0x1F2, 2, 1, irq); // sector count
+                ide.write(0x1F3, 0, 1, irq); // LBA 7:0
+                ide.write(0x1F4, 0, 1, irq); // LBA 15:8
+                ide.write(0x1F5, 0, 1, irq); // LBA 23:16
+                ide.write(0x1F6, 0xE0, 1, irq); // LBA mode, drive 0
+                ide.write(0x1F7, 0xC8, 1, irq); // READ DMA
             }
             // Bochs harddrv.cc: READ DMA arms the seek timer; only its
             // deadline (seek_timer) signals bmdma_start_transfer.
@@ -2602,10 +2552,10 @@ mod tests {
             {
                 let DeviceManager {
                     ref mut ide,
-                    ref mut pic,
+                    ref mut irq,
                     ..
                 } = dm;
-                ide.seek_timer(0b00, pic);
+                ide.seek_timer(0b00, irq);
             }
             assert!(
                 dm.ide.bus_master.bmdma[0].data_ready,
@@ -2878,7 +2828,7 @@ mod tests {
                 "elcr1_changed must be drained by the write dispatch"
             );
             assert_eq!(
-                dm.pic.master.edge_level, 0x20,
+                dm.irq.pic().master.edge_level, 0x20,
                 "pic.set_mode(true, elcr1) must mirror ELCR1 into master edge_level"
             );
 
@@ -2892,7 +2842,7 @@ mod tests {
                 "elcr2_changed must be drained by the write dispatch"
             );
             assert_eq!(
-                dm.pic.slave.edge_level, 0x04,
+                dm.irq.pic().slave.edge_level, 0x04,
                 "pic.set_mode(false, elcr2) must mirror ELCR2 into slave edge_level"
             );
         });
@@ -2909,25 +2859,25 @@ mod tests {
 
             // Mark IRQ5 level-triggered via the real ELCR1 port write path.
             io.outp(0x04D0, 0x20, 1, 0, &mut pc_system, &mut dm, &mut mem);
-            assert_eq!(dm.pic.master.edge_level, 0x20);
+            assert_eq!(dm.irq.pic().master.edge_level, 0x20);
 
             // Unmask IRQ5 and assert the line (a level-triggered device holds
             // the line high until it services the condition).
-            dm.pic.master.imr &= !(1 << 5);
-            dm.pic.raise_irq(5);
+            dm.irq.pic_mut().master.imr &= !(1 << 5);
+            dm.irq.raise(rusty_box_devices::api::IrqLine(5));
             assert_ne!(
-                dm.pic.master.irr & (1 << 5),
+                dm.irq.pic().master.irr & (1 << 5),
                 0,
                 "IRR must be set once the line is raised"
             );
 
-            let vector = dm.pic.iac();
-            assert_eq!(vector, dm.pic.master.interrupt_offset + 5);
+            let vector = dm.irq.acknowledge();
+            assert_eq!(vector, dm.irq.pic().master.interrupt_offset + 5);
 
             // Level-triggered: IRR must stay set after ack because the guest
             // hasn't lowered the line yet (Bochs pic.cc IAC edge_level gate).
             assert_ne!(
-                dm.pic.master.irr & (1 << 5),
+                dm.irq.pic().master.irr & (1 << 5),
                 0,
                 "level-triggered IRQ must keep IRR set after ack"
             );

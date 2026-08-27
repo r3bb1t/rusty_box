@@ -686,7 +686,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 format!("restored {what} level disagrees with restored PIC line"),
             )
         }
-        let pic = &self.device_manager.pic;
+        let pic = self.device_manager.irq.pic();
         let kbd = &self.device_manager.keyboard.kbd_controller;
 
         if !kbd.irq1_requested && pic.irq_line_level(1) != keyboard.irq1_level {
@@ -1061,7 +1061,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         {
             let ram_size = self.config.memory.guest_bytes() as u64;
             let cpu_count = self.config.cpu_params.cpu_count();
-            self.device_manager.ioapic.set_id(cpu_count);
+            self.device_manager.irq.ioapic_mut().set_id(cpu_count);
             self.device_manager.fw_cfg.init(ram_size, cpu_count);
             #[cfg(feature = "alloc")]
             {
@@ -1662,7 +1662,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         let ch1 = &self.device_manager.ide.drives.channels[1];
         let d = ch1.selected_drive();
         let (vec15, masked15, trig15, _dmode15) =
-            self.device_manager.ioapic.redirect_entry_diag(15);
+            self.device_manager.irq.ioapic().redirect_entry_diag(15);
         // Check LAPIC IRR/ISR for the IDE vector
         let (irr_set, isr_set) = if vec15 > 0 {
             self.cpu_ref(0).lapic_vector_state(vec15)

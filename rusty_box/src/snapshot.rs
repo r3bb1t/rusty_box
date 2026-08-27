@@ -471,7 +471,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         let platform_len = checked_snapshot_len_add(4, checked_snapshot_len_add(self.device_manager.fw_cfg.snapshot_v3_body_len()?, checked_snapshot_len_add(self.devices.snapshot_v3_body_len()?, self.device_manager.snapshot_v3_body_len()?)?)?)?;
         write_section(writer, SEC_PLATFORM, platform_len, |s| { s.write_u32(SNAPSHOT_SECTION_VERSION)?; self.device_manager.fw_cfg.save_snapshot_v3_body(s)?; self.devices.save_snapshot_v3_body(s)?; self.device_manager.save_snapshot_v3_body(s) })?;
         write_section(writer, SEC_CPU, cpu_len(self)?, |s| save_cpus(self, s))?;
-        write_device_section(writer, &self.device_manager.pic)?;
+        write_device_section(writer, self.device_manager.irq.pic())?;
         write_device_section(writer, &self.device_manager.pit)?;
         write_device_section(writer, &self.device_manager.cmos)?;
         write_device_section(writer, &self.device_manager.dma)?;
@@ -482,7 +482,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         write_section(writer, SEC_PCI, pci_len, |s| { s.write_u32(SNAPSHOT_SECTION_VERSION)?; self.device_manager.pci_bridge.save_snapshot_v3_body(s)?; self.device_manager.pci2isa.save_snapshot_v3_body(s)?; self.device_manager.ide.bus_master.save_snapshot_v3_body(s) })?;
         write_device_section(writer, &self.device_manager.acpi)?;
         write_device_section(writer, &self.device_manager.vga)?;
-        write_device_section(writer, &self.device_manager.ioapic)?;
+        write_device_section(writer, self.device_manager.irq.ioapic())?;
         write_section(writer, SEC_LAPIC, lapic_len(self)?, |s| save_lapics(self, s))?;
         write_device_section(writer, &self.device_manager.hpet)
     }
@@ -513,6 +513,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
         let mut expected = 0usize;
         let mut platform = None;
         let mut io_platform = None;
+        // The 8259 section restores before the I/O APIC one, so edges an older
+        // image left unforwarded have to wait until both have landed.
+        let mut deferred_edges = None;
         let mut pit_decoded = false;
         let mut cmos_decoded = false;
         let mut keyboard = None;
@@ -579,7 +582,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
                         );
                     }
                     SEC_CPU => self.restore_cpus(&mut section).restated()?,
-                    SEC_PIC => self.device_manager.pic.restore(&mut section).restated()?,
+                    SEC_PIC => {
+                        deferred_edges = Some(
+                            self.device_manager
+                                .irq
+                                .pic_mut()
+                                .restore(&mut section)
+                                .restated()?,
+                        );
+                    }
                     SEC_PIT => {
                         self.device_manager.pit.restore(&mut section).restated()?;
                         pit_decoded = true;
@@ -622,7 +633,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
                     SEC_VGA => {
                         vga = Some(self.device_manager.vga.restore(&mut section).restated()?);
                     }
-                    SEC_IOAPIC => self.device_manager.ioapic.restore(&mut section).restated()?,
+                    SEC_IOAPIC => self
+                        .device_manager
+                        .irq
+                        .ioapic_mut()
+                        .restore(&mut section)
+                        .restated()?,
                     SEC_LAPIC => self.restore_lapics(&mut section).restated()?,
                     SEC_HPET => self.device_manager.hpet.restore(&mut section).restated()?,
                     _ => unreachable!(),
@@ -680,6 +696,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
             |port, handle| self.pc_system.validate_timer_handle_owner(handle, TimerOwner::SerialTx(port)),
         ).restated()?;
         self.reanchor_slowdown_after_restore()?;
+        // Both interrupt controllers are restored now, so an older image's
+        // unforwarded edges can finish the trip the fabric would have made
+        // synchronously. Empty for anything this build wrote.
+        if let Some(edges) = deferred_edges {
+            for edge in edges.as_slice() {
+                self.device_manager
+                    .irq
+                    .set_ioapic_pin(edge.pin, edge.level);
+            }
+        }
         if platform.desired_bmdma_base != pci.bmdma_base || platform.desired_pm_base != acpi.pm_base || platform.desired_sm_base != acpi.sm_base || platform.desired_vga_lfb_base != vga.lfb_base || platform.desired_vga_mmio_base != vga.mmio_base { return Err(invalid_snapshot("snapshot mapping targets disagree across sections")); }
         self.finish_snapshot_restore_v3(
             live_bmdma, live_pm, live_sm, live_vga, platform, keyboard, cmos, acpi, vga, pci,
@@ -1002,12 +1028,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 .attach_cdrom_data(0, 0, vec![0u8; 2048 * 4]);
             {
                 let dm = &mut emu.device_manager;
-                let crate::iodev::devices::DeviceManager { ide, pic, .. } = dm;
-                ide.write(0x1f7, 0xA0, 1, pic); // PACKET
+                let crate::iodev::devices::DeviceManager { ide, irq, .. } = dm;
+                ide.write(0x1f7, 0xA0, 1, irq); // PACKET
                 let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
                 for word in packet.chunks_exact(2) {
                     let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                    ide.write(0x1f0, value, 2, pic);
+                    ide.write(0x1f0, value, 2, irq);
                 }
             }
             // Apply the arm the way the I/O layer does after the OUT.
@@ -1047,7 +1073,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             emu.service_scheduler_boundary(seek_ticks / 2 + 2).unwrap();
             let drive = &emu.device_manager.ide.drives.channels[0].drives[0];
             assert!(drive.controller.interrupt_pending);
-            assert!(emu.device_manager.pic.irq_line_level(14));
+            assert!(emu
+                .device_manager
+                .irq
+                .line_level(rusty_box_devices::api::IrqLine(14)));
         });
     }
 
@@ -1064,25 +1093,20 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             // A real OBF fill raises IRQ1 (Bochs keyboard.cc periodic timer);
             // keep the machine self-consistent for the restore-time
             // device/PIC level validation.
-            emu.device_manager.pic.raise_irq(1);
-            {
-                let dm = &mut emu.device_manager;
-                let (fwds, count) = dm.pic.take_ioapic_forwards();
-                for &(irq, level) in &fwds[..count] {
-                    dm.ioapic.set_irq_level(irq, level, Some(&mut dm.pic), None);
-                }
-            }
+            emu.device_manager
+                .irq
+                .raise(rusty_box_devices::api::IrqLine(1));
             // Non-default state across the remaining device families so the
             // round trip proves more than default images: a masked IOAPIC
             // redirect entry, a LAPIC TPR, a DMA extra page register, a
             // CMOS RAM byte, and the COM1 scratch register. (The PCI config
             // latch cross-check has its own dedicated rejection regression.)
             emu.device_manager
-                .ioapic
-                .write_aligned(0xFEC0_0000, 0x12, None, None);
+                .irq
+                .mmio_write(0x00, 4, &0x12u32.to_ne_bytes());
             emu.device_manager
-                .ioapic
-                .write_aligned(0xFEC0_0010, 0x0001_00E5, None, None);
+                .irq
+                .mmio_write(0x10, 4, &0x0001_00E5u32.to_ne_bytes());
             emu.cpu_mut().lapic.write_aligned(0x80, 0x20, 0);
             emu.device_manager.dma.ext_page_reg[3] = 0x42;
             emu.device_manager.cmos.ram[0x30] = 0x99;
@@ -1113,12 +1137,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             assert!(emu.device_manager.keyboard.kbd_controller.outb);
             // Non-default device families made it back.
             assert_eq!(
-                emu.device_manager.ioapic.read_aligned(0xFEC0_0000),
+                emu.device_manager.irq.ioapic().read_aligned(0xFEC0_0000),
                 0x12,
                 "IOAPIC IOREGSEL did not round-trip"
             );
             assert_eq!(
-                emu.device_manager.ioapic.read_aligned(0xFEC0_0010),
+                emu.device_manager.irq.ioapic().read_aligned(0xFEC0_0010),
                 0x0001_00E5,
                 "IOAPIC redirect entry did not round-trip"
             );
@@ -1202,18 +1226,15 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             let mut source = machine();
             // Keyboard OBF with the line legitimately raised and unmasked so
             // the INT pin (and therefore the CPU event bit) asserts.
-            source.device_manager.pic.master.imr = 0xFF & !0x02;
+            source.device_manager.irq.pic_mut().master.imr = 0xFF & !0x02;
             source.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0x5A;
             source.device_manager.keyboard.kbd_controller.outb = true;
-            source.device_manager.pic.raise_irq(1);
-            {
-                let dm = &mut source.device_manager;
-                let (fwds, count) = dm.pic.take_ioapic_forwards();
-                for &(irq, level) in &fwds[..count] {
-                    dm.ioapic.set_irq_level(irq, level, Some(&mut dm.pic), None);
-                }
-            }
+            source
+                .device_manager
+                .irq
+                .raise(rusty_box_devices::api::IrqLine(1));
             source.service_scheduler_boundary(0).unwrap();
+            let source_pin = source.device_manager.irq.ioapic().pin_state(1);
 
             let mut saved = Vec::new();
             source.save_snapshot(&mut saved).unwrap();
@@ -1221,13 +1242,22 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             let mut restored = machine();
             restored.restore_snapshot(&mut Cursor::new(&saved)).unwrap();
 
-            // Final level preserved, no artificial edge generated: the
-            // restore path enqueued zero IOAPIC forwards.
-            assert!(restored.device_manager.pic.irq_line_level(1));
-            let (_, forward_count) =
-                restored.device_manager.pic.take_ioapic_forwards();
+            // The final level is preserved and no artificial edge is generated.
+            // Both halves are read off the controllers themselves rather than
+            // off a queue: an edge crossed during restore would drive the I/O
+            // APIC pin and leave a delivery queued behind it, and the source's
+            // own deliveries were drained before it was saved.
+            assert!(restored
+                .device_manager
+                .irq
+                .line_level(rusty_box_devices::api::IrqLine(1)));
             assert_eq!(
-                forward_count, 0,
+                restored.device_manager.irq.ioapic().pin_state(1),
+                source_pin,
+                "restored I/O APIC pin does not match the saved one"
+            );
+            assert!(
+                !restored.device_manager.irq.has_pending_deliveries(),
                 "restore generated an artificial IRQ edge"
             );
             // The CPU observes the restored line through the republished
@@ -1459,7 +1489,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
             let mut elcr_source = machine();
             elcr_source.service_scheduler_boundary(0).unwrap();
-            elcr_source.device_manager.pic.set_mode(true, 0x20);
+            elcr_source
+                .device_manager
+                .irq
+                .pic_mut()
+                .set_mode(true, 0x20);
             let mut elcr_snapshot = Vec::new();
             elcr_source.save_snapshot(&mut elcr_snapshot).unwrap();
             assert_restore_error(

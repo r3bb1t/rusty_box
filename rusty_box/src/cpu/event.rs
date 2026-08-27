@@ -492,8 +492,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
 
             // Then check PIC (legacy 8259 path) — only if LAPIC didn't deliver
             if !delivered {
-                if self.device_manager.pic.has_interrupt() {
-                    let vector = self.device_manager.pic.iac();
+                if self.device_manager.irq.int_pin_asserted() {
+                    let vector = self.device_manager.irq.acknowledge();
                     tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
                     vector, self.rip(), self.sregs[0].selector.value,
                     self.cpu_mode, self.eflags.contains(super::eflags::EFlags::IF_));
@@ -551,7 +551,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                     // current deasserted INT pin. A later device assertion
                     // will set irq_pending again, so it cannot be erased by
                     // this acknowledge's stale irq_cleared flag.
-                    self.device_manager.pic.reconcile_deasserted_intr();
+                    self.device_manager.irq.pic_mut().reconcile_deasserted_intr();
                     self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
                     if self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR == 0 {
                         self.async_event = super::cpu::BX_ASYNC_EVENT_STOP_TRACE;

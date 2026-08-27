@@ -631,13 +631,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .ide.drives
                     .attach_cdrom_data(0, 0, vec![0u8; 2048 * 4]);
                 {
-                    let crate::iodev::devices::DeviceManager { ide, pic, .. } =
+                    let crate::iodev::devices::DeviceManager { ide, irq, .. } =
                         &mut emu.device_manager;
-                    ide.write(0x1f7, 0xA0, 1, pic); // PACKET
+                    ide.write(0x1f7, 0xA0, 1, irq); // PACKET
                     let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
                     for word in packet.chunks_exact(2) {
                         let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                        ide.write(0x1f0, value, 2, pic);
+                        ide.write(0x1f0, value, 2, irq);
                     }
                 }
                 // The I/O layer drains the arm right after the OUT dispatch
@@ -657,14 +657,14 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let drive = &emu.device_manager.ide.drives.channels[0].drives[0];
                 assert!(!drive.controller.status.contains(AtaStatus::DRQ));
                 assert!(!drive.controller.interrupt_pending);
-                assert!(!emu.device_manager.pic.irq_line_level(14));
+                assert!(!emu.device_manager.irq.pic().irq_line_level(14));
 
                 // Crossing the deadline completes the command.
                 emu.service_scheduler_boundary(2).unwrap();
                 let drive = &emu.device_manager.ide.drives.channels[0].drives[0];
                 assert!(drive.controller.status.contains(AtaStatus::DRQ));
                 assert!(drive.controller.interrupt_pending);
-                assert!(emu.device_manager.pic.irq_line_level(14));
+                assert!(emu.device_manager.irq.pic().irq_line_level(14));
             })
             .unwrap()
             .join()
@@ -718,21 +718,19 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 // Program IOAPIC pin 2: vector 0x30, fixed, physical dest CPU 0,
                 // edge, unmasked. Redirection low index = 0x10 + 2*2 = 0x14.
-                emu.device_manager
-                    .ioapic
-                    .write_aligned(0xFEC0_0000, 0x14, None, None);
-                emu.device_manager
-                    .ioapic
-                    .write_aligned(0xFEC0_0010, 0x30, None, None);
-                emu.device_manager
-                    .ioapic
-                    .write_aligned(0xFEC0_0000, 0x15, None, None);
-                emu.device_manager
-                    .ioapic
-                    .write_aligned(0xFEC0_0010, 0x00, None, None);
+                for (offset, value) in [
+                    (0x00u64, 0x14u32),
+                    (0x10, 0x30),
+                    (0x00, 0x15),
+                    (0x10, 0x00),
+                ] {
+                    emu.device_manager
+                        .irq
+                        .mmio_write(offset, 4, &value.to_ne_bytes());
+                }
 
                 // Linux masks IRQ0 in the 8259 when routing via the IOAPIC.
-                emu.device_manager.pic.master.imr |= 0x01;
+                emu.device_manager.irq.pic_mut().master.imr |= 0x01;
 
                 // Fire the PIT across several periods.
                 emu.service_scheduler_boundary(2_000).unwrap();
@@ -783,7 +781,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let executed = emu.run_cpu_batch(4_096).unwrap();
                 assert_eq!(executed, 1);
                 assert!(emu.device_manager.keyboard.kbd_controller.outb);
-                assert_eq!(emu.device_manager.pic.master.irq_in[1], 0);
+                assert_eq!(emu.device_manager.irq.pic().master.irq_in[1], 0);
 
                 // The following serial-delay fire's top-of-function collection
                 // raises IRQ1 (one period after the transfer, exactly as Bochs).
@@ -795,7 +793,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 );
                 emu.drain_device_timer_requests();
                 emu.run_cpu_batch(4_096).unwrap();
-                assert_ne!(emu.device_manager.pic.master.irq_in[1], 0);
+                assert_ne!(emu.device_manager.irq.pic().master.irq_in[1], 0);
             })
             .unwrap()
             .join()
@@ -1898,7 +1896,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.device_manager.pic.master.imr = 0x00;
+                emu.device_manager.irq.pic_mut().master.imr = 0x00;
 
                 // Port 92 bit 0 requests software reset while bit 1 requests
                 // A20 disable. Reset must discard the queued disable.
@@ -1918,7 +1916,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.service_scheduler_boundary(0).unwrap();
 
                 assert_eq!(
-                    emu.device_manager.pic.master.imr, 0x00,
+                    emu.device_manager.irq.pic().master.imr, 0x00,
                     "Bochs software reset must not reset devices"
                 );
                 assert!(emu.pc_system.get_enable_a20());
@@ -1942,13 +1940,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.device_manager.pic.master.imr = 0x00;
+                emu.device_manager.irq.pic_mut().master.imr = 0x00;
                 emu.device_manager.pci2isa.reset_request = Some(ResetReason::Hardware);
 
                 assert!(emu.check_and_handle_resets().unwrap());
 
                 assert_eq!(
-                    emu.device_manager.pic.master.imr, 0xFF,
+                    emu.device_manager.irq.pic().master.imr, 0xFF,
                     "Bochs hardware reset resets devices"
                 );
             })
@@ -2467,7 +2465,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 emu.initialize().unwrap();
 
-                assert_eq!(emu.device_manager.ioapic.apic_id(), NONFLAT_TOPOLOGY_CPUS);
+                assert_eq!(
+                    emu.device_manager.irq.ioapic().apic_id(),
+                    NONFLAT_TOPOLOGY_CPUS
+                );
                 let Emulator {
                     device_manager,
                     memory,
@@ -4011,9 +4012,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 .unwrap();
                 emu.cpu_mut()
                     .clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
-                emu.device_manager.pic.irq_pending = true;
-                emu.device_manager.pic.irq_cleared = true;
-                emu.device_manager.pic.master.int_pin = true;
+                let pic = emu.device_manager.irq.pic_mut();
+                pic.irq_pending = true;
+                pic.irq_cleared = true;
+                pic.master.int_pin = true;
 
                 emu.sync_event_flags();
 
@@ -4021,8 +4023,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     emu.cpu().pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
                     0
                 );
-                assert!(!emu.device_manager.pic.irq_pending);
-                assert!(!emu.device_manager.pic.irq_cleared);
+                assert!(!emu.device_manager.irq.pic().irq_pending);
+                assert!(!emu.device_manager.irq.pic().irq_cleared);
             })
             .unwrap()
             .join()
@@ -4039,9 +4041,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     CpuSetupMode::FlatProtected32,
                 )
                 .unwrap();
-                emu.device_manager.pic.master.int_pin = true;
-                emu.device_manager.pic.irq_pending = false;
-                emu.device_manager.pic.irq_cleared = false;
+                let pic = emu.device_manager.irq.pic_mut();
+                pic.master.int_pin = true;
+                pic.irq_pending = false;
+                pic.irq_cleared = false;
                 emu.cpu_mut()
                     .clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
 

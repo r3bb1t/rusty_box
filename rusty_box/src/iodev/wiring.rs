@@ -6,26 +6,29 @@
 //! timer wheel, while these adapters are the single place that knows how a
 //! request reaches real hardware state.
 
-use rusty_box_devices::api::{DeviceCtx, IrqLine, IrqSink, TimerKey, TimerService};
+use rusty_box_devices::api::{DeviceCtx, TimerKey, TimerService};
+use crate::iodev::irq::IrqFabric;
 use crate::pc_system::BxPcSystemC;
-use crate::pic::BxPicC;
 
 /// Build a device context over the machine's parts and run `f` with it.
 ///
 /// The single place a [`DeviceCtx`] is assembled. The parts arrive already
 /// borrowed disjointly — the caller has to split them out of the device manager
 /// anyway, since the device being dispatched lives in the same struct as the
-/// PIC — so this owns only the assembly, not the split.
+/// interrupt fabric — so this owns only the assembly, not the split.
+///
+/// The fabric goes in as the interrupt sink itself: it implements
+/// [`IrqSink`](rusty_box_devices::api::IrqSink), so a line a device drives from
+/// inside this call reaches both interrupt controllers before the call returns.
 #[inline]
 pub(crate) fn with_device_ctx<R>(
-    pic: &mut BxPicC,
+    irq: &mut IrqFabric,
     pc_system: &mut BxPcSystemC,
     handles: TimerHandles,
     now_ticks: u64,
     f: impl FnOnce(&mut DeviceCtx<'_>) -> R,
 ) -> R {
     let clock = pc_system.clock_at(now_ticks);
-    let mut irq = PicIrqSink { pic };
     let mut timers = WheelTimerService {
         pc_system,
         handles,
@@ -33,30 +36,10 @@ pub(crate) fn with_device_ctx<R>(
     };
     let mut ctx = DeviceCtx {
         clock,
-        irq: &mut irq,
+        irq,
         timers: &mut timers,
     };
     f(&mut ctx)
-}
-
-/// Routes device interrupts to the 8259 pair — Bochs `DEV_pic_raise_irq` /
-/// `DEV_pic_lower_irq`.
-pub(crate) struct PicIrqSink<'a> {
-    pub(crate) pic: &'a mut BxPicC,
-}
-
-impl IrqSink for PicIrqSink<'_> {
-    #[inline]
-    fn set_level(&mut self, line: IrqLine, level: bool) {
-        // The PIC enqueues any I/O APIC forward this edge implies; the
-        // scheduler boundary replays it with `take_ioapic_forwards`.
-        self.pic.set_irq_level(line.0, level);
-    }
-
-    #[inline]
-    fn level(&self, line: IrqLine) -> bool {
-        self.pic.irq_line_level(line.0)
-    }
 }
 
 /// The scheduler slots one converted device owns, snapshotted before dispatch.

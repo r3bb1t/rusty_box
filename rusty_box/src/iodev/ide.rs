@@ -13,8 +13,8 @@
 //! callers hold one device instead of reaching across the manager.
 
 use super::harddrv::BxHardDriveC;
+use super::irq::IrqFabric;
 use super::pci_ide::BxPciIde;
-use crate::pic::BxPicC;
 
 /// Bounce-buffer capacity for one bus-master transfer — Bochs pci_ide.cc
 /// copies through a scratch region of this size.
@@ -72,14 +72,14 @@ impl IdeSubsystem {
     }
 
     #[inline]
-    pub(crate) fn read(&mut self, port: u16, io_len: u8, pic: &mut BxPicC) -> u32 {
-        self.drives.read(port, io_len, pic, &mut self.bus_master)
+    pub(crate) fn read(&mut self, port: u16, io_len: u8, irq: &mut IrqFabric) -> u32 {
+        self.drives.read(port, io_len, irq, &mut self.bus_master)
     }
 
     #[inline]
-    pub(crate) fn write(&mut self, port: u16, value: u32, io_len: u8, pic: &mut BxPicC) {
+    pub(crate) fn write(&mut self, port: u16, value: u32, io_len: u8, irq: &mut IrqFabric) {
         self.drives
-            .write(port, value, io_len, pic, &mut self.bus_master)
+            .write(port, value, io_len, irq, &mut self.bus_master)
     }
 
     #[inline]
@@ -88,15 +88,15 @@ impl IdeSubsystem {
         port: u16,
         io_len: u8,
         buf: &mut [u8],
-        pic: &mut BxPicC,
+        irq: &mut IrqFabric,
     ) -> usize {
         self.drives
-            .bulk_read_data(port, io_len, buf, pic, &mut self.bus_master)
+            .bulk_read_data(port, io_len, buf, irq, &mut self.bus_master)
     }
 
     #[inline]
-    pub(crate) fn seek_timer(&mut self, param: u8, pic: &mut BxPicC) {
-        self.drives.seek_timer(param, pic, &mut self.bus_master)
+    pub(crate) fn seek_timer(&mut self, param: u8, irq: &mut IrqFabric) {
+        self.drives.seek_timer(param, irq, &mut self.bus_master)
     }
 
 }

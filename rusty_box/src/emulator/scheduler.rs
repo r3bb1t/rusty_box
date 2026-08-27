@@ -861,7 +861,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
             self.apply_lapic_timer_request(cpu_index, timer_handle, deactivate, activate, false);
 
             if let Some(vector) = eoi_vector {
-                self.device_manager.ioapic.receive_eoi(vector);
+                self.device_manager.irq.receive_eoi(vector);
             }
             self.refresh_cpu_masks(cpu_index);
         }
@@ -906,12 +906,10 @@ impl<'a, T: Instrumentation> Emulator<T> {
             // IOAPIC deliveries deferred until the LAPIC bus is reachable
             // (sync_final_event_levels): enqueued by mid-slice I/O without
             // setting any request flag, so they must be checked directly.
-            || self.device_manager.ioapic.num_pending_deliveries != 0
+            || self.device_manager.irq.has_pending_deliveries()
             // PIC edge bookkeeping awaiting collapse to a final level.
-            || self.device_manager.pic.irq_pending
-            || self.device_manager.pic.irq_cleared
-            // PIC→IOAPIC edge forwards (drained by dispatch_timer_fires).
-            || self.device_manager.pic.num_ioapic_forwards != 0
+            || self.device_manager.irq.pic().irq_pending
+            || self.device_manager.irq.pic().irq_cleared
             // Latched CPU events (sync_final_event_levels tail).
             || self.pc_system.intr_raised
             || self.pc_system.intr_cleared
@@ -1146,8 +1144,8 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// consuming any restored PIC, IOAPIC, LAPIC, or timer work queues.
     #[cfg(feature = "std")]
     pub(super) fn sync_restored_event_levels(&mut self) {
-        let pic_asserted = self.device_manager.pic.has_interrupt()
-            || self.device_manager.pic.irq_pending
+        let pic_asserted = self.device_manager.irq.int_pin_asserted()
+            || self.device_manager.irq.pic().irq_pending
             || self.pc_system.intr_raised;
         if pic_asserted {
             self.cpu_mut().signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
@@ -1171,27 +1169,39 @@ impl<'a, T: Instrumentation> Emulator<T> {
         // Publish the physical PIC pin on every commit, not only when legacy
         // edge bookkeeping happens to be present. This restores the level
         // after CPU reset and prevents lost interrupt state.
-        let asserted = self.device_manager.pic.has_interrupt();
-        self.device_manager.pic.irq_pending = false;
-        self.device_manager.pic.irq_cleared = false;
+        let asserted = self.device_manager.irq.int_pin_asserted();
+        self.device_manager.irq.pic_mut().irq_pending = false;
+        self.device_manager.irq.pic_mut().irq_cleared = false;
         if asserted {
             self.cpu_mut().signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         } else {
             self.cpu_mut().clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         }
 
-        // PIC forwarding has already changed IOAPIC levels; now route its
-        // deferred deliveries in registration order into the LAPICs.
-        let (deliveries, count) = self.device_manager.ioapic.take_pending_deliveries();
+        // The I/O APIC's levels are already current — the fabric moved them
+        // when the lines did. What is left is routing its queued messages, in
+        // registration order, into the LAPICs, which live on the CPUs and so
+        // sit outside the fabric.
+        let (deliveries, count) = self
+            .device_manager
+            .irq
+            .ioapic_mut()
+            .take_pending_deliveries();
         for &delivery in &deliveries[..count] {
             let mut delivery = delivery;
             if delivery.needs_pic_iac {
-                delivery.vector = self.device_manager.pic.iac();
+                // Only a snapshot written before the fabric existed can carry
+                // an unresolved ExtINT message: the vector is read inside the
+                // servicing scan now. Finishing the acknowledge here keeps
+                // such an image bootable, and routes it through the one INTA
+                // site like every other.
+                delivery.vector = self.device_manager.irq.acknowledge();
                 delivery.needs_pic_iac = false;
             }
             let done = self.deliver_ioapic_to_lapics(delivery);
             self.device_manager
-                .ioapic
+                .irq
+                .ioapic_mut()
                 .complete_deferred_delivery(delivery, done);
         }
 
