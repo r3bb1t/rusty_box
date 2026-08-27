@@ -135,7 +135,7 @@ pub struct BxICache {
 ///
 /// `packed` holds the target trace's mpool start index in bits 0..20
 /// (`BX_ICACHE_MEM_POOL` = 576K < 2^20) and its tlen in bits 20..27
-/// (tlen ≤ `BX_MAX_TRACE_LENGTH` + 1 dummy = 33). `expected_rip` is a
+/// (tlen ≤ `BX_MAX_TRACE_LENGTH` = 32). `expected_rip` is a
 /// host-side-stronger guard than Bochs carries: Bochs trusts the stored
 /// target unconditionally, which tolerates a virtual-aliasing edge (two
 /// mappings of one physical code page); the RIP check can only *refuse* a
@@ -506,14 +506,22 @@ fn is_incomplete_decode_error(error: &DecodeError) -> bool {
     )
 }
 
-fn gen_dummy_icache_entry(i: &mut Instruction) {
-    // Matching C++ line 88-90: genDummyICacheEntry
-    i.set_ilen(0);
-    i.set_ia_opcode(Opcode::InsertedOpcode);
-    // Note: In C++, execute1 is set to &BX_CPU_C::BxEndTrace
-    // In Rust, we check for Opcode::InsertedOpcode in cpu_loop_n and set async_event
-}
-
+/// Why there is no end-of-trace marker in a trace.
+///
+/// Bochs `genDummyICacheEntry` writes one — an `ilen` of zero and
+/// `execute1 = BxEndTrace` — and `serveICacheMiss` appends it to the trace and
+/// counts it in `tlen`. Both are inside `#if
+/// BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS`, and that is `0` in the shipped
+/// configuration (`config.h.in`).
+///
+/// The marker exists only for the chaining build, where handlers tail-call one
+/// another instead of returning, so nothing tests `++i == last` and something
+/// has to stop the chain. This port's loop is the other shape: it holds a
+/// `trace_end` and tests it, exactly as Bochs does with chaining off. A marker
+/// here was a dispatch, a branch and an mpool slot per trace, all to reach a
+/// handler whose only job was to announce an end the loop already knew.
+///
+/// [`flush_smc`] declines to write one for a separate and harder reason.
 /// Check if an opcode ends trace construction — the exact `BX_TRACE_END`
 /// flag set from Bochs `ia_opcodes.def`.
 ///
@@ -993,17 +1001,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                     self.memory.smc_mark_icache_mask(p_addr, 0x80000000);
                     self.memory.smc_mark_icache_mask(fetch_page, 0x1);
 
-                    // Add end-of-trace opcode if not in debugger (matching C++ line 158-163)
-                    // TODO: Check debugger active state
-                    {
-                        if current_mpindex < BX_ICACHE_MEM_POOL {
-                            let entry = &mut self.i_cache.entry[entry_idx];
-                            entry.tlen += 1; /* Add the inserted end of trace opcode */
-                            gen_dummy_icache_entry(&mut self.i_cache.mpool[current_mpindex]);
-                            current_mpindex += 1;
-                        }
-                    }
-
                     self.i_cache.mpindex = current_mpindex;
                     let entry = self.i_cache.entry[entry_idx].clone();
                     self.i_cache.commit_page_split_trace(fetch_page, entry_idx);
@@ -1018,18 +1015,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             entry.trace_mask |= trace_mask;
         }
         self.memory.smc_mark_icache_mask(current_p_addr, trace_mask);
-
-        // Add end-of-trace opcode if not in debugger (matching C++ line 210-214)
-        // TODO: Check debugger active state
-        {
-            // Check bounds before accessing mpool
-            if current_mpindex < BX_ICACHE_MEM_POOL {
-                // Note: tlen will be incremented here, then used below
-                gen_dummy_icache_entry(&mut self.i_cache.mpool[current_mpindex]);
-                current_mpindex += 1;
-                tlen += 1; /* Add the inserted end of trace opcode */
-            }
-        }
 
         // Update entry tlen (matching C++ line 217). Bochs entry->i points at the
         // first mpool instruction; our mpool_start_idx (set earlier) plays that role.
@@ -1358,11 +1343,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                         Opcode::Nop,
                         Opcode::Nop,
                         Opcode::RetOp64,
-                        // rusty appends the InsertedOpcode trace terminator
-                        // (Bochs genDummyICacheEntry) inside tlen.
-                        Opcode::InsertedOpcode,
                     ],
-                    "trace must span the not-taken JZ and end at RET"
+                    "a trace spans the not-taken JZ, ends at RET, and holds \
+                     nothing the guest did not write"
                 );
             })
             .unwrap()

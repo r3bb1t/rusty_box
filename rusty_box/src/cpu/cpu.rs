@@ -2332,7 +2332,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 //
                 // instr_idx is always a valid mpool index: it starts at a get_icache_entry
                 // mpool_start_idx and only advances within [start, start+tlen), and
-                // serve_icache_miss guarantees start + BX_MAX_TRACE_LENGTH + 1 <= mpool length.
+                // serve_icache_miss guarantees start + BX_MAX_TRACE_LENGTH <= mpool length.
                 // The debug_assert enforces that invariant in debug/test builds; release keeps
                 // the per-instruction bounds check elided.
                 debug_assert!(
@@ -2358,20 +2358,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
                 let ilen_val = instr_ref().ilen();
-                // ilen=0 is valid ONLY for InsertedOpcode (trace boundary marker).
-                // Debug-only sanity check — Bochs does not validate ilen in the hot loop,
-                // and the decoder already guarantees 1..=15 (or 0 for InsertedOpcode).
+                // Every instruction in a trace is one the guest wrote, so every
+                // one has a real length: 1..=15, the architectural bounds the
+                // decoder enforces. A zero would mean a synthetic entry reached
+                // the dispatch path — the shape this port deliberately does not
+                // build (see `icache.rs`, beside `flush_smc`) — and it would be
+                // counted as an instruction and charged a tick.
+                //
+                // Debug-only: Bochs does not validate ilen in its hot loop.
                 #[cfg(debug_assertions)]
-                if ilen_val == 0 || ilen_val > 15 {
-                    let oc = instr_ref().get_ia_opcode();
-                    assert!(
-                        ilen_val == 0 && oc == super::decoder::Opcode::InsertedOpcode,
-                        "Invalid ilen={} opcode={:?} at RIP={:#x}",
-                        ilen_val,
-                        oc,
-                        self.gen_reg[BX_64BIT_REG_RIP].rrx()
-                    );
-                }
+                assert!(
+                    (1..=15).contains(&ilen_val),
+                    "Invalid ilen={} opcode={:?} at RIP={:#x}",
+                    ilen_val,
+                    instr_ref().get_ia_opcode(),
+                    self.gen_reg[BX_64BIT_REG_RIP].rrx()
+                );
                 // Read then write, rather than nesting the two. Reaching the
                 // register file through `Deref` makes each `self.gen_reg`
                 // a separate deref call, so the inner read and the outer write
@@ -2453,30 +2455,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
                 // Bochs cpu.cc — prev_rip = RIP AFTER execution ("commit new RIP")
                 self.prev_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
-                // Bochs cpu.cc — icount++, but only for a guest instruction.
+                // Bochs cpu.cc — icount++
                 //
-                // The end-of-trace marker is not one. Bochs puts it in a trace
-                // only when handler chaining is compiled in, and its shipped
-                // configuration does not compile it in (config.h.in
-                // `BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS 0`), so upstream's
-                // `tlen` holds nothing but real instructions and its `icount`
-                // counts nothing but real instructions. This port keeps the
-                // marker because its trace linking needs an mpool slot to hang
-                // a link on, and keeps upstream's count by not charging for it.
-                //
-                // Charging for it was guest-VISIBLE, not merely a reporting
-                // error: `cpu_ticks()` is `icount + tick_surplus` and is the
-                // machine's time source, so a phantom tick per trace made every
-                // device deadline arrive early — around a tenth of them, at the
-                // trace lengths this decoder produces.
-                if opcode != super::decoder::Opcode::InsertedOpcode {
-                    self.icount += 1;
-                    #[cfg(feature = "profiling")]
-                    {
-                        self.perf_instructions += 1;
-                    }
-                    iteration += 1;
+                // Unconditional because a trace holds nothing but guest
+                // instructions: this port builds no end-of-trace marker, for
+                // the reasons in `icache.rs` beside `flush_smc`. While one was
+                // built, it was dispatched and counted here, and that was
+                // guest-VISIBLE rather than a reporting error — `cpu_ticks()`
+                // is `icount + tick_surplus` and is the machine's time source,
+                // so a phantom tick per trace brought every device deadline
+                // forward.
+                self.icount += 1;
+                #[cfg(feature = "profiling")]
+                {
+                    self.perf_instructions += 1;
                 }
+
+                iteration += 1;
 
                 // Check async events (matching C++ line 215: if (async_event) break;)
                 // When async_event is set (branch taken, exception, HLT, etc.), we MUST

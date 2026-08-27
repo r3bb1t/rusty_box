@@ -2992,8 +2992,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::PcmpistrmVdqWdqIb => self.pcmpistrm_vdq_wdq_ib(instr),
             Opcode::PcmpistriVdqWdqIb => self.pcmpistri_vdq_wdq_ib(instr),
 
-            // End-of-trace sentinel (matching C++ BxEndTrace).
-            // Sets STOP_TRACE so the inner loop breaks at the async_event check.
+            // Bochs `BxEndTrace`, the end-of-trace sentinel. Nothing in this
+            // port builds one — trace construction leaves a trace holding only
+            // guest instructions (see `icache.rs`, beside `flush_smc`) — so
+            // this arm is reachable only if something starts. It ends the trace
+            // rather than executing an instruction that is not there.
             Opcode::InsertedOpcode => {
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 Ok(())

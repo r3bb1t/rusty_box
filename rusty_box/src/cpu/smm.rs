@@ -194,9 +194,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // trace-ending control transfer (ctrl_xfer*.cc JMP/CALL/RET/IRET) sets
         // BX_ASYNC_EVENT_STOP_TRACE from its handler for exactly this reason.
         // Without it, after RSM restores the outer RIP the loop advances
-        // `instr_idx` into the *next* slot of the now-defunct SMM-handler trace
-        // (its trailing InsertedOpcode boundary marker), executing it under the
-        // SMM trace's stale real-mode `is_real` and masking RIP to 16 bits.
+        // `instr_idx` into the *next* slot of the now-defunct SMM-handler
+        // trace, executing whatever it holds under that trace's stale
+        // real-mode `is_real` and masking RIP to 16 bits.
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
 
         Ok(())
