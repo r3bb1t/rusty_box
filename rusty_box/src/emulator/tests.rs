@@ -10,6 +10,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use crate::cpu::{
         instrumentation::{CpuSetupMode, X86Reg},
     };
+    use crate::cpu::api_bridge::SegmentSize;
     use crate::cpu::apic::LocalApicCpuEvent;
     use rusty_box_devices::pci::PciDevice;
     use crate::iodev::{DeviceTimerOwner, TimerRequest};
@@ -4189,12 +4190,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     /// called `handle_interrupt_mask_change`, and the acknowledge is what
     /// proves the vector left the controller rather than being dropped.
     ///
-    /// It deliberately stops at the acknowledge. Whether the guest then
-    /// ENTERS its handler is not asserted here, because on this fixture it
-    /// does not: the vector is acknowledged and IF is cleared — delivery
-    /// begins — and yet the processor resumes at the interrupted instruction
-    /// with the handler unrun. That is its own investigation, and claiming it
-    /// works would be worse than leaving it open.
+    /// The chain runs to the end: the guest enters its handler and the handler
+    /// names the vector it was entered for. That last link was broken until
+    /// `setup_real_mode` sized SS as 16-bit — with B set, the pushed FLAGS/CS/IP
+    /// went to `ESP` rather than `SP`, ran off the 64 KiB limit and raised #SS,
+    /// which failed to push for the same reason, and the cascade unwound with
+    /// the vector consumed and nothing else changed.
     #[cfg(feature = "alloc")]
     #[test]
     fn a_raised_isa_line_is_armed_asserted_and_acknowledged() {
@@ -4242,7 +4243,14 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     "and interrupts must be enabled, or nothing is deliverable"
                 );
 
-                emu.run_cpu_batch(64).unwrap();
+                // One instruction of progress, observed inside the handler.
+                // Delivery happens at the boundary check before an instruction
+                // is fetched, so it costs nothing from the budget: this single
+                // step both vectors the processor and runs the handler's first
+                // instruction. Stopping here is what makes the mid-flight
+                // state observable at all — IRET puts IF back, so a full batch
+                // ends with no trace that delivery ever cleared it.
+                emu.step_exactly(1).unwrap();
 
                 // The processor accepted it: the 8259 saw an INTA, so the
                 // vector left the controller and entered the CPU.
@@ -4262,12 +4270,43 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     "and the processor's pending-interrupt event must be consumed"
                 );
                 // Taking an interrupt clears IF, which re-masks the IF-gated
-                // events — the observable proof that delivery began rather
-                // than the event being dropped.
+                // events — so a second interrupt cannot arrive before the
+                // handler chooses to allow one.
                 assert_ne!(
                     emu.cpu().event_mask & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
                     0,
                     "and delivery must clear IF, re-masking the IF-gated events"
+                );
+                // The IVT entry for this vector, and no other, is where the
+                // processor went: one instruction into that vector's own stub.
+                const STORE_LENGTH: u64 = 5;
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rip),
+                    VECTOR_STUBS + u64::from(expected) * VECTOR_STUB_STRIDE + STORE_LENGTH,
+                    "and the processor must be inside that vector's own \
+                     handler, at the address its IVT entry names"
+                );
+                assert_eq!(
+                    vector_taken(&mut emu),
+                    expected,
+                    "and the handler that ran must be the one for the \
+                     acknowledged vector — any other value here is a fault \
+                     wearing an interrupt's costume"
+                );
+
+                // Let the handler return.
+                emu.run_cpu_batch(64).unwrap();
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rip),
+                    VECTOR_TEST_CODE + 5,
+                    "and IRET must put the guest back on the instruction it \
+                     was interrupted at"
+                );
+                assert_ne!(
+                    emu.reg_read(X86Reg::Rflags) & 0x200,
+                    0,
+                    "with the IF that IRET restored from the stack — which is \
+                     also proof the pushed FLAGS survived the round trip"
                 );
             })
             .unwrap()
@@ -4908,47 +4947,55 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 0x10, 0x11, 0x12, 0x13, 0x20, 0x21, 0x22, 0x23, 0x30, 0x31, 0x32, 0x33,
             ];
 
+            /// Where a REP MOVSD stopped, and what it left behind.
+            struct RepOutcome {
+                destination: alloc::vec::Vec<u8>,
+                remaining: u64,
+                source_index: u64,
+                destination_index: u64,
+            }
+
             let run_movsd = |ds_limit, es_limit| {
                 let mut emu = phase6_flat32();
                 emu.virt_write(CODE, &[0xF3, 0xA5, 0xEB, 0xFE]).unwrap();
                 emu.mem_write(SRC, &SOURCE).unwrap();
                 emu.mem_fill(DST, SOURCE.len(), 0xCC).unwrap();
                 emu.cpu_mut()
-                    .set_seg_for_api(X86Reg::Ds, 0x10, 0, ds_limit, false, false);
+                    .set_seg_for_api(X86Reg::Ds, 0x10, 0, ds_limit, SegmentSize::Bits32);
                 emu.cpu_mut()
-                    .set_seg_for_api(X86Reg::Es, 0x10, 0, es_limit, false, false);
+                    .set_seg_for_api(X86Reg::Es, 0x10, 0, es_limit, SegmentSize::Bits32);
                 emu.reg_write(X86Reg::Rip, CODE);
                 emu.reg_write(X86Reg::Rsi, SRC);
                 emu.reg_write(X86Reg::Rdi, DST);
                 emu.reg_write(X86Reg::Rcx, COUNT);
                 phase6_run(&mut emu);
-                (
-                    emu.mem_read_vec(DST, SOURCE.len()).unwrap(),
-                    emu.reg_read(X86Reg::Rcx),
-                    emu.reg_read(X86Reg::Rsi),
-                    emu.reg_read(X86Reg::Rdi),
-                )
+                RepOutcome {
+                    destination: emu.mem_read_vec(DST, SOURCE.len()).unwrap(),
+                    remaining: emu.reg_read(X86Reg::Rcx),
+                    source_index: emu.reg_read(X86Reg::Rsi),
+                    destination_index: emu.reg_read(X86Reg::Rdi),
+                }
             };
 
             let source_limited = run_movsd((SRC + 7) as u32, u32::MAX);
-            assert_eq!(&source_limited.0[..8], &SOURCE[..8]);
-            assert_eq!(&source_limited.0[8..], &[0xCC; 4]);
-            assert_eq!(source_limited.1, 1);
-            assert_eq!(source_limited.2, SRC + 8);
-            assert_eq!(source_limited.3, DST + 8);
+            assert_eq!(&source_limited.destination[..8], &SOURCE[..8]);
+            assert_eq!(&source_limited.destination[8..], &[0xCC; 4]);
+            assert_eq!(source_limited.remaining, 1);
+            assert_eq!(source_limited.source_index, SRC + 8);
+            assert_eq!(source_limited.destination_index, DST + 8);
 
             let destination_limited = run_movsd(u32::MAX, (DST + 7) as u32);
-            assert_eq!(&destination_limited.0[..8], &SOURCE[..8]);
-            assert_eq!(&destination_limited.0[8..], &[0xCC; 4]);
-            assert_eq!(destination_limited.1, 1);
-            assert_eq!(destination_limited.2, SRC + 8);
-            assert_eq!(destination_limited.3, DST + 8);
+            assert_eq!(&destination_limited.destination[..8], &SOURCE[..8]);
+            assert_eq!(&destination_limited.destination[8..], &[0xCC; 4]);
+            assert_eq!(destination_limited.remaining, 1);
+            assert_eq!(destination_limited.source_index, SRC + 8);
+            assert_eq!(destination_limited.destination_index, DST + 8);
 
             let mut emu = phase6_flat32();
             emu.virt_write(CODE, &[0xF3, 0xAB, 0xEB, 0xFE]).unwrap();
             emu.mem_fill(DST, 12, 0xCC).unwrap();
             emu.cpu_mut()
-                .set_seg_for_api(X86Reg::Es, 0x10, 0, (DST + 7) as u32, false, false);
+                .set_seg_for_api(X86Reg::Es, 0x10, 0, (DST + 7) as u32, SegmentSize::Bits32);
             emu.reg_write(X86Reg::Rip, CODE);
             emu.reg_write(X86Reg::Rax, 0x4433_2211);
             emu.reg_write(X86Reg::Rdi, DST);

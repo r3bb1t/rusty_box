@@ -24,6 +24,7 @@ use crate::cpu::instrumentation::{
     BranchEvent, HookHandle, HwInterruptEvent, InstrumentationError, IoHookEvent, IoHookType,
     MemHookEvent, MemHookType,
 };
+use crate::cpu::api_bridge::{ScaledLimit, SegmentSize};
 use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, X86Reg};
 #[cfg(feature = "alloc")]
 use crate::cpu::ResetReason;
@@ -1117,12 +1118,21 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Every documented use of this mode (MBR, DOS binaries, real-mode
     /// shellcode) loads low, so the reset CS is wrong for all of them.
     fn setup_real_mode(&mut self) -> Result<()> {
-        // Selector 0, base 0, the 64 KiB limit real mode gives every segment.
-        // 16-bit code, not long — this is what makes an offset an address.
-        self.cpu_mut()
-            .set_seg_for_api(X86Reg::Cs, 0, 0, 0xFFFF, true, false);
-        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
-            self.cpu_mut().set_seg_for_api(reg, 0, 0, 0xFFFF, false, false);
+        // Selector 0, base 0, the 64 KiB limit real mode gives every segment,
+        // and 16-bit sizing on all six — Bochs cpu.cc `reset`. SS is the one
+        // that bites: with B set, a push writes at ESP rather than SP, walks
+        // straight off the 64 KiB limit and raises #SS, so the machine cannot
+        // take an interrupt or make a call at all.
+        for reg in [
+            X86Reg::Cs,
+            X86Reg::Ds,
+            X86Reg::Es,
+            X86Reg::Ss,
+            X86Reg::Fs,
+            X86Reg::Gs,
+        ] {
+            self.cpu_mut()
+                .set_seg_for_api(reg, 0, 0, 0xFFFF, SegmentSize::Bits16);
         }
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
         self.cpu_mut().set_rflags_for_api(0x0000_0202); // IF=1, bit1 reserved=1
@@ -1132,18 +1142,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Build a minimal GDT, set descriptor caches, and switch to CR0.PE=1
     /// with 16-bit limits. Rarely used — most callers want `FlatProtected32`.
     fn setup_protected16(&mut self) -> Result<()> {
-        self.install_flat_gdt()?;
-        // CS 16-bit, limit 64KB
-        self.cpu_mut().set_seg_for_api(crate::cpu::instrumentation::X86Reg::Cs,
-        0x08,
-        0,
-        0xFFFF,
-        /*code16*/ true,
-        /*long*/ false,);
-        // Data selectors, 16-bit
-        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
-            self.cpu_mut().set_seg_for_api(reg, 0x10, 0, 0xFFFF, false, false);
-        }
+        self.install_flat_segments(FlatSegments::PROTECTED16)?;
         self.cpu_mut().enter_protected_mode_for_api();
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
@@ -1153,17 +1152,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     /// Flat 32-bit protected mode: CR0.PE=1, segments base=0 limit=4GB,
     /// 32-bit default operand/address size.
     fn setup_flat_protected32(&mut self) -> Result<()> {
-        self.install_flat_gdt()?;
-        // CS 32-bit, 4GB flat
-        self.cpu_mut().set_seg_for_api(X86Reg::Cs,
-        0x08,
-        0,
-        0xFFFFFFFF,
-        /*code16*/ false,
-        /*long*/ false,);
-        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
-            self.cpu_mut().set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
-        }
+        self.install_flat_segments(FlatSegments::FLAT_PROTECTED32)?;
         self.cpu_mut().enter_protected_mode_for_api();
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
@@ -1197,50 +1186,106 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
             }
         }
 
-        self.install_flat_gdt()?;
-        // CS in long mode: L=1, D=0
-        self.cpu_mut().set_seg_for_api(X86Reg::Cs,
-        0x08,
-        0,
-        0xFFFFFFFF,
-        /*code16*/ false,
-        /*long*/ true,);
-        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
-            self.cpu_mut().set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
-        }
-
+        self.install_flat_segments(FlatSegments::FLAT_LONG64)?;
         self.cpu_mut().enter_long_mode_for_api(PML4);
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
         Ok(())
     }
 
-    /// Install a minimal flat GDT at 0x800 with null/code/data/TSS
-    /// descriptors. Shared by all protected-mode setups.
-    fn install_flat_gdt(&mut self) -> Result<()> {
+    /// Install a flat GDT at 0x800 and load every segment's descriptor cache
+    /// from the same description, so the two can never disagree about the
+    /// machine they describe.
+    ///
+    /// Both halves in one place is the point. A guest that reloads a segment
+    /// register reads the GDT; everything before that runs off the caches.
+    /// When the two were written independently, a 16-bit setup handed its
+    /// guest 16-bit caches over 32-bit descriptors, and the machine changed
+    /// width the first time it touched its own segments.
+    fn install_flat_segments(&mut self, segments: FlatSegments) -> Result<()> {
         const GDT_BASE: u64 = 0x0800;
+        const CODE_SELECTOR: u16 = 0x08;
+        const DATA_SELECTOR: u16 = 0x10;
+        // Present, DPL 0, S=1; type 1010 = code exec/read non-conforming,
+        // type 0010 = data read/write. Bochs descriptor.h access byte.
+        const CODE_ACCESS: u8 = 0x9A;
+        const DATA_ACCESS: u8 = 0x92;
 
-        // Null descriptor
-        self.mem_write_u64_le(GDT_BASE, 0)?;
-
-        // Code selector at index 1 (selector 0x08):
-        // base=0 limit=0xFFFFF G=1 (4 KiB pages → 4 GiB) P=1 DPL=0 S=1
-        // type=1010 (code, readable, non-conforming) D=1 L=0 AVL=0
-        // For FlatLong64 we overwrite this entry below in enter_long_mode path
-        // via set_seg_for_api which writes descriptor caches directly — the
-        // GDT itself needs a plausible entry so IRET/syscall paths succeed.
-        let code_desc: u64 = 0x00CF9A000000FFFF;
-        self.mem_write_u64_le(GDT_BASE + 0x08, code_desc)?;
-
-        // Data selector at index 2 (selector 0x10):
-        // base=0 limit=0xFFFFF G=1 P=1 DPL=0 S=1 type=0010 (data, writable)
-        let data_desc: u64 = 0x00CF92000000FFFF;
-        self.mem_write_u64_le(GDT_BASE + 0x10, data_desc)?;
-
+        self.mem_write_u64_le(GDT_BASE, 0)?; // null descriptor
+        self.mem_write_u64_le(
+            GDT_BASE + CODE_SELECTOR as u64,
+            flat_descriptor(CODE_ACCESS, segments.code, segments.limit),
+        )?;
+        self.mem_write_u64_le(
+            GDT_BASE + DATA_SELECTOR as u64,
+            flat_descriptor(DATA_ACCESS, segments.data, segments.limit),
+        )?;
         self.cpu_mut().set_gdtr_base_for_api(GDT_BASE);
         self.cpu_mut().set_gdtr_limit_for_api(0x1F);
+
+        self.cpu_mut().set_seg_for_api(
+            X86Reg::Cs,
+            CODE_SELECTOR,
+            0,
+            segments.limit,
+            segments.code,
+        );
+        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
+            self.cpu_mut()
+                .set_seg_for_api(reg, DATA_SELECTOR, 0, segments.limit, segments.data);
+        }
         Ok(())
     }
+}
+
+/// The flat segment layout a [`CpuSetupMode`] installs.
+///
+/// `code` and `data` share a type and long mode is exactly where they differ,
+/// so passing them positionally would let a swap compile into a machine whose
+/// stack is the wrong width. Naming them — and carrying the limit they share —
+/// makes one value the whole description, which is what lets the GDT and the
+/// descriptor caches be written from the same source.
+#[derive(Clone, Copy)]
+struct FlatSegments {
+    code: SegmentSize,
+    /// Also SS, so this is what decides between `SP` and `ESP`.
+    data: SegmentSize,
+    /// Byte limit for every segment: the last addressable offset.
+    limit: u32,
+}
+
+impl FlatSegments {
+    const PROTECTED16: Self = Self {
+        code: SegmentSize::Bits16,
+        data: SegmentSize::Bits16,
+        limit: 0xFFFF,
+    };
+    const FLAT_PROTECTED32: Self = Self {
+        code: SegmentSize::Bits32,
+        data: SegmentSize::Bits32,
+        limit: 0xFFFF_FFFF,
+    };
+    /// Long mode's data segments stay 32-bit — the descriptors a 64-bit
+    /// operating system loads carry D/B set and L clear, because L belongs to
+    /// code segments alone.
+    const FLAT_LONG64: Self = Self {
+        code: SegmentSize::Long64,
+        data: SegmentSize::Bits32,
+        limit: 0xFFFF_FFFF,
+    };
+}
+
+/// Compose a base-zero GDT descriptor. Bochs descriptor.h `parse_descriptor`
+/// read in reverse: limit low 16, access byte at 40, limit high 4 at 48, then
+/// AVL/L/D/G, then base high — all of base being zero here.
+fn flat_descriptor(access: u8, size: SegmentSize, byte_limit: u32) -> u64 {
+    let limit = ScaledLimit::of(byte_limit);
+    u64::from(limit.field & 0xFFFF)
+        | (u64::from(access) << 40)
+        | ((u64::from(limit.field >> 16) & 0xF) << 48)
+        | (u64::from(size.long64()) << 53)
+        | (u64::from(size.d_b()) << 54)
+        | (u64::from(limit.page_granular) << 55)
 }
 
 // ─────────────────────────── Tests ───────────────────────────

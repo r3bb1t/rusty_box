@@ -13,6 +13,73 @@ use super::decoder::BxSegregs;
 use super::instrumentation::X86Reg;
 use super::BxCpuC;
 
+/// The default operand and address size a segment carries — the descriptor's
+/// D/B and L bits as one value.
+///
+/// Bochs descriptor.h keeps `d_b` and `l` as separate bits, but only three of
+/// their four combinations exist: a 64-bit code segment must have D clear, so
+/// `L=1, D=1` is not a segment, it is a typo. Naming the three states (R2)
+/// also removes a subtler trap. Spelled as a `code16` bool, the parameter
+/// described a *code* segment, and a caller reasonably passed `false` for the
+/// data segments of a real-mode machine — which set B on SS, making the stack
+/// 32-bit. Every push then went to `ESP` instead of `SP`, ran off the 64 KiB
+/// segment limit and raised #SS, so no real-mode guest could take an
+/// interrupt, service a call, or return from one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SegmentSize {
+    /// D/B = 0, L = 0 — real mode's segments and 16-bit protected mode. On SS
+    /// this is what selects `SP` as the stack pointer.
+    Bits16,
+    /// D/B = 1, L = 0.
+    Bits32,
+    /// L = 1, and D/B = 0 with it. Code segments only; long mode's data
+    /// segments keep [`SegmentSize::Bits32`], as the descriptors a 64-bit
+    /// operating system loads do.
+    Long64,
+}
+
+impl SegmentSize {
+    /// Bochs descriptor.h `d_b`.
+    pub(crate) const fn d_b(self) -> bool {
+        matches!(self, Self::Bits32)
+    }
+
+    /// Bochs descriptor.h `l`.
+    pub(crate) const fn long64(self) -> bool {
+        matches!(self, Self::Long64)
+    }
+}
+
+/// A descriptor's 20-bit limit field together with the granularity bit that
+/// scales it — the two halves of one answer, so no caller can set one and
+/// forget the other.
+pub(crate) struct ScaledLimit {
+    /// What the descriptor's limit field holds.
+    pub(crate) field: u32,
+    /// Whether that field counts 4 KiB pages rather than bytes (G).
+    pub(crate) page_granular: bool,
+}
+
+impl ScaledLimit {
+    /// Encode a byte limit — the segment's last addressable offset — the way a
+    /// descriptor must. The field is 20 bits, so byte granularity reaches
+    /// 0xFFFFF and nothing past it is expressible without pages. Bochs
+    /// descriptor.h `parse_descriptor`.
+    pub(crate) const fn of(byte_limit: u32) -> Self {
+        if byte_limit > 0x000F_FFFF {
+            Self {
+                field: byte_limit >> 12,
+                page_granular: true,
+            }
+        } else {
+            Self {
+                field: byte_limit,
+                page_granular: false,
+            }
+        }
+    }
+}
+
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ── RFLAGS / EFLAGS ────────────────────────────────────────────────
 
@@ -67,14 +134,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Set segment to a flat-cache state used by `CpuSetupMode::*`.
     /// Writes both selector and descriptor cache so later instructions see
     /// a valid, flat segment without needing a GDT reload.
+    ///
+    /// `limit` is a byte limit, already scaled: the segment's last addressable
+    /// offset, not the 20-bit field a descriptor encodes.
+    ///
+    /// Loading a segment is more than a write to its cache. Bochs
+    /// segment_ctrl_pro.cc `load_seg_reg` re-derives the fetch-mode mask, drops
+    /// the prefetch queue and re-evaluates alignment checking when CS moves,
+    /// and drops the stack cache when SS does — so this does too, rather than
+    /// leaving the new segment behind windows still describing the old one.
     pub(crate) fn set_seg_for_api(
         &mut self,
         reg: X86Reg,
         selector: u16,
         base: u64,
         limit: u32,
-        code16: bool,
-        long: bool,
+        size: SegmentSize,
     ) {
         let idx = match reg {
             X86Reg::Es => BxSegregs::Es as usize,
@@ -99,10 +174,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         s.cache.r#type = if matches!(reg, X86Reg::Cs) { 0xB } else { 0x3 };
         s.cache.u.set_segment_base(base);
         s.cache.u.set_segment_limit_scaled(limit);
-        s.cache.u.set_segment_g(true);
-        s.cache.u.set_segment_d_b(!code16 && !long);
-        s.cache.u.set_segment_l(long);
+        // Granularity is not free to choose: Bochs cpu.cc `reset` leaves real
+        // mode's 0xFFFF segments byte-granular because a 20-bit field holds
+        // them, and claiming G on one describes a segment no descriptor could
+        // have produced.
+        s.cache.u.set_segment_g(ScaledLimit::of(limit).page_granular);
+        s.cache.u.set_segment_d_b(size.d_b());
+        s.cache.u.set_segment_l(size.long64());
         s.cache.u.set_segment_avl(false);
+
+        if idx == BxSegregs::Cs as usize {
+            self.invalidate_prefetch_q();
+            self.update_fetch_mode_mask();
+            self.handle_alignment_check();
+        }
+        if idx == BxSegregs::Ss as usize {
+            self.invalidate_stack_cache();
+        }
     }
 
     /// Enable CR0.PE and update fetch mode / alignment state.
