@@ -16,7 +16,10 @@
 //!   RB_SNAPSHOT     Snapshot file (default target/snapshot_resume.rbx)
 
 use rusty_box::{
-    emulator::{AtaSlot, BootDevice, BootOrder, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder},
+    emulator::{
+        AtaSlot, BootDevice, BootOrder, Emulator, EmulatorConfig, Ips, MachineBuilder, MemorySize,
+        RunBudget,
+    },
     gui::NoGui,
 };
 
@@ -132,14 +135,17 @@ fn run_instructions(emu: &mut Emulator, budget: u64) -> u64 {
     let mut executed_total = 0u64;
     while executed_total < budget {
         let chunk = (budget - executed_total).min(50_000_000);
-        let outcome = emu.step_batch(chunk).expect("step_batch");
+        let outcome = emu.step(RunBudget::Instructions(chunk)).expect("step");
         assert!(
             !outcome.is_terminal(),
             "guest stopped ({:?}) inside the instruction budget",
             outcome.stop
         );
-        assert!(outcome.executed > 0, "guest made no progress");
-        executed_total += outcome.executed;
+        assert!(!outcome.progress.stalled(), "guest made no progress");
+        executed_total += outcome
+            .progress
+            .instructions()
+            .expect("this harness boots a uniprocessor machine");
     }
     executed_total
 }

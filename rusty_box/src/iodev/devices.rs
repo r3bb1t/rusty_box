@@ -2439,7 +2439,7 @@ mod tests {
         code.push(0xEF);
         emu.virt_write(code_address, &code).unwrap();
         emu.reg_write(X86Reg::Rip, code_address);
-        emu.run_cpu_batch(64)
+        emu.run_cpu_batch(64).map(|progress| progress.count())
     }
 
     fn guest_inb(emu: &mut Emulator, port: u16) -> crate::cpu::Result<u8> {
@@ -2469,7 +2469,7 @@ mod tests {
         code.extend_from_slice(&address.to_le_bytes());
         emu.virt_write(code_address, &code).unwrap();
         emu.reg_write(X86Reg::Rip, code_address);
-        emu.run_cpu_batch(1)
+        emu.run_cpu_batch(1).map(|progress| progress.count())
     }
 
     #[test]

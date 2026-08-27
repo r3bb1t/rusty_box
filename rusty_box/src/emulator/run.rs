@@ -12,7 +12,7 @@ use crate::{cpu::CpuError, Error};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{Emulator, ResetReason};
+use super::{Emulator, ResetReason, SliceEngine, SoftwareEngine};
 use crate::memory::plan::{MemoryPlan, MemoryPlanError};
 // Only the direct-Linux-boot path below reaches a CPU through the store, and
 // that path needs an allocator.
@@ -44,11 +44,11 @@ pub enum PowerState {
 
 /// The machine's power and reset controls — Bochs's chipset-level ACPI, which
 /// every profile has, so this is not a device that can be absent.
-pub struct Power<'m, T: Instrumentation> {
-    machine: &'m mut Emulator<T>,
+pub struct Power<'m, T: Instrumentation, E = SoftwareEngine> {
+    machine: &'m mut Emulator<T, E>,
 }
 
-impl<T: Instrumentation> Power<'_, T> {
+impl<T: Instrumentation, E: SliceEngine<T>> Power<'_, T, E> {
     /// Press the power button.
     ///
     /// This is a request to the guest, not an order: it raises ACPI's
@@ -96,11 +96,11 @@ impl<T: Instrumentation> Power<'_, T> {
 /// the caller finds out by the guest missing keystrokes. Reporting instead
 /// turns that into backpressure: send, see how much landed, step the machine,
 /// send the rest.
-pub struct Keyboard<'m, T: Instrumentation> {
-    machine: &'m mut Emulator<T>,
+pub struct Keyboard<'m, T: Instrumentation, E = SoftwareEngine> {
+    machine: &'m mut Emulator<T, E>,
 }
 
-impl<T: Instrumentation> Keyboard<'_, T> {
+impl<T: Instrumentation, E> Keyboard<'_, T, E> {
     /// Press or release a key, rendered through the guest's active scancode
     /// set. Returns whether the whole sequence reached the guest — see
     /// `BxKeyboardC::gen_scancode` for why a key can be partly delivered.
@@ -162,11 +162,11 @@ impl<T: Instrumentation> Keyboard<'_, T> {
 }
 
 /// The machine's PS/2 mouse, as a host driving it sees it.
-pub struct Mouse<'m, T: Instrumentation> {
-    machine: &'m mut Emulator<T>,
+pub struct Mouse<'m, T: Instrumentation, E = SoftwareEngine> {
+    machine: &'m mut Emulator<T, E>,
 }
 
-impl<T: Instrumentation> Mouse<'_, T> {
+impl<T: Instrumentation, E> Mouse<'_, T, E> {
     /// Report relative motion and the current button mask (bit 0 left, bit 1
     /// right, bit 2 middle), returning whether a packet reached the guest.
     ///
@@ -225,18 +225,141 @@ pub enum StopReason {
     BudgetExhausted,
 }
 
-/// What one `step_batch` call did.
+/// What bounds one run.
 ///
-/// A named struct rather than a pair (doctrine R0): the two fields are a count
-/// and a cause, and nothing about `(u64, bool)` said which was which — nor
-/// could a `bool` carry more than one of the five causes above.
+/// The two units a machine can hold itself to without consulting a clock it
+/// does not own. A host deadline is the third, and waits for a machine that has
+/// a `HostClock`: `std::time::Instant` is not available on every target this
+/// runs on, and a front end that wants to bound a frame already has one.
+///
+/// Both bounds are honoured exactly. Neither is a hint about an inner batch —
+/// that shape is what let `step_batch(1)` retire 475,135 instructions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunBudget {
+    /// Guest instructions the boot processor may retire.
+    ///
+    /// Counted on the boot processor because that is the one a caller set RIP
+    /// on. An engine that does not count instructions cannot honour this.
+    Instructions(u64),
+    /// Ticks of guest time to let pass.
+    ///
+    /// The unit both a multiprocessor machine and a hardware engine can hold
+    /// to, and the one [`Emulator::ticks_to_next_timer_deadline`] answers in —
+    /// so "run until the next device deadline" is expressible without guessing
+    /// how many instructions that is.
+    Ticks(u64),
+}
+
+/// How far a run got, in the unit the machine can actually answer in.
+///
+/// A uniprocessor answers in instructions: one processor retires them, and its
+/// count is the machine's own. A multiprocessor cannot. Bochs `main.cc` gives
+/// every processor a quantum and credits the whole round with one `BX_TICKN`,
+/// so machine time advances by the round's average — a figure no single
+/// processor's instruction count describes, and one that keeps moving while a
+/// halted processor retires nothing at all.
+///
+/// The two used to travel as one `u64` called `executed`, documented as
+/// instructions and holding ticks whenever the machine had more than one
+/// processor. Naming them apart is doctrine R4: a count of instructions and a
+/// span of time are different things, and a caller that adds them is wrong in
+/// a way no type was previously able to say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// Guest instructions retired.
+    Instructions(u64),
+    /// Ticks of guest time that passed.
+    Ticks(u64),
+}
+
+impl Progress {
+    /// The instructions retired, or `None` when the machine measured its
+    /// progress as time instead.
+    #[inline]
+    #[must_use]
+    pub fn instructions(self) -> Option<u64> {
+        match self {
+            Self::Instructions(count) => Some(count),
+            Self::Ticks(_) => None,
+        }
+    }
+
+    /// The guest time that passed, or `None` when the machine measured its
+    /// progress as instructions instead.
+    #[inline]
+    #[must_use]
+    pub fn ticks(self) -> Option<u64> {
+        match self {
+            Self::Ticks(count) => Some(count),
+            Self::Instructions(_) => None,
+        }
+    }
+
+    /// Whether the guest failed to advance at all.
+    ///
+    /// One of the two questions both units answer the same way, and the one a
+    /// caller asks to find out whether stepping again is worth it.
+    #[inline]
+    #[must_use]
+    pub fn stalled(self) -> bool {
+        match self {
+            Self::Instructions(count) | Self::Ticks(count) => count == 0,
+        }
+    }
+
+    /// Add a later run's progress to this one.
+    ///
+    /// A machine's processor count is fixed at construction, so every run of
+    /// one machine reports the same unit. Two that disagree would mean adding
+    /// a duration to a count, which is refused rather than summed: the caller
+    /// is handed back the later reading, and the machine has a defect no total
+    /// could describe.
+    #[inline]
+    #[must_use]
+    pub(crate) fn add(self, later: Self) -> Self {
+        match (self, later) {
+            (Self::Instructions(a), Self::Instructions(b)) => {
+                Self::Instructions(a.saturating_add(b))
+            }
+            (Self::Ticks(a), Self::Ticks(b)) => Self::Ticks(a.saturating_add(b)),
+            (before, later) => {
+                tracing::error!(
+                    "a machine changed how it measures progress mid-run: {before:?} then {later:?}"
+                );
+                later
+            }
+        }
+    }
+
+    /// The number, with the unit deliberately discarded.
+    ///
+    /// For pacing, where the unit genuinely does not matter: a front end
+    /// bounding how much it does per frame wants to know how much happened,
+    /// not what kind. Anything that will compare against an instruction count
+    /// or a deadline must ask [`Self::instructions`] or [`Self::ticks`] and
+    /// handle the `None` — discarding the unit there is how the two got
+    /// confused in the first place.
+    #[inline]
+    #[must_use]
+    pub const fn count(self) -> u64 {
+        match self {
+            Self::Instructions(count) | Self::Ticks(count) => count,
+        }
+    }
+}
+
+/// What one run did.
+///
+/// A named struct rather than a pair (doctrine R0): the two fields are how far
+/// it got and why it stopped, and nothing about `(u64, bool)` said which was
+/// which — nor could a `bool` carry more than one of the five causes above.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BatchOutcome {
-    /// Instructions retired across the whole call. Under `std` this may exceed
-    /// the requested `batch_instructions`, because the call keeps running whole
-    /// batches until its wall-clock budget is spent.
-    pub executed: u64,
+    /// How far the guest got. Under `std` this may exceed what was asked for,
+    /// because the call keeps running whole batches until its wall-clock
+    /// budget is spent.
+    pub progress: Progress,
     /// Why the call returned.
     pub stop: StopReason,
 }
@@ -272,7 +395,7 @@ pub(crate) enum StopCause {
     GuestPowerOff,
 }
 
-impl<'a, T: Instrumentation> Emulator<T> {
+impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     #[cfg(feature = "alloc")]
     /// Draw one VGA frame to the attached front end.
     ///
@@ -474,47 +597,86 @@ impl<'a, T: Instrumentation> Emulator<T> {
         Ok(())
     }
 
-    /// Execute a batch of instructions cooperatively (no blocking loop).
+    /// Run the guest until `budget` is spent, then hand control back.
     ///
-    /// Designed for single-threaded environments like WASM or UEFI where the
-    /// caller must yield control back to its event loop regularly. Runs the
-    /// guest, ticks devices, syncs A20, then returns why it stopped.
+    /// Cooperative: the call returns, so a single-threaded host — wasm, UEFI, a
+    /// GUI frame loop — keeps its event loop. Runs the guest, ticks devices,
+    /// syncs A20, then says why it returned.
     ///
-    /// `batch_instructions` bounds one inner batch, not the call. Under `std` the
-    /// call keeps running batches until a 15 ms wall-clock budget is spent — so
-    /// `BatchOutcome::executed` may come back well above `batch_instructions`.
-    /// Under `no_std` there is no clock, so the instruction count is the budget
-    /// and the figure is a true ceiling.
+    /// The budget is a ceiling and is honoured exactly. Its predecessor's
+    /// argument bounded an *inner* batch while the call ran on for a fixed
+    /// 15 ms of host time, so asking for one instruction could retire hundreds
+    /// of thousands of them, and asking twice on a loaded machine gave two
+    /// different answers. A caller that wants to bound host time owns a clock
+    /// and can bound its own loop; the machine no longer guesses on its behalf.
     ///
     /// A caller driving a machine to completion should stop on
-    /// [`BatchOutcome::is_terminal`]; testing the count against
-    /// `batch_instructions` cannot tell "the guest powered off" from "the budget
-    /// ran out", and under `std` cannot even tell the budget ran out.
-    pub fn step_batch(&mut self, batch_instructions: u64) -> Result<BatchOutcome> {
+    /// [`BatchOutcome::is_terminal`]: comparing progress against the budget
+    /// cannot tell "the guest powered off" from "the budget ran out".
+    ///
+    /// # Errors
+    /// Whatever ended the run other than a budget or a stop: a fault the
+    /// processor could not take, or a machine boundary that failed to apply.
+    pub fn step(&mut self, budget: RunBudget) -> Result<BatchOutcome> {
+        // What the budget is measured against, sampled before anything runs.
+        // Instructions come off the boot processor — the one whose RIP a caller
+        // set — and ticks off the machine's own clock.
+        let started_at = match budget {
+            RunBudget::Instructions(_) => self.cpu_ref(0).icount,
+            RunBudget::Ticks(_) => self.pc_system.time_ticks(),
+        };
+        let spent = |machine: &Self| match budget {
+            RunBudget::Instructions(_) => {
+                machine.cpu_ref(0).icount.saturating_sub(started_at)
+            }
+            RunBudget::Ticks(_) => machine.pc_system.time_ticks().saturating_sub(started_at),
+        };
+        let ceiling = match budget {
+            RunBudget::Instructions(count) | RunBudget::Ticks(count) => count,
+        };
+        self.run_until_budget_spent(ceiling, spent)
+    }
+
+    /// The run loop, over a budget it can measure but need not understand.
+    fn run_until_budget_spent(
+        &mut self,
+        ceiling: u64,
+        spent: impl Fn(&Self) -> u64,
+    ) -> Result<BatchOutcome> {
         let ips = self.config.ips.per_second_u64();
-        let mut total_executed = 0u64;
-        // Wall-clock budget: 15ms keeps GUI responsive at 60 fps.
-        // Bochs runs CPU on a dedicated thread with no frame budget; we emulate
-        // that throughput by processing multiple MWAIT→wake→execute cycles here.
-        #[cfg(feature = "std")]
-        let wall_start = std::time::Instant::now();
-        #[cfg(feature = "std")]
-        let wall_budget = std::time::Duration::from_millis(15);
+        // Seeded from what this machine will report, so the running total never
+        // has to guess a unit before the first batch answers in one.
+        let mut total = if self.cpu_count() > 1 {
+            Progress::Ticks(0)
+        } else {
+            Progress::Instructions(0)
+        };
+        // One inner batch is capped so a run that ends on a device deadline
+        // still notices promptly; the budget above, not this, decides when the
+        // call returns.
+        const INNER_BATCH_CEILING: u64 = 100_000;
 
         'batch: loop {
-            // --- Run CPU batch ---
-            // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
-            let result = self.run_cpu_batch(batch_instructions);
+            let remaining = ceiling.saturating_sub(spent(self));
+            if remaining == 0 {
+                break 'batch;
+            }
 
-            let executed = match result {
-                Ok(n) => n,
+            // --- Run CPU batch ---
+            let progress = match self
+                .run_cpu_batch_with_strict_limit(remaining.min(INNER_BATCH_CEILING), true)
+            {
+                Ok(progress) => progress,
                 Err(e) => return Err(crate::error::Error::Cpu(e)),
             };
-            total_executed += executed;
+            total = total.add(progress);
 
             // --- Tick devices + pc_system ---
+            // Only reached when the batch advanced nothing itself, which on a
+            // multiprocessor it always does — so in practice this is the
+            // uniprocessor path, where a retired instruction is a tick.
             if !self.batch_advanced_pc_system {
-                self.advance_pc_system_after_cpu_ticks(executed);
+                self.advance_pc_system_after_cpu_ticks(progress.count());
             }
 
             // --- HLT/MWAIT: advance time until interrupt ---
@@ -571,29 +733,17 @@ impl<'a, T: Instrumentation> Emulator<T> {
                 }
             }
 
-            // --- Tight loop: if CPU was woken from MWAIT and wall budget remains,
-            // run another cycle instead of returning to egui event loop.
-            // This matches Bochs's dedicated CPU thread which never yields to GUI.
-            // Without std there is no wall clock: yield cooperatively on the
-            // instruction budget instead, so an Active CPU cannot spin here
-            // forever and starve the caller's event loop.
-            // A raised stop flag ends the call now rather than at the end of
-            // the wall-clock budget. It is raised by a host `StopHandle`, by a
-            // guest power-off drained at a scheduler boundary, and by a hook
-            // whose honoured stop request the batch just drained — none of
-            // which is worth spending another 15 ms of guest time on.
+            // Keep going while the guest is live and the budget is not spent.
+            //
+            // A raised stop flag ends the call at once rather than at the end
+            // of the budget. It is raised by a host `StopHandle`, by a guest
+            // power-off drained at a scheduler boundary, and by a hook whose
+            // honoured stop request the batch just drained — none of which is
+            // worth spending more guest time on. A processor that is no longer
+            // Active has had its chance to wake in the fast-forward above; if
+            // it did not, returning lets the caller decide what to do about it.
             if !self.stop_flag.load(core::sync::atomic::Ordering::Relaxed)
                 && matches!(self.cpu_ref(0).activity_state, CpuActivityState::Active)
-                && {
-                    #[cfg(feature = "std")]
-                    {
-                        wall_start.elapsed() < wall_budget
-                    }
-                    #[cfg(not(feature = "std"))]
-                    {
-                        total_executed < batch_instructions
-                    }
-                }
             {
                 continue 'batch;
             }
@@ -606,7 +756,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         self.pump_gui_input();
 
         Ok(BatchOutcome {
-            executed: total_executed,
+            progress: total,
             stop: self.classify_batch_stop(),
         })
     }
@@ -624,31 +774,31 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// not fall behind — only the batching is different.
     #[cfg(feature = "alloc")]
     pub(crate) fn step_exactly(&mut self, instructions: u64) -> Result<BatchOutcome> {
-        let executed = self
+        let progress = self
             .run_cpu_batch_with_strict_limit(instructions, true)
             .map_err(crate::error::Error::Cpu)?;
         if !self.batch_advanced_pc_system {
-            self.advance_pc_system_after_cpu_ticks(executed);
+            self.advance_pc_system_after_cpu_ticks(progress.count());
         }
         self.pump_gui_input();
         Ok(BatchOutcome {
-            executed,
+            progress,
             stop: self.classify_batch_stop(),
         })
     }
 
     /// The machine's power and reset controls.
-    pub fn power(&mut self) -> Power<'_, T> {
+    pub fn power(&mut self) -> Power<'_, T, E> {
         Power { machine: self }
     }
 
     /// The machine's keyboard, for a host driving it.
-    pub fn keyboard(&mut self) -> Keyboard<'_, T> {
+    pub fn keyboard(&mut self) -> Keyboard<'_, T, E> {
         Keyboard { machine: self }
     }
 
     /// The machine's PS/2 mouse, for a host driving it.
-    pub fn mouse(&mut self) -> Mouse<'_, T> {
+    pub fn mouse(&mut self) -> Mouse<'_, T, E> {
         Mouse { machine: self }
     }
 

@@ -28,7 +28,7 @@ use crate::cpu::api_bridge::{ScaledLimit, SegmentSize};
 use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, X86Reg};
 #[cfg(feature = "alloc")]
 use crate::cpu::ResetReason;
-use crate::emulator::Emulator;
+use crate::emulator::{Emulator, SliceEngine};
 #[cfg(feature = "alloc")]
 use crate::emulator::EmulatorConfig;
 use crate::iodev::devices::DeviceManager;
@@ -115,7 +115,7 @@ impl DebugPort<'_> {
     }
 }
 
-impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
+impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Borrow UART `port` (0-based; COM1 is 0). `None` when the index is
     /// outside the modelled set.
     #[inline]
@@ -171,7 +171,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
 // feature-gated. When the feature is off, the methods simply do not exist.
 
 #[cfg(all(feature = "instrumentation", feature = "alloc"))]
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Register a hook fired before each instruction whose RIP is in `range`.
     /// Callback receives `(rip, &Instruction)`.
     pub fn hook_add_code<R, F>(&mut self, range: R, cb: F) -> HookHandle
@@ -303,7 +303,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
 
 // ─────────────────────────── reg_read / reg_write ───────────────────────────
 
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Read any register by enum tag. Narrower registers are zero-extended
     /// into the returned `u64`.
     pub fn reg_read(&self, reg: X86Reg) -> u64 {
@@ -415,7 +415,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
 
 // ─────────────────────────── Wide register read/write ───────────────────────────
 
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Read an x87 FPU register as 10 bytes (80-bit extended precision).
     /// `reg` must be Fpr0..Fpr7.
     pub fn reg_read_fp80(&self, reg: X86Reg) -> [u8; 10] {
@@ -657,7 +657,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
 
 // ─────────────────────────── mem_read / mem_write ───────────────────────────
 
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Read bytes from guest physical memory into the caller's buffer.
     /// Returns the number of bytes read (always `buf.len()` on success).
     /// Bypasses MMIO handlers — matches Unicorn `uc_mem_read` semantics.
@@ -911,7 +911,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
 
 // ─────────────────────────── emu_start / emu_stop ───────────────────────────
 
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Obtain a cross-thread [`StopHandle`] that breaks the `emu_start` loop
     /// at its next batch boundary.
     #[cfg(feature = "alloc")]
@@ -959,7 +959,13 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
             }
         }
 
-        let mut executed: u64 = 0;
+        // Counted from the boot processor's own retired-instruction counter,
+        // not from what a batch reports. A multiprocessor batch reports elapsed
+        // TIME — no single processor's instruction count describes a round in
+        // which every processor got a quantum — and a caller asking to run N
+        // instructions is asking about the processor it set RIP on.
+        let started_at = self.cpu().icount_for_api();
+        let executed_now = |machine: &Self| machine.cpu().icount_for_api() - started_at;
         const BATCH: u64 = 4096;
 
         // An address the caller wants execution to stop AT can only be
@@ -985,7 +991,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
             if self.stop_flag.load(Ordering::Relaxed) {
                 return Ok(EmuStopReason::Stopped);
             }
-            if count.is_some_and(|c| executed >= c) {
+            if count.is_some_and(|c| executed_now(self) >= c) {
                 return Ok(EmuStopReason::CountExhausted);
             }
             #[cfg(feature = "std")]
@@ -997,15 +1003,14 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
             }
 
             let budget = match count {
-                Some(c) => stride.min(c - executed),
+                Some(c) => stride.min(c - executed_now(self)),
                 None => stride,
             };
             let outcome = if bounded {
                 self.step_exactly(budget)?
             } else {
-                self.step_batch(budget)?
+                self.step(crate::emulator::RunBudget::Instructions(budget))?
             };
-            executed = executed.saturating_add(outcome.executed);
 
             // The addresses this wrapper watches are its own business, and they
             // outrank the batch's verdict: reaching `until` is why the caller
@@ -1076,14 +1081,17 @@ impl<'a> Emulator<()> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Create a new emulator pre-configured for the given CPU mode with a
     /// monomorphized tracer. Combines `new_with_instrumentation` + `setup_cpu_mode`.
     pub fn new_with_mode_and_instrumentation(
         config: EmulatorConfig,
         mode: CpuSetupMode,
         tracer: T,
-    ) -> Result<Box<Self>> {
+    ) -> Result<Box<Self>>
+    where
+        E: Default,
+    {
         let mut emu = Self::with_tracer(config, tracer)?;
         emu.init_memory_and_pc_system()?;
         emu.reset(crate::cpu::ResetReason::Hardware)?;
@@ -1092,7 +1100,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
     }
 }
 
-impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Reconfigure an existing emulator for the given CPU mode, skipping BIOS.
     /// The machine must already have memory and a PC system, which is what
     /// [`Emulator::new_with_mode`] arranges.

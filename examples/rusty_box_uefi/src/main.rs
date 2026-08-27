@@ -14,7 +14,7 @@ use uefi::prelude::*;
 use rusty_box::{
     cpu::{builder::BxCpuBuilder, cpu::BxCpuC},
     emulator::{
-        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder,
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder, RunBudget,
     },
     memory::BxMemoryStubC,
 };
@@ -258,14 +258,16 @@ fn run() -> Status {
     let mut login_sent = false;
 
     while total < max {
-        let outcome = match emu.step_batch(batch) {
+        let outcome = match emu.step(RunBudget::Instructions(batch)) {
             Ok(result) => result,
             Err(e) => {
                 error!("CPU error at {}M: {:?}", total / 1_000_000, e);
                 break;
             }
         };
-        total += outcome.executed;
+        // Whichever unit this machine measures in — the loop below is a
+        // progress budget, not an instruction count.
+        total += outcome.progress.count();
 
 
         // Drain and print BIOS/serial output (no Vec allocation)

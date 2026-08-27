@@ -12,11 +12,11 @@ use alloc::{string::String, vec::Vec};
 #[cfg(feature = "alloc")]
 use core::sync::atomic::Ordering;
 
-use super::Emulator;
+use super::{Emulator, SliceEngine};
 #[cfg(feature = "std")]
 use super::status_ips_from_retired_instructions;
 
-impl<'a, T: Instrumentation> Emulator<T> {
+impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
     fn total_cpu_icount(&self) -> u64 {
         (0..self.cpu_count()).fold(0u64, |total, cpu_index| {
@@ -25,7 +25,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     }
 }
 
-impl<'a, T: Instrumentation> Emulator<T> {
+impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     #[cfg(feature = "alloc")]
     /// Run emulator interactively with GUI event handling
     ///
@@ -128,6 +128,9 @@ impl<'a, T: Instrumentation> Emulator<T> {
         let mut stuck_reported = false;
         // Counter for consecutive HLT+IF=0 zero-batches (transient recovery)
         let mut hlt_if0_count: u32 = 0;
+        // The boot processor's counter when this run began, so the budget below
+        // measures what this run retired rather than what the machine ever has.
+        let icount_at_start = self.cpu_ref(0).icount;
         while instructions_executed < max_instructions && !self.stop_flag.load(Ordering::Relaxed) {
             // 1. Handle GUI events (keyboard/mouse/serial input) first.
             self.pump_gui_input();
@@ -135,17 +138,22 @@ impl<'a, T: Instrumentation> Emulator<T> {
             // 2. Execute CPU instructions in batches
             let remaining_instructions = max_instructions - instructions_executed;
             let batch_size = remaining_instructions.min(INSTRUCTION_BATCH_SIZE);
-            // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
-            let result =
-                self.run_cpu_batch_with_strict_limit(batch_size, true);
-
+            let result = self.run_cpu_batch_with_strict_limit(batch_size, true);
 
             let _should_update_gui = match result {
-                Ok(executed) => {
-                    instructions_executed += executed;
+                Ok(progress) => {
+                    // The budget is named in instructions, so it is counted in
+                    // instructions — read off the boot processor rather than
+                    // taken from the batch, which answers in elapsed time once
+                    // the machine has more than one processor.
+                    let before = instructions_executed;
+                    instructions_executed = self.cpu_ref(0).icount.saturating_sub(icount_at_start);
+                    let executed = instructions_executed.saturating_sub(before);
 
-                    // Reset HLT+IF=0 counter on any non-zero batch
-                    if executed > 0 {
+                    // Reset HLT+IF=0 counter on any batch that advanced the
+                    // machine, whichever unit it advanced in: an AP running
+                    // while the boot processor is halted is progress too.
+                    if !progress.stalled() {
                         hlt_if0_count = 0;
                     }
 
@@ -163,7 +171,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
                         );
                     }
                     // Detect zero-return batches (HLT or stuck)
-                    if executed == 0 {
+                    if progress.stalled() {
                         // HLT with IF=0: CPU is dead (panic or intentional halt)
                         // Use counter-based approach: only break after N consecutive
                         // zero-batch HLT+IF=0 cycles. This allows transient IF=0 states
@@ -459,12 +467,12 @@ impl<'a, T: Instrumentation> Emulator<T> {
                                 if batch2 == 0 {
                                     break;
                                 }
-                                // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
                                 let r2 = self.run_cpu_batch_with_strict_limit(batch2, true);
-                                if let Ok(ex2) = r2 {
-                                    instructions_executed += ex2;
+                                if let Ok(progress2) = r2 {
+                                    instructions_executed =
+                                        self.cpu_ref(0).icount.saturating_sub(icount_at_start);
                                     if !self.batch_advanced_pc_system {
-                                        self.advance_pc_system_after_cpu_ticks(ex2);
+                                        self.advance_pc_system_after_cpu_ticks(progress2.count());
                                     }
                                 } else {
                                     break;

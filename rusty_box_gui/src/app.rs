@@ -11,6 +11,10 @@ use std::sync::{
 };
 
 use egui::{Color32, RichText, Stroke};
+// The wasm build drives the machine directly from the frame loop below; the
+// native build hands it to a runner thread instead.
+#[cfg(target_arch = "wasm32")]
+use rusty_box::emulator::RunBudget;
 use rusty_box::params::{
     BxParams, BX_CPU_CORES_LIMIT, BX_CPU_HT_THREADS_LIMIT, BX_CPU_PROCESSORS_LIMIT,
     BX_MAX_SMP_THREADS_SUPPORTED,
@@ -2911,9 +2915,13 @@ impl WebShellApp {
                     frame_executed,
                     web_time::Instant::now().duration_since(frame_start),
                 ) {
-                    match emu.step_batch(WEB_BATCH_SIZE) {
+                    match emu.step(RunBudget::Instructions(WEB_BATCH_SIZE)) {
                         Ok(outcome) => {
-                            frame_executed = frame_executed.saturating_add(outcome.executed);
+                            // Whichever unit the machine measures in: this
+                            // paces a frame, and a frame is over when enough
+                            // has happened, not when a particular kind has.
+                            frame_executed =
+                                frame_executed.saturating_add(outcome.progress.count());
                             // Every terminal cause, not just a CPU shutdown: a
                             // guest that powers itself off through ACPI leaves
                             // the CPU healthy, so testing the CPU alone would
@@ -2922,7 +2930,7 @@ impl WebShellApp {
                                 self.shutdown = true;
                                 break;
                             }
-                            if outcome.executed == 0 {
+                            if outcome.progress.stalled() {
                                 break;
                             }
                         }

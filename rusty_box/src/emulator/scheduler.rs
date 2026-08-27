@@ -9,9 +9,9 @@ use crate::{
 };
 
 
-use super::{CpuMask, Emulator, SliceRequest, BOCHS_APIC_BUS_ID_MASK};
+use super::{CpuMask, Emulator, Progress, SliceEngine, SliceRequest, BOCHS_APIC_BUS_ID_MASK};
 
-impl<'a, T: Instrumentation> Emulator<T> {
+impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Invalidate every host pointer and decoded trace before memory backing
     /// can be replaced or restored.
     pub(crate) fn invalidate_all_cpu_host_mappings(&mut self) {
@@ -157,7 +157,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     /// `ExecCtx`; what raw wiring remains is device-side, installed and
     /// cleared entirely within this call, so `&mut self` is the whole
     /// contract and there is nothing left for a caller to uphold.
-    pub fn run_cpu_batch(&mut self, batch_size: u64) -> CpuResult<u64> {
+    pub fn run_cpu_batch(&mut self, batch_size: u64) -> CpuResult<Progress> {
         self.run_cpu_batch_with_strict_limit(batch_size, false)
     }
 
@@ -165,7 +165,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
         &mut self,
         batch_size: u64,
         strict_limit: bool,
-    ) -> CpuResult<u64> {
+    ) -> CpuResult<Progress> {
         if self.snapshot_restore_failed {
             return Err(CpuError::CpuNotInitialized);
         }
@@ -381,10 +381,14 @@ impl<'a, T: Instrumentation> Emulator<T> {
         self.assert_cpu_masks_match_scan();
         self.drain_hook_stop_requests();
         result.map(|_| {
+            // Bochs main.cc: an SMP round credits every processor a quantum and
+            // advances machine time by the round's average, so what this batch
+            // advanced is a span of time and not any processor's instruction
+            // count. A uniprocessor's own count IS the machine's, so it says so.
             if smp {
-                total_elapsed_ticks
+                Progress::Ticks(total_elapsed_ticks)
             } else {
-                total_up_executed
+                Progress::Instructions(total_up_executed)
             }
         })
     }
@@ -462,7 +466,7 @@ impl<'a, T: Instrumentation> Emulator<T> {
     }
 }
 
-impl<'a, T: Instrumentation> Emulator<T> {
+impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Check for pending reset requests (keyboard 0xFE, port 92h, PCI CF9).
     /// If a reset is pending, clears the request flags and performs that reset type.
     /// Returns true if a reset was performed.

@@ -25,6 +25,27 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const AP_TRAMPOLINE_OPCODE: u8 = 0x90;
     const AP_TRAMPOLINE_LEN: usize = 32;
     const AP_BATCH_INSTRUCTIONS: u64 = 16;
+
+    /// A batch's progress in the unit the test expects, so a test that asks the
+    /// wrong one fails saying so instead of comparing a duration to a count.
+    impl<T: Instrumentation> Emulator<T> {
+        /// Instructions retired. A uniprocessor machine answers in these.
+        fn run_cpu_batch_retiring(&mut self, batch_size: u64) -> crate::cpu::Result<u64> {
+            self.run_cpu_batch(batch_size).map(|progress| {
+                progress
+                    .instructions()
+                    .expect("a uniprocessor batch reports instructions")
+            })
+        }
+
+        /// Ticks of guest time. A multiprocessor machine answers in these,
+        /// because a round credits every processor and advances the machine's
+        /// clock by the average.
+        fn run_cpu_batch_elapsed(&mut self, batch_size: u64) -> crate::cpu::Result<u64> {
+            self.run_cpu_batch(batch_size)
+                .map(|progress| progress.ticks().expect("an SMP batch reports elapsed ticks"))
+        }
+    }
     const UNSET_APIC_ID: u8 = 0xFF;
     const ACPI_CHECKSUM_VALID_SUM: u8 = 0;
     // ACPI/MADT wire-format offsets used by the fw_cfg table-parsing helpers
@@ -318,6 +339,62 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
 
+    /// A machine says which unit it measured itself in, and the two are not
+    /// interchangeable.
+    ///
+    /// One processor retires instructions and its count is the machine's own.
+    /// Two share a round — Bochs main.cc credits every processor a quantum and
+    /// advances the clock by the average — so the machine advances while a
+    /// halted processor retires nothing, and no instruction count describes it.
+    /// The two used to arrive as one `u64` documented as instructions.
+    #[test]
+    fn a_machine_reports_progress_in_the_unit_it_can_actually_measure() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let code = [0x90u8; 64];
+
+                let mut uniprocessor = Emulator::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                uniprocessor.virt_write(0x1000, &code).unwrap();
+                uniprocessor.reg_write(X86Reg::Rip, 0x1000);
+                let before = uniprocessor.cpu_ref(BSP_INDEX).icount;
+                let progress = uniprocessor.run_cpu_batch(8).unwrap();
+                assert_eq!(
+                    progress.instructions(),
+                    Some(uniprocessor.cpu_ref(BSP_INDEX).icount - before),
+                    "one processor's retired count is the machine's own"
+                );
+                assert_eq!(progress.ticks(), None, "and it is not a span of time");
+
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut multiprocessor =
+                    Emulator::new_with_mode(config, CpuSetupMode::FlatProtected32).unwrap();
+                multiprocessor.reset(ResetReason::Hardware).unwrap();
+                multiprocessor.virt_write(0x1000, &code).unwrap();
+                multiprocessor.reg_write(X86Reg::Rip, 0x1000);
+                let progress = multiprocessor.run_cpu_batch(8).unwrap();
+                assert_eq!(
+                    progress.instructions(),
+                    None,
+                    "a round shared between processors is not an instruction count"
+                );
+                assert!(
+                    progress.ticks().is_some(),
+                    "a multiprocessor machine measures itself in time"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn strict_smp_deadline_keeps_bochs_idle_cpu_quantum_credit() {
         std::thread::Builder::new()
@@ -342,7 +419,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .register_timer(TimerOwner::NullTimer, 1, true, false, "one_tick")
                     .unwrap();
 
-                let elapsed = emu.run_cpu_batch(quantum / 2).unwrap();
+                let elapsed = emu.run_cpu_batch_elapsed(quantum / 2).unwrap();
 
                 assert_eq!(elapsed, (1 + quantum) / 2);
                 assert_eq!(emu.pc_system.time_ticks(), elapsed);
@@ -388,7 +465,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .unwrap();
                 let icount_before = emu.cpu_ref(BSP_INDEX).icount;
 
-                let elapsed = emu.run_cpu_batch(short_round).unwrap();
+                let elapsed = emu.run_cpu_batch_elapsed(short_round).unwrap();
 
                 assert_eq!(
                     emu.cpu_ref(BSP_INDEX).icount - icount_before,
@@ -422,8 +499,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.virt_write(CODE, &[0x49, 0x75, 0xFD]).unwrap();
                 emu.reg_write(X86Reg::Rip, CODE);
 
-                let executed =
-                    emu.run_cpu_batch_with_strict_limit(501, true).unwrap();
+                let executed = emu
+                    .run_cpu_batch_with_strict_limit(501, true)
+                    .unwrap()
+                    .instructions()
+                    .expect("a uniprocessor batch reports instructions");
 
                 assert_eq!(executed, 501, "strict budget must be exact");
                 // 501 instructions = 251 decs + 250 taken jnz.
@@ -453,7 +533,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .register_timer(TimerOwner::NullTimer, 1, true, true, "one_tick")
                     .unwrap();
 
-                let executed = emu.run_cpu_batch(4096).unwrap();
+                let executed = emu.run_cpu_batch_retiring(4096).unwrap();
                 assert!(
                     (1..128).contains(&executed),
                     "one-tick deadline did not stop the active batch promptly: {executed}"
@@ -780,7 +860,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // The tick-1 fire ends the batch and transfers the byte to the
                 // output buffer, but Bochs keyboard.cc periodic() only LATCHES
                 // the IRQ on a transfer — it is not raised until the next fire.
-                let executed = emu.run_cpu_batch(4_096).unwrap();
+                let executed = emu.run_cpu_batch_retiring(4_096).unwrap();
                 assert_eq!(executed, 1);
                 assert!(emu.device_manager.keyboard.kbd_controller.outb);
                 assert_eq!(emu.device_manager.irq.pic().master.irq_in[1], 0);
@@ -990,7 +1070,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 }
                 emu.drain_device_timer_requests();
 
-                let executed = emu.run_cpu_batch(512).unwrap();
+                let executed = emu.run_cpu_batch_retiring(512).unwrap();
                 assert_eq!(executed, 1, "the tied exact deadline must end the batch");
                 assert_eq!(emu.pc_system.time_ticks(), 1);
                 assert!(emu.device_manager.keyboard.kbd_controller.outb);
@@ -1009,7 +1089,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     "tied CMOS owners must fire in one-second-then-UIP order"
                 );
 
-                let executed = emu.run_cpu_batch(512).unwrap();
+                let executed = emu.run_cpu_batch_retiring(512).unwrap();
                 assert_eq!(executed, 244, "the mixed owner must fire at its exact deadline");
                 assert_eq!(emu.pc_system.time_ticks(), 245);
                 assert!(!emu.pc_system.is_timer_active(uip_handle));
@@ -1046,7 +1126,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, START);
 
                 let before = emu.cpu_ref(BSP_INDEX).icount;
-                let executed = emu.run_cpu_batch(4).unwrap();
+                let executed = emu.run_cpu_batch_retiring(4).unwrap();
                 assert!(executed >= 5);
                 assert!(emu.cpu_ref(BSP_INDEX).icount - before >= 5);
                 assert_eq!(emu.reg_read(X86Reg::Rip), START + 4);
@@ -1074,8 +1154,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, START);
 
                 let before = emu.cpu_ref(BSP_INDEX).icount;
-                let executed =
-                    emu.run_cpu_batch_with_strict_limit(4, true).unwrap();
+                let executed = emu
+                    .run_cpu_batch_with_strict_limit(4, true)
+                    .unwrap()
+                    .instructions()
+                    .expect("a uniprocessor batch reports instructions");
 
                 assert_eq!(executed, 4);
                 assert_eq!(emu.cpu_ref(BSP_INDEX).icount - before, 4);
@@ -1145,7 +1228,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let ticks_before = emu.pc_system.time_ticks();
 
                 let before = emu.cpu_ref(BSP_INDEX).icount;
-                let executed = emu.run_cpu_batch(1).unwrap();
+                let executed = emu.run_cpu_batch_retiring(1).unwrap();
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
 
                 // A batch budget of one is one DISPATCH, and the REP is that
@@ -1257,7 +1340,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, 0x1000);
 
                 let before = emu.cpu_ref(BSP_INDEX).icount;
-                let executed = emu.run_cpu_batch(4096).unwrap();
+                let executed = emu.run_cpu_batch_elapsed(4096).unwrap();
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
 
                 assert!(
@@ -1298,7 +1381,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 }
 
                 let before = emu.cpu_ref(BSP_INDEX).icount;
-                let executed = emu.run_cpu_batch(4096).unwrap();
+                let executed = emu.run_cpu_batch_elapsed(4096).unwrap();
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
 
                 assert!(
@@ -1339,7 +1422,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.virt_write(0x1000, &code).unwrap();
                 emu.reg_write(X86Reg::Rip, 0x1000);
 
-                let executed = emu.run_cpu_batch(4096).unwrap();
+                let executed = emu.run_cpu_batch_elapsed(4096).unwrap();
 
                 assert!(
                     executed < 4096,
@@ -1587,7 +1670,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.virt_write(0x1000, &code).unwrap();
                 emu.reg_write(X86Reg::Rip, 0x1000);
 
-                let executed = emu.run_cpu_batch(100_000).unwrap();
+                let executed = emu.run_cpu_batch_retiring(100_000).unwrap();
                 assert!(
                     executed >= 100_000,
                     "active batch retained a fixed polling cap: {executed}"
@@ -1603,7 +1686,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 high_ips_emu.virt_write(0x1000, &code).unwrap();
                 high_ips_emu.reg_write(X86Reg::Rip, 0x1000);
 
-                let executed = high_ips_emu.run_cpu_batch(100_000).unwrap();
+                let executed = high_ips_emu.run_cpu_batch_retiring(100_000).unwrap();
                 assert!(
                     executed >= 100_000,
                     "configured IPS reintroduced an active polling cap: {executed}"
@@ -1635,7 +1718,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, 0x1000);
 
                 for _ in 0..16 {
-                    let executed = emu.run_cpu_batch(100_000).unwrap();
+                    let executed = emu.run_cpu_batch_retiring(100_000).unwrap();
                     if !emu.batch_advanced_pc_system {
                         emu.advance_pc_system_after_cpu_ticks(executed);
                     }
@@ -2099,7 +2182,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                         .unwrap();
                     emu.virt_write(CODE, code).unwrap();
                     emu.reg_write(X86Reg::Rip, CODE);
-                    let executed = emu.run_cpu_batch(64).unwrap();
+                    let executed = emu.run_cpu_batch_retiring(64).unwrap();
                     assert!(executed > 0);
                     assert!(
                         emu.devices.take_port_e9_output().is_empty(),
@@ -2254,7 +2337,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // first instruction completes the batch.
                 emu.virt_write(CODE, &[0x90, 0xF4]).unwrap();
                 emu.reg_write(X86Reg::Rip, CODE);
-                let executed = emu.run_cpu_batch(8).unwrap();
+                let executed = emu.run_cpu_batch_retiring(8).unwrap();
                 assert!(executed > 0);
 
                 // Payload landed at page_reg 0x20 -> physical 0x20_0000.
@@ -2307,7 +2390,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, CODE);
 
                 let t0 = emu.pc_system.time_ticks();
-                let executed = emu.run_cpu_batch(64).unwrap();
+                let executed = emu.run_cpu_batch_retiring(64).unwrap();
                 assert!(executed > 0);
                 assert!(
                     emu.devices.take_port_e9_output().is_empty(),
@@ -2853,7 +2936,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.rebuild_cpu_masks_from_scan();
                 let before = emu.cpu_ref(AP_INDEX).icount;
 
-                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
+                let executed = emu.run_cpu_batch_elapsed(AP_BATCH_INSTRUCTIONS).unwrap();
 
                 assert!(executed > 0);
                 assert!(
@@ -2906,7 +2989,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 }
                 emu.refresh_cpu_masks(BSP_INDEX);
 
-                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
+                let executed = emu.run_cpu_batch_elapsed(AP_BATCH_INSTRUCTIONS).unwrap();
 
                 assert!(executed > 0);
                 assert_eq!(
@@ -2960,7 +3043,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // in Bochs — so the INIT must be processed before the SIPI is
                 // sent, mirroring the MP-spec INIT/SIPI delay.
                 send_bsp_icr_init(&mut emu);
-                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
+                let executed = emu.run_cpu_batch_elapsed(AP_BATCH_INSTRUCTIONS).unwrap();
                 assert!(executed > 0);
                 assert_eq!(
                     emu.cpu_ref(AP_INDEX).activity_state,
@@ -2971,7 +3054,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 send_bsp_icr_sipi(&mut emu, SECOND_TRAMPOLINE_VECTOR);
                 let before = emu.cpu_ref(AP_INDEX).icount;
 
-                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
+                let executed = emu.run_cpu_batch_elapsed(AP_BATCH_INSTRUCTIONS).unwrap();
 
                 assert!(executed > 0);
                 assert_eq!(
@@ -3037,7 +3120,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .cpu_ref(AP_INDEX)
                     .is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_INIT));
 
-                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
+                let executed = emu.run_cpu_batch_elapsed(AP_BATCH_INSTRUCTIONS).unwrap();
                 assert!(executed > 0);
                 assert_eq!(
                     emu.cpu_ref(AP_INDEX).activity_state,
@@ -3079,7 +3162,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .cpu_ref(AP_INDEX)
                     .is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_INIT));
 
-                let executed = emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS).unwrap();
+                let executed = emu.run_cpu_batch_elapsed(AP_BATCH_INSTRUCTIONS).unwrap();
                 assert!(executed > 0);
                 assert_eq!(
                     emu.cpu_ref(AP_INDEX).activity_state,
@@ -3169,7 +3252,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 let before = emu.cpu_ref(AP_INDEX).icount;
                 let quantum = emu.smp_quantum_ticks();
-                let elapsed = emu.run_cpu_batch(quantum).unwrap();
+                let elapsed = emu.run_cpu_batch_elapsed(quantum).unwrap();
                 let ap_delta = emu.cpu_ref(AP_INDEX).icount - before;
 
                 // The halted peer is credited its quantum and the running AP
@@ -3275,7 +3358,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.service_lapic_local_events();
 
                 let quantum = emu.smp_quantum_ticks();
-                let elapsed = emu.run_cpu_batch(quantum).unwrap();
+                let elapsed = emu.run_cpu_batch_elapsed(quantum).unwrap();
 
                 assert!(elapsed > 0);
                 assert!(
@@ -3987,7 +4070,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let before = emu.cpu_ref(BSP_INDEX).icount;
                 // batch_size=1 finishes after the first round: the quantum
                 // credits alone guarantee elapsed >= 1.
-                let elapsed = emu.run_cpu_batch(1).unwrap();
+                let elapsed = emu.run_cpu_batch_elapsed(1).unwrap();
 
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
                 // Bochs main.cc bx_begin_simulation: every CPU that executes
@@ -4397,7 +4480,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // defect under test.
                 let mut stop = None;
                 for _ in 0..8 {
-                    let outcome = emu.step_batch(1_000).expect("step_batch");
+                    let outcome = emu
+                        .step(RunBudget::Instructions(1_000))
+                        .expect("step");
                     if outcome.is_terminal() {
                         stop = Some(outcome.stop);
                         break;
@@ -4499,7 +4584,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.reg_write(X86Reg::Rip, CODE_ADDR);
 
                 emu.cpu_mut().instrumentation.stop_request = true;
-                let outcome = emu.step_batch(50_000_000).expect("step_batch");
+                let outcome = emu
+                    .step(RunBudget::Instructions(50_000_000))
+                    .expect("step");
 
                 assert_eq!(
                     outcome.stop,
@@ -5668,7 +5755,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         // so pump until the guest has stamped everything or its HLT stops it.
         let mut output = Vec::new();
         for _ in 0..STAMP_COUNT {
-            let executed = emu.run_cpu_batch(STAMP_BUDGET).unwrap();
+            let executed = emu.run_cpu_batch_retiring(STAMP_BUDGET).unwrap();
             output.extend(emu.devices.take_port_e9_output());
             if executed == 0 || output.len() >= STAMP_COUNT as usize {
                 break;

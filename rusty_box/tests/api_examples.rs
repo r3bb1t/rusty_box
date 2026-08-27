@@ -16,7 +16,7 @@
 use rusty_box::cpu::{CpuSetupMode, ResetReason, X86Reg};
 use rusty_box::emulator::{
     AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder,
-    MemorySize, PowerState, StopReason,
+    MemorySize, PowerState, RunBudget, StopReason,
 };
 use rusty_box::gui::NoGui;
 use rusty_box::{GpaPerms, GpaPlan, HostOffset, MemoryPlanError};
@@ -53,7 +53,7 @@ fn a_machine_is_assembled_by_the_builder_and_starts_at_its_reset_vector() {
         .build()
         .expect("build");
 
-    let outcome = machine.step_batch(16).expect("step");
+    let outcome = machine.step(RunBudget::Instructions(16)).expect("step");
     assert_eq!(
         outcome.stop,
         StopReason::Halted,
@@ -149,7 +149,7 @@ fn a_real_mode_machine_fetches_from_where_the_caller_loaded_code() {
         .expect("load");
     machine.reg_write(X86Reg::Rip, CODE);
 
-    machine.step_batch(32).expect("step");
+    machine.step(RunBudget::Instructions(32)).expect("step");
 
     let mut mark = [0u8; 1];
     machine.virt_read(MARK, &mut mark).expect("read back");
@@ -239,8 +239,14 @@ fn a_batch_reports_both_how_far_it_got_and_why_it_stopped() {
 
     let mut executed = 0u64;
     let stop = loop {
-        let outcome = machine.step_batch(1_000).expect("step");
-        executed += outcome.executed;
+        let outcome = machine.step(RunBudget::Instructions(1_000)).expect("step");
+        // One processor, so the machine answers in instructions. A machine with
+        // more would answer in ticks, and `instructions()` would say `None`
+        // rather than hand back a duration dressed as a count.
+        executed += outcome
+            .progress
+            .instructions()
+            .expect("a uniprocessor machine measures its progress in instructions");
 
         // A caller that only needs "should I keep going" asks this instead of
         // enumerating the reasons.
@@ -269,7 +275,7 @@ fn a_halted_machine_says_how_long_until_its_next_timer() {
         .build()
         .expect("build");
 
-    assert_eq!(machine.step_batch(16).expect("step").stop, StopReason::Halted);
+    assert_eq!(machine.step(RunBudget::Instructions(16)).expect("step").stop, StopReason::Halted);
     // Some timer is always armed on a running machine, so an idle host knows
     // how far it may skip ahead.
     assert!(machine.ticks_to_next_timer_deadline().is_some());
@@ -406,7 +412,7 @@ fn a_stop_handle_ends_a_run_from_another_thread() {
     assert!(!handle.is_stopping());
     std::thread::spawn(move || handle.stop()).join().expect("join");
 
-    let outcome = machine.step_batch(1_000_000).expect("step");
+    let outcome = machine.step(RunBudget::Instructions(1_000_000)).expect("step");
     assert_eq!(outcome.stop, StopReason::StopRequested);
 }
 
@@ -547,6 +553,30 @@ fn an_instruction_count_is_not_spent_on_trace_boundaries() {
     );
 }
 
+/// A run can be bounded by guest time instead of by instructions, which is the
+/// unit a device deadline is expressed in.
+///
+/// The pair a caller actually wants: ask how far the next timer is, then run
+/// exactly that far. Sizing the same run in instructions means guessing how
+/// many of them fit in a tick, and a guest that halts retires none at all while
+/// time keeps moving.
+#[test]
+fn a_run_can_be_bounded_by_guest_time_rather_than_by_instructions() {
+    let mut machine =
+        Emulator::new_with_mode(small_config(), CpuSetupMode::FlatLong64).expect("machine");
+    machine.mem_write(CODE, &[0x90; 64]).expect("write code");
+    machine.reg_write(X86Reg::Rip, CODE);
+    machine.reg_write(X86Reg::Rsp, 0x0030_0000);
+
+    let before = machine.ticks();
+    machine
+        .step(RunBudget::Ticks(32))
+        .expect("step");
+    let advanced = machine.ticks() - before;
+
+    assert_eq!(advanced, 32, "a tick budget advances the machine's clock exactly");
+}
+
 // ── Instrumentation ─────────────────────────────────────────────────────────
 
 #[cfg(feature = "instrumentation")]
@@ -675,7 +705,7 @@ fn machines_are_send_so_a_fleet_is_one_per_worker() {
                     .bios(&bios)
                     .build()
                     .expect("build");
-                machine.step_batch(16).expect("step").stop
+                machine.step(RunBudget::Instructions(16)).expect("step").stop
             })
         })
         .collect();

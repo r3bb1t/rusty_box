@@ -7,7 +7,7 @@
 
 use rusty_box::{
     emulator::{
-        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder,
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder, RunBudget,
     },
     gui::shared_display::SharedDisplay,
 };
@@ -643,9 +643,11 @@ impl eframe::App for WasmEmulatorApp {
             if let Some(ref mut emu) = self.emulator {
                 let mut frame_executed = 0u64;
                 while frame_executed < FRAME_BUDGET {
-                    match emu.step_batch(BATCH_SIZE) {
+                    match emu.step(RunBudget::Instructions(BATCH_SIZE)) {
                         Ok(outcome) => {
-                            frame_executed += outcome.executed;
+                            // Whichever unit the machine measures in: this is a
+                            // frame budget, not an instruction count.
+                            frame_executed += outcome.progress.count();
                             // Terminal covers a guest ACPI power-off, which
                             // leaves the CPU healthy and so was previously
                             // invisible here — the frame loop just kept going.
@@ -653,7 +655,7 @@ impl eframe::App for WasmEmulatorApp {
                                 self.shutdown = true;
                                 break;
                             }
-                            if outcome.executed == 0 {
+                            if outcome.progress.stalled() {
                                 break;
                             }
                         }
