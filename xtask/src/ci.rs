@@ -75,6 +75,13 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // `#![forbid(unsafe_code)]`. A device model has no business with raw memory
     // — it is handed what it may touch.
     ("rusty_box_devices/src", 0),
+    // The host-FFI leaf, and the one crate whose baseline is not zero and is
+    // not aiming there: calling the WinHvPlatform C API is its whole purpose.
+    // What the ratchet enforces here is CONFINEMENT — every one of these lives
+    // in `sys/windows.rs`, which is the only file that lifts the workspace's
+    // `deny(unsafe_code)`, and each block names the invariant it rests on. A
+    // rise means either a new platform call or unsafe that escaped the seam.
+    ("rusty_box_whp/src", 30),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. Zero, permanently: thread
 /// safety is derived from ownership, and `Emulator`'s `const` assertion in
@@ -313,6 +320,24 @@ const MATRIX: &[Step] = &[
             "--target",
             "x86_64-unknown-none",
         ],
+        envs: &[],
+        stdout_marker: None,
+    },
+    // The Windows Hypervisor Platform leaf. Its tests need no hypervisor —
+    // they cover the bitfield layouts transcribed from the SDK, which is
+    // exactly the part a reader cannot check by eye — so this step runs
+    // everywhere, including on a host where `hypervisor_present()` is false.
+    // Building the probe too, because an example outside the gate is an
+    // example that rots.
+    Step {
+        name: "WHP leaf tests",
+        args: &["test", "--release", "-p", "rusty_box_whp"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        name: "WHP probe builds",
+        args: &["check", "--release", "-p", "rusty_box_whp", "--examples"],
         envs: &[],
         stdout_marker: None,
     },
