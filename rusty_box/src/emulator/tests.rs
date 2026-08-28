@@ -26,6 +26,45 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const AP_TRAMPOLINE_LEN: usize = 32;
     const AP_BATCH_INSTRUCTIONS: u64 = 16;
 
+    /// An engine that runs the guest exactly as the interpreter does, and
+    /// counts the times the machine told it the guest-physical map moved.
+    ///
+    /// Stands in for an engine that installed the map in hardware, which is
+    /// the only kind that needs telling — and does it without a hypervisor, so
+    /// the machine's half of that contract is testable everywhere.
+    #[derive(Default)]
+    struct MapWatchingEngine {
+        installs: core::sync::atomic::AtomicUsize,
+    }
+
+    impl MapWatchingEngine {
+        fn installs(&self) -> usize {
+            self.installs.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl<T: Instrumentation> SliceEngine<T> for MapWatchingEngine {
+        const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Instructions;
+
+        fn run_slice(
+            &mut self,
+            cpu: &mut BxCpuC<T>,
+            io: super::PcIo<'_>,
+            request: SliceRequest,
+        ) -> crate::cpu::Result<Progress> {
+            SoftwareEngine.run_slice(cpu, io, request)
+        }
+
+        fn memory_map_changed(
+            &mut self,
+            _memory: &mut crate::memory::BxMemC,
+        ) -> crate::cpu::Result<()> {
+            self.installs
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
     /// A batch's progress in the unit the test expects, so a test that asks the
     /// wrong one fails saying so instead of comparing a duration to a count.
     impl<T: Instrumentation> Emulator<T> {
@@ -677,6 +716,83 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert!(
                     fires >= 5,
                     "PIT mode 2 must generate repeated IRQ0 edges, got {fires}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// An engine that installed the guest-physical map is told when the
+    /// chipset changes it.
+    ///
+    /// An engine running the guest on real hardware hands the map over once
+    /// and the hardware holds it; every later change is the machine's to
+    /// forward. The producer used here is the one that matters most — a PAM
+    /// write, which is how a BIOS shadows itself before jumping into the copy.
+    /// A machine that stayed quiet would leave such a guest executing the ROM
+    /// it thought it had replaced.
+    ///
+    /// Deliberately not asserted through a boundary that changed nothing: the
+    /// forward has to be tied to the map moving, or an engine on a busy
+    /// machine would reinstall the map thousands of times a second.
+    #[test]
+    fn a_chipset_change_to_the_map_is_forwarded_to_the_engine() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut emu = Emulator::<(), MapWatchingEngine>::with_engine(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+
+                // The first boundary after device init applies the routing the
+                // chipset came up with, so it moves the map and says so. What
+                // matters is the boundary AFTER that, which moves nothing.
+                emu.service_scheduler_boundary(0).unwrap();
+                let settled = emu.engine().installs();
+                emu.service_scheduler_boundary(0).unwrap();
+                assert_eq!(
+                    emu.engine().installs(),
+                    settled,
+                    "a boundary that moved nothing must not reinstall the map"
+                );
+
+                // PAM0's upper nibble routes 0xF0000-0xFFFFF; setting read and
+                // write makes that range plain RAM (i440FX, Bochs pci.cc).
+                // Written the way a guest writes it — the config address port,
+                // then the byte at 0x59 — so the whole latch path is under
+                // test and not just the register.
+                let ticks = emu.pc_system.time_ticks();
+                emu.devices.outp(
+                    0x0CF8,
+                    0x8000_0058,
+                    4,
+                    ticks,
+                    &mut emu.pc_system,
+                    &mut emu.device_manager,
+                    &mut emu.memory,
+                );
+                emu.devices.outp(
+                    0x0CFD,
+                    0x30,
+                    1,
+                    ticks,
+                    &mut emu.pc_system,
+                    &mut emu.device_manager,
+                    &mut emu.memory,
+                );
+                emu.service_scheduler_boundary(0).unwrap();
+                assert_eq!(
+                    emu.engine().installs(),
+                    settled + 1,
+                    "a PAM write moves the map, and an engine holding one has to \
+                     be told exactly once"
                 );
             })
             .unwrap()

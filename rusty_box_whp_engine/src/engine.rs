@@ -29,6 +29,8 @@ use rusty_box::cpu::arch_state::VcpuArchState;
 use rusty_box::cpu::{cpu::BxCpuC, instrumentation::Instrumentation, CpuError, Result};
 use rusty_box::emulator::{PcIo, Progress, ProgressUnit, SliceEngine, SliceRequest};
 use rusty_box::memory::plan::MemoryPlan;
+use rusty_box::memory::BxMemC;
+use rusty_box::GpaWindow;
 
 /// The processor this engine runs. SMP under a hypervisor is its own unit; a
 /// machine with more processors than this refuses to start rather than running
@@ -54,6 +56,13 @@ struct Started {
     partition: Partition,
     /// Reused across slices so a state exchange allocates nothing per exit.
     state: VcpuArchState,
+    /// The map the partition is currently holding.
+    ///
+    /// Kept because a borrowed mapping leaves no bookkeeping behind — the
+    /// partition records the range only for memory it owns — so this is the
+    /// only record of what is installed, and the only way to know which
+    /// windows a new map removed rather than merely changed.
+    installed: MemoryPlan,
 }
 
 /// Runs guest code on the Windows Hypervisor Platform.
@@ -86,10 +95,11 @@ impl WhpEngine {
                 .map_err(platform_failed)?;
             let mut partition = config.setup().map_err(platform_failed)?;
 
-            map_machine_memory(&mut partition, io)?;
+            let installed = install_the_machines_map(&mut partition, io.memory(), None)?;
             partition.create_processor(BOOT_VP).map_err(platform_failed)?;
 
-            self.started = Some(Started { partition, state: VcpuArchState::default() });
+            self.started =
+                Some(Started { partition, state: VcpuArchState::default(), installed });
         }
         // Established just now, or by an earlier slice. Reported rather than
         // asserted: a library says what it cannot do instead of ending the
@@ -112,25 +122,70 @@ enum Yielded {
     Halted,
     /// The host asked for the processor back mid-run.
     Canceled,
+    /// A device dispatch asked for the machine's boundary to be serviced.
+    ///
+    /// The guest must not run on until it has been. A chipset write that
+    /// re-routes guest-physical space — a PAM flip, an SMRAM open, a relocated
+    /// BAR — only takes effect when the machine applies it, and this engine
+    /// then has a new map to install; a guest that kept running would be
+    /// running against the layout the write was replacing.
+    Boundary,
 }
 
-/// Install the machine's guest-physical map into the partition.
+/// Install the machine's guest-physical map into the partition, replacing
+/// whatever `installed` describes, and report what is now installed.
 ///
-/// The plan is derived from the machine's own memory, so the hypervisor and
+/// The map is derived from the machine's own memory, so the hypervisor and
 /// this port's interpreter serve the same bytes at the same addresses — which
 /// is what makes an exit serviced by the shadow processor land where the guest
 /// expects it.
-fn map_machine_memory(partition: &mut Partition, io: &mut PcIo<'_>) -> Result<()> {
-    let plan = MemoryPlan::derive(io.memory()).map_err(|error| {
+///
+/// Two things make the replacement more than a loop of maps. A mapping
+/// REPLACES any prior one over the same range, so a window that merely changed
+/// its permissions or its backing needs no unmap — but a window the new map
+/// DROPS has to be taken out explicitly, or a range the chipset just turned
+/// into device space would keep being served from RAM and never exit. And a
+/// borrowed mapping leaves the partition no bookkeeping to consult, so what
+/// the old map was has to be remembered rather than asked for.
+///
+/// Windows that did not change are left alone. That is not only for the cost
+/// of the call: re-mapping a range discards the second-level translations the
+/// hypervisor built for it, and a BIOS flipping one PAM area has no business
+/// making the guest fault its way back through all of RAM.
+///
+/// # Errors
+/// A machine whose memory has no stable map, a window outside the allocation,
+/// or a platform call that refused.
+fn install_the_machines_map(
+    partition: &mut Partition,
+    memory: &mut BxMemC,
+    installed: Option<&MemoryPlan>,
+) -> Result<MemoryPlan> {
+    let plan = MemoryPlan::derive(memory).map_err(|error| {
         tracing::error!("this machine has no stable guest-physical map: {error:?}");
         CpuError::UnsupportedCpuOperation {
             operation: "a partially resident machine has no map to install",
         }
     })?;
+    let old: &[GpaWindow] = installed.map_or(&[], MemoryPlan::windows);
+    if old == plan.windows() {
+        return Ok(plan);
+    }
+
+    for window in old {
+        if plan.windows().contains(window) {
+            continue;
+        }
+        partition
+            .unmap_subrange(window.gpa, window.len)
+            .map_err(platform_failed)?;
+    }
 
     for window in plan.windows() {
-        let host = io
-            .memory()
+        if old.contains(window) {
+            continue;
+        }
+        let host = memory
             .allocation_slice(window.host.get(), window.len)
             .ok_or(CpuError::UnsupportedCpuOperation {
                 operation: "a plan window fell outside the machine's allocation",
@@ -142,7 +197,7 @@ fn map_machine_memory(partition: &mut Partition, io: &mut PcIo<'_>) -> Result<()
         // in `rusty_box_whp`, whose signature carries the contract.
         map_window(partition, window.gpa, host, window.perms)?;
     }
-    Ok(())
+    Ok(plan)
 }
 
 /// Install one window, discharging the contract `map_borrowed` names.
@@ -182,6 +237,18 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
     // The hardware retires the guest's instructions and this port never sees
     // them, so what a slice can report is the time it took. See `ticks_elapsed`.
     const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Ticks;
+
+    fn memory_map_changed(&mut self, memory: &mut BxMemC) -> Result<()> {
+        // Before the first slice there is no partition and nothing installed;
+        // the map this would have installed is the one `start` derives, so a
+        // change now is not a change to anything.
+        let Some(started) = self.started.as_mut() else {
+            return Ok(());
+        };
+        started.installed =
+            install_the_machines_map(&mut started.partition, memory, Some(&started.installed))?;
+        Ok(())
+    }
 
     fn run_slice(
         &mut self,
@@ -224,7 +291,10 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             // exchange above; the platform reports it as the reason the run
             // ended, and the shadow is where the machine reads it.
             Yielded::Halted => cpu.record_halt(),
-            Yielded::Canceled => {}
+            // The request is already on the processor, where the scheduler
+            // takes it the moment this slice returns; ending the slice is the
+            // whole of what this engine owes it.
+            Yielded::Canceled | Yielded::Boundary => {}
         }
         Ok(Progress::Ticks(ticks_elapsed(began.elapsed(), ips)))
     }
@@ -242,7 +312,9 @@ fn install_the_shadow<T: Instrumentation>(
     started: &mut Started,
     cpu: &BxCpuC<T>,
 ) -> Result<()> {
-    let Started { partition, state } = started;
+    // Named rather than elided, so a field added to `Started` has to be
+    // considered here instead of silently ignored.
+    let Started { partition, state, installed: _ } = started;
     cpu.export_arch_state(state);
     state::import(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)
 }
@@ -256,7 +328,7 @@ fn read_back_into_the_shadow<T: Instrumentation>(
     started: &mut Started,
     cpu: &mut BxCpuC<T>,
 ) -> Result<()> {
-    let Started { partition, state } = started;
+    let Started { partition, state, installed: _ } = started;
     state::export(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)?;
     cpu.import_arch_state(state).map_err(|error| {
         tracing::error!("the hypervisor returned a state this port refuses: {error:?}");
@@ -280,6 +352,14 @@ fn run_until_the_machine_is_needed<T: Instrumentation>(
             // machine's own device dispatch answers it directly.
             ExitReason::IoPortAccess(access) => {
                 service_port_access(started, io, &exit, access)?;
+                // A device answering that write may have latched something on
+                // the bus — an interrupt line, a hold request, a machine
+                // boundary to service. The interpreter drains those at its own
+                // next instruction boundary; this is that boundary here.
+                io.sync_io_events(cpu);
+                if cpu.wants_a_machine_boundary() {
+                    return Ok(Yielded::Boundary);
+                }
             }
             // A halted processor is the machine's business: its HLT
             // fast-forward advances time to the next deadline and decides when

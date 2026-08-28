@@ -79,6 +79,47 @@ impl<'a> PcIo<'a> {
         self.pc_system
     }
 
+    /// Move what a device dispatch latched onto the processor that caused it.
+    ///
+    /// A device answering a port write cannot reach a processor — it is handed
+    /// what it may touch, and a CPU is not on the list — so what it wants said
+    /// is latched on the bus: the PIC's interrupt line, the 8237's hold
+    /// request, and a request for the machine to service its boundary. This is
+    /// where those become the processor's business, and it is the only place
+    /// (R5) — a second drain would leave whichever ran first with nothing and
+    /// the other with a latch it had already consumed.
+    ///
+    /// Every engine has to do it, which is why it lives here rather than on
+    /// the interpreter's execution context: an engine running the guest on
+    /// hardware answers a port exit out of these same devices, and a boundary
+    /// request it dropped would strand a PAM flip or a relocated BAR.
+    pub fn sync_io_events<T: Instrumentation>(&mut self, cpu: &mut BxCpuC<T>) {
+        let pic_intr_level = self.devices.take_pic_intr_level();
+        let hrq_level = self.devices.take_hrq_level();
+        let scheduler_boundary_requested = self.devices.take_scheduler_boundary_requested();
+
+        if let Some(level) = pic_intr_level {
+            if level {
+                cpu.signal_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
+            } else {
+                cpu.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
+            }
+        }
+        if let Some(level) = hrq_level {
+            // Bochs pc_system.cc set_HRQ: `HRQ = val; if (val)
+            // BX_CPU(0)->async_event = 1;` — the OUT that unmasked a pending
+            // DRQ makes HRQ visible at this CPU's very next instruction
+            // boundary, where handle_async_event services HLDA.
+            self.pc_system.set_hrq(level);
+            if level {
+                cpu.raise_async_event();
+            }
+        }
+        if scheduler_boundary_requested {
+            cpu.request_scheduler_boundary();
+        }
+    }
+
     /// Execute exactly one guest instruction on `cpu`, against these parts.
     ///
     /// The verb an execution engine needs and cannot write for itself. An

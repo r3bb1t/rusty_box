@@ -127,6 +127,27 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
     ) {
         (self.cpu, self.memory, self.devices, self.pc_system)
     }
+
+    /// The processor and the machine parts, as the pair a device dispatch has
+    /// to reconcile.
+    ///
+    /// The same pair an execution engine holds — a processor, and the parts it
+    /// runs against — which is why the verbs that reconcile them live on
+    /// [`PcIo`] and are reached from here rather than written twice (R5).
+    #[inline]
+    pub(crate) fn cpu_with_io(&mut self) -> CpuWithIo<'_, T> {
+        CpuWithIo {
+            cpu: self.cpu,
+            io: PcIo::new(self.memory, self.devices, self.device_manager, self.pc_system),
+        }
+    }
+}
+
+/// A processor beside the machine parts it runs against, both borrowed from
+/// one execution context.
+pub(crate) struct CpuWithIo<'a, T: Instrumentation> {
+    pub(crate) cpu: &'a mut BxCpuC<T>,
+    pub(crate) io: PcIo<'a>,
 }
 
 /// Machine parts for tests that drive instructions directly.

@@ -1109,6 +1109,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.device_manager.keyboard.a20_enabled = a20_enabled;
         if mapping_changed {
             self.invalidate_all_cpu_host_mappings();
+            // The processors' cached translations are not the only copy of
+            // the map that just moved. An engine that installed it in
+            // hardware holds one too, and this is the one place the machine
+            // knows it moved — every producer of a topology change
+            // (PAM, SMRAM, the BIOS-write gate, a relocated BAR, A20) is
+            // aggregated above (R5).
+            <E as SliceEngine<T>>::memory_map_changed(&mut self.engine, &mut self.memory)?;
         }
         self.drain_device_timer_requests();
         } // had_work prologue

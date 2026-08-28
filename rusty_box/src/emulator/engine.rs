@@ -22,6 +22,8 @@
 
 use super::{PcIo, Progress};
 use crate::cpu::{cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentation, Result};
+#[cfg(doc)]
+use crate::memory::plan::MemoryPlan;
 
 /// One bounded stretch of guest execution, as the machine asks for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +130,31 @@ pub trait SliceEngine<T: Instrumentation> {
         io: PcIo<'_>,
         request: SliceRequest,
     ) -> Result<Progress>;
+
+    /// The machine's guest-physical map has changed; install the new one.
+    ///
+    /// Called at the machine boundary that applies chipset effects, which is
+    /// the one place a PAM flip, an SMRAM open, a BIOS-write enable or a
+    /// relocated BAR becomes visible (doctrine R5). Derive the map with
+    /// [`MemoryPlan::derive`] — an engine is handed the memory rather than the
+    /// map, because only an engine that installs one needs to build it.
+    ///
+    /// Defaulted to doing nothing, and that is the honest default: this port's
+    /// interpreter consults the routing on every access, so there is nothing
+    /// for it to install and no staleness for it to have. An engine that gave
+    /// the map to hardware once is the one that must be told — a BIOS
+    /// shadowing itself flips PAM three times before jumping into the copy,
+    /// and a guest left running against the map it was given at reset would
+    /// execute the ROM it thought it had replaced.
+    ///
+    /// # Errors
+    /// Whatever prevented the new map from being installed. A machine treats
+    /// that as a boundary failure rather than continuing, because a guest
+    /// running against a stale map is worse than a guest that stopped.
+    fn memory_map_changed(&mut self, memory: &mut crate::memory::BxMemC) -> Result<()> {
+        let _ = memory;
+        Ok(())
+    }
 }
 
 /// This port's own interpreter.

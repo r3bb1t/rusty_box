@@ -852,6 +852,18 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         })
     }
 
+    /// The engine this machine runs its guest on.
+    ///
+    /// A machine's engine is chosen when it is built and never changes, so
+    /// this is how a caller that named one asks it something afterwards — how
+    /// a hypervisor partition is faring, what a test engine recorded. Shared
+    /// rather than exclusive: running the guest is the machine's to do, and an
+    /// engine driven from two places would be two machines.
+    #[must_use]
+    pub fn engine(&self) -> &E {
+        &self.engine
+    }
+
     /// The machine's power and reset controls.
     pub fn power(&mut self) -> Power<'_, T, E> {
         Power { machine: self }

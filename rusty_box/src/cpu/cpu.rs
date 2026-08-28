@@ -1026,6 +1026,29 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.async_event |= BX_ASYNC_EVENT_SCHEDULER_BOUNDARY;
     }
 
+    /// Whether the machine has to service its boundary before this processor
+    /// runs on.
+    ///
+    /// The reading half of the latch above, for a caller that must react to a
+    /// request without consuming it — an execution engine sees the request
+    /// first, and has to hand the processor back with the request intact for
+    /// the scheduler to take.
+    #[must_use]
+    #[inline]
+    pub fn wants_a_machine_boundary(&self) -> bool {
+        self.async_event & BX_ASYNC_EVENT_SCHEDULER_BOUNDARY != 0
+    }
+
+    /// Ask for this processor's next instruction boundary to check for
+    /// asynchronous work.
+    ///
+    /// Bochs sets `async_event = 1` from wherever the work arose; this is the
+    /// same thing said once, so nothing outside the processor writes the field.
+    #[inline]
+    pub(crate) fn raise_async_event(&mut self) {
+        self.async_event |= 1;
+    }
+
     /// Take the scheduler boundary latch after CPU execution wiring has been
     /// cleared. The CPU loop deliberately does not consume this bit.
     #[inline]
@@ -1818,30 +1841,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// or nowhere.
     #[inline]
     pub(super) fn sync_io_events(&mut self) {
-        let pic_intr_level = self.devices.take_pic_intr_level();
-        let hrq_level = self.devices.take_hrq_level();
-        let scheduler_boundary_requested = self.devices.take_scheduler_boundary_requested();
-
-        if let Some(level) = pic_intr_level {
-            if level {
-                self.signal_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
-            } else {
-                self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
-            }
-        }
-        if let Some(level) = hrq_level {
-            // Bochs pc_system.cc set_HRQ: `HRQ = val; if (val)
-            // BX_CPU(0)->async_event = 1;` — the OUT that unmasked a pending
-            // DRQ makes HRQ visible at this CPU's very next instruction
-            // boundary, where handle_async_event services HLDA.
-            self.pc_system.set_hrq(level);
-            if level {
-                self.async_event |= 1;
-            }
-        }
-        if scheduler_boundary_requested {
-            self.request_scheduler_boundary();
-        }
+        let mut parts = self.cpu_with_io();
+        parts.io.sync_io_events(parts.cpu);
     }
 
     /// Check HRQ (DMA Hold Request) state from pc_system.
