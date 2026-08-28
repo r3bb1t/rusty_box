@@ -20,7 +20,7 @@
 //! meaning came from position alone — `1` at one call site and the processor
 //! count at the other, with nothing on the page saying which was which (R0).
 
-use super::PcIo;
+use super::{PcIo, Progress};
 use crate::cpu::{cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentation, Result};
 
 /// One bounded stretch of guest execution, as the machine asks for it.
@@ -64,7 +64,14 @@ pub struct SliceRequest {
 /// sealing policy); `caps()` is the first one waiting.
 pub trait SliceEngine<T: Instrumentation> {
     /// Run `cpu` against `io` for the stretch `request` describes, and report
-    /// how many instructions it retired.
+    /// how far the guest got.
+    ///
+    /// In whichever unit this engine can answer in. An interpreter retires
+    /// instructions and counts them. An engine running the guest on the host's
+    /// own processor counts none — the hardware does the work, and the shadow
+    /// processor it is handed here holds no tally the machine could read — so
+    /// it reports the time the stretch took instead. The machine divides a
+    /// round and arms its timers off that either way.
     ///
     /// # Errors
     /// Whatever ended the stretch other than its own budget: a fault the
@@ -74,7 +81,7 @@ pub trait SliceEngine<T: Instrumentation> {
         cpu: &mut BxCpuC<T>,
         io: PcIo<'_>,
         request: SliceRequest,
-    ) -> Result<u64>;
+    ) -> Result<Progress>;
 }
 
 /// This port's own interpreter.
@@ -94,12 +101,13 @@ impl<T: Instrumentation> SliceEngine<T> for SoftwareEngine {
         cpu: &mut BxCpuC<T>,
         io: PcIo<'_>,
         request: SliceRequest,
-    ) -> Result<u64> {
+    ) -> Result<Progress> {
         let mut ctx = ExecCtx::new(cpu, io);
-        if request.yield_after_one_trace {
+        let retired = if request.yield_after_one_trace {
             ctx.cpu_run_trace_slice(request.instructions, request.strict, request.tick_denominator)
         } else {
             ctx.cpu_loop_n_slice(request.instructions, request.strict, request.tick_denominator)
-        }
+        }?;
+        Ok(Progress::Instructions(retired))
     }
 }

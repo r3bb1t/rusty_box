@@ -630,7 +630,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// is why this hands the processor and the machine's parts to
     /// [`SliceEngine`] rather than executing anything itself.
     #[inline]
-    pub(crate) fn run_slice(&mut self, index: usize, request: SliceRequest) -> CpuResult<u64> {
+    pub(crate) fn run_slice(&mut self, index: usize, request: SliceRequest) -> CpuResult<Progress> {
         let Self {
             engine,
             cpus,

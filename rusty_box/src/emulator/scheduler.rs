@@ -273,21 +273,38 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 self.refresh_cpu_masks(cpu_index);
 
                 match slice_result {
-                    Ok(executed) => {
-                        if !smp {
-                            total_up_executed = total_up_executed.saturating_add(executed);
-                        }
-                        let elapsed = if smp {
-                            let delta = self.cpu_ref(cpu_index).tick_delta_since_sync();
-                            if delta == 0 {
-                                self.smp_quantum_ticks()
-                            } else {
-                                delta
+                    Ok(advanced) => {
+                        // How far the slice got, and how much time that was.
+                        //
+                        // An engine that retires instructions reports them, and
+                        // the machine reads elapsed time off the processor's own
+                        // tick counter — which is where a fast-REP surplus lands,
+                        // so the two are not the same number. An engine that runs
+                        // the guest on the host's processor counts no
+                        // instructions at all and reports the time it took
+                        // instead; there is nothing on a shadow processor for the
+                        // machine to read, because the hardware did the work.
+                        let elapsed = match advanced {
+                            Progress::Instructions(retired) => {
+                                if !smp {
+                                    total_up_executed =
+                                        total_up_executed.saturating_add(retired);
+                                }
+                                if smp {
+                                    let delta =
+                                        self.cpu_ref(cpu_index).tick_delta_since_sync();
+                                    if delta == 0 {
+                                        self.smp_quantum_ticks()
+                                    } else {
+                                        delta
+                                    }
+                                } else {
+                                    self.cpu_ref(cpu_index)
+                                        .cpu_ticks()
+                                        .saturating_sub(ticks_before)
+                                }
                             }
-                        } else {
-                            self.cpu_ref(cpu_index)
-                                .cpu_ticks()
-                                .saturating_sub(ticks_before)
+                            Progress::Ticks(ticks) => ticks,
                         };
                         round_ticks = if smp {
                             round_ticks.saturating_add(elapsed)
