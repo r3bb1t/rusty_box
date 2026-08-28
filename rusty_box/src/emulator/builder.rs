@@ -270,7 +270,9 @@ struct Settings<'r> {
 ///
 /// ```no_run
 /// use rusty_box::config::EmulatorConfig;
-/// use rusty_box::emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, MachineBuilder};
+/// use rusty_box::emulator::{
+///     AtaSlot, BootDevice, BootOrder, DiskGeometry, MachineBuilder, RunBudget,
+/// };
 ///
 /// # fn main() -> rusty_box::Result<()> {
 /// # let bios: &[u8] = &[]; let vga_bios: &[u8] = &[];
@@ -284,7 +286,7 @@ struct Settings<'r> {
 ///         DiskGeometry::new(306, 4, 17),
 ///     )
 ///     .build()?;
-/// let outcome = machine.step_batch(100_000)?;
+/// let outcome = machine.step(RunBudget::Instructions(100_000))?;
 /// # let _ = outcome;
 /// # Ok(())
 /// # }
@@ -647,7 +649,9 @@ mod tests {
                 .build()
                 .expect("build");
 
-            let outcome = machine.step_batch(4).expect("step");
+            let outcome = machine
+                .step(crate::emulator::RunBudget::Instructions(4))
+                .expect("step");
             assert_eq!(
                 outcome.stop,
                 StopReason::Halted,

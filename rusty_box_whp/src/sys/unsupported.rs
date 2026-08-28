@@ -12,7 +12,7 @@
 
 use crate::error::{WhpError, WhpResult};
 use crate::sys::{CapabilityCode, GpaPerms, GvaTranslation, PropertyCode, RawPartition};
-use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister};
+use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister, TableRegister};
 
 /// The name every refusal below carries, since on this target the platform
 /// itself is what is missing rather than any particular call.
@@ -114,11 +114,38 @@ pub(crate) fn set_words(
     Err(WhpError::unsupported(CALL))
 }
 
+pub(crate) fn get_segments(
+    _partition: RawPartition,
+    _index: u32,
+    _regs: &[Reg],
+    _out: &mut [SegmentRegister],
+) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
 pub(crate) fn set_segments(
     _partition: RawPartition,
     _index: u32,
     _regs: &[Reg],
     _segments: &[SegmentRegister],
+) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub(crate) fn get_tables(
+    _partition: RawPartition,
+    _index: u32,
+    _regs: &[Reg],
+    _out: &mut [TableRegister],
+) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub(crate) fn set_tables(
+    _partition: RawPartition,
+    _index: u32,
+    _regs: &[Reg],
+    _tables: &[TableRegister],
 ) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }

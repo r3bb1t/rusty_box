@@ -20,15 +20,54 @@ pub enum Reg {
     Rdi,
     Rsp,
     Rbp,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    R13,
+    R14,
+    R15,
     Rip,
     Rflags,
     Cs,
     Ds,
     Es,
     Ss,
+    Fs,
+    Gs,
+    /// Segment-shaped on this platform, like the six above: the local
+    /// descriptor table and the task register each carry a base, a limit and
+    /// an attribute word, not just a selector.
+    Ldtr,
+    Tr,
+    /// Table-shaped: a base and a 16-bit limit, and nothing else.
+    Gdtr,
+    Idtr,
     Cr0,
+    Cr2,
     Cr3,
     Cr4,
+    Cr8,
+    Dr0,
+    Dr1,
+    Dr2,
+    Dr3,
+    Dr6,
+    Dr7,
+    Efer,
+    KernelGsBase,
+    Star,
+    Lstar,
+    Cstar,
+    Sfmask,
+    SysenterCs,
+    SysenterEsp,
+    SysenterEip,
+    Pat,
+    ApicBase,
+    Tsc,
+    Xcr0,
     /// `WHvRegisterPendingInterruption` — the event injected into the guest.
     PendingInterruption,
     /// `WHvRegisterInterruptState` — interrupt shadow and NMI mask.
@@ -38,6 +77,36 @@ pub enum Reg {
     /// `WHvX64RegisterDeliverabilityNotifications` — ask for an
     /// interrupt-window exit when the guest can next take a vector.
     DeliverabilityNotifications,
+}
+
+impl Reg {
+    /// Whether this register carries a base, a limit, a selector and an
+    /// attribute word rather than a single value.
+    ///
+    /// The platform's own split, and the reason a state exchange cannot be one
+    /// array of words: `WHV_X64_SEGMENT_REGISTER` and `WHV_X64_TABLE_REGISTER`
+    /// are different members of the value union, and reading either as a word
+    /// returns its base and silently drops the rest.
+    #[must_use]
+    pub const fn is_segment(self) -> bool {
+        matches!(
+            self,
+            Self::Cs | Self::Ds | Self::Es | Self::Ss | Self::Fs | Self::Gs | Self::Ldtr | Self::Tr
+        )
+    }
+
+    /// Whether this register is a descriptor-table base and limit.
+    #[must_use]
+    pub const fn is_table(self) -> bool {
+        matches!(self, Self::Gdtr | Self::Idtr)
+    }
+}
+
+/// A descriptor-table register in the shape `WHV_X64_TABLE_REGISTER` wants it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct TableRegister {
+    pub base: u64,
+    pub limit: u16,
 }
 
 /// A segment register in the shape `WHV_X64_SEGMENT_REGISTER` wants it.
@@ -371,9 +440,76 @@ impl Exit {
     }
 }
 
+/// Every register this port exchanges, in one list.
+///
+/// The list a state exchange iterates, and the one the tests below check the
+/// shape classification against. A variant added to [`Reg`] and forgotten here
+/// is caught by `every_register_is_in_the_exchange_list`, which matches on each
+/// variant exhaustively so the compiler refuses to let the two drift.
+pub const ALL_REGS: &[Reg] = &[
+    Reg::Rax, Reg::Rbx, Reg::Rcx, Reg::Rdx, Reg::Rsi, Reg::Rdi, Reg::Rsp, Reg::Rbp,
+    Reg::R8, Reg::R9, Reg::R10, Reg::R11, Reg::R12, Reg::R13, Reg::R14, Reg::R15,
+    Reg::Rip, Reg::Rflags,
+    Reg::Cs, Reg::Ds, Reg::Es, Reg::Ss, Reg::Fs, Reg::Gs, Reg::Ldtr, Reg::Tr,
+    Reg::Gdtr, Reg::Idtr,
+    Reg::Cr0, Reg::Cr2, Reg::Cr3, Reg::Cr4, Reg::Cr8,
+    Reg::Dr0, Reg::Dr1, Reg::Dr2, Reg::Dr3, Reg::Dr6, Reg::Dr7,
+    Reg::Efer, Reg::KernelGsBase, Reg::Star, Reg::Lstar, Reg::Cstar, Reg::Sfmask,
+    Reg::SysenterCs, Reg::SysenterEsp, Reg::SysenterEip,
+    Reg::Pat, Reg::ApicBase, Reg::Tsc, Reg::Xcr0,
+    Reg::PendingInterruption, Reg::InterruptState, Reg::InternalActivityState,
+    Reg::DeliverabilityNotifications,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`ALL_REGS`] holds every variant, enforced by a match the compiler makes
+    /// exhaustive rather than by a count someone has to remember to bump.
+    #[test]
+    fn every_register_is_in_the_exchange_list() {
+        for reg in ALL_REGS {
+            // Naming each variant is the assertion: a new one fails to compile
+            // here, and the fix is to add it to the list above as well.
+            match reg {
+                Reg::Rax | Reg::Rbx | Reg::Rcx | Reg::Rdx | Reg::Rsi | Reg::Rdi | Reg::Rsp
+                | Reg::Rbp | Reg::R8 | Reg::R9 | Reg::R10 | Reg::R11 | Reg::R12 | Reg::R13
+                | Reg::R14 | Reg::R15 | Reg::Rip | Reg::Rflags => {}
+                Reg::Cs | Reg::Ds | Reg::Es | Reg::Ss | Reg::Fs | Reg::Gs | Reg::Ldtr
+                | Reg::Tr => assert!(reg.is_segment(), "{reg:?} is segment-shaped"),
+                Reg::Gdtr | Reg::Idtr => assert!(reg.is_table(), "{reg:?} is table-shaped"),
+                Reg::Cr0 | Reg::Cr2 | Reg::Cr3 | Reg::Cr4 | Reg::Cr8 => {}
+                Reg::Dr0 | Reg::Dr1 | Reg::Dr2 | Reg::Dr3 | Reg::Dr6 | Reg::Dr7 => {}
+                Reg::Efer | Reg::KernelGsBase | Reg::Star | Reg::Lstar | Reg::Cstar
+                | Reg::Sfmask | Reg::SysenterCs | Reg::SysenterEsp | Reg::SysenterEip
+                | Reg::Pat | Reg::ApicBase | Reg::Tsc | Reg::Xcr0 => {}
+                Reg::PendingInterruption
+                | Reg::InterruptState
+                | Reg::InternalActivityState
+                | Reg::DeliverabilityNotifications => {}
+            }
+        }
+    }
+
+    /// A register is word-shaped, segment-shaped or table-shaped, and never two
+    /// of those — reading one as the wrong member of the platform's value union
+    /// returns a base and silently drops everything else.
+    #[test]
+    fn a_register_has_exactly_one_shape() {
+        for reg in ALL_REGS {
+            assert!(
+                !(reg.is_segment() && reg.is_table()),
+                "{reg:?} claims two shapes"
+            );
+        }
+        assert_eq!(
+            ALL_REGS.iter().filter(|reg| reg.is_segment()).count(),
+            8,
+            "six segments plus LDTR and TR"
+        );
+        assert_eq!(ALL_REGS.iter().filter(|reg| reg.is_table()).count(), 2);
+    }
 
     #[test]
     fn a_real_mode_segment_puts_the_selector_in_the_base_and_says_present() {

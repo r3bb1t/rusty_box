@@ -26,7 +26,7 @@ use crate::error::{WhpError, WhpResult};
 use crate::sys::{CapabilityCode, GpaPerms, GvaTranslation, PropertyCode, RawPartition};
 use crate::vcpu::{
     AccessType, CpuidAccess, Exit, ExitReason, InterruptRequest, IoPortAccess, MemoryAccess,
-    MsrAccess, Reg, SegmentRegister, VpContext,
+    MsrAccess, Reg, SegmentRegister, TableRegister, VpContext,
 };
 
 /// `WHvCapabilityCodePhysicalAddressWidth`, which the SDK header defines but
@@ -69,10 +69,43 @@ impl RegVal {
         })
     }
 
+    const fn table(table: TableRegister) -> Self {
+        Self(WHV_REGISTER_VALUE {
+            Table: WHV_X64_TABLE_REGISTER {
+                Pad: [0; 3],
+                Limit: table.limit,
+                Base: table.base,
+            },
+        })
+    }
+
     fn as_word(self) -> u64 {
         // SAFETY: every member of the union is at least 8 bytes wide and this
         // reads the 8 the caller asked a word-shaped register for.
         unsafe { self.0.Reg64 }
+    }
+
+    fn as_segment(self) -> SegmentRegister {
+        // SAFETY: read back from a register the caller named as segment-shaped,
+        // so the platform wrote this member of the union.
+        let seg = unsafe { self.0.Segment };
+        SegmentRegister {
+            base: seg.Base,
+            limit: seg.Limit,
+            selector: seg.Selector,
+            // SAFETY: the attribute union's two members are the bitfield and
+            // this `u16`, both two bytes of plain data.
+            attributes: unsafe { seg.Anonymous.Attributes },
+        }
+    }
+
+    fn as_table(self) -> TableRegister {
+        // SAFETY: as `as_segment`, for a register named as table-shaped.
+        let table = unsafe { self.0.Table };
+        TableRegister {
+            base: table.Base,
+            limit: table.Limit,
+        }
     }
 }
 
@@ -130,15 +163,50 @@ const fn register_name(reg: Reg) -> WHV_REGISTER_NAME {
         Reg::Rdi => WHvX64RegisterRdi,
         Reg::Rsp => WHvX64RegisterRsp,
         Reg::Rbp => WHvX64RegisterRbp,
+        Reg::R8 => WHvX64RegisterR8,
+        Reg::R9 => WHvX64RegisterR9,
+        Reg::R10 => WHvX64RegisterR10,
+        Reg::R11 => WHvX64RegisterR11,
+        Reg::R12 => WHvX64RegisterR12,
+        Reg::R13 => WHvX64RegisterR13,
+        Reg::R14 => WHvX64RegisterR14,
+        Reg::R15 => WHvX64RegisterR15,
         Reg::Rip => WHvX64RegisterRip,
         Reg::Rflags => WHvX64RegisterRflags,
         Reg::Cs => WHvX64RegisterCs,
         Reg::Ds => WHvX64RegisterDs,
         Reg::Es => WHvX64RegisterEs,
         Reg::Ss => WHvX64RegisterSs,
+        Reg::Fs => WHvX64RegisterFs,
+        Reg::Gs => WHvX64RegisterGs,
+        Reg::Ldtr => WHvX64RegisterLdtr,
+        Reg::Tr => WHvX64RegisterTr,
+        Reg::Gdtr => WHvX64RegisterGdtr,
+        Reg::Idtr => WHvX64RegisterIdtr,
         Reg::Cr0 => WHvX64RegisterCr0,
+        Reg::Cr2 => WHvX64RegisterCr2,
         Reg::Cr3 => WHvX64RegisterCr3,
         Reg::Cr4 => WHvX64RegisterCr4,
+        Reg::Cr8 => WHvX64RegisterCr8,
+        Reg::Dr0 => WHvX64RegisterDr0,
+        Reg::Dr1 => WHvX64RegisterDr1,
+        Reg::Dr2 => WHvX64RegisterDr2,
+        Reg::Dr3 => WHvX64RegisterDr3,
+        Reg::Dr6 => WHvX64RegisterDr6,
+        Reg::Dr7 => WHvX64RegisterDr7,
+        Reg::Efer => WHvX64RegisterEfer,
+        Reg::KernelGsBase => WHvX64RegisterKernelGsBase,
+        Reg::Star => WHvX64RegisterStar,
+        Reg::Lstar => WHvX64RegisterLstar,
+        Reg::Cstar => WHvX64RegisterCstar,
+        Reg::Sfmask => WHvX64RegisterSfmask,
+        Reg::SysenterCs => WHvX64RegisterSysenterCs,
+        Reg::SysenterEsp => WHvX64RegisterSysenterEsp,
+        Reg::SysenterEip => WHvX64RegisterSysenterEip,
+        Reg::Pat => WHvX64RegisterPat,
+        Reg::ApicBase => WHvX64RegisterApicBase,
+        Reg::Tsc => WHvX64RegisterTsc,
+        Reg::Xcr0 => WHvX64RegisterXCr0,
         Reg::PendingInterruption => WHvRegisterPendingInterruption,
         Reg::InterruptState => WHvRegisterInterruptState,
         Reg::InternalActivityState => WHvRegisterInternalActivityState,
@@ -393,14 +461,18 @@ pub(crate) fn request_interrupt(
     )
 }
 
-pub(crate) fn get_words(
+/// The register-read choke point (R5), mirroring `set_values`: every typed
+/// getter converges here, so the length agreement and the aligned buffer are
+/// established once and each getter differs only in which member of the value
+/// union it reads back.
+fn get_values(
     partition: RawPartition,
     index: u32,
     regs: &[Reg],
-    out: &mut [u64],
-) -> WhpResult<()> {
+    wanted: usize,
+) -> WhpResult<[RegVal; SET_MAX]> {
     const CALL: &str = "WHvGetVirtualProcessorRegisters";
-    if regs.len() != out.len() || regs.len() > SET_MAX {
+    if regs.len() != wanted || regs.len() > SET_MAX {
         return Err(WhpError::contract(CALL));
     }
     let mut names = [0 as WHV_REGISTER_NAME; SET_MAX];
@@ -423,8 +495,44 @@ pub(crate) fn get_words(
         },
         CALL,
     )?;
+    Ok(values)
+}
+
+pub(crate) fn get_words(
+    partition: RawPartition,
+    index: u32,
+    regs: &[Reg],
+    out: &mut [u64],
+) -> WhpResult<()> {
+    let values = get_values(partition, index, regs, out.len())?;
     for (slot, value) in out.iter_mut().zip(values) {
         *slot = value.as_word();
+    }
+    Ok(())
+}
+
+pub(crate) fn get_segments(
+    partition: RawPartition,
+    index: u32,
+    regs: &[Reg],
+    out: &mut [SegmentRegister],
+) -> WhpResult<()> {
+    let values = get_values(partition, index, regs, out.len())?;
+    for (slot, value) in out.iter_mut().zip(values) {
+        *slot = value.as_segment();
+    }
+    Ok(())
+}
+
+pub(crate) fn get_tables(
+    partition: RawPartition,
+    index: u32,
+    regs: &[Reg],
+    out: &mut [TableRegister],
+) -> WhpResult<()> {
+    let values = get_values(partition, index, regs, out.len())?;
+    for (slot, value) in out.iter_mut().zip(values) {
+        *slot = value.as_table();
     }
     Ok(())
 }
@@ -453,6 +561,19 @@ pub(crate) fn set_segments(
         *slot = RegVal::segment(*seg);
     }
     set_values(partition, index, regs, segments.len(), &values)
+}
+
+pub(crate) fn set_tables(
+    partition: RawPartition,
+    index: u32,
+    regs: &[Reg],
+    tables: &[TableRegister],
+) -> WhpResult<()> {
+    let mut values = [RegVal::zeroed(); SET_MAX];
+    for (slot, table) in values.iter_mut().zip(tables) {
+        *slot = RegVal::table(*table);
+    }
+    set_values(partition, index, regs, tables.len(), &values)
 }
 
 /// How many registers one platform call may name. The platform takes an array
@@ -640,4 +761,52 @@ fn decode_exit(context: &WHV_RUN_VP_EXIT_CONTEXT) -> Exit {
         other => ExitReason::Unrecognized(other),
     };
     Exit { vp, reason }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vcpu::ALL_REGS;
+
+    /// No two registers may share a platform name.
+    ///
+    /// `register_name` is one exhaustive match over fifty-odd arms, so a
+    /// register added to the enum cannot be forgotten — the compiler refuses.
+    /// What the compiler cannot see is a copy-paste slip WITHIN it: writing
+    /// `Reg::R11 => WHvX64RegisterR10` type-checks perfectly and silently
+    /// transfers the wrong register, which is the failure this catches.
+    #[test]
+    fn every_register_names_a_different_platform_register() {
+        for (position, reg) in ALL_REGS.iter().enumerate() {
+            let name = register_name(*reg);
+            for other in &ALL_REGS[position + 1..] {
+                assert_ne!(
+                    name,
+                    register_name(*other),
+                    "{reg:?} and {other:?} both map to platform register {name}"
+                );
+            }
+        }
+    }
+
+    /// The general-purpose registers are consecutive in the platform's own
+    /// numbering, in the architectural order. Bochs and the SDK agree on that
+    /// order, so a transposition among the eight new ones shows up as a gap.
+    #[test]
+    fn the_general_purpose_registers_run_in_architectural_order() {
+        let names: Vec<_> = [
+            Reg::Rax, Reg::Rcx, Reg::Rdx, Reg::Rbx, Reg::Rsp, Reg::Rbp, Reg::Rsi, Reg::Rdi,
+            Reg::R8, Reg::R9, Reg::R10, Reg::R11, Reg::R12, Reg::R13, Reg::R14, Reg::R15,
+        ]
+        .iter()
+        .map(|reg| register_name(*reg))
+        .collect();
+        for pair in names.windows(2) {
+            assert_eq!(
+                pair[1],
+                pair[0] + 1,
+                "the platform numbers its general-purpose registers consecutively"
+            );
+        }
+    }
 }

@@ -81,7 +81,13 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // in `sys/windows.rs`, which is the only file that lifts the workspace's
     // `deny(unsafe_code)`, and each block names the invariant it rests on. A
     // rise means either a new platform call or unsafe that escaped the seam.
-    ("rusty_box_whp/src", 31),
+    //
+    // 31 -> 34: reading a segment or a descriptor-table register back out of
+    // the platform's value union. The union is how `WHV_REGISTER_VALUE` is
+    // defined, so a read of any member is unsafe by construction — `as_word`
+    // was already one — and these three are the export half of a state
+    // exchange that previously only wrote. Still confined to `sys/windows.rs`.
+    ("rusty_box_whp/src", 34),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. Zero, permanently: thread
 /// safety is derived from ownership, and `Emulator`'s `const` assertion in

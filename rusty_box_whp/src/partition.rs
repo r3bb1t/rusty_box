@@ -22,6 +22,7 @@ use rusty_box_core::GpaPerms;
 use crate::sys::{self, GvaTranslation, PropertyCode, RawPartition};
 use crate::vcpu::{
     Exit, InternalActivity, InterruptRequest, PendingInterruption, Reg, SegmentRegister,
+    TableRegister,
 };
 
 /// Guest-physical pages are 4 KiB, and every WHP range must start and end on
@@ -460,6 +461,49 @@ impl Partition {
         segments: &[SegmentRegister],
     ) -> WhpResult<()> {
         sys::set_segments(self.handle.0, index, regs, segments)
+    }
+
+    /// Read segment registers.
+    ///
+    /// Separate from [`Partition::read_regs`] because the platform keeps a
+    /// segment in a different member of its value union: reading one as a word
+    /// yields its base and silently drops the limit, selector and attributes.
+    ///
+    /// # Errors
+    /// As [`Partition::read_regs`].
+    pub fn read_segments(
+        &self,
+        index: u32,
+        regs: &[Reg],
+        out: &mut [SegmentRegister],
+    ) -> WhpResult<()> {
+        sys::get_segments(self.handle.0, index, regs, out)
+    }
+
+    /// Read the descriptor-table registers, `GDTR` and `IDTR`.
+    ///
+    /// # Errors
+    /// As [`Partition::read_regs`].
+    pub fn read_tables(
+        &self,
+        index: u32,
+        regs: &[Reg],
+        out: &mut [TableRegister],
+    ) -> WhpResult<()> {
+        sys::get_tables(self.handle.0, index, regs, out)
+    }
+
+    /// Write the descriptor-table registers.
+    ///
+    /// # Errors
+    /// As [`Partition::read_regs`].
+    pub fn write_tables(
+        &self,
+        index: u32,
+        regs: &[Reg],
+        tables: &[TableRegister],
+    ) -> WhpResult<()> {
+        sys::set_tables(self.handle.0, index, regs, tables)
     }
 
     /// Hand a processor an interrupt, NMI or exception to take at its next

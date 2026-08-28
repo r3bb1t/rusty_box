@@ -55,7 +55,7 @@ pub use rusty_box_core::GpaPerms;
 pub use vcpu::{
     AccessType, CpuidAccess, DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind,
     InterruptRequest, InterruptionType, IoPortAccess, MemoryAccess, MsrAccess,
-    PendingInterruption, Reg, SegmentRegister, TriggerMode, VpContext,
+    PendingInterruption, Reg, SegmentRegister, TableRegister, TriggerMode, VpContext, ALL_REGS,
 };
 
 /// A partition handle is a plain integer and the pages behind a mapping are
