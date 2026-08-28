@@ -406,6 +406,30 @@ impl<T: Instrumentation> BxCpuC<T> {
         self.enter_sleep_state(CpuActivityState::Hlt);
     }
 
+    /// Whether this processor has an event waiting that it may take now.
+    ///
+    /// The same question the scheduler asks to decide whether a processor is
+    /// runnable — an unmasked pending event, or a local-APIC interrupt with
+    /// interrupts enabled — and deliberately NOT the whole of Bochs's
+    /// `async_event` word, which also carries bookkeeping that is not a
+    /// delivery: a trace that must not be chained, a scheduler boundary to
+    /// service. A processor fresh from reset has the first of those set, so an
+    /// engine keying off the raw word would interpret an instruction at the
+    /// head of every stretch of guest execution.
+    ///
+    /// An engine running the guest on the host's own processor has to ask,
+    /// because the hardware cannot answer: this machine's 8259 pair and local
+    /// APIC are its own, and a partition created with no APIC of its own knows
+    /// nothing of either. When this says yes, the engine runs one instruction
+    /// on the shadow first, so delivery is the interpreter's — which is what
+    /// makes an interrupt taken under a hypervisor identical, frame for frame,
+    /// to the same interrupt taken without one.
+    #[must_use]
+    pub fn has_an_event_to_deliver(&self) -> bool {
+        self.is_unmasked_event_pending(u32::MAX)
+            || (self.lapic.intr && self.interrupts_enabled())
+    }
+
     /// Read this processor's architectural state out.
     ///
     /// Pure: nothing about the processor changes, so an engine may export as
@@ -726,6 +750,64 @@ mod tests {
             page_granular.scaled_limit(),
             0xFFFF_FFFF,
             "a full 20-bit page-granular limit addresses the whole 4 GiB"
+        );
+    }
+
+    /// A processor with an event waiting says so; one with nothing waiting
+    /// says no, and says no straight out of reset.
+    ///
+    /// The question an engine running the guest on the host's own processor
+    /// asks before handing the hardware anything: delivery belongs to this
+    /// port, so a stretch that begins with an event waiting begins on the
+    /// interpreter instead. Both directions matter, and the negative one is
+    /// the trap — a processor fresh from reset has Bochs's `async_event` word
+    /// non-zero (its prefetch queue was invalidated, which asks for the trace
+    /// not to be chained), so an engine reading that word would interpret an
+    /// instruction at the head of every stretch and quietly run most of the
+    /// guest in software.
+    #[test]
+    fn a_processor_reports_an_event_to_deliver_only_when_it_has_one() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+        assert!(
+            !cpu.has_an_event_to_deliver(),
+            "a processor just reset has nothing to deliver"
+        );
+
+        // An NMI, because it is not gated on IF and a processor at reset has
+        // interrupts disabled — this asks about the predicate, not about the
+        // flag.
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_NMI);
+        assert!(
+            cpu.has_an_event_to_deliver(),
+            "an unmasked pending event is exactly what an engine must let the \
+             interpreter deliver"
+        );
+    }
+
+    /// Recording a halt leaves the processor a scheduler will stop running,
+    /// and does it the way the `HLT` instruction does.
+    ///
+    /// An engine's only way to report that the hardware halted the guest —
+    /// halting is not architectural state, so it cannot travel in a
+    /// [`VcpuArchState`].
+    #[test]
+    fn a_recorded_halt_leaves_the_processor_asleep() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+        assert_eq!(cpu.activity_state, crate::cpu::cpu::CpuActivityState::Active);
+
+        cpu.record_halt();
+        assert_eq!(
+            cpu.activity_state,
+            crate::cpu::cpu::CpuActivityState::Hlt,
+            "a machine reads the activity state to decide whether to keep \
+             scheduling this processor"
+        );
+        assert!(
+            !cpu.has_an_event_to_deliver(),
+            "a halt is not itself an event to deliver: what wakes a halted \
+             processor is something arriving afterwards"
         );
     }
 

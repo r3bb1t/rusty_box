@@ -219,6 +219,45 @@ mod tests {
         );
     }
 
+    /// An access the hardware cannot finish is finished by the shadow
+    /// processor, against the machine's own devices.
+    ///
+    /// The guest stores a byte into video memory and loads it straight back.
+    /// Neither access is in the partition's map — video memory is a device
+    /// window — so each traps with no instruction length and, for the store,
+    /// possibly no instruction bytes either; the platform cannot finish or
+    /// even skip them. The byte arriving at the debug port is proof that both
+    /// were executed on the shadow, that the machine's own VGA answered them,
+    /// and that the processor the platform resumed was the one the shadow left
+    /// behind.
+    #[test]
+    fn an_access_the_hardware_cannot_finish_is_serviced_by_the_machine() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        let _turn = a_turn_on_the_hardware();
+        let mut machine = machine_running(&[
+            0xB8, 0x00, 0xB8, // mov ax, 0xB800   — the text-mode video segment
+            0x8E, 0xC0, //       mov es, ax
+            0x26, 0xC6, 0x06, 0x00, 0x00, MARK, // mov byte [es:0], MARK
+            0x26, 0xA0, 0x00, 0x00, //           mov al, [es:0]
+            0xE6, DEBUG_PORT, //                 out 0xE9, al
+            0xF4, //                             hlt
+        ]);
+        machine
+            .step(RunBudget::Ticks(1_000_000))
+            .expect("the hypervisor runs the guest and the shadow finishes its accesses");
+
+        let written: std::vec::Vec<u8> = machine.debug_port().take_output().collect();
+        assert_eq!(
+            written,
+            std::vec![MARK],
+            "the byte must survive a store and a load that only the shadow processor \
+             could carry out"
+        );
+    }
+
     /// An instruction budget is refused, not silently never spent.
     ///
     /// Nothing this machine can measure advances per instruction, so the loop

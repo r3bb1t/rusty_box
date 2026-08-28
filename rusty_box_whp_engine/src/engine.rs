@@ -190,12 +190,26 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         request: SliceRequest,
     ) -> Result<Progress> {
         let ips = io.pc_system.ips();
+
+        // An interrupt to deliver, a halt to wake from, any work the
+        // interpreter does at a trace boundary: it happens HERE, on the
+        // shadow, before the hardware is given the processor. The partition
+        // was created with no local APIC of its own precisely so that delivery
+        // stays on this side (REPLAN decision 6), and running it through the
+        // interpreter means a guest's interrupt frame is what it would be with
+        // no hypervisor in the picture.
+        //
+        // Which is also why this engine never writes
+        // `WHvRegisterPendingInterruption`: there is nothing for the platform
+        // to inject that the shadow has not already delivered.
+        if cpu.has_an_event_to_deliver() {
+            io.emulate_one(cpu)?;
+        }
+
         let started = self.start(&mut io)?;
 
         // The shadow describes the processor; the platform runs it.
-        cpu.export_arch_state(&mut started.state);
-        let vp = Vp::new(&started.partition, BOOT_VP);
-        state::import(&vp, &started.state).map_err(platform_failed)?;
+        install_the_shadow(started, cpu)?;
 
         let began = std::time::Instant::now();
         let outcome = run_until_the_machine_is_needed(started, cpu, &mut io, request);
@@ -203,12 +217,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // Whatever ended the run, the shadow must describe the processor again
         // before the machine looks at it: the scheduler reads activity state,
         // the interrupt fabric reads IF, and a snapshot reads all of it.
-        let vp = Vp::new(&started.partition, BOOT_VP);
-        state::export(&vp, &mut started.state).map_err(platform_failed)?;
-        cpu.import_arch_state(&started.state).map_err(|error| {
-            tracing::error!("the hypervisor returned a state this port refuses: {error:?}");
-            CpuError::UnsupportedCpuOperation { operation: "hypervisor state refused on import" }
-        })?;
+        read_back_into_the_shadow(started, cpu)?;
 
         match outcome? {
             // Halting is not architectural state, so it does not arrive in the
@@ -221,11 +230,45 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
     }
 }
 
+/// Describe the platform's processor from the shadow.
+///
+/// One of the two halves of the state exchange, named because both halves run
+/// in two places now — around a whole slice, and around each exit the shadow
+/// has to finish. Writing them out twice is how the two could drift.
+///
+/// # Errors
+/// A register the platform refused to take.
+fn install_the_shadow<T: Instrumentation>(
+    started: &mut Started,
+    cpu: &BxCpuC<T>,
+) -> Result<()> {
+    let Started { partition, state } = started;
+    cpu.export_arch_state(state);
+    state::import(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)
+}
+
+/// Describe the shadow from the platform's processor.
+///
+/// # Errors
+/// A register the platform refused to hand over, or a state this port will not
+/// import — a segment whose attributes describe no descriptor it can build.
+fn read_back_into_the_shadow<T: Instrumentation>(
+    started: &mut Started,
+    cpu: &mut BxCpuC<T>,
+) -> Result<()> {
+    let Started { partition, state } = started;
+    state::export(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)?;
+    cpu.import_arch_state(state).map_err(|error| {
+        tracing::error!("the hypervisor returned a state this port refuses: {error:?}");
+        CpuError::UnsupportedCpuOperation { operation: "hypervisor state refused on import" }
+    })
+}
+
 /// Run the processor, servicing what the platform cannot, until something the
 /// machine owns has to happen.
 fn run_until_the_machine_is_needed<T: Instrumentation>(
     started: &mut Started,
-    _cpu: &mut BxCpuC<T>,
+    cpu: &mut BxCpuC<T>,
     io: &mut PcIo<'_>,
     _request: SliceRequest,
 ) -> Result<Yielded> {
@@ -246,7 +289,18 @@ fn run_until_the_machine_is_needed<T: Instrumentation>(
             ExitReason::Canceled { .. } => return Ok(Yielded::Canceled),
             // The platform documents this as one a run never returns.
             ExitReason::None => return Err(unserviced("the platform's own \"no reason\"")),
-            ExitReason::MemoryAccess(_) => return Err(unserviced("memory access")),
+            // An access the partition's map does not answer: a device window,
+            // a page the plan left out, or a write to a range mapped read-only.
+            // The shadow finishes it, because nothing else can — see below.
+            ExitReason::MemoryAccess(access) => {
+                service_memory_access(started, cpu, io, access)?;
+            }
+            // Neither exit is requested of the platform — CPUID needs a
+            // `CpuidExitList` and an MSR exit needs `X64MsrExit`, and this
+            // engine asks for neither, so a guest's CPUID and RDMSR run on the
+            // host's own processor. That is a parity divergence to register
+            // and close (REPLAN H3), not an exit to service: an arm that
+            // cannot be reached must say so rather than pretend to work.
             ExitReason::Cpuid(_) => return Err(unserviced("CPUID")),
             ExitReason::MsrAccess(_) => return Err(unserviced("MSR access")),
             ExitReason::InterruptWindow => return Err(unserviced("interrupt window")),
@@ -271,6 +325,48 @@ fn run_until_the_machine_is_needed<T: Instrumentation>(
             }
         }
     }
+}
+
+/// Finish a memory access the partition could not, on the shadow processor.
+///
+/// The reason a shadow processor is mandatory rather than an optimisation, and
+/// the measurement is in `docs/whp-platform-probe-2026-08-27.md`: this exit
+/// reports `InstructionLength = 0` and does NOT advance `RIP`, so there is no
+/// stepping over it; and for a write to a read-only window it carries no
+/// instruction bytes either, so there is nothing to decode from the exit. The
+/// only thing that can finish it is a processor that reads the instruction out
+/// of guest memory and executes it — which is this port's interpreter, running
+/// one instruction against the very same machine parts.
+///
+/// That is also what makes the result right rather than merely possible. The
+/// access lands through the machine's own routing, so a device window answers
+/// exactly as it would under the interpreter, a write the chipset ignores is
+/// ignored the same way, and an unbacked read returns the same bus value —
+/// bit-identical, which is the property the whole design rests on.
+///
+/// The exchange around it is the whole architectural state each way. A trapped
+/// instruction may read any register, and the shadow must be the processor,
+/// not an approximation of it.
+///
+/// # Errors
+/// A state the exchange refused, or a fault the shadow could not take.
+fn service_memory_access<T: Instrumentation>(
+    started: &mut Started,
+    cpu: &mut BxCpuC<T>,
+    io: &mut PcIo<'_>,
+    access: rusty_box_whp::MemoryAccess,
+) -> Result<()> {
+    tracing::trace!(
+        "servicing a {:?} at gpa {:#x} on the shadow processor",
+        access.access,
+        access.gpa
+    );
+    read_back_into_the_shadow(started, cpu)?;
+    // One instruction, on the machine's own dispatch path. Whatever it does —
+    // completes the access, or raises a fault and enters a handler — the
+    // processor it leaves behind is the one the platform must continue from.
+    io.emulate_one(cpu)?;
+    install_the_shadow(started, cpu)
 }
 
 /// Answer a port access out of the machine's own device set, then step the
