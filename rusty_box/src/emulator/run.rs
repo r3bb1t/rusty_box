@@ -96,20 +96,26 @@ impl<T: Instrumentation, E: SliceEngine<T>> Power<'_, T, E> {
 /// the caller finds out by the guest missing keystrokes. Reporting instead
 /// turns that into backpressure: send, see how much landed, step the machine,
 /// send the rest.
-pub struct Keyboard<'m, T: Instrumentation, E = SoftwareEngine> {
-    machine: &'m mut Emulator<T, E>,
+///
+/// Built from the device, not from the machine. Every verb below reaches the
+/// 8042 and nothing else, so borrowing the whole machine would tie the handle
+/// to how that machine is parameterised for no reason — and a machine on any
+/// engine hands out this same type. `Display` already has this shape.
+pub struct Keyboard<'m> {
+    keyboard: &'m mut crate::iodev::keyboard::BxKeyboardC,
 }
 
-impl<T: Instrumentation, E> Keyboard<'_, T, E> {
+impl<'m> Keyboard<'m> {
+    pub(crate) fn new(keyboard: &'m mut crate::iodev::keyboard::BxKeyboardC) -> Self {
+        Self { keyboard }
+    }
+
     /// Press or release a key, rendered through the guest's active scancode
     /// set. Returns whether the whole sequence reached the guest — see
     /// `BxKeyboardC::gen_scancode` for why a key can be partly delivered.
     #[must_use = "a refused key never reached the guest"]
     pub fn key(&mut self, key: crate::iodev::scancodes::BxKey, pressed: bool) -> bool {
-        self.machine
-            .device_manager
-            .keyboard
-            .gen_scancode(key, pressed)
+        self.keyboard.gen_scancode(key, pressed)
     }
 
     /// Press and release a key. `false` if either half was not delivered
@@ -130,7 +136,7 @@ impl<T: Instrumentation, E> Keyboard<'_, T, E> {
     pub fn scancodes(&mut self, bytes: &[u8]) -> usize {
         let mut accepted = 0;
         for &byte in bytes {
-            if !self.machine.device_manager.keyboard.send_scancode(byte) {
+            if !self.keyboard.send_scancode(byte) {
                 break;
             }
             accepted += 1;
@@ -162,11 +168,18 @@ impl<T: Instrumentation, E> Keyboard<'_, T, E> {
 }
 
 /// The machine's PS/2 mouse, as a host driving it sees it.
-pub struct Mouse<'m, T: Instrumentation, E = SoftwareEngine> {
-    machine: &'m mut Emulator<T, E>,
+///
+/// Built from the device for the same reason as [`Keyboard`], and from the
+/// same device: on a PC the mouse hangs off the 8042's auxiliary port.
+pub struct Mouse<'m> {
+    keyboard: &'m mut crate::iodev::keyboard::BxKeyboardC,
 }
 
-impl<T: Instrumentation, E> Mouse<'_, T, E> {
+impl<'m> Mouse<'m> {
+    pub(crate) fn new(keyboard: &'m mut crate::iodev::keyboard::BxKeyboardC) -> Self {
+        Self { keyboard }
+    }
+
     /// Report relative motion and the current button mask (bit 0 left, bit 1
     /// right, bit 2 middle), returning whether a packet reached the guest.
     ///
@@ -177,10 +190,7 @@ impl<T: Instrumentation, E> Mouse<'_, T, E> {
     /// is the case worth checking for.
     #[must_use = "a refused packet carried a button edge the guest will never see"]
     pub fn motion(&mut self, dx: i32, dy: i32, dz: i32, buttons: u8) -> bool {
-        self.machine
-            .device_manager
-            .keyboard
-            .mouse_motion(dx, dy, dz, buttons)
+        self.keyboard.mouse_motion(dx, dy, dz, buttons)
     }
 }
 
@@ -793,13 +803,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     }
 
     /// The machine's keyboard, for a host driving it.
-    pub fn keyboard(&mut self) -> Keyboard<'_, T, E> {
-        Keyboard { machine: self }
+    pub fn keyboard(&mut self) -> Keyboard<'_> {
+        Keyboard::new(&mut self.device_manager.keyboard)
     }
 
     /// The machine's PS/2 mouse, for a host driving it.
-    pub fn mouse(&mut self) -> Mouse<'_, T, E> {
-        Mouse { machine: self }
+    pub fn mouse(&mut self) -> Mouse<'_> {
+        Mouse::new(&mut self.device_manager.keyboard)
     }
 
     /// How many ticks of guest time may pass before the next device timer
