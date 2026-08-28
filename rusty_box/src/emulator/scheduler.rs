@@ -177,7 +177,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         let cpu_count = self.cpu_count();
         let smp = cpu_count > 1;
         let mut total_elapsed_ticks = 0u64;
-        let mut total_up_executed = 0u64;
+        // What a uniprocessor's batch advanced, in whatever unit its engine
+        // answers in — instructions from the interpreter, guest time from an
+        // engine running on the host's own processor, which retires
+        // instructions this port never sees. `None` until the first slice
+        // answers, so the unit is the engine's to state and never this
+        // machine's to presume.
+        let mut total_up_advanced: Option<Progress> = None;
         let mut result: CpuResult<()> = Ok(());
         let initial_deadline_ticks =
             u64::from(self.pc_system.get_num_cpu_ticks_left_next_event());
@@ -284,12 +290,14 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                         // instructions at all and reports the time it took
                         // instead; there is nothing on a shadow processor for the
                         // machine to read, because the hardware did the work.
+                        if !smp {
+                            total_up_advanced = Some(match total_up_advanced {
+                                Some(so_far) => so_far.add(advanced),
+                                None => advanced,
+                            });
+                        }
                         let elapsed = match advanced {
-                            Progress::Instructions(retired) => {
-                                if !smp {
-                                    total_up_executed =
-                                        total_up_executed.saturating_add(retired);
-                                }
+                            Progress::Instructions(_) => {
                                 if smp {
                                     let delta =
                                         self.cpu_ref(cpu_index).tick_delta_since_sync();
@@ -401,11 +409,14 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             // Bochs main.cc: an SMP round credits every processor a quantum and
             // advances machine time by the round's average, so what this batch
             // advanced is a span of time and not any processor's instruction
-            // count. A uniprocessor's own count IS the machine's, so it says so.
+            // count. A uniprocessor has one engine's answer and passes it on
+            // in the unit that engine gave it; a batch whose sole processor
+            // never ran advanced no instructions, which is the same nothing in
+            // either unit.
             if smp {
                 Progress::Ticks(total_elapsed_ticks)
             } else {
-                Progress::Instructions(total_up_executed)
+                total_up_advanced.unwrap_or(Progress::Instructions(0))
             }
         })
     }

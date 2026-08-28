@@ -87,7 +87,22 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // defined, so a read of any member is unsafe by construction — `as_word`
     // was already one — and these three are the export half of a state
     // exchange that previously only wrote. Still confined to `sys/windows.rs`.
-    ("rusty_box_whp/src", 34),
+    //
+    // 34 -> 35: `Partition::map_borrowed` is `unsafe fn`, and it is the ONE
+    // token outside `sys/windows.rs`. It performs no unsafe operation of its
+    // own — the `unsafe` is the signature, carrying a contract no lifetime can
+    // express: the host bytes must outlive the mapping, and a partition stored
+    // beside the memory it maps cannot borrow its sibling. Stating it here is
+    // what lets the crate that discharges it hold exactly one `unsafe` call.
+    ("rusty_box_whp/src", 35),
+    // The adapter between the machine and the leaf. ONE: installing the
+    // machine's memory into a partition hands the hypervisor host addresses
+    // that outlive the borrow they came from, and no lifetime can say
+    // otherwise. The leaf puts that contract in a signature; this crate is
+    // where it is discharged, because this is the crate that knows the machine
+    // owns both the allocation and the engine. A rise means a second place
+    // making that claim, which is exactly what must not happen.
+    ("rusty_box_whp_engine/src", 1),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. Zero, permanently: thread
 /// safety is derived from ownership, and `Emulator`'s `const` assertion in
@@ -497,6 +512,17 @@ const MATRIX: &[Step] = &[
     Step {
         name: "WHP probe builds",
         args: &["check", "--release", "-p", "rusty_box_whp", "--examples"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    // The adapter between the machine and the leaf, and the only crate that
+    // depends on both. Its state-exchange and time-conversion tests need no
+    // hypervisor; the ones that start a machine on hardware skip with a reason
+    // when there is none, so this runs everywhere and proves the wiring still
+    // compiles even where it cannot be exercised.
+    Step {
+        name: "WHP engine tests",
+        args: &["test", "--release", "-p", "rusty_box_whp_engine"],
         envs: &[],
         stdout_marker: None,
     },

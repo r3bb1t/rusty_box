@@ -47,13 +47,14 @@ pub use display::{
 pub mod cpu_store;
 use cpu_store::CpuStore;
 pub(crate) mod engine;
-pub use engine::{SliceEngine, SliceRequest, SoftwareEngine};
+pub use engine::{ProgressUnit, SliceEngine, SliceRequest, SoftwareEngine};
 pub(crate) mod io;
 pub use io::PcIo;
 mod interactive;
 mod run;
 pub use run::{
-    BatchOutcome, Keyboard, Mouse, Power, PowerState, Progress, RunBudget, StopReason,
+    BatchOutcome, EngineRefusal, Keyboard, Mouse, Power, PowerState, Progress, RunBudget,
+    StopReason,
 };
 pub(crate) use run::StopCause;
 mod scheduler;
@@ -830,11 +831,16 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 }
 
 #[cfg(feature = "alloc")]
+#[cfg(test)]
 impl Emulator<()> {
     /// Construct an uninitialised machine with no instrumentation.
     ///
-    /// In-crate shorthand for the untraced factory; every machine that leaves
-    /// this crate is assembled by [`MachineBuilder`] instead.
+    /// Tests are its only callers: a machine that leaves this crate is
+    /// assembled by [`MachineBuilder`], and the two constructors that skip the
+    /// BIOS — [`Emulator::with_engine`] and its interpreter spelling
+    /// [`Emulator::new_with_mode`] — reach the factory themselves, because an
+    /// engine has to be named where a machine is built and this shorthand
+    /// cannot name one.
     pub(crate) fn new(config: EmulatorConfig) -> Result<Box<Self>> {
         Self::with_tracer_factory(config, || ())
     }
@@ -1292,11 +1298,16 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// borrows, which is why the function carries the obligation instead.
     ///
     /// ```compile_fail
-    /// use rusty_box::cpu::core_i7_skylake::Corei7SkylakeX;
+    /// use rusty_box::cpu::instrumentation::CpuSetupMode;
     /// use rusty_box::emulator::{Emulator, EmulatorConfig};
     ///
-    /// let mut first = Emulator::new(EmulatorConfig::default()).unwrap();
-    /// let mut second = Emulator::new(EmulatorConfig::default()).unwrap();
+    /// // Built through the PUBLIC constructor, so the snippet is refused for
+    /// // the reason it is here to demonstrate and not because it could not
+    /// // build a machine in the first place.
+    /// let mut first =
+    ///     Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::RealMode).unwrap();
+    /// let mut second =
+    ///     Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::RealMode).unwrap();
     /// // Safe code cannot obtain mutable CPU storage to swap it.
     /// core::mem::swap(first.cpu_mut(), second.cpu_mut());
     /// ```

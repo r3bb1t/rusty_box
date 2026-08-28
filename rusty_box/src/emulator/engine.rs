@@ -48,21 +48,67 @@ pub struct SliceRequest {
     pub(crate) yield_after_one_trace: bool,
 }
 
+impl SliceRequest {
+    /// Guest instructions this stretch may retire.
+    #[must_use]
+    pub const fn instructions(self) -> u64 {
+        self.instructions
+    }
+
+    /// Whether the count is a ceiling the engine may not exceed.
+    #[must_use]
+    pub const fn is_strict(self) -> bool {
+        self.strict
+    }
+
+    /// How many processors share one tick of machine time.
+    #[must_use]
+    pub const fn tick_denominator(self) -> u64 {
+        self.tick_denominator
+    }
+
+    /// Whether the stretch ends at the first instruction-trace boundary.
+    #[must_use]
+    pub const fn yields_after_one_trace(self) -> bool {
+        self.yield_after_one_trace
+    }
+}
+
+/// The unit an engine's slices report progress in.
+///
+/// Fixed per engine rather than chosen per slice, because it follows from how
+/// the engine runs the guest and not from what it was asked to do. A machine
+/// reads it before accepting a budget: a budget denominated in a unit its
+/// engine never reports is one that would never be spent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressUnit {
+    /// The engine retires the guest's instructions itself and counts them.
+    Instructions,
+    /// The engine reports the guest time a stretch took.
+    ///
+    /// What an engine running the guest on the host's own processor can say:
+    /// the hardware retires the instructions, and the shadow processor handed
+    /// to the engine holds no tally of them for the machine to read.
+    Ticks,
+}
+
 /// Whatever runs guest code for one processor.
 ///
 /// Not dyn-compatible and deliberately so (R8): a machine knows its engine at
 /// compile time, and monomorphising is what keeps the interpreter's slice entry
 /// as direct as it was before there was an engine at all.
 ///
-/// Public because it bounds `Emulator`'s engine parameter, and sealed by that
-/// same signature: `BxCpuC` and [`PcIo`] are this crate's, so only this crate
-/// can write an implementation. That is the intended shape rather than an
-/// oversight — an engine needs the machine's insides, and a backend crate stays
-/// a thin host-FFI leaf that this crate adapts, exchanging architectural state
-/// through `VcpuArchState` rather than reaching into a processor directly.
-/// Sealing also keeps the trait free to gain methods (doctrine's per-trait
-/// sealing policy); `caps()` is the first one waiting.
+/// Unsealed, because an engine backed by a host hypervisor lives in its own
+/// crate — a backend must never be something the machine crate depends on, so
+/// the adapter that knows both sides is a third crate and implements this from
+/// outside. That is what makes [`PcIo`]'s fields and `emulate_one` public:
+/// an engine needs the machine's parts to service what its hardware could not
+/// finish. Being unsealed binds this trait to the doctrine's rule for
+/// user-extensible traits — it gains only defaulted methods from here on.
 pub trait SliceEngine<T: Instrumentation> {
+    /// The unit this engine's slices answer in. See [`ProgressUnit`].
+    const PROGRESS_UNIT: ProgressUnit;
+
     /// Run `cpu` against `io` for the stretch `request` describes, and report
     /// how far the guest got.
     ///
@@ -95,6 +141,8 @@ pub trait SliceEngine<T: Instrumentation> {
 pub struct SoftwareEngine;
 
 impl<T: Instrumentation> SliceEngine<T> for SoftwareEngine {
+    const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Instructions;
+
     #[inline]
     fn run_slice(
         &mut self,

@@ -1062,14 +1062,25 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
 // ─────────────────────────── CpuSetupMode builders ───────────────────────────
 
 #[cfg(feature = "alloc")]
-impl<'a> Emulator<()> {
-    /// Create a new emulator with guest memory allocated but no BIOS loaded,
-    /// pre-configured for the given CPU mode. See [`CpuSetupMode`].
+impl<'a, E: SliceEngine<()> + Default> Emulator<(), E> {
+    /// Create a machine on a NAMED engine, with guest memory allocated but no
+    /// BIOS loaded, pre-configured for the given CPU mode.
+    ///
+    /// `Emulator::<(), WhpEngine>::with_engine(config, CpuSetupMode::RealMode)`
+    /// — the whole point being that the engine is spelled out.
+    ///
+    /// Two names rather than one generic function, because a defaulted type
+    /// parameter binds its default in a TYPE and not in a path: written as
+    /// `Emulator::new_with_mode(…)` into a `let` with no annotation there is
+    /// nothing for the engine to be inferred from, so making that one generic
+    /// would force every caller to name an engine it does not care about.
+    /// [`Emulator::new_with_mode`] is this function with the interpreter
+    /// named, and shares its body rather than repeating it.
     ///
     /// Returns `Box<Self>` because `Emulator` is ~1.4 MB — stack allocation
     /// would silently overflow on most platforms.
-    pub fn new_with_mode(config: EmulatorConfig, mode: CpuSetupMode) -> Result<Box<Self>> {
-        let mut emu = Self::new(config)?;
+    pub fn with_engine(config: EmulatorConfig, mode: CpuSetupMode) -> Result<Box<Self>> {
+        let mut emu = Self::with_tracer_factory(config, || ())?;
         // Minimal init: memory + CPU registers + async event flags. We skip
         // load_bios + pc_system.start etc. since the user will not run a BIOS.
         emu.init_memory_and_pc_system()?;
@@ -1077,6 +1088,17 @@ impl<'a> Emulator<()> {
         emu.reset(ResetReason::Hardware)?;
         emu.setup_cpu_mode(mode)?;
         Ok(emu)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<'a> Emulator<()> {
+    /// Create a new emulator with guest memory allocated but no BIOS loaded,
+    /// pre-configured for the given CPU mode. See [`CpuSetupMode`].
+    ///
+    /// The interpreter's spelling of [`Emulator::with_engine`].
+    pub fn new_with_mode(config: EmulatorConfig, mode: CpuSetupMode) -> Result<Box<Self>> {
+        Self::with_engine(config, mode)
     }
 }
 

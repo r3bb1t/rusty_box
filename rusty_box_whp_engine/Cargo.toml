@@ -1,0 +1,26 @@
+[package]
+name = "rusty_box_whp_engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Runs a rusty_box machine's guest on the Windows Hypervisor Platform"
+keywords = ["x86", "emulator", "hypervisor", "whp", "virtualization"]
+categories = ["emulators", "virtualization"]
+
+[lib]
+name = "rusty_box_whp_engine"
+path = "src/lib.rs"
+
+# The adapter between the two, and the only crate that knows both. `rusty_box`
+# depends on neither: an engine is chosen by the binary that builds a machine,
+# so the emulator never depends on a backend (REPLAN decision 12). Keeping this
+# separate from `rusty_box_whp` is what leaves that crate a thin host-FFI leaf
+# — one that still compiles, and whose tests still run, on a host with no
+# hypervisor and without pulling an emulator in behind it.
+[dependencies]
+rusty_box = { path = "../rusty_box", features = ["std"] }
+rusty_box_whp = { path = "../rusty_box_whp" }
+tracing.workspace = true

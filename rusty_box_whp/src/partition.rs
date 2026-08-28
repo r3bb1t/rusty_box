@@ -267,6 +267,46 @@ impl Partition {
         Ok(())
     }
 
+    /// Map memory the caller owns, without taking it.
+    ///
+    /// A machine that already has guest RAM — allocated, resident, and reached
+    /// by its own interpreter through the same bytes — cannot hand that
+    /// allocation over, so this maps it in place. The partition records the
+    /// range but not the storage, and [`Partition::unmap_subrange`] is how it
+    /// is taken back.
+    ///
+    /// # Safety
+    /// The caller keeps `host` alive, at the same address, and unmoved, for as
+    /// long as the mapping stands or the partition lives — whichever ends
+    /// first. The hypervisor holds the host addresses directly; freeing or
+    /// reallocating mapped memory leaves the guest running against pages the
+    /// host no longer owns, and no borrow here can say so, because a partition
+    /// stored beside the memory it maps cannot borrow its sibling.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Contract`] if `gpa` or the buffer is not
+    /// page-shaped, otherwise [`crate::WhpErrorKind::Platform`].
+    // UNSAFETY: the one `unsafe` outside `sys/`, and it is a signature rather
+    // than a block — this function performs no unsafe operation itself. It is
+    // marked so because it hands the hypervisor host addresses that outlive the
+    // borrow, which is an obligation only a caller can discharge.
+    #[expect(
+        unsafe_code,
+        reason = "the mapping outlives the borrow, so the contract belongs in the signature"
+    )]
+    pub unsafe fn map_borrowed(
+        &mut self,
+        gpa: u64,
+        host: &mut [u8],
+        perms: GpaPerms,
+    ) -> WhpResult<()> {
+        const CALL: &str = "Partition::map_borrowed";
+        if gpa % PAGE_SIZE as u64 != 0 || host.is_empty() || host.len() % PAGE_SIZE != 0 {
+            return Err(WhpError::contract(CALL));
+        }
+        sys::map_gpa(self.handle.0, host, gpa, perms)
+    }
+
     /// Change the permissions of an already-mapped range without disturbing
     /// its contents — the chipset's PAM flip, and the verb whose cost decides
     /// whether a shadowed BIOS is affordable.
@@ -674,6 +714,81 @@ mod tests {
     fn a_zero_page_allocation_is_refused_rather_than_producing_an_empty_window() {
         let refused = HostPages::new(0).expect_err("zero pages");
         assert_eq!(refused.kind(), crate::WhpErrorKind::HostMemory);
+    }
+
+    /// Where a fresh processor's `CS` is based, and so where a guest reached
+    /// without touching `CS` must live.
+    ///
+    /// A processor the platform has just created is at the architectural reset
+    /// state, `CS` included, so `RIP` alone does not say where execution goes.
+    /// Mapping here and leaving `CS` as found keeps the measurement about the
+    /// partition rather than about segment loading.
+    #[cfg(test)]
+    const RESET_CS_BASE: u64 = 0xF_0000;
+    /// Offset into that segment where the measurement guest's `HLT` sits.
+    #[cfg(test)]
+    const GUEST_IP: u64 = 0x1000;
+
+    /// A partition holding one processor pointed at a single `HLT`.
+    ///
+    /// The smallest thing that proves a partition is live, and the memory is
+    /// mapped because mapping is where the platform materialises the partition
+    /// underneath — a fact the test below exists to record.
+    #[cfg(test)]
+    fn halting_partition() -> WhpResult<Partition> {
+        let mut config = PartitionConfig::new()?;
+        config.processor_count(1)?.local_apic(LocalApicMode::None)?;
+        let mut partition = config.setup()?;
+
+        let mut pages = HostPages::new(2)?;
+        pages.bytes_mut()[GUEST_IP as usize] = 0xF4;
+        partition.map(RESET_CS_BASE, pages, GpaPerms::RWX)?;
+        partition.create_processor(0)?;
+        partition.write_reg(0, Reg::Rip, GUEST_IP)?;
+        Ok(partition)
+    }
+
+    /// **A process holds one partition at a time.** Measured, not read.
+    ///
+    /// The second partition's first `WHvMapGpaRange` fails with
+    /// `ERROR_VID_PARTITION_ALREADY_EXISTS` (0xC0370008) — the platform does
+    /// not materialise its backing partition until memory is mapped, and the
+    /// name it uses is the process's, so the collision surfaces at the map
+    /// rather than at `WHvCreatePartition` or `WHvSetupPartition`. Both of
+    /// those succeed for the second partition, which is why a caller cannot
+    /// learn this any earlier.
+    ///
+    /// What it means for anything built on this crate: a fleet of machines on
+    /// this engine is a fleet of PROCESSES. One hypervisor-backed machine per
+    /// process, alongside as many software-backed machines as the host will
+    /// hold. Two hypervisor-backed machines in one process need the surrogate
+    /// process that other hypervisor front ends use, which this port does not
+    /// have.
+    #[test]
+    fn a_process_holds_one_partition_at_a_time() {
+        if !crate::hypervisor_present().unwrap_or(false) {
+            eprintln!("skipped: this host has no Windows Hypervisor Platform");
+            return;
+        }
+        let first = halting_partition().expect("the first partition");
+        let refused = halting_partition().expect_err("a second live partition");
+        assert_eq!(
+            refused.kind(),
+            crate::WhpErrorKind::Platform,
+            "the second partition must be refused BY THE PLATFORM, and at the map that \
+             materialises it: {refused}"
+        );
+
+        // Dropping the first releases the name, so partitions are serially
+        // reusable within one process even though they do not coexist.
+        drop(first);
+        let mut again = halting_partition().expect("a partition after the first is gone");
+        let exit = again.run(0).expect("the guest runs");
+        assert!(
+            matches!(exit.reason, crate::ExitReason::Halt),
+            "the guest must reach its HLT, not {:?}",
+            exit.reason
+        );
     }
 
     #[test]

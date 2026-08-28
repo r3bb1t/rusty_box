@@ -73,6 +73,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
             devices,
             device_manager,
             pc_system,
+            ..
         } = io;
         let (mem_host_base, mem_host_len) = memory.identity_guest_base();
         let (mem_alloc_base, _alloc_len) = memory.allocation_span();

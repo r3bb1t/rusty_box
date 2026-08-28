@@ -3820,6 +3820,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_box_whp_engine"
+version = "0.0.3"
+dependencies = [
+ "rusty_box",
+ "rusty_box_whp",
+ "tracing",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

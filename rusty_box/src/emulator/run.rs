@@ -12,12 +12,35 @@ use crate::{cpu::CpuError, Error};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{Emulator, ResetReason, SliceEngine, SoftwareEngine};
+use super::{Emulator, ProgressUnit, ResetReason, SliceEngine, SoftwareEngine};
 use crate::memory::plan::{MemoryPlan, MemoryPlanError};
 // Only the direct-Linux-boot path below reaches a CPU through the store, and
 // that path needs an allocator.
 #[cfg(feature = "alloc")]
 use super::cpu_store::CpuStore;
+
+/// What a machine was asked for that its engine cannot do.
+///
+/// Separate from the faults a run can hit, because nothing went wrong: the ask
+/// was answerable only by a different engine, and the machine says so instead
+/// of running and reporting a number that means nothing.
+///
+/// `#[non_exhaustive]` at birth: engines are written outside this crate, so the
+/// set of asks one can decline grows with the seam rather than with a release
+/// of this crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum EngineRefusal {
+    /// An instruction budget, on an engine that reports guest time.
+    ///
+    /// The budget would never be spent: nothing this machine can measure
+    /// advances, so the run would not end until the guest did. Ask in
+    /// [`RunBudget::Ticks`] instead — the unit both engines hold to.
+    #[error(
+        "this machine's engine reports guest time, not retired instructions, so an instruction budget could never be spent"
+    )]
+    NoInstructionCount,
+}
 
 /// What state a machine's power is in.
 ///
@@ -625,9 +648,14 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// cannot tell "the guest powered off" from "the budget ran out".
     ///
     /// # Errors
-    /// Whatever ended the run other than a budget or a stop: a fault the
-    /// processor could not take, or a machine boundary that failed to apply.
+    /// [`EngineRefusal::NoInstructionCount`] when an instruction budget is
+    /// asked of an engine that reports guest time. Otherwise whatever ended
+    /// the run other than a budget or a stop: a fault the processor could not
+    /// take, or a machine boundary that failed to apply.
     pub fn step(&mut self, budget: RunBudget) -> Result<BatchOutcome> {
+        if matches!(budget, RunBudget::Instructions(_)) {
+            Self::require_an_instruction_count()?;
+        }
         // What the budget is measured against, sampled before anything runs.
         // Instructions come off the boot processor — the one whose RIP a caller
         // set — and ticks off the machine's own clock.
@@ -654,13 +682,11 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         spent: impl Fn(&Self) -> u64,
     ) -> Result<BatchOutcome> {
         let ips = self.config.ips.per_second_u64();
-        // Seeded from what this machine will report, so the running total never
-        // has to guess a unit before the first batch answers in one.
-        let mut total = if self.cpu_count() > 1 {
-            Progress::Ticks(0)
-        } else {
-            Progress::Instructions(0)
-        };
+        // Unset until the first batch answers, so the running total never
+        // guesses a unit: a multiprocessor answers in ticks, a uniprocessor in
+        // whatever its engine counts, and a run that never got to execute
+        // anything reports the nothing both units agree on.
+        let mut total: Option<Progress> = None;
         // One inner batch is capped so a run that ends on a device deadline
         // still notices promptly; the budget above, not this, decides when the
         // call returns.
@@ -679,7 +705,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 Ok(progress) => progress,
                 Err(e) => return Err(crate::error::Error::Cpu(e)),
             };
-            total = total.add(progress);
+            total = Some(match total {
+                Some(so_far) => so_far.add(progress),
+                None => progress,
+            });
 
             // --- Tick devices + pc_system ---
             // Only reached when the batch advanced nothing itself, which on a
@@ -766,9 +795,28 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.pump_gui_input();
 
         Ok(BatchOutcome {
-            progress: total,
+            // A run that never reached a batch advanced nothing, and no
+            // instructions is the reading both units spell the same way.
+            progress: total.unwrap_or(Progress::Instructions(0)),
             stop: self.classify_batch_stop(),
         })
+    }
+
+    /// The one place a machine tests whether an ask denominated in
+    /// instructions is answerable at all (R5).
+    ///
+    /// Reads a constant of the engine type, so a machine on a counting engine
+    /// pays nothing for it — the branch folds away at monomorphisation and the
+    /// error is unreachable.
+    ///
+    /// # Errors
+    /// [`EngineRefusal::NoInstructionCount`] when the engine reports guest
+    /// time instead.
+    fn require_an_instruction_count() -> Result<()> {
+        match E::PROGRESS_UNIT {
+            ProgressUnit::Instructions => Ok(()),
+            ProgressUnit::Ticks => Err(EngineRefusal::NoInstructionCount.into()),
+        }
     }
 
     /// Execute at most `instructions` guest instructions, and no more.
@@ -782,8 +830,15 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     ///
     /// Devices still advance by the ticks the CPU consumed, so guest time does
     /// not fall behind — only the batching is different.
+    ///
+    /// # Errors
+    /// [`EngineRefusal::NoInstructionCount`] on an engine that does not retire
+    /// the guest's instructions itself: it cannot stop after a count it never
+    /// sees, and running a whole stretch instead would be this method's exact
+    /// promise broken.
     #[cfg(feature = "alloc")]
     pub(crate) fn step_exactly(&mut self, instructions: u64) -> Result<BatchOutcome> {
+        Self::require_an_instruction_count()?;
         let progress = self
             .run_cpu_batch_with_strict_limit(instructions, true)
             .map_err(crate::error::Error::Cpu)?;

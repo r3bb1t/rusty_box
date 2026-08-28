@@ -6,7 +6,7 @@ pub mod misc_mem;
 pub mod mmio;
 pub mod mmio_map;
 pub mod permissions;
-pub(crate) mod plan;
+pub mod plan;
 mod residency;
 
 #[cfg(test)]
@@ -640,6 +640,25 @@ impl BxMemC {
         let stub = &mut self.inherited_memory_stub;
         let len = stub.actual_vector_len;
         (stub.backing.as_mut_slice().as_mut_ptr(), len)
+    }
+
+    /// One window of the allocation above, as bytes, or `None` if it does not
+    /// lie inside.
+    ///
+    /// The same span [`Self::allocation_span`] reports, handed out safely. An
+    /// execution engine that installs this machine's memory somewhere — a
+    /// hypervisor partition — needs the bytes a plan window names, and needs
+    /// them without reconstructing a slice from a pointer at the call site.
+    /// The bounds check is here, once, rather than at each caller.
+    pub fn allocation_slice(&mut self, offset: u64, len: u64) -> Option<&mut [u8]> {
+        let offset = usize::try_from(offset).ok()?;
+        let len = usize::try_from(len).ok()?;
+        let end = offset.checked_add(len)?;
+        let stub = &mut self.inherited_memory_stub;
+        if end > stub.actual_vector_len {
+            return None;
+        }
+        stub.backing.as_mut_slice().get_mut(offset..end)
     }
 
     /// Block-logical snapshot geometry; no caller receives the host backing.

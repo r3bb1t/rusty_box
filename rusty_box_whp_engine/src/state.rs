@@ -1,0 +1,464 @@
+//! Moving a processor's architectural state between this port and the platform.
+//!
+//! Both sides already describe a processor the same way, which is why this is a
+//! transcription and not a translation. [`SegmentAttributes`] is the packed
+//! `u16` a GDT descriptor uses, and `WHV_X64_SEGMENT_REGISTER.Attributes` is
+//! the same word with the same bits in the same places — so the attribute
+//! travels whole rather than being unpacked here and repacked there, which
+//! would be two chances to disagree about, say, bit 13.
+//!
+//! What does NOT cross here is the x87 and vector file. The platform carries
+//! them, but a guest reaches them only through instructions, and every
+//! instruction the hypervisor cannot finish is finished by the shadow
+//! processor — which already holds that state and never handed it away. Moving
+//! it every exit would be several hundred bytes each way for a register file
+//! neither side had touched.
+
+use rusty_box_whp::{Reg, SegmentRegister, TableRegister, WhpResult};
+#[cfg(test)]
+use rusty_box_whp::ALL_REGS;
+
+use rusty_box::cpu::arch_state::{
+    DescriptorTableState, MsrState, SegmentAttributes, SegmentState, VcpuArchState,
+};
+
+/// The word-shaped registers, in the order [`WORD_VALUES`] reads and writes.
+///
+/// One list, used for both directions, so an import and an export cannot
+/// disagree about which slot holds what.
+const WORD_REGS: &[Reg] = &[
+    Reg::Rax,
+    Reg::Rcx,
+    Reg::Rdx,
+    Reg::Rbx,
+    Reg::Rsp,
+    Reg::Rbp,
+    Reg::Rsi,
+    Reg::Rdi,
+    Reg::R8,
+    Reg::R9,
+    Reg::R10,
+    Reg::R11,
+    Reg::R12,
+    Reg::R13,
+    Reg::R14,
+    Reg::R15,
+    Reg::Rip,
+    Reg::Rflags,
+    Reg::Cr0,
+    Reg::Cr2,
+    Reg::Cr3,
+    Reg::Cr4,
+    Reg::Cr8,
+    Reg::Dr0,
+    Reg::Dr1,
+    Reg::Dr2,
+    Reg::Dr3,
+    Reg::Dr6,
+    Reg::Dr7,
+];
+
+/// How many words the list above carries.
+const WORD_VALUES: usize = WORD_REGS.len();
+
+/// The model-specific registers, kept in a second batch because the platform
+/// takes at most thirty-two names per call.
+const MSR_REGS: &[Reg] = &[
+    Reg::Efer,
+    Reg::ApicBase,
+    Reg::Star,
+    Reg::Lstar,
+    Reg::Cstar,
+    Reg::Sfmask,
+    Reg::KernelGsBase,
+    Reg::SysenterCs,
+    Reg::SysenterEsp,
+    Reg::SysenterEip,
+    Reg::Pat,
+    Reg::Tsc,
+    Reg::Xcr0,
+];
+
+const MSR_VALUES: usize = MSR_REGS.len();
+
+/// The six segment registers plus the two system ones, in `VcpuArchState`'s own
+/// order so the first six index its `segments` array directly.
+const SEGMENT_REGS: &[Reg] = &[
+    Reg::Es,
+    Reg::Cs,
+    Reg::Ss,
+    Reg::Ds,
+    Reg::Fs,
+    Reg::Gs,
+    Reg::Ldtr,
+    Reg::Tr,
+];
+
+/// Where `ldtr` and `tr` sit in [`SEGMENT_REGS`], after the six the guest names.
+const LDTR_SLOT: usize = 6;
+const TR_SLOT: usize = 7;
+
+const TABLE_REGS: &[Reg] = &[Reg::Gdtr, Reg::Idtr];
+const GDTR_SLOT: usize = 0;
+const IDTR_SLOT: usize = 1;
+
+/// What a state exchange talks to.
+///
+/// A trait so the exchange can be tested against a processor that records what
+/// it was told rather than one that needs a hypervisor. Implemented for
+/// `Partition`, whose methods these are.
+pub(crate) trait VpRegisters {
+    fn read_words(&self, regs: &[Reg], out: &mut [u64]) -> WhpResult<()>;
+    fn write_words(&self, regs: &[Reg], words: &[u64]) -> WhpResult<()>;
+    fn read_segments(&self, regs: &[Reg], out: &mut [SegmentRegister]) -> WhpResult<()>;
+    fn write_segments(&self, regs: &[Reg], segments: &[SegmentRegister]) -> WhpResult<()>;
+    fn read_tables(&self, regs: &[Reg], out: &mut [TableRegister]) -> WhpResult<()>;
+    fn write_tables(&self, regs: &[Reg], tables: &[TableRegister]) -> WhpResult<()>;
+}
+
+const fn to_platform_segment(state: SegmentState) -> SegmentRegister {
+    SegmentRegister {
+        base: state.base,
+        limit: state.limit,
+        selector: state.selector,
+        attributes: state.attributes.bits(),
+    }
+}
+
+const fn from_platform_segment(seg: SegmentRegister) -> SegmentState {
+    SegmentState {
+        selector: seg.selector,
+        base: seg.base,
+        limit: seg.limit,
+        attributes: SegmentAttributes::from_bits(seg.attributes),
+    }
+}
+
+/// Write `state` into the processor.
+///
+/// # Errors
+/// Whatever the platform said about a register it would not take.
+pub(crate) fn import(vp: &impl VpRegisters, state: &VcpuArchState) -> WhpResult<()> {
+    let mut words = [0u64; WORD_VALUES];
+    words[..16].copy_from_slice(&state.gprs);
+    words[16] = state.rip;
+    words[17] = state.rflags;
+    words[18] = state.cr0;
+    words[19] = state.cr2;
+    words[20] = state.cr3;
+    words[21] = state.cr4;
+    words[22] = state.cr8;
+    words[23..27].copy_from_slice(&state.dr);
+    words[27] = state.dr6;
+    words[28] = state.dr7;
+    vp.write_words(WORD_REGS, &words)?;
+
+    vp.write_words(MSR_REGS, &msr_words(&state.msrs, state.xcr0))?;
+
+    let mut segments = [SegmentRegister::default(); 8];
+    for (slot, seg) in segments.iter_mut().zip(&state.segments) {
+        *slot = to_platform_segment(*seg);
+    }
+    segments[LDTR_SLOT] = to_platform_segment(state.ldtr);
+    segments[TR_SLOT] = to_platform_segment(state.tr);
+    vp.write_segments(SEGMENT_REGS, &segments)?;
+
+    let tables = [
+        TableRegister { base: state.gdtr.base, limit: state.gdtr.limit },
+        TableRegister { base: state.idtr.base, limit: state.idtr.limit },
+    ];
+    vp.write_tables(TABLE_REGS, &tables)
+}
+
+/// Read the processor into `state`, leaving the parts this seam does not carry
+/// as they were.
+///
+/// # Errors
+/// Whatever the platform said about a register it would not give up.
+pub(crate) fn export(vp: &impl VpRegisters, state: &mut VcpuArchState) -> WhpResult<()> {
+    let mut words = [0u64; WORD_VALUES];
+    vp.read_words(WORD_REGS, &mut words)?;
+    state.gprs.copy_from_slice(&words[..16]);
+    state.rip = words[16];
+    state.rflags = words[17];
+    state.cr0 = words[18];
+    state.cr2 = words[19];
+    state.cr3 = words[20];
+    state.cr4 = words[21];
+    state.cr8 = words[22];
+    state.dr.copy_from_slice(&words[23..27]);
+    state.dr6 = words[27];
+    state.dr7 = words[28];
+
+    let mut msrs = [0u64; MSR_VALUES];
+    vp.read_words(MSR_REGS, &mut msrs)?;
+    state.msrs = MsrState {
+        efer: msrs[0],
+        apic_base: msrs[1],
+        star: msrs[2],
+        lstar: msrs[3],
+        cstar: msrs[4],
+        sfmask: msrs[5],
+        kernel_gs_base: msrs[6],
+        sysenter_cs: msrs[7],
+        sysenter_esp: msrs[8],
+        sysenter_eip: msrs[9],
+        pat: msrs[10],
+        tsc: msrs[11],
+    };
+    // XCR0 is architecturally 64 bits and every bit this port models lives in
+    // the low half, which is why the state holds it as a `u32`. Truncating is
+    // the same narrowing `xcr0.get32()` performs on the processor.
+    state.xcr0 = msrs[12] as u32;
+
+    let mut segments = [SegmentRegister::default(); 8];
+    vp.read_segments(SEGMENT_REGS, &mut segments)?;
+    for (slot, seg) in state.segments.iter_mut().zip(&segments) {
+        *slot = from_platform_segment(*seg);
+    }
+    state.ldtr = from_platform_segment(segments[LDTR_SLOT]);
+    state.tr = from_platform_segment(segments[TR_SLOT]);
+
+    let mut tables = [TableRegister::default(); 2];
+    vp.read_tables(TABLE_REGS, &mut tables)?;
+    state.gdtr = DescriptorTableState {
+        base: tables[GDTR_SLOT].base,
+        limit: tables[GDTR_SLOT].limit,
+    };
+    state.idtr = DescriptorTableState {
+        base: tables[IDTR_SLOT].base,
+        limit: tables[IDTR_SLOT].limit,
+    };
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusty_box::cpu::arch_state::{SegmentAttributeParts, VECTOR_REGISTERS};
+    use std::collections::BTreeMap;
+
+    /// A processor that remembers what it was told, so the exchange can be
+    /// exercised on a host with no hypervisor — which is every host the gates
+    /// run on.
+    #[derive(Default)]
+    struct Recorder {
+        words: core::cell::RefCell<BTreeMap<usize, u64>>,
+        segments: core::cell::RefCell<BTreeMap<usize, SegmentRegister>>,
+        tables: core::cell::RefCell<BTreeMap<usize, TableRegister>>,
+    }
+
+    /// A stable key per register, so a write and the read that follows it agree
+    /// without the recorder knowing what any of them mean.
+    fn key(reg: Reg) -> usize {
+        ALL_REGS.iter().position(|candidate| *candidate == reg).expect("a known register")
+    }
+
+    impl VpRegisters for Recorder {
+        fn read_words(&self, regs: &[Reg], out: &mut [u64]) -> WhpResult<()> {
+            let words = self.words.borrow();
+            for (slot, reg) in out.iter_mut().zip(regs) {
+                *slot = words.get(&key(*reg)).copied().unwrap_or(0);
+            }
+            Ok(())
+        }
+
+        fn write_words(&self, regs: &[Reg], words: &[u64]) -> WhpResult<()> {
+            let mut stored = self.words.borrow_mut();
+            for (reg, word) in regs.iter().zip(words) {
+                stored.insert(key(*reg), *word);
+            }
+            Ok(())
+        }
+
+        fn read_segments(&self, regs: &[Reg], out: &mut [SegmentRegister]) -> WhpResult<()> {
+            let segments = self.segments.borrow();
+            for (slot, reg) in out.iter_mut().zip(regs) {
+                *slot = segments.get(&key(*reg)).copied().unwrap_or_default();
+            }
+            Ok(())
+        }
+
+        fn write_segments(&self, regs: &[Reg], segments: &[SegmentRegister]) -> WhpResult<()> {
+            let mut stored = self.segments.borrow_mut();
+            for (reg, seg) in regs.iter().zip(segments) {
+                stored.insert(key(*reg), *seg);
+            }
+            Ok(())
+        }
+
+        fn read_tables(&self, regs: &[Reg], out: &mut [TableRegister]) -> WhpResult<()> {
+            let tables = self.tables.borrow();
+            for (slot, reg) in out.iter_mut().zip(regs) {
+                *slot = tables.get(&key(*reg)).copied().unwrap_or_default();
+            }
+            Ok(())
+        }
+
+        fn write_tables(&self, regs: &[Reg], tables: &[TableRegister]) -> WhpResult<()> {
+            let mut stored = self.tables.borrow_mut();
+            for (reg, table) in regs.iter().zip(tables) {
+                stored.insert(key(*reg), *table);
+            }
+            Ok(())
+        }
+    }
+
+    /// A distinctive state, so a field that lands in the wrong slot shows up as
+    /// a wrong VALUE rather than as a zero that a default would also produce.
+    fn distinctive() -> VcpuArchState {
+        let mut state = VcpuArchState::default();
+        for (index, gpr) in state.gprs.iter_mut().enumerate() {
+            *gpr = 0x1000 + index as u64;
+        }
+        state.rip = 0xDEAD_BEEF;
+        state.rflags = 0x0000_0202;
+        state.cr0 = 0x8000_0011;
+        state.cr2 = 0x2222;
+        state.cr3 = 0x3333;
+        state.cr4 = 0x4444;
+        state.cr8 = 0x000F;
+        for (index, dr) in state.dr.iter_mut().enumerate() {
+            *dr = 0xD000 + index as u64;
+        }
+        state.dr6 = 0xD6;
+        state.dr7 = 0xD7;
+        state.msrs = MsrState {
+            efer: 0xE0,
+            apic_base: 0xE1,
+            star: 0xE2,
+            lstar: 0xE3,
+            cstar: 0xE4,
+            sfmask: 0xE5,
+            kernel_gs_base: 0xE6,
+            sysenter_cs: 0xE7,
+            sysenter_esp: 0xE8,
+            sysenter_eip: 0xE9,
+            pat: 0xEA,
+            tsc: 0xEB,
+        };
+        state.xcr0 = 0x0000_0007;
+        for (index, seg) in state.segments.iter_mut().enumerate() {
+            *seg = SegmentState {
+                selector: 0x10 + index as u16,
+                base: 0x10_0000 + index as u64,
+                limit: 0xF_0000 + index as u32,
+                attributes: SegmentAttributes::new(SegmentAttributeParts {
+                    kind: 3,
+                    dpl: 0,
+                    code_or_data: true,
+                    present: true,
+                    available: false,
+                    long: false,
+                    default_big: true,
+                    granular: true,
+                }),
+            };
+        }
+        state.ldtr = SegmentState { selector: 0x50, base: 0x5000, ..state.segments[0] };
+        state.tr = SegmentState { selector: 0x60, base: 0x6000, ..state.segments[0] };
+        state.gdtr = DescriptorTableState { base: 0x7000, limit: 0x7F };
+        state.idtr = DescriptorTableState { base: 0x8000, limit: 0x8F };
+        state
+    }
+
+    /// Everything this seam carries survives the round trip.
+    ///
+    /// The whole point of the exchange: a processor described here, installed
+    /// on the platform and read back, describes the same processor. A field
+    /// written to the wrong slot fails on the value, not on a zero.
+    #[test]
+    fn a_processor_survives_being_installed_and_read_back() {
+        let vp = Recorder::default();
+        let original = distinctive();
+        import(&vp, &original).expect("a recorder refuses nothing");
+
+        let mut read_back = VcpuArchState::default();
+        export(&vp, &mut read_back).expect("a recorder refuses nothing");
+
+        assert_eq!(read_back.gprs, original.gprs);
+        assert_eq!(read_back.rip, original.rip);
+        assert_eq!(read_back.rflags, original.rflags);
+        assert_eq!(read_back.cr0, original.cr0);
+        assert_eq!(read_back.cr2, original.cr2);
+        assert_eq!(read_back.cr3, original.cr3);
+        assert_eq!(read_back.cr4, original.cr4);
+        assert_eq!(read_back.cr8, original.cr8);
+        assert_eq!(read_back.dr, original.dr);
+        assert_eq!(read_back.dr6, original.dr6);
+        assert_eq!(read_back.dr7, original.dr7);
+        assert_eq!(read_back.msrs, original.msrs);
+        assert_eq!(read_back.xcr0, original.xcr0);
+        assert_eq!(read_back.segments, original.segments);
+        assert_eq!(read_back.ldtr, original.ldtr);
+        assert_eq!(read_back.tr, original.tr);
+        assert_eq!(read_back.gdtr, original.gdtr);
+        assert_eq!(read_back.idtr, original.idtr);
+    }
+
+    /// A segment's attribute word crosses whole.
+    ///
+    /// The reason both sides store the packed `u16` rather than parts: bit 13
+    /// is `L` and bit 14 is `D/B`, they mean opposite things about the same
+    /// segment, and unpacking on one side and repacking on the other is two
+    /// chances to swap them.
+    #[test]
+    fn a_segment_keeps_its_attribute_word_across_the_seam() {
+        let long_code = SegmentState {
+            selector: 0x08,
+            base: 0,
+            limit: 0xFFFFF,
+            attributes: SegmentAttributes::new(SegmentAttributeParts {
+                kind: 0xB,
+                dpl: 0,
+                code_or_data: true,
+                present: true,
+                available: false,
+                long: true,
+                default_big: false,
+                granular: true,
+            }),
+        };
+        let crossed = from_platform_segment(to_platform_segment(long_code));
+        assert_eq!(crossed, long_code);
+        assert!(crossed.attributes.is_long());
+        assert!(!crossed.attributes.is_default_big());
+    }
+
+    /// The register file the seam deliberately leaves alone stays untouched, so
+    /// an export cannot quietly zero state the shadow processor still owns.
+    #[test]
+    fn the_vector_file_is_not_carried_and_is_not_disturbed() {
+        let vp = Recorder::default();
+        import(&vp, &distinctive()).expect("a recorder refuses nothing");
+
+        let mut read_back = VcpuArchState::default();
+        read_back.vector[1][0] = 0xA5;
+        read_back.opmask[2] = 0x1234;
+        read_back.mxcsr = 0x1F80;
+        export(&vp, &mut read_back).expect("a recorder refuses nothing");
+
+        assert_eq!(read_back.vector[1][0], 0xA5, "the vector file is the shadow's");
+        assert_eq!(read_back.opmask[2], 0x1234);
+        assert_eq!(read_back.mxcsr, 0x1F80);
+        assert_eq!(read_back.vector.len(), VECTOR_REGISTERS);
+    }
+}
+
+const fn msr_words(msrs: &MsrState, xcr0: u32) -> [u64; MSR_VALUES] {
+    [
+        msrs.efer,
+        msrs.apic_base,
+        msrs.star,
+        msrs.lstar,
+        msrs.cstar,
+        msrs.sfmask,
+        msrs.kernel_gs_base,
+        msrs.sysenter_cs,
+        msrs.sysenter_esp,
+        msrs.sysenter_eip,
+        msrs.pat,
+        msrs.tsc,
+        xcr0 as u64,
+    ]
+}

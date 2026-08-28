@@ -19,7 +19,7 @@
 //! a hypervisor cannot be serviced through this seam, which is why the engine
 //! seam refuses that configuration rather than carrying half of it.
 
-use super::cpu::BxCpuC;
+use super::cpu::{BxCpuC, CpuActivityState};
 use super::decoder::BxSegregs;
 use super::descriptor::SEG_VALID_CACHE;
 use super::instrumentation::Instrumentation;
@@ -386,6 +386,26 @@ const SEGMENT_ORDER: [BxSegregs; 6] = [
 ];
 
 impl<T: Instrumentation> BxCpuC<T> {
+    /// Record that this processor halted while an engine was running it.
+    ///
+    /// The engine's counterpart to the `HLT` handler, and the reason it is
+    /// needed: a processor run on the host's own hardware executes `HLT`
+    /// itself, so the checks Bochs makes before halting — CPL, an SVM or VMX
+    /// intercept — are the hardware's, and what reaches an engine is a
+    /// processor that has already halted. Halting is not architectural state
+    /// either, so it does not travel in a [`VcpuArchState`]; the platform
+    /// reports it as the reason a run ended, and this is where that reason
+    /// becomes something the machine can read.
+    ///
+    /// It goes through the same `enter_sleep_state` the interpreter's `HLT`
+    /// ends in, so a processor halted by hardware and one halted by the
+    /// interpreter are indistinguishable to the scheduler that stops running
+    /// it and to the wake-up path that decides an interrupt may start it
+    /// again.
+    pub fn record_halt(&mut self) {
+        self.enter_sleep_state(CpuActivityState::Hlt);
+    }
+
     /// Read this processor's architectural state out.
     ///
     /// Pure: nothing about the processor changes, so an engine may export as

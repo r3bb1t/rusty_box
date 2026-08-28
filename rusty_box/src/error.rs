@@ -16,6 +16,9 @@ pub enum Error {
     #[error(transparent)]
     Build(#[from] crate::emulator::BuildError),
 
+    #[error(transparent)]
+    Engine(#[from] crate::emulator::EngineRefusal),
+
     #[cfg(feature = "instrumentation")]
     #[error(transparent)]
     Instrumentation(#[from] crate::cpu::InstrumentationError),
