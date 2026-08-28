@@ -16,6 +16,7 @@
 //! how many mappings a partition tolerates. Choosing the sharing before
 //! measuring is what the probe is meant to prevent.
 
+use crate::caps::MsrExits;
 use crate::error::{WhpError, WhpResult};
 use rusty_box_core::GpaPerms;
 
@@ -175,6 +176,18 @@ impl PartitionConfig {
         exits: crate::caps::ExtendedVmExits,
     ) -> WhpResult<&mut Self> {
         sys::set_property(self.handle.0, PropertyCode::ExtendedVmExits, exits.as_word())?;
+        Ok(self)
+    }
+
+    /// Which model-specific register accesses should exit instead of being
+    /// answered by the platform. Requires
+    /// [`crate::caps::ExtendedVmExits::msr`], and without it that bit traps
+    /// nothing at all — see [`MsrExits`].
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the host refuses.
+    pub fn msr_exits(&mut self, exits: MsrExits) -> WhpResult<&mut Self> {
+        sys::set_property(self.handle.0, PropertyCode::MsrExitBitmap, exits.as_word())?;
         Ok(self)
     }
 

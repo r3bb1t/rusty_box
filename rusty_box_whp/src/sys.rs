@@ -59,6 +59,7 @@ pub(crate) enum CapabilityCode {
 pub(crate) enum PropertyCode {
     ProcessorCount,
     ExtendedVmExits,
+    MsrExitBitmap,
     SeparateSecurityDomain,
     LocalApicEmulationMode,
 }

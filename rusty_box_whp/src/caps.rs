@@ -24,6 +24,58 @@ mod feature_bit {
 /// Bit positions within `WHV_EXTENDED_VM_EXITS` (AMD64 layout). Note that the
 /// four `X64ApicWrite*ExitTrap` bits sit between `HypercallExit` and
 /// `GpaAccessFaultExit`, which is why the last one lands at 14 and not lower.
+/// Which model-specific register accesses leave the partition.
+///
+/// Setting [`ExtendedVmExits::msr`] is not by itself enough, and finding that
+/// out cost a wrong test: the platform answers a handful of MSRs from inside
+/// the hypervisor and exits only for what this names. Everything else — every
+/// MSR the platform has no opinion about — is covered by
+/// [`MsrExits::unhandled`].
+///
+/// The six are the whole of `WHV_X64_MSR_EXIT_BITMAP`; there is no way to name
+/// an individual MSR.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct MsrExits {
+    /// Every MSR the platform does not handle itself.
+    pub unhandled: bool,
+    /// `WRMSR` to `IA32_TIME_STAMP_COUNTER`.
+    pub tsc_write: bool,
+    /// `RDMSR` of `IA32_TIME_STAMP_COUNTER`. Note this is the MSR and not the
+    /// `RDTSC` instruction, which has its own bit in [`ExtendedVmExits`] — a
+    /// caller that traps one and not the other leaves a guest two clocks that
+    /// disagree.
+    pub tsc_read: bool,
+    /// `WRMSR` to `IA32_APIC_BASE`.
+    pub apic_base_write: bool,
+    /// `RDMSR` of `IA32_MISC_ENABLE`.
+    pub misc_enable_read: bool,
+    /// `RDMSR` of `IA32_BIOS_SIGN_ID`, the microcode revision.
+    pub microcode_revision_read: bool,
+}
+
+impl MsrExits {
+    /// Every MSR access the platform will hand over.
+    pub const ALL: Self = Self {
+        unhandled: true,
+        tsc_write: true,
+        tsc_read: true,
+        apic_base_write: true,
+        misc_enable_read: true,
+        microcode_revision_read: true,
+    };
+
+    /// The word to hand `WHvSetPartitionProperty`.
+    #[must_use]
+    pub const fn as_word(self) -> u64 {
+        (self.unhandled as u64)
+            | (self.tsc_write as u64) << 1
+            | (self.tsc_read as u64) << 2
+            | (self.apic_base_write as u64) << 3
+            | (self.misc_enable_read as u64) << 4
+            | (self.microcode_revision_read as u64) << 5
+    }
+}
+
 mod exit_bit {
     pub(super) const CPUID: u32 = 0;
     pub(super) const MSR: u32 = 1;
@@ -173,6 +225,31 @@ mod tests {
         let only = ExtendedVmExits { gpa_access_fault: true, ..ExtendedVmExits::default() };
         assert_eq!(only.as_word(), 1 << 14);
         assert_eq!(ExtendedVmExits::from_word(1 << 14), only);
+    }
+
+    /// Each MSR exit sits where the SDK's `WHV_X64_MSR_EXIT_BITMAP` declares
+    /// it, in field order.
+    ///
+    /// Checked one at a time against the header rather than as a round trip:
+    /// there is no `from_word` here to make a round trip meaningful, and a
+    /// pair of bits swapped between them would trap the wrong register while
+    /// still looking like it worked — the guest would simply be told the
+    /// host's answer for one MSR and this port's for another.
+    #[test]
+    fn each_msr_exit_sits_where_the_platform_declares_it() {
+        let each = [
+            (MsrExits { unhandled: true, ..MsrExits::default() }, 0),
+            (MsrExits { tsc_write: true, ..MsrExits::default() }, 1),
+            (MsrExits { tsc_read: true, ..MsrExits::default() }, 2),
+            (MsrExits { apic_base_write: true, ..MsrExits::default() }, 3),
+            (MsrExits { misc_enable_read: true, ..MsrExits::default() }, 4),
+            (MsrExits { microcode_revision_read: true, ..MsrExits::default() }, 5),
+        ];
+        for (exits, bit) in each {
+            assert_eq!(exits.as_word(), 1 << bit, "{exits:?} must be bit {bit}");
+        }
+        assert_eq!(MsrExits::ALL.as_word(), 0b11_1111);
+        assert_eq!(MsrExits::default().as_word(), 0);
     }
 
     #[test]

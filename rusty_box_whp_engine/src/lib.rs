@@ -258,6 +258,143 @@ mod tests {
         );
     }
 
+    /// A guest asking what processor it is on gets this port's answer, not the
+    /// host's — and does not learn that it is virtualised.
+    ///
+    /// The guest reads `CPUID` leaf 1 on both engines and the answers must
+    /// match — family, model and stepping, byte for byte, plus `ECX` bit 31,
+    /// `HypervisorPresent`, which this port's model leaves clear because a
+    /// guest that can see it is a guest that knows.
+    ///
+    /// Measured while writing it, so the assertion is known to bite rather
+    /// than assumed to: with the trapping removed this host answers
+    /// `0x000906A3` where the interpreter answers `0x00050654`. Worth knowing
+    /// alongside it — this platform does NOT set `HypervisorPresent` for a
+    /// partition configured like ours, so that bit alone would prove nothing;
+    /// the model bytes are what carry the test.
+    ///
+    /// A host whose own processor happened to be this port's exact model and
+    /// stepping would make it vacuous. Nothing can be done about that from
+    /// inside the test, and the equality it asserts is the property that
+    /// matters either way: two engines, one answer.
+    #[test]
+    fn a_guest_on_hardware_is_told_the_same_processor_the_interpreter_tells_it() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        // mov eax,1 ; cpuid ; then EAX and ECX out a byte at a time
+        let asking: &[u8] = &[
+            0x66, 0xB8, 0x01, 0x00, 0x00, 0x00, //  mov eax, 1
+            0x0F, 0xA2, //                          cpuid
+            0xE6, DEBUG_PORT, //                    out 0xE9, al
+            0x66, 0xC1, 0xE8, 0x08, //              shr eax, 8
+            0xE6, DEBUG_PORT,
+            0x66, 0xC1, 0xE8, 0x08,
+            0xE6, DEBUG_PORT,
+            0x66, 0xC1, 0xE8, 0x08,
+            0xE6, DEBUG_PORT,
+            0x66, 0xC1, 0xE9, 0x1F, //              shr ecx, 31
+            0x88, 0xC8, //                          mov al, cl
+            0xE6, DEBUG_PORT, //                    out 0xE9, al
+            0xF4, //                                hlt
+        ];
+
+        let config = EmulatorConfig {
+            memory: MemorySize::bytes(8 * 1024 * 1024),
+            ..EmulatorConfig::default()
+        };
+        let mut interpreted =
+            Emulator::new_with_mode(config, CpuSetupMode::RealMode).expect("machine");
+        interpreted.mem_write(CODE, asking).expect("load");
+        interpreted.reg_write(X86Reg::Rip, CODE);
+        interpreted
+            .step(RunBudget::Ticks(1_000_000))
+            .expect("the interpreter runs the guest");
+        let by_the_interpreter: std::vec::Vec<u8> =
+            interpreted.debug_port().take_output().collect();
+
+        let _turn = a_turn_on_the_hardware();
+        let mut on_hardware = machine_running(asking);
+        on_hardware
+            .step(RunBudget::Ticks(1_000_000))
+            .expect("the hypervisor runs the guest");
+        let by_the_hardware: std::vec::Vec<u8> =
+            on_hardware.debug_port().take_output().collect();
+
+        assert_eq!(
+            by_the_interpreter.last(),
+            Some(&0),
+            "this port's own model does not claim to be running under a hypervisor"
+        );
+        assert_eq!(
+            by_the_hardware, by_the_interpreter,
+            "a guest must not be able to tell the two engines apart by asking the \
+             processor about itself"
+        );
+    }
+
+    /// A guest reading a model-specific register reads this port's, not the
+    /// host's.
+    ///
+    /// `IA32_MISC_ENABLE` is a register every x86 has and no two agree on, so
+    /// leaving it to the host would be as loud a divergence as `CPUID` — and
+    /// unlike `CPUID` it needs no exit list, just the platform's MSR exit.
+    /// Serviced on the shadow, which is the same path a trapped memory access
+    /// and a trapped `CPUID` take.
+    #[test]
+    fn a_guest_on_hardware_reads_this_ports_model_specific_registers() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        // mov ecx,0x1A0 ; rdmsr ; then EAX out a byte at a time
+        let asking: &[u8] = &[
+            0x66, 0xB9, 0xA0, 0x01, 0x00, 0x00, //  mov ecx, IA32_MISC_ENABLE
+            0x0F, 0x32, //                          rdmsr
+            0xE6, DEBUG_PORT,
+            0x66, 0xC1, 0xE8, 0x08,
+            0xE6, DEBUG_PORT,
+            0x66, 0xC1, 0xE8, 0x08,
+            0xE6, DEBUG_PORT,
+            0x66, 0xC1, 0xE8, 0x08,
+            0xE6, DEBUG_PORT,
+            0xF4, //                                hlt
+        ];
+
+        let config = EmulatorConfig {
+            memory: MemorySize::bytes(8 * 1024 * 1024),
+            ..EmulatorConfig::default()
+        };
+        let mut interpreted =
+            Emulator::new_with_mode(config, CpuSetupMode::RealMode).expect("machine");
+        interpreted.mem_write(CODE, asking).expect("load");
+        interpreted.reg_write(X86Reg::Rip, CODE);
+        interpreted
+            .step(RunBudget::Ticks(1_000_000))
+            .expect("the interpreter runs the guest");
+        let by_the_interpreter: std::vec::Vec<u8> =
+            interpreted.debug_port().take_output().collect();
+
+        let _turn = a_turn_on_the_hardware();
+        let mut on_hardware = machine_running(asking);
+        on_hardware
+            .step(RunBudget::Ticks(1_000_000))
+            .expect("the hypervisor runs the guest");
+        let by_the_hardware: std::vec::Vec<u8> =
+            on_hardware.debug_port().take_output().collect();
+
+        assert_eq!(
+            by_the_interpreter.len(),
+            4,
+            "the guest must have completed its four writes on the interpreter"
+        );
+        assert_eq!(
+            by_the_hardware, by_the_interpreter,
+            "a model-specific register must read the same under both engines"
+        );
+    }
+
     /// An instruction budget is refused, not silently never spent.
     ///
     /// Nothing this machine can measure advances per instruction, so the loop

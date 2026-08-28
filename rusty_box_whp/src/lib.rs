@@ -39,7 +39,9 @@ mod partition;
 mod sys;
 mod vcpu;
 
-pub use caps::{capabilities, hypervisor_present, Capabilities, ExtendedVmExits, Features};
+pub use caps::{
+    capabilities, hypervisor_present, Capabilities, ExtendedVmExits, Features, MsrExits,
+};
 pub use error::{WhpError, WhpErrorKind, WhpResult};
 pub use partition::{
     Canceller, HostPages, InterruptRequester, LateProperty, LocalApicMode, Partition,

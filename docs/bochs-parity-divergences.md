@@ -184,3 +184,92 @@ gates plus an A/B, and the cliff is a throughput dip, not a correctness problem.
 
 **Status:** open and deliberate. Written up for upstream in
 `docs/bochs-upstream-bugs.md`.
+
+---
+
+# Hypervisor-engine divergences (`H<n>`)
+
+A machine running its guest on `rusty_box_whp_engine` executes on the host's
+own processor, and there are things a hypervisor will not let a port control.
+These are numbered `H<n>` rather than `D<n>` because they hold **only** for a
+machine on that engine — the interpreter has none of them, and a machine on
+the interpreter is the reference both are measured against.
+
+The mixed-engine equality tests in `rusty_box_whp_engine` are how each entry
+here stays honest: anything a guest can observe differently between the two
+engines and is NOT listed here is a bug.
+
+## H1 — A20 is recorded but never masks an address
+
+**Bochs:** `memory/misc_mem.cc` applies the A20 mask to every physical access,
+so a guest with the gate closed sees addresses at and above 1 MiB wrap.
+
+**rusty_box on the hypervisor:** the guest-physical map installed in the
+partition is derived by `memory/plan.rs`, which does not model A20. The gate is
+still recorded — `pc_system`'s A20 state, both controller mirrors and the
+port-92 and keyboard paths all work exactly as they do under the interpreter —
+but the hardware serves the unmasked address.
+
+### What the guest observes
+
+A guest that closes the gate and reads at 1 MiB reads the byte at 1 MiB rather
+than the one at 0. Real-mode software that relies on the wrap to address the
+high memory area is the case that notices.
+
+### Why it is not merely unfixed
+
+No hypervisor exposes A20: there is no A20 in KVM's or WHP's interfaces, QEMU's
+accelerators contain no `a20` handling at all, and VirtualBox's NEM backend
+documents the same absence. The map is the only lever an engine has, and
+expressing a wrap in a map means aliasing every page above 1 MiB to its
+counterpart below — which the plan's window model cannot say and the platform
+would charge a mapping for.
+
+### Price of closing it
+
+The guest-physical map would have to carry aliases, and every window above
+1 MiB would need re-mapping on each gate change. A BIOS toggles A20 during
+early boot, so the cost lands exactly where boot time is measured. Not paid
+because the guests this engine targets enable A20 and leave it enabled.
+
+**Status:** open and deliberate.
+
+## H2 — The time-stamp counter is the host's
+
+**Bochs:** `cpu/proc_ctrl.cc get_tsc` derives the counter from the emulated
+processor's own retired-instruction count, so guest time and the TSC advance
+together and both are this port's.
+
+**rusty_box on the hypervisor:** neither `RDTSC` nor `RDMSR` of
+`IA32_TIME_STAMP_COUNTER` exits, so both answer from the host's counter. Every
+other model-specific register IS taken — see `TRAPPED_MSRS` in the engine —
+which is what makes this one entry rather than a category.
+
+### What the guest observes
+
+A TSC that runs at the host's rate and starts wherever the host's was, rather
+than one that counts this machine's own instructions. A guest calibrating the
+TSC against the PIT gets a host-derived frequency.
+
+### Why the divergence is *this* shape rather than the other
+
+Taking the TSC without taking `RDTSC` would be worse, and taking both would be
+worse still. The shadow processor retires almost no instructions while the
+guest runs on hardware, so a TSC derived from its instruction count barely
+moves; a guest reading a frozen TSC either divides by zero calibrating or spins
+forever waiting for it to advance. Two clocks that disagree — a trapped MSR
+read answering from the frozen shadow while `RDTSC` answers from the host — is
+the worst of the three. So both stay with the hardware, together.
+
+### Price of closing it
+
+A cross-engine TSC bridge: the engine would have to drive this port's counter
+from elapsed host time at the machine's own rate, the way it already converts a
+slice's duration into ticks, and then take `X64RdtscExit` plus the two TSC
+bits in the MSR exit bitmap. `X64RdtscExit` also puts an exit on the hottest
+instruction a calibrating guest executes, so it needs a measurement before it
+is worth having. Both bits are one named constant away in
+`rusty_box_whp::MsrExits`.
+
+**Status:** open and deliberate. The lever exists and is named; what is missing
+is the bridge and the measurement.

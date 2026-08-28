@@ -143,6 +143,7 @@ const fn property_code(code: PropertyCode) -> (WHV_PARTITION_PROPERTY_CODE, u32)
     match code {
         PropertyCode::ProcessorCount => (WHvPartitionPropertyCodeProcessorCount, 4),
         PropertyCode::ExtendedVmExits => (WHvPartitionPropertyCodeExtendedVmExits, 8),
+        PropertyCode::MsrExitBitmap => (WHvPartitionPropertyCodeX64MsrExitBitmap, 8),
         PropertyCode::SeparateSecurityDomain => {
             (WHvPartitionPropertyCodeSeparateSecurityDomain, 4)
         }

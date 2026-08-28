@@ -21,7 +21,10 @@
 
 use core::time::Duration;
 
-use rusty_box_whp::{Exit, ExitReason, LocalApicMode, Partition, PartitionConfig, WhpError};
+use rusty_box_whp::{
+    Exit, ExitReason, ExtendedVmExits, LocalApicMode, MsrExits, Partition, PartitionConfig,
+    WhpError,
+};
 
 use super::state::{self, VpRegisters};
 use super::Vp;
@@ -36,6 +39,70 @@ use rusty_box::GpaWindow;
 /// machine with more processors than this refuses to start rather than running
 /// one and pretending.
 const BOOT_VP: u32 = 0;
+
+/// Every `CPUID` leaf this engine takes away from the host.
+///
+/// A leaf that is not here executes on the host's own processor and answers
+/// with the host's own values — the model, the stepping, the feature words,
+/// and leaf 1's `HypervisorPresent` bit. That is the loudest divergence a
+/// guest can hear, and the one that matters most to anything looking for an
+/// emulator, so the list is generous rather than minimal: a leaf omitted by
+/// oversight is a leaf the host answers.
+///
+/// The ranges are the architectural ones — the standard leaves, the
+/// hypervisor range, the extended leaves and Centaur's — each taken well past
+/// what this port implements, because an unimplemented leaf still has a
+/// correct answer and it is this port's to give (Bochs `cpuid.cc` returns
+/// zeros or the highest supported leaf, never the host's).
+const TRAPPED_CPUID_LEAVES: &[u32] = &{
+    let mut leaves = [0u32; 0x20 + 0x10 + 0x20 + 0x02];
+    let mut at = 0;
+    let mut leaf = 0x0000_0000u32;
+    while leaf < 0x0000_0020 {
+        leaves[at] = leaf;
+        at += 1;
+        leaf += 1;
+    }
+    leaf = 0x4000_0000;
+    while leaf < 0x4000_0010 {
+        leaves[at] = leaf;
+        at += 1;
+        leaf += 1;
+    }
+    leaf = 0x8000_0000;
+    while leaf < 0x8000_0020 {
+        leaves[at] = leaf;
+        at += 1;
+        leaf += 1;
+    }
+    leaves[at] = 0xC000_0000;
+    leaves[at + 1] = 0xC000_0001;
+    leaves
+};
+
+/// Which model-specific register accesses this engine takes away from the
+/// platform.
+///
+/// Setting the MSR exit bit alone traps nothing: the platform answers a fixed
+/// handful of MSRs itself and hands over only what this names — a fact that
+/// cost a test which read `IA32_MISC_ENABLE` and got the host's `0x00851809`
+/// while the interpreter answered zero.
+///
+/// Everything is taken EXCEPT the two time-stamp-counter entries, and that is
+/// a decision rather than an oversight. This port derives its TSC from retired
+/// instructions, and a shadow processor retires almost none while the guest
+/// runs on hardware — so a trapped `RDMSR` of the TSC would answer from a
+/// clock that barely moves, while `RDTSC`, which is a separate exit this
+/// engine does not request, would keep answering from the host's. Two clocks
+/// that disagree is worse for a calibrating guest than one clock that is not
+/// this port's, so both stay with the hardware until the cross-engine TSC
+/// bridge exists. That is the one MSR divergence this engine has, and it is
+/// registered rather than hidden.
+const TRAPPED_MSRS: MsrExits = MsrExits {
+    tsc_read: false,
+    tsc_write: false,
+    ..MsrExits::ALL
+};
 
 /// Guest code this port has not been asked to run on hardware yet, and which
 /// the platform cannot finish alone. Each is a real exit that a complete engine
@@ -92,6 +159,21 @@ impl WhpEngine {
                 // leaves `WHvRunVirtualProcessor`, which would strand the
                 // timer wheel on a thread that never returns.
                 .local_apic(LocalApicMode::None)
+                .map_err(platform_failed)?
+                // What a guest asks ABOUT the processor is this port's to
+                // answer, not the host's. Both are serviced on the shadow, so
+                // a guest reading CPUID or an MSR under a hypervisor gets the
+                // same bytes it would get with none — which is the whole of
+                // what parity means here.
+                .extended_vm_exits(ExtendedVmExits {
+                    cpuid: true,
+                    msr: true,
+                    ..ExtendedVmExits::default()
+                })
+                .map_err(platform_failed)?
+                .cpuid_exit_list(TRAPPED_CPUID_LEAVES)
+                .map_err(platform_failed)?
+                .msr_exits(TRAPPED_MSRS)
                 .map_err(platform_failed)?;
             let mut partition = config.setup().map_err(platform_failed)?;
 
@@ -373,16 +455,19 @@ fn run_until_the_machine_is_needed<T: Instrumentation>(
             // a page the plan left out, or a write to a range mapped read-only.
             // The shadow finishes it, because nothing else can — see below.
             ExitReason::MemoryAccess(access) => {
-                service_memory_access(started, cpu, io, access)?;
+                tracing::trace!(
+                    "servicing a {:?} at gpa {:#x} on the shadow processor",
+                    access.access,
+                    access.gpa
+                );
+                finish_on_the_shadow(started, cpu, io)?;
             }
-            // Neither exit is requested of the platform — CPUID needs a
-            // `CpuidExitList` and an MSR exit needs `X64MsrExit`, and this
-            // engine asks for neither, so a guest's CPUID and RDMSR run on the
-            // host's own processor. That is a parity divergence to register
-            // and close (REPLAN H3), not an exit to service: an arm that
-            // cannot be reached must say so rather than pretend to work.
-            ExitReason::Cpuid(_) => return Err(unserviced("CPUID")),
-            ExitReason::MsrAccess(_) => return Err(unserviced("MSR access")),
+            // What the guest asked about the processor. Answered by executing
+            // the instruction on the shadow, so the answer is this port's
+            // model rather than the host's silicon — see the exit list above.
+            ExitReason::Cpuid(_) | ExitReason::MsrAccess(_) => {
+                finish_on_the_shadow(started, cpu, io)?;
+            }
             ExitReason::InterruptWindow => return Err(unserviced("interrupt window")),
             ExitReason::Exception => return Err(unserviced("exception")),
             ExitReason::Rdtsc => return Err(unserviced("RDTSC")),
@@ -407,22 +492,24 @@ fn run_until_the_machine_is_needed<T: Instrumentation>(
     }
 }
 
-/// Finish a memory access the partition could not, on the shadow processor.
+/// Execute the trapped instruction on the shadow processor.
 ///
 /// The reason a shadow processor is mandatory rather than an optimisation, and
-/// the measurement is in `docs/whp-platform-probe-2026-08-27.md`: this exit
-/// reports `InstructionLength = 0` and does NOT advance `RIP`, so there is no
-/// stepping over it; and for a write to a read-only window it carries no
+/// the measurement is in `docs/whp-platform-probe-2026-08-27.md`: a memory
+/// exit reports `InstructionLength = 0` and does NOT advance `RIP`, so there is
+/// no stepping over it; and for a write to a read-only window it carries no
 /// instruction bytes either, so there is nothing to decode from the exit. The
 /// only thing that can finish it is a processor that reads the instruction out
 /// of guest memory and executes it — which is this port's interpreter, running
 /// one instruction against the very same machine parts.
 ///
-/// That is also what makes the result right rather than merely possible. The
-/// access lands through the machine's own routing, so a device window answers
-/// exactly as it would under the interpreter, a write the chipset ignores is
-/// ignored the same way, and an unbacked read returns the same bus value —
-/// bit-identical, which is the property the whole design rests on.
+/// That is also what makes the result right rather than merely possible, and
+/// it is why the same treatment serves an access, a `CPUID` and an MSR alike.
+/// The access lands through the machine's own routing, so a device window
+/// answers exactly as it would under the interpreter; the `CPUID` answers out
+/// of this port's own model rather than the host's silicon; the MSR reads and
+/// writes this port's own register file. Bit-identical, which is the property
+/// the whole design rests on.
 ///
 /// The exchange around it is the whole architectural state each way. A trapped
 /// instruction may read any register, and the shadow must be the processor,
@@ -430,17 +517,11 @@ fn run_until_the_machine_is_needed<T: Instrumentation>(
 ///
 /// # Errors
 /// A state the exchange refused, or a fault the shadow could not take.
-fn service_memory_access<T: Instrumentation>(
+fn finish_on_the_shadow<T: Instrumentation>(
     started: &mut Started,
     cpu: &mut BxCpuC<T>,
     io: &mut PcIo<'_>,
-    access: rusty_box_whp::MemoryAccess,
 ) -> Result<()> {
-    tracing::trace!(
-        "servicing a {:?} at gpa {:#x} on the shadow processor",
-        access.access,
-        access.gpa
-    );
     read_back_into_the_shadow(started, cpu)?;
     // One instruction, on the machine's own dispatch path. Whatever it does —
     // completes the access, or raises a fault and enters a handler — the
