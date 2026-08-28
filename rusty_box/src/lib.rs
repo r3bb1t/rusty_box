@@ -9,6 +9,15 @@ extern crate self as tracing;
 #[cfg(not(feature = "alloc"))]
 #[macro_export]
 macro_rules! trace {
+    // `tracing` lets a call name the target it belongs to, and code shared
+    // with the alloc build does. The target is a compile-time string with no
+    // subscriber here to route it, so it is accepted and discarded — but the
+    // arm has to exist, or every `target:` call site is a syntax error in this
+    // build alone. That is a different compile, not a subset of the other one.
+    (target: $target:expr, $($arg:tt)*) => {{
+        let _ = $target;
+        core::format_args!($($arg)*);
+    }};
     ($($arg:tt)*) => {{
         core::format_args!($($arg)*);
     }};
@@ -17,6 +26,15 @@ macro_rules! trace {
 #[cfg(not(feature = "alloc"))]
 #[macro_export]
 macro_rules! debug {
+    // `tracing` lets a call name the target it belongs to, and code shared
+    // with the alloc build does. The target is a compile-time string with no
+    // subscriber here to route it, so it is accepted and discarded — but the
+    // arm has to exist, or every `target:` call site is a syntax error in this
+    // build alone. That is a different compile, not a subset of the other one.
+    (target: $target:expr, $($arg:tt)*) => {{
+        let _ = $target;
+        core::format_args!($($arg)*);
+    }};
     ($($arg:tt)*) => {{
         core::format_args!($($arg)*);
     }};
@@ -25,6 +43,15 @@ macro_rules! debug {
 #[cfg(not(feature = "alloc"))]
 #[macro_export]
 macro_rules! info {
+    // `tracing` lets a call name the target it belongs to, and code shared
+    // with the alloc build does. The target is a compile-time string with no
+    // subscriber here to route it, so it is accepted and discarded — but the
+    // arm has to exist, or every `target:` call site is a syntax error in this
+    // build alone. That is a different compile, not a subset of the other one.
+    (target: $target:expr, $($arg:tt)*) => {{
+        let _ = $target;
+        core::format_args!($($arg)*);
+    }};
     ($($arg:tt)*) => {{
         core::format_args!($($arg)*);
     }};
@@ -33,6 +60,15 @@ macro_rules! info {
 #[cfg(not(feature = "alloc"))]
 #[macro_export]
 macro_rules! warn {
+    // `tracing` lets a call name the target it belongs to, and code shared
+    // with the alloc build does. The target is a compile-time string with no
+    // subscriber here to route it, so it is accepted and discarded — but the
+    // arm has to exist, or every `target:` call site is a syntax error in this
+    // build alone. That is a different compile, not a subset of the other one.
+    (target: $target:expr, $($arg:tt)*) => {{
+        let _ = $target;
+        core::format_args!($($arg)*);
+    }};
     ($($arg:tt)*) => {{
         core::format_args!($($arg)*);
     }};
@@ -41,6 +77,15 @@ macro_rules! warn {
 #[cfg(not(feature = "alloc"))]
 #[macro_export]
 macro_rules! error {
+    // `tracing` lets a call name the target it belongs to, and code shared
+    // with the alloc build does. The target is a compile-time string with no
+    // subscriber here to route it, so it is accepted and discarded — but the
+    // arm has to exist, or every `target:` call site is a syntax error in this
+    // build alone. That is a different compile, not a subset of the other one.
+    (target: $target:expr, $($arg:tt)*) => {{
+        let _ = $target;
+        core::format_args!($($arg)*);
+    }};
     ($($arg:tt)*) => {{
         core::format_args!($($arg)*);
     }};

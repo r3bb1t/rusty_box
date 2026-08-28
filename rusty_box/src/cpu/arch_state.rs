@@ -24,6 +24,28 @@ use super::decoder::BxSegregs;
 use super::descriptor::SEG_VALID_CACHE;
 use super::instrumentation::Instrumentation;
 
+/// The trace-scheduling bits of a processor's `async_event`, held while
+/// something else runs.
+///
+/// Opaque, and returned rather than described, because the only thing a caller
+/// may do with it is give it back: these bits are work the machine still owes
+/// itself, and a caller that could read or forge them could quietly drop a
+/// pending scheduler boundary — which is how a chipset's PAM flip would go
+/// missing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TraceBookkeeping(u32);
+
+impl TraceBookkeeping {
+    /// The bits that are the trace scheduler's rather than the guest's.
+    ///
+    /// `BX_ASYNC_EVENT_STOP_TRACE` ends the current trace — set by a taken
+    /// branch, by self-modifying code, and by a fast string burst reaching a
+    /// device deadline. `BX_ASYNC_EVENT_SCHEDULER_BOUNDARY` says a device
+    /// latched work for the machine. Neither is an event the guest may take.
+    const MASK: u32 =
+        BxCpuC::<()>::BX_ASYNC_EVENT_STOP_TRACE | super::cpu::BX_ASYNC_EVENT_SCHEDULER_BOUNDARY;
+}
+
 /// The number of vector registers carried, matching the processor's own file.
 ///
 /// The whole file travels, not just the XMM halves. A trapped instruction may
@@ -406,6 +428,41 @@ impl<T: Instrumentation> BxCpuC<T> {
         self.enter_sleep_state(CpuActivityState::Hlt);
     }
 
+    /// Lift the interpreter's trace bookkeeping out of the way, and hand it
+    /// back to be restored.
+    ///
+    /// Bochs keeps two different things in one word. Some bits of
+    /// `async_event` say an EVENT is deliverable; the rest are the trace
+    /// scheduler talking to itself — stop chaining traces because a jump was
+    /// taken, because code was written, because a device latched some work for
+    /// the machine's next boundary. A repeated string instruction consults the
+    /// whole word between items and stops for any of it, which is right for an
+    /// interpreter that will service the bookkeeping in a moment.
+    ///
+    /// It is wrong for an engine servicing a trap. There, the bookkeeping
+    /// cannot be acted on until the whole slice ends, so stopping for it
+    /// achieves nothing and costs everything: a `REP INSW` reading one disk
+    /// sector stops after each of its 256 words, and each restart is another
+    /// exit and another exchange of the processor's entire architectural
+    /// state. What may still stop the instruction is what the architecture
+    /// says may — a deliverable interrupt — and that is a different bit.
+    ///
+    /// Returns what was taken so the caller can put it back. The bits are not
+    /// discarded: the machine still has that work to do, and still does it,
+    /// one slice boundary later.
+    #[must_use]
+    pub fn park_trace_bookkeeping(&mut self) -> TraceBookkeeping {
+        let parked = self.async_event & TraceBookkeeping::MASK;
+        self.async_event &= !TraceBookkeeping::MASK;
+        TraceBookkeeping(parked)
+    }
+
+    /// Put back what [`Self::park_trace_bookkeeping`] took, alongside anything
+    /// that arrived meanwhile.
+    pub fn resume_trace_bookkeeping(&mut self, parked: TraceBookkeeping) {
+        self.async_event |= parked.0;
+    }
+
     /// Whether this processor has an event waiting that it may take now.
     ///
     /// The same question the scheduler asks to decide whether a processor is
@@ -428,6 +485,21 @@ impl<T: Instrumentation> BxCpuC<T> {
     pub fn has_an_event_to_deliver(&self) -> bool {
         self.is_unmasked_event_pending(u32::MAX)
             || (self.lapic.intr && self.interrupts_enabled())
+    }
+
+    /// Whether this processor is inside system-management mode.
+    ///
+    /// An engine running the guest on the host's own processor has to ask,
+    /// because SMM is not a mode it can hand over: no hypervisor offers one,
+    /// the state a processor saves on entry lives in SMRAM in a layout the
+    /// hardware would not produce, and `RSM` outside SMM is an invalid opcode.
+    /// A handler is therefore run to completion on the shadow, where SMM is
+    /// this port's own and behaves exactly as Bochs does — which is what keeps
+    /// a chipset's SMI a real one rather than something the engine had to
+    /// pretend away.
+    #[must_use]
+    pub fn is_in_smm(&self) -> bool {
+        self.smm_mode()
     }
 
     /// Read this processor's architectural state out.
@@ -663,7 +735,13 @@ fn segment_out(seg: &super::descriptor::BxSegmentReg) -> SegmentState {
 /// `BxCpuC::load_segment`, which exists to carry exactly those effects.
 fn segment_in(seg: &mut super::descriptor::BxSegmentReg, state: &SegmentState) {
     super::segment_ctrl_pro::parse_selector(state.selector, &mut seg.selector);
-    seg.cache.valid = SEG_VALID_CACHE;
+    // As in `BxCpuC::load_segment`: a descriptor that is not present describes
+    // nothing, and a cache that claims otherwise is believed downstream.
+    seg.cache.valid = if state.attributes.is_present() {
+        SEG_VALID_CACHE
+    } else {
+        0
+    };
     seg.cache.p = state.attributes.is_present();
     seg.cache.dpl = state.attributes.dpl();
     seg.cache.segment = state.attributes.is_code_or_data();

@@ -99,6 +99,11 @@ impl<'a> PcIo<'a> {
         let scheduler_boundary_requested = self.devices.take_scheduler_boundary_requested();
 
         if let Some(level) = pic_intr_level {
+            // The moment the bus's interrupt line becomes the processor's
+            // business. Watching it alongside the device that raised it and
+            // the INTA that takes it is what turns "an interrupt arrived that
+            // nobody expected" into a sequence with an order.
+            tracing::debug!(target: "irq", "BUS: PIC line -> {level}, onto the processor");
             if level {
                 cpu.signal_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
             } else {
@@ -144,6 +149,85 @@ impl<'a> PcIo<'a> {
         // single instruction on one processor, not a slice of a round.
         ctx.cpu_loop_n_slice(1, true, 1).map(|_| ())
     }
+
+    /// Whether the machine has work queued that only the machine can do.
+    ///
+    /// EVERY source, which is the whole point of it being one question: the
+    /// PIC's final interrupt level, the 8237's hold request, an explicit
+    /// boundary request, and — the one easy to forget — a device timer armed
+    /// during dispatch.
+    ///
+    /// That last one is what an engine cannot afford to miss. A disk arms its
+    /// completion timer while answering a port write, and raises its interrupt
+    /// when that timer fires; a timer fires only when the machine has the
+    /// processor back. An engine that kept running would deliver the interrupt
+    /// a whole slice late, and a driver that has meanwhile polled the data and
+    /// finished takes an interrupt it armed no handler for — which is how
+    /// Linux says `hda: unexpected_intr` and then dies in its own interrupt
+    /// return path.
+    #[must_use]
+    pub fn needs_boundary(&self) -> bool {
+        self.devices.has_pending_boundary_work()
+    }
+
+    /// Execute the guest instruction at `RIP` until the processor is past it.
+    ///
+    /// A repeated string instruction is ONE instruction that moves many items,
+    /// and asking for one instruction moves one item: `RIP` stays where it is
+    /// and `RCX` comes down by one. That is not a quirk — it is how x86 makes
+    /// such an instruction interruptible — but it is ruinous for an engine
+    /// that traps to get here. A guest handed back mid-`REP INSW` traps again
+    /// for the next word, so reading one disk sector costs 256 exits and 512
+    /// architectural state exchanges instead of one.
+    ///
+    /// Stops early when the processor has an event to attend to, because an
+    /// interruptible instruction is precisely what may be interrupted there,
+    /// and stops after [`Self::ITEM_CEILING`] items regardless — the processor
+    /// is left mid-instruction in the state the architecture defines for one,
+    /// so the only cost of stopping early is trapping again.
+    ///
+    /// # Errors
+    /// Whatever the instruction raised that the processor could not take.
+    pub fn finish_the_instruction<T: Instrumentation>(
+        &mut self,
+        cpu: &mut BxCpuC<T>,
+    ) -> crate::cpu::Result<()> {
+        let began_at = cpu.rip();
+        // The interpreter's trace bookkeeping would stop the instruction
+        // between items, and here that buys nothing: an engine servicing a
+        // trap cannot act on a queued scheduler boundary until its whole slice
+        // ends. Parked, not dropped — put back below, along with anything that
+        // arrived while the instruction ran.
+        let parked = cpu.park_trace_bookkeeping();
+        let mut outcome = Ok(());
+        for _ in 0..Self::ITEM_CEILING {
+            outcome = self.emulate_one(cpu);
+            if outcome.is_err() || cpu.rip() != began_at {
+                break;
+            }
+            // What the architecture allows to interrupt a repeated
+            // instruction, and one thing it does not: a device deadline coming
+            // due. Stopping for that is deliberate and registered (divergence
+            // D3) — this port delivers a timer interrupt on time rather than
+            // at the end of a burst, and an engine that ran on would be the
+            // one diverging.
+            if cpu.has_an_event_to_deliver()
+                || self.pc_system.get_num_cpu_ticks_left_next_event() == 0
+            {
+                break;
+            }
+        }
+        cpu.resume_trace_bookkeeping(parked);
+        outcome
+    }
+
+    /// How many items of one repeated instruction are executed before the
+    /// machine gets a look in.
+    ///
+    /// Well past the 256 words of a disk sector, which is the case this
+    /// exists for, and far short of the four billion a `REP` may name — a
+    /// guest that asked for that has not stopped being interruptible.
+    pub const ITEM_CEILING: u32 = 1 << 16;
 
     /// Lend the same parts onward for a shorter time.
     ///

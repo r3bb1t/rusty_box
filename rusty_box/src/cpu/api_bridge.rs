@@ -200,7 +200,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         {
             let s = &mut self.sregs[idx];
             super::segment_ctrl_pro::parse_selector(state.selector, &mut s.selector);
-            s.cache.valid = super::descriptor::SEG_VALID_CACHE;
+            // A descriptor that is not present describes nothing, and saying
+            // otherwise is not a harmless overstatement. Bochs
+            // segment_ctrl_pro.cc leaves the cache invalid for a null selector,
+            // and everything downstream believes the flag: a system-management
+            // entry writes every valid segment into SMRAM, and the `RSM` that
+            // reads it back refuses a descriptor whose type is zero and whose
+            // cache claimed to be valid — shutting the processor down inside
+            // the firmware's own SMI handler.
+            s.cache.valid = if state.attributes.is_present() {
+                super::descriptor::SEG_VALID_CACHE
+            } else {
+                0
+            };
             s.cache.segment = state.attributes.is_code_or_data();
             s.cache.p = state.attributes.is_present();
             s.cache.dpl = state.attributes.dpl();

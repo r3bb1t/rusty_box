@@ -56,15 +56,18 @@ fn run_dlxlinux() -> Result<()> {
 
     // Initialize tracing - respect RUST_LOG env var, with WARN as default
     // (set RUST_LOG=debug or RUST_LOG=info to see more detail)
-    let log_level = std::env::var("RUST_LOG")
-        .ok()
-        .and_then(|s| s.parse::<tracing::Level>().ok())
-        .unwrap_or(tracing::Level::WARN);
-
+    // A full filter directive, not a bare level. Parsing `RUST_LOG` as a
+    // `Level` silently swallows anything targeted — `RUST_LOG=irq=debug` fails
+    // to parse and falls back to WARN, so a trace someone added to chase a bug
+    // simply never appears and its absence reads as evidence. Targets are the
+    // whole point of having them.
     tracing_subscriber::fmt()
         .without_time()
-        .with_target(false)
-        .with_max_level(log_level)
+        .with_target(true)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
 
     println!("╔════════════════════════════════════════════════════════════╗");

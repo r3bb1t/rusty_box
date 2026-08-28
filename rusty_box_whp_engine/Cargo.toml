@@ -24,3 +24,8 @@ path = "src/lib.rs"
 rusty_box = { path = "../rusty_box", features = ["std"] }
 rusty_box_whp = { path = "../rusty_box_whp" }
 tracing.workspace = true
+
+# The boot example turns the engine's own tracing on, which is how a boot that
+# stops says where. Not a dependency of the library.
+[dev-dependencies]
+tracing-subscriber.workspace = true

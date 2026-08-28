@@ -15,7 +15,11 @@ use crate::{
     Result,
 };
 
-use super::{Emulator, EmulatorConfig};
+use super::{Emulator, EmulatorConfig, SliceEngine};
+// Only the alloc-gated `build` names the interpreter; a no-alloc host places
+// its machine itself and takes the default engine with it.
+#[cfg(feature = "alloc")]
+use super::SoftwareEngine;
 
 /// A misconfiguration caught at the construction choke point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -426,7 +430,37 @@ impl<'r, T: Instrumentation> MachineBuilder<'r, T> {
     ///
     /// The result sits at its reset vector with timers armed: the next
     /// `step_batch` executes the first firmware instruction.
+    ///
+    /// Runs the guest on this port's own interpreter. To name a different
+    /// engine, see [`MachineBuilder::build_on`] — which this is, with the
+    /// interpreter named.
     pub fn build(self) -> Result<alloc::boxed::Box<Emulator<T>>> {
+        self.build_on::<SoftwareEngine>()
+    }
+
+    /// Build the machine on a NAMED execution engine.
+    ///
+    /// `MachineBuilder::new(config).bios(rom).build_on::<WhpEngine>()` — the
+    /// engine is a type argument because it is a decision about the machine
+    /// rather than a piece of its configuration, and because a machine that
+    /// runs its guest on hardware and one that interprets it are different
+    /// types with different capabilities.
+    ///
+    /// Two verbs rather than one generic function, for the reason
+    /// [`Emulator::with_engine`] gives: a defaulted type parameter binds in a
+    /// type and not in a path, so making `build` itself generic would force
+    /// every existing caller to name an engine it does not care about.
+    ///
+    /// Everything else is identical — the same hardware initialisation, in the
+    /// same order, through the same choke point. An engine is what runs the
+    /// guest, not what the machine is made of.
+    ///
+    /// # Errors
+    /// Whatever [`MachineBuilder::build`] can fail with.
+    pub fn build_on<E>(self) -> Result<alloc::boxed::Box<Emulator<T, E>>>
+    where
+        E: SliceEngine<T> + Default,
+    {
         let Self {
             config,
             tracers,
@@ -464,10 +498,10 @@ impl<'r> MachineBuilder<'r, ()> {
 }
 
 #[cfg(feature = "alloc")]
-fn construct<T: Instrumentation>(
+fn construct<T: Instrumentation, E: SliceEngine<T> + Default>(
     config: EmulatorConfig,
     tracers: Tracers<T>,
-) -> Result<alloc::boxed::Box<Emulator<T>>> {
+) -> Result<alloc::boxed::Box<Emulator<T, E>>> {
     match tracers {
         Tracers::Single(tracer) => Emulator::with_tracer(config, tracer),
         Tracers::PerProcessor(make) => Emulator::with_tracer_factory(config, make),
@@ -480,7 +514,10 @@ impl Settings<'_> {
     ///
     /// This is the one choke point for the whole sequence: no caller can
     /// reorder or skip a step (R5).
-    fn furnish<T: Instrumentation>(self, machine: &mut Emulator<T>) -> Result<()> {
+    fn furnish<T: Instrumentation, E: SliceEngine<T>>(
+        self,
+        machine: &mut Emulator<T, E>,
+    ) -> Result<()> {
         #[cfg(feature = "alloc")]
         if let Some(gui) = self.gui {
             machine.set_boxed_gui(gui);
@@ -561,8 +598,8 @@ fn bios_load_address(len: usize) -> Result<u64> {
     Ok(u64::from(!(size - 1)))
 }
 
-fn attach<T: Instrumentation>(
-    machine: &mut Emulator<T>,
+fn attach<T: Instrumentation, E: SliceEngine<T>>(
+    machine: &mut Emulator<T, E>,
     slot: AtaSlot,
     media: Media,
 ) -> Result<()> {

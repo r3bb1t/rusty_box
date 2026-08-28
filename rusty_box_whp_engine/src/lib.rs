@@ -46,6 +46,7 @@
     reason = "UNSAFETY: mapping the machine's own memory into a partition — see map_window"
 )]
 
+mod alarm;
 mod engine;
 mod state;
 

@@ -1907,7 +1907,14 @@ impl BxHardDriveC {
             pci_ide.bmdma_set_irq(channel_num as u8);
             // Bochs harddrv.cc: DEV_pic_raise_irq(irq)
             // PIC forwards to IOAPIC synchronously (Bochs pic.cc).
+            tracing::debug!(target: "irq", "IDE: raising IRQ{line} (channel {channel_num})");
             irq.raise(IrqLine(line));
+        } else {
+            tracing::debug!(
+                target: "irq",
+                "IDE: dropping IRQ (channel {channel_num}, nIEN set, ctrl {:#04x})",
+                drive.controller.control
+            );
         }
     }
 
@@ -2647,6 +2654,11 @@ impl BxHardDriveC {
                         _ => 15u8,
                     };
                     // Bochs DEV_pic_lower_irq() — PIC forwards to IOAPIC synchronously.
+                    tracing::debug!(
+                        target: "irq",
+                        "IDE: status read lowers IRQ{line}, status {:#04x}",
+                        status.bits()
+                    );
                     irq.lower(IrqLine(line));
                 }
                 tracing::trace!(
@@ -3178,6 +3190,11 @@ impl BxHardDriveC {
                 for d in 0..2 {
                     channel.drives[d].controller.control = value;
                 }
+                tracing::debug!(
+                    target: "irq",
+                    "IDE: device control ch{channel_num} <- {value:#04x} (nIEN {})",
+                    if (value & 0x02) != 0 { 1 } else { 0 }
+                );
 
                 // Bochs harddrv.cc: nIEN transitions have NO interrupt side
                 // effects — an interrupt raised while nIEN=1 is dropped, never

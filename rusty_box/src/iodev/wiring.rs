@@ -171,6 +171,18 @@ impl WheelTimerService<'_> {
             return;
         };
         let deadline = self.now_ticks.saturating_add(delay_ticks);
+        // The anchor and the wheel together, because the gap between them is
+        // the whole of what this function's doc comment is about. Under the
+        // interpreter the anchor leads the wheel by the instructions retired
+        // so far in the batch; an engine whose anchor EQUALS the wheel on
+        // every arm is one whose device clock does not advance within a slice,
+        // and every deadline it takes is measured from the wrong instant.
+        tracing::debug!(
+            target: "irq",
+            "TIMER: arm {key:?} anchor={} +{delay_ticks} => {deadline} (wheel={})",
+            self.now_ticks,
+            self.pc_system.time_ticks()
+        );
         match self
             .pc_system
             .activate_timer_at_ticks_with_period(handle, deadline, delay_ticks, continuous)

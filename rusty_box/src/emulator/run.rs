@@ -12,7 +12,7 @@ use crate::{cpu::CpuError, Error};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{Emulator, ProgressUnit, ResetReason, SliceEngine, SoftwareEngine};
+use super::{Emulator, EventDelivery, ProgressUnit, ResetReason, SliceEngine, SoftwareEngine};
 use crate::memory::plan::{MemoryPlan, MemoryPlanError};
 // Only the direct-Linux-boot path below reaches a CPU through the store, and
 // that path needs an allocator.
@@ -687,6 +687,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // whatever its engine counts, and a run that never got to execute
         // anything reports the nothing both units agree on.
         let mut total: Option<Progress> = None;
+        // Consecutive batches that advanced nothing. See the check below.
+        let mut stalled_batches = 0u32;
         // One inner batch is capped so a run that ends on a device deadline
         // still notices promptly; the budget above, not this, decides when the
         // call returns.
@@ -698,10 +700,27 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 break 'batch;
             }
 
+            // How much to ask for at once. What an early return costs depends
+            // entirely on the engine: an interpreter pays a trace boundary,
+            // which is nothing, while an engine running the guest on real
+            // hardware pays a whole architectural state exchange in each
+            // direction — every register, every segment, every descriptor
+            // table — and a ceiling sized for the first is ruinous for the
+            // second. Measured: at 300 MHz the interpreter's 100,000-tick
+            // ceiling is 333 microseconds of a processor that could have run
+            // until the next device deadline, so a boot spends thousands of
+            // exchanges a second and the hardware's speed goes with them.
+            //
+            // A hardware engine is handed the whole remaining budget, because
+            // `run_cpu_batch` already clamps a batch to the next device
+            // deadline — which was the only reason to cut one short.
+            let ask = match E::PROGRESS_UNIT {
+                ProgressUnit::Instructions => remaining.min(INNER_BATCH_CEILING),
+                ProgressUnit::Ticks => remaining,
+            };
+
             // --- Run CPU batch ---
-            let progress = match self
-                .run_cpu_batch_with_strict_limit(remaining.min(INNER_BATCH_CEILING), true)
-            {
+            let progress = match self.run_cpu_batch_with_strict_limit(ask, true) {
                 Ok(progress) => progress,
                 Err(e) => return Err(crate::error::Error::Cpu(e)),
             };
@@ -756,7 +775,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             }
 
             // --- Deliver PIC interrupt ---
-            if self.device_manager.has_interrupt()
+            // Only when delivery is the machine's. An engine that delivers at
+            // the head of its own stretches has already taken this vector off
+            // the 8259 by the time control returns here, and `iac()` cannot
+            // give it back: injecting again hands the guest an interrupt no
+            // driver is waiting for.
+            if matches!(E::EVENT_DELIVERY, EventDelivery::Machine)
+                && self.device_manager.has_interrupt()
                 && self.cpu_ref(0).get_b_if() != 0
                 && !self.cpu_ref(0).interrupts_inhibited(0x01)
                 // Bochs event.cc delivers Priority-4 debug traps before
@@ -781,6 +806,29 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             // worth spending more guest time on. A processor that is no longer
             // Active has had its chance to wake in the fast-forward above; if
             // it did not, returning lets the caller decide what to do about it.
+            // A budget is spent by the machine making progress, so a machine
+            // that has stopped making any cannot spend one. Nothing here can
+            // change between two identical empty batches, so asking a third
+            // time is a livelock, and this loop has no other way out: the
+            // budget is measured against a clock the batches were supposed to
+            // advance.
+            //
+            // Two rather than one, because a single empty batch is ordinary —
+            // a boundary that consumed the whole round, a reset applied at
+            // entry — and only a repeat means nothing is coming.
+            if progress.stalled() {
+                stalled_batches += 1;
+                if stalled_batches >= 2 {
+                    tracing::warn!(
+                        "a batch advanced nothing twice running; ending the call rather \
+                         than spending a budget the machine cannot spend"
+                    );
+                    break 'batch;
+                }
+            } else {
+                stalled_batches = 0;
+            }
+
             if !self.stop_flag.load(core::sync::atomic::Ordering::Relaxed)
                 && matches!(self.cpu_ref(0).activity_state, CpuActivityState::Active)
             {

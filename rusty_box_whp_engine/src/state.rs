@@ -75,11 +75,32 @@ const MSR_REGS: &[Reg] = &[
     Reg::SysenterEsp,
     Reg::SysenterEip,
     Reg::Pat,
-    Reg::Tsc,
     Reg::Xcr0,
+    // LAST, and deliberately: everything before this is written back to the
+    // processor, and the time-stamp counter is not. See [`IMPORTED_MSRS`].
+    Reg::Tsc,
 ];
 
 const MSR_VALUES: usize = MSR_REGS.len();
+
+/// How many of [`MSR_REGS`] are written back into the processor.
+///
+/// All but the last, which is the time-stamp counter — read so the state is
+/// complete, never written.
+///
+/// The hardware owns the TSC on this engine. `TRAPPED_MSRS` deliberately
+/// leaves both TSC entries with the platform, because this port derives its
+/// TSC from retired instructions and a shadow processor retires almost none
+/// while the guest runs on hardware. Writing that shadow value back therefore
+/// STOMPS the guest's time-stamp counter to near zero on every single slice,
+/// while the hardware has been advancing it at gigahertz — a counter that
+/// jumps backwards thousands of times a second, which is the one thing every
+/// timing loop in a guest assumes cannot happen.
+///
+/// Measured before the fix: the state exchange round-tripped every field
+/// exactly EXCEPT `tsc`, which came back `0` from the shadow against the
+/// hardware's real value, on 278,069 of 278,069 slices.
+const IMPORTED_MSRS: usize = MSR_VALUES - 1;
 
 /// The six segment registers plus the two system ones, in `VcpuArchState`'s own
 /// order so the first six index its `segments` array directly.
@@ -116,21 +137,39 @@ pub(crate) trait VpRegisters {
     fn write_tables(&self, regs: &[Reg], tables: &[TableRegister]) -> WhpResult<()>;
 }
 
+/// The two sides count a segment's limit differently, and this is where that
+/// is reconciled.
+///
+/// The platform's limit is the EFFECTIVE one — the descriptor's field with
+/// granularity already applied, which is the convention the VMCS uses and what
+/// this host demonstrably hands back: a guest that loads a flat 4 GiB segment
+/// produces `0xFFFF_FFFF` here. This port keeps the descriptor's own twenty-bit
+/// field and applies granularity when it needs the effective value, which is
+/// what [`SegmentState::scaled_limit`] is for.
+///
+/// The conversion is exact in both directions for any legal descriptor: a
+/// granular segment's effective limit always has its low twelve bits set, so
+/// shifting them away loses nothing that was ever chosen.
 const fn to_platform_segment(state: SegmentState) -> SegmentRegister {
     SegmentRegister {
         base: state.base,
-        limit: state.limit,
+        limit: state.scaled_limit(),
         selector: state.selector,
         attributes: state.attributes.bits(),
     }
 }
 
 const fn from_platform_segment(seg: SegmentRegister) -> SegmentState {
+    let attributes = SegmentAttributes::from_bits(seg.attributes);
     SegmentState {
         selector: seg.selector,
         base: seg.base,
-        limit: seg.limit,
-        attributes: SegmentAttributes::from_bits(seg.attributes),
+        limit: if attributes.is_granular() {
+            seg.limit >> 12
+        } else {
+            seg.limit
+        },
+        attributes,
     }
 }
 
@@ -153,7 +192,11 @@ pub(crate) fn import(vp: &impl VpRegisters, state: &VcpuArchState) -> WhpResult<
     words[28] = state.dr7;
     vp.write_words(WORD_REGS, &words)?;
 
-    vp.write_words(MSR_REGS, &msr_words(&state.msrs, state.xcr0))?;
+    // All but the time-stamp counter — the hardware owns that one, and writing
+    // the shadow's copy back would drag the guest's clock backwards on every
+    // slice. See [`IMPORTED_MSRS`].
+    let msrs = msr_words(&state.msrs, state.xcr0);
+    vp.write_words(&MSR_REGS[..IMPORTED_MSRS], &msrs[..IMPORTED_MSRS])?;
 
     let mut segments = [SegmentRegister::default(); 8];
     for (slot, seg) in segments.iter_mut().zip(&state.segments) {
@@ -204,12 +247,12 @@ pub(crate) fn export(vp: &impl VpRegisters, state: &mut VcpuArchState) -> WhpRes
         sysenter_esp: msrs[8],
         sysenter_eip: msrs[9],
         pat: msrs[10],
-        tsc: msrs[11],
+        tsc: msrs[12],
     };
     // XCR0 is architecturally 64 bits and every bit this port models lives in
     // the low half, which is why the state holds it as a `u32`. Truncating is
     // the same narrowing `xcr0.get32()` performs on the processor.
-    state.xcr0 = msrs[12] as u32;
+    state.xcr0 = msrs[11] as u32;
 
     let mut segments = [SegmentRegister::default(); 8];
     vp.read_segments(SEGMENT_REGS, &mut segments)?;
@@ -387,13 +430,48 @@ mod tests {
         assert_eq!(read_back.dr, original.dr);
         assert_eq!(read_back.dr6, original.dr6);
         assert_eq!(read_back.dr7, original.dr7);
-        assert_eq!(read_back.msrs, original.msrs);
+        // Every model-specific register EXCEPT the time-stamp counter, which
+        // this seam deliberately does not write — see [`IMPORTED_MSRS`]. Named
+        // field by field rather than compared whole, so that a future field
+        // added to `MsrState` and forgotten in `msr_words` fails here.
+        assert_eq!(
+            MsrState { tsc: 0, ..read_back.msrs },
+            MsrState { tsc: 0, ..original.msrs }
+        );
         assert_eq!(read_back.xcr0, original.xcr0);
         assert_eq!(read_back.segments, original.segments);
         assert_eq!(read_back.ldtr, original.ldtr);
         assert_eq!(read_back.tr, original.tr);
         assert_eq!(read_back.gdtr, original.gdtr);
         assert_eq!(read_back.idtr, original.idtr);
+    }
+
+    /// The guest's time-stamp counter is never written by this seam.
+    ///
+    /// The hardware owns it (`TRAPPED_MSRS` leaves both TSC entries with the
+    /// platform), and the shadow's copy is derived from retired instructions —
+    /// of which a shadow retires almost none while the guest runs on hardware.
+    /// Writing that copy back therefore drags the guest's clock to near zero on
+    /// every single slice, while the processor has been advancing it at
+    /// gigahertz. A counter that jumps backwards thousands of times a second is
+    /// the one thing every timing loop in a guest assumes cannot happen.
+    ///
+    /// Asserted on the RECORDER rather than on a read-back, because the point
+    /// is that no write reached the register at all.
+    #[test]
+    fn the_time_stamp_counter_is_never_written_to_the_processor() {
+        let vp = Recorder::default();
+        let mut state = distinctive();
+        state.msrs.tsc = 0xDEAD_BEEF;
+        import(&vp, &state).expect("a recorder refuses nothing");
+
+        assert!(
+            !vp.words.borrow().contains_key(&key(Reg::Tsc)),
+            "the seam wrote the shadow's time-stamp counter into the processor"
+        );
+        // The MSR beside it in the list did land, so this is not a batch that
+        // silently failed to write anything.
+        assert_eq!(vp.words.borrow().get(&key(Reg::Pat)).copied(), Some(state.msrs.pat));
     }
 
     /// A segment's attribute word crosses whole.
@@ -458,7 +536,7 @@ const fn msr_words(msrs: &MsrState, xcr0: u32) -> [u64; MSR_VALUES] {
         msrs.sysenter_esp,
         msrs.sysenter_eip,
         msrs.pat,
-        msrs.tsc,
         xcr0 as u64,
+        msrs.tsc,
     ]
 }

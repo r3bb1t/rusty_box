@@ -273,3 +273,43 @@ is worth having. Both bits are one named constant away in
 
 **Status:** open and deliberate. The lever exists and is named; what is missing
 is the bridge and the measurement.
+
+## OPEN QUESTION — what may cut short a trapped instruction
+
+Not a divergence yet, and recorded here so it is not silently settled by
+whoever next reads the code.
+
+An engine that traps an instruction hands it to the shadow processor, and the
+interpreter's REP handlers (`cpu/string.rs`, e.g. `rep_movsb16`) stop between
+items on `if self.async_event != 0`. That word holds two different kinds of
+thing:
+
+- **Deliverable events** — an interrupt with IF, an NMI, an SMI. x86 says a
+  repeated instruction may be interrupted between items, so these must stop it.
+- **Trace bookkeeping** — `BX_ASYNC_EVENT_STOP_TRACE` set by any taken branch,
+  by self-modifying code, and by `tickn_fastrep` reaching a device deadline;
+  `BX_ASYNC_EVENT_SCHEDULER_BOUNDARY` set by a device latching machine work.
+
+For the interpreter, stopping for the second kind is free and right: it services
+the bookkeeping in the next breath. For an engine servicing a trap it is
+ruinous and pointless — the machine cannot act on a queued boundary until the
+whole slice ends, so all the stop achieves is to end the instruction after ONE
+item, and the guest re-traps for the next one. A `REP INSW` reading one disk
+sector then costs 256 exits and 512 whole-architectural-state exchanges instead
+of one.
+
+**Decided provisionally** (2026-08-28): `PcIo::finish_the_instruction` parks the
+bookkeeping bits for the duration of a trapped instruction and puts them back
+after, so only a deliverable event stops it — plus one deliberate exception, a
+device deadline coming due, which is asked directly of `pc_system` rather than
+through the shared `STOP_TRACE` bit. That exception exists so divergence **D3**
+keeps working on both engines: this port delivers a timer interrupt in the
+middle of a long string burst rather than at the end of it, and an engine that
+ran on would be the one diverging.
+
+**What to revisit.** Whether the two kinds should share a bit at all. Splitting
+them — a `TraceControl` word separate from `async_event` — would remove the
+parking, remove the need to ask `pc_system` a second question that the
+`STOP_TRACE` bit was already answering, and make both engines say what they
+mean. It touches every `async_event` site in `cpu/`, which is why it was not
+done under a boot bring-up.

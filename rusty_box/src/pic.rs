@@ -987,6 +987,21 @@ impl BxPicC {
     /// - Slave cascade via IRQ2
     /// - Re-service after acknowledge
     pub fn iac(&mut self) -> u8 {
+        // The one place an interrupt is taken off the 8259, and therefore the
+        // one place worth watching when a guest reports an interrupt it did
+        // not ask for. `RUST_LOG=irq=debug` turns this on with the rest of the
+        // path; it is off by default and costs a level test when it is.
+        tracing::debug!(
+            target: "irq",
+            "INTA: master irq={} irr={:#04x} imr={:#04x} isr={:#04x} | slave irr={:#04x} imr={:#04x} isr={:#04x}",
+            self.master.irq,
+            self.master.irr,
+            self.master.imr,
+            self.master.isr,
+            self.slave.irr,
+            self.slave.imr,
+            self.slave.isr,
+        );
         // Bochs pic.cc: BX_CLEAR_INTR(); master_pic.INT = 0;
         self.clear_intr(); // Signal CPU to clear pending interrupt event
         self.master.int_pin = false;
@@ -994,6 +1009,11 @@ impl BxPicC {
         // Spurious interrupt check: if no unmasked requests, return spurious vector
         // (Bochs pic.cc)
         if (self.master.irr & !self.master.imr) == 0 {
+            tracing::debug!(
+                target: "irq",
+                "INTA: nothing unmasked pending — returning the SPURIOUS vector {}",
+                self.master.interrupt_offset + 7
+            );
             return self.master.interrupt_offset + 7;
         }
 
@@ -1054,6 +1074,7 @@ impl BxPicC {
         // BENCHMARK-ONLY (temporary): delivered-vector histogram (PIC bank)
         crate::vec_diag::count(256 + usize::from(vector));
 
+        tracing::debug!(target: "irq", "INTA: took vector {vector:#04x}");
         vector
     }
 }

@@ -103,7 +103,15 @@ impl MemoryPlan {
     /// [`MemoryPlanError::PartiallyResident`].
     pub fn derive(memory: &BxMemC) -> Result<Self, MemoryPlanError> {
         let mut carve_outs = CarveOuts::new();
-        carve_outs.add(VIDEO_APERTURE.start, VIDEO_APERTURE.end);
+        // The 0xA0000-0xBFFFF window is video memory, EXCEPT while the chipset
+        // has SMRAM open over it — then it is plain guest RAM, which is Bochs
+        // `misc_mem.cc`'s own routing order (SMRAM is checked before the device
+        // handlers) and the whole reason firmware can reach its SMM handler.
+        // Leaving it carved out would trap the chipset's own handler install,
+        // one exit per byte of it.
+        if !memory.smram_is_open() {
+            carve_outs.add(VIDEO_APERTURE.start, VIDEO_APERTURE.end);
+        }
         carve_outs.add(LOCAL_APIC_REGION.start, LOCAL_APIC_REGION.end);
         for region in memory.mmio.regions() {
             // The map stores an inclusive end; a carve-out is half-open.
@@ -273,12 +281,26 @@ impl BxMemC {
 
         // RAM below the video aperture. Identity-mapped, so the host offset is
         // the guest-physical address itself.
-        list.push(ram_between(0, guest_len.min(VIDEO_APERTURE.start), 0));
+        // RAM runs to the video aperture, or straight through it when the
+        // chipset has SMRAM open there — see the carve-outs in `derive`.
+        let low_ram_top = if self.smram_is_open() {
+            SHADOW_REGION.start
+        } else {
+            VIDEO_APERTURE.start
+        };
+        list.push(ram_between(0, guest_len.min(low_ram_top), 0));
 
-        // The shadowable region, one PAM area at a time. Read-and-execute in
-        // every case: the write path excludes the whole region, so the PAM
-        // write bit decides what the machine does with a trapped write and
-        // never whether it traps.
+        // The shadowable region, one PAM area at a time, with BOTH PAM bits
+        // honoured — the read bit chooses what backs the area, and the write
+        // bit chooses whether a write lands or leaves the engine.
+        //
+        // The write bit is not a nicety. A chipset opens an area for writing
+        // exactly so the firmware can copy itself into it, and Bochs's own
+        // BIOS does that a byte at a time: `mov cl,[eax]; mov [eax+0xC0000],cl;
+        // inc eax` over 256 KiB. An engine that trapped every one of those
+        // writes would spend a quarter of a million exits — about half a
+        // minute — on a copy that takes a millisecond when the window is
+        // simply writable.
         let mut area_base = SHADOW_REGION.start;
         while area_base < SHADOW_REGION.end {
             let area_len = if area_base >= LAST_PAM_AREA_BASE {
@@ -288,13 +310,17 @@ impl BxMemC {
             };
             let reads_ram = self.pci_enabled && self.pam_area_reads_ram(area_base);
             if reads_ram {
-                // Shadow RAM: the guest's own bytes, writes trapped.
+                // Shadow RAM: the guest's own bytes. Writable when the chipset
+                // says so; otherwise writes leave the engine, where the
+                // machine drops them exactly as Bochs `misc_mem.cc` does for a
+                // write-protected shadow area.
+                let writes_ram = self.pam_area_writes_ram(area_base);
                 if area_base + area_len <= guest_len {
                     list.push(Candidate {
                         gpa: area_base,
                         end: area_base + area_len,
                         delta: 0,
-                        perms: GpaPerms::RX,
+                        perms: if writes_ram { GpaPerms::RWX } else { GpaPerms::RX },
                     });
                 }
             } else {
@@ -346,6 +372,28 @@ impl BxMemC {
     /// than from the ROM image.
     fn pam_area_reads_ram(&self, addr: u64) -> bool {
         self.memory_type[pam_area_index(addr)][0]
+    }
+
+    /// Whether the chipset has SMRAM open over the video aperture for ordinary
+    /// accesses.
+    ///
+    /// The engine's half of Bochs `misc_mem.cc`'s SMRAM test. That test also
+    /// admits a processor already IN system-management mode, which cannot
+    /// apply here: a guest on a hypervisor never enters SMM — its handler runs
+    /// on the shadow processor, where the interpreter applies the full test.
+    /// So a map only ever opens the window for the `D_OPEN` case, and the
+    /// stricter one stays where it can be answered.
+    fn smram_is_open(&self) -> bool {
+        self.smram_available && self.smram_enable
+    }
+
+    /// Whether the chipset has this PAM area's writes landing in guest RAM
+    /// rather than being dropped on the bus.
+    ///
+    /// The second half of `memory_type[area][rw]`, and the one that decides
+    /// whether a shadow copy runs at memory speed or at one exit per byte.
+    fn pam_area_writes_ram(&self, addr: u64) -> bool {
+        self.memory_type[pam_area_index(addr)][1]
     }
 }
 

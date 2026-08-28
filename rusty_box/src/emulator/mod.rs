@@ -47,7 +47,7 @@ pub use display::{
 pub mod cpu_store;
 use cpu_store::CpuStore;
 pub(crate) mod engine;
-pub use engine::{ProgressUnit, SliceEngine, SliceRequest, SoftwareEngine};
+pub use engine::{EventDelivery, ProgressUnit, SliceEngine, SliceRequest, SoftwareEngine};
 pub(crate) mod io;
 pub use io::PcIo;
 mod interactive;

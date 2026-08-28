@@ -94,6 +94,28 @@ pub enum ProgressUnit {
     Ticks,
 }
 
+/// Who puts a pending event into the processor.
+///
+/// Exactly one of them may, and which one is a property of the engine rather
+/// than of the machine. Acknowledging an interrupt is irreversible — `iac()`
+/// takes it off the 8259 and there is no putting it back — so a machine and an
+/// engine that both deliver do not merely duplicate work: they hand the guest
+/// a vector nobody is expecting. Linux says so out loud
+/// (`unexpected_intr`, then `Aiee, killing interrupt handler`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventDelivery {
+    /// The machine delivers, between batches. What this port's own interpreter
+    /// expects: its loop is entered with the event already in the processor.
+    Machine,
+    /// The engine delivers, at the head of every stretch it runs.
+    ///
+    /// What an engine running the guest on real hardware must do, because the
+    /// hardware has neither this machine's 8259 pair nor its local APIC, and
+    /// because delivering through the interpreter is what makes the guest's
+    /// interrupt frame identical either way.
+    Engine,
+}
+
 /// Whatever runs guest code for one processor.
 ///
 /// Not dyn-compatible and deliberately so (R8): a machine knows its engine at
@@ -110,6 +132,12 @@ pub enum ProgressUnit {
 pub trait SliceEngine<T: Instrumentation> {
     /// The unit this engine's slices answer in. See [`ProgressUnit`].
     const PROGRESS_UNIT: ProgressUnit;
+
+    /// Who delivers this processor's pending events. See [`EventDelivery`].
+    ///
+    /// Defaulted to the machine, which is what an engine that says nothing
+    /// gets and what this port's interpreter has always had.
+    const EVENT_DELIVERY: EventDelivery = EventDelivery::Machine;
 
     /// Run `cpu` against `io` for the stretch `request` describes, and report
     /// how far the guest got.

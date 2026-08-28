@@ -3826,6 +3826,7 @@ dependencies = [
  "rusty_box",
  "rusty_box_whp",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
