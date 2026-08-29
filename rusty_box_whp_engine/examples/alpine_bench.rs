@@ -178,6 +178,16 @@ fn main() -> std::process::ExitCode {
 }
 
 fn bench() -> std::process::ExitCode {
+    // Without this nothing the machine narrates is printed, and an
+    // investigation reads every count as zero — which looks exactly like a
+    // finding and is not one. `RUST_LOG` decides what is listened to; note
+    // that this workspace compiles `trace!` and `debug!` out of release
+    // builds, so a probe meant to be seen here has to be `info!`.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_target(true)
+        .init();
+
     let Some(root) = workspace_root() else {
         eprintln!("not inside the workspace");
         return std::process::ExitCode::FAILURE;
