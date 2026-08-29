@@ -23,7 +23,9 @@
 use windows_sys::Win32::System::Hypervisor::*;
 
 use crate::error::{WhpError, WhpResult};
-use crate::sys::{CapabilityCode, GpaPerms, GvaTranslation, PropertyCode, RawPartition};
+use crate::sys::{
+    CapabilityCode, CounterSet, GpaPerms, GvaTranslation, PropertyCode, RawPartition,
+};
 use crate::vcpu::{
     AccessType, CpuidAccess, Exit, ExitReason, InterruptRequest, IoPortAccess, MemoryAccess,
     MsrAccess, Reg, SegmentRegister, TableRegister, VpContext,
@@ -461,6 +463,51 @@ pub(crate) fn request_interrupt(
         unsafe { WHvRequestInterrupt(partition.get(), &control, size) },
         "WHvRequestInterrupt",
     )
+}
+
+/// The platform value for each counter set this port reads. Exhaustive, so a
+/// set added to the enum must be named here (R5).
+const fn counter_set_code(set: CounterSet) -> WHV_PROCESSOR_COUNTER_SET {
+    match set {
+        CounterSet::Intercepts => WHvProcessorCounterSetIntercepts,
+        CounterSet::Runtime => WHvProcessorCounterSetRuntime,
+    }
+}
+
+/// Read one counter set into `out`, answering how many bytes the platform
+/// wrote.
+///
+/// The buffer is `u64`-shaped because every counter structure the platform
+/// defines is a run of `u64`s; a byte buffer would carry no guarantee of the
+/// alignment those words are read back at.
+pub(crate) fn get_counters(
+    partition: RawPartition,
+    index: u32,
+    set: CounterSet,
+    out: &mut [u64],
+) -> WhpResult<usize> {
+    const CALL: &str = "WHvGetVirtualProcessorCounters";
+    let Ok(len) = u32::try_from(core::mem::size_of_val(out)) else {
+        return Err(WhpError::contract(CALL));
+    };
+    let mut written = 0u32;
+    // SAFETY: the platform writes at most `len` bytes, and `len` is exactly
+    // what the slice owns; `written` is a live, correctly typed out-parameter.
+    // The buffer outlives the call because it is borrowed for it.
+    check(
+        unsafe {
+            WHvGetVirtualProcessorCounters(
+                partition.get(),
+                index,
+                counter_set_code(set),
+                out.as_mut_ptr().cast(),
+                len,
+                &mut written,
+            )
+        },
+        CALL,
+    )?;
+    usize::try_from(written).map_err(|_| WhpError::contract(CALL))
 }
 
 /// The register-read choke point (R5), mirroring `set_values`: every typed

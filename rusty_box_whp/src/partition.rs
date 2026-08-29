@@ -261,6 +261,145 @@ impl PartitionConfig {
     }
 }
 
+/// One intercept class: how often a processor left the hardware for it, and
+/// how long the hypervisor spent servicing it.
+///
+/// The platform's `WHV_PROCESSOR_INTERCEPT_COUNTER`. Keeping the two together
+/// is what lets a class that is rare but slow be told apart from one that is
+/// frequent and cheap.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct InterceptCounter {
+    /// How many times the class was entered.
+    pub count: u64,
+    /// How long was spent in it, in 100-nanosecond units — the platform's own
+    /// unit, kept rather than converted so nothing is lost to rounding.
+    pub time_100ns: u64,
+}
+
+/// What a processor has been leaving the hardware for, counted by the
+/// hypervisor.
+///
+/// The platform's `WHV_PROCESSOR_INTERCEPT_COUNTERS`, one class per field in
+/// the order that structure declares them. That order is load-bearing: the
+/// platform writes a flat run of words with no tags, so a field read one
+/// position out would report halts as port I/O and every conclusion drawn from
+/// it would be wrong.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct InterceptCounters {
+    /// Guest TLB invalidations the hypervisor had to see.
+    pub page_invalidations: InterceptCounter,
+    /// Control-register reads and writes that trapped.
+    pub control_register_accesses: InterceptCounter,
+    /// `IN`, `OUT` and their string forms.
+    pub io_instructions: InterceptCounter,
+    /// Time spent on `HLT`. The COUNT of a halt that exits to the root
+    /// partition lands in [`Self::other_intercepts`] instead, so this field's
+    /// count stays zero for a guest whose halts this port services — measured
+    /// on this platform, not assumed.
+    pub halt_instructions: InterceptCounter,
+    /// `CPUID` leaves the partition asked to trap.
+    pub cpuid_instructions: InterceptCounter,
+    /// `RDMSR` and `WRMSR` the partition's MSR bitmap traps.
+    pub msr_accesses: InterceptCounter,
+    /// Everything the platform does not class separately, which on this
+    /// platform includes the count of every root-serviced `HLT`.
+    pub other_intercepts: InterceptCounter,
+    /// Interrupts held pending because the guest could not yet take them.
+    pub pending_interrupts: InterceptCounter,
+    /// Instructions the hypervisor's own emulator completed rather than
+    /// re-entering the guest for.
+    pub emulated_instructions: InterceptCounter,
+    /// Debug-register accesses that trapped.
+    pub debug_register_accesses: InterceptCounter,
+    /// Guest page faults delivered to the host.
+    pub page_fault_intercepts: InterceptCounter,
+    /// Second-level (nested paging) faults, which is what an unmapped or
+    /// permission-refused guest-physical access arrives as.
+    pub nested_page_fault_intercepts: InterceptCounter,
+    /// `VMCALL`-class instructions the guest issued.
+    pub hypercalls: InterceptCounter,
+    /// `RDPMC`.
+    pub rdpmc_instructions: InterceptCounter,
+}
+
+impl InterceptCounters {
+    /// How many `u64`s the platform's structure is: two per class.
+    const WORDS: usize = 14 * 2;
+
+    /// Read the platform's flat run of words, or refuse a run too short to be
+    /// the structure it claims to be.
+    fn from_words(words: &[u64]) -> Option<Self> {
+        let words: &[u64; Self::WORDS] = words.get(..Self::WORDS)?.try_into().ok()?;
+        Some(Self {
+            page_invalidations: counter_at(words, 0),
+            control_register_accesses: counter_at(words, 1),
+            io_instructions: counter_at(words, 2),
+            halt_instructions: counter_at(words, 3),
+            cpuid_instructions: counter_at(words, 4),
+            msr_accesses: counter_at(words, 5),
+            other_intercepts: counter_at(words, 6),
+            pending_interrupts: counter_at(words, 7),
+            emulated_instructions: counter_at(words, 8),
+            debug_register_accesses: counter_at(words, 9),
+            page_fault_intercepts: counter_at(words, 10),
+            nested_page_fault_intercepts: counter_at(words, 11),
+            hypercalls: counter_at(words, 12),
+            rdpmc_instructions: counter_at(words, 13),
+        })
+    }
+}
+
+/// The class at position `class` of the platform's structure.
+///
+/// Each `WHV_PROCESSOR_INTERCEPT_COUNTER` is a count followed by a time, so a
+/// class occupies two consecutive words and its position is its index in the
+/// declaration order of `WHV_PROCESSOR_INTERCEPT_COUNTERS`.
+const fn counter_at(
+    words: &[u64; InterceptCounters::WORDS],
+    class: usize,
+) -> InterceptCounter {
+    InterceptCounter { count: words[class * 2], time_100ns: words[class * 2 + 1] }
+}
+
+/// How many whole `u64`s of a `capacity`-word buffer the platform filled.
+///
+/// Capped at the buffer, so a byte count larger than what was offered — which
+/// the platform's contract forbids — yields a short read that the caller
+/// refuses, rather than an index past the end.
+const fn filled_words(written_bytes: usize, capacity: usize) -> usize {
+    let whole = written_bytes / core::mem::size_of::<u64>();
+    if whole < capacity {
+        whole
+    } else {
+        capacity
+    }
+}
+
+/// How long a processor has existed, and how much of that the hypervisor spent
+/// on its behalf rather than running its guest.
+///
+/// The platform's `WHV_PROCESSOR_RUNTIME_COUNTERS`. The difference between the
+/// two is guest time; the hypervisor's share is what an engine leaving the
+/// partition too often is paying for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct RuntimeCounters {
+    /// Total processor runtime, in 100-nanosecond units.
+    pub total_100ns: u64,
+    /// The part of it attributed to the hypervisor, in the same units.
+    pub hypervisor_100ns: u64,
+}
+
+impl RuntimeCounters {
+    /// The structure is two words, in this order.
+    const WORDS: usize = 2;
+
+    /// As [`InterceptCounters::from_words`].
+    fn from_words(words: &[u64]) -> Option<Self> {
+        let words: &[u64; Self::WORDS] = words.get(..Self::WORDS)?.try_into().ok()?;
+        Some(Self { total_100ns: words[0], hypervisor_100ns: words[1] })
+    }
+}
+
 /// A configured partition: its guest-physical map and its processors.
 #[derive(Debug)]
 pub struct Partition {
@@ -622,6 +761,42 @@ impl Partition {
         self.write_reg(index, Reg::InternalActivityState, activity.as_word())
     }
 
+    /// What the guest has been leaving the hardware for, counted by the
+    /// hypervisor rather than by this port.
+    ///
+    /// The count AND the time per class, so a class that is rare but slow is
+    /// distinguishable from one that is frequent and cheap — which no tally
+    /// this port keeps can tell apart. Being the platform's own accounting is
+    /// the point: a disagreement between it and an engine's census means one of
+    /// the two is measuring something other than what it claims.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the platform refuses,
+    /// [`crate::WhpErrorKind::Contract`] if it answers with fewer counters than
+    /// its own structure holds.
+    pub fn intercept_counters(&self, index: u32) -> WhpResult<InterceptCounters> {
+        const CALL: &str = "WHvGetVirtualProcessorCounters(Intercepts)";
+        let mut words = [0u64; InterceptCounters::WORDS];
+        let written =
+            sys::get_counters(self.handle.0, index, sys::CounterSet::Intercepts, &mut words)?;
+        InterceptCounters::from_words(&words[..filled_words(written, words.len())])
+            .ok_or(WhpError::contract(CALL))
+    }
+
+    /// How long a processor has run, and how much of that went to the
+    /// hypervisor rather than to the guest.
+    ///
+    /// # Errors
+    /// As [`Partition::intercept_counters`].
+    pub fn runtime_counters(&self, index: u32) -> WhpResult<RuntimeCounters> {
+        const CALL: &str = "WHvGetVirtualProcessorCounters(Runtime)";
+        let mut words = [0u64; RuntimeCounters::WORDS];
+        let written =
+            sys::get_counters(self.handle.0, index, sys::CounterSet::Runtime, &mut words)?;
+        RuntimeCounters::from_words(&words[..filled_words(written, words.len())])
+            .ok_or(WhpError::contract(CALL))
+    }
+
     /// Translate a guest linear address through the guest's own paging.
     ///
     /// # Errors
@@ -780,6 +955,54 @@ mod tests {
         Ok(partition)
     }
 
+    /// The turn a test takes before putting a partition on the hardware.
+    ///
+    /// A process holds one partition at a time, which
+    /// [`a_process_holds_one_partition_at_a_time`] measures. Libtest runs tests
+    /// on several threads, so without this two of them would hold partitions at
+    /// once and the platform would refuse one — a fact about the platform
+    /// rather than about anything under test.
+    #[cfg(test)]
+    fn a_turn_on_the_hardware() -> std::sync::MutexGuard<'static, ()> {
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // A test that panicked while holding the turn poisoned nothing: the
+        // guard protects an ordering, not a value.
+        TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// How many exits one measurement guest may take before the loop calls it
+    /// a runaway. Far above what any code these tests run can need, and finite
+    /// so a guest that never halts fails rather than hangs.
+    #[cfg(test)]
+    const EXIT_CEILING: usize = 64;
+
+    /// Put `code` where the processor is pointed and run until the guest halts.
+    ///
+    /// Port accesses are stepped over rather than serviced: no device is behind
+    /// them, and what a caller here is measuring is the platform's own account
+    /// of the access. The platform leaves `RIP` on the trapping instruction for
+    /// an I/O exit, so advancing it by the exit's instruction length is what
+    /// lets the guest continue.
+    #[cfg(test)]
+    fn run_until_halt_with(partition: &mut Partition, code: &[u8]) -> WhpResult<()> {
+        let start = GUEST_IP as usize;
+        let memory = partition.bytes_at_mut(RESET_CS_BASE).expect("the mapped guest page");
+        memory[start..start + code.len()].copy_from_slice(code);
+        partition.write_reg(0, Reg::Rip, GUEST_IP)?;
+
+        for _ in 0..EXIT_CEILING {
+            let exit = partition.run(0)?;
+            match exit.reason {
+                crate::ExitReason::Halt => return Ok(()),
+                crate::ExitReason::IoPortAccess(_) => {
+                    partition.write_reg(0, Reg::Rip, exit.rip_after_instruction())?;
+                }
+                other => panic!("the measurement guest took an unexpected exit: {other:?}"),
+            }
+        }
+        panic!("the measurement guest ran past {EXIT_CEILING} exits without halting");
+    }
+
     /// **A process holds one partition at a time.** Measured, not read.
     ///
     /// The second partition's first `WHvMapGpaRange` fails with
@@ -802,6 +1025,7 @@ mod tests {
             eprintln!("skipped: this host has no Windows Hypervisor Platform");
             return;
         }
+        let _turn = a_turn_on_the_hardware();
         let first = halting_partition().expect("the first partition");
         let refused = halting_partition().expect_err("a second live partition");
         assert_eq!(
@@ -820,6 +1044,122 @@ mod tests {
             matches!(exit.reason, crate::ExitReason::Halt),
             "the guest must reach its HLT, not {:?}",
             exit.reason
+        );
+    }
+
+    /// The platform counts a guest's port writes, and says so without being
+    /// asked.
+    ///
+    /// This is an engine's independent witness: the hypervisor's own
+    /// accounting, not this port's, so a disagreement between it and an
+    /// engine's census means one of the two is measuring something other than
+    /// what it claims.
+    ///
+    /// The guest writes THREE times because the structure is a flat, untagged
+    /// run of words and a reader one position out would silently attribute a
+    /// class to its neighbour. A delta of three cannot come from the single
+    /// halt on either side of the I/O class, so the count pins the position
+    /// rather than merely agreeing with it — and the neighbours are asserted
+    /// still, so the shift is refused in both directions.
+    ///
+    /// The halt itself is the platform's own oddity, measured here rather than
+    /// assumed: a `HLT` that exits to the root partition is COUNTED under
+    /// `OtherIntercepts`, while its time is charged to `HaltInstructions`. An
+    /// engine reading `halt_instructions.count` to find its halts would find
+    /// none.
+    #[test]
+    fn the_platform_counts_the_guests_port_writes_apart_from_its_halts() {
+        if !crate::hypervisor_present().unwrap_or(false) {
+            eprintln!("skipped: this host has no Windows Hypervisor Platform");
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut partition = halting_partition().expect("a partition");
+
+        let before = partition
+            .intercept_counters(0)
+            .expect("a created processor reports its counters");
+
+        // out 0xE9, al ; out 0xE9, al ; out 0xE9, al ; hlt
+        run_until_halt_with(&mut partition, &[0xE6, 0xE9, 0xE6, 0xE9, 0xE6, 0xE9, 0xF4])
+            .expect("the guest runs");
+
+        let after = partition
+            .intercept_counters(0)
+            .expect("a processor that has run reports its counters");
+
+        assert_eq!(
+            after.io_instructions.count - before.io_instructions.count,
+            3,
+            "three OUTs executed, so the platform must report exactly three I/O \
+             intercepts; before {before:?}, after {after:?}"
+        );
+        assert!(
+            after.io_instructions.time_100ns > before.io_instructions.time_100ns,
+            "an intercept that took no time at all would mean the count and the time of \
+             a class are being read the wrong way round; before {before:?}, after {after:?}"
+        );
+        assert_eq!(
+            after.control_register_accesses.count, before.control_register_accesses.count,
+            "the class before I/O must not have absorbed the port writes; \
+             before {before:?}, after {after:?}"
+        );
+        assert_eq!(
+            after.halt_instructions.count, before.halt_instructions.count,
+            "the class after I/O must not have absorbed the port writes, and the halt \
+             does not move this counter either: the platform books a root-serviced HLT \
+             under OtherIntercepts and charges only its time here; \
+             before {before:?}, after {after:?}"
+        );
+        assert_eq!(
+            after.other_intercepts.count - before.other_intercepts.count,
+            1,
+            "the one halt is where the platform's count of it lands; \
+             before {before:?}, after {after:?}"
+        );
+    }
+
+    /// A processor's runtime is accounted for, and the hypervisor's share of it
+    /// is a part rather than the whole.
+    ///
+    /// The two words are the engine's measure of what leaving the partition
+    /// costs: guest time is the difference between them, so a run whose
+    /// hypervisor share exceeded its total would mean the pair is being read
+    /// the wrong way round.
+    #[test]
+    fn a_processor_that_has_run_accounts_for_its_time() {
+        if !crate::hypervisor_present().unwrap_or(false) {
+            eprintln!("skipped: this host has no Windows Hypervisor Platform");
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut partition = halting_partition().expect("a partition");
+        run_until_halt_with(&mut partition, &[0xE6, 0xE9, 0xF4]).expect("the guest runs");
+
+        let runtime = partition.runtime_counters(0).expect("a processor that has run");
+        assert!(
+            runtime.total_100ns > 0,
+            "a processor that executed instructions has spent time: {runtime:?}"
+        );
+        assert!(
+            runtime.hypervisor_100ns <= runtime.total_100ns,
+            "the hypervisor's share cannot exceed the total it is a share of: {runtime:?}"
+        );
+    }
+
+    /// A counter buffer shorter than the platform's structure is refused, not
+    /// silently padded with zeroes.
+    ///
+    /// A short answer means the platform reported fewer classes than this port
+    /// knows how to name, and reading it anyway would report an absent class as
+    /// one that never fired.
+    #[test]
+    fn a_short_counter_answer_is_refused_rather_than_read() {
+        assert_eq!(InterceptCounters::from_words(&[0; 27]), None);
+        assert_eq!(RuntimeCounters::from_words(&[0; 1]), None);
+        assert_eq!(
+            RuntimeCounters::from_words(&[3, 1]),
+            Some(RuntimeCounters { total_100ns: 3, hypervisor_100ns: 1 })
         );
     }
 

@@ -44,8 +44,8 @@ pub use caps::{
 };
 pub use error::{WhpError, WhpErrorKind, WhpResult};
 pub use partition::{
-    Canceller, HostPages, InterruptRequester, LateProperty, LocalApicMode, Partition,
-    PartitionConfig, PAGE_SIZE,
+    Canceller, HostPages, InterceptCounter, InterceptCounters, InterruptRequester, LateProperty,
+    LocalApicMode, Partition, PartitionConfig, RuntimeCounters, PAGE_SIZE,
 };
 pub use sys::GvaTranslation;
 

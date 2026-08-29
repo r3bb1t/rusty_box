@@ -11,7 +11,9 @@
 //! result, and the reason the other verbs are never reached here.
 
 use crate::error::{WhpError, WhpResult};
-use crate::sys::{CapabilityCode, GpaPerms, GvaTranslation, PropertyCode, RawPartition};
+use crate::sys::{
+    CapabilityCode, CounterSet, GpaPerms, GvaTranslation, PropertyCode, RawPartition,
+};
 use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister, TableRegister};
 
 /// The name every refusal below carries, since on this target the platform
@@ -93,6 +95,15 @@ pub(crate) fn request_interrupt(
     _partition: RawPartition,
     _request: InterruptRequest,
 ) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub(crate) fn get_counters(
+    _partition: RawPartition,
+    _index: u32,
+    _set: CounterSet,
+    _out: &mut [u64],
+) -> WhpResult<usize> {
     Err(WhpError::unsupported(CALL))
 }
 

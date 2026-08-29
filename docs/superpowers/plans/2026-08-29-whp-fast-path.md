@@ -36,7 +36,34 @@ The DLX WHP example is `rusty_box_whp_engine/examples/dlx_whp.rs`; `DLX_WHP_PATI
 
 ---
 
-### Task 1: Wrap the hypervisor's own performance counters
+### Task 1: Wrap the hypervisor's own performance counters — **DONE**
+
+> **Implemented and measured. Four things written below turned out to be wrong;
+> the shipped code follows the measurement, not this sketch. Read these before
+> trusting any number this task's sketch quotes.**
+>
+> 1. **`WHV_PROCESSOR_INTERCEPT_COUNTERS` has FOURTEEN classes, not the eleven
+>    sketched.** The three missing ones are `NestedPageFaultIntercepts`,
+>    `Hypercalls` and `RdpmcInstructions` — and the first of those is where an
+>    unmapped or permission-refused guest-physical access lands, i.e. *exactly*
+>    the MMIO exits Tasks 4–6 exist to remove. Following the sketch literally
+>    would have made this plan's own subject invisible to its own instrument.
+> 2. **The buffer is 224 bytes (28 `u64`), not the 176 the sketch sized.** Step 7's
+>    `[0u64; 22]` was short by six words. The shipped call takes `&mut [u64]`
+>    rather than `&mut [u8]`, so the platform's 8-byte writes land on an aligned
+>    buffer by construction rather than by luck.
+> 3. **The platform does NOT refuse counters for a processor that has never
+>    run** — it returns zeros. Step 7's `# Errors` clause claiming otherwise is
+>    wrong, and a test asserting a refusal there would fail.
+> 4. **Hyper-V does not increment `HaltInstructions.Count`.** See Task 3's
+>    mapping table — this is the one that changes a later task.
+>
+> Ratchet note, flagged by the implementer and accepted: `rusty_box_whp/src`'s
+> unsafe baseline went 35 → 36. A new platform call is the one reason that count
+> rises; the block is confined to `sys/windows.rs` like every other, and the
+> re-baseline carries that justification inline in `xtask/src/ci.rs`.
+
+
 
 `WHvGetVirtualProcessorCounters` reports per-intercept-class **count and time**, and total-vs-hypervisor runtime, with no instrumentation of ours. It is the independent check on Task 3's census: if our numbers and the platform's disagree, one of them is measuring the wrong thing and we must know before redesigning.
 
@@ -450,9 +477,23 @@ From the final report: `slices`, the `exits_per_slice` histogram, the four endin
 
 The spec predicts: **median 1 exit per slice, >70% of slices ending `Boundary`, and `total_100ns − hypervisor_100ns` a small fraction of wall time.**
 
+Cross-check the engine's tally against the platform's using **this mapping**,
+which was measured during Task 1 and is not the obvious one:
+
+| engine `ExitCounts` | platform counter | why not the obvious field |
+|---|---|---|
+| `port` | `io_instructions.count` | — |
+| `memory` | `nested_page_fault_intercepts.count` | an unmapped or permission-refused guest-physical access is a *second-level* fault; `page_fault_intercepts` is the guest's own paging |
+| `halt` | `other_intercepts.count` | **`halt_instructions.count` stays ZERO.** Hyper-V books a root-serviced `HLT`'s count under `other_intercepts` and charges only its *time* to `halt_instructions`. Reading the obvious field finds nothing and looks like a disagreement |
+| `cpuid` | `cpuid_instructions.count` | — |
+| `msr` | `msr_accesses.count` | — |
+
+Then act on what the two together say:
+
 - **If confirmed** — proceed to Task 4.
 - **If the median is 5+ and slices end on `Budget`** — §1's ranking is wrong. **Stop. Do not do Tasks 4–6.** Task 7 (cheaper exchange) becomes the whole plan, and the spec needs revising first.
-- **If the platform's `io_instructions` count and the engine's `ExitCounts.port` disagree by more than 1%** — stop and find out why before trusting either.
+- **If `port` and `io_instructions.count` disagree by more than 1%** — stop and
+  find out why before trusting either.
 
 - [ ] **Step 4: Write the measurement down**
 

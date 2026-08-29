@@ -68,6 +68,21 @@ pub(crate) enum PropertyCode {
     LocalApicEmulationMode,
 }
 
+/// Which counter set `WHvGetVirtualProcessorCounters` should report.
+///
+/// The platform declares five sets in `WHV_PROCESSOR_COUNTER_SET`; these are
+/// the two whose payload this port reads, and each names a different structure,
+/// so the set chosen and the structure parsed are decided together.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CounterSet {
+    /// Per-intercept-class count and time,
+    /// `WHV_PROCESSOR_INTERCEPT_COUNTERS`.
+    Intercepts,
+    /// Total and hypervisor-attributed runtime,
+    /// `WHV_PROCESSOR_RUNTIME_COUNTERS`.
+    Runtime,
+}
+
 /// How far a `WHvTranslateGva` got.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct GvaTranslation {
@@ -80,9 +95,9 @@ pub struct GvaTranslation {
 
 pub(crate) use imp::{
     cancel_vp, capability, create_partition, create_vp, delete_partition, delete_vp,
-    dirty_bitmap, get_segments, get_tables, get_words, hypervisor_present, map_gpa,
-    request_interrupt, run_vp, set_cpuid_exit_list, set_property, set_segments, set_tables,
-    set_words, setup, translate_gva, unmap_gpa,
+    dirty_bitmap, get_counters, get_segments, get_tables, get_words, hypervisor_present,
+    map_gpa, request_interrupt, run_vp, set_cpuid_exit_list, set_property, set_segments,
+    set_tables, set_words, setup, translate_gva, unmap_gpa,
 };
 
 /// Every function `imp` must provide, stated once so the two implementations
@@ -104,6 +119,7 @@ const _IMP_IS_COMPLETE: ImpSignatures = ImpSignatures {
     run_vp: imp::run_vp,
     cancel_vp: imp::cancel_vp,
     request_interrupt: imp::request_interrupt,
+    get_counters: imp::get_counters,
     get_words: imp::get_words,
     set_words: imp::set_words,
     get_segments: imp::get_segments,
@@ -137,6 +153,7 @@ struct ImpSignatures {
     run_vp: fn(RawPartition, u32) -> WhpResult<Exit>,
     cancel_vp: fn(RawPartition, u32) -> WhpResult<()>,
     request_interrupt: fn(RawPartition, InterruptRequest) -> WhpResult<()>,
+    get_counters: fn(RawPartition, u32, CounterSet, &mut [u64]) -> WhpResult<usize>,
     get_words: fn(RawPartition, u32, &[Reg], &mut [u64]) -> WhpResult<()>,
     set_words: fn(RawPartition, u32, &[Reg], &[u64]) -> WhpResult<()>,
     get_segments: fn(RawPartition, u32, &[Reg], &mut [SegmentRegister]) -> WhpResult<()>,

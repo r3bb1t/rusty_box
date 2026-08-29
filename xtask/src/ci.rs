@@ -94,7 +94,14 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // express: the host bytes must outlive the mapping, and a partition stored
     // beside the memory it maps cannot borrow its sibling. Stating it here is
     // what lets the crate that discharges it hold exactly one `unsafe` call.
-    ("rusty_box_whp/src", 35),
+    //
+    // 35 -> 36: `WHvGetVirtualProcessorCounters`, the platform's own per-class
+    // intercept and runtime accounting. A new platform call is the one reason
+    // this crate's count rises, and this one is confined the same way as the
+    // rest: the block is in `sys/windows.rs`, the buffer it hands over is a
+    // borrowed `u64` slice whose length is what bounds the write, and the
+    // structure is parsed in safe code above the seam.
+    ("rusty_box_whp/src", 36),
     // The adapter between the machine and the leaf. ONE: installing the
     // machine's memory into a partition hands the hypervisor host addresses
     // that outlive the borrow they came from, and no lifetime can say
