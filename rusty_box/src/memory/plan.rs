@@ -664,6 +664,157 @@ mod tests {
         );
     }
 
+    /// The plan and this port's own routing answer for the same byte.
+    ///
+    /// This is the equivalence the whole hypervisor design rests on and the
+    /// one thing no other test covers. A guest under an engine that runs on
+    /// hardware reaches memory TWICE by two different routes: the processor
+    /// itself goes through the windows this plan installs, and the shadow —
+    /// which services every exit the hardware cannot finish, and which pushes
+    /// the interrupt frames the hardware later pops — goes through
+    /// `host_mem_range`. If those two disagree about which host byte backs a
+    /// guest-physical address, the guest writes through one and reads back
+    /// through the other, and nothing in the machine can detect it.
+    ///
+    /// Every page of a real machine's map, not a sample: the interesting
+    /// addresses are the edges — the video aperture, the shadow region's PAM
+    /// areas, the top of RAM — and a sample is exactly what misses an edge.
+    /// A machine shaped like the ones the boot examples build.
+    ///
+    /// PCI enabled, because the shadow region's PAM branch is gated on it —
+    /// with PCI off every area falls through to the ROM behind it and no
+    /// writable shadow window is ever produced, which is exactly the case
+    /// worth checking. Both boot examples set it.
+    fn a_machine_like_the_boot_examples() -> crate::memory::BxMemC {
+        const MIB: usize = 1024 * 1024;
+        let mut memory = crate::memory::BxMemC::new(
+            crate::memory::BxMemoryStubC::create_and_init(32 * MIB, 32 * MIB, MIB)
+                .expect("memory allocation"),
+            true,
+        );
+        memory.set_a20_mask(u64::MAX);
+        // The state the firmware actually puts the chipset in, not the reset
+        // one: every PAM area open for reading AND writing, which is what
+        // `bios_shadow_init` does before it copies itself into the shadow
+        // region. The reset state leaves those areas read-only, so a check
+        // that only saw it would never exercise a writable window there.
+        for area in 0..13 {
+            memory.set_memory_type(area, 0, true);
+            memory.set_memory_type(area, 1, true);
+        }
+        memory
+    }
+
+    #[test]
+    fn every_planned_page_names_the_host_byte_this_ports_routing_would_use() {
+        let mut memory = a_machine_like_the_boot_examples();
+        the_plan_agrees_with_this_ports_routing(&mut memory);
+    }
+
+    /// The same equivalence with the chipset's SMRAM window open.
+    ///
+    /// A separate state rather than a variation, because opening SMRAM moves
+    /// the 0xA0000-0xBFFFF aperture from "the VGA model answers this" to
+    /// "plain guest RAM" and extends low RAM through it. That is a different
+    /// map, reached by real firmware installing its SMM handler, and it is
+    /// the other place this plan departs from the reset layout.
+    #[test]
+    fn the_plan_still_matches_this_ports_routing_with_smram_open() {
+        let mut memory = a_machine_like_the_boot_examples();
+        memory.smram_available = true;
+        memory.smram_enable = true;
+        assert!(memory.smram_is_open(), "the window this test is about must be open");
+        the_plan_agrees_with_this_ports_routing(&mut memory);
+    }
+
+    fn the_plan_agrees_with_this_ports_routing(memory: &mut crate::memory::BxMemC) {
+        let plan = MemoryPlan::derive(memory).expect("a fully resident machine has a plan");
+        let policy = crate::memory::CpuMemoryPolicy::new(false, false);
+
+        let mut checked = 0u64;
+        for window in plan.windows() {
+            let mut offset = 0u64;
+            while offset < window.len {
+                let gpa = window.gpa + offset;
+                let planned = window.host.get() as usize + offset as usize;
+
+                // The plan claims the hardware may serve this page straight
+                // from `planned`, so a read through this port must return the
+                // byte that lives there.
+                //
+                // Asserted on the BYTE, not on whether the read is direct.
+                // `host_mem_range` answers the second question, and the two
+                // part company legitimately: the video aperture is vetoed from
+                // the direct path outright, yet with SMRAM open the slow path
+                // reads it straight out of guest RAM. What the hardware and
+                // the shadow must agree on is the value a guest sees.
+                let stamp = 0xA5u8.wrapping_add((gpa >> 12) as u8);
+                memory
+                    .allocation_slice(planned as u64, 1)
+                    .expect("a planned host offset must be inside the allocation")[0] = stamp;
+                let mut seen = [0u8; 1];
+                match memory
+                    .read_physical_page(policy, gpa, 1, &mut seen)
+                    .expect("reading a planned page must not fault")
+                {
+                    crate::memory::PhysAccess::Done => {}
+                    crate::memory::PhysAccess::Mmio(hit) => panic!(
+                        "gpa {gpa:#x} is planned as memory the hardware reads directly, \
+                         but this port routes it to a device window ({hit:?})"
+                    ),
+                }
+                assert_eq!(
+                    seen[0], stamp,
+                    "gpa {gpa:#x} is planned at host offset {planned:#x}, but reading it \
+                     through this port returned {:#x} rather than that byte",
+                    seen[0]
+                );
+
+                // And where the plan grants write permission, a write through
+                // this port's own path must land in that same byte.
+                //
+                // Asserted on the RESULTING BYTE rather than on whether the
+                // write is direct, because those are different questions and
+                // conflating them is wrong in both directions: the shadow
+                // region is never written directly (`direct_host_write_allowed`
+                // excludes 0xC0000..0x100000 outright) and yet a PAM-writable
+                // area still lands in exactly this host byte through the slow
+                // path. What the hardware and the shadow must agree on is
+                // where the byte ENDS UP, which is what a guest can observe.
+                if window.perms.write {
+                    let stamp = 0x5Au8.wrapping_add((gpa >> 12) as u8);
+                    let mut data = [stamp];
+                    // The verdict matters as much as the bytes: a planned
+                    // window is memory the hardware writes with no exit, so
+                    // this port answering `Mmio` for the same address means
+                    // the two disagree about what kind of thing lives there.
+                    match memory
+                        .write_physical_page(policy, gpa, 1, &mut data)
+                        .expect("a planned writable page must accept a write")
+                    {
+                        crate::memory::PhysAccess::Done => {}
+                        crate::memory::PhysAccess::Mmio(hit) => panic!(
+                            "gpa {gpa:#x} is planned as writable memory, but this port \
+                             routes it to a device window ({hit:?})"
+                        ),
+                    }
+                    let landed = memory
+                        .allocation_slice(planned as u64, 1)
+                        .expect("a planned host offset must be inside the allocation")[0];
+                    assert_eq!(
+                        landed, stamp,
+                        "gpa {gpa:#x} is planned WRITABLE at host offset {planned:#x}, \
+                         but writing through this port left that byte as {landed:#x}"
+                    );
+                }
+
+                checked += 1;
+                offset += GUEST_PAGE;
+            }
+        }
+        assert!(checked > 1000, "a 32 MiB machine has more pages than this: {checked}");
+    }
+
     #[test]
     fn an_empty_candidate_is_dropped_rather_than_emitted() {
         let mut list = CandidateList::new();
