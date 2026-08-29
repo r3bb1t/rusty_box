@@ -721,6 +721,33 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             return run_slice_on_the_shadow(cpu, &mut io, request, &mut self.census);
         }
 
+        // A slice the hardware cannot be interrupted within belongs to the
+        // shadow, which can end one exactly.
+        //
+        // The alarm that bounds a hardware slice is a thread waiting on a
+        // condition variable, so its resolution is a thread wake — tens of
+        // microseconds. A machine whose next device deadline is nearer than
+        // that asks for a budget the hardware will overrun no matter what,
+        // because the floor in `host_time_for` is already larger than the
+        // request: measured on an Alpine boot, the mean slice overran its
+        // budget 271-fold and the worst by over a million.
+        //
+        // What the guest sees when that happens is a timer that fires in
+        // bursts at slice boundaries instead of at its deadline. The pulses
+        // and the brief windows in which a kernel has its I/O APIC pin
+        // unmasked stop overlapping, so `check_timer` finds no tick and Linux
+        // panics with "IO-APIC + timer doesn't work" before it ever reaches
+        // userspace.
+        //
+        // The interpreter has no such floor: it retires instructions and stops
+        // on the one the budget names. So the engine runs on the processor
+        // that can honour the request, and the guest cannot tell which — the
+        // shadow is this port's own interpreter against this machine's own
+        // devices.
+        if host_time_exactly(request.instructions(), ips) < SLICE_RESOLUTION {
+            return run_slice_on_the_shadow(cpu, &mut io, request, &mut self.census);
+        }
+
         // An interrupt to deliver, a halt to wake from, any work the
         // interpreter does at a trace boundary: it happens HERE, on the
         // shadow, before the hardware is given the processor. The partition
@@ -1663,6 +1690,17 @@ fn deadline(request: SliceRequest, ips: u64) -> Duration {
 /// and one that ran shorter leaves the machine waiting for time that has
 /// already passed.
 fn host_time_for(ticks: u64, ips: u64) -> Duration {
+    host_time_exactly(ticks, ips).max(SLICE_RESOLUTION)
+}
+
+/// The same conversion without the floor — what the machine actually asked
+/// for, rather than the least this engine can deliver.
+///
+/// The two differ precisely when a device deadline is nearer than the hardware
+/// can be interrupted, and telling them apart is what
+/// [`SliceEngine::run_slice`] uses to decide which processor should run the
+/// slice at all.
+fn host_time_exactly(ticks: u64, ips: u64) -> Duration {
     if ips == 0 {
         // A machine with no rate cannot say how long a tick is; give the
         // slice this engine's own resolution and let the machine decide.
@@ -1670,8 +1708,7 @@ fn host_time_for(ticks: u64, ips: u64) -> Duration {
     }
     let rate = u128::from(ips).saturating_mul(u128::from(HARDWARE_SPEED));
     let nanos = u128::from(ticks).saturating_mul(1_000_000_000) / rate;
-    let asked = Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX));
-    asked.max(SLICE_RESOLUTION)
+    Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
 
 /// The shortest stretch this engine can actually run.
@@ -1688,6 +1725,7 @@ fn host_time_for(ticks: u64, ips: u64) -> Duration {
 /// machine asked for by more than the machine can measure, and never returns
 /// claiming that no time passed when it ran.
 const SLICE_RESOLUTION: Duration = Duration::from_micros(50);
+
 
 /// How much faster the host's own processor is than the rate this machine
 /// nominally runs at.
