@@ -30,7 +30,11 @@ use super::alarm::Alarm;
 use super::state::{self, VpRegisters};
 use super::Vp;
 use rusty_box::cpu::arch_state::VcpuArchState;
-use rusty_box::cpu::{cpu::BxCpuC, instrumentation::Instrumentation, CpuError, Result};
+use rusty_box::cpu::{
+    cpu::{BxCpuC, CpuActivityState},
+    instrumentation::Instrumentation,
+    CpuError, Result,
+};
 use rusty_box::emulator::{
     EventDelivery, PcIo, Progress, ProgressUnit, SliceEngine, SliceRequest,
 };
@@ -259,6 +263,93 @@ pub struct ExitCounts {
     pub boundary: u64,
 }
 
+/// How the guest's time divided into slices, and what ended each one.
+///
+/// [`ExitCounts`] says what the guest asked the hardware for; it cannot say how
+/// those asks were divided into slices, and the division is what a slice costs.
+/// A slice holding one exit bought a VM entry and a VM exit — roughly four
+/// microseconds on this host — and ran the guest for whatever fits between
+/// them, which is approximately nothing. So the shape of the histogram is the
+/// shape of the problem, and the split of [`Yielded::Boundary`] says which of
+/// three different fixes the shape calls for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SliceCensus {
+    /// Slices that ended in something the machine could act on.
+    ///
+    /// A slice that ended in an error is not one of them: the machine is handed
+    /// a fault rather than a processor, and counting it as a slice would put a
+    /// row in the histogram for a stretch the guest never got.
+    pub slices: u64,
+    /// How many exits each slice held, bucketed by [`Self::bucket_of`] and
+    /// named by [`Self::BUCKET_LABELS`].
+    pub exits_per_slice: [u64; Self::BUCKETS],
+    /// Slices the guest ended by halting.
+    pub ended_halted: u64,
+    /// Slices the host ended by asking for the processor back mid-run.
+    pub ended_canceled: u64,
+    /// Slices that ran for the whole stretch the machine asked for.
+    pub ended_budget: u64,
+    /// Slices ended because the processor itself asked for a machine boundary.
+    pub ended_wants_machine_boundary: u64,
+    /// Slices ended because a device had latched work only the machine can do.
+    pub ended_needs_boundary: u64,
+    /// Slices ended because an interrupt had become deliverable.
+    pub ended_event_to_deliver: u64,
+}
+
+impl SliceCensus {
+    /// How many buckets [`Self::exits_per_slice`] holds.
+    pub const BUCKETS: usize = 6;
+
+    /// What each bucket of [`Self::exits_per_slice`] covers, in order.
+    ///
+    /// Fine at the bottom and coarse at the top, because that is where the
+    /// question lives: one exit per slice and two exits per slice are different
+    /// diagnoses, while forty and eighty are the same one.
+    pub const BUCKET_LABELS: [&'static str; Self::BUCKETS] =
+        ["0", "1", "2", "3-4", "5-8", "9+"];
+
+    /// Which bucket a slice holding `exits` exits belongs in.
+    ///
+    /// The one place the edges are written down, so the histogram a reader
+    /// prints and the histogram this records cannot describe different ranges.
+    #[must_use]
+    pub const fn bucket_of(exits: u64) -> usize {
+        match exits {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3..=4 => 3,
+            5..=8 => 4,
+            _ => 5,
+        }
+    }
+
+    /// Record one slice: how many exits it held, and what ended it.
+    ///
+    /// The single place a slice is counted, so the histogram and the ending
+    /// tallies cannot disagree about how many slices there were — they are
+    /// two readings of the same population and a report subtracts one from the
+    /// other.
+    fn record(&mut self, exits: u64, yielded: &Yielded) {
+        self.slices += 1;
+        self.exits_per_slice[Self::bucket_of(exits)] += 1;
+        match yielded {
+            Yielded::Halted => self.ended_halted += 1,
+            Yielded::Canceled => self.ended_canceled += 1,
+            Yielded::Budget => self.ended_budget += 1,
+            Yielded::Boundary(BoundaryReason::ProcessorAsked) => {
+                self.ended_wants_machine_boundary += 1;
+            }
+            Yielded::Boundary(BoundaryReason::DeviceLatched) => self.ended_needs_boundary += 1,
+            Yielded::Boundary(BoundaryReason::EventToDeliver) => {
+                self.ended_event_to_deliver += 1;
+            }
+        }
+    }
+}
+
 /// Runs guest code on the Windows Hypervisor Platform.
 ///
 /// Starts unconfigured because a machine constructs its engine before it has
@@ -269,6 +360,7 @@ pub struct ExitCounts {
 pub struct WhpEngine {
     started: Option<Started>,
     exits: ExitCounts,
+    census: SliceCensus,
     /// Diagnostic; see [`ExitHistory`]. Lives here rather than in a slice
     /// because a guest's path to a fault crosses slice boundaries — a handler
     /// that traps for its own port I/O is several slices old by the time it
@@ -284,6 +376,15 @@ impl WhpEngine {
         self.exits
     }
 
+    /// How the guest's time has been divided into slices, and what ended each.
+    ///
+    /// A slice holding one exit means the engine bought a VM entry and a VM
+    /// exit and ran the guest for nothing in between; the shape of this
+    /// histogram is therefore the shape of the problem.
+    #[must_use]
+    pub const fn census(&self) -> SliceCensus {
+        self.census
+    }
 }
 
 /// Build the partition, map the machine's memory into it and create the
@@ -375,7 +476,7 @@ enum Yielded {
     /// BAR — only takes effect when the machine applies it, and this engine
     /// then has a new map to install; a guest that kept running would be
     /// running against the layout the write was replacing.
-    Boundary,
+    Boundary(BoundaryReason),
     /// The stretch the machine asked for is over.
     ///
     /// The machine bounds a slice by the time to its next device deadline, and
@@ -386,6 +487,23 @@ enum Yielded {
     /// when the controller — waiting on a timer that never fires — does not
     /// answer.
     Budget,
+}
+
+/// Which of the three questions ended a slice at [`Yielded::Boundary`].
+///
+/// Carried as a state rather than tallied at each `return`, because the three
+/// call for different fixes and a single `Boundary` count cannot tell them
+/// apart: a device that latched work wants the drain moved, a processor that
+/// asked for a boundary wants the machine to run, and an interrupt that became
+/// deliverable wants delivery to stop being a slice-entry-only affair.
+enum BoundaryReason {
+    /// The processor itself asked for a machine boundary.
+    ProcessorAsked,
+    /// A device latched work only the machine can do.
+    DeviceLatched,
+    /// An interrupt became deliverable, and this engine delivers only at the
+    /// head of a slice.
+    EventToDeliver,
 }
 
 /// Install the machine's guest-physical map into the partition, replacing
@@ -533,7 +651,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // engine's own slice and delivery logic, which the interpreter's loop
         // does differently.
         if std::env::var_os("WHP_ALL_SHADOW").is_some() {
-            return run_slice_on_the_shadow(cpu, &mut io, request);
+            return run_slice_on_the_shadow(cpu, &mut io, request, &mut self.census);
         }
 
         // An interrupt to deliver, a halt to wake from, any work the
@@ -598,7 +716,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // here rather than being handed over half-entered.
         run_the_shadow_out_of_smm(cpu, &mut io)?;
 
-        let Self { started, exits, history } = self;
+        let Self { started, exits, census, history } = self;
         let started = start(started, &mut io)?;
 
         // The shadow describes the processor; the platform runs it.
@@ -620,7 +738,8 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // the interrupt fabric reads IF, and a snapshot reads all of it.
         read_back_into_the_shadow(started, cpu)?;
 
-        let SliceOutcome { yielded, ran } = outcome?;
+        let SliceOutcome { yielded, ran, exits: exits_held } = outcome?;
+        census.record(exits_held, &yielded);
         match yielded {
             // Halting is not architectural state, so it does not arrive in the
             // exchange above; the platform reports it as the reason the run
@@ -630,7 +749,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             // scheduler takes it the moment this slice returns; ending the
             // slice is the whole of what this engine owes it. The other two
             // leave the processor exactly as the hardware left it.
-            Yielded::Canceled | Yielded::Boundary | Yielded::Budget => {}
+            Yielded::Canceled | Yielded::Boundary(_) | Yielded::Budget => {}
         }
         // What the guest earned, whole.
         //
@@ -657,12 +776,19 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
 /// `PcIo` offers and this path is a diagnostic: it is slower than the
 /// interpreter's own loop and does not need not to be.
 ///
+/// It keeps the same census as the hardware path, in the same
+/// [`SliceCensus`], because a bisection that could not say how its slices ended
+/// would be comparing a measured run against an unmeasured one. Every slice
+/// here lands in the histogram's first bucket by construction: the guest's
+/// instructions retire on the shadow, so no exit crosses this path at all.
+///
 /// # Errors
 /// Whatever the guest raised that the shadow could not take.
 fn run_slice_on_the_shadow<T: Instrumentation>(
     cpu: &mut BxCpuC<T>,
     io: &mut PcIo<'_>,
     request: SliceRequest,
+    census: &mut SliceCensus,
 ) -> Result<Progress> {
     io.sync_io_events(cpu);
     if cpu.has_an_event_to_deliver() {
@@ -673,23 +799,39 @@ fn run_slice_on_the_shadow<T: Instrumentation>(
 
     let budget = request.instructions();
     let mut retired = 0u64;
-    while retired < budget {
+    let yielded = loop {
+        if retired >= budget {
+            break Yielded::Budget;
+        }
         // In bulk, not one at a time. Building an execution context per
         // instruction cost this path six times the interpreter's own speed on
         // a DLX boot — 92 seconds against 15 — which is a property of how it
         // asked rather than of what it was running.
         let ran = io.emulate_batch(cpu, budget - retired)?;
         retired += ran;
-        if ran == 0 {
-            break;
+        if cpu.wants_a_machine_boundary() {
+            break Yielded::Boundary(BoundaryReason::ProcessorAsked);
         }
-        if cpu.wants_a_machine_boundary() || io.needs_boundary() {
-            break;
+        if io.needs_boundary() {
+            break Yielded::Boundary(BoundaryReason::DeviceLatched);
         }
         if cpu.has_an_event_to_deliver() {
-            break;
+            break Yielded::Boundary(BoundaryReason::EventToDeliver);
         }
-    }
+        if ran == 0 {
+            // A batch that retired nothing while no question above holds is a
+            // processor that is no longer executing — the shadow's own `HLT`
+            // handler has entered the sleep state the machine reads. An active
+            // processor that still retired nothing has no more to give this
+            // slice either, and the machine gets it back the same way.
+            break if matches!(cpu.activity_state, CpuActivityState::Active) {
+                Yielded::Budget
+            } else {
+                Yielded::Halted
+            };
+        }
+    };
+    census.record(0, &yielded);
     // One instruction is one tick here, which is the software engine's own
     // denomination — this path retires instructions and can count them.
     Ok(Progress::Ticks(retired))
@@ -758,6 +900,13 @@ struct SliceOutcome {
     yielded: Yielded,
     /// Host time spent inside the platform's run call, and nowhere else.
     ran: Duration,
+    /// How many times the hardware handed the guest back during this slice.
+    ///
+    /// The per-slice figure rather than the running total in [`ExitCounts`]:
+    /// what a slice cost is a VM entry plus this many VM exits, and a total
+    /// divided by a slice count would only give the mean of a distribution
+    /// whose shape is the thing in question.
+    exits: u64,
 }
 
 /// Run the processor, servicing what the platform cannot, until something the
@@ -773,13 +922,15 @@ fn run_until_the_machine_is_needed<T: Instrumentation>(
     history: &mut ExitHistory,
 ) -> Result<SliceOutcome> {
     let mut ran = Duration::ZERO;
-    let yielded =
-        run_the_exit_loop(started, cpu, io, deadline, budget, ips, counts, &mut ran, history);
+    let mut exits = 0u64;
+    let yielded = run_the_exit_loop(
+        started, cpu, io, deadline, budget, ips, counts, &mut ran, &mut exits, history,
+    );
     // The alarm is armed per run inside the loop, so an error path can leave
     // one armed against a processor nobody is running. Disarming here is what
     // makes that impossible.
     started.alarm.disarm();
-    yielded.map(|yielded| SliceOutcome { yielded, ran })
+    yielded.map(|yielded| SliceOutcome { yielded, ran, exits })
 }
 
 /// The exit loop proper, wrapped so the alarm is disarmed on every path out —
@@ -793,6 +944,7 @@ fn run_the_exit_loop<T: Instrumentation>(
     ips: u64,
     counts: &mut ExitCounts,
     ran: &mut Duration,
+    exits: &mut u64,
     history: &mut ExitHistory,
 ) -> Result<Yielded> {
     loop {
@@ -852,6 +1004,11 @@ fn run_the_exit_loop<T: Instrumentation>(
         // would otherwise end the next run before it began.
         started.alarm.disarm();
         let exit = exit.map_err(platform_failed)?;
+        // Every exit this slice took, whatever its reason. Counted apart from
+        // the per-class tally below, whose match leaves some reasons out: what
+        // a slice cost is one VM entry plus this many VM exits, and a reason
+        // this engine does not classify cost exactly as much as one it does.
+        *exits += 1;
         // Counted before it is serviced, so the tally describes what the guest
         // asked for even when servicing it fails.
         match exit.reason {
@@ -1073,9 +1230,13 @@ fn run_the_exit_loop<T: Instrumentation>(
         // cannot fire until the machine has the processor back. Asked after
         // every serviced exit rather than only after a port write, because a
         // device reached through the shadow arms timers the same way.
-        if cpu.wants_a_machine_boundary() || io.needs_boundary() {
+        if cpu.wants_a_machine_boundary() {
             counts.boundary += 1;
-            return Ok(Yielded::Boundary);
+            return Ok(Yielded::Boundary(BoundaryReason::ProcessorAsked));
+        }
+        if io.needs_boundary() {
+            counts.boundary += 1;
+            return Ok(Yielded::Boundary(BoundaryReason::DeviceLatched));
         }
 
         // Bring the bus's levels onto the processor for every exit, not only
@@ -1099,7 +1260,7 @@ fn run_the_exit_loop<T: Instrumentation>(
         // vector to the guest at the next slice entry, which is immediately.
         if cpu.has_an_event_to_deliver() {
             counts.boundary += 1;
-            return Ok(Yielded::Boundary);
+            return Ok(Yielded::Boundary(BoundaryReason::EventToDeliver));
         }
     }
 }

@@ -23,7 +23,7 @@ use rusty_box::emulator::{
     AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MachineBuilder,
     MemorySize, RunBudget, StopReason,
 };
-use rusty_box_whp_engine::WhpEngine;
+use rusty_box_whp_engine::{ExitCounts, SliceCensus, WhpEngine};
 
 /// DLX Linux disk geometry, from `bochsrc.bxrc`.
 const DLX_CYLINDERS: u16 = 306;
@@ -181,7 +181,13 @@ fn boot() -> i32 {
         let outcome = match machine.step(RunBudget::Ticks(SLICE_TICKS)) {
             Ok(outcome) => outcome,
             Err(error) => {
-                report(reached, began, ticks);
+                report(
+                    reached,
+                    began,
+                    ticks,
+                    machine.engine().exits(),
+                    machine.engine().census(),
+                );
                 eprintln!("the run ended with an error: {error}");
                 return 1;
             }
@@ -207,9 +213,16 @@ fn boot() -> i32 {
         }
         // A boot that is merely slow and one that is stuck look the same from
         // outside, so say what the guest has been exiting for as it goes.
+        //
+        // And how those exits were divided into slices, which the counts alone
+        // cannot say: the same ten thousand exits are one cost spread over a
+        // hundred slices and quite another spread over ten thousand, because a
+        // slice buys a VM entry, a VM exit and two architectural state
+        // exchanges whatever it then does with them.
         if began.elapsed().as_secs() != last_said {
             last_said = began.elapsed().as_secs();
             let exits = machine.engine().exits();
+            let census = machine.engine().census();
             println!(
                 "       rip={:#x} exits: port {} mem {} cpuid {} msr {} halt {} boundary {}",
                 machine.rip(),
@@ -220,6 +233,7 @@ fn boot() -> i32 {
                 exits.halt,
                 exits.boundary,
             );
+            println!("       {}", one_line_census(&census));
         }
 
         if let Some(screen) = machine.display().text().map(|text| text.to_text()) {
@@ -242,19 +256,37 @@ fn boot() -> i32 {
         }
 
         if outcome.is_terminal() {
-            report(reached, began, ticks);
+            report(
+                reached,
+                began,
+                ticks,
+                machine.engine().exits(),
+                machine.engine().census(),
+            );
             eprintln!("the guest stopped: {:?}", outcome.stop);
             return 1;
         }
         if began.elapsed() > patience {
-            report(reached, began, ticks);
+            report(
+                reached,
+                began,
+                ticks,
+                machine.engine().exits(),
+                machine.engine().census(),
+            );
             eprintln!("gave up after {patience:?} of host time");
             return 1;
         }
         // A machine whose processor is halted with nothing able to wake it is
         // not going to become unstuck by being asked again.
         if matches!(outcome.stop, StopReason::Halted) && outcome.progress.stalled() {
-            report(reached, began, ticks);
+            report(
+                reached,
+                began,
+                ticks,
+                machine.engine().exits(),
+                machine.engine().census(),
+            );
             eprintln!("the guest halted with nothing left to wake it");
             dump(&mut machine);
             return 1;
@@ -263,7 +295,7 @@ fn boot() -> i32 {
 }
 
 /// Say how far the guest got and, more usefully, what it was doing.
-fn report(reached: usize, began: Instant, ticks: u64) {
+fn report(reached: usize, began: Instant, ticks: u64, exits: ExitCounts, census: SliceCensus) {
     println!();
     println!(
         "got {} of {} milestones in {:.1}s of host time and {} Mticks of guest time",
@@ -276,6 +308,43 @@ fn report(reached: usize, began: Instant, ticks: u64) {
         let mark = if index < reached { "reached" } else { "NOT reached" };
         println!("  {mark}: {name}  (looking for {needle:?})");
     }
+    println!(
+        "  exits: port {} mem {} cpuid {} msr {} halt {} canceled {} boundary {}",
+        exits.port,
+        exits.memory,
+        exits.cpuid,
+        exits.msr,
+        exits.halt,
+        exits.canceled,
+        exits.boundary,
+    );
+    println!("  {}", one_line_census(&census));
+}
+
+/// The census as one line: how many slices, how many exits each held, and what
+/// ended them.
+///
+/// The histogram's buckets are named from [`SliceCensus::BUCKET_LABELS`] rather
+/// than written out here, so a reader and the engine cannot describe different
+/// ranges with the same numbers.
+fn one_line_census(census: &SliceCensus) -> String {
+    let histogram: Vec<String> = SliceCensus::BUCKET_LABELS
+        .iter()
+        .zip(census.exits_per_slice.iter())
+        .map(|(label, slices)| format!("{label}={slices}"))
+        .collect();
+    format!(
+        "slices: {} [exits/slice {}] ended: halted {} canceled {} budget {} \
+         boundary(processor {} device {} event {})",
+        census.slices,
+        histogram.join(" "),
+        census.ended_halted,
+        census.ended_canceled,
+        census.ended_budget,
+        census.ended_wants_machine_boundary,
+        census.ended_needs_boundary,
+        census.ended_event_to_deliver,
+    )
 }
 
 /// Show what the guest was doing when it stopped.

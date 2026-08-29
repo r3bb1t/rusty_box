@@ -294,7 +294,41 @@ EOF
 
 ---
 
-### Task 2: Census the slices — how many exits, and why each slice ended
+### Task 2: Census the slices — how many exits, and why each slice ended — **DONE**
+
+> **Implemented and verified. Six things below are wrong; the shipped code
+> follows the tree, not this sketch.**
+>
+> 1. **Step 4's recording site cannot see the number it needs.** At that point
+>    `exits` is the `&mut ExitCounts` destructured from `self` — the machine's
+>    *lifetime* tally, not the slice's. Bucketing it files every slice under a
+>    bucket that ratchets upward forever. The per-slice count is a local of
+>    `run_the_exit_loop` and is carried out on `SliceOutcome`.
+> 2. **The ending is a STATE, not a tally at each `return`.**
+>    `Yielded::Boundary` now carries `BoundaryReason { ProcessorAsked,
+>    DeviceLatched, EventToDeliver }` and the whole slice is recorded at one
+>    choke point, `SliceCensus::record` (R2, R5) — because a tally written at a
+>    `return` cannot also see how many exits the slice held. **Task 4's Step 4
+>    is transcribed for this**; do not add `census.* += 1` back.
+> 3. **Both loops are instrumented**, the hardware one and the `WHP_ALL_SHADOW`
+>    one. Leaving the second blind would report *zero slices* for a run in which
+>    slices demonstrably ran — a silent lie inside the diagnostic itself, and
+>    comparing the two paths is the whole point of the bisection.
+> 4. **`SliceCensus` and `ExitCounts` were unnameable** by any consumer: `mod
+>    engine` is private and `lib.rs` re-exported only `WhpEngine`. Both are now
+>    re-exported. Check this for every new public type in this crate.
+> 5. **Step 6's "watchdog's per-second line" does not exist** — the watchdog is a
+>    detached thread owning an `Arc<AtomicU64>`; it holds no machine and cannot
+>    reach `engine()`. The per-second line is in the main boot loop, and `report`
+>    printed no exit counts at all before this.
+> 6. **The Files list was short by two** (`lib.rs`, `examples/dlx_whp.rs`).
+>
+> Measured on the two-exit test: `slices: 1`, `exits_per_slice[2] == 1`,
+> `ended_halted: 1` — the slice was **not** ended by the port write, because the
+> 0xE9 debug port latches nothing. That neither confirms nor refutes Task 4's
+> premise for a real device; Task 3's DLX census is what decides it.
+
+
 
 **Files:**
 - Modify: `rusty_box_whp_engine/src/engine.rs` (the census type, the loop, the report)
@@ -451,10 +485,45 @@ EOF
 
 ### Task 3: Measure a DLX boot, and decide whether this plan is right
 
-**This task writes no production code.** It is the falsification gate the spec demands, and it may invalidate Tasks 4–7.
+It is the falsification gate the spec demands, and it may invalidate Tasks 4–7.
 
 **Files:**
+- Modify: `rusty_box_whp_engine/src/engine.rs` (Step 0 only — the accessor below)
+- Modify: `rusty_box_whp_engine/src/lib.rs` (re-export the counter types)
 - Create: `docs/perf/2026-08-29-whp-slice-census.md`
+
+- [ ] **Step 0: Make the platform's counters reachable at all**
+
+Task 2 established that they are not. `Partition::intercept_counters` and
+`runtime_counters` exist (Task 1), but the `Partition` lives in the private
+`Started` inside `WhpEngine`, and `lib.rs` re-exports only `WhpEngine`,
+`ExitCounts` and `SliceCensus`. **Step 2 below cannot read what it asks for
+until this exists.**
+
+Add to `WhpEngine` one accessor returning **both** counter sets in a single
+named struct — never a tuple (R0), and one call rather than two so the two
+halves describe the same instant:
+
+```rust
+/// What the hypervisor itself charged this guest, beside what this engine
+/// believes it did.
+///
+/// The independent check on [`Self::census`]: a disagreement means one of
+/// the two is measuring something other than what it claims. See the
+/// mapping in this task — it is not field-for-field obvious.
+///
+/// # Errors
+/// [`WhpErrorKind::Contract`] if the engine has not started a partition, and
+/// whatever the platform returns otherwise.
+pub fn platform_counters(&self) -> WhpResult<PlatformCounters>;
+```
+
+Not-started is a contract error rather than `None`: asking a stopped engine
+what the hardware charged is a caller mistake, and collapsing a platform
+refusal into the same `None` would discard a `Result` (forbidden here).
+Re-export `InterceptCounters`, `RuntimeCounters` and `InterceptCounter` from
+`rusty_box_whp_engine`, or the returned struct is unnameable — the same gap
+Task 2 found for `ExitCounts`.
 
 - [ ] **Step 1: Build and run a bounded DLX boot with the census**
 
@@ -601,20 +670,23 @@ In `engine.rs`, replace the block from Task 2 Step 4 with:
 
         if cpu.wants_a_machine_boundary() {
             counts.boundary += 1;
-            census.ended_wants_machine_boundary += 1;
-            return Ok(Yielded::Boundary);
+            return Ok(Yielded::Boundary(BoundaryReason::ProcessorAsked));
         }
         if io.has_a_deadline_due() {
             counts.boundary += 1;
-            census.ended_needs_boundary += 1;
-            return Ok(Yielded::Boundary);
+            return Ok(Yielded::Boundary(BoundaryReason::DeviceLatched));
         }
         if cpu.has_an_event_to_deliver() {
             counts.boundary += 1;
-            census.ended_event_to_deliver += 1;
-            return Ok(Yielded::Boundary);
+            return Ok(Yielded::Boundary(BoundaryReason::EventToDeliver));
         }
 ```
+
+**The census is NOT incremented here.** Task 2 made the ending a state carried
+on `Yielded::Boundary(BoundaryReason)` and records the whole slice at one choke
+point (`SliceCensus::record`, R5), because a tally written at each `return`
+cannot also see how many exits the slice held. Adding `census.* += 1` back at
+these sites would double-count every slice.
 
 Delete the `io.sync_io_events(cpu)` call inside the `ExitReason::IoPortAccess` arm — it is now unconditional for every exit, which is what a device reached through the shadow needs too.
 

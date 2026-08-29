@@ -50,7 +50,7 @@ mod alarm;
 mod engine;
 mod state;
 
-pub use engine::WhpEngine;
+pub use engine::{ExitCounts, SliceCensus, WhpEngine};
 
 use rusty_box_whp::{Partition, Reg, SegmentRegister, TableRegister, WhpResult};
 
@@ -393,6 +393,39 @@ mod tests {
         assert_eq!(
             by_the_hardware, by_the_interpreter,
             "a model-specific register must read the same under both engines"
+        );
+    }
+
+    /// A slice that services a port write and then halts is ONE slice with two
+    /// exits, not two slices with one each.
+    ///
+    /// The distinction is the whole subject of this work: an engine that leaves
+    /// the partition after every exit buys one VM entry per exit and runs the
+    /// guest for approximately no time.
+    #[test]
+    fn a_port_write_and_a_halt_are_two_exits_in_one_slice() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        let _turn = a_turn_on_the_hardware();
+        // out 0xE9, al ; hlt
+        let mut machine = machine_running(&[0xE6, DEBUG_PORT, 0xF4]);
+        machine
+            .step(RunBudget::Ticks(1_000_000))
+            .expect("the hypervisor runs the guest");
+
+        let census = machine.engine().census();
+        assert_eq!(census.slices, 1, "one step is one slice; census was {census:?}");
+        assert_eq!(
+            census.exits_per_slice[2], 1,
+            "that slice held two exits — the OUT and the HLT — so the 2-bucket has one \
+             entry; census was {census:?}"
+        );
+        assert_eq!(
+            census.ended_halted, 1,
+            "the guest's own HLT is what ended it, so no boundary question may claim \
+             the slice; census was {census:?}"
         );
     }
 
