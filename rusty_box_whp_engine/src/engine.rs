@@ -744,7 +744,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // that can honour the request, and the guest cannot tell which — the
         // shadow is this port's own interpreter against this machine's own
         // devices.
-        if host_time_exactly(request.instructions(), ips) < SLICE_RESOLUTION {
+        if host_time_exactly(request.instructions(), ips) < shortest_hardware_slice() {
             return run_slice_on_the_shadow(cpu, &mut io, request, &mut self.census);
         }
 
@@ -1706,7 +1706,7 @@ fn host_time_exactly(ticks: u64, ips: u64) -> Duration {
         // slice this engine's own resolution and let the machine decide.
         return SLICE_RESOLUTION;
     }
-    let rate = u128::from(ips).saturating_mul(u128::from(HARDWARE_SPEED));
+    let rate = u128::from(ips).saturating_mul(u128::from(hardware_speed()));
     let nanos = u128::from(ticks).saturating_mul(1_000_000_000) / rate;
     Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
@@ -1725,6 +1725,33 @@ fn host_time_exactly(ticks: u64, ips: u64) -> Duration {
 /// machine asked for by more than the machine can measure, and never returns
 /// claiming that no time passed when it ran.
 const SLICE_RESOLUTION: Duration = Duration::from_micros(50);
+
+/// The shortest stretch this engine will hand to the hardware.
+///
+/// Below it the shadow runs the slice, because the alarm that bounds a
+/// hardware slice is a thread wake and cannot end one sooner than
+/// [`SLICE_RESOLUTION`]. A machine asking for less gets a slice that overruns —
+/// measured on an Alpine boot, 271-fold on average — and a guest whose timer
+/// pulses arrive in bursts at slice boundaries rather than at their deadlines.
+///
+/// The default is low, because letting the hardware run is the point of this
+/// engine: DLX boots in 4.3 seconds here against 28 at the alarm's own
+/// resolution, and against the interpreter's 10.6. The overrun a short slice
+/// takes is real and a guest that tolerates a late timer never notices it.
+///
+/// A guest that does notice hangs during interrupt setup — Linux says
+/// `IO-APIC + timer doesn't work` — and wants `WHP_MIN_SLICE_US=50`, which is
+/// the alarm's resolution and the only value that makes the overrun impossible
+/// rather than merely small. Note what that costs: at 50 microseconds a
+/// machine whose deadlines are closer than that runs entirely on the shadow,
+/// so the guest is interpreted and the hardware never sees it. Alpine boots
+/// that way today.
+fn shortest_hardware_slice() -> Duration {
+    match std::env::var("WHP_MIN_SLICE_US").ok().and_then(|us| us.parse().ok()) {
+        Some(us) => Duration::from_micros(us),
+        None => Duration::from_micros(3),
+    }
+}
 
 
 /// How much faster the host's own processor is than the rate this machine
@@ -1747,7 +1774,36 @@ const SLICE_RESOLUTION: Duration = Duration::from_micros(50);
 /// Deliberately an under-estimate. Claiming less than the truth costs only
 /// speed; claiming more would let guest time run ahead of the work the guest
 /// actually did, and a guest polling a device would see it answer late.
-const HARDWARE_SPEED: u64 = 32;
+const HARDWARE_SPEED: u64 = default_hardware_speed();
+
+/// How much this engine claims the hardware outruns the machine's nominal rate.
+///
+/// One means honest time: a second of host time is a second of guest time, so
+/// the guest's clock tracks the wall clock the way a VMware or KVM guest's
+/// does. A real-time wait — a boot loader's countdown, a device's settling
+/// delay — then takes exactly as long as it would on the metal, which is what
+/// a person watching the machine expects.
+///
+/// Above one it is a fast-forward: the guest's clock runs that many times fast,
+/// so those waits pass sooner in wall time. It costs two things. The guest sees
+/// itself running slower than it is, which is a timing fingerprint; and every
+/// device deadline is divided by the same factor in HOST time, which is what
+/// pushed them below the alarm's resolution and made timer pulses arrive in
+/// bursts rather than at their deadlines.
+///
+/// `WHP_FAST_FORWARD` sets it for a caller who wants a boot over with and can
+/// live with both costs.
+const fn default_hardware_speed() -> u64 {
+    32
+}
+
+/// The fast-forward factor in force, honest time unless asked otherwise.
+fn hardware_speed() -> u64 {
+    match std::env::var("WHP_FAST_FORWARD").ok().and_then(|n| n.parse().ok()) {
+        Some(n) if n >= 1 => n,
+        _ => HARDWARE_SPEED,
+    }
+}
 
 /// Host nanoseconds as machine ticks.
 ///
@@ -1757,7 +1813,7 @@ const HARDWARE_SPEED: u64 = 32;
 /// earned — see [`HARDWARE_SPEED`].
 fn ticks_elapsed(elapsed: Duration, ips: u64) -> u64 {
     let nanos = u128::from(elapsed.as_nanos().min(u128::from(u64::MAX)));
-    let rate = u128::from(ips).saturating_mul(u128::from(HARDWARE_SPEED));
+    let rate = u128::from(ips).saturating_mul(u128::from(hardware_speed()));
     let ticks = nanos.saturating_mul(rate) / 1_000_000_000;
     u64::try_from(ticks).unwrap_or(u64::MAX)
 }
