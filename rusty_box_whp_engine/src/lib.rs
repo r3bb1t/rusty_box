@@ -50,7 +50,13 @@ mod alarm;
 mod engine;
 mod state;
 
-pub use engine::{ExitCounts, SliceCensus, WhpEngine};
+pub use engine::{ExitCounts, PlatformCounters, SliceCensus, WhpEngine};
+
+/// Re-exported so a caller reading [`WhpEngine::platform_counters`] need not
+/// also name the platform crate to spell what it returns. These are that
+/// crate's types, not this one's — the hypervisor's own accounting, which this
+/// engine forwards rather than defines.
+pub use rusty_box_whp::{InterceptCounter, InterceptCounters, RuntimeCounters};
 
 use rusty_box_whp::{Partition, Reg, SegmentRegister, TableRegister, WhpResult};
 

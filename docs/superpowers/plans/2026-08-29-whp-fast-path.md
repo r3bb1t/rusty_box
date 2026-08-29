@@ -492,7 +492,19 @@ It is the falsification gate the spec demands, and it may invalidate Tasks 4–7
 - Modify: `rusty_box_whp_engine/src/lib.rs` (re-export the counter types)
 - Create: `docs/perf/2026-08-29-whp-slice-census.md`
 
-- [ ] **Step 0: Make the platform's counters reachable at all**
+- [x] **Step 0: Make the platform's counters reachable at all** — **DONE**
+
+> Shipped as `WhpEngine::platform_counters(&self) -> Result<PlatformCounters>`,
+> using the crate's own `rusty_box::cpu::Result`/`CpuError` — **not** the
+> `WhpResult` sketched below. `WhpError::contract` is `pub(crate)` in
+> `rusty_box_whp`, deliberately: an outside crate must not fabricate an error
+> claiming the platform said something. Not-started reuses the existing wording
+> `UnsupportedCpuOperation { operation: "the partition did not start" }`, and a
+> platform refusal goes through the existing `platform_failed` mapper, so this
+> accessor reports the way every other verb in this engine already does.
+> `PlatformCounters`, `InterceptCounter`, `InterceptCounters` and
+> `RuntimeCounters` are re-exported.
+
 
 Task 2 established that they are not. `Partition::intercept_counters` and
 `runtime_counters` exist (Task 1), but the `Partition` lives in the private

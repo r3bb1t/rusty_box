@@ -22,8 +22,8 @@
 use core::time::Duration;
 
 use rusty_box_whp::{
-    Exit, ExitReason, ExtendedVmExits, LocalApicMode, MsrExits, Partition, PartitionConfig,
-    WhpError,
+    Exit, ExitReason, ExtendedVmExits, InterceptCounters, LocalApicMode, MsrExits, Partition,
+    PartitionConfig, RuntimeCounters, WhpError,
 };
 
 use super::alarm::Alarm;
@@ -385,6 +385,54 @@ impl WhpEngine {
     pub const fn census(&self) -> SliceCensus {
         self.census
     }
+
+    /// What the hypervisor itself charged this guest, beside what this engine
+    /// believes it did.
+    ///
+    /// The independent check on [`Self::exits`] and [`Self::census`]: those are
+    /// this port's own account of its own behaviour, and an account cannot
+    /// audit itself. A disagreement means one of the two is measuring
+    /// something other than what it claims, and which one is wrong is a
+    /// question worth answering before designing against either.
+    ///
+    /// The two sets come back together because they describe one instant: read
+    /// separately, a slice can run between them and the runtime no longer
+    /// belongs to the intercepts.
+    ///
+    /// The mapping between these counters and this engine's own tallies is not
+    /// field-for-field obvious — notably a halt serviced by the machine leaves
+    /// `halt_instructions.count` at zero and is booked under
+    /// `other_intercepts`. See `docs/superpowers/plans/2026-08-29-whp-fast-path.md`.
+    ///
+    /// # Errors
+    /// [`CpuError::UnsupportedCpuOperation`] if no partition has started, since
+    /// an engine that has not run has no hardware to have charged anything, or
+    /// if the platform refuses the query.
+    pub fn platform_counters(&self) -> Result<PlatformCounters> {
+        let started = self.started.as_ref().ok_or(CpuError::UnsupportedCpuOperation {
+            operation: "the partition did not start",
+        })?;
+        Ok(PlatformCounters {
+            intercepts: started.partition.intercept_counters(BOOT_VP).map_err(platform_failed)?,
+            runtime: started.partition.runtime_counters(BOOT_VP).map_err(platform_failed)?,
+        })
+    }
+}
+
+/// The hypervisor's own accounting for a processor, both sets at one instant.
+///
+/// Named rather than a pair because the two are read together and mean
+/// different things: one says what the guest left the hardware for and how
+/// long each class took, the other says how much of the processor's whole life
+/// went to the hypervisor rather than to the guest. Neither answers the
+/// other's question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PlatformCounters {
+    /// Per-class count and time.
+    pub intercepts: InterceptCounters,
+    /// Total versus hypervisor-attributed runtime.
+    pub runtime: RuntimeCounters,
 }
 
 /// Build the partition, map the machine's memory into it and create the

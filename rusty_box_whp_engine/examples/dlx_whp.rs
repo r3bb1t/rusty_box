@@ -23,7 +23,7 @@ use rusty_box::emulator::{
     AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MachineBuilder,
     MemorySize, RunBudget, StopReason,
 };
-use rusty_box_whp_engine::{ExitCounts, SliceCensus, WhpEngine};
+use rusty_box_whp_engine::{SliceCensus, WhpEngine};
 
 /// DLX Linux disk geometry, from `bochsrc.bxrc`.
 const DLX_CYLINDERS: u16 = 306;
@@ -185,8 +185,7 @@ fn boot() -> i32 {
                     reached,
                     began,
                     ticks,
-                    machine.engine().exits(),
-                    machine.engine().census(),
+                    &machine,
                 );
                 eprintln!("the run ended with an error: {error}");
                 return 1;
@@ -252,6 +251,11 @@ fn boot() -> i32 {
         }
         if reached == MILESTONES.len() {
             println!("*** LOGIN DETECTED (WHP) ***");
+            // Reported on the way OUT, not only on the way down. The census of
+            // a boot that succeeded is the measurement this example exists to
+            // produce; printing it only on the failure paths would mean the
+            // one run worth measuring is the one that says nothing.
+            report(reached, began, ticks, &machine);
             return 0;
         }
 
@@ -260,8 +264,7 @@ fn boot() -> i32 {
                 reached,
                 began,
                 ticks,
-                machine.engine().exits(),
-                machine.engine().census(),
+                &machine,
             );
             eprintln!("the guest stopped: {:?}", outcome.stop);
             return 1;
@@ -271,8 +274,7 @@ fn boot() -> i32 {
                 reached,
                 began,
                 ticks,
-                machine.engine().exits(),
-                machine.engine().census(),
+                &machine,
             );
             eprintln!("gave up after {patience:?} of host time");
             return 1;
@@ -284,8 +286,7 @@ fn boot() -> i32 {
                 reached,
                 began,
                 ticks,
-                machine.engine().exits(),
-                machine.engine().census(),
+                &machine,
             );
             eprintln!("the guest halted with nothing left to wake it");
             dump(&mut machine);
@@ -295,7 +296,14 @@ fn boot() -> i32 {
 }
 
 /// Say how far the guest got and, more usefully, what it was doing.
-fn report(reached: usize, began: Instant, ticks: u64, exits: ExitCounts, census: SliceCensus) {
+fn report(
+    reached: usize,
+    began: Instant,
+    ticks: u64,
+    machine: &rusty_box::emulator::Emulator<(), WhpEngine>,
+) {
+    let exits = machine.engine().exits();
+    let census = machine.engine().census();
     println!();
     println!(
         "got {} of {} milestones in {:.1}s of host time and {} Mticks of guest time",
@@ -319,6 +327,30 @@ fn report(reached: usize, began: Instant, ticks: u64, exits: ExitCounts, census:
         exits.boundary,
     );
     println!("  {}", one_line_census(&census));
+    // The hypervisor's own account, beside this engine's. Printed even when it
+    // is unavailable: "the platform would not say" is itself a result, and
+    // silently omitting the independent check would leave a reader believing
+    // the two agreed.
+    match machine.engine().platform_counters() {
+        Ok(counters) => {
+            let intercepts = &counters.intercepts;
+            println!(
+                "  platform: io {} npf {} other {} cpuid {} msr {} halt_time_100ns {}",
+                intercepts.io_instructions.count,
+                intercepts.nested_page_fault_intercepts.count,
+                intercepts.other_intercepts.count,
+                intercepts.cpuid_instructions.count,
+                intercepts.msr_accesses.count,
+                intercepts.halt_instructions.time_100ns,
+            );
+            println!(
+                "  runtime: total {}ms hypervisor {}ms",
+                counters.runtime.total_100ns / 10_000,
+                counters.runtime.hypervisor_100ns / 10_000,
+            );
+        }
+        Err(error) => println!("  platform counters unavailable: {error}"),
+    }
 }
 
 /// The census as one line: how many slices, how many exits each held, and what
