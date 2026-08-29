@@ -1032,10 +1032,22 @@ fn service_port_access(
     let port = access.port;
     let width = access.access_size;
 
+    // The platform hands back RAX WHOLE, whatever the access width, so both
+    // directions have to narrow it themselves. An `OUT DX, AL` that handed a
+    // device the other three bytes of RAX would be telling it something the
+    // guest never wrote, and the interpreter — whose handler passes `AL`,
+    // `AX` or `EAX` and nothing else — would tell it something different for
+    // the same guest instruction.
+    let mask: u64 = match width {
+        1 => 0xFF,
+        2 => 0xFFFF,
+        _ => 0xFFFF_FFFF,
+    };
+
     let rax = if access.is_write {
         io.devices.outp(
             port,
-            access.rax as u32,
+            (access.rax & mask) as u32,
             width,
             ticks,
             io.pc_system,
@@ -1047,14 +1059,8 @@ fn service_port_access(
         let value =
             io.devices
                 .inp(port, width, ticks, io.pc_system, io.device_manager);
-        // The platform hands back RAX whole, so a narrower `IN` leaves the
-        // bytes above its width as the guest had them — the same rule the
-        // interpreter's own `port_in` follows.
-        let mask = match width {
-            1 => 0xFF,
-            2 => 0xFFFF,
-            _ => 0xFFFF_FFFF,
-        };
+        // A narrower `IN` leaves the bytes above its width as the guest had
+        // them — the same rule the interpreter's own `port_in` follows.
         (access.rax & !mask) | (u64::from(value) & mask)
     };
 
