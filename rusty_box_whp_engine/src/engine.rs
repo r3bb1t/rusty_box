@@ -235,6 +235,22 @@ struct Started {
     /// is a `general protection: 0000` on `IRET`, which is exactly how a DLX
     /// boot died once IDE interrupts started flowing.
     shadowed: bool,
+    /// What the platform's registers hold, as far as this engine knows.
+    ///
+    /// Written at exactly the two moments the answer is certain: after reading
+    /// the processor, and after writing it. Every other platform register write
+    /// this engine makes happens inside a slice, before the read-back that ends
+    /// it, so this is accurate by the time the next slice consults it.
+    ///
+    /// `None` until the first read, which is the honest reading of "not known".
+    held: Option<VcpuArchState>,
+    /// How many memory exits in a row this partition has taken.
+    ///
+    /// A guest that touched device memory once produces one; a guest clearing
+    /// the VGA planar aperture produces tens of thousands, one per `mov`. The
+    /// two want opposite treatment, and the run length is what tells them
+    /// apart — see [`BURST_AFTER`].
+    consecutive_mmio: u32,
 }
 
 /// What the guest has been leaving the hardware for.
@@ -494,6 +510,9 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                 installed,
                 // A processor that has never run cannot be mid-instruction.
                 shadowed: false,
+                consecutive_mmio: 0,
+                // Nothing has been read from this processor yet.
+                held: None,
             });
         }
     }
@@ -899,9 +918,32 @@ fn install_the_shadow<T: Instrumentation>(
 ) -> Result<()> {
     // Named rather than elided, so a field added to `Started` has to be
     // considered here instead of silently ignored.
-    let Started { alarm: _, partition, state, installed: _, shadowed: _ } = started;
+    let Started {
+        alarm: _,
+        partition,
+        state,
+        installed: _,
+        shadowed: _,
+        consecutive_mmio: _,
+        held,
+    } = started;
     cpu.export_arch_state(state);
-    state::import(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)
+    // A slice that ended with the guest on hardware left the processor holding
+    // exactly what the read-back then copied into the shadow, so installing it
+    // again writes every register back unchanged. That is the common case —
+    // most slices deliver nothing and emulate nothing — and it costs a platform
+    // round trip per register group to say nothing.
+    //
+    // Compared rather than tracked with a flag, because the engine is not the
+    // only writer: the machine owns this processor between slices and may set a
+    // register itself, and a flag the engine maintains could not see that. The
+    // comparison can.
+    if held.as_ref() == Some(state) {
+        return Ok(());
+    }
+    state::import(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)?;
+    *held = Some(state.clone());
+    Ok(())
 }
 
 /// Describe the shadow from the platform's processor.
@@ -913,9 +955,20 @@ fn read_back_into_the_shadow<T: Instrumentation>(
     started: &mut Started,
     cpu: &mut BxCpuC<T>,
 ) -> Result<()> {
-    let Started { alarm: _, partition, state, installed: _, shadowed } = started;
+    let Started {
+        alarm: _,
+        partition,
+        state,
+        installed: _,
+        shadowed,
+        consecutive_mmio: _,
+        held,
+    } = started;
     let vp = Vp::new(partition, BOOT_VP);
     state::export(&vp, state).map_err(platform_failed)?;
+    // The one moment the two are known to agree, because the shadow was just
+    // copied from the processor.
+    *held = Some(state.clone());
 
     // Read alongside the architectural state, because it is not part of it:
     // the interrupt shadow is a property of where the guest stopped, and the
@@ -1057,6 +1110,15 @@ fn run_the_exit_loop<T: Instrumentation>(
         // a slice cost is one VM entry plus this many VM exits, and a reason
         // this engine does not classify cost exactly as much as one it does.
         *exits += 1;
+        // How long the current run of memory exits is, maintained in one place
+        // (R5) so the two readings — extending a run and ending one — cannot
+        // disagree. Any exit that is not a memory access ends the run: the
+        // guest asking a device a question is not a guest looping over device
+        // memory, and the burst is for the second.
+        started.consecutive_mmio = match exit.reason {
+            ExitReason::MemoryAccess(_) => started.consecutive_mmio.saturating_add(1),
+            _ => 0,
+        };
         // Counted before it is serviced, so the tally describes what the guest
         // asked for even when servicing it fails.
         match exit.reason {
@@ -1151,7 +1213,11 @@ fn run_the_exit_loop<T: Instrumentation>(
                     access.access,
                     access.gpa
                 );
-                finish_on_the_shadow(started, cpu, io, Trapped::Access)?;
+                if started.consecutive_mmio >= BURST_AFTER {
+                    burst_on_the_shadow(started, cpu, io)?;
+                } else {
+                    finish_on_the_shadow(started, cpu, io, Trapped::Access)?;
+                }
             }
             // What the guest asked about the processor. Answered by executing
             // the instruction on the shadow, so the answer is this port's
@@ -1431,6 +1497,64 @@ fn withhold_virtualisation_from(state: &mut VcpuArchState, leaf: u32) {
 ///
 /// # Errors
 /// A state the exchange refused, or a fault the shadow could not take.
+/// Memory exits in a row before this engine stops handing them back one at a
+/// time.
+///
+/// High enough that a guest touching a device in passing is never bursted, low
+/// enough that a loop is caught almost immediately. A guest in an MMIO loop
+/// produces thousands in a row; eight is not an accident.
+const BURST_AFTER: u32 = 8;
+
+/// Instructions the shadow runs once a burst is called for.
+///
+/// The trade is one-sided by three orders of magnitude. An exit costs ~136 µs
+/// here; the shadow interprets at ~75 M instructions/s, so this burst costs
+/// ~55 µs even if the guest leaves device memory immediately and every
+/// instruction of it was wasted. One additional exit avoided pays for the whole
+/// burst twice over, and a VGA clear avoids thousands.
+const BURST_INSTRUCTIONS: u64 = 4096;
+
+/// Run the guest on the shadow processor for a stretch rather than for one
+/// instruction, because it is going to trap again immediately.
+///
+/// The measured case is the kernel clearing the VGA planar aperture: 65,536
+/// exits over eight pages, four plane passes of 2,048 word writes, every one a
+/// single `mov` that leaves the hardware and pays a 52-register exchange in
+/// each direction. On that stretch the interpreter is simply the better engine
+/// — it serves device memory without leaving anything — and this is how the
+/// engine reaches for it.
+///
+/// Nothing about correctness changes with the burst: the shadow is this port's
+/// own interpreter running against this machine's own devices, so a guest
+/// bursted through a stretch sees exactly what a guest interpreted through it
+/// sees. Only who executed it differs, and no guest can ask.
+fn burst_on_the_shadow<T: Instrumentation>(
+    started: &mut Started,
+    cpu: &mut BxCpuC<T>,
+    io: &mut PcIo<'_>,
+) -> Result<()> {
+    read_back_into_the_shadow(started, cpu)?;
+    // Not `finish_the_instruction`: that one holds off the external interrupt
+    // for the length of a single trapped access, which is right when finishing
+    // one instruction and wrong for a stretch. Across a burst the interpreter
+    // delivers on its own terms, exactly as it does when it owns the machine.
+    io.emulate_batch(cpu, BURST_INSTRUCTIONS)?;
+
+    let Started {
+        alarm: _,
+        partition,
+        state,
+        installed: _,
+        shadowed: _,
+        consecutive_mmio: _,
+        held,
+    } = started;
+    cpu.export_arch_state(state);
+    state::import(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)?;
+    *held = Some(state.clone());
+    Ok(())
+}
+
 fn finish_on_the_shadow<T: Instrumentation>(
     started: &mut Started,
     cpu: &mut BxCpuC<T>,
@@ -1444,12 +1568,22 @@ fn finish_on_the_shadow<T: Instrumentation>(
     // the platform must continue from.
     io.finish_the_instruction(cpu)?;
 
-    let Started { alarm: _, partition, state, installed: _, shadowed: _ } = started;
+    let Started {
+        alarm: _,
+        partition,
+        state,
+        installed: _,
+        shadowed: _,
+        consecutive_mmio: _,
+        held,
+    } = started;
     cpu.export_arch_state(state);
     if let Trapped::Cpuid { leaf } = trapped {
         withhold_virtualisation_from(state, leaf);
     }
-    state::import(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)
+    state::import(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)?;
+    *held = Some(state.clone());
+    Ok(())
 }
 
 /// Answer a port access out of the machine's own device set, then step the

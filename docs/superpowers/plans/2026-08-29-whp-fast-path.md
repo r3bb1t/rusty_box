@@ -4,7 +4,37 @@
 
 **Goal:** Make the Windows Hypervisor Platform engine beat this port's own interpreter on a DLX Linux boot, by letting the guest actually run instead of leaving the partition after every exit.
 
-**Architecture:** The engine currently pays ~26.5 µs of wall time per slice to buy one VM entry and one VM exit — because after servicing any exit it drains device latches and immediately returns `Yielded::Boundary`. This plan first *measures* that claim with the hypervisor's own counters, then removes the per-exit boundary, moves device deadlines onto a host clock so slice length stops being set by the next device timer, adds VirtualBox-style exit elision for MMIO-dense regions, and finally trims the per-slice architectural state exchange.
+**Architecture — REWRITTEN 2026-08-29 on measurement. The original premise was
+wrong and Task 4 is dead; read this before anything below.**
+
+The engine does *not* return `Yielded::Boundary` after each exit (157 of 217,640
+slices did). What it does is pay for every exit twice: a full 52-register state
+exchange in and out of the shadow processor, and a slice short enough to hold
+exactly one exit. Two measurements set the whole direction:
+
+**The hypervisor is 81.9× the interpreter when the guest touches no device**
+(`cargo run --release -p rusty_box_whp_engine --example compute_bench`):
+100,000,003 instructions, 1.32 s interpreted against 0.02 s on hardware —
+75.6 M/s against 6,190 M/s. Native execution is not the problem and never was.
+
+**A DLX boot is 27.8 s against the interpreter's 10.6 s, and 93 % of its memory
+exits are one thing**: 65,536 of 70,715 land in the VGA planar aperture
+`0xa8000`–`0xaf000`, exactly 8,192 per 4 KiB page — four plane passes over 2,048
+words, the kernel clearing video memory one `mov` at a time. At ~136 µs an exit
+that is ~8.9 s of the 27.8 s spent clearing the screen.
+
+So the deficit is not spread across the boot; it is concentrated in tight MMIO
+loops where the guest executes one trapping instruction after another in the
+same region. For a 65,536-instruction VGA clear the *interpreter* is the right
+engine — it does that work with zero exits, which is precisely why it wins.
+
+This plan therefore stops trying to make exits cheap enough to win, and instead
+stops taking them: run on hardware where hardware is good, and hand the shadow a
+**burst** when the guest enters an MMIO-dense phase. Supporting work: narrow the
+per-exit exchange (wtf reads 3 registers on an exit; we move 52 each way), and
+decouple slice length from the guest deadline (`HARDWARE_SPEED = 32` divides a
+guest-time deadline into a host-time budget 32× shorter, which is a self-
+inflicted 32× multiplier on slice count).
 
 **Tech Stack:** Rust 2021, `windows-sys` (WHP FFI, confined to `rusty_box_whp/src/sys/windows.rs`), the in-tree Bochs-derived interpreter as the shadow processor.
 
@@ -27,12 +57,30 @@
 
 ## Baseline to beat
 
+Re-measured 2026-08-29 after the `prev_rip` fix (`8ac9c94`), which is what made
+WHP reach login at all.
+
 | | Time to `dlx login:` |
 |---|---|
-| Interpreter, headless (`RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=450000000`) | **15.0 s** |
-| WHP today | never reaches login (crashes after root mount) |
+| Interpreter, headless (`RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=450000000`) | **10.6 s** |
+| WHP | **27.8 s** — 2.6× slower, the gap this plan closes |
+| WHP, `WHP_ALL_SHADOW=1` | ~92 s (bisection mode, not a target) |
 
-The DLX WHP example is `rusty_box_whp_engine/examples/dlx_whp.rs`; `DLX_WHP_PATIENCE_SECS` bounds it.
+Where the 27.8 s goes: ~2.4 s of guest execution on hardware, 6.8 s of
+hypervisor time (74 % of the 9.2 s of processor runtime), and ~18.6 s of
+host-side servicing — 185,724 exits at ~136 µs each.
+
+And the case the whole engine exists for, which the boot number says nothing
+about:
+
+| `compute_bench`, 100,000,003 instructions, no device access | |
+|---|---|
+| Interpreter | 1.32 s — 75.6 M instructions/s |
+| WHP | **0.02 s — 6,190 M instructions/s, 81.9×** |
+
+The DLX WHP example is `rusty_box_whp_engine/examples/dlx_whp.rs`
+(`DLX_WHP_PATIENCE_SECS` bounds it); the compute benchmark is
+`rusty_box_whp_engine/examples/compute_bench.rs`.
 
 ---
 
