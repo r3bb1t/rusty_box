@@ -1004,7 +1004,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.commit_cr0_write(val_32);
 
         // BOCHS BX_INSTR_TLB_CNTRL with MovCr0 kind
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
             self.instrumentation
                 .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr0 {
@@ -1088,7 +1087,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.tlb_flush();
 
         // BOCHS BX_INSTR_TLB_CNTRL with MovCr3 kind
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
             self.instrumentation
                 .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr3 { new_value: val });
@@ -1133,7 +1131,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.cr3 = val;
         self.tlb_flush();
 
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
             self.instrumentation
                 .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr3 { new_value: val });
@@ -1283,7 +1280,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // because it reports a guest instruction: a host writing CR4 through
         // the machine's API has not executed `MOV CR4`, and telling a tracer
         // otherwise would put an instruction in its record that never ran.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
             self.instrumentation
                 .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr4 { new_value: val_32 });

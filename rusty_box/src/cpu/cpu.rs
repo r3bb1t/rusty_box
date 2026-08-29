@@ -756,7 +756,6 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     /// With `T = ()` and no closures registered, this is 4 bytes (the bitmask).
     pub(crate) instrumentation: super::instrumentation::InstrumentationRegistry<T>,
 
-    #[cfg(feature = "instrumentation")]
     pub(crate) page_permissions: Option<crate::memory::permissions::PagePermissions>,
 
     pub(crate) mmio: crate::memory::mmio::MmioRegistry,
@@ -1676,10 +1675,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     #[inline(always)]
     pub(crate) fn on_repeat_iteration(
         &mut self,
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         instr: &super::decoder::Instruction,
     ) {
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_exec() {
             let rip = self.prev_rip;
             self.instrumentation.fire_repeat_iteration(rip, instr);
@@ -1689,13 +1686,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Fire an unconditional near branch hook (JMP/CALL/RET/LOOP).
     /// Call AFTER the branch_near* sets the new IP.
     #[inline(always)]
-    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(crate) fn on_ucnear_branch(
         &mut self,
         what: super::instrumentation::BranchType,
         new_rip: u64,
     ) {
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_branch() {
             let src = self.prev_rip;
             self.instrumentation
@@ -1709,7 +1704,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     /// Fire a far branch hook (inter-segment). Call AFTER the new CS:IP is set.
     #[inline(always)]
-    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(crate) fn on_far_branch(
         &mut self,
         what: super::instrumentation::BranchType,
@@ -1717,7 +1711,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         new_cs: u16,
         new_rip: u64,
     ) {
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_branch() {
             let src_rip = self.prev_rip;
             self.instrumentation
@@ -1734,7 +1727,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Fire the BOCHS `lin_access` hook. No-op when the feature is disabled
     /// or no memory hooks are registered.
     #[inline(always)]
-    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(crate) fn on_lin_access(
         &mut self,
         laddr: u64,
@@ -1742,7 +1734,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         data: &[u8],
         rw: super::instrumentation::MemAccessRW,
     ) {
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_mem() {
             let ev = super::instrumentation::LinAccess {
                 lin: laddr,
@@ -1988,7 +1979,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         }
 
         // BOCHS BX_INSTR_HWINTERRUPT(cpu_id, vector, cs, eip)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_hw_interrupt() {
             let cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
                 .selector
@@ -2319,7 +2309,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let is_real = self.real_mode();
 
             // Unicorn-inspired: fire block hook at trace (basic block) start
-            #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_block() {
                 let block_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
                 let block_len = (trace_end - instr_idx) as u16;
@@ -2394,7 +2383,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 }
 
                 // Bochs BX_INSTR_BEFORE_EXECUTION(cpu_id, i)
-                #[cfg(feature = "instrumentation")]
                 if self.instrumentation.active.has_exec() {
                     let rip_before = self.prev_rip;
                     self.instrumentation
@@ -2447,7 +2435,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 // Bochs BX_INSTR_AFTER_EXECUTION(cpu_id, i)
                 // Use prev_rip BEFORE updating it — that's the address of the instruction
                 // we just executed (matches BOCHS semantics).
-                #[cfg(feature = "instrumentation")]
                 if self.instrumentation.active.has_exec() {
                     let executed_rip = self.prev_rip;
                     self.instrumentation
@@ -2519,7 +2506,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                                         .unwrap_or(usize::MAX);
                                 trace_end = trace_end.min(instr_idx.saturating_add(trace_budget));
                             }
-                            #[cfg(feature = "instrumentation")]
                             if self.instrumentation.active.has_block() {
                                 let block_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
                                 let block_len = (trace_end - instr_idx) as u16;
@@ -2572,7 +2558,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     }
 
                     // Unicorn-inspired: fire block hook at trace (basic block) start
-                    #[cfg(feature = "instrumentation")]
                     if self.instrumentation.active.has_block() {
                         let block_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
                         let block_len = (trace_end - instr_idx) as u16;
@@ -3384,7 +3369,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         }
 
         // Unicorn-inspired: give hooks a chance to suppress #UD for unrecognized opcodes
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_invalid_insn() {
             let prev_rip = self.prev_rip;
             if self.instrumentation.fire_invalid_instruction(prev_rip) {
@@ -4271,7 +4255,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     pub(crate) fn conditional_branch16(&mut self, taken: bool, new_ip: u16) -> Result<()> {
         if taken {
             self.branch_near16(new_ip)?;
-            #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
                 self.instrumentation.fire_branch(
@@ -4282,7 +4265,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 );
             }
         } else {
-            #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
                 let fall = self.rip();
@@ -4302,7 +4284,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     pub(crate) fn conditional_branch32(&mut self, taken: bool, new_eip: u32) -> Result<()> {
         if taken {
             self.branch_near32(new_eip)?;
-            #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
                 self.instrumentation.fire_branch(
@@ -4313,7 +4294,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 );
             }
         } else {
-            #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
                 let fall = self.rip();
@@ -4339,7 +4319,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> Result<()> {
         if taken {
             self.branch_near64(instr)?;
-            #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
                 let dst = self.rip();
@@ -4351,7 +4330,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 );
             }
         } else {
-            #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
                 let fall = self.rip();

@@ -579,33 +579,6 @@ fn a_run_can_be_bounded_by_guest_time_rather_than_by_instructions() {
 
 // ── Instrumentation ─────────────────────────────────────────────────────────
 
-#[cfg(feature = "instrumentation")]
-#[test]
-fn a_code_hook_sees_every_instruction_in_its_range() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    let mut machine =
-        Emulator::new_with_mode(small_config(), CpuSetupMode::FlatLong64).expect("machine");
-    machine
-        .mem_write(CODE, &[0x90, 0x90, 0x90, 0xF4])
-        .expect("write code");
-
-    let seen = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&seen);
-    let hook = machine.hook_add_code(CODE..CODE + 8, move |_rip, _instr| {
-        counter.fetch_add(1, Ordering::Relaxed);
-    });
-
-    machine
-        .emu_start(CODE, None, None, Some(8))
-        .expect("emu_start");
-    assert!(seen.load(Ordering::Relaxed) >= 3, "three NOPs and a HLT ran");
-
-    // The crate's own error absorbs its own sub-error, so `?` composes.
-    let removed: rusty_box::Result<()> = machine.hook_del(hook).map_err(Into::into);
-    removed.expect("hook removed");
-}
 
 /// A tracer type is the monomorphized alternative to closures: no per-hook
 /// dispatch, and the machine carries it in its own type.

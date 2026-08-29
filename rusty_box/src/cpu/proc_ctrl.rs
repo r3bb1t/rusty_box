@@ -52,7 +52,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // every sleep entry, not just the HLT instruction: MWAIT fires it after
         // BX_INSTR_MWAIT (mwait.cc) rather than instead of it, and an AP parking
         // in WAIT_FOR_SIPI (init.cc) reports too.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_hlt_mwait() {
             self.instrumentation.fire_hlt();
         }
@@ -355,7 +354,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(());
         }
         // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_WBINVD)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cache() {
             self.instrumentation
                 .fire_cache_cntrl(super::instrumentation::CacheCntrl::Wbinvd);
@@ -384,7 +382,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.vmx_vmexit(super::vmx::VmxVmexitReason::Invd, 0);
         }
         // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_INVD)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cache() {
             self.instrumentation
                 .fire_cache_cntrl(super::instrumentation::CacheCntrl::Invd);
@@ -430,7 +427,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.tlb_invlpg(laddr);
 
         // BOCHS BX_INSTR_TLB_CNTRL with INVLPG kind.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
             self.instrumentation
                 .fire_tlb_cntrl(super::instrumentation::TlbCntrl::Invlpg { laddr });
@@ -609,7 +605,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // BOCHS BX_INSTR_MWAIT(cpu_id, addr, len, flags)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_hlt_mwait() {
             let flags = super::instrumentation::MwaitFlags::from_bits_truncate(self.ecx());
             let addr = self.monitor.monitor_addr;
@@ -819,7 +814,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // CLFLUSH — Cache Line Flush (opcode 0F AE /7)
     // =========================================================================
 
-    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(super) fn clflush(
         &mut self,
         instr: &super::decoder::Instruction,
@@ -827,7 +821,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // BOCHS BX_INSTR_CLFLUSH(cpu_id, laddr, paddr).
         // We don't actually flush a cache (no D-cache modeled), but we surface
         // the linear/physical addresses so users can track flushed lines.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
             let seg = super::decoder::BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
@@ -1234,7 +1227,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let msr = self.ecx();
         let val = ((self.edx() as u64) << 32) | (self.eax() as u64);
 
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cpuid_msr() {
             self.instrumentation.fire_wrmsr(msr, val);
         }
@@ -2259,10 +2251,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // intact). Returns an `InstrAction` controlling whether we execute
         // the architectural transition, skip it (Unicorn-style intercept),
         // stop the CPU loop, or both.
-        #[cfg(feature = "instrumentation")]
         let action = self.fire_pre_syscall();
-        #[cfg(not(feature = "instrumentation"))]
-        let action = crate::cpu::instrumentation::InstrAction::Continue;
 
         if action.is_stop() {
             self.instrumentation.stop_request = true;

@@ -37,34 +37,6 @@ pub enum InstrAction {
 
 // ─────────────────────────── Hook handle ───────────────────────────
 
-#[cfg(feature = "instrumentation")]
-/// Opaque identifier for a registered hook.
-///
-/// Returned by `Emulator::hook_add_*` methods and consumed by
-/// `Emulator::hook_del`. Cannot be constructed externally — eliminates
-/// a whole class of "passed wrong integer" bugs.
-///
-/// `#[repr(transparent)]` keeps the layout identical to `u64` so that
-/// future C bindings can cast freely.
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[must_use = "a HookHandle is the only way to remove the hook again: store it, or pass it to `drop` to say the hook is permanent"]
-pub struct HookHandle(u64);
-
-#[cfg(feature = "instrumentation")]
-impl HookHandle {
-    #[inline]
-    pub(crate) const fn new(id: u64) -> Self {
-        Self(id)
-    }
-
-    /// Raw numeric value — useful for FFI bridges and serialization.
-    #[inline]
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
-
 // ─────────────────────────── HookMask ───────────────────────────
 
 bitflags! {
@@ -363,60 +335,6 @@ bitflags! {
 }
 
 // ─────────────────────────── Hook event types ───────────────────────────
-
-#[cfg(feature = "instrumentation")]
-/// Memory hook category — selects which kind of accesses fire the hook.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MemHookType {
-    Read,
-    Write,
-    /// Both read and write.
-    ReadWrite,
-    /// Instruction fetch.
-    Fetch,
-    /// All four (read, write, RW, execute).
-    All,
-}
-
-#[cfg(feature = "instrumentation")]
-impl MemHookType {
-    #[inline]
-    pub(crate) fn matches(self, rw: MemAccessRW) -> bool {
-        match self {
-            Self::All => true,
-            Self::Read => matches!(rw, MemAccessRW::Read | MemAccessRW::RW),
-            Self::Write => matches!(rw, MemAccessRW::Write | MemAccessRW::RW),
-            Self::ReadWrite => {
-                matches!(rw, MemAccessRW::Read | MemAccessRW::Write | MemAccessRW::RW)
-            }
-            Self::Fetch => matches!(rw, MemAccessRW::Execute),
-        }
-    }
-}
-
-#[cfg(feature = "instrumentation")]
-/// I/O port hook category.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum IoHookType {
-    /// IN instructions (port read).
-    In,
-    /// OUT instructions (port write).
-    Out,
-    /// Both.
-    InOut,
-}
-
-#[cfg(feature = "instrumentation")]
-impl IoHookType {
-    #[inline]
-    pub(crate) fn matches(self, rw: MemAccessRW) -> bool {
-        match self {
-            Self::InOut => true,
-            Self::In => matches!(rw, MemAccessRW::Read),
-            Self::Out => matches!(rw, MemAccessRW::Write),
-        }
-    }
-}
 
 /// Memory access hook event. Single-pointer payload at the call site.
 #[derive(Debug, Clone, Copy)]

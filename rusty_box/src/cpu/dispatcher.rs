@@ -2369,7 +2369,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             | Opcode::Prefetcht1Mb
             | Opcode::Prefetcht2Mb
             | Opcode::PrefetchntaMb => {
-                #[cfg(feature = "instrumentation")]
                 if self.instrumentation.active.has_cache() {
                     use super::instrumentation::PrefetchHint;
                     let hint = match instr.get_ia_opcode() {

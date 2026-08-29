@@ -813,7 +813,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                         is_trace_end_opcode(self.i_cache.mpool[current_mpindex].get_ia_opcode());
 
                     // BX_INSTR_OPCODE (matching C++ icache.cc)
-                    #[cfg(feature = "instrumentation")]
                     if self.instrumentation.active.has_exec() {
                         let rip =
                             self.prev_rip + (current_page_offset as u64 - (page_offset as u64));
@@ -1136,7 +1135,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         self.set_rip(prev_rip);
 
         // BX_INSTR_OPCODE (matching C++ icache.cc)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_exec() {
             let rip = self.prev_rip;
             let bytes = &fetch_buffer[..instr.ilen() as usize];

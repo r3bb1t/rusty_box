@@ -280,9 +280,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let di = self.di() as u32;
         let laddr = self.prepare_rmw_virtual_byte(BxSegregs::Es, di)?;
         self.check_rmw_write_permissions(laddr, 1)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_byte();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &[old_value]);
         let value = self.port_in(port, 1) as u8;
         self.write_rmw_linear_byte(value);
@@ -301,7 +299,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.write_rmw_linear_word(value);
     }
 
-    #[cfg(feature = "instrumentation")]
     #[inline]
     fn report_ins_rmw_access(&mut self, laddr: u64, bytes: &[u8]) {
         let xlation = self.address_xlation;
@@ -331,18 +328,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Direct bulk execution must not bypass active instrumentation hooks.
     #[inline]
-    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(super) fn direct_rep_bulk_allowed(&self, includes_io: bool) -> bool {
-        #[cfg(feature = "instrumentation")]
         {
             self.page_permissions.is_none()
                 && !self.instrumentation.active.has_exec()
                 && !self.instrumentation.active.has_mem()
                 && (!includes_io || !self.instrumentation.active.has_io())
-        }
-        #[cfg(not(feature = "instrumentation"))]
-        {
-            true
         }
     }
 
@@ -355,9 +346,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // then the port input commits through that same RMW translation.
         let laddr = self.prepare_rmw_virtual_word(BxSegregs::Es, di)?;
         self.check_rmw_word_write_permissions(laddr)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_word();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 2) as u16;
         self.commit_insw_rmw(value);
@@ -377,9 +366,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let di = self.di() as u32;
         let laddr = self.prepare_rmw_virtual_dword(BxSegregs::Es, di)?;
         self.check_rmw_write_permissions(laddr, 4)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_dword();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 4);
         self.write_rmw_linear_dword(value);
@@ -402,9 +389,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let edi = self.edi();
         let laddr = self.prepare_rmw_virtual_byte(BxSegregs::Es, edi)?;
         self.check_rmw_write_permissions(laddr, 1)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_byte();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &[old_value]);
         let value = self.port_in(port, 1) as u8;
         self.write_rmw_linear_byte(value);
@@ -426,9 +411,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // not consume destructive MMIO state.
         let laddr = self.prepare_rmw_virtual_word(BxSegregs::Es, edi)?;
         self.check_rmw_word_write_permissions(laddr)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_word();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 2) as u16;
         self.commit_insw_rmw(value);
@@ -448,9 +431,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let edi = self.edi();
         let laddr = self.prepare_rmw_virtual_dword(BxSegregs::Es, edi)?;
         self.check_rmw_write_permissions(laddr, 4)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_dword();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 4);
         self.write_rmw_linear_dword(value);
@@ -1048,9 +1029,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let rdi = self.rdi();
         let laddr = self.prepare_rmw_virtual_byte_64(BxSegregs::Es, rdi)?;
         self.check_rmw_write_permissions(laddr, 1)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_byte();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &[old_value]);
         let value = self.port_in(port, 1) as u8;
         self.write_rmw_linear_byte(value);
@@ -1072,9 +1051,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // not consume destructive MMIO state.
         let laddr = self.prepare_rmw_virtual_word_64(BxSegregs::Es, rdi)?;
         self.check_rmw_word_write_permissions(laddr)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_word();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 2) as u16;
         self.commit_insw_rmw(value);
@@ -1093,9 +1070,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let rdi = self.rdi();
         let laddr = self.prepare_rmw_virtual_dword_64(BxSegregs::Es, rdi)?;
         self.check_rmw_write_permissions(laddr, 4)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_dword();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 4);
         self.write_rmw_linear_dword(value);
@@ -1621,7 +1596,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// reads as all-ones there, matching Bochs iodev unmapped port semantics.
     fn port_in(&mut self, port: u16, len: u8) -> u32 {
         // BOCHS BX_INSTR_INP(addr, len) — fires before the port read.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
             self.instrumentation.fire_inp(port, len);
         }
@@ -1633,7 +1607,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sync_io_events();
 
         // BOCHS BX_INSTR_INP2(addr, len, val) — fires after the read with the value.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
             let ev = super::instrumentation::IoHookEvent {
                 port,
@@ -1650,7 +1623,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Write to I/O port, dispatching to `BxDevicesC::outp`.
     fn port_out(&mut self, port: u16, value: u32, len: u8) {
         // BOCHS BX_INSTR_OUTP(addr, len, val) — fires at the port write.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
             let ev = super::instrumentation::IoHookEvent {
                 port,

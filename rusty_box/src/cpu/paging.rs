@@ -508,7 +508,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                         )
                 );
 
-                #[cfg(feature = "instrumentation")]
                 if is_not_present && self.instrumentation.active.has_mem_unmapped() {
                     let instr_rw = match rw {
                         MemoryAccessType::Write => crate::cpu::instrumentation::MemAccessRW::Write,

@@ -12,7 +12,7 @@
 //! cargo run --release --example shellcode_trace --features "std,instrumentation"
 //! ```
 
-#![cfg(all(feature = "std", feature = "instrumentation"))]
+#![cfg(feature = "std")]
 
 use rusty_box::{
     cpu::{

@@ -19,10 +19,6 @@ pub enum Error {
     #[error(transparent)]
     Engine(#[from] crate::emulator::EngineRefusal),
 
-    #[cfg(feature = "instrumentation")]
-    #[error(transparent)]
-    Instrumentation(#[from] crate::cpu::InstrumentationError),
-
     #[error(transparent)]
     Infallible(#[from] core::convert::Infallible),
 

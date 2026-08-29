@@ -439,7 +439,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         self.handle_cpu_context_change();
 
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_any() {
             let reset_type = match source {
                 ResetReason::Hardware => super::instrumentation::ResetType::Hardware,

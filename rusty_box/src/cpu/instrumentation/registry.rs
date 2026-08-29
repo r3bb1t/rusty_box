@@ -16,39 +16,21 @@
 //!
 //! The outer callsite pattern is:
 //! ```ignore
-//! #[cfg(feature = "instrumentation")]
 //! if self.instrumentation.active.has_exec() {
 //!     self.instrumentation.fire_before_execution(rip, instr);
 //! }
 //! ```
 
-#[cfg(feature = "instrumentation")]
-use alloc::{boxed::Box, vec::Vec};
-#[cfg(feature = "instrumentation")]
-use core::ops::RangeBounds;
 
 use crate::cpu::decoder::Instruction;
 
 use super::bochs::Instrumentation;
-#[cfg(feature = "instrumentation")]
-use super::hooks::{
-    AddrRange, BlockHook, BranchHook, CodeHook, ExceptionHook, HwIntrHook, IntrHook,
-    InvalidInsnHook, IoHook, MemHook, MemUnmappedHook,
-};
 use super::types::{
     BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, IoHookEvent, LinAccess, MemPermViolation,
     MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType, TlbCntrl,
 };
-#[cfg(feature = "instrumentation")]
-use super::types::{HookHandle, IoHookType, MemAccessRW, MemHookEvent, MemHookType};
 
 /// Error returned by registry mutation methods.
-#[cfg(feature = "instrumentation")]
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum InstrumentationError {
-    #[error("hook handle {0:#x} is invalid or already removed")]
-    InvalidHandle(u64),
-}
 
 /// Registry holding the monomorphized tracer plus per-category closure vecs.
 ///
@@ -92,34 +74,6 @@ pub struct InstrumentationRegistry<T: Instrumentation = ()> {
     /// that an empty slot produced, without anyone having to ask whether the
     /// slot is empty.
     pub(crate) tracer: T,
-
-    #[cfg(feature = "instrumentation")]
-    pub(crate) code_hooks: Vec<CodeHook>,
-    #[cfg(feature = "instrumentation")]
-    pub(crate) code_after_hooks: Vec<CodeHook>,
-    #[cfg(feature = "instrumentation")]
-    pub(crate) mem_hooks: Vec<MemHook>,
-    #[cfg(feature = "instrumentation")]
-    pub(crate) intr_hooks: Vec<IntrHook>,
-    #[cfg(feature = "instrumentation")]
-    pub(crate) hw_intr_hooks: Vec<HwIntrHook>,
-    #[cfg(feature = "instrumentation")]
-    pub(crate) exception_hooks: Vec<ExceptionHook>,
-    #[cfg(feature = "instrumentation")]
-    pub(crate) io_hooks: Vec<IoHook>,
-    #[cfg(feature = "instrumentation")]
-    pub(crate) branch_hooks: Vec<BranchHook>,
-    #[cfg(feature = "instrumentation")]
-    pub(crate) block_hooks: Vec<BlockHook>,
-    #[cfg(feature = "instrumentation")]
-    pub(crate) invalid_insn_hooks: Vec<InvalidInsnHook>,
-    #[cfg(feature = "instrumentation")]
-    pub(crate) mem_unmapped_hooks: Vec<MemUnmappedHook>,
-
-    /// Monotonic handle counter. Starts at 1; zero is reserved as "never
-    /// returned" so future sentinel use is possible.
-    #[cfg(feature = "instrumentation")]
-    next_handle: u64,
 }
 
 impl<T: Instrumentation + Default> Default for InstrumentationRegistry<T> {
@@ -137,30 +91,6 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
             stop_request: false,
             stop_honored: false,
             tracer,
-            #[cfg(feature = "instrumentation")]
-            code_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            code_after_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            mem_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            intr_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            hw_intr_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            exception_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            io_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            branch_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            block_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            invalid_insn_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            mem_unmapped_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            next_handle: 1,
         };
         reg.refresh_active();
         reg
@@ -172,223 +102,26 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
         #[allow(unused_mut)]
         let mut m = self.tracer.active_hooks();
 
-        #[cfg(feature = "instrumentation")]
-        {
-            if !self.code_hooks.is_empty() || !self.code_after_hooks.is_empty() {
-                m |= HookMask::EXEC;
-            }
-            if !self.mem_hooks.is_empty() {
-                m |= HookMask::MEM;
-            }
-            if !self.branch_hooks.is_empty() {
-                m |= HookMask::BRANCH;
-            }
-            if !self.intr_hooks.is_empty() {
-                m |= HookMask::INTERRUPT;
-            }
-            if !self.hw_intr_hooks.is_empty() {
-                m |= HookMask::HW_INTERRUPT;
-            }
-            if !self.exception_hooks.is_empty() {
-                m |= HookMask::EXCEPTION;
-            }
-            if !self.io_hooks.is_empty() {
-                m |= HookMask::IO;
-            }
-            if !self.block_hooks.is_empty() {
-                m |= HookMask::BLOCK;
-            }
-            if !self.invalid_insn_hooks.is_empty() {
-                m |= HookMask::INVALID_INSN;
-            }
-            if !self.mem_unmapped_hooks.is_empty() {
-                m |= HookMask::MEM_UNMAPPED;
-            }
-        }
 
         self.active = m;
     }
 
     // ─────────────────── Hook registration (alloc only) ───────────────────
 
-    #[cfg(feature = "instrumentation")]
-    fn mint_handle(&mut self) -> HookHandle {
-        let id = self.next_handle;
-        self.next_handle = self.next_handle.wrapping_add(1);
-        HookHandle::new(id)
-    }
 
-    #[cfg(feature = "instrumentation")]
-    pub fn add_code<R: RangeBounds<u64>>(
-        &mut self,
-        range: R,
-        cb: Box<dyn FnMut(u64, &Instruction) + Send>,
-    ) -> HookHandle {
-        let handle = self.mint_handle();
-        self.code_hooks.push(CodeHook {
-            handle,
-            range: AddrRange::<u64>::from_bounds(range),
-            cb,
-        });
-        self.active |= HookMask::EXEC;
-        handle
-    }
 
-    #[cfg(feature = "instrumentation")]
-    pub fn add_code_after<R: RangeBounds<u64>>(
-        &mut self,
-        range: R,
-        cb: Box<dyn FnMut(u64, &Instruction) + Send>,
-    ) -> HookHandle {
-        let handle = self.mint_handle();
-        self.code_after_hooks.push(CodeHook {
-            handle,
-            range: AddrRange::<u64>::from_bounds(range),
-            cb,
-        });
-        self.active |= HookMask::EXEC;
-        handle
-    }
 
-    #[cfg(feature = "instrumentation")]
-    pub fn add_mem<R: RangeBounds<u64>>(
-        &mut self,
-        kind: MemHookType,
-        range: R,
-        cb: Box<dyn FnMut(&MemHookEvent) + Send>,
-    ) -> HookHandle {
-        let handle = self.mint_handle();
-        self.mem_hooks.push(MemHook {
-            handle,
-            kind,
-            range: AddrRange::<u64>::from_bounds(range),
-            cb,
-        });
-        self.active |= HookMask::MEM;
-        handle
-    }
 
-    #[cfg(feature = "instrumentation")]
-    pub fn add_interrupt(&mut self, cb: Box<dyn FnMut(u8) + Send>) -> HookHandle {
-        let handle = self.mint_handle();
-        self.intr_hooks.push(IntrHook { handle, cb });
-        self.active |= HookMask::INTERRUPT;
-        handle
-    }
 
-    #[cfg(feature = "instrumentation")]
-    pub fn add_hw_interrupt(&mut self, cb: Box<dyn FnMut(&HwInterruptEvent) + Send>) -> HookHandle {
-        let handle = self.mint_handle();
-        self.hw_intr_hooks.push(HwIntrHook { handle, cb });
-        self.active |= HookMask::HW_INTERRUPT;
-        handle
-    }
 
-    #[cfg(feature = "instrumentation")]
-    pub fn add_exception(&mut self, cb: Box<dyn FnMut(u8, u32) + Send>) -> HookHandle {
-        let handle = self.mint_handle();
-        self.exception_hooks.push(ExceptionHook { handle, cb });
-        self.active |= HookMask::EXCEPTION;
-        handle
-    }
 
-    #[cfg(feature = "instrumentation")]
-    pub fn add_io<R: RangeBounds<u16>>(
-        &mut self,
-        kind: IoHookType,
-        range: R,
-        cb: Box<dyn FnMut(&IoHookEvent) + Send>,
-    ) -> HookHandle {
-        let handle = self.mint_handle();
-        self.io_hooks.push(IoHook {
-            handle,
-            kind,
-            range: AddrRange::<u16>::from_bounds(range),
-            cb,
-        });
-        self.active |= HookMask::IO;
-        handle
-    }
 
-    #[cfg(feature = "instrumentation")]
-    pub fn add_branch<R: RangeBounds<u64>>(
-        &mut self,
-        range: R,
-        cb: Box<dyn FnMut(&BranchEvent) + Send>,
-    ) -> HookHandle {
-        let handle = self.mint_handle();
-        self.branch_hooks.push(BranchHook {
-            handle,
-            range: AddrRange::<u64>::from_bounds(range),
-            cb,
-        });
-        self.active |= HookMask::BRANCH;
-        handle
-    }
 
-    #[cfg(feature = "instrumentation")]
-    pub fn add_block<R: RangeBounds<u64>>(
-        &mut self,
-        range: R,
-        cb: Box<dyn FnMut(u64, u16) + Send>,
-    ) -> HookHandle {
-        let handle = self.mint_handle();
-        self.block_hooks.push(BlockHook {
-            handle,
-            range: AddrRange::<u64>::from_bounds(range),
-            cb,
-        });
-        self.active |= HookMask::BLOCK;
-        handle
-    }
 
-    #[cfg(feature = "instrumentation")]
-    pub fn add_invalid_insn(&mut self, cb: Box<dyn FnMut(u64) -> bool + Send>) -> HookHandle {
-        let handle = self.mint_handle();
-        self.invalid_insn_hooks.push(InvalidInsnHook { handle, cb });
-        self.active |= HookMask::INVALID_INSN;
-        handle
-    }
 
-    #[cfg(feature = "instrumentation")]
-    pub fn add_mem_unmapped(
-        &mut self,
-        cb: Box<dyn FnMut(u64, usize, MemAccessRW) -> bool + Send>,
-    ) -> HookHandle {
-        let handle = self.mint_handle();
-        self.mem_unmapped_hooks.push(MemUnmappedHook { handle, cb });
-        self.active |= HookMask::MEM_UNMAPPED;
-        handle
-    }
 
     /// Remove any hook by handle. Searches every category; returns
     /// `Err(InvalidHandle)` if not found.
-    #[cfg(feature = "instrumentation")]
-    pub fn remove(&mut self, handle: HookHandle) -> Result<(), InstrumentationError> {
-        let target = handle;
-        // Try every category; stop as soon as one hits.
-        macro_rules! try_remove {
-            ($vec:expr) => {{
-                if let Some(pos) = $vec.iter().position(|h| h.handle == target) {
-                    $vec.swap_remove(pos);
-                    self.refresh_active();
-                    return Ok(());
-                }
-            }};
-        }
-        try_remove!(self.code_hooks);
-        try_remove!(self.code_after_hooks);
-        try_remove!(self.mem_hooks);
-        try_remove!(self.intr_hooks);
-        try_remove!(self.hw_intr_hooks);
-        try_remove!(self.exception_hooks);
-        try_remove!(self.io_hooks);
-        try_remove!(self.branch_hooks);
-        try_remove!(self.block_hooks);
-        try_remove!(self.invalid_insn_hooks);
-        try_remove!(self.mem_unmapped_hooks);
-        Err(InstrumentationError::InvalidHandle(handle.raw()))
-    }
 
     // ─────────────────── Fire methods (hot path) ───────────────────
     //
@@ -407,23 +140,11 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     #[inline]
     pub fn fire_before_execution(&mut self, rip: u64, instr: &Instruction) {
         self.tracer.before_execution(rip, instr);
-        #[cfg(feature = "instrumentation")]
-        for h in &mut self.code_hooks {
-            if h.range.contains(rip) {
-                (h.cb)(rip, instr);
-            }
-        }
     }
 
     #[inline]
     pub fn fire_after_execution(&mut self, rip: u64, instr: &Instruction) {
         self.tracer.after_execution(rip, instr);
-        #[cfg(feature = "instrumentation")]
-        for h in &mut self.code_after_hooks {
-            if h.range.contains(rip) {
-                (h.cb)(rip, instr);
-            }
-        }
     }
 
     #[inline]
@@ -452,79 +173,26 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     #[inline]
     pub fn fire_branch(&mut self, ev: &BranchEvent) {
         self.tracer.branch(ev);
-        #[cfg(feature = "instrumentation")]
-        if !self.branch_hooks.is_empty() {
-            let src_rip = ev.src_rip();
-            for h in &mut self.branch_hooks {
-                if h.range.contains(src_rip) {
-                    (h.cb)(ev);
-                }
-            }
-        }
     }
 
     #[inline]
     pub fn fire_interrupt(&mut self, vector: u8) {
         self.tracer.interrupt(vector);
-        #[cfg(feature = "instrumentation")]
-        for h in &mut self.intr_hooks {
-            (h.cb)(vector);
-        }
     }
 
     #[inline]
     pub fn fire_exception(&mut self, vector: u8, error_code: u32) {
         self.tracer.exception(vector, error_code);
-        #[cfg(feature = "instrumentation")]
-        for h in &mut self.exception_hooks {
-            (h.cb)(vector, error_code);
-        }
     }
 
     #[inline]
     pub fn fire_hwinterrupt(&mut self, ev: &HwInterruptEvent) {
         self.tracer.hwinterrupt(ev);
-        #[cfg(feature = "instrumentation")]
-        for h in &mut self.hw_intr_hooks {
-            (h.cb)(ev);
-        }
     }
 
     #[inline]
     pub fn fire_lin_access(&mut self, ev: &LinAccess) {
         self.tracer.lin_access(ev);
-        #[cfg(feature = "instrumentation")]
-        if !self.mem_hooks.is_empty() {
-            // Map small accesses (≤8 bytes) to an integer value for closure hooks.
-            let value = match ev.data.len() {
-                1 => Some(u64::from(ev.data[0])),
-                2 => Some(u64::from(u16::from_le_bytes([ev.data[0], ev.data[1]]))),
-                4 => {
-                    let mut b = [0u8; 4];
-                    b.copy_from_slice(&ev.data[..4]);
-                    Some(u64::from(u32::from_le_bytes(b)))
-                }
-                8 => {
-                    let mut b = [0u8; 8];
-                    b.copy_from_slice(&ev.data[..8]);
-                    Some(u64::from_le_bytes(b))
-                }
-                _ => None,
-            };
-            let hev = MemHookEvent {
-                access: ev.rw,
-                addr: ev.lin,
-                size: ev.data.len(),
-                value,
-                phys_addr: ev.phy,
-                memtype: ev.memtype,
-            };
-            for h in &mut self.mem_hooks {
-                if h.kind.matches(ev.rw) && h.range.contains(ev.lin) {
-                    (h.cb)(&hev);
-                }
-            }
-        }
     }
 
     #[inline]
@@ -540,23 +208,11 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     #[inline]
     pub fn fire_inp2(&mut self, ev: &IoHookEvent) {
         self.tracer.inp2(ev);
-        #[cfg(feature = "instrumentation")]
-        for h in &mut self.io_hooks {
-            if h.kind.matches(ev.access) && h.range.contains(ev.port) {
-                (h.cb)(ev);
-            }
-        }
     }
 
     #[inline]
     pub fn fire_outp(&mut self, ev: &IoHookEvent) {
         self.tracer.outp(ev);
-        #[cfg(feature = "instrumentation")]
-        for h in &mut self.io_hooks {
-            if h.kind.matches(ev.access) && h.range.contains(ev.port) {
-                (h.cb)(ev);
-            }
-        }
     }
 
     #[inline]
@@ -597,24 +253,12 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     #[inline]
     pub fn fire_block_start(&mut self, rip: u64, block_size: u16) {
         self.tracer.block_start(rip, block_size);
-        #[cfg(feature = "instrumentation")]
-        for hook in &mut self.block_hooks {
-            if hook.range.contains(rip) {
-                (hook.cb)(rip, block_size);
-            }
-        }
     }
 
     #[inline]
     pub fn fire_invalid_instruction(&mut self, rip: u64) -> bool {
         if self.tracer.invalid_instruction(rip) {
             return true;
-        }
-        #[cfg(feature = "instrumentation")]
-        for hook in &mut self.invalid_insn_hooks {
-            if (hook.cb)(rip) {
-                return true;
-            }
         }
         false
     }
@@ -623,12 +267,6 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     pub fn fire_mem_unmapped(&mut self, ev: &MemUnmapped) -> bool {
         if self.tracer.mem_unmapped(ev) {
             return true;
-        }
-        #[cfg(feature = "instrumentation")]
-        for hook in &mut self.mem_unmapped_hooks {
-            if (hook.cb)(ev.laddr, ev.size, ev.rw) {
-                return true;
-            }
         }
         false
     }
@@ -667,30 +305,6 @@ impl InstrumentationRegistry<()> {
             stop_request: false,
             stop_honored: false,
             tracer: (),
-            #[cfg(feature = "instrumentation")]
-            code_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            code_after_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            mem_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            intr_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            hw_intr_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            exception_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            io_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            branch_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            block_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            invalid_insn_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            mem_unmapped_hooks: Vec::new(),
-            #[cfg(feature = "instrumentation")]
-            next_handle: 1,
         }
     }
 }
@@ -713,12 +327,5 @@ mod const_constructor_tests {
         assert_eq!(constructed.stop_request, runtime.stop_request);
         assert_eq!(constructed.tracer, runtime.tracer);
 
-        #[cfg(feature = "instrumentation")]
-        {
-            assert_eq!(constructed.next_handle, runtime.next_handle);
-            assert!(constructed.code_hooks.is_empty());
-            assert!(constructed.mem_hooks.is_empty());
-            assert!(constructed.mem_unmapped_hooks.is_empty());
-        }
     }
 }

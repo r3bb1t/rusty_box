@@ -16,12 +16,11 @@ name = "rusty_box"
 path = "src/lib.rs"
 
 [features]
-default = ["std", "instrumentation", "gui-egui"]
+default = ["std", "gui-egui"]
 
 alloc = ["dep:tracing", "rusty_box_core/alloc", "rusty_box_devices/alloc"]
 std = ["alloc", "tracing/std", "tempfile", "crossterm", "rusty_box_core/std", "rusty_box_devices/std"]
 gui-egui = ["dep:egui", "dep:eframe"]
-instrumentation = ["alloc"]
 profiling = ["std"]
 bench = ["std", "dep:criterion"]
 
@@ -54,7 +53,7 @@ required-features = ["std"]
 [[example]]
 name = "alpine_strace"
 path = "examples/alpine/alpine_strace.rs"
-required-features = ["std", "instrumentation", "gui-egui"]
+required-features = ["std", "gui-egui"]
 
 [[example]]
 name = "dlxlinux"
@@ -74,7 +73,7 @@ required-features = ["std", "gui-egui"]
 [[example]]
 name = "shellcode_trace"
 path = "examples/shellcode/shellcode_trace.rs"
-required-features = ["std", "instrumentation"]
+required-features = ["std"]
 
 [[example]]
 name = "perfbench"

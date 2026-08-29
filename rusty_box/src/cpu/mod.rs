@@ -9,8 +9,6 @@ pub use instrumentation::{
     MemType, MemUnmapped, MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent,
     PrefetchHint, ResetType, TlbCntrl, X86Reg,
 };
-#[cfg(feature = "instrumentation")]
-pub use instrumentation::{HookHandle, InstrumentationError, IoHookType, MemHookType};
 
 /// The decoded instruction every [`Instrumentation`] execution hook is handed.
 /// Re-exported beside the trait so implementing one needs a single import.

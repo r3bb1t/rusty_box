@@ -1236,7 +1236,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ReadsPhysical
 // registry Option slot, running the hook, then putting it back. `None` is
 // visible only during the hook call — user code can't observe it.
 
-#[cfg(feature = "instrumentation")]
 use crate::cpu::instrumentation::{HookCtx, InstrAction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
@@ -1244,7 +1243,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// `sysenter()` BEFORE the architectural CS/RIP transition. The hook
     /// returns an `InstrAction` which the caller inspects to decide whether
     /// to execute the transition, skip it, stop the loop, or both.
-    #[cfg(feature = "instrumentation")]
     pub(crate) fn fire_pre_syscall(&mut self) -> InstrAction {
         // The hook wants `&mut` on the whole processor, and the tracer lives
         // inside the processor — so it is moved out for the call and put back

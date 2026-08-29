@@ -24,11 +24,7 @@
 //! - `RUSTY_BOX_BOOT`   — `bios` for full BIOS/ISOLINUX boot (serial-only)
 //! - `RUSTY_BOX_NOSYNC` — set to `1` to disable wall-clock slowdown
 
-#![cfg(all(
-    feature = "std",
-    feature = "instrumentation",
-    feature = "gui-egui"
-))]
+#![cfg(all(feature = "std", feature = "gui-egui"))]
 
 use rusty_box::{
     cpu::{HookCtx, HookMask, InstrAction, Instrumentation, X86Reg},

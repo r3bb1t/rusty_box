@@ -1673,7 +1673,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     // ── Permission & MMIO helpers for hot-path memory access ──
 
-    #[cfg(feature = "instrumentation")]
     #[inline]
     fn check_perm_read(&mut self, laddr: u64, paddr: u64, size: usize) -> Result<()> {
         if let Some(ref pp) = self.page_permissions {
@@ -1696,7 +1695,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    #[cfg(feature = "instrumentation")]
     #[inline]
     fn check_perm_write(&mut self, laddr: u64, paddr: u64, size: usize) -> Result<()> {
         if let Some(ref pp) = self.page_permissions {
@@ -1722,9 +1720,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Apply instrumentation-only write permissions to a prepared RMW
     /// translation before an external side effect.
     #[inline]
-    #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
     pub(super) fn check_rmw_write_permissions(&mut self, laddr: u64, size: usize) -> Result<()> {
-        #[cfg(feature = "instrumentation")]
         {
             if self.address_xlation.pages == 2 {
                 self.check_perm_write(
@@ -1786,13 +1782,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
-            #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr_hit, 1)?;
             let v = unsafe { *host_at_page_offset(host, laddr) };
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = [v];
                 self.on_lin_access(
@@ -1805,13 +1798,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(v);
         }
         let paddr = self.translate_data_read(laddr)?;
-        #[cfg(feature = "instrumentation")]
         self.check_perm_read(laddr, paddr, 1)?;
         if let Some(val) = self.mmio_read(paddr, 1) {
             return Ok(val as u8);
         }
         let v = self.mem_read_byte(paddr);
-        #[cfg(feature = "instrumentation")]
         {
             let _buf = [v];
             self.on_lin_access(
@@ -1838,15 +1829,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
-            #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr_hit, 2)?;
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let v = read_unaligned_u16(ptr);
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = v.to_le_bytes();
                 self.on_lin_access(
@@ -1861,13 +1849,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let page_offset = laddr & 0xFFF;
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
-            #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr, 2)?;
             if let Some(val) = self.mmio_read(paddr, 2) {
                 return Ok(val as u16);
             }
             let v = self.mem_read_word(paddr);
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = v.to_le_bytes();
                 self.on_lin_access(
@@ -1901,15 +1887,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
-            #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr_hit, 4)?;
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let v = read_unaligned_u32(ptr);
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = v.to_le_bytes();
                 self.on_lin_access(
@@ -1924,13 +1907,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let page_offset = laddr & 0xFFF;
         if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
-            #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr, 4)?;
             if let Some(val) = self.mmio_read(paddr, 4) {
                 return Ok(val as u32);
             }
             let v = self.mem_read_dword(paddr);
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = v.to_le_bytes();
                 self.on_lin_access(
@@ -1965,15 +1946,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
-            #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr_hit, 8)?;
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let v = read_unaligned_u64(ptr);
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = v.to_le_bytes();
                 self.on_lin_access(
@@ -1988,13 +1966,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
-            #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr, 8)?;
             if let Some(val) = self.mmio_read(paddr, 8) {
                 return Ok(val);
             }
             let v = self.mem_read_qword(paddr);
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = v.to_le_bytes();
                 self.on_lin_access(
@@ -2030,11 +2006,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
-            #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 1)?;
             self.smc_write_check(paddr, 1);
             unsafe { *host_at_page_offset_mut(host, laddr) = val };
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = [val];
                 self.on_lin_access(
@@ -2047,14 +2021,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(());
         }
         let paddr = self.translate_data_write(laddr)?;
-        #[cfg(feature = "instrumentation")]
         self.check_perm_write(laddr, paddr, 1)?;
         if self.mmio_write(paddr, 1, val as u64) {
             return Ok(());
         }
         self.smc_write_check(paddr, 1);
         self.mem_write_byte(paddr, val);
-        #[cfg(feature = "instrumentation")]
         {
             let _buf = [val];
             self.on_lin_access(
@@ -2088,13 +2060,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
-            #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 2)?;
             self.smc_write_check(paddr, 2);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u16(ptr, val);
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = val.to_le_bytes();
                 self.on_lin_access(
@@ -2109,13 +2079,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let page_offset = laddr & 0xFFF;
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
-            #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 2)?;
             self.smc_write_check(paddr, 2);
             if !self.mmio_write(paddr, 2, val as u64) {
                 self.mem_write_word(paddr, val);
             }
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = val.to_le_bytes();
                 self.on_lin_access(
@@ -2130,7 +2098,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let next_page = (laddr | 0xFFF).wrapping_add(1);
             let p0 = self.translate_data_write(laddr)?;
             let p1 = self.translate_data_write(next_page)?;
-            #[cfg(feature = "instrumentation")]
             {
                 self.check_perm_write(laddr, p0, 1)?;
                 self.check_perm_write(next_page, p1, 1)?;
@@ -2139,7 +2106,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if !self.mmio_write(p0, 1, u64::from(bytes[0])) {
                 self.mem_write_byte(p0, bytes[0]);
             }
-            #[cfg(feature = "instrumentation")]
             self.on_lin_access(
                 laddr,
                 p0,
@@ -2150,7 +2116,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if !self.mmio_write(p1, 1, u64::from(bytes[1])) {
                 self.mem_write_byte(p1, bytes[1]);
             }
-            #[cfg(feature = "instrumentation")]
             self.on_lin_access(
                 next_page,
                 p1,
@@ -2188,13 +2153,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
-            #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 4)?;
             self.smc_write_check(paddr, 4);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u32(ptr, val);
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = val.to_le_bytes();
                 self.on_lin_access(
@@ -2209,14 +2172,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let page_offset = laddr & 0xFFF;
         if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
-            #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 4)?;
             if self.mmio_write(paddr, 4, val as u64) {
                 return Ok(());
             }
             self.smc_write_check(paddr, 4);
             self.mem_write_dword(paddr, val);
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = val.to_le_bytes();
                 self.on_lin_access(
@@ -2260,13 +2221,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
-            #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 8)?;
             self.smc_write_check(paddr, 8);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u64(ptr, val);
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = val.to_le_bytes();
                 self.on_lin_access(
@@ -2281,14 +2240,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
-            #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 8)?;
             if self.mmio_write(paddr, 8, val) {
                 return Ok(());
             }
             self.smc_write_check(paddr, 8);
             self.mem_write_qword(paddr, val);
-            #[cfg(feature = "instrumentation")]
             {
                 let _buf = val.to_le_bytes();
                 self.on_lin_access(

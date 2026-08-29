@@ -90,7 +90,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         );
         // BOCHS BX_INSTR_INTERRUPT(cpu_id, vector)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_interrupt() {
             self.instrumentation.fire_interrupt(vector);
         }
@@ -1202,7 +1201,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Input: EAX = function number, ECX = sub-function (for some functions)
     pub fn cpuid(&mut self, _instr: &Instruction) -> super::Result<()> {
         // BOCHS BX_INSTR_CPUID(cpu_id)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cpuid_msr() {
             self.instrumentation.fire_cpuid();
         }

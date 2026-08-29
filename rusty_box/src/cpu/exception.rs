@@ -322,7 +322,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         // BOCHS BX_INSTR_EXCEPTION(cpu_id, vector, error_code)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_exception() {
             self.instrumentation
                 .fire_exception(vector as u8, error_code as u32);

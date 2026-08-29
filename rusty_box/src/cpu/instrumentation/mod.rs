@@ -42,14 +42,11 @@
 
 pub mod bochs;
 pub mod ctx;
-pub mod hooks;
 pub mod registry;
 pub mod types;
 
 pub use bochs::Instrumentation;
 pub use ctx::{CpuAccess, HookCtx};
-#[cfg(feature = "instrumentation")]
-pub use registry::InstrumentationError;
 pub use registry::InstrumentationRegistry;
 pub use types::{
     BranchEvent, BranchType, CacheCntrl, CodeSize, CpuSetupMode, CpuSnapshot, EmuStopReason,
@@ -58,5 +55,3 @@ pub use types::{
     MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent, PrefetchHint, ResetType,
     TlbCntrl, X86Reg,
 };
-#[cfg(feature = "instrumentation")]
-pub use types::{HookHandle, IoHookType, MemHookType};

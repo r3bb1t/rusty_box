@@ -291,7 +291,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
-    #[cfg(feature = "instrumentation")]
     #[test]
     fn instrumented_constructor_applies_configured_cpuid_frequency() {
         #[derive(Default)]
@@ -4518,7 +4517,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
-    #[cfg(feature = "instrumentation")]
     #[test]
     fn rep_insw_respects_configured_page_write_permissions() {
         std::thread::Builder::new()
@@ -4776,7 +4774,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
-    #[cfg(feature = "instrumentation")]
     #[test]
     fn insw_permission_fault_precedes_destructive_mmio_read() {
         std::thread::Builder::new()
@@ -4945,11 +4942,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emu.run_cpu_batch(1).unwrap();
     }
 
-    #[cfg(feature = "instrumentation")]
     #[derive(Clone, Default)]
     struct Phase6RepeatTrace(std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
 
-    #[cfg(feature = "instrumentation")]
     impl crate::cpu::instrumentation::Instrumentation for Phase6RepeatTrace {
         fn active_hooks(&self) -> crate::cpu::instrumentation::HookMask {
             crate::cpu::instrumentation::HookMask::EXEC
@@ -4960,7 +4955,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         }
     }
 
-    #[cfg(feature = "instrumentation")]
     fn phase6_repeat_trace() -> (
         Phase6RepeatTrace,
         std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
@@ -4969,7 +4963,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         (Phase6RepeatTrace(std::sync::Arc::clone(&repeats)), repeats)
     }
 
-    #[cfg(feature = "instrumentation")]
     #[test]
     fn ins_byte_and_dword_prefault_before_destructive_port_read() {
         phase6_large_stack(|| {
@@ -5071,7 +5064,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
     // (or a `debug_assert!`), which do not exist in a release build.
     #[cfg(debug_assertions)]
-    #[cfg(feature = "instrumentation")]
     #[test]
     fn rep_string_io_checks_permission_once_even_when_count_zero() {
         phase6_large_stack(|| {
@@ -5218,114 +5210,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         });
     }
 
-    #[cfg(feature = "instrumentation")]
-    #[test]
-    fn rep_bulk_falls_back_for_hooks_and_page_permissions() {
-        phase6_large_stack(|| {
-            use crate::cpu::instrumentation::{IoHookType, MemHookType};
-            use std::sync::{Arc, Mutex};
 
-            const CODE: u64 = 0x1000;
-            const SRC: u64 = 0x2000;
-            const DST: u64 = 0x3000;
-            const COUNT: u64 = 3;
-            const PCI_CONFIG_DATA: u16 = 0x0CFC;
-
-            let events = Arc::new(Mutex::new(Vec::new()));
-            let (trace, repeats) = phase6_repeat_trace();
-            let exec_events = Arc::clone(&events);
-            let mut emu =
-                Emulator::<Phase6RepeatTrace>::new_with_mode_and_instrumentation(
-                    EmulatorConfig::default(),
-                    CpuSetupMode::FlatProtected32,
-                    trace,
-                )
-                .unwrap();
-            let _ = emu.hook_add_code(CODE..=CODE, move |_rip, _instr| {
-                phase6_lock(&exec_events).push("exec");
-            });
-            emu.virt_write(CODE, &[0xF3, 0xA4, 0xEB, 0xFE]).unwrap();
-            emu.mem_write(SRC, &[1, 2, 3]).unwrap();
-            emu.reg_write(X86Reg::Rip, CODE);
-            emu.reg_write(X86Reg::Rsi, SRC);
-            emu.reg_write(X86Reg::Rdi, DST);
-            emu.reg_write(X86Reg::Rcx, COUNT);
-            phase6_run(&mut emu);
-            assert_eq!(emu.mem_read_vec(DST, 3).unwrap(), [1, 2, 3]);
-            assert_eq!(phase6_lock(&events).as_slice(), ["exec"]);
-            assert_eq!(phase6_lock(&repeats).len(), COUNT as usize);
-
-            let writes = Arc::new(Mutex::new(Vec::new()));
-            let observed_writes = Arc::clone(&writes);
-            let mut emu = phase6_flat32();
-            let _ = emu.hook_add_mem(MemHookType::Write, DST..=DST + COUNT - 1, move |ev| {
-                phase6_lock(&observed_writes).push((ev.addr, ev.size));
-            });
-            emu.virt_write(CODE, &[0xF3, 0xA4, 0xEB, 0xFE]).unwrap();
-            emu.mem_write(SRC, &[4, 5, 6]).unwrap();
-            emu.reg_write(X86Reg::Rip, CODE);
-            emu.reg_write(X86Reg::Rsi, SRC);
-            emu.reg_write(X86Reg::Rdi, DST);
-            emu.reg_write(X86Reg::Rcx, COUNT);
-            phase6_run(&mut emu);
-            assert_eq!(
-                phase6_lock(&writes).as_slice(),
-                &[(DST, 1), (DST + 1, 1), (DST + 2, 1)]
-            );
-
-            let inputs = Arc::new(Mutex::new(Vec::new()));
-            let observed_inputs = Arc::clone(&inputs);
-            let mut emu = phase6_flat32();
-            phase6_prepare_fw_cfg(&mut emu, &[]);
-            emu.device_manager.pci_conf_addr = 0x8000_0000;
-            let expected_word = emu.device_manager.pci_read(PCI_CONFIG_DATA, 2) as u16;
-            let word_bytes = expected_word.to_le_bytes();
-            let _ = emu.hook_add_io(IoHookType::In, PCI_CONFIG_DATA..=PCI_CONFIG_DATA, move |ev| {
-                phase6_lock(&observed_inputs).push((ev.port, ev.size, ev.value));
-            });
-            emu.virt_write(CODE, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
-                .unwrap();
-            emu.reg_write(X86Reg::Rip, CODE);
-            emu.reg_write(X86Reg::Rdx, u64::from(PCI_CONFIG_DATA));
-            emu.reg_write(X86Reg::Rdi, DST);
-            emu.reg_write(X86Reg::Rcx, COUNT);
-            phase6_run(&mut emu);
-            assert_eq!(
-                emu.mem_read_vec(DST, 6).unwrap(),
-                [
-                    word_bytes[0],
-                    word_bytes[1],
-                    word_bytes[0],
-                    word_bytes[1],
-                    word_bytes[0],
-                    word_bytes[1],
-                ]
-            );
-            assert_eq!(
-                phase6_lock(&inputs).as_slice(),
-                &[(PCI_CONFIG_DATA, 2, u32::from(expected_word)); 3]
-            );
-
-            let mut emu = phase6_flat32();
-            emu.virt_write(CODE, &[0xF3, 0xA4, 0xEB, 0xFE]).unwrap();
-            emu.mem_write(SRC, &[0x7A, 0x7B, 0x7C]).unwrap();
-            emu.mem_fill(DST, COUNT as usize, 0xCC).unwrap();
-            emu.mem_protect(
-                DST,
-                0x1000,
-                crate::cpu::instrumentation::MemPerms::READ,
-            );
-            emu.reg_write(X86Reg::Rip, CODE);
-            emu.reg_write(X86Reg::Rsi, SRC);
-            emu.reg_write(X86Reg::Rdi, DST);
-            emu.reg_write(X86Reg::Rcx, COUNT);
-            phase6_run(&mut emu);
-            assert_eq!(emu.mem_read_vec(DST, COUNT as usize).unwrap(), [0xCC; 3]);
-            assert_eq!(emu.reg_read(X86Reg::Rcx), COUNT);
-        });
-    }
-
-    #[cfg(feature = "instrumentation")]
     #[test]
     fn repeat_iteration_is_not_reported_for_faulting_element() {
         phase6_large_stack(|| {
@@ -5556,7 +5441,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     /// `tick_surplus`) and retires one icount per chunk, while the scalar
     /// repeat() loop retires one icount per element. Tick totals match
     /// exactly; icount deliberately differs.
-    #[cfg(feature = "instrumentation")]
     #[test]
     fn fast_rep_charges_ticks_not_icount_and_matches_scalar_ticks() {
         phase6_large_stack(|| {

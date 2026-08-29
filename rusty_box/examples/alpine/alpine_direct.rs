@@ -317,39 +317,6 @@ fn run_alpine() -> Result<()> {
         max_instructions
     );
 
-    // =========================================================================
-    // =========================================================================
-    // Instrumentation: awk field-splitting debug hook
-    // =========================================================================
-    #[cfg(feature = "instrumentation")]
-    {
-        use std::cell::Cell;
-        let icount = Cell::new(0u64);
-        let hits = Cell::new(0u32);
-        let _ = emu.hook_add_code(.., move |rip, instr| {
-            let ic = icount.get() + 1;
-            icount.set(ic);
-            if ic < 3_000_000_000 || rip < 0x400000 {
-                return;
-            }
-            if hits.get() >= 100 {
-                return;
-            }
-            let opcode = instr.get_ia_opcode() as u16;
-            if (opcode == 42 || opcode == 70 || opcode == 38) && hits.get() < 30 {
-                tracing::info!(
-                    "[INSTR] op={} RIP={:#x} ilen={} icount={}",
-                    opcode,
-                    rip,
-                    instr.ilen(),
-                    ic
-                );
-                hits.set(hits.get() + 1);
-            }
-        });
-        tracing::info!("Instrumentation: AwkFieldSplitTracer installed (as closure hook)");
-    }
-
     // Execution loop
     // =========================================================================
     let start_time = Instant::now();

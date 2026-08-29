@@ -10,20 +10,11 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(feature = "instrumentation")]
-use core::ops::RangeBounds;
 
-#[cfg(feature = "instrumentation")]
-use crate::cpu::decoder::Instruction;
 #[cfg(feature = "alloc")]
 use crate::cpu::instrumentation::EmuStopReason;
 #[cfg(feature = "alloc")]
 use crate::emulator::StopReason;
-#[cfg(feature = "instrumentation")]
-use crate::cpu::instrumentation::{
-    BranchEvent, HookHandle, HwInterruptEvent, InstrumentationError, IoHookEvent, IoHookType,
-    MemHookEvent, MemHookType,
-};
 use crate::cpu::api_bridge::{ScaledLimit, SegmentSize};
 use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, X86Reg};
 #[cfg(feature = "alloc")]
@@ -164,126 +155,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
 
 }
 
-// ─────────────────────────── Hook registration ───────────────────────────
+// ─────────────────────────── The observer ───────────────────────────
 //
-// All hook_add_* methods require the `instrumentation` feature because they
-// populate the [`InstrumentationRegistry`] on the CPU, which is itself
-// feature-gated. When the feature is off, the methods simply do not exist.
+// One observer per machine, chosen at COMPILE time as the tracer parameter
+// `T`. It is a trait rather than a set of registered closures, which is what
+// lets it work in every build this port ships: a `no_alloc` machine cannot
+// box a closure, but it can name a type.
 
-#[cfg(all(feature = "instrumentation", feature = "alloc"))]
 impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
-    /// Register a hook fired before each instruction whose RIP is in `range`.
-    /// Callback receives `(rip, &Instruction)`.
-    pub fn hook_add_code<R, F>(&mut self, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u64>,
-        F: FnMut(u64, &Instruction) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_code(range, Box::new(cb))
-    }
-
-    /// Register a hook fired AFTER each instruction whose RIP is in `range`.
-    pub fn hook_add_code_after<R, F>(&mut self, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u64>,
-        F: FnMut(u64, &Instruction) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_code_after(range, Box::new(cb))
-    }
-
-    /// Register a memory access hook.
-    pub fn hook_add_mem<R, F>(&mut self, hook_type: MemHookType, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u64>,
-        F: FnMut(&MemHookEvent) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_mem(hook_type, range, Box::new(cb))
-    }
-
-    /// Register a software-interrupt hook (INT n / INT3 / INTO).
-    /// Callback receives the vector.
-    pub fn hook_add_interrupt<F>(&mut self, cb: F) -> HookHandle
-    where
-        F: FnMut(u8) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_interrupt(Box::new(cb))
-    }
-
-    /// Register a hardware-interrupt hook (external IRQ delivery).
-    pub fn hook_add_hwinterrupt<F>(&mut self, cb: F) -> HookHandle
-    where
-        F: FnMut(&HwInterruptEvent) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_hw_interrupt(Box::new(cb))
-    }
-
-    /// Register a CPU-exception hook.
-    /// Callback receives `(vector, error_code)`.
-    pub fn hook_add_exception<F>(&mut self, cb: F) -> HookHandle
-    where
-        F: FnMut(u8, u32) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_exception(Box::new(cb))
-    }
-
-    /// Register an I/O port hook (IN/OUT instructions).
-    pub fn hook_add_io<R, F>(&mut self, hook_type: IoHookType, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u16>,
-        F: FnMut(&IoHookEvent) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_io(hook_type, range, Box::new(cb))
-    }
-
-    /// Register a branch hook. Fires for conditional, unconditional, and
-    /// far branches; the variant in [`BranchEvent`] tells them apart.
-    pub fn hook_add_branch<R, F>(&mut self, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u64>,
-        F: FnMut(&BranchEvent) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_branch(range, Box::new(cb))
-    }
-
-    /// Register a block hook. Fires at the start of each basic block (trace)
-    /// whose RIP is in range.
-    pub fn hook_add_block<R, F>(&mut self, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u64>,
-        F: FnMut(u64, u16) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_block(range, Box::new(cb))
-    }
-
-    /// Register an invalid-instruction hook. Fires before #UD for
-    /// unrecognized opcodes. Return `true` from the callback to suppress
-    /// the exception.
-    pub fn hook_add_invalid_insn<F>(&mut self, cb: F) -> HookHandle
-    where
-        F: FnMut(u64) -> bool + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_invalid_insn(Box::new(cb))
-    }
-
-    /// Register an unmapped-memory hook. Fires before page fault for
-    /// not-present pages. Return `true` to suppress the fault.
-    pub fn hook_add_mem_unmapped<F>(&mut self, cb: F) -> HookHandle
-    where
-        F: FnMut(u64, usize, crate::cpu::instrumentation::MemAccessRW) -> bool + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_mem_unmapped(Box::new(cb))
-    }
-
-    /// Remove a previously registered hook.
-    /// Returns `Err(InvalidHandle)` if the handle was already removed or
-    /// never valid.
-    pub fn hook_del(
-        &mut self,
-        handle: HookHandle,
-    ) -> core::result::Result<(), InstrumentationError> {
-        self.cpu_mut().instrumentation.remove(handle)
-    }
-
     /// Direct typed reference to the installed tracer. Zero-cost field access.
     pub fn instrumentation(&self) -> &T {
         &self.cpu().instrumentation.tracer
@@ -722,7 +601,6 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
 
     /// Set memory permissions for a physical address range.
     /// Creates the permissions bitmap on first call, sizing it to physical memory.
-    #[cfg(feature = "instrumentation")]
     pub fn mem_protect(
         &mut self,
         addr: u64,
@@ -1455,23 +1333,6 @@ mod tests {
             .unwrap();
     }
 
-    /// Hook registration and deletion round-trip.
-    #[cfg(feature = "instrumentation")]
-    #[test]
-    fn hook_add_del_roundtrip() {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::new(cfg).unwrap();
-                let h = emu.hook_add_code(.., |_, _| {});
-                assert!(emu.hook_del(h).is_ok());
-                assert!(emu.hook_del(h).is_err(), "double-delete must fail");
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
     /// FPU register round-trip: write FP80 bytes, read back.
     #[test]
@@ -1624,42 +1485,9 @@ mod tests {
             .unwrap();
     }
 
-    /// Block hook registration round-trip.
-    #[cfg(feature = "instrumentation")]
-    #[test]
-    fn hook_add_block_round_trip() {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::new(cfg).unwrap();
-                let h = emu.hook_add_block(.., |_rip, _size| {});
-                assert!(emu.hook_del(h).is_ok());
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
-    /// Invalid instruction hook registration.
-    #[cfg(feature = "instrumentation")]
-    #[test]
-    fn hook_add_invalid_insn() {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::new(cfg).unwrap();
-                let h = emu.hook_add_invalid_insn(|_rip| false);
-                assert!(emu.hook_del(h).is_ok());
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
     /// Memory permissions basic operations.
-    #[cfg(feature = "instrumentation")]
     #[test]
     fn mem_permissions_basic() {
         use crate::cpu::instrumentation::MemPerms;

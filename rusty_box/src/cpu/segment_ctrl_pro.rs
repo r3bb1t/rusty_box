@@ -672,7 +672,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         cpl: u8,
     ) -> Result<()> {
         // Capture prev CS before load_cs changes it (BOCHS BX_INSTR_FAR_BRANCH_ORIGIN).
-        #[cfg(feature = "instrumentation")]
         let prev_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
 
         // Bochs ctrl_xfer_pro.cc
@@ -714,7 +713,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // BOCHS BX_INSTR_FAR_BRANCH fires here with generic Jmp kind;
         // call sites that know the specific kind (CALL, RET, IRET, INT, SYSENTER...)
         // fire their own far_branch hook with the correct BranchType.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_branch() {
             let new_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
             let src_rip = self.prev_rip;
