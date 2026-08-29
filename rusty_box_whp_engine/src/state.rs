@@ -190,13 +190,24 @@ pub(crate) fn import(vp: &impl VpRegisters, state: &VcpuArchState) -> WhpResult<
     words[23..27].copy_from_slice(&state.dr);
     words[27] = state.dr6;
     words[28] = state.dr7;
-    vp.write_words(WORD_REGS, &words)?;
-
     // All but the time-stamp counter — the hardware owns that one, and writing
     // the shadow's copy back would drag the guest's clock backwards on every
     // slice. See [`IMPORTED_MSRS`].
     let msrs = msr_words(&state.msrs, state.xcr0);
-    vp.write_words(&MSR_REGS[..IMPORTED_MSRS], &msrs[..IMPORTED_MSRS])?;
+
+    // One call for both. The platform takes an arbitrary list of register
+    // names, and the cost of a register transfer is overwhelmingly the call
+    // rather than the registers in it — a machine booting takes one of these
+    // per slice, so a call saved here is a call saved a hundred thousand
+    // times. The lists stay separate because they are read back separately and
+    // written to different halves of the state.
+    let mut names = [Reg::Rax; WORD_VALUES + IMPORTED_MSRS];
+    let mut values = [0u64; WORD_VALUES + IMPORTED_MSRS];
+    names[..WORD_VALUES].copy_from_slice(WORD_REGS);
+    names[WORD_VALUES..].copy_from_slice(&MSR_REGS[..IMPORTED_MSRS]);
+    values[..WORD_VALUES].copy_from_slice(&words);
+    values[WORD_VALUES..].copy_from_slice(&msrs[..IMPORTED_MSRS]);
+    vp.write_words(&names, &values)?;
 
     let mut segments = [SegmentRegister::default(); 8];
     for (slot, seg) in segments.iter_mut().zip(&state.segments) {
@@ -219,8 +230,15 @@ pub(crate) fn import(vp: &impl VpRegisters, state: &VcpuArchState) -> WhpResult<
 /// # Errors
 /// Whatever the platform said about a register it would not give up.
 pub(crate) fn export(vp: &impl VpRegisters, state: &mut VcpuArchState) -> WhpResult<()> {
-    let mut words = [0u64; WORD_VALUES];
-    vp.read_words(WORD_REGS, &mut words)?;
+    // Both word-shaped groups in one call, for the reason given in `import`:
+    // the call dominates, and a booting machine takes one of these per slice.
+    let mut names = [Reg::Rax; WORD_VALUES + MSR_VALUES];
+    let mut all = [0u64; WORD_VALUES + MSR_VALUES];
+    names[..WORD_VALUES].copy_from_slice(WORD_REGS);
+    names[WORD_VALUES..].copy_from_slice(MSR_REGS);
+    vp.read_words(&names, &mut all)?;
+    let (words, msrs) = all.split_at(WORD_VALUES);
+
     state.gprs.copy_from_slice(&words[..16]);
     state.rip = words[16];
     state.rflags = words[17];
@@ -233,8 +251,6 @@ pub(crate) fn export(vp: &impl VpRegisters, state: &mut VcpuArchState) -> WhpRes
     state.dr6 = words[27];
     state.dr7 = words[28];
 
-    let mut msrs = [0u64; MSR_VALUES];
-    vp.read_words(MSR_REGS, &mut msrs)?;
     state.msrs = MsrState {
         efer: msrs[0],
         apic_base: msrs[1],

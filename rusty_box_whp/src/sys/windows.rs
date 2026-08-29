@@ -628,7 +628,14 @@ pub(crate) fn set_tables(
 /// How many registers one platform call may name. The platform takes an array
 /// of names and an array of values, so a fixed buffer bounds a single call;
 /// callers batch larger transfers themselves.
-const SET_MAX: usize = 32;
+///
+/// Large enough to hold every word-shaped register an engine exchanges at once
+/// — the general registers, the control and debug registers and the model
+/// specific registers together — because the cost of a transfer is the call and
+/// not the registers in it. A caller forced to split that in two pays twice for
+/// the same information, once per slice, for as long as a guest runs. At
+/// sixteen bytes a value this buffer is a kilobyte of stack.
+const SET_MAX: usize = 64;
 
 /// The register-write choke point (R5): both typed setters converge here, so
 /// the length agreement and the aligned buffer are established once.
