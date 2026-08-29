@@ -150,6 +150,32 @@ impl<'a> PcIo<'a> {
         ctx.cpu_loop_n_slice(1, true, 1).map(|_| ())
     }
 
+    /// Execute up to `instructions` guest instructions on `cpu`, as one run.
+    ///
+    /// The same verb as [`Self::emulate_one`] with the batch left intact.
+    /// Building an execution context is not free, and the interpreter's own
+    /// loop chains traces inside one — so asking for a thousand instructions
+    /// once is not the same work as asking for one instruction a thousand
+    /// times, by a factor this port can measure. An engine that emulates in
+    /// bulk rather than to finish a single trapped access wants this one.
+    ///
+    /// Returns the number of instructions actually retired, which may be fewer
+    /// than asked for: the loop stops at a halt, at an event to deliver, or at
+    /// whatever else ends a trace.
+    ///
+    /// # Errors
+    /// Whatever the guest raised that the processor could not take.
+    pub fn emulate_batch<T: Instrumentation>(
+        &mut self,
+        cpu: &mut BxCpuC<T>,
+        instructions: u64,
+    ) -> crate::cpu::Result<u64> {
+        let mut ctx = ExecCtx::new(cpu, self.reborrow());
+        // A tick denominator of one, so an instruction is a tick — the same
+        // denomination the software engine reports its progress in.
+        ctx.cpu_loop_n_slice(instructions, false, 1)
+    }
+
     /// Whether the machine has work queued that only the machine can do.
     ///
     /// EVERY source, which is the whole point of it being one question: the
@@ -199,6 +225,13 @@ impl<'a> PcIo<'a> {
         // ends. Parked, not dropped — put back below, along with anything that
         // arrived while the instruction ran.
         let parked = cpu.park_trace_bookkeeping();
+        // And the external interrupt, for the length of this instruction. The
+        // interpreter's loop delivers one at the head of every iteration
+        // regardless of the budget, so without this a trapped `REP INSW` can
+        // enter an interrupt handler halfway through servicing a disk sector —
+        // delivery in a place the engine's own contract says delivery does not
+        // happen. See `park_deliverable_interrupt`.
+        let held = cpu.park_deliverable_interrupt();
         let mut outcome = Ok(());
         for _ in 0..Self::ITEM_CEILING {
             outcome = self.emulate_one(cpu);
@@ -218,6 +251,7 @@ impl<'a> PcIo<'a> {
             }
         }
         cpu.resume_trace_bookkeeping(parked);
+        cpu.resume_deliverable_interrupt(held);
         outcome
     }
 

@@ -191,6 +191,25 @@ impl PartitionConfig {
         Ok(self)
     }
 
+    /// Which processor exceptions exit instead of being delivered to the
+    /// guest, one bit per vector — bit 13 is `#GP`, bit 14 is `#PF`. Requires
+    /// [`crate::caps::ExtendedVmExits::exception`], and without it this traps
+    /// nothing, the same way the MSR bitmap needs its own extended exit.
+    ///
+    /// A partition that traps an exception owes the guest its delivery: the
+    /// exit is the host's to service, and a host that neither re-injects nor
+    /// emulates has stopped the guest mid-fault. For that reason this is a
+    /// DIAGNOSTIC seam rather than something a running machine wants — a
+    /// guest takes exceptions as part of working correctly, and a fault
+    /// trapped here is one the guest's own handler never sees.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the platform refuses the bitmap.
+    pub fn exception_exits(&mut self, vectors: u64) -> WhpResult<&mut Self> {
+        sys::set_property(self.handle.0, PropertyCode::ExceptionExitBitmap, vectors)?;
+        Ok(self)
+    }
+
     /// The `CPUID` leaves that should exit instead of executing. Requires
     /// [`crate::caps::ExtendedVmExits::cpuid`].
     ///

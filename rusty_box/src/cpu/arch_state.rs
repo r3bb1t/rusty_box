@@ -35,6 +35,24 @@ use super::instrumentation::Instrumentation;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TraceBookkeeping(u32);
 
+/// A processor's pending external interrupt, held while a trapped instruction
+/// finishes.
+///
+/// Opaque for the same reason as [`TraceBookkeeping`]: the only thing a caller
+/// may do with it is give it back. A caller that could forge one would deliver
+/// a vector the controller never raised; a caller that dropped one would leave
+/// a guest waiting forever on a line that is still asserted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeliverableInterrupt(u32);
+
+impl DeliverableInterrupt {
+    /// The external-interrupt bit alone. NOT the whole deliverable set: an
+    /// `INIT`, an `SMI` or a shutdown is not something to postpone for the
+    /// convenience of finishing an instruction, and a fault raised BY that
+    /// instruction must still be taken by it.
+    const MASK: u32 = BxCpuC::<()>::BX_EVENT_PENDING_INTR;
+}
+
 impl TraceBookkeeping {
     /// The bits that are the trace scheduler's rather than the guest's.
     ///
@@ -461,6 +479,44 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// that arrived meanwhile.
     pub fn resume_trace_bookkeeping(&mut self, parked: TraceBookkeeping) {
         self.async_event |= parked.0;
+    }
+
+    /// Hold back an external interrupt while a trapped instruction finishes.
+    ///
+    /// The interpreter's loop asks `handle_async_event` at the head of EVERY
+    /// iteration, and a strict one-instruction budget does not change that —
+    /// so a processor asked to finish one trapped instruction will instead
+    /// deliver a pending interrupt, push a frame, and jump to a handler.
+    ///
+    /// For an engine that runs the guest on hardware, that is delivery in a
+    /// place the engine does not know it happened: its contract is that a
+    /// vector reaches the guest at the head of a slice and nowhere else, so
+    /// that the frame, the handler and the `IRET` all belong to the same
+    /// story. A delivery nested inside the servicing of a disk's `REP INSW`
+    /// leaves the guest somewhere its own driver never agreed to be, and the
+    /// stack does not come back — which is a `general protection` on the
+    /// `IRET` that ends the handler, some hundred bytes below where its frame
+    /// was pushed.
+    ///
+    /// Held, not dropped: the line is still asserted, the machine still owes
+    /// the guest the vector, and [`Self::resume_deliverable_interrupt`] hands
+    /// it back for the next slice head to deliver properly.
+    /// Masked rather than cleared, deliberately. The interpreter's own loop
+    /// drains the bus at instruction boundaries and re-signals the pending bit
+    /// the moment a device raises its line, so a bit merely taken away comes
+    /// straight back and is delivered anyway. Masking is what actually holds.
+    #[must_use]
+    pub fn park_deliverable_interrupt(&mut self) -> DeliverableInterrupt {
+        let was = self.event_mask & DeliverableInterrupt::MASK;
+        self.event_mask |= DeliverableInterrupt::MASK;
+        DeliverableInterrupt(was)
+    }
+
+    /// Restore the mask to what it was, so a processor whose guest had
+    /// interrupts disabled anyway stays that way.
+    pub fn resume_deliverable_interrupt(&mut self, parked: DeliverableInterrupt) {
+        self.event_mask &= !DeliverableInterrupt::MASK;
+        self.event_mask |= parked.0;
     }
 
     /// Whether this processor has an event waiting that it may take now.

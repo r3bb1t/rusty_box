@@ -107,6 +107,62 @@ const TRAPPED_MSRS: MsrExits = MsrExits {
     ..MsrExits::ALL
 };
 
+/// The last few exits, kept so a fault can say what led to it.
+///
+/// A trapped exception reports the instant it happened and nothing about how
+/// the guest got there, which for a stack that has drifted out of balance is
+/// the only interesting part. Written on every exit and read only when one
+/// cannot be serviced, so it costs a store and an increment.
+///
+/// DIAGNOSTIC, alongside `WHP_TRAP_EXCEPTIONS`, and inert without it.
+struct ExitHistory {
+    entries: [(u64, u8); Self::DEPTH],
+    at: usize,
+    seen: usize,
+}
+
+impl Default for ExitHistory {
+    fn default() -> Self {
+        Self { entries: [(0, 0); Self::DEPTH], at: 0, seen: 0 }
+    }
+}
+
+impl ExitHistory {
+    const DEPTH: usize = 64;
+
+    fn record(&mut self, rip: u64, reason: u8) {
+        self.entries[self.at] = (rip, reason);
+        self.at = (self.at + 1) % Self::DEPTH;
+        self.seen += 1;
+    }
+
+    /// Oldest first, so the report reads forwards in time.
+    fn replay(&self) -> impl Iterator<Item = (u64, u8)> + '_ {
+        let held = self.seen.min(Self::DEPTH);
+        let first = if self.seen > Self::DEPTH { self.at } else { 0 };
+        (0..held).map(move |step| self.entries[(first + step) % Self::DEPTH])
+    }
+}
+
+/// Which processor exceptions this engine takes away from the guest, as a
+/// bitmap of vectors — DIAGNOSTIC, and empty unless asked for.
+///
+/// `WHP_TRAP_EXCEPTIONS` names them in hexadecimal, so `2000` is `#GP` (vector
+/// 13) alone and `6000` is `#GP` and `#PF` together.
+///
+/// A guest takes exceptions in the course of working: a page fault is how
+/// demand paging happens, and Linux uses `#GP` deliberately in places. Trapping
+/// one means its own handler never runs, so a boot under this will diverge —
+/// which is the point. It answers the question the guest's own crash report
+/// cannot: what the processor was doing at the instant of the fault, rather
+/// than what the handler could still print once the damage was done.
+fn trapped_exceptions() -> u64 {
+    std::env::var("WHP_TRAP_EXCEPTIONS")
+        .ok()
+        .and_then(|vectors| u64::from_str_radix(vectors.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0)
+}
+
 /// Guest code this port has not been asked to run on hardware yet, and which
 /// the platform cannot finish alone. Each is a real exit that a complete engine
 /// services; refusing by name is what keeps a half-serviced one from looking
@@ -116,11 +172,20 @@ fn unserviced(what: &'static str, exit: &Exit) -> CpuError {
     // this engine cannot service is a report about guest code, and the report
     // is useless without an address to look at.
     tracing::error!(
-        "WHP exit not serviced by this engine: {what} at {:#x}:{:#x} (cs base {:#x}, rflags {:#x})",
+        "WHP exit not serviced by this engine: {what} at {:#x}:{:#x} (cs base {:#x}, rflags {:#x}, \
+         execution state {:#06x} — interruption pending {}, interrupt shadow {})",
         exit.vp.cs.selector,
         exit.vp.rip,
         exit.vp.cs.base,
         exit.vp.rflags,
+        exit.vp.execution_state,
+        // `WHV_X64_VP_EXECUTION_STATE`: bit 6 says a delivery is already in
+        // flight, bit 12 that the processor is in an interrupt shadow. Both
+        // arrive free on every exit, and both are state this engine does NOT
+        // carry across its seam — so a slice that rewrites the processor while
+        // one is set can make the hardware deliver an event a second time.
+        (exit.vp.execution_state >> 6) & 1,
+        (exit.vp.execution_state >> 12) & 1,
     );
     CpuError::UnsupportedCpuOperation { operation: "WHP exit not serviced by this engine" }
 }
@@ -204,6 +269,11 @@ pub struct ExitCounts {
 pub struct WhpEngine {
     started: Option<Started>,
     exits: ExitCounts,
+    /// Diagnostic; see [`ExitHistory`]. Lives here rather than in a slice
+    /// because a guest's path to a fault crosses slice boundaries — a handler
+    /// that traps for its own port I/O is several slices old by the time it
+    /// faults, and a per-slice history shows only the fault itself.
+    history: ExitHistory,
 }
 
 impl WhpEngine {
@@ -245,12 +315,22 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                 .extended_vm_exits(ExtendedVmExits {
                     cpuid: true,
                     msr: true,
+                    // Diagnostic only, and off unless asked for: a guest takes
+                    // exceptions as part of running correctly, and one trapped
+                    // here is one its own handler never sees. What it buys is
+                    // the fault ITSELF rather than the guest's report of it —
+                    // the faulting address and the processor's state at the
+                    // instant, instead of whatever the guest managed to print
+                    // afterwards from a state the fault had already disturbed.
+                    exception: trapped_exceptions() != 0,
                     ..ExtendedVmExits::default()
                 })
                 .map_err(platform_failed)?
                 .cpuid_exit_list(TRAPPED_CPUID_LEAVES)
                 .map_err(platform_failed)?
                 .msr_exits(TRAPPED_MSRS)
+                .map_err(platform_failed)?
+                .exception_exits(trapped_exceptions())
                 .map_err(platform_failed)?;
             let mut partition = config.setup().map_err(platform_failed)?;
 
@@ -491,13 +571,24 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             // delivery that happened shows as a jump to a handler and one that
             // did not shows as an ordinary instruction.
             let before = cpu.rip();
+            let rsp_before = {
+                let mut state = VcpuArchState::default();
+                cpu.export_arch_state(&mut state);
+                state.gprs[4]
+            };
             io.emulate_one(cpu)?;
             tracing::debug!(
                 target: "irq",
-                "CPU: had an event at slice entry; rip {:#x} -> {:#x}, IF={}",
+                "CPU: had an event at slice entry; rip {:#x} -> {:#x}, IF={} rsp {:#x} -> {:#x}",
                 before,
                 cpu.rip(),
-                cpu.interrupts_enabled()
+                cpu.interrupts_enabled(),
+                rsp_before,
+                {
+                    let mut after = VcpuArchState::default();
+                    cpu.export_arch_state(&mut after);
+                    after.gprs[4]
+                }
             );
             // Delivery acknowledged the interrupt, which changes the line.
             io.sync_io_events(cpu);
@@ -507,7 +598,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // here rather than being handed over half-entered.
         run_the_shadow_out_of_smm(cpu, &mut io)?;
 
-        let Self { started, exits } = self;
+        let Self { started, exits, history } = self;
         let started = start(started, &mut io)?;
 
         // The shadow describes the processor; the platform runs it.
@@ -521,6 +612,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             request.instructions(),
             ips,
             exits,
+            history,
         );
 
         // Whatever ended the run, the shadow must describe the processor again
@@ -582,8 +674,15 @@ fn run_slice_on_the_shadow<T: Instrumentation>(
     let budget = request.instructions();
     let mut retired = 0u64;
     while retired < budget {
-        io.emulate_one(cpu)?;
-        retired += 1;
+        // In bulk, not one at a time. Building an execution context per
+        // instruction cost this path six times the interpreter's own speed on
+        // a DLX boot — 92 seconds against 15 — which is a property of how it
+        // asked rather than of what it was running.
+        let ran = io.emulate_batch(cpu, budget - retired)?;
+        retired += ran;
+        if ran == 0 {
+            break;
+        }
         if cpu.wants_a_machine_boundary() || io.needs_boundary() {
             break;
         }
@@ -671,9 +770,11 @@ fn run_until_the_machine_is_needed<T: Instrumentation>(
     budget: u64,
     ips: u64,
     counts: &mut ExitCounts,
+    history: &mut ExitHistory,
 ) -> Result<SliceOutcome> {
     let mut ran = Duration::ZERO;
-    let yielded = run_the_exit_loop(started, cpu, io, deadline, budget, ips, counts, &mut ran);
+    let yielded =
+        run_the_exit_loop(started, cpu, io, deadline, budget, ips, counts, &mut ran, history);
     // The alarm is armed per run inside the loop, so an error path can leave
     // one armed against a processor nobody is running. Disarming here is what
     // makes that impossible.
@@ -692,6 +793,7 @@ fn run_the_exit_loop<T: Instrumentation>(
     ips: u64,
     counts: &mut ExitCounts,
     ran: &mut Duration,
+    history: &mut ExitHistory,
 ) -> Result<Yielded> {
     loop {
         // Checked before running rather than after, so a slice whose budget is
@@ -761,12 +863,46 @@ fn run_the_exit_loop<T: Instrumentation>(
             ExitReason::Canceled { .. } => counts.canceled += 1,
             _ => {}
         }
+        // An exit that arrives with a delivery already in flight is one this
+        // engine must not rewrite the processor underneath — wtf's WHP backend
+        // hands the vCPU straight back in that case rather than touching
+        // resume state. Reported rather than acted on until it is seen.
+        if (exit.vp.execution_state >> 6) & 1 == 1 {
+            tracing::warn!(
+                target: "irq",
+                "exit at {:#x} arrived with an interruption already pending",
+                exit.vp.rip
+            );
+        }
+        history.record(
+            exit.vp.rip,
+            match exit.reason {
+                ExitReason::IoPortAccess(access) => {
+                    if access.string_op || access.rep_prefix {
+                        b'S'
+                    } else if access.is_write {
+                        b'o'
+                    } else {
+                        b'i'
+                    }
+                }
+                ExitReason::MemoryAccess(_) => b'm',
+                ExitReason::Cpuid(_) => b'c',
+                ExitReason::MsrAccess(_) => b'r',
+                ExitReason::Halt => b'h',
+                ExitReason::Canceled { .. } => b'x',
+                _ => b'?',
+            },
+        );
         match exit.reason {
             // The one exit the platform pre-decodes: port, width, direction and
             // RAX all arrive in the exit, so no decoder is involved and the
             // machine's own device dispatch answers it directly.
             ExitReason::IoPortAccess(access) => {
-                if access.string_op || access.rep_prefix {
+                if access.string_op
+                    || access.rep_prefix
+                    || std::env::var_os("WHP_PORTS_ON_SHADOW").is_some()
+                {
                     // A string or repeated port access moves memory as well as
                     // a register, and the exit describes only the register.
                     // Finishing it from the exit alone would transfer one item
@@ -823,7 +959,94 @@ fn run_the_exit_loop<T: Instrumentation>(
                 finish_on_the_shadow(started, cpu, io, Trapped::Access)?;
             }
             ExitReason::InterruptWindow => return Err(unserviced("interrupt window", &exit)),
-            ExitReason::Exception => return Err(unserviced("exception", &exit)),
+            ExitReason::Exception => {
+                // Diagnostic only — reached solely when `WHP_TRAP_EXCEPTIONS`
+                // asked for it. The whole point of trapping a fault rather
+                // than letting the guest report it is that the processor is
+                // still standing exactly where it faulted, so describe it
+                // fully here; a guest's own crash dump is written after its
+                // handler has already run over half of this.
+                read_back_into_the_shadow(started, cpu)?;
+                let mut state = VcpuArchState::default();
+                cpu.export_arch_state(&mut state);
+                // What the guest was doing on the way here. `o`/`i` are port
+                // writes and reads, `S` a string or repeated one, `m` memory,
+                // `h` a halt.
+                let trail: std::vec::Vec<std::string::String> = history
+                    .replay()
+                    .map(|(rip, kind)| std::format!("{}@{rip:#x}", kind as char))
+                    .collect();
+                tracing::error!("  exits leading here (oldest first): {}", trail.join(" "));
+                const NAMES: [&str; 16] = [
+                    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10",
+                    "r11", "r12", "r13", "r14", "r15",
+                ];
+                for (name, value) in NAMES.iter().zip(state.gprs.iter()) {
+                    tracing::error!("  {name} = {value:#x}");
+                }
+                const SEGMENTS: [&str; 6] = ["es", "cs", "ss", "ds", "fs", "gs"];
+                for (name, seg) in SEGMENTS.iter().zip(state.segments.iter()) {
+                    tracing::error!(
+                        "  {name} = {:#06x} base {:#x} limit {:#x} attr {:#x}",
+                        seg.selector,
+                        seg.base,
+                        seg.limit,
+                        seg.attributes.bits()
+                    );
+                }
+                tracing::error!(
+                    "  rip {:#x} rflags {:#x} cr0 {:#x} cr2 {:#x} cr3 {:#x} cr4 {:#x}",
+                    state.rip,
+                    state.rflags,
+                    state.cr0,
+                    state.cr2,
+                    state.cr3,
+                    state.cr4
+                );
+
+                // The bytes at the faulting instruction, and the stack it is
+                // about to act on. A fault on `IRET` is a claim about the
+                // frame under `SS:ESP`, and this is the only place that frame
+                // can still be read as the processor sees it.
+                let stack = state.segments[2].base.wrapping_add(state.gprs[4]);
+                let code = state.segments[1].base.wrapping_add(state.rip);
+                // A window BEFORE the faulting instruction as well as at it:
+                // the handler that led here is the interesting part, and it
+                // is the bytes immediately preceding the `IRET`.
+                let before = code.wrapping_sub(0x60);
+                for (what, linear, len) in
+                    [("before", before, 0x60u64), ("code", code, 16u64), ("stack", stack, 24u64)]
+                {
+                    match started.partition.translate_gva(BOOT_VP, linear) {
+                        Ok(translation) if translation.result_code == 0 => {
+                            // Straight out of the allocation at the guest
+                            // -physical address: RAM below the PCI hole is
+                            // identity-mapped, which `MemoryPlan`'s own
+                            // equivalence test asserts page by page. A
+                            // diagnostic may lean on that; a data path may not.
+                            match io.memory.allocation_slice(translation.gpa, len) {
+                                Some(bytes) => tracing::error!(
+                                    "  {what} at {linear:#x} (gpa {:#x}): {:02x?}",
+                                    translation.gpa,
+                                    bytes
+                                ),
+                                None => tracing::error!(
+                                    "  {what} at {linear:#x} (gpa {:#x}) is outside the allocation",
+                                    translation.gpa
+                                ),
+                            }
+                        }
+                        Ok(translation) => tracing::error!(
+                            "  {what} at {linear:#x} did not translate (code {})",
+                            translation.result_code
+                        ),
+                        Err(error) => {
+                            tracing::error!("  {what} at {linear:#x} translation failed: {error}")
+                        }
+                    }
+                }
+                return Err(unserviced("exception", &exit));
+            }
             ExitReason::Rdtsc => return Err(unserviced("RDTSC", &exit)),
             ExitReason::UnrecoverableException => {
                 return Err(unserviced("unrecoverable exception", &exit))

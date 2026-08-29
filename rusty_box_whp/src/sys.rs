@@ -60,6 +60,10 @@ pub(crate) enum PropertyCode {
     ProcessorCount,
     ExtendedVmExits,
     MsrExitBitmap,
+    /// Which processor exceptions exit instead of being delivered to the
+    /// guest. One bit per vector; requires the `exception` extended exit,
+    /// which on its own traps nothing.
+    ExceptionExitBitmap,
     SeparateSecurityDomain,
     LocalApicEmulationMode,
 }
