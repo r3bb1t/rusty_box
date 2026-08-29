@@ -87,17 +87,35 @@ immediately returns `Yielded::Boundary`**". Measured, it does not. Device
 latches ended zero slices. Slices end because the stretch the machine asked for
 is over.
 
-**Tasks 4, 5 and 6 remove a cost that is not being paid.** Task 4 exists to stop
-leaving the partition for work already done; the engine is not leaving for that
-reason. Task 5 moves device deadlines off the guest clock; deadlines are not
-what ends these slices. Task 6 elides exits in MMIO-dense regions; memory exits
-had **stopped entirely** by the time the run ended (frozen at 72,897 for the
-last 15 s while port exits kept climbing).
+**Only Task 4's premise is refuted.** It exists to stop the engine leaving the
+partition for work already done, and the engine is not leaving for that reason:
+157 boundary endings in 217,640 slices, with the device reason at zero. There is
+nothing there to remove. Task 4 is dead.
 
-Task 7 (cheaper state exchange) keeps a real premise: 19.1 µs of hypervisor time
-per slice against H0's ~4 µs for a bare exit leaves ~15 µs that is entry and
-state exchange. But the whole envelope is 3.9 % — halving it buys under 2 %,
-nowhere near what "not less performance" requires.
+**Tasks 5, 6 and 7 are NOT refuted — they are capped.** Say so plainly, because
+the distinction decides whether they are ever worth revisiting:
+
+- **Task 5's premise HOLDS.** Slices end on `Budget`, and the budget is the
+  machine's requested stretch converted from its next device deadline — so slice
+  length *is* set by device deadlines, exactly as the plan claimed. Longer slices
+  would amortise the per-slice cost over more exits. Ceiling: the entire
+  per-slice overhead, 4,150 ms of 120 s.
+- **Task 6's premise partly holds.** Memory exits are 72,897 — a third of all
+  exits, not the storm the spec imagined, and worth ~0.3 s of exit time. (They
+  stop entirely once the guest hangs, but that describes the hang, not a boot.)
+- **Task 7's premise holds.** 19.1 µs of hypervisor time per slice against H0's
+  ~4 µs for a bare exit leaves ~15 µs of entry and state exchange.
+
+What caps all three is the same number: **the whole addressable envelope is
+3.9 %.** Even eliminating every slice boundary and every state exchange leaves a
+guest that runs at roughly the speed it runs now. That is nowhere near "we can
+have less control but not less performance", so none of them is the answer, and
+doing them now would tune a workload that never completes.
+
+They are therefore **deferred, not cancelled**, and the order to revisit them in
+is 5, then 7, then 6. Re-run this census against a guest that reaches `login:`
+before ranking them again — a hang is not a boot, and a boot may well exit at a
+different rate.
 
 ## The dominant fact, which is not a performance fact
 
@@ -113,10 +131,13 @@ returning 128 bytes low) recorded during the earlier debugging.
 
 ## Ruling
 
-**Stop the fast-path work. Do not do Tasks 4–6.** Not for the reason the plan
-anticipated — the median is 1, not 5+ — but because the mechanism those tasks
-remove accounts for 0.07 % of slice endings and the hypervisor accounts for
-3.9 % of runtime.
+**Stop the fast-path work.** Task 4 is dead outright — its mechanism accounts for
+0.07 % of slice endings. Tasks 5, 6 and 7 keep their premises but share a 3.9 %
+ceiling, so they are deferred behind the boot rather than cancelled.
+
+Not for the reason the plan anticipated, either: the gate offered two branches
+and reality took a third. The median is 1 exit per slice as predicted, but
+slices end on `Budget` rather than `Boundary`, which neither branch describes.
 
 The next work is the stall: identify the port the kernel polls, and why the
 interrupt that would end the poll never arrives. Re-run this census against a

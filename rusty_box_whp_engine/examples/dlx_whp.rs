@@ -277,6 +277,10 @@ fn boot() -> i32 {
                 &machine,
             );
             eprintln!("gave up after {patience:?} of host time");
+            // What the guest had reached matters most on the path that gives up
+            // on it: a run that ends by exhausting patience is the one whose
+            // screen nobody has seen.
+            dump(&mut machine);
             return 1;
         }
         // A machine whose processor is halted with nothing able to wake it is

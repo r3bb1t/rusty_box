@@ -701,6 +701,21 @@ impl<T: Instrumentation> BxCpuC<T> {
         self.idtr.limit = state.idtr.limit;
 
         self.set_rip(state.rip);
+        // An imported processor stands at an instruction boundary, so the
+        // instruction it is about to execute begins where `RIP` points. That is
+        // what `prev_rip` means, and it is not architectural state — no
+        // hypervisor carries it, so it survives an import holding whatever the
+        // last guest this processor emulated left behind.
+        //
+        // It is load-bearing rather than cosmetic. A repeated string
+        // instruction broken by an asynchronous event rewinds with
+        // `set_rip(prev_rip)` so the remaining items re-execute (Bochs cpu.cc
+        // `repeat`), and `exception` restarts a faulting instruction the same
+        // way. Left stale, both resume the guest at an address belonging to
+        // some earlier trap — a `REP INSW` servicing a disk sector jumps into
+        // an unrelated interrupt stub mid-transfer, and the guest is lost with
+        // no fault to show for it.
+        self.prev_rip = state.rip;
         // Through the API path, which calls `handle_interrupt_mask_change`:
         // IF gates the deliverable events, and a flags write that skips that
         // leaves the processor unable to take an interrupt it says it can.
