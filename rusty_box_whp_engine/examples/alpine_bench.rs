@@ -76,6 +76,7 @@ where
 {
     let began = Instant::now();
     let mut reached = 0;
+    let mut panicked = false;
     let mut at = Vec::new();
     let limit = patience();
     loop {
@@ -88,6 +89,13 @@ where
         };
         if let Some(text) = machine.display().text() {
             let screen = text.to_text();
+            // Into the same log stream as everything else the machine
+            // narrates, so a guest that gave up can be placed in the order of
+            // events rather than only at the end of them.
+            if !panicked && screen.contains("Kernel panic") {
+                panicked = true;
+                tracing::info!(target: "vec", "GUEST PANICKED");
+            }
             while reached < MILESTONES.len() {
                 let (name, needle) = MILESTONES[reached];
                 if !screen.contains(needle) {
