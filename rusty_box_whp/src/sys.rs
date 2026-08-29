@@ -83,6 +83,43 @@ pub(crate) enum CounterSet {
     Runtime,
 }
 
+/// One register's value, in whichever shape its name calls for.
+///
+/// The platform carries every register in one union, and which member is
+/// meaningful is decided by the register named beside it. This is that union
+/// with the decision already made, so a mixed batch — the general registers,
+/// the segments and the descriptor tables in one call — can cross this seam
+/// without the union crossing it too.
+/// Exhaustive on purpose (R5): these are the union members this port reads, and
+/// a fourth would have to be handled everywhere a batch is parsed. A `_` arm
+/// would let one be added and silently misread instead.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RegisterValue {
+    Word(u64),
+    Segment(SegmentRegister),
+    Table(TableRegister),
+}
+
+/// Which member of the platform's value union a register name means.
+///
+/// Derived from the name rather than declared by the caller, so the two cannot
+/// disagree — reading a segment as a word is not a type error, it is a wrong
+/// number (R5).
+pub const fn shape_of(reg: Reg) -> RegisterValue {
+    match reg {
+        Reg::Cs | Reg::Ds | Reg::Es | Reg::Ss | Reg::Fs | Reg::Gs | Reg::Ldtr | Reg::Tr => {
+            RegisterValue::Segment(SegmentRegister {
+                base: 0,
+                limit: 0,
+                selector: 0,
+                attributes: 0,
+            })
+        }
+        Reg::Gdtr | Reg::Idtr => RegisterValue::Table(TableRegister { base: 0, limit: 0 }),
+        _ => RegisterValue::Word(0),
+    }
+}
+
 /// How far a `WHvTranslateGva` got.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct GvaTranslation {
@@ -95,9 +132,9 @@ pub struct GvaTranslation {
 
 pub(crate) use imp::{
     cancel_vp, capability, create_partition, create_vp, delete_partition, delete_vp,
-    dirty_bitmap, get_counters, get_segments, get_tables, get_words, hypervisor_present,
-    map_gpa, request_interrupt, run_vp, set_cpuid_exit_list, set_property, set_segments,
-    set_tables, set_words, setup, translate_gva, unmap_gpa,
+    dirty_bitmap, get_counters, get_registers, get_segments, get_tables, get_words,
+    hypervisor_present, map_gpa, request_interrupt, run_vp, set_cpuid_exit_list, set_property,
+    set_registers, set_segments, set_tables, set_words, setup, translate_gva, unmap_gpa,
 };
 
 /// Every function `imp` must provide, stated once so the two implementations
@@ -120,6 +157,8 @@ const _IMP_IS_COMPLETE: ImpSignatures = ImpSignatures {
     cancel_vp: imp::cancel_vp,
     request_interrupt: imp::request_interrupt,
     get_counters: imp::get_counters,
+    get_registers: imp::get_registers,
+    set_registers: imp::set_registers,
     get_words: imp::get_words,
     set_words: imp::set_words,
     get_segments: imp::get_segments,
@@ -154,6 +193,8 @@ struct ImpSignatures {
     cancel_vp: fn(RawPartition, u32) -> WhpResult<()>,
     request_interrupt: fn(RawPartition, InterruptRequest) -> WhpResult<()>,
     get_counters: fn(RawPartition, u32, CounterSet, &mut [u64]) -> WhpResult<usize>,
+    get_registers: fn(RawPartition, u32, &[Reg], &mut [RegisterValue]) -> WhpResult<()>,
+    set_registers: fn(RawPartition, u32, &[Reg], &[RegisterValue]) -> WhpResult<()>,
     get_words: fn(RawPartition, u32, &[Reg], &mut [u64]) -> WhpResult<()>,
     set_words: fn(RawPartition, u32, &[Reg], &[u64]) -> WhpResult<()>,
     get_segments: fn(RawPartition, u32, &[Reg], &mut [SegmentRegister]) -> WhpResult<()>,

@@ -24,7 +24,8 @@ use windows_sys::Win32::System::Hypervisor::*;
 
 use crate::error::{WhpError, WhpResult};
 use crate::sys::{
-    CapabilityCode, CounterSet, GpaPerms, GvaTranslation, PropertyCode, RawPartition,
+    shape_of, CapabilityCode, CounterSet, GpaPerms, GvaTranslation, PropertyCode, RawPartition,
+    RegisterValue,
 };
 use crate::vcpu::{
     AccessType, CpuidAccess, Exit, ExitReason, InterruptRequest, IoPortAccess, MemoryAccess,
@@ -558,6 +559,52 @@ pub(crate) fn get_words(
         *slot = value.as_word();
     }
     Ok(())
+}
+
+/// Read registers of mixed shape in one call.
+///
+/// The whole architectural state of a processor is one transfer rather than
+/// three, which matters because a machine running a guest makes one of these
+/// per slice and the cost is the call rather than what it carries. Each value
+/// is taken from the union member its register names, decided by
+/// [`sys::shape_of`] so a caller cannot ask for the wrong one.
+pub(crate) fn get_registers(
+    partition: RawPartition,
+    index: u32,
+    regs: &[Reg],
+    out: &mut [RegisterValue],
+) -> WhpResult<()> {
+    let values = get_values(partition, index, regs, out.len())?;
+    for ((slot, value), reg) in out.iter_mut().zip(values).zip(regs) {
+        *slot = match shape_of(*reg) {
+            RegisterValue::Word(_) => RegisterValue::Word(value.as_word()),
+            RegisterValue::Segment(_) => RegisterValue::Segment(value.as_segment()),
+            RegisterValue::Table(_) => RegisterValue::Table(value.as_table()),
+        };
+    }
+    Ok(())
+}
+
+/// Write registers of mixed shape in one call. The counterpart of
+/// [`get_registers`].
+pub(crate) fn set_registers(
+    partition: RawPartition,
+    index: u32,
+    regs: &[Reg],
+    values: &[RegisterValue],
+) -> WhpResult<()> {
+    let mut raw = [RegVal::zeroed(); SET_MAX];
+    if values.len() > SET_MAX {
+        return Err(WhpError::contract("WHvSetVirtualProcessorRegisters"));
+    }
+    for (slot, value) in raw.iter_mut().zip(values) {
+        *slot = match *value {
+            RegisterValue::Word(word) => RegVal::word(word),
+            RegisterValue::Segment(seg) => RegVal::segment(seg),
+            RegisterValue::Table(table) => RegVal::table(table),
+        };
+    }
+    set_values(partition, index, regs, values.len(), &raw)
 }
 
 pub(crate) fn get_segments(

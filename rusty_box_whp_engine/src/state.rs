@@ -14,7 +14,7 @@
 //! it every exit would be several hundred bytes each way for a register file
 //! neither side had touched.
 
-use rusty_box_whp::{Reg, SegmentRegister, TableRegister, WhpResult};
+use rusty_box_whp::{Reg, RegisterValue, SegmentRegister, TableRegister, WhpResult};
 #[cfg(test)]
 use rusty_box_whp::ALL_REGS;
 
@@ -100,7 +100,15 @@ const MSR_VALUES: usize = MSR_REGS.len();
 /// Measured before the fix: the state exchange round-tripped every field
 /// exactly EXCEPT `tsc`, which came back `0` from the shadow against the
 /// hardware's real value, on 278,069 of 278,069 slices.
+///
+/// It is [`TSC_SLOT`] that carries the rule now — the whole-state write skips
+/// that one register by index rather than by truncating a list.
 const IMPORTED_MSRS: usize = MSR_VALUES - 1;
+
+const _: () = assert!(
+    IMPORTED_MSRS == TSC_SLOT,
+    "the time-stamp counter is the register the import leaves out, and it is last"
+);
 
 /// The six segment registers plus the two system ones, in `VcpuArchState`'s own
 /// order so the first six index its `segments` array directly.
@@ -131,10 +139,61 @@ const IDTR_SLOT: usize = 1;
 pub(crate) trait VpRegisters {
     fn read_words(&self, regs: &[Reg], out: &mut [u64]) -> WhpResult<()>;
     fn write_words(&self, regs: &[Reg], words: &[u64]) -> WhpResult<()>;
-    fn read_segments(&self, regs: &[Reg], out: &mut [SegmentRegister]) -> WhpResult<()>;
-    fn write_segments(&self, regs: &[Reg], segments: &[SegmentRegister]) -> WhpResult<()>;
-    fn read_tables(&self, regs: &[Reg], out: &mut [TableRegister]) -> WhpResult<()>;
-    fn write_tables(&self, regs: &[Reg], tables: &[TableRegister]) -> WhpResult<()>;
+    /// Registers of mixed shape in one call — what a whole-state exchange uses,
+    /// and the only shape it needs. The per-shape calls the platform also
+    /// offers are not here because nothing above this seam wants them: a
+    /// processor is exchanged whole or not at all.
+    fn read_registers(&self, regs: &[Reg], out: &mut [RegisterValue]) -> WhpResult<()>;
+    fn write_registers(&self, regs: &[Reg], values: &[RegisterValue]) -> WhpResult<()>;
+}
+
+/// Every register a whole-state exchange moves, in the order the exchange reads
+/// and writes them.
+///
+/// One list, so one platform call carries the lot. The layout is words, then
+/// model specific registers, then segments, then descriptor tables, and
+/// [`WORD_VALUES`], [`MSR_VALUES`] and the segment count are the offsets into
+/// it — a register added to any group shifts the ones after it and both sides
+/// follow, because both index the same constants.
+fn whole_state_regs() -> [Reg; WHOLE_STATE] {
+    let mut regs = [Reg::Rax; WHOLE_STATE];
+    let (words, rest) = regs.split_at_mut(WORD_VALUES);
+    words.copy_from_slice(WORD_REGS);
+    let (msrs, rest) = rest.split_at_mut(MSR_VALUES);
+    msrs.copy_from_slice(MSR_REGS);
+    let (segments, tables) = rest.split_at_mut(SEGMENT_VALUES);
+    segments.copy_from_slice(SEGMENT_REGS);
+    tables.copy_from_slice(TABLE_REGS);
+    regs
+}
+
+/// How many segment registers the exchange carries.
+const SEGMENT_VALUES: usize = 8;
+
+/// Where the time-stamp counter sits within [`MSR_REGS`] — last, which is what
+/// [`IMPORTED_MSRS`] rests on.
+const TSC_SLOT: usize = MSR_VALUES - 1;
+
+/// How many registers a whole-state exchange names.
+const WHOLE_STATE: usize = WORD_VALUES + MSR_VALUES + SEGMENT_VALUES + 2;
+
+/// Where the segments begin in [`whole_state_regs`].
+const SEGMENTS_AT: usize = WORD_VALUES + MSR_VALUES;
+
+/// Where the descriptor tables begin in [`whole_state_regs`].
+const TABLES_AT: usize = SEGMENTS_AT + SEGMENT_VALUES;
+
+/// Take a word from a value the platform returned, or zero if it is not one.
+///
+/// A mismatch means [`whole_state_regs`] and the offsets above have drifted
+/// apart, which is a defect in this file rather than anything the platform did
+/// — so it reads as zero and the guest-visible tests catch it, instead of a
+/// panic in a library.
+const fn word_of(value: RegisterValue) -> u64 {
+    match value {
+        RegisterValue::Word(word) => word,
+        _ => 0,
+    }
 }
 
 /// The two sides count a segment's limit differently, and this is where that
@@ -195,33 +254,44 @@ pub(crate) fn import(vp: &impl VpRegisters, state: &VcpuArchState) -> WhpResult<
     // slice. See [`IMPORTED_MSRS`].
     let msrs = msr_words(&state.msrs, state.xcr0);
 
-    // One call for both. The platform takes an arbitrary list of register
-    // names, and the cost of a register transfer is overwhelmingly the call
-    // rather than the registers in it — a machine booting takes one of these
-    // per slice, so a call saved here is a call saved a hundred thousand
-    // times. The lists stay separate because they are read back separately and
-    // written to different halves of the state.
-    let mut names = [Reg::Rax; WORD_VALUES + IMPORTED_MSRS];
-    let mut values = [0u64; WORD_VALUES + IMPORTED_MSRS];
-    names[..WORD_VALUES].copy_from_slice(WORD_REGS);
-    names[WORD_VALUES..].copy_from_slice(&MSR_REGS[..IMPORTED_MSRS]);
-    values[..WORD_VALUES].copy_from_slice(&words);
-    values[WORD_VALUES..].copy_from_slice(&msrs[..IMPORTED_MSRS]);
-    vp.write_words(&names, &values)?;
-
-    let mut segments = [SegmentRegister::default(); 8];
+    let mut segments = [SegmentRegister::default(); SEGMENT_VALUES];
     for (slot, seg) in segments.iter_mut().zip(&state.segments) {
         *slot = to_platform_segment(*seg);
     }
     segments[LDTR_SLOT] = to_platform_segment(state.ldtr);
     segments[TR_SLOT] = to_platform_segment(state.tr);
-    vp.write_segments(SEGMENT_REGS, &segments)?;
 
     let tables = [
         TableRegister { base: state.gdtr.base, limit: state.gdtr.limit },
         TableRegister { base: state.idtr.base, limit: state.idtr.limit },
     ];
-    vp.write_tables(TABLE_REGS, &tables)
+
+    // The whole processor in one call, as `export` reads it — minus the
+    // time-stamp counter, which is why the names are the whole-state list with
+    // that one register left out rather than the list itself.
+    let all = whole_state_regs();
+    let mut names = [Reg::Rax; WHOLE_STATE - 1];
+    let mut values = [RegisterValue::Word(0); WHOLE_STATE - 1];
+    let mut at = 0;
+    for (index, reg) in all.iter().enumerate() {
+        // The one register the hardware owns. Writing the shadow's copy back
+        // would drag the guest's clock backwards on every slice.
+        if index == WORD_VALUES + TSC_SLOT {
+            continue;
+        }
+        names[at] = *reg;
+        values[at] = if index < WORD_VALUES {
+            RegisterValue::Word(words[index])
+        } else if index < SEGMENTS_AT {
+            RegisterValue::Word(msrs[index - WORD_VALUES])
+        } else if index < TABLES_AT {
+            RegisterValue::Segment(segments[index - SEGMENTS_AT])
+        } else {
+            RegisterValue::Table(tables[index - TABLES_AT])
+        };
+        at += 1;
+    }
+    vp.write_registers(&names, &values)
 }
 
 /// Read the processor into `state`, leaving the parts this seam does not carry
@@ -230,14 +300,17 @@ pub(crate) fn import(vp: &impl VpRegisters, state: &VcpuArchState) -> WhpResult<
 /// # Errors
 /// Whatever the platform said about a register it would not give up.
 pub(crate) fn export(vp: &impl VpRegisters, state: &mut VcpuArchState) -> WhpResult<()> {
-    // Both word-shaped groups in one call, for the reason given in `import`:
-    // the call dominates, and a booting machine takes one of these per slice.
-    let mut names = [Reg::Rax; WORD_VALUES + MSR_VALUES];
-    let mut all = [0u64; WORD_VALUES + MSR_VALUES];
-    names[..WORD_VALUES].copy_from_slice(WORD_REGS);
-    names[WORD_VALUES..].copy_from_slice(MSR_REGS);
-    vp.read_words(&names, &mut all)?;
-    let (words, msrs) = all.split_at(WORD_VALUES);
+    // The whole processor in one call. The cost of a transfer is the call and
+    // not the registers in it, and a booting machine makes one of these per
+    // slice — a hundred thousand over a DLX boot — so the three calls this
+    // replaces were three times the price for the same information.
+    let names = whole_state_regs();
+    let mut values = [RegisterValue::Word(0); WHOLE_STATE];
+    vp.read_registers(&names, &mut values)?;
+    let words: [u64; WORD_VALUES] =
+        core::array::from_fn(|index| word_of(values[index]));
+    let msrs: [u64; MSR_VALUES] =
+        core::array::from_fn(|index| word_of(values[WORD_VALUES + index]));
 
     state.gprs.copy_from_slice(&words[..16]);
     state.rip = words[16];
@@ -270,16 +343,23 @@ pub(crate) fn export(vp: &impl VpRegisters, state: &mut VcpuArchState) -> WhpRes
     // the same narrowing `xcr0.get32()` performs on the processor.
     state.xcr0 = msrs[11] as u32;
 
-    let mut segments = [SegmentRegister::default(); 8];
-    vp.read_segments(SEGMENT_REGS, &mut segments)?;
+    let segments: [SegmentRegister; SEGMENT_VALUES] = core::array::from_fn(|index| {
+        match values[SEGMENTS_AT + index] {
+            RegisterValue::Segment(seg) => seg,
+            _ => SegmentRegister::default(),
+        }
+    });
     for (slot, seg) in state.segments.iter_mut().zip(&segments) {
         *slot = from_platform_segment(*seg);
     }
     state.ldtr = from_platform_segment(segments[LDTR_SLOT]);
     state.tr = from_platform_segment(segments[TR_SLOT]);
 
-    let mut tables = [TableRegister::default(); 2];
-    vp.read_tables(TABLE_REGS, &mut tables)?;
+    let tables: [TableRegister; 2] =
+        core::array::from_fn(|index| match values[TABLES_AT + index] {
+            RegisterValue::Table(table) => table,
+            _ => TableRegister::default(),
+        });
     state.gdtr = DescriptorTableState {
         base: tables[GDTR_SLOT].base,
         limit: tables[GDTR_SLOT].limit,
@@ -313,23 +393,10 @@ mod tests {
         ALL_REGS.iter().position(|candidate| *candidate == reg).expect("a known register")
     }
 
-    impl VpRegisters for Recorder {
-        fn read_words(&self, regs: &[Reg], out: &mut [u64]) -> WhpResult<()> {
-            let words = self.words.borrow();
-            for (slot, reg) in out.iter_mut().zip(regs) {
-                *slot = words.get(&key(*reg)).copied().unwrap_or(0);
-            }
-            Ok(())
-        }
-
-        fn write_words(&self, regs: &[Reg], words: &[u64]) -> WhpResult<()> {
-            let mut stored = self.words.borrow_mut();
-            for (reg, word) in regs.iter().zip(words) {
-                stored.insert(key(*reg), *word);
-            }
-            Ok(())
-        }
-
+    /// The per-shape stores behind the recorder. Inherent rather than part of
+    /// [`VpRegisters`], because that trait carries only what the exchange asks
+    /// of a real processor and a mixed batch is all it asks.
+    impl Recorder {
         fn read_segments(&self, regs: &[Reg], out: &mut [SegmentRegister]) -> WhpResult<()> {
             let segments = self.segments.borrow();
             for (slot, reg) in out.iter_mut().zip(regs) {
@@ -361,6 +428,61 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    impl VpRegisters for Recorder {
+        fn read_words(&self, regs: &[Reg], out: &mut [u64]) -> WhpResult<()> {
+            let words = self.words.borrow();
+            for (slot, reg) in out.iter_mut().zip(regs) {
+                *slot = words.get(&key(*reg)).copied().unwrap_or(0);
+            }
+            Ok(())
+        }
+
+        fn write_words(&self, regs: &[Reg], words: &[u64]) -> WhpResult<()> {
+            let mut stored = self.words.borrow_mut();
+            for (reg, word) in regs.iter().zip(words) {
+                stored.insert(key(*reg), *word);
+            }
+            Ok(())
+        }
+
+        /// Routed by the same shape rule the platform uses, so the recorder
+        /// files a mixed batch exactly where the per-shape calls would.
+        fn read_registers(&self, regs: &[Reg], out: &mut [RegisterValue]) -> WhpResult<()> {
+            for (slot, reg) in out.iter_mut().zip(regs) {
+                *slot = match rusty_box_whp::shape_of(*reg) {
+                    RegisterValue::Word(_) => {
+                        let mut word = [0u64];
+                        self.read_words(&[*reg], &mut word)?;
+                        RegisterValue::Word(word[0])
+                    }
+                    RegisterValue::Segment(_) => {
+                        let mut seg = [SegmentRegister::default()];
+                        self.read_segments(&[*reg], &mut seg)?;
+                        RegisterValue::Segment(seg[0])
+                    }
+                    RegisterValue::Table(_) => {
+                        let mut table = [TableRegister::default()];
+                        self.read_tables(&[*reg], &mut table)?;
+                        RegisterValue::Table(table[0])
+                    }
+                };
+            }
+            Ok(())
+        }
+
+        fn write_registers(&self, regs: &[Reg], values: &[RegisterValue]) -> WhpResult<()> {
+            for (reg, value) in regs.iter().zip(values) {
+                match *value {
+                    RegisterValue::Word(word) => self.write_words(&[*reg], &[word])?,
+                    RegisterValue::Segment(seg) => self.write_segments(&[*reg], &[seg])?,
+                    RegisterValue::Table(table) => self.write_tables(&[*reg], &[table])?,
+                }
+            }
+            Ok(())
+        }
+
     }
 
     /// A distinctive state, so a field that lands in the wrong slot shows up as

@@ -20,7 +20,7 @@ use crate::caps::MsrExits;
 use crate::error::{WhpError, WhpResult};
 use rusty_box_core::GpaPerms;
 
-use crate::sys::{self, GvaTranslation, PropertyCode, RawPartition};
+use crate::sys::{self, GvaTranslation, PropertyCode, RawPartition, RegisterValue};
 use crate::vcpu::{
     Exit, InternalActivity, InterruptRequest, PendingInterruption, Reg, SegmentRegister,
     TableRegister,
@@ -651,6 +651,41 @@ impl Partition {
     /// As [`Partition::read_regs`].
     pub fn write_regs(&self, index: u32, regs: &[Reg], words: &[u64]) -> WhpResult<()> {
         sys::set_words(self.handle.0, index, regs, words)
+    }
+
+    /// Read registers of mixed shape — words, segments and descriptor tables —
+    /// in a single call.
+    ///
+    /// The whole architectural state of a processor is one transfer rather
+    /// than several. That matters because the cost of a transfer is the call
+    /// and not the registers in it, and a machine running a guest makes one per
+    /// slice: on a DLX boot, a hundred thousand of them. Each value arrives in
+    /// the shape its register names, decided here rather than by the caller.
+    ///
+    /// # Errors
+    /// As [`Partition::read_regs`], and a contract error if the slices
+    /// disagree in length or exceed one call's worth.
+    pub fn read_registers(
+        &self,
+        index: u32,
+        regs: &[Reg],
+        out: &mut [RegisterValue],
+    ) -> WhpResult<()> {
+        sys::get_registers(self.handle.0, index, regs, out)
+    }
+
+    /// Write registers of mixed shape in a single call. The counterpart of
+    /// [`Partition::read_registers`].
+    ///
+    /// # Errors
+    /// As [`Partition::read_registers`].
+    pub fn write_registers(
+        &self,
+        index: u32,
+        regs: &[Reg],
+        values: &[RegisterValue],
+    ) -> WhpResult<()> {
+        sys::set_registers(self.handle.0, index, regs, values)
     }
 
     /// Write one word-shaped register.

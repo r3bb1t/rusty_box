@@ -13,6 +13,7 @@
 use crate::error::{WhpError, WhpResult};
 use crate::sys::{
     CapabilityCode, CounterSet, GpaPerms, GvaTranslation, PropertyCode, RawPartition,
+    RegisterValue,
 };
 use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister, TableRegister};
 
@@ -112,6 +113,24 @@ pub(crate) fn get_words(
     _index: u32,
     _regs: &[Reg],
     _out: &mut [u64],
+) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub(crate) fn get_registers(
+    _partition: RawPartition,
+    _index: u32,
+    _regs: &[Reg],
+    _out: &mut [RegisterValue],
+) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub(crate) fn set_registers(
+    _partition: RawPartition,
+    _index: u32,
+    _regs: &[Reg],
+    _values: &[RegisterValue],
 ) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }

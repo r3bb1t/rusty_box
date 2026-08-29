@@ -47,7 +47,7 @@ pub use partition::{
     Canceller, HostPages, InterceptCounter, InterceptCounters, InterruptRequester, LateProperty,
     LocalApicMode, Partition, PartitionConfig, RuntimeCounters, PAGE_SIZE,
 };
-pub use sys::GvaTranslation;
+pub use sys::{shape_of, GvaTranslation, RegisterValue};
 
 /// Re-exported so a caller mapping memory into a partition need not also name
 /// the core crate. It is core's type, not this crate's: a permission on a

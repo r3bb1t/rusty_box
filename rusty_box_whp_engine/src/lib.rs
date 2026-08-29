@@ -58,7 +58,7 @@ pub use engine::{ExitCounts, PlatformCounters, SliceCensus, WhpEngine};
 /// engine forwards rather than defines.
 pub use rusty_box_whp::{InterceptCounter, InterceptCounters, RuntimeCounters};
 
-use rusty_box_whp::{Partition, Reg, SegmentRegister, TableRegister, WhpResult};
+use rusty_box_whp::{Partition, Reg, RegisterValue, WhpResult};
 
 /// One virtual processor of a partition, as the state exchange addresses it.
 ///
@@ -85,20 +85,12 @@ impl state::VpRegisters for Vp<'_> {
         self.partition.write_regs(self.index, regs, words)
     }
 
-    fn read_segments(&self, regs: &[Reg], out: &mut [SegmentRegister]) -> WhpResult<()> {
-        self.partition.read_segments(self.index, regs, out)
+    fn read_registers(&self, regs: &[Reg], out: &mut [RegisterValue]) -> WhpResult<()> {
+        self.partition.read_registers(self.index, regs, out)
     }
 
-    fn write_segments(&self, regs: &[Reg], segments: &[SegmentRegister]) -> WhpResult<()> {
-        self.partition.write_segments(self.index, regs, segments)
-    }
-
-    fn read_tables(&self, regs: &[Reg], out: &mut [TableRegister]) -> WhpResult<()> {
-        self.partition.read_tables(self.index, regs, out)
-    }
-
-    fn write_tables(&self, regs: &[Reg], tables: &[TableRegister]) -> WhpResult<()> {
-        self.partition.write_tables(self.index, regs, tables)
+    fn write_registers(&self, regs: &[Reg], values: &[RegisterValue]) -> WhpResult<()> {
+        self.partition.write_registers(self.index, regs, values)
     }
 }
 
