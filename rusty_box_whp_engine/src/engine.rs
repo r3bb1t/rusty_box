@@ -1031,8 +1031,22 @@ fn install_the_shadow<T: Instrumentation>(
     // only writer: the machine owns this processor between slices and may set a
     // register itself, and a flag the engine maintains could not see that. The
     // comparison can.
-    if held.as_ref() == Some(state) {
-        return Ok(());
+    // Every field except the time-stamp counter, because that is the one field
+    // `state::import` does not write: the hardware owns it, and the shadow's
+    // own answer for it is not what the partition holds. Comparing it asks
+    // whether a register that is never sent has changed, which it always has —
+    // and the skip below never fired.
+    //
+    // Swapped in place rather than compared field by field, so a field added
+    // to the state joins the comparison without being remembered here.
+    if let Some(previous) = held.as_ref() {
+        let exported = state.msrs.tsc;
+        state.msrs.tsc = previous.msrs.tsc;
+        let unchanged = previous == state;
+        state.msrs.tsc = exported;
+        if unchanged {
+            return Ok(());
+        }
     }
     state::import(&Vp::new(partition, BOOT_VP), state).map_err(|error| refused_state(error, state))?;
     *held = Some(state.clone());
