@@ -46,11 +46,21 @@ pub struct TraceBookkeeping(u32);
 pub struct DeliverableInterrupt(u32);
 
 impl DeliverableInterrupt {
-    /// The external-interrupt bit alone. NOT the whole deliverable set: an
-    /// `INIT`, an `SMI` or a shutdown is not something to postpone for the
-    /// convenience of finishing an instruction, and a fault raised BY that
+    /// The external-interrupt bits, and only those. NOT the whole deliverable
+    /// set: an `INIT`, an `SMI` or a shutdown is not something to postpone for
+    /// the convenience of finishing an instruction, and a fault raised BY that
     /// instruction must still be taken by it.
-    const MASK: u32 = BxCpuC::<()>::BX_EVENT_PENDING_INTR;
+    ///
+    /// All three of them, because all three are what
+    /// [`BxCpuC::handle_async_event`] will deliver as an external interrupt.
+    /// Holding back the 8259's bit alone left the other two deliverable in the
+    /// middle of a trapped instruction — the very thing this type exists to
+    /// prevent — and which one a machine uses is a property of the guest: a
+    /// guest routing its timer through the 8259 was safe, one routing it
+    /// through an I/O APIC to the local APIC was not.
+    const MASK: u32 = BxCpuC::<()>::BX_EVENT_PENDING_INTR
+        | BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR
+        | BxCpuC::<()>::BX_EVENT_PENDING_VMX_VIRTUAL_INTR;
 }
 
 impl TraceBookkeeping {
