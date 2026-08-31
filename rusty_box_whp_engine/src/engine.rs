@@ -160,11 +160,36 @@ impl ExitHistory {
 /// which is the point. It answers the question the guest's own crash report
 /// cannot: what the processor was doing at the instant of the fault, rather
 /// than what the handler could still print once the damage was done.
+/// The exceptions the platform hands back instead of delivering to the guest.
+///
+/// `#GP` always, because the platform answers a handful of model-specific
+/// registers itself and refuses writes this port's own processor completes.
+/// `IA32_FEATURE_CONTROL` is the one every boot reaches: the firmware sees VMX
+/// in `CPUID`, writes the register to lock it, and the platform refuses —
+/// in code that has no interrupt descriptor table yet, which is a triple fault
+/// before the boot loader has run. Trapped, the write is finished on the
+/// shadow instead, and the guest sees what the interpreter would have shown
+/// it.
+///
+/// `WHP_TRAP_EXCEPTIONS` names a different set as a hex vector bitmask — bit
+/// 13 is `#GP`, bit 14 is `#PF` — and asks for a full report at each one.
 fn trapped_exceptions() -> u64 {
-    std::env::var("WHP_TRAP_EXCEPTIONS")
-        .ok()
-        .and_then(|vectors| u64::from_str_radix(vectors.trim_start_matches("0x"), 16).ok())
-        .unwrap_or(0)
+    /// Vector 13, the fault the platform's refusals arrive as.
+    const GENERAL_PROTECTION: u64 = 1 << 13;
+
+    match std::env::var("WHP_TRAP_EXCEPTIONS") {
+        Ok(vectors) => u64::from_str_radix(vectors.trim_start_matches("0x"), 16)
+            .unwrap_or(GENERAL_PROTECTION),
+        Err(_) => GENERAL_PROTECTION,
+    }
+}
+
+/// Whether each trapped fault is described in full as it is serviced.
+///
+/// Off unless asked for: servicing one is ordinary work, and a guest takes
+/// exceptions as part of running correctly.
+fn reports_each_fault() -> bool {
+    std::env::var_os("WHP_TRAP_EXCEPTIONS").is_some()
 }
 
 /// Guest code this port has not been asked to run on hardware yet, and which
@@ -191,7 +216,11 @@ fn unserviced(what: &'static str, exit: &Exit) -> CpuError {
         (exit.vp.execution_state >> 6) & 1,
         (exit.vp.execution_state >> 12) & 1,
     );
-    CpuError::UnsupportedCpuOperation { operation: "WHP exit not serviced by this engine" }
+    // The reason travels in the error, not only in the log. A caller that shows
+    // this to a person — the GUI puts it in a box on the window — otherwise
+    // reports that something went wrong without saying what, and the one fact
+    // that would identify it is sitting in a log they may not be reading.
+    CpuError::UnsupportedCpuOperation { operation: what }
 }
 
 fn platform_failed(error: WhpError) -> CpuError {
@@ -1258,92 +1287,19 @@ fn run_the_exit_loop<T: Instrumentation>(
             }
             ExitReason::InterruptWindow => return Err(unserviced("interrupt window", &exit)),
             ExitReason::Exception => {
-                // Diagnostic only — reached solely when `WHP_TRAP_EXCEPTIONS`
-                // asked for it. The whole point of trapping a fault rather
-                // than letting the guest report it is that the processor is
-                // still standing exactly where it faulted, so describe it
-                // fully here; a guest's own crash dump is written after its
-                // handler has already run over half of this.
-                read_back_into_the_shadow(started, cpu)?;
-                let mut state = VcpuArchState::default();
-                cpu.export_arch_state(&mut state);
-                // What the guest was doing on the way here. `o`/`i` are port
-                // writes and reads, `S` a string or repeated one, `m` memory,
-                // `h` a halt.
-                let trail: std::vec::Vec<std::string::String> = history
-                    .replay()
-                    .map(|(rip, kind)| std::format!("{}@{rip:#x}", kind as char))
-                    .collect();
-                tracing::error!("  exits leading here (oldest first): {}", trail.join(" "));
-                const NAMES: [&str; 16] = [
-                    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10",
-                    "r11", "r12", "r13", "r14", "r15",
-                ];
-                for (name, value) in NAMES.iter().zip(state.gprs.iter()) {
-                    tracing::error!("  {name} = {value:#x}");
+                // The platform hands a trapped fault back instead of
+                // delivering it, so the processor still stands on the
+                // instruction that raised it and the shadow can finish that
+                // instruction itself. It either completes what the platform
+                // refused — the firmware's write to `IA32_FEATURE_CONTROL` is
+                // the one every boot reaches — or raises the same fault and
+                // enters the guest's own handler. Either way the guest sees
+                // what the interpreter would have shown it, which is the same
+                // treatment an MMIO access, a `CPUID` and a port access get.
+                if reports_each_fault() {
+                    report_the_fault(started, cpu, io, &exit, history)?;
                 }
-                const SEGMENTS: [&str; 6] = ["es", "cs", "ss", "ds", "fs", "gs"];
-                for (name, seg) in SEGMENTS.iter().zip(state.segments.iter()) {
-                    tracing::error!(
-                        "  {name} = {:#06x} base {:#x} limit {:#x} attr {:#x}",
-                        seg.selector,
-                        seg.base,
-                        seg.limit,
-                        seg.attributes.bits()
-                    );
-                }
-                tracing::error!(
-                    "  rip {:#x} rflags {:#x} cr0 {:#x} cr2 {:#x} cr3 {:#x} cr4 {:#x}",
-                    state.rip,
-                    state.rflags,
-                    state.cr0,
-                    state.cr2,
-                    state.cr3,
-                    state.cr4
-                );
-
-                // The bytes at the faulting instruction, and the stack it is
-                // about to act on. A fault on `IRET` is a claim about the
-                // frame under `SS:ESP`, and this is the only place that frame
-                // can still be read as the processor sees it.
-                let stack = state.segments[2].base.wrapping_add(state.gprs[4]);
-                let code = state.segments[1].base.wrapping_add(state.rip);
-                // A window BEFORE the faulting instruction as well as at it:
-                // the handler that led here is the interesting part, and it
-                // is the bytes immediately preceding the `IRET`.
-                let before = code.wrapping_sub(0x60);
-                for (what, linear, len) in
-                    [("before", before, 0x60u64), ("code", code, 16u64), ("stack", stack, 24u64)]
-                {
-                    match started.partition.translate_gva(BOOT_VP, linear) {
-                        Ok(translation) if translation.result_code == 0 => {
-                            // Straight out of the allocation at the guest
-                            // -physical address: RAM below the PCI hole is
-                            // identity-mapped, which `MemoryPlan`'s own
-                            // equivalence test asserts page by page. A
-                            // diagnostic may lean on that; a data path may not.
-                            match io.memory.allocation_slice(translation.gpa, len) {
-                                Some(bytes) => tracing::error!(
-                                    "  {what} at {linear:#x} (gpa {:#x}): {:02x?}",
-                                    translation.gpa,
-                                    bytes
-                                ),
-                                None => tracing::error!(
-                                    "  {what} at {linear:#x} (gpa {:#x}) is outside the allocation",
-                                    translation.gpa
-                                ),
-                            }
-                        }
-                        Ok(translation) => tracing::error!(
-                            "  {what} at {linear:#x} did not translate (code {})",
-                            translation.result_code
-                        ),
-                        Err(error) => {
-                            tracing::error!("  {what} at {linear:#x} translation failed: {error}")
-                        }
-                    }
-                }
-                return Err(unserviced("exception", &exit));
+                finish_on_the_shadow(started, cpu, io, Trapped::Access)?;
             }
             ExitReason::Rdtsc => return Err(unserviced("RDTSC", &exit)),
             ExitReason::UnrecoverableException => {
@@ -1497,6 +1453,105 @@ fn withhold_virtualisation_from(state: &mut VcpuArchState, leaf: u32) {
         0x8000_0001 => state.gprs[RCX] &= !SVM,
         _ => {}
     }
+}
+
+/// Describe a trapped fault while the processor is still standing on it.
+///
+/// A guest's own crash dump is written after its handler has already run over
+/// half of this, so the registers, the segments, the bytes at the faulting
+/// instruction and the stack it was about to act on are only readable here.
+/// Asked for by name with `WHP_TRAP_EXCEPTIONS`, because a guest takes
+/// exceptions as part of running correctly and every one of them would
+/// otherwise be reported.
+fn report_the_fault<T: Instrumentation>(
+    started: &mut Started,
+    cpu: &mut BxCpuC<T>,
+    io: &mut PcIo<'_>,
+    exit: &Exit,
+    history: &ExitHistory,
+) -> Result<()> {
+    read_back_into_the_shadow(started, cpu)?;
+    let mut state = VcpuArchState::default();
+    cpu.export_arch_state(&mut state);
+    tracing::error!(
+        "trapped fault at {:#x}:{:#x} (cs base {:#x})",
+        exit.vp.cs.selector,
+        exit.vp.rip,
+        exit.vp.cs.base
+    );
+    // What the guest was doing on the way here. `o`/`i` are port writes and
+    // reads, `S` a string or repeated one, `m` memory, `h` a halt.
+    let trail: std::vec::Vec<std::string::String> =
+        history.replay().map(|(rip, kind)| std::format!("{}@{rip:#x}", kind as char)).collect();
+    tracing::error!("  exits leading here (oldest first): {}", trail.join(" "));
+    const NAMES: [&str; 16] = [
+        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12",
+        "r13", "r14", "r15",
+    ];
+    for (name, value) in NAMES.iter().zip(state.gprs.iter()) {
+        tracing::error!("  {name} = {value:#x}");
+    }
+    const SEGMENTS: [&str; 6] = ["es", "cs", "ss", "ds", "fs", "gs"];
+    for (name, seg) in SEGMENTS.iter().zip(state.segments.iter()) {
+        tracing::error!(
+            "  {name} = {:#06x} base {:#x} limit {:#x} attr {:#x}",
+            seg.selector,
+            seg.base,
+            seg.limit,
+            seg.attributes.bits()
+        );
+    }
+    tracing::error!(
+        "  rip {:#x} rflags {:#x} cr0 {:#x} cr2 {:#x} cr3 {:#x} cr4 {:#x}",
+        state.rip,
+        state.rflags,
+        state.cr0,
+        state.cr2,
+        state.cr3,
+        state.cr4
+    );
+
+    // The bytes at the faulting instruction, and the stack it is about to act
+    // on. A fault on `IRET` is a claim about the frame under `SS:ESP`, and
+    // this is the only place that frame can still be read as the processor
+    // sees it.
+    let stack = state.segments[2].base.wrapping_add(state.gprs[4]);
+    let code = state.segments[1].base.wrapping_add(state.rip);
+    // A window BEFORE the faulting instruction as well as at it: the handler
+    // that led here is the interesting part, and it is the bytes immediately
+    // preceding the `IRET`.
+    let before = code.wrapping_sub(0x60);
+    for (what, linear, len) in
+        [("before", before, 0x60u64), ("code", code, 16u64), ("stack", stack, 24u64)]
+    {
+        match started.partition.translate_gva(BOOT_VP, linear) {
+            Ok(translation) if translation.result_code == 0 => {
+                // Straight out of the allocation at the guest-physical
+                // address: RAM below the PCI hole is identity-mapped, which
+                // `MemoryPlan`'s own equivalence test asserts page by page. A
+                // diagnostic may lean on that; a data path may not.
+                match io.memory.allocation_slice(translation.gpa, len) {
+                    Some(bytes) => tracing::error!(
+                        "  {what} at {linear:#x} (gpa {:#x}): {:02x?}",
+                        translation.gpa,
+                        bytes
+                    ),
+                    None => tracing::error!(
+                        "  {what} at {linear:#x} (gpa {:#x}) is outside the allocation",
+                        translation.gpa
+                    ),
+                }
+            }
+            Ok(translation) => tracing::error!(
+                "  {what} at {linear:#x} did not translate (code {})",
+                translation.result_code
+            ),
+            Err(error) => {
+                tracing::error!("  {what} at {linear:#x} translation failed: {error}")
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Execute the trapped instruction on the shadow processor.
