@@ -108,8 +108,36 @@ pub struct LoggingToml {
     pub level: Option<LogLevel>,
 }
 
+/// Which engine retires the guest's instructions.
+///
+/// Named rather than a bool because a third is already foreseen — a KVM leaf
+/// on Linux — and because a reader of `--engine whp` should not have to know
+/// which way round a flag points.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Deserialize,
+    serde::Serialize,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Engine {
+    /// This port's own interpreter. Everywhere, and the default.
+    #[default]
+    Interpreter,
+    /// The Windows Hypervisor Platform. Needs the `hv-whp` feature and a host
+    /// that has the platform enabled.
+    Whp,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedConfig {
+    /// Which engine retires the guest's instructions.
+    pub engine: Engine,
     pub memory_mib: u32,
     pub host_memory_mib: u32,
     pub memory_block_kib: u32,
@@ -330,6 +358,7 @@ fn resolve_config_with_base(
     validate_boot_order(&boot_order, disk.is_some(), cdrom.is_some())?;
 
     Ok(ResolvedConfig {
+        engine: args.engine,
         memory_mib,
         host_memory_mib,
         memory_block_kib,

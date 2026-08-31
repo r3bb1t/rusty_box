@@ -112,6 +112,12 @@ pub enum RunError {
     #[error("egui window failed: {message}")]
     Gui { message: String },
 
+    #[error(
+        "this host has no Windows Hypervisor Platform, so `--engine whp` cannot run. \
+         Enable it with: dism /Online /Enable-Feature /FeatureName:HypervisorPlatform"
+    )]
+    NoHypervisor,
+
     #[error(transparent)]
     Emulator(#[from] rusty_box::Error),
 }

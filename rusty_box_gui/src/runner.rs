@@ -161,8 +161,27 @@ where
         builder = builder.cdrom_file(slot, path_to_str(&cdrom.path)?);
     }
 
+    // The hypervisor engine, when this build has it and the caller asked.
+    //
+    // Returns from here rather than falling through, because the two machines
+    // are different TYPES — the engine is a type parameter, not a field — so
+    // one binding cannot hold either. What they share is `drive`, which is
+    // generic over exactly that parameter.
+    #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+    if config.engine == crate::config::Engine::Whp {
+        // Asked for and absent is a refusal, not a silent fall back to the
+        // interpreter: a caller who chose an engine wants to know it did not
+        // get it, and a boot that quietly ran somewhere else is a measurement
+        // nobody can trust.
+        if !rusty_box_whp_engine::hypervisor_present().unwrap_or(false) {
+            return Err(RunError::NoHypervisor);
+        }
+        let emu = builder.build_on::<rusty_box_whp_engine::WhpEngine>()?;
+        return drive(emu, &config, stop_flag);
+    }
+
     #[cfg(not(feature = "guest-trace"))]
-    let mut emu = builder.build()?;
+    let emu = builder.build()?;
     // Diagnostic build: run the CPU with the guest-death tracer installed.
     // Single-CPU only — one tracer instance cannot be shared between processors.
     #[cfg(feature = "guest-trace")]
@@ -179,6 +198,24 @@ where
         builder.tracer(tracer).build()?
     };
 
+    drive(emu, &config, stop_flag)
+}
+
+/// Bring a built machine up and run it, whichever engine retires its guest's
+/// instructions.
+///
+/// Generic over the engine rather than written twice, because none of this
+/// depends on which one it is: a machine on the hypervisor takes the same
+/// stop flag, the same pre-boot video mode and the same queued keystroke as a
+/// machine on the interpreter, and answers `run_interactive` the same way.
+fn drive<E>(
+    mut emu: Box<rusty_box::emulator::Emulator<(), E>>,
+    config: &ResolvedConfig,
+    stop_flag: Option<Arc<AtomicBool>>,
+) -> Result<RunSummary, RunError>
+where
+    E: rusty_box::emulator::SliceEngine<()>,
+{
     if let Some(stop_flag) = stop_flag {
         emu.set_stop_flag(stop_flag);
     }

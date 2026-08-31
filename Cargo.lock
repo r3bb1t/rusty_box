@@ -3767,6 +3767,7 @@ dependencies = [
  "rfd",
  "rusty_box",
  "rusty_box_bximage",
+ "rusty_box_whp_engine",
  "serde",
  "thiserror 2.0.18",
  "toml 0.8.23",

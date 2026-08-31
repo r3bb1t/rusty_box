@@ -189,6 +189,8 @@ struct NativeVmSettings {
     boot_order: Vec<crate::args::BootDevice>,
     pci: bool,
     sync_slowdown: bool,
+    /// Which engine retires the guest's instructions.
+    engine: crate::config::Engine,
     max_instructions: u64,
     log_level: crate::args::LogLevel,
     bios_path: String,
@@ -226,6 +228,7 @@ impl NativeVmSettings {
             boot_order: config.boot_order.clone(),
             pci: config.pci,
             sync_slowdown: config.sync_slowdown,
+            engine: config.engine,
             max_instructions: if config.max_instructions == u64::MAX {
                 0
             } else {
@@ -241,7 +244,13 @@ impl NativeVmSettings {
             disk_path: disk.map_or_else(String::new, |disk| disk.path.display().to_string()),
             disk_channel: disk.map_or(0, |disk| disk.channel),
             disk_drive: disk.map_or(0, |disk| disk.drive),
-            disk_chs_override: None,
+            // The geometry the configuration already resolved, carried rather
+            // than re-derived. Detecting it a second time here is a second
+            // answer for the same disk, and the two disagree whenever the
+            // image's sector count is not a multiple of the detected heads
+            // times sectors-per-track: the tail of the image becomes
+            // unreachable, which is where a boot loader keeps its map.
+            disk_chs_override: disk.map(|disk| disk.geometry),
             disk_creation: disk.and_then(|disk| disk.creation.clone()),
             cdrom_enabled: cdrom.is_some(),
             cdrom_path: cdrom.map_or_else(String::new, |cdrom| cdrom.path.display().to_string()),
@@ -271,6 +280,7 @@ impl NativeVmSettings {
             })?;
         config.pci = self.pci;
         config.sync_slowdown = self.sync_slowdown;
+        config.engine = self.engine;
         config.max_instructions = if self.max_instructions == 0 {
             u64::MAX
         } else {
@@ -1481,6 +1491,32 @@ impl NativeShellApp {
                     changed |= ui
                         .checkbox(&mut self.settings.sync_slowdown, "Sync slowdown")
                         .changed();
+                    // Which engine retires the guest's instructions. The
+                    // hypervisor is offered only by a build that carries it on
+                    // a host that has it, because choosing it otherwise is
+                    // refused at power-on rather than quietly downgraded — see
+                    // `RunError::NoHypervisor`.
+                    egui::ComboBox::from_label("Engine")
+                        .selected_text(engine_label(self.settings.engine))
+                        .show_ui(ui, |ui| {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.settings.engine,
+                                    crate::config::Engine::Interpreter,
+                                    engine_label(crate::config::Engine::Interpreter),
+                                )
+                                .changed();
+                            #[cfg(all(feature = "hv-whp", windows))]
+                            {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut self.settings.engine,
+                                        crate::config::Engine::Whp,
+                                        engine_label(crate::config::Engine::Whp),
+                                    )
+                                    .changed();
+                            }
+                        });
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new("Max instructions")
@@ -3910,6 +3946,14 @@ fn js_error(error: wasm_bindgen::JsValue) -> String {
     error
         .as_string()
         .unwrap_or_else(|| "browser JavaScript operation failed".to_owned())
+}
+
+/// What an engine is called in the window.
+fn engine_label(engine: crate::config::Engine) -> &'static str {
+    match engine {
+        crate::config::Engine::Interpreter => "Interpreter",
+        crate::config::Engine::Whp => "Windows Hypervisor",
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

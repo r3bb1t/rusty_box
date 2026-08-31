@@ -58,6 +58,17 @@ pub use engine::{ExitCounts, PlatformCounters, SliceCensus, WhpEngine};
 /// engine forwards rather than defines.
 pub use rusty_box_whp::{InterceptCounter, InterceptCounters, RuntimeCounters};
 
+/// Whether this host can run a guest on the hardware at all.
+///
+/// Re-exported because it is the first question a caller of this engine has,
+/// and asking it should not require naming the platform crate underneath: a
+/// machine that selects an engine wants to know whether the one it chose
+/// exists before it builds anything.
+///
+/// # Errors
+/// Whatever the platform said when asked.
+pub use rusty_box_whp::hypervisor_present;
+
 use rusty_box_whp::{Partition, Reg, RegisterValue, WhpResult};
 
 /// One virtual processor of a partition, as the state exchange addresses it.

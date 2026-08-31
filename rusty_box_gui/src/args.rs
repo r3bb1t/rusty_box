@@ -29,6 +29,13 @@ pub struct Args {
     #[arg(long = "display", value_enum)]
     pub display: Option<DisplayBackend>,
 
+    /// Which engine retires the guest's instructions.
+    ///
+    /// `whp` needs the `hv-whp` feature built in and a host with the platform
+    /// enabled; it is refused rather than silently downgraded when absent.
+    #[arg(long = "engine", value_enum, default_value_t = crate::config::Engine::Interpreter)]
+    pub engine: crate::config::Engine,
+
     #[arg(long = "boot", value_delimiter = ',', num_args = 1..=3, value_enum)]
     pub boot: Vec<BootDevice>,
 
