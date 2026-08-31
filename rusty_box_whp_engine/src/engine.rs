@@ -223,6 +223,43 @@ fn unserviced(what: &'static str, exit: &Exit) -> CpuError {
     CpuError::UnsupportedCpuOperation { operation: what }
 }
 
+/// Report a processor state the platform would not take, and say what was in
+/// it.
+///
+/// `WHvSetVirtualProcessorRegisters` answers `WHV_E_INVALID_VP_STATE` without
+/// naming the register that offended it, and by the time anyone reads the
+/// error the state is gone — the shadow has moved on and the partition kept
+/// what it had. Here is the only place it still exists, so here is where it is
+/// described. The fields are the ones a platform validates against each other:
+/// the mode bits, the paging registers, and every segment, since a descriptor
+/// this port can build is not always one the platform will accept.
+fn refused_state(error: WhpError, state: &VcpuArchState) -> CpuError {
+    tracing::error!(
+        "the hypervisor refused a processor state: {error}; rip {:#x} rflags {:#x} \
+         cr0 {:#x} cr2 {:#x} cr3 {:#x} cr4 {:#x} efer {:#x} xcr0 {:#x} apic_base {:#x}",
+        state.rip,
+        state.rflags,
+        state.cr0,
+        state.cr2,
+        state.cr3,
+        state.cr4,
+        state.msrs.efer,
+        state.xcr0,
+        state.msrs.apic_base
+    );
+    const SEGMENTS: [&str; 6] = ["es", "cs", "ss", "ds", "fs", "gs"];
+    for (name, seg) in SEGMENTS.iter().zip(&state.segments) {
+        tracing::error!(
+            "  {name} = {:#06x} base {:#x} limit {:#x} attr {:#x}",
+            seg.selector,
+            seg.base,
+            seg.limit,
+            seg.attributes.bits()
+        );
+    }
+    platform_failed(error)
+}
+
 fn platform_failed(error: WhpError) -> CpuError {
     tracing::error!("WHP platform call failed: {error}");
     CpuError::UnsupportedCpuOperation { operation: "the hypervisor refused" }
@@ -859,7 +896,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // Whatever ended the run, the shadow must describe the processor again
         // before the machine looks at it: the scheduler reads activity state,
         // the interrupt fabric reads IF, and a snapshot reads all of it.
-        read_back_into_the_shadow(started, cpu)?;
+        read_back_into_the_shadow(started, cpu, io.pc_system.time_ticks())?;
 
         let SliceOutcome { yielded, ran, exits: exits_held } = outcome?;
         census.record(exits_held, &yielded);
@@ -997,7 +1034,7 @@ fn install_the_shadow<T: Instrumentation>(
     if held.as_ref() == Some(state) {
         return Ok(());
     }
-    state::import(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)?;
+    state::import(&Vp::new(partition, BOOT_VP), state).map_err(|error| refused_state(error, state))?;
     *held = Some(state.clone());
     Ok(())
 }
@@ -1010,6 +1047,7 @@ fn install_the_shadow<T: Instrumentation>(
 fn read_back_into_the_shadow<T: Instrumentation>(
     started: &mut Started,
     cpu: &mut BxCpuC<T>,
+    machine_ticks: u64,
 ) -> Result<()> {
     let Started {
         alarm: _,
@@ -1039,6 +1077,23 @@ fn read_back_into_the_shadow<T: Instrumentation>(
         tracing::error!("the hypervisor returned a state this port refuses: {error:?}");
         CpuError::UnsupportedCpuOperation { operation: "hypervisor state refused on import" }
     })?;
+
+    // One counter, whichever processor the guest asks. `RDTSC` is not a trapped
+    // instruction here, so on the hardware it answers from the partition's own
+    // counter; the shadow would otherwise answer from this machine's tick
+    // clock, which has neither the same epoch nor the same rate. A guest that
+    // reads it on both sides subtracts one from the other, and the subtraction
+    // is unsigned: Linux's `delay_with_tsc` takes `start` on one processor and
+    // `now` on the other, sees a difference larger than the whole delay it was
+    // waiting out, and returns at once. `check_timer` then measures no timer
+    // ticks in a window that never happened and panics with `IO-APIC + timer
+    // doesn't work` before userspace.
+    //
+    // So the shadow is set to the counter the guest last saw, at the tick the
+    // machine is standing on. Rebased at every read-back rather than converted
+    // once, because the two run at different rates and only the handoffs are
+    // points where they are known to agree.
+    cpu.set_tsc(state.msrs.tsc, machine_ticks);
 
     Ok(())
 }
@@ -1470,7 +1525,7 @@ fn report_the_fault<T: Instrumentation>(
     exit: &Exit,
     history: &ExitHistory,
 ) -> Result<()> {
-    read_back_into_the_shadow(started, cpu)?;
+    read_back_into_the_shadow(started, cpu, io.pc_system.time_ticks())?;
     let mut state = VcpuArchState::default();
     cpu.export_arch_state(&mut state);
     tracing::error!(
@@ -1615,7 +1670,7 @@ fn burst_on_the_shadow<T: Instrumentation>(
     cpu: &mut BxCpuC<T>,
     io: &mut PcIo<'_>,
 ) -> Result<()> {
-    read_back_into_the_shadow(started, cpu)?;
+    read_back_into_the_shadow(started, cpu, io.pc_system.time_ticks())?;
     // Not `finish_the_instruction`: that one holds off the external interrupt
     // for the length of a single trapped access, which is right when finishing
     // one instruction and wrong for a stretch. Across a burst the interpreter
@@ -1632,7 +1687,7 @@ fn burst_on_the_shadow<T: Instrumentation>(
         held,
     } = started;
     cpu.export_arch_state(state);
-    state::import(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)?;
+    state::import(&Vp::new(partition, BOOT_VP), state).map_err(|error| refused_state(error, state))?;
     *held = Some(state.clone());
     Ok(())
 }
@@ -1643,7 +1698,7 @@ fn finish_on_the_shadow<T: Instrumentation>(
     io: &mut PcIo<'_>,
     trapped: Trapped,
 ) -> Result<()> {
-    read_back_into_the_shadow(started, cpu)?;
+    read_back_into_the_shadow(started, cpu, io.pc_system.time_ticks())?;
     // The trapped instruction, whole, on the machine's own dispatch path.
     // Whatever it does — completes the access, moves a sector, or raises a
     // fault and enters a handler — the processor it leaves behind is the one
@@ -1663,7 +1718,7 @@ fn finish_on_the_shadow<T: Instrumentation>(
     if let Trapped::Cpuid { leaf } = trapped {
         withhold_virtualisation_from(state, leaf);
     }
-    state::import(&Vp::new(partition, BOOT_VP), state).map_err(platform_failed)?;
+    state::import(&Vp::new(partition, BOOT_VP), state).map_err(|error| refused_state(error, state))?;
     *held = Some(state.clone());
     Ok(())
 }
