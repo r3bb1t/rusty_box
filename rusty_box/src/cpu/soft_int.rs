@@ -13,6 +13,20 @@ use super::{
     segment_ctrl_pro::parse_selector,
 };
 
+/// `CPUID.7:0:EBX` — AVX512F, DQ, IFMA, PF, ER, CD, BW and VL.
+const CPUID_LEAF7_EBX_AVX512: u32 = (1 << 16)
+    | (1 << 17)
+    | (1 << 21)
+    | (1 << 26)
+    | (1 << 27)
+    | (1 << 28)
+    | (1 << 30)
+    | (1 << 31);
+/// `CPUID.7:0:ECX` — VBMI, VBMI2, VNNI, BITALG and VPOPCNTDQ.
+const CPUID_LEAF7_ECX_AVX512: u32 = (1 << 1) | (1 << 6) | (1 << 11) | (1 << 12) | (1 << 14);
+/// `CPUID.7:0:EDX` — 4VNNIW, 4FMAPS, VP2INTERSECT and FP16.
+const CPUID_LEAF7_EDX_AVX512: u32 = (1 << 2) | (1 << 3) | (1 << 8) | (1 << 23);
+
 const CPUID_LEAF_FEATURE_INFO: u32 = 0x0000_0001;
 const CPUID_LEAF_EXTENDED_TOPOLOGY: u32 = 0x0000_000B;
 const CPUID_OSXSAVE_ECX_BIT: u32 = 1 << 27;
@@ -1292,7 +1306,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     _ => {}
                 }
             }
-            0x00000007 if sub_function == 0 => {}
+            0x00000007 if sub_function == 0 => {
+                // The AVX-512 promises, withdrawn together with the register
+                // file behind them. Subleaf 0 of leaf `D` above answers from
+                // `xcr0_suppmask`, which is derived from the ISA bitmask, so
+                // a feature bit left standing here would tell a guest it has
+                // instructions whose state `XSETBV` then refuses. A guest
+                // believes the feature bit: it enables the component, takes a
+                // fault on the first use, and under a hypervisor hands back a
+                // processor state the platform will not accept at all.
+                if !self
+                    .bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaAvx512)
+                {
+                    ebx &= !CPUID_LEAF7_EBX_AVX512;
+                    ecx &= !CPUID_LEAF7_ECX_AVX512;
+                    edx &= !CPUID_LEAF7_EDX_AVX512;
+                }
+            }
 
             0x0000000D => {
                 if sub_function == 0 {

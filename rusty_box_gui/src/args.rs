@@ -36,6 +36,14 @@ pub struct Args {
     #[arg(long = "engine", value_enum, default_value_t = crate::config::Engine::Interpreter)]
     pub engine: crate::config::Engine,
 
+    /// Which processor the machine offers its guest.
+    ///
+    /// `preset` is this port's own model, the same on every host. `host-shared`
+    /// narrows it to what this host can also carry, which a machine that may
+    /// run on the hypervisor needs.
+    #[arg(long = "cpu-capabilities", value_enum, default_value_t = crate::config::CpuCapabilities::Preset)]
+    pub cpu_capabilities: crate::config::CpuCapabilities,
+
     #[arg(long = "boot", value_delimiter = ',', num_args = 1..=3, value_enum)]
     pub boot: Vec<BootDevice>,
 

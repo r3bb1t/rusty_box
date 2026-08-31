@@ -138,7 +138,7 @@ where
         sync_realtime: config.sync_realtime,
         smp_quantum: config.smp_quantum,
         cpuid_freq: config.cpuid_freq,
-        cpu_params: config.cpu_params.clone(),
+        cpu_params: config.cpu_capabilities.narrow(config.cpu_params.clone()),
         ..EmulatorConfig::default()
     };
 

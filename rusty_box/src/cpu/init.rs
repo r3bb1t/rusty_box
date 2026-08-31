@@ -42,11 +42,42 @@ pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
 use super::ResetReason;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Turn one ISA extension on or off in the bitmask every gate reads.
+    ///
+    /// The bitmask is what decides whether an opcode decodes and what
+    /// [`Self::get_xcr0_allow_mask`] will let a guest enable, so this is the
+    /// one place a feature is granted or withheld (R5). `CPUID` answers the
+    /// leaves that depend on it from the same bitmask, which is what keeps a
+    /// guest from being told it has a register file `XSETBV` would refuse.
+    pub(super) fn set_isa_extension(&mut self, feature: X86Feature, present: bool) {
+        let index = feature as usize;
+        let (word, bit) = (index / 32, 1u32 << (index % 32));
+        if present {
+            self.ia_extensions_bitmask[word] |= bit;
+        } else {
+            self.ia_extensions_bitmask[word] &= !bit;
+        }
+    }
+
     pub fn initialize(&mut self, _config: BxParams) -> Result<()> {
         tracing::debug!("Initialized cpu model {}", self.cpuid.get_name());
 
         // Populate ISA extensions bitmask from CPUID model — matches Bochs init.cc
         self.ia_extensions_bitmask = self.cpuid.get_isa_extensions_bitmask();
+        // Then what the machine was configured to add or hold back — Bochs
+        // `cpuid: avx=0` and friends, which edit the same bitmask before
+        // anything reads it. Both lists are empty unless a caller filled them,
+        // so a machine that says nothing gets its model's processor whole.
+        //
+        // Exclusion runs second and therefore wins: a caller naming the same
+        // feature twice is asking a question with one sensible answer, which
+        // is the narrower one.
+        for feature in _config.cpu_include_features.iter() {
+            self.set_isa_extension(*feature, true);
+        }
+        for feature in _config.cpu_exclude_features.iter() {
+            self.set_isa_extension(*feature, false);
+        }
         let tsc_deadline_supported =
             self.bx_cpuid_support_isa_extension(X86Feature::IsaTscDeadline);
         self.lapic
