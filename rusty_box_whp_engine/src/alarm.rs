@@ -9,8 +9,15 @@
 //!
 //! So the deadline needs a voice of its own. The platform documents
 //! `WHvCancelRunVirtualProcessor` as callable from a thread other than the one
-//! inside the run, which is the whole of what this needs: one thread, asleep
-//! until a deadline, whose only act is to ask the processor to come back.
+//! inside the run, which is the whole of what this needs: one thread waiting
+//! on a deadline, whose only act is to ask the processor to come back.
+//!
+//! ## Why the wait has two phases
+//!
+//! The waiting is slept in bulk and spun at the end, because a slept wait
+//! cannot end a slice on time — the host's timer tick is 15.6 ms and a slice
+//! is measured in microseconds. [`SPIN_MARGIN`] carries the measurement and
+//! the cost.
 //!
 //! ## Why a thread and not a timer callback
 //!
@@ -22,11 +29,40 @@
 //! and a notify, and a thread per slice would cost more to create than the
 //! slice it was guarding.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rusty_box_whp::Canceller;
+
+/// How much of a wait is spun rather than slept.
+///
+/// A timed wait on a condition variable cannot return sooner than the host's
+/// timer tick. Measured here: asked for 50 microseconds it returns after
+/// 15,467 on average — 309 times the request, and the same 15.6 ms tick
+/// whatever it is asked for. Raising the period to a millisecond brings that
+/// to 1,692 microseconds, still 34 times over. Spinning the same 50
+/// microseconds lands in 59.9.
+///
+/// So the wait has two phases: everything beyond this margin is slept, and
+/// the margin itself is spun. A slice shorter than the margin — which is
+/// most of them, since a machine asks for the time to its next device
+/// deadline — is spun whole and ends when it was asked to.
+///
+/// The cost is a core busy for as long as the guest is on the hardware, and
+/// it buys the only thing that makes a hardware slice honest: a guest whose
+/// timer pulses arrive at their deadline rather than in bursts at slice
+/// boundaries. Linux notices the difference during interrupt setup and
+/// refuses to boot without it.
+const SPIN_MARGIN: Duration = Duration::from_millis(2);
+
+/// A wait longer than [`SPIN_MARGIN`] still rides the host's own timer tick
+/// for the part of it that is slept, and so can end late by as much as that
+/// tick. The margin is what a slice is measured against, and a slice this
+/// engine hands the hardware is shorter than the margin, so it is spun whole
+/// and ends when it was asked to. Only a budget larger than the margin — a
+/// guest that has halted, and is not waiting on this — takes the slept path.
 
 /// A thread that interrupts a running processor when its slice runs out.
 ///
@@ -43,6 +79,14 @@ pub(crate) struct Alarm {
 struct Shared {
     at: Mutex<State>,
     changed: Condvar,
+    /// Bumped by every change to `at`.
+    ///
+    /// The spinning phase of a wait holds no lock — it cannot, because the
+    /// thread arming the next slice would then block behind a thread that is
+    /// deliberately busy. So it watches this instead, and a slice that ends
+    /// early is noticed within one turn of the loop rather than at its
+    /// deadline.
+    generation: AtomicU64,
 }
 
 /// What the sleeping thread is waiting for.
@@ -65,6 +109,7 @@ impl Alarm {
         let shared = Arc::new(Shared {
             at: Mutex::new(State::Idle),
             changed: Condvar::new(),
+            generation: AtomicU64::new(0),
         });
         let mine = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
@@ -96,6 +141,10 @@ impl Alarm {
             Ok(mut at) => *at = state,
             Err(poisoned) => *poisoned.into_inner() = state,
         }
+        // Published after the state it describes, and read before a spinning
+        // watcher acts on the deadline it was holding, so the deadline of a
+        // slice that has already ended cannot interrupt the one after it.
+        self.shared.generation.fetch_add(1, Ordering::Release);
         self.shared.changed.notify_one();
     }
 }
@@ -112,7 +161,7 @@ impl Drop for Alarm {
     }
 }
 
-/// Sleep until a deadline passes, then ask the processor to come back.
+/// Wait until a deadline passes, then ask the processor to come back.
 fn watch(shared: &Shared, canceller: Canceller) {
     let mut at = match shared.at.lock() {
         Ok(at) => at,
@@ -131,20 +180,37 @@ fn watch(shared: &Shared, canceller: Canceller) {
             State::Armed(deadline) => deadline,
         };
 
-        let now = Instant::now();
-        if now < deadline {
-            let (guard, _timed_out) = match shared
-                .changed
-                .wait_timeout(at, deadline.saturating_duration_since(now))
+        if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            if let Some(sleepable) = remaining.checked_sub(SPIN_MARGIN) {
+                let (guard, _timed_out) = match shared.changed.wait_timeout(at, sleepable) {
+                    Ok(pair) => pair,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                at = guard;
+                // Re-read rather than assume the wait timed out: the slice may
+                // have finished and armed a later deadline while this thread was
+                // asleep, and cancelling then would interrupt a slice that had
+                // barely started.
+                continue;
+            }
+
+            // Inside the margin, so the rest is spun. The lock is released
+            // first: this thread is about to be deliberately busy, and the
+            // thread that ends the slice must not queue behind it.
+            let generation = shared.generation.load(Ordering::Acquire);
+            drop(at);
+            while Instant::now() < deadline
+                && shared.generation.load(Ordering::Acquire) == generation
             {
-                Ok(pair) => pair,
+                std::hint::spin_loop();
+            }
+            at = match shared.at.lock() {
+                Ok(at) => at,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            at = guard;
-            // Re-read rather than assume the wait timed out: the slice may
-            // have finished and armed a later deadline while this thread was
-            // asleep, and cancelling then would interrupt a slice that had
-            // barely started.
+            // Re-read for the same reason the slept phase does, and for one
+            // more: the spin ends on a changed generation as well as on the
+            // deadline, and only the state says which happened.
             continue;
         }
 
