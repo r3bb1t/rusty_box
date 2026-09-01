@@ -227,6 +227,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         if seg == BxSegregs::Cs {
             self.invalidate_prefetch_q();
+            // In long mode the CS just loaded decides which sub-mode the
+            // processor is in — its L bit switches 64-bit against
+            // compatibility — so the mode is re-derived from the new segment
+            // before anything reads it. Bochs segment_ctrl_pro.cc
+            // load_seg_reg does exactly this, and only in long mode, where
+            // the comment notes a mode change can happen at all. Without it
+            // a processor imported across a compatibility↔64-bit transition
+            // keeps the OLD segment's sub-mode: a fetch through an L=1
+            // segment is then limit-checked as though the limit meant
+            // something, and an exception delivery walks eight-byte gates
+            // through a sixteen-byte IDT.
+            if self.long_mode() {
+                self.handle_cpu_mode_change();
+            }
             self.update_fetch_mode_mask();
             self.handle_alignment_check();
         }
