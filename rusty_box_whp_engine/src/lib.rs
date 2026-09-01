@@ -751,4 +751,127 @@ mod tests {
              reached the gate and proves nothing"
         );
     }
+
+    /// A vector that becomes deliverable AT AN ERRAND'S TAIL is deferred to a
+    /// window — the wiring proof that every errand republishes the cache
+    /// before the staging decision reads it.
+    ///
+    /// After an errand the engine cannot see the interpreter's inhibit state,
+    /// so the freshness contract presumes it live: the staging gate must find
+    /// `shadowed` set, arm a deliverability window, and let the NEXT exit's
+    /// authoritative header lift the presumption — one deferred injection,
+    /// one window exit, nothing acknowledged on unknown evidence.
+    ///
+    /// The guest manufactures exactly that moment, once per trial: a PIT tick
+    /// is latched at the 8259 but MASKED (`IF=1` the whole time, so every
+    /// exit header carries `IF=1` and no shadow), and the instruction that
+    /// unmasks it is `OUTSB` to port 0x21 — a string port write, which the
+    /// engine always services as a shadow errand (`finish_on_the_shadow`).
+    /// The vector becomes deliverable during that errand and the tail stages
+    /// with everything permitting EXCEPT the post-errand presumption. With
+    /// the errand republish wired, the engine arms a window and defers; with
+    /// a republish call site missing, the cache still holds the header's
+    /// `IF=1`/no-shadow and the engine injects DIRECTLY at the tail, arming
+    /// no window at all. `windows_armed >= 1` is therefore the discriminator
+    /// this test exists for: deleting the `refresh_from_shadow` call site in
+    /// `finish_on_the_shadow` drives it to zero deterministically. Trials
+    /// repeat because a stretch the shadow happens to carry delivers through
+    /// the interpreter (no window, legitimately); only a hardware trial
+    /// exercises the errand tail, and many trials make missing them all
+    /// vanishingly unlikely.
+    ///
+    /// The ISR runs `STI` before anything else, deliberately: after any
+    /// injection the processor's latched interrupt pin is stale until the
+    /// next acknowledge attempt reconciles it, and an `IF=0` handler exit
+    /// would present stale-pin-plus-blocked to the gate and arm a spurious
+    /// window — on either build — burying the discriminator. With `IF=1`
+    /// inside the handler, the gate reaches the acknowledge, finds the 8259
+    /// empty, and the reconcile clears the stale pin without arming
+    /// anything.
+    #[test]
+    fn a_vector_raised_inside_an_errand_is_deferred_to_a_window() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        let _turn = a_turn_on_the_hardware();
+        // isr at CODE+0x42; the 0xFE unmask image byte at CODE+0x4D.
+        let mut machine = machine_with_devices(&[
+            0x31, 0xC0, //             xor ax, ax
+            0x8E, 0xD8, //             mov ds, ax
+            0x8E, 0xD0, //             mov ss, ax
+            0xBC, 0x00, 0x70, //       mov sp, 0x7000
+            0xFC, //                   cld — OUTSB walks SI forward
+            0xC7, 0x06, 0x20, 0x00, 0x42, 0x10, // mov word [0x20], isr
+            0xC7, 0x06, 0x22, 0x00, 0x00, 0x00, // mov word [0x22], 0
+            0xB0, 0x0A, //             mov al, 0x0A — OCW3: reads answer IRR
+            0xE6, 0x20, //             out 0x20, al
+            0xB9, 0x18, 0x00, //       mov cx, 24 — the trials
+            // trial (CODE+0x1D):
+            0xB0, 0xFF, //             mov al, 0xFF — mask everything
+            0xE6, 0x21, //             out 0x21, al
+            0xB0, 0x30, //             mov al, 0x30 — PIT ch0, lo/hi, mode 0
+            0xE6, 0x43, //             out 0x43, al
+            0xB0, 0x00, //             mov al, 0x00 — count 0x0400, low
+            0xE6, 0x40, //             out 0x40, al
+            0xB0, 0x04, //             mov al, 0x04 — count 0x0400, high
+            0xE6, 0x40, //             out 0x40, al
+            0xFB, //                   sti — IF=1; safe, the tick is masked
+            // poll (CODE+0x2E): masked, so nothing is deliverable yet
+            0xE4, 0x20, //             in al, 0x20 — the IRR
+            0xA8, 0x01, //             test al, 1
+            0x74, 0xFA, //             jz poll
+            0xBE, 0x4D, 0x10, //       mov si, unmask_image
+            0xBA, 0x21, 0x00, //       mov dx, 0x0021
+            0x6E, //                   outsb — THE ERRAND: unmasks IRQ0, so the
+            //                         vector becomes deliverable inside it
+            0x90, //                   nop — the deferred delivery lands here
+            0x90, //                   nop
+            0xE2, 0xDE, //             loop trial
+            // park (CODE+0x3F):
+            0xF4, //                   hlt
+            0xEB, 0xFD, //             jmp park
+            // isr (CODE+0x42): STI first — see the doc above — then report
+            0xFB, //                   sti
+            0x90, //                   nop — the STI shadow lapses
+            0xB0, MARK, //             mov al, MARK
+            0xE6, DEBUG_PORT, //       out 0xE9, al
+            0xB0, 0x20, //             mov al, 0x20
+            0xE6, 0x20, //             out 0x20, al — non-specific EOI
+            0xCF, //                   iret
+            // unmask_image (CODE+0x4D): what OUTSB sends to port 0x21
+            0xFE,
+        ]);
+        let mut written: std::vec::Vec<u8> = std::vec::Vec::new();
+        for _ in 0..40 {
+            machine
+                .step(RunBudget::Ticks(2_000_000))
+                .expect("the hypervisor runs the guest and its ticks reach it");
+            written.extend(machine.debug_port().take_output());
+            if !written.is_empty() && machine.engine().inject_census().windows_armed >= 1 {
+                break;
+            }
+        }
+        // Every tick still arrives — the presumption defers, it never loses.
+        // How each deferred vector lands is the engine's business: the window
+        // exit's follow-up stages it, and a slice whose budget expires first
+        // hands it to the next slice head instead, where the shadow delivers
+        // it. Either way the guest sees its interrupt; a wedge would show
+        // here as missing MARKs.
+        assert!(
+            !written.is_empty() && written.iter().all(|byte| *byte == MARK),
+            "every trial's tick must reach the guest's own ISR and nothing else \
+             may write the debug port: {written:#04x?}"
+        );
+        let census = machine.engine().inject_census();
+        assert!(
+            census.windows_armed >= 1,
+            "a vector that became deliverable inside an errand must be DEFERRED \
+             to a window — injecting directly at the errand tail means the gate \
+             read a cache no errand republished; census: windows armed {}, \
+             injected {}",
+            census.windows_armed,
+            census.injected,
+        );
+    }
 }

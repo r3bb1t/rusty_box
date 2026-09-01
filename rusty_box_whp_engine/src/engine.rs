@@ -312,14 +312,16 @@ fn platform_failed(error: WhpError) -> CpuError {
 ///   errand's `impose_the_shadow` has just made the partition identical to
 ///   the shadow, so the SHADOW is what the next VM entry sees and the header
 ///   is stale. Every errand path therefore ends with
-///   [`Self::refresh_from_shadow`], which republishes `if_flag` and the
-///   shadow bit from the interpreter itself.
+///   [`Self::refresh_from_shadow`], which republishes `if_flag` from the
+///   interpreter and PRESUMES the interrupt shadow live — the interpreter's
+///   inhibit bookkeeping is invisible to this crate, and unknown means
+///   blocked, never permitted.
 ///
 /// The property both together guarantee: at the instant `stage_injection`
-/// pops a vector — an irreversible acknowledge — `if_flag` and `shadowed`
-/// describe the processor as it will be at the next VM entry, never as it was
-/// at the last exit. Getting this wrong injects a maskable interrupt into an
-/// `IF=0` or interrupt-shadowed context, which the VM-entry guest-state
+/// pops a vector — an irreversible acknowledge — the gate holds POSITIVE
+/// evidence that delivery is permitted, never merely the absence of evidence
+/// that it is blocked. Getting this wrong injects a maskable interrupt into
+/// an `IF=0` or interrupt-shadowed context, which the VM-entry guest-state
 /// checks reject with `WHV_E_INVALID_VP_STATE` and which loses the
 /// acknowledged vector.
 struct InjectState {
@@ -335,11 +337,13 @@ struct InjectState {
     /// guest `MOV CR8` retires on hardware without an exit, so no copy this
     /// engine keeps between exits can be trusted over the header's.
     cr8: u8,
-    /// Whether the processor the next VM entry will run is inside an
+    /// Whether the processor the next VM entry will run may be inside an
     /// interrupt shadow — an `STI` / `MOV SS` / `POP SS` window that blocks
     /// delivery for one instruction. `ExecutionState` bit 12 from the exit
-    /// header on an errand-free iteration; republished by
-    /// [`Self::refresh_from_shadow`] after an errand.
+    /// header on an errand-free iteration; PRESUMED true by
+    /// [`Self::refresh_from_shadow`] after an errand, because the
+    /// interpreter's inhibit state is invisible to this crate and the gate
+    /// may only act on positive permission.
     shadowed: bool,
     /// A `DeliverabilityNotifications` request armed at this priority and not
     /// yet answered by a window exit. NOT touched by either refresh — no
@@ -373,17 +377,30 @@ impl InjectState {
         self.cr8 = vp.cr8;
     }
 
-    /// Republish `if_flag` and `shadowed` from the shadow — the authority
-    /// for an iteration in which an errand ran.
+    /// Republish deliverability from the shadow — the authority for an
+    /// iteration in which an errand ran.
     ///
     /// Called at the end of every path that emulates before the injection
     /// tail, once `impose_the_shadow` has made the partition identical to the
     /// interpreter, with the shadow's live `IF` (`cpu.interrupts_enabled()`).
-    /// The interpreter stops an errand only at an instruction boundary where
-    /// delivery is permitted — a fault clears `IF` and lands at a handler
-    /// entry, a burst runs to a trace boundary, and neither leaves the guest
-    /// one instruction into an `STI` / `MOV SS` window — so `shadowed` is
-    /// cleared, and the sole remaining question is that live `IF`.
+    ///
+    /// `shadowed` is set TRUE — unknown, therefore blocked. The
+    /// interpreter's one-instruction interrupt inhibit (`STI` / `MOV SS` /
+    /// `POP SS`) is crate-private bookkeeping this crate cannot read, and an
+    /// errand CAN stop with one live: the batch loop breaks on its
+    /// instruction budget at the loop head, before the async-event handling
+    /// that would lapse an inhibit (rusty_box `cpu.rs` `cpu_loop_n_impl`,
+    /// `inhibit_interrupts`), so a stretch whose last retired instruction is
+    /// a shadower returns mid-window, and a single trapped `MOV SS`/`POP SS`
+    /// with a device-memory operand does the same in one step. Claiming "not
+    /// shadowed" there would hand the gate positive permission it does not
+    /// have, and the gate acknowledges on it — an irreversible INTA — before
+    /// injecting into a live shadow. So the gate is told BLOCKED, the vector
+    /// is deferred to a window, and the NEXT exit's header bit 12 —
+    /// authoritative and free — answers truthfully. The cost of the
+    /// presumption is one deferred injection resolved by one window exit;
+    /// nothing irreversible happens on the unknown.
+    ///
     /// `in_flight` and `cr8` are not republished: nothing an errand does
     /// begins a platform delivery, and the header's `CR8` still stands.
     ///
@@ -392,7 +409,7 @@ impl InjectState {
     /// from the shadow.
     fn refresh_from_shadow(&mut self, shadow_if: bool) {
         self.if_flag = shadow_if;
-        self.shadowed = false;
+        self.shadowed = true;
     }
 }
 
@@ -2315,30 +2332,7 @@ fn burst_on_the_shadow<T: Instrumentation>(
     // Across a burst the interpreter delivers on its own terms, exactly as it
     // does when it owns the machine.
     io.emulate_batch(cpu, BURST_INSTRUCTIONS)?;
-    // The stretch has retired on the shadow; the impose below makes the
-    // partition identical to it, so the shadow's live `IF` and delivery
-    // boundary are what the injection tail must judge against, not the
-    // pre-burst exit header (a `CLI` anywhere in the stretch would make the
-    // header's `IF` a lie). See `InjectState`'s freshness contract.
-    started.inject.refresh_from_shadow(cpu.interrupts_enabled());
-
-    let Started {
-        alarm: _,
-        partition,
-        state,
-        installed: _,
-        shadowed: _,
-        consecutive_mmio: _,
-        held,
-        xsave,
-        // Republished from the shadow just above; the state exchange below
-        // does not change it again.
-        inject: _,
-    } = started;
-    cpu.export_arch_state(state);
-    impose_the_shadow(partition, state, xsave, held.as_ref())?;
-    *held = Some(state.clone());
-    Ok(())
+    impose_after_errand(started, cpu, Trapped::Access)
 }
 
 fn finish_on_the_shadow<T: Instrumentation>(
@@ -2353,11 +2347,28 @@ fn finish_on_the_shadow<T: Instrumentation>(
     // fault and enters a handler — the processor it leaves behind is the one
     // the platform must continue from.
     io.finish_the_instruction(cpu)?;
-    // The instruction has retired on the shadow, and `impose_the_shadow`
-    // below makes the partition identical to it — so the shadow's live `IF`
-    // and delivery boundary, not the pre-errand exit header, are what the
-    // injection tail must judge against. Republish them now (see
-    // `InjectState`'s freshness contract).
+    impose_after_errand(started, cpu, trapped)
+}
+
+/// The end every errand shares: republish deliverability from the shadow,
+/// then write the shadow into the partition.
+///
+/// One function rather than a tail repeated in `finish_on_the_shadow` and
+/// `burst_on_the_shadow`, because the republish is a safety obligation (R5):
+/// the injection tail runs next, and a gate that reads the pre-errand header
+/// after the interpreter has moved `IF` acknowledges vectors it must not.
+/// With the obligation living here, no errand can skip it without every
+/// errand losing it — which is a rewrite, not a slip.
+fn impose_after_errand<T: Instrumentation>(
+    started: &mut Started,
+    cpu: &BxCpuC<T>,
+    trapped: Trapped,
+) -> Result<()> {
+    // The errand has retired on the shadow, and `impose_the_shadow` below
+    // makes the partition identical to it — so the shadow's live `IF`, not
+    // the pre-errand exit header, is what the injection tail must judge
+    // against, and the inhibit the errand may have armed is presumed live.
+    // See `InjectState`'s freshness contract.
     started.inject.refresh_from_shadow(cpu.interrupts_enabled());
 
     let Started {
@@ -2638,44 +2649,63 @@ mod tests {
     }
 
     /// The freshness contract: after an errand, the shadow's `IF` overrides
-    /// whatever the exit header said, and the interrupt shadow is cleared —
-    /// because the interpreter stopped the errand at a boundary where
-    /// delivery is permitted. This is the property the injection gate turns
-    /// on: a `CLI` retired on the shadow between the exit and the staging
-    /// decision must be seen, or a maskable interrupt is injected into an
-    /// `IF=0` context the VM-entry checks reject.
+    /// whatever the exit header said, and the interrupt shadow is presumed
+    /// LIVE — unknown-therefore-blocked. The interpreter's one-instruction
+    /// inhibit is bookkeeping this crate cannot read, and an errand can stop
+    /// with one armed, so the gate gets no claim that delivery is permitted;
+    /// the next exit's header answers truthfully and for free. This is the
+    /// property the injection gate turns on: a `CLI` retired on the shadow
+    /// between the exit and the staging decision must be seen, and an
+    /// invisible `STI`/`MOV SS` window must never be injected into.
     #[test]
-    fn a_shadow_errand_republishes_if_over_the_stale_header() {
-        let header = VpContext {
+    fn a_shadow_errand_republishes_if_and_presumes_the_inhibit() {
+        let mut inject = InjectState::at_reset();
+        inject.window = Some(0);
+        // Header carries IF=1 and NO interrupt shadow — the processor as it
+        // was at the exit, BEFORE the errand ran.
+        inject.refresh_from(&VpContext {
             rip: 0,
-            // Header carries IF=1 and an interrupt shadow — the processor as
-            // it was at the exit, BEFORE the errand ran.
             rflags: 0x202,
             cs: SegmentRegister::default(),
             instruction_length: 0,
             cr8: 0,
-            execution_state: 0x1000,
-        };
-        let mut inject = InjectState::at_reset();
-        inject.window = Some(0);
-        inject.refresh_from(&header);
+            execution_state: 0x0000,
+        });
         assert!(inject.if_flag, "the header's IF is set");
-        assert!(inject.shadowed, "the header's interrupt shadow is set");
+        assert!(!inject.shadowed, "the header reports no interrupt shadow");
 
         // The errand retired a `CLI` (or entered a fault gate): the shadow's
-        // live IF is now clear, and the interpreter left the guest at a
-        // deliverable boundary.
+        // live IF is now clear — and whether its last instruction armed an
+        // inhibit is unknowable from this crate.
         inject.refresh_from_shadow(false);
         assert!(
             !inject.if_flag,
             "the shadow's IF must override the header's — the gate injects on this"
         );
-        assert!(!inject.shadowed, "an errand ends at a deliverable boundary");
+        assert!(
+            inject.shadowed,
+            "an errand's inhibit state is unknown, so the gate must be told \
+             BLOCKED — never that delivery is permitted without evidence"
+        );
         // The window record and in-flight state are the errand's to leave
         // alone: no header or shadow reports the armed notification, and
         // nothing an errand does begins a platform delivery.
         assert_eq!(inject.window, Some(0), "an errand never touches the window");
         assert!(!inject.in_flight, "an errand begins no platform delivery");
+
+        // The next exit's header is authoritative again: bit 12 clear lifts
+        // the presumption, which is how a deferred injection resolves after
+        // exactly one more exit.
+        inject.refresh_from(&VpContext {
+            rip: 0,
+            rflags: 0x202,
+            cs: SegmentRegister::default(),
+            instruction_length: 0,
+            cr8: 0,
+            execution_state: 0x0000,
+        });
+        assert!(!inject.shadowed, "the next header's truth lifts the presumption");
+        assert!(inject.if_flag);
     }
 
     /// A tick is a unit of guest time at the machine's own rate, so a second of
