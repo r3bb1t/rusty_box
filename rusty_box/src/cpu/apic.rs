@@ -753,6 +753,16 @@ impl BxLocalApic {
         self.xapic
     }
 
+    /// Test-only: the xAPIC/legacy model switch Bochs wires at construction
+    /// (Bochs apic.cc constructor: `xapic = simulate_xapic`). Production
+    /// keeps the legacy setting; a test arranges the xAPIC model so the
+    /// SVR's full eight vector bits are writable, the way xAPIC hardware
+    /// (and Bochs apic.cc write_spurious_interrupt_register) has them.
+    #[cfg(test)]
+    pub(crate) fn set_xapic_for_test(&mut self, xapic: bool) {
+        self.xapic = xapic;
+    }
+
     /// Get current mode.
     #[inline]
     pub(crate) fn get_mode(&self) -> ApicMode {

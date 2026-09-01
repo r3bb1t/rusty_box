@@ -1419,4 +1419,134 @@ mod tests {
             "the boundary ends the trace instead of rescanning an empty PIC"
         );
     }
+
+    /// A LAPIC vector in priority class 0x40 — above the power-on PPR of 0,
+    /// so the LAPIC will deliver it, and distinct from every 8259 vector.
+    const LAPIC_VECTOR: u8 = 0x41;
+    /// xAPIC spurious-vector register offset (Bochs apic.h BX_LAPIC_SPURIOUS_VECTOR).
+    const LAPIC_SVR_OFFSET: u64 = 0xF0;
+    /// The guest-visible IRR/ISR word holding [`LAPIC_VECTOR`]'s bit:
+    /// word 0x41 / 32 = 2 of the register file (Bochs apic.cc read_aligned).
+    const LAPIC_VECTOR_ISR_OFFSET: u64 = 0x120;
+    const LAPIC_VECTOR_IRR_OFFSET: u64 = 0x220;
+    /// Bit 0x41 % 32 = 1 inside that word.
+    const LAPIC_VECTOR_REG_BIT: u32 = 1 << 1;
+
+    /// With BOTH controllers armed, the LAPIC answers the boundary and the
+    /// 8259 is left untouched — Bochs event.cc interrupt_acknowledge
+    /// consults the local APIC before DEV_pic_iac. The 8259's request must
+    /// survive the LAPIC's turn: the next pop answers with the PIC's vector.
+    #[test]
+    fn the_lapic_outranks_the_pic_and_the_pic_request_survives() {
+        use crate::cpu::apic::{ApicDeliveryMode, APIC_EDGE_TRIGGERED};
+
+        let (mut cpu, mut bus) = machine_with_irq1_raised();
+        // The guest software-enables its LAPIC before use — an SVR write
+        // with bit 8 set, keeping the power-on spurious vector 0xFF.
+        cpu.lapic.write_aligned(LAPIC_SVR_OFFSET, 0x1FF, 0);
+        // A fixed interrupt arrives over the APIC bus and lands in the IRR.
+        assert!(
+            cpu.lapic.deliver(
+                LAPIC_VECTOR,
+                ApicDeliveryMode::Fixed as u8,
+                APIC_EDGE_TRIGGERED
+            ),
+            "fixed delivery is accepted"
+        );
+        assert!(cpu.lapic.intr, "service_local_apic raised INTR");
+        cpu.sync_lapic_events();
+        assert_ne!(
+            cpu.pending_event & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR,
+            0,
+            "the sync point mirrored INTR onto the CPU event bit"
+        );
+
+        let first = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(
+            first,
+            Some(LAPIC_VECTOR),
+            "the LAPIC's vector wins the boundary"
+        );
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            0,
+            "the 8259 saw no INTA while the LAPIC answered"
+        );
+        // The vector really moved IRR -> ISR: the guest-visible ISR word
+        // reads it back, and the LAPIC's INTR line dropped.
+        assert_eq!(
+            cpu.lapic.read_aligned(LAPIC_VECTOR_ISR_OFFSET, 0) & LAPIC_VECTOR_REG_BIT,
+            LAPIC_VECTOR_REG_BIT,
+            "the acknowledged vector is in service"
+        );
+        assert!(!cpu.lapic.intr, "the LAPIC consumed its request");
+
+        // The PIC's request was preserved, not dropped: the next boundary
+        // answers with it, through the fabric's counted INTA.
+        let second = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(
+            second,
+            Some(IRQ1_VECTOR),
+            "the 8259's request survived the LAPIC's turn"
+        );
+        assert_eq!(bus.device_manager.irq.acknowledge_count(), 1);
+        assert_eq!(bus.device_manager.irq.vectors_acknowledged(IRQ1_VECTOR), 1);
+    }
+
+    /// The vector-0 gate: with the SVR's vector bits programmed to 0 (the
+    /// xAPIC model keeps all eight writable — Bochs apic.cc
+    /// write_spurious_interrupt_register) a nothing-deliverable acknowledge
+    /// answers 0 (Bochs apic.cc acknowledge_int returns spurious_vector).
+    /// The shared body must treat that answer as "nothing from the LAPIC"
+    /// and give the 8259 its turn this boundary — never hand a caller
+    /// vector 0, never answer None while the PIC holds a request.
+    #[test]
+    fn a_zero_vector_from_the_lapic_falls_through_to_the_pic() {
+        use crate::cpu::apic::{ApicDeliveryMode, APIC_EDGE_TRIGGERED};
+
+        let (mut cpu, mut bus) = machine_with_irq1_raised();
+        cpu.lapic.set_xapic_for_test(true);
+        // The guest software-enables the LAPIC with spurious vector 0.
+        cpu.lapic.write_aligned(LAPIC_SVR_OFFSET, 0x100, 0);
+        // A fixed interrupt raises INTR...
+        assert!(cpu.lapic.deliver(
+            LAPIC_VECTOR,
+            ApicDeliveryMode::Fixed as u8,
+            APIC_EDGE_TRIGGERED
+        ));
+        assert!(cpu.lapic.intr);
+        cpu.sync_lapic_events();
+        // ...and the guest raises TPR to the vector's class before the
+        // INTA — the race that makes the acknowledge answer the spurious
+        // vector (Bochs apic.cc acknowledge_int: vector & 0xf0 <= get_ppr()).
+        cpu.lapic.set_tpr(LAPIC_VECTOR);
+        assert!(
+            cpu.lapic.intr,
+            "raising TPR does not lower an already-raised INTR"
+        );
+
+        let popped = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(
+            popped,
+            Some(IRQ1_VECTOR),
+            "a zero LAPIC answer must fall through to the 8259's vector"
+        );
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            1,
+            "the fall-through takes the PIC's counted INTA"
+        );
+        assert_eq!(bus.device_manager.irq.vectors_acknowledged(IRQ1_VECTOR), 1);
+        assert!(!cpu.lapic.intr, "the spurious acknowledge lowered INTR");
+        // The blocked request stays latched for when TPR drops: the
+        // guest-visible IRR word still holds the vector's bit.
+        assert_eq!(
+            cpu.lapic.read_aligned(LAPIC_VECTOR_IRR_OFFSET, 0) & LAPIC_VECTOR_REG_BIT,
+            LAPIC_VECTOR_REG_BIT,
+            "the TPR-blocked request is not dropped"
+        );
+    }
 }
