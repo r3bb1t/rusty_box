@@ -19,7 +19,7 @@
 //! else).
 
 use crate::{
-    cpu::{cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentation},
+    cpu::{cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentation, AcknowledgedInterrupt},
     iodev::{devices::DeviceManager, BxDevicesC},
     memory::BxMemC,
     pc_system::BxPcSystemC,
@@ -148,6 +148,34 @@ impl<'a> PcIo<'a> {
         // A budget of one, strictly, and a tick denominator of one: this is a
         // single instruction on one processor, not a slice of a round.
         ctx.cpu_loop_n_slice(1, true, 1).map(|_| ())
+    }
+
+    /// Take one interrupt-acknowledge moment on behalf of an execution engine.
+    ///
+    /// The same INTA cycle the interpreter takes at an instruction boundary —
+    /// LAPIC before 8259, the fabric's counted acknowledge, spurious vectors
+    /// included — because it IS the same body
+    /// ([`acknowledge_external_interrupt`](ExecCtx::acknowledge_external_interrupt)),
+    /// which is what keeps the two engines acknowledging in one order. An
+    /// engine about to inject an external interrupt into its partition pops
+    /// the vector here; `None` says nothing was deliverable and the stale
+    /// pin was reconciled.
+    pub fn pop_deliverable_vector<T: Instrumentation>(
+        &mut self,
+        cpu: &mut BxCpuC<T>,
+    ) -> Option<u8> {
+        let mut ctx = ExecCtx::new(cpu, self.reborrow());
+        match ctx.acknowledge_external_interrupt() {
+            AcknowledgedInterrupt::Lapic(vector) => {
+                debug_assert!(
+                    vector > 0,
+                    "the shared body gates LAPIC answers on vector > 0"
+                );
+                Some(vector)
+            }
+            AcknowledgedInterrupt::Pic(vector) => Some(vector),
+            AcknowledgedInterrupt::None => None,
+        }
     }
 
     /// Execute up to `instructions` guest instructions on `cpu`, as one run.

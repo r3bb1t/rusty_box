@@ -8,6 +8,19 @@ use super::{
     BxCpuC,
 };
 
+/// What one INTA moment produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "an acknowledged vector was consumed from its controller; dropping it loses the interrupt"]
+pub(crate) enum AcknowledgedInterrupt {
+    /// The LAPIC answered; delivery (or a VMX fold) is the caller's.
+    Lapic(u8),
+    /// The 8259 answered through the fabric's counted INTA; spurious
+    /// vectors arrive here exactly as a real INTA would produce them.
+    Pic(u8),
+    /// Nothing deliverable; the deasserted pin was reconciled.
+    None,
+}
+
 /// Async-event servicing runs on the execution context: interrupt delivery
 /// reads the IDT and pushes stack frames, and the hold-acknowledge path hands
 /// guest memory to the DMA controller. Bochs `handleAsyncEvent` (event.cc)
@@ -418,87 +431,68 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                 }
             }
 
-            // Deliver exactly ONE interrupt: LAPIC first, then PIC.
-            let mut delivered = false;
-
-            // Check LAPIC first (higher priority than PIC in APIC mode)
-            if !delivered && self.lapic.intr {
-                // Clear event before acknowledge — acknowledge_int() calls
-                // service_local_apic() which may re-signal if more IRQs pending.
-                self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR);
-                let vector = self.lapic.acknowledge_int();
-                self.sync_lapic_events();
-                // Bochs event.cc HandleExtInterrupt consults posted-interrupt
-                // processing with the vector the controller just acknowledged:
-                // if it IS the notification vector, it is consumed folding PIR
-                // into the virtual IRR and never reaches the guest as itself.
-                if vector > 0 && self.in_vmx_guest && self.vmx_posted_interrupt_processing(vector) {
-                    delivered = true;
-                } else if vector > 0 {
-                    #[cfg(debug_assertions)]
-                    {
-                        self.diag_hae_intr_delivered += 1;
-                        self.diag_iac_vectors[vector as usize] += 1;
-                    }
-                    self.activity_state = CpuActivityState::Active;
-                    self.ext = true;
-                    // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
-                    // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set
-                    // — the acknowledged vector is recorded in exit_intr_info.
-                    if self.in_vmx_guest {
-                        match self.vmexit_check_event_intr(vector) {
-                            Ok(true) => {
-                                self.ext = false;
-                                self.prev_rip = self.rip();
-                                return false;
+            // Deliver exactly ONE interrupt: LAPIC first, then PIC. The INTA
+            // moment itself — priority order, the fabric's counted 8259
+            // acknowledge, spurious vectors, the deasserted-pin reconcile —
+            // is the shared body; what stays here is delivery into the guest
+            // and the VMX folds around it.
+            match self.acknowledge_external_interrupt() {
+                AcknowledgedInterrupt::Lapic(vector) => {
+                    // Bochs event.cc HandleExtInterrupt consults posted-interrupt
+                    // processing with the vector the controller just acknowledged:
+                    // if it IS the notification vector, it is consumed folding PIR
+                    // into the virtual IRR and never reaches the guest as itself.
+                    if self.in_vmx_guest && self.vmx_posted_interrupt_processing(vector) {
+                        // Consumed; nothing is delivered this boundary.
+                    } else {
+                        self.ext = true;
+                        // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
+                        // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set
+                        // — the acknowledged vector is recorded in exit_intr_info.
+                        if self.in_vmx_guest {
+                            match self.vmexit_check_event_intr(vector) {
+                                Ok(true) => {
+                                    self.ext = false;
+                                    self.prev_rip = self.rip();
+                                    return false;
+                                }
+                                Ok(false) => {}
+                                Err(super::error::CpuError::CpuLoopRestart) => {
+                                    self.ext = false;
+                                    self.prev_rip = self.rip();
+                                    return false;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
+                                }
                             }
-                            Ok(false) => {}
+                        }
+                        let result = self.interrupt(
+                            vector,
+                            super::exception::InterruptType::ExternalInterrupt,
+                            false,
+                            false,
+                            0,
+                        );
+                        self.ext = false;
+                        match result {
+                            Ok(()) => {
+                                // Bochs event.cc — update prev_rip after delivery
+                                self.prev_rip = self.rip();
+                            }
                             Err(super::error::CpuError::CpuLoopRestart) => {
-                                self.ext = false;
+                                // interrupt() delivered via exception path (CpuLoopRestart).
+                                // Bochs event.cc: prev_rip = RIP after successful delivery.
                                 self.prev_rip = self.rip();
                                 return false;
                             }
                             Err(e) => {
-                                tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
+                                tracing::warn!("LAPIC interrupt delivery failed: {:?}", e);
                             }
                         }
                     }
-                    let result = self.interrupt(
-                        vector,
-                        super::exception::InterruptType::ExternalInterrupt,
-                        false,
-                        false,
-                        0,
-                    );
-                    self.ext = false;
-                    delivered = true;
-                    match result {
-                        Ok(()) => {
-                            // Bochs event.cc — update prev_rip after delivery
-                            self.prev_rip = self.rip();
-                        }
-                        Err(super::error::CpuError::CpuLoopRestart) => {
-                            // interrupt() delivered via exception path (CpuLoopRestart).
-                            // Bochs event.cc: prev_rip = RIP after successful delivery.
-                            self.prev_rip = self.rip();
-                            return false;
-                        }
-                        Err(e) => {
-                            tracing::warn!("LAPIC interrupt delivery failed: {:?}", e);
-                        }
-                    }
                 }
-            }
-
-            // Then check PIC (legacy 8259 path) — only if LAPIC didn't deliver
-            if !delivered {
-                if self.device_manager.irq.int_pin_asserted() {
-                    let vector = self.device_manager.irq.acknowledge();
-                    tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
-                    vector, self.rip(), self.sregs[0].selector.value,
-                    self.cpu_mode, self.eflags.contains(super::eflags::EFlags::IF_));
-                    // Wake from halt if needed
-                    self.activity_state = CpuActivityState::Active;
+                AcknowledgedInterrupt::Pic(vector) => {
                     // Mark as external interrupt (EXT=1)
                     self.ext = true;
                     // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
@@ -542,25 +536,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                             tracing::warn!("PIC interrupt delivery failed: {:?}", e);
                         }
                     }
-                } else {
-                    // The CPU event bit mirrors the PIC INT pin. If no vector is
-                    // deliverable, reconcile a stale assertion now; otherwise
-                    // async_event remains set and every instruction exits its
-                    // trace to rescan an empty PIC indefinitely.
-                    // Consume deferred PIC edge flags while reconciling the
-                    // current deasserted INT pin. A later device assertion
-                    // will set irq_pending again, so it cannot be erased by
-                    // this acknowledge's stale irq_cleared flag.
-                    self.device_manager.irq.pic_mut().reconcile_deasserted_intr();
-                    self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
-                    if self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR == 0 {
-                        self.async_event = super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                    }
-                    #[cfg(debug_assertions)]
-                    {
-                        self.diag_hae_intr_pic_empty += 1;
-                    }
                 }
+                AcknowledgedInterrupt::None => {}
             }
         } else if self.get_hrq() {
             // Assert Hold Acknowledge (HLDA) and perform the DMA transfer.
@@ -622,6 +599,66 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         self.activity_state = CpuActivityState::Active;
 
         false // Continue execution
+    }
+
+    /// One interrupt-acknowledge moment: LAPIC first, then the 8259, in the
+    /// priority order Bochs event.cc HandleExtInterrupt takes them.
+    ///
+    /// The machine's single INTA chain (R5): the interpreter delivers what
+    /// this returns into the guest's IDT, and an execution engine injects it
+    /// into its partition — both through this body, so the priority order,
+    /// the fabric's counted acknowledge and the spurious-vector handling can
+    /// never drift between them.
+    pub(crate) fn acknowledge_external_interrupt(&mut self) -> AcknowledgedInterrupt {
+        // Check LAPIC first (higher priority than PIC in APIC mode)
+        if self.lapic.intr {
+            // Clear event before acknowledge — acknowledge_int() calls
+            // service_local_apic() which may re-signal if more IRQs pending.
+            self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR);
+            let vector = self.lapic.acknowledge_int();
+            self.sync_lapic_events();
+            // A zero vector means the LAPIC had nothing after all; the 8259
+            // below still gets its turn this boundary.
+            if vector > 0 {
+                #[cfg(debug_assertions)]
+                {
+                    self.diag_hae_intr_delivered += 1;
+                    self.diag_iac_vectors[vector as usize] += 1;
+                }
+                self.activity_state = CpuActivityState::Active;
+                return AcknowledgedInterrupt::Lapic(vector);
+            }
+        }
+
+        // Then check PIC (legacy 8259 path) — only if the LAPIC didn't answer
+        if self.device_manager.irq.int_pin_asserted() {
+            let vector = self.device_manager.irq.acknowledge();
+            tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
+            vector, self.rip(), self.sregs[0].selector.value,
+            self.cpu_mode, self.eflags.contains(super::eflags::EFlags::IF_));
+            // Wake from halt if needed
+            self.activity_state = CpuActivityState::Active;
+            AcknowledgedInterrupt::Pic(vector)
+        } else {
+            // The CPU event bit mirrors the PIC INT pin. If no vector is
+            // deliverable, reconcile a stale assertion now; otherwise
+            // async_event remains set and every instruction exits its
+            // trace to rescan an empty PIC indefinitely.
+            // Consume deferred PIC edge flags while reconciling the
+            // current deasserted INT pin. A later device assertion
+            // will set irq_pending again, so it cannot be erased by
+            // this acknowledge's stale irq_cleared flag.
+            self.device_manager.irq.pic_mut().reconcile_deasserted_intr();
+            self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
+            if self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR == 0 {
+                self.async_event = super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+            }
+            #[cfg(debug_assertions)]
+            {
+                self.diag_hae_intr_pic_empty += 1;
+            }
+            AcknowledgedInterrupt::None
+        }
     }
 }
 
@@ -854,6 +891,17 @@ mod tests {
                     &mut self.device_manager,
                     &mut self.pc_system,
                 ),
+            )
+        }
+
+        /// The same four parts as [`Self::ctx`], as the loan an execution
+        /// engine holds — the shape `Emulator` lends to a hardware backend.
+        fn io(&mut self) -> crate::emulator::PcIo<'_> {
+            crate::emulator::PcIo::new(
+                &mut self.memory,
+                &mut self.devices,
+                &mut self.device_manager,
+                &mut self.pc_system,
             )
         }
     }
@@ -1248,6 +1296,127 @@ mod tests {
             0,
             "the VMexit itself re-masks INIT (Bochs vmx.cc: INIT is \
              disabled in VMX root mode)"
+        );
+    }
+
+    /// IRQ1's line at the fabric.
+    const KEYBOARD_LINE: rusty_box_devices::api::IrqLine = rusty_box_devices::api::IrqLine(1);
+    /// IRQ1 through the master 8259's power-on offset (pic.rs `new`: 0x08).
+    const IRQ1_VECTOR: u8 = 0x09;
+    /// The master 8259's spurious vector: its offset + 7 (Bochs pic.cc IAC).
+    const SPURIOUS_VECTOR: u8 = 0x0F;
+
+    /// A machine with IRQ1 raised at the fabric and mirrored onto the CPU's
+    /// event bit — the pair `sync_io_events` (emulator/io.rs) leaves behind
+    /// when a device dispatch latches the PIC line. IF is set so the
+    /// interpreter's Priority-5 arm sees the event unmasked.
+    fn machine_with_irq1_raised() -> (alloc::boxed::Box<BxCpuC>, TestBus) {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        cpu.reset(ResetReason::Hardware);
+        // The 8259 powers on with every line masked; unmask them all, as a
+        // guest's OCW1 write would.
+        bus.device_manager.irq.pic_mut().master.imr = 0x00;
+        bus.device_manager.irq.raise(KEYBOARD_LINE);
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+        cpu.eflags.insert(EFlags::IF_);
+        cpu.handle_interrupt_mask_change();
+        (cpu, bus)
+    }
+
+    /// The extracted INTA body and the interpreter's delivery agree: raising
+    /// a PIC line and letting handle_async_event run delivers the same
+    /// vector, through the same counted acknowledge, as popping it directly.
+    #[test]
+    fn the_popper_and_the_interpreter_acknowledge_identically() {
+        // Machine A: the interpreter's own delivery path.
+        let (mut cpu, mut bus) = machine_with_irq1_raised();
+        assert_eq!(bus.device_manager.irq.acknowledge_count(), 0);
+
+        let exited = bus.ctx(&mut cpu).handle_async_event();
+
+        assert!(!exited);
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            1,
+            "the interpreter takes exactly one counted INTA"
+        );
+        assert_eq!(bus.device_manager.irq.vectors_acknowledged(IRQ1_VECTOR), 1);
+        // Delivery really happened: real-mode delivery loads CS:IP from IVT
+        // entry 9 (zeroed memory: 0000:0000) and clears IF.
+        assert_eq!(cpu.get_cs_selector(), 0);
+        assert_eq!(cpu.rip(), 0);
+        assert!(!cpu.eflags.contains(EFlags::IF_));
+
+        // Machine B: identical setup, the vector popped directly — the
+        // engine's INTA moment.
+        let (mut cpu, mut bus) = machine_with_irq1_raised();
+        assert_eq!(bus.device_manager.irq.acknowledge_count(), 0);
+
+        let popped = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(popped, Some(IRQ1_VECTOR), "same vector as the interpreter");
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            1,
+            "same acknowledge delta as the interpreter"
+        );
+        assert_eq!(bus.device_manager.irq.vectors_acknowledged(IRQ1_VECTOR), 1);
+    }
+
+    /// A line that drops between assertion and acknowledge produces the
+    /// 8259's spurious vector through the popper exactly as a real INTA
+    /// would — Bochs pic.cc IAC: no unmasked request answers offset + 7.
+    #[test]
+    fn a_line_lowered_before_the_inta_pops_the_spurious_vector() {
+        let (mut cpu, mut bus) = machine_with_irq1_raised();
+        // The device drops the line before the acknowledge. The edge-latched
+        // INT pin stays asserted — Bochs pic.cc lower_irq clears IRR only.
+        bus.device_manager.irq.lower(KEYBOARD_LINE);
+        assert!(bus.device_manager.irq.int_pin_asserted());
+
+        let popped = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(popped, Some(SPURIOUS_VECTOR));
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            1,
+            "a spurious INTA is still a counted INTA"
+        );
+        assert_eq!(
+            bus.device_manager.irq.vectors_acknowledged(SPURIOUS_VECTOR),
+            1
+        );
+    }
+
+    /// With nothing asserted at the PIC the popper answers None and
+    /// reconciles the stale CPU event bit, exactly as the interpreter's
+    /// deasserted-pin branch does — and takes no INTA doing it.
+    #[test]
+    fn an_empty_pic_pops_none_and_reconciles_the_stale_event_bit() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        cpu.reset(ResetReason::Hardware);
+        // A stale assertion: the event bit set with the INT pin deasserted.
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+
+        let popped = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(popped, None);
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            0,
+            "no INTA on an empty PIC"
+        );
+        assert_eq!(
+            cpu.pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
+            0,
+            "the stale event bit is reconciled"
+        );
+        assert_eq!(
+            cpu.async_event,
+            BxCpuC::<()>::BX_ASYNC_EVENT_STOP_TRACE,
+            "the boundary ends the trace instead of rescanning an empty PIC"
         );
     }
 }
