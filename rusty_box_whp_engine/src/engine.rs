@@ -28,6 +28,7 @@ use rusty_box_whp::{
 
 use super::alarm::Alarm;
 use super::state::{self, VpRegisters};
+use super::xsave::{self, XsaveArea};
 use super::Vp;
 use rusty_box::cpu::arch_state::VcpuArchState;
 use rusty_box::cpu::{
@@ -189,7 +190,26 @@ fn trapped_exceptions() -> u64 {
 /// Off unless asked for: servicing one is ordinary work, and a guest takes
 /// exceptions as part of running correctly.
 fn reports_each_fault() -> bool {
-    std::env::var_os("WHP_TRAP_EXCEPTIONS").is_some()
+    static SETTING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SETTING.get_or_init(|| std::env::var_os("WHP_TRAP_EXCEPTIONS").is_some())
+}
+
+/// Whether every slice is run on the shadow — the diagnostic bisection.
+///
+/// Read once. It is asked on the slice path, where reading the environment
+/// again per slice costs a lock, an allocation and a parse to learn something
+/// that cannot have changed since the machine started.
+fn everything_on_the_shadow() -> bool {
+    static SETTING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SETTING.get_or_init(|| std::env::var_os("WHP_ALL_SHADOW").is_some())
+}
+
+/// Whether every port access is finished on the shadow rather than from the
+/// exit. Read once, and asked once per port exit — the most frequent exit a
+/// booting guest takes.
+fn ports_on_the_shadow() -> bool {
+    static SETTING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SETTING.get_or_init(|| std::env::var_os("WHP_PORTS_ON_SHADOW").is_some())
 }
 
 /// Guest code this port has not been asked to run on hardware yet, and which
@@ -317,6 +337,12 @@ struct Started {
     /// two want opposite treatment, and the run length is what tells them
     /// apart — see [`BURST_AFTER`].
     consecutive_mmio: u32,
+    /// The processor's extended-state area — the x87 and vector file the
+    /// named-register exchange cannot carry. Refreshed at every read-back and
+    /// patched at every write-back, alongside `state` and under the same
+    /// `held` skip, so the two register files a guest can reach never
+    /// diverge across the seam.
+    xsave: XsaveArea,
 }
 
 /// What the guest has been leaving the hardware for.
@@ -568,6 +594,18 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
             let installed = install_the_machines_map(&mut partition, io.memory(), None)?;
             partition.create_processor(BOOT_VP).map_err(platform_failed)?;
 
+            // The fresh processor's own area, read once here so every later
+            // exchange patches the platform's bytes rather than inventing
+            // them — the components this port does not model cross untouched
+            // that way. A host that refuses the read cannot keep the two
+            // register files agreed, so it refuses the engine.
+            let xsave = XsaveArea::read_from(
+                &partition,
+                BOOT_VP,
+                xsave::HostComponents::of_this_host(),
+            )
+            .map_err(platform_failed)?;
+
             let alarm = Alarm::watching(partition.canceller(BOOT_VP));
             *started = Some(Started {
                 alarm,
@@ -579,6 +617,7 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                 consecutive_mmio: 0,
                 // Nothing has been read from this processor yet.
                 held: None,
+                xsave,
             });
         }
     }
@@ -770,6 +809,8 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
     ) -> Result<Progress> {
         let ips = io.pc_system.ips();
 
+        let progress = (|| {
+
         // DIAGNOSTIC BISECTION, not a shipping mode. `WHP_ALL_SHADOW=1` keeps
         // every part of this engine except the hardware: the same slice
         // budgeting, the same delivery-at-slice-entry policy, the same device
@@ -783,8 +824,12 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // with the same `general protection` on `IRET`, the fault is in this
         // engine's own slice and delivery logic, which the interpreter's loop
         // does differently.
-        if std::env::var_os("WHP_ALL_SHADOW").is_some() {
-            return run_slice_on_the_shadow(cpu, &mut io, request, &mut self.census);
+        if everything_on_the_shadow() {
+            let shadowed = match self.started.as_mut() {
+                Some(started) => core::mem::replace(&mut started.shadowed, false),
+                None => false,
+            };
+            return run_slice_on_the_shadow(cpu, &mut io, request, &mut self.census, shadowed);
         }
 
         // A slice the hardware cannot be interrupted within belongs to the
@@ -811,7 +856,15 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // shadow is this port's own interpreter against this machine's own
         // devices.
         if host_time_exactly(request.instructions(), ips) < shortest_hardware_slice() {
-            return run_slice_on_the_shadow(cpu, &mut io, request, &mut self.census);
+            // Taken, not merely read: the slice below retires the shadowing
+            // instruction itself, so the flag must lapse with it — a stale
+            // `true` would hold the next slice's delivery off for an
+            // instruction the guest has already executed.
+            let shadowed = match self.started.as_mut() {
+                Some(started) => core::mem::replace(&mut started.shadowed, false),
+                None => false,
+            };
+            return run_slice_on_the_shadow(cpu, &mut io, request, &mut self.census, shadowed);
         }
 
         // An interrupt to deliver, a halt to wake from, any work the
@@ -922,6 +975,41 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // sooner — the budget check above — never by under-reporting a slice
         // that has already run.
         Ok(Progress::Ticks(ticks_elapsed(ran, ips)))
+
+        })();
+        if let Err(error) = &progress {
+            // The trail a dead slice leaves. A guest fault the shadow could
+            // not deliver surfaces as this error, and by then the guest's own
+            // report — if it ever manages one — describes the wreckage, not
+            // the approach. What led here is only readable now: the last
+            // exits the hardware took (`o`/`i` port writes and reads, `S` a
+            // string or repeated one, `m` memory, `c`/`r` CPUID and MSR, `h`
+            // a halt, `x` a cancellation), and the processor the shadow was
+            // left holding.
+            let trail: std::vec::Vec<std::string::String> = self
+                .history
+                .replay()
+                .map(|(rip, kind)| std::format!("{}@{rip:#x}", kind as char))
+                .collect();
+            let mut state = VcpuArchState::default();
+            cpu.export_arch_state(&mut state);
+            let cs = &state.segments[1];
+            tracing::error!(
+                "a slice died: {error:?}; the shadow held rip={:#x} efer={:#x} cr0={:#x} \
+                 cr4={:#x} cs sel={:#06x} base={:#x} limit={:#x} (scaled {:#x}) attr={:#06x}",
+                state.rip,
+                state.msrs.efer,
+                state.cr0,
+                state.cr4,
+                cs.selector,
+                cs.base,
+                cs.limit,
+                cs.scaled_limit(),
+                cs.attributes.bits()
+            );
+            tracing::error!("  exits leading here (oldest first): {}", trail.join(" "));
+        }
+        progress
     }
 }
 
@@ -949,8 +1037,22 @@ fn run_slice_on_the_shadow<T: Instrumentation>(
     io: &mut PcIo<'_>,
     request: SliceRequest,
     census: &mut SliceCensus,
+    shadowed: bool,
 ) -> Result<Progress> {
     io.sync_io_events(cpu);
+    // An interrupt shadow the hardware left behind: `MOV SS`, `POP SS` and
+    // `STI` block delivery for exactly one instruction, and that fact lives
+    // in the partition's interrupt state, not in any register the exchange
+    // carries — the interpreter's own inhibit mask did not cross the seam.
+    // So the shadowing instruction retires here first, with delivery held
+    // off for its length, exactly as the architecture asks. Delivering
+    // instead would push the interrupt frame with the new `SS` and the old
+    // `ESP` — the same wrong frame the hardware path's guard exists to
+    // prevent.
+    if shadowed {
+        io.finish_the_instruction(cpu)?;
+        io.sync_io_events(cpu);
+    }
     if cpu.has_an_event_to_deliver() {
         io.emulate_one(cpu)?;
         io.sync_io_events(cpu);
@@ -1019,6 +1121,7 @@ fn install_the_shadow<T: Instrumentation>(
         shadowed: _,
         consecutive_mmio: _,
         held,
+        xsave,
     } = started;
     cpu.export_arch_state(state);
     // A slice that ended with the guest on hardware left the processor holding
@@ -1048,9 +1151,45 @@ fn install_the_shadow<T: Instrumentation>(
             return Ok(());
         }
     }
-    state::import(&Vp::new(partition, BOOT_VP), state).map_err(|error| refused_state(error, state))?;
+    impose_the_shadow(partition, state, xsave, held.as_ref())?;
     *held = Some(state.clone());
     Ok(())
+}
+
+/// Write the shadow processor into the partition — the named registers and,
+/// when it moved, the vector file.
+///
+/// `previous` is the last state the two sides agreed on. The named registers
+/// go every time — the caller already knows they changed — but the x87 and
+/// vector file is a whole-area transfer, and most exchanges move a `RIP` and
+/// a flag word while that file sat still, so it goes only when it differs.
+/// With no agreement to compare against, everything goes.
+fn impose_the_shadow(
+    partition: &Partition,
+    state: &VcpuArchState,
+    xsave: &mut XsaveArea,
+    previous: Option<&VcpuArchState>,
+) -> Result<()> {
+    state::import(&Vp::new(partition, BOOT_VP), state)
+        .map_err(|error| refused_state(error, state))?;
+    if previous.is_none_or(|held| xsave::vector_file_differs(state, held)) {
+        xsave.patch(state).map_err(uncarried)?;
+        xsave.write_to(partition, BOOT_VP).map_err(platform_failed)?;
+    }
+    Ok(())
+}
+
+/// The shadow holds extended state the partition's area has no place for —
+/// a defect in what this engine offered the guest, reported rather than
+/// silently dropped on the floor.
+fn uncarried(refused: xsave::UncarriedComponent) -> CpuError {
+    tracing::error!(
+        "the shadow holds extended-state component {} and the partition's area cannot carry it",
+        refused.index
+    );
+    CpuError::UnsupportedCpuOperation {
+        operation: "an extended-state component the partition cannot carry",
+    }
 }
 
 /// Describe the shadow from the platform's processor.
@@ -1071,9 +1210,16 @@ fn read_back_into_the_shadow<T: Instrumentation>(
         shadowed,
         consecutive_mmio: _,
         held,
+        xsave,
     } = started;
     let vp = Vp::new(partition, BOOT_VP);
     state::export(&vp, state).map_err(platform_failed)?;
+    // The x87 and vector file arrives beside the named registers, so the
+    // shadow starts from everything the hardware left behind — not just what
+    // has a register name. A stretch of guest code that lands here mid
+    // string routine reads the very bytes the hardware was holding.
+    xsave.refresh_from(partition, BOOT_VP).map_err(platform_failed)?;
+    xsave.fill(state);
     // The one moment the two are known to agree, because the shadow was just
     // copied from the processor.
     *held = Some(state.clone());
@@ -1091,6 +1237,13 @@ fn read_back_into_the_shadow<T: Instrumentation>(
         tracing::error!("the hypervisor returned a state this port refuses: {error:?}");
         CpuError::UnsupportedCpuOperation { operation: "hypervisor state refused on import" }
     })?;
+    // The hardware may have written any page of the shared memory while it
+    // held the guest, and no write of its makes it into the interpreter's
+    // self-modifying-code stamps. Whatever the shadow decoded before this
+    // hand-back may therefore describe bytes that are gone — a guest kernel
+    // patching its own text leaves a transient `INT3` at the patch site, and
+    // a cached trace must not deliver it after the patch retired.
+    cpu.discard_decoded_traces();
 
     // One counter, whichever processor the guest asks. `RDTSC` is not a trapped
     // instruction here, so on the hardware it answers from the partition's own
@@ -1173,6 +1326,11 @@ fn run_the_exit_loop<T: Instrumentation>(
     exits: &mut u64,
     history: &mut ExitHistory,
 ) -> Result<Yielded> {
+    // Whether the last exit left the platform holding an interruption it had
+    // begun delivering. While it does, the slice may not end — see the
+    // `Canceled` arm — so the budget checks below stand down for exactly one
+    // more entry.
+    let mut delivery_in_flight = false;
     loop {
         // Checked before running rather than after, so a slice whose budget is
         // already spent hands the machine back without another exit's worth of
@@ -1207,12 +1365,19 @@ fn run_the_exit_loop<T: Instrumentation>(
         // waits are granular to the millisecond — could not tell either from
         // four milliseconds. Every slice ran 836 times its budget, so every
         // device deadline inside it was serviced late, together, at the end.
-        if ticks_elapsed(*ran, ips) >= budget {
+        if !delivery_in_flight && ticks_elapsed(*ran, ips) >= budget {
             return Ok(Yielded::Budget);
         }
-        let Some(left) = deadline.checked_sub(*ran).filter(|left| !left.is_zero()) else {
-            return Ok(Yielded::Budget);
+        let left = match deadline.checked_sub(*ran).filter(|left| !left.is_zero()) {
+            Some(left) => left,
+            // Past the deadline with a delivery in flight: the slice cannot
+            // end yet, so the processor gets one more entry — long enough for
+            // an injection to land, bounded by the shortest stretch the alarm
+            // can measure rather than by a budget already spent.
+            None if delivery_in_flight => shortest_hardware_slice(),
+            None => return Ok(Yielded::Budget),
         };
+        delivery_in_flight = false;
         // The budget needs a voice that does not depend on the guest exiting:
         // a guest in a loop that touches no device and no unmapped page is
         // inside the platform's run call and never reaches the check above.
@@ -1256,9 +1421,13 @@ fn run_the_exit_loop<T: Instrumentation>(
             _ => {}
         }
         // An exit that arrives with a delivery already in flight is one this
-        // engine must not rewrite the processor underneath — wtf's WHP backend
-        // hands the vCPU straight back in that case rather than touching
-        // resume state. Reported rather than acted on until it is seen.
+        // engine must not rewrite the processor underneath — the `Canceled`
+        // arm below hands the processor straight back for exactly that
+        // reason. The reasons the engine services by rewriting cannot carry
+        // the bit on this machine (a delivery intercepts only when its IDT or
+        // stack pushes leave RAM, and here they never do), so for those it
+        // stays a report — and a report that ever fires is a claim in this
+        // comment proven wrong.
         if (exit.vp.execution_state >> 6) & 1 == 1 {
             tracing::warn!(
                 target: "irq",
@@ -1291,10 +1460,7 @@ fn run_the_exit_loop<T: Instrumentation>(
             // RAX all arrive in the exit, so no decoder is involved and the
             // machine's own device dispatch answers it directly.
             ExitReason::IoPortAccess(access) => {
-                if access.string_op
-                    || access.rep_prefix
-                    || std::env::var_os("WHP_PORTS_ON_SHADOW").is_some()
-                {
+                if access.string_op || access.rep_prefix || ports_on_the_shadow() {
                     // A string or repeated port access moves memory as well as
                     // a register, and the exit describes only the register.
                     // Finishing it from the exit alone would transfer one item
@@ -1321,6 +1487,22 @@ fn run_the_exit_loop<T: Instrumentation>(
             // past the deadline it is this slice's own alarm, which is the
             // budget running out and not an interruption.
             ExitReason::Canceled { .. } => {
+                // An interruption the platform has begun delivering is part
+                // of the processor's in-flight state, and the one holder of
+                // it is the partition (`execution_state` bit 6,
+                // `InterruptionPending`). Ending the slice here hands the
+                // processor to the machine and the shadow, both of which
+                // rewrite it — and the delivery then lands in whatever
+                // context they leave behind. Measured as `Oops: int3` in a
+                // guest: a text-poke `#BP` held pending across a cancel was
+                // delivered after the shadow had moved the guest on, at an
+                // address whose patch record was already retired. So the
+                // processor goes straight back until the delivery lands —
+                // the same rule wtf's WHP backend follows.
+                if (exit.vp.execution_state >> 6) & 1 == 1 {
+                    delivery_in_flight = true;
+                    continue;
+                }
                 return Ok(if *ran >= deadline {
                     Yielded::Budget
                 } else {
@@ -1375,7 +1557,15 @@ fn run_the_exit_loop<T: Instrumentation>(
                 return Err(unserviced("unrecoverable exception", &exit))
             }
             ExitReason::InvalidVpRegisterValue => {
-                return Err(unserviced("invalid processor register", &exit))
+                // The platform refuses to run the processor it holds, and
+                // does not say which register offends. The last state this
+                // engine wrote is the prime suspect, so it is reported whole
+                // — segments first, because the architecture's entry checks
+                // put most of their rules on segments.
+                if let Some(held) = started.held.as_ref() {
+                    report_the_state_the_platform_refused(held);
+                }
+                return Err(unserviced("invalid processor register", &exit));
             }
             ExitReason::UnsupportedFeature { .. } => return Err(unserviced("unsupported feature", &exit)),
             ExitReason::ApicEoi { .. }
@@ -1489,6 +1679,64 @@ enum Trapped {
     Access,
     /// `CPUID` for this leaf.
     Cpuid { leaf: u32 },
+}
+
+/// Report the whole state the platform refused to run, so the register that
+/// broke an architectural entry check can be found by inspection — the
+/// refusal itself names nothing.
+fn report_the_state_the_platform_refused(held: &VcpuArchState) {
+    tracing::error!("the platform refuses this processor; the state last written:");
+    const NAMES: [&str; 6] = ["es", "cs", "ss", "ds", "fs", "gs"];
+    for (name, seg) in NAMES.iter().zip(held.segments.iter()) {
+        tracing::error!(
+            "  {name}: sel={:#06x} base={:#x} limit={:#x} (scaled {:#x}) attr={:#06x}",
+            seg.selector,
+            seg.base,
+            seg.limit,
+            seg.scaled_limit(),
+            seg.attributes.bits()
+        );
+    }
+    tracing::error!(
+        "  ldtr sel={:#06x} base={:#x} limit={:#x} attr={:#06x}; tr sel={:#06x} base={:#x} \
+         limit={:#x} attr={:#06x}",
+        held.ldtr.selector,
+        held.ldtr.base,
+        held.ldtr.limit,
+        held.ldtr.attributes.bits(),
+        held.tr.selector,
+        held.tr.base,
+        held.tr.limit,
+        held.tr.attributes.bits()
+    );
+    tracing::error!(
+        "  rip={:#x} rflags={:#x} cr0={:#x} cr3={:#x} cr4={:#x} cr8={:#x} efer={:#x} \
+         xcr0={:#x} apic_base={:#x}",
+        held.rip,
+        held.rflags,
+        held.cr0,
+        held.cr3,
+        held.cr4,
+        held.cr8,
+        held.msrs.efer,
+        held.xcr0,
+        held.msrs.apic_base
+    );
+    tracing::error!(
+        "  dr6={:#x} dr7={:#x} gdtr={:#x}/{:#x} idtr={:#x}/{:#x} pat={:#x} star={:#x} \
+         lstar={:#x} sfmask={:#x} kgsbase={:#x}",
+        held.dr6,
+        held.dr7,
+        held.gdtr.base,
+        held.gdtr.limit,
+        held.idtr.base,
+        held.idtr.limit,
+        held.msrs.pat,
+        held.msrs.star,
+        held.msrs.lstar,
+        held.msrs.sfmask,
+        held.msrs.kernel_gs_base
+    );
 }
 
 /// Take the virtualization features out of an answer this engine cannot honour.
@@ -1685,10 +1933,19 @@ fn burst_on_the_shadow<T: Instrumentation>(
     io: &mut PcIo<'_>,
 ) -> Result<()> {
     read_back_into_the_shadow(started, cpu, io.pc_system.time_ticks())?;
-    // Not `finish_the_instruction`: that one holds off the external interrupt
-    // for the length of a single trapped access, which is right when finishing
-    // one instruction and wrong for a stretch. Across a burst the interpreter
-    // delivers on its own terms, exactly as it does when it owns the machine.
+    // An interrupt shadow crossing into the burst: the read-back just said
+    // the guest stands inside one, and `emulate_batch` below delivers freely
+    // at every instruction boundary — so the shadowing instruction retires
+    // first with delivery held off, and the flag lapses with it, the same
+    // rule the converted-slice path follows.
+    if core::mem::replace(&mut started.shadowed, false) {
+        io.finish_the_instruction(cpu)?;
+    }
+    // Not `finish_the_instruction` for the stretch itself: that verb holds
+    // off the external interrupt for the length of a single trapped access,
+    // which is right when finishing one instruction and wrong for a stretch.
+    // Across a burst the interpreter delivers on its own terms, exactly as it
+    // does when it owns the machine.
     io.emulate_batch(cpu, BURST_INSTRUCTIONS)?;
 
     let Started {
@@ -1699,9 +1956,10 @@ fn burst_on_the_shadow<T: Instrumentation>(
         shadowed: _,
         consecutive_mmio: _,
         held,
+        xsave,
     } = started;
     cpu.export_arch_state(state);
-    state::import(&Vp::new(partition, BOOT_VP), state).map_err(|error| refused_state(error, state))?;
+    impose_the_shadow(partition, state, xsave, held.as_ref())?;
     *held = Some(state.clone());
     Ok(())
 }
@@ -1727,12 +1985,13 @@ fn finish_on_the_shadow<T: Instrumentation>(
         shadowed: _,
         consecutive_mmio: _,
         held,
+        xsave,
     } = started;
     cpu.export_arch_state(state);
     if let Trapped::Cpuid { leaf } = trapped {
         withhold_virtualisation_from(state, leaf);
     }
-    state::import(&Vp::new(partition, BOOT_VP), state).map_err(|error| refused_state(error, state))?;
+    impose_the_shadow(partition, state, xsave, held.as_ref())?;
     *held = Some(state.clone());
     Ok(())
 }
@@ -1871,10 +2130,13 @@ const SLICE_RESOLUTION: Duration = Duration::from_micros(50);
 /// so the guest is interpreted and the hardware never sees it. Alpine boots
 /// that way today.
 fn shortest_hardware_slice() -> Duration {
-    match std::env::var("WHP_MIN_SLICE_US").ok().and_then(|us| us.parse().ok()) {
-        Some(us) => Duration::from_micros(us),
-        None => Duration::from_micros(3),
-    }
+    static SETTING: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *SETTING.get_or_init(|| {
+        match std::env::var("WHP_MIN_SLICE_US").ok().and_then(|us| us.parse().ok()) {
+            Some(us) => Duration::from_micros(us),
+            None => Duration::from_micros(3),
+        }
+    })
 }
 
 
@@ -1923,10 +2185,13 @@ const fn default_hardware_speed() -> u64 {
 
 /// The fast-forward factor in force, honest time unless asked otherwise.
 fn hardware_speed() -> u64 {
-    match std::env::var("WHP_FAST_FORWARD").ok().and_then(|n| n.parse().ok()) {
-        Some(n) if n >= 1 => n,
-        _ => HARDWARE_SPEED,
-    }
+    static SETTING: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SETTING.get_or_init(|| {
+        match std::env::var("WHP_FAST_FORWARD").ok().and_then(|n| n.parse().ok()) {
+            Some(n) if n >= 1 => n,
+            _ => HARDWARE_SPEED,
+        }
+    })
 }
 
 /// Host nanoseconds as machine ticks.

@@ -49,6 +49,7 @@
 mod alarm;
 mod engine;
 mod state;
+mod xsave;
 
 pub use engine::{ExitCounts, PlatformCounters, SliceCensus, WhpEngine};
 

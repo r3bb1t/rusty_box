@@ -7,12 +7,11 @@
 //! travels whole rather than being unpacked here and repacked there, which
 //! would be two chances to disagree about, say, bit 13.
 //!
-//! What does NOT cross here is the x87 and vector file. The platform carries
-//! them, but a guest reaches them only through instructions, and every
-//! instruction the hypervisor cannot finish is finished by the shadow
-//! processor — which already holds that state and never handed it away. Moving
-//! it every exit would be several hundred bytes each way for a register file
-//! neither side had touched.
+//! What does NOT cross here is the x87 and vector file: the platform names no
+//! register for most of it, so it crosses as the architecture's own XSAVE
+//! area instead — [`crate::xsave`], refreshed and written back beside this
+//! exchange. This module's export leaves those fields of the state exactly as
+//! they were, which is what lets that area fill them afterwards.
 
 use rusty_box_whp::{Reg, RegisterValue, SegmentRegister, TableRegister, WhpResult};
 #[cfg(test)]
@@ -349,6 +348,50 @@ pub(crate) fn export(vp: &impl VpRegisters, state: &mut VcpuArchState) -> WhpRes
             _ => SegmentRegister::default(),
         }
     });
+    // A processor cannot be executing through the CS this read-back carries
+    // unless the pieces agree: a long (L=1) CS is legal exactly when
+    // `EFER.LMA` says long mode is active — its base and limit are then out
+    // of play — and any other CS under CR0.PE must be present with a nonzero
+    // effective limit. A state that breaks this will not fail here; it fails
+    // later as an unattributable guest fault, because the import cannot
+    // refuse it and the shadow then applies the wrong mode's rules — a limit
+    // check against a long segment, an eight-byte gate walk through a
+    // sixteen-byte IDT. Reported on the platform's raw bytes, the one moment
+    // the disagreement is still visible. CS only: data segments legitimately
+    // read back zeroed after a null selector load.
+    {
+        /// `EFER.LMA`, bit 10 — long mode ACTIVE, the bit the mode derivation
+        /// turns on.
+        const LMA: u64 = 1 << 10;
+        let cs = segments[1];
+        let attributes = SegmentAttributes::from_bits(cs.attributes);
+        let executable = attributes.is_present()
+            && if attributes.is_long() {
+                msrs[0] & LMA != 0
+            } else {
+                cs.limit != 0 || attributes.is_granular()
+            };
+        if words[18] & 1 != 0 && !executable {
+            tracing::error!(
+                "read-back CS cannot be executing: cs sel={:#06x} base={:#x} limit={:#x} \
+                 attr={:#06x}; ss sel={:#06x} limit={:#x} attr={:#06x} ds attr={:#06x} \
+                 rip={:#x} cr0={:#x} rflags={:#x} efer={:#x} cr4={:#x}",
+                cs.selector,
+                cs.base,
+                cs.limit,
+                cs.attributes,
+                segments[2].selector,
+                segments[2].limit,
+                segments[2].attributes,
+                segments[3].attributes,
+                words[16],
+                words[18],
+                words[17],
+                msrs[0],
+                words[21]
+            );
+        }
+    }
     for (slot, seg) in state.segments.iter_mut().zip(&segments) {
         *slot = from_platform_segment(*seg);
     }
@@ -641,8 +684,9 @@ mod tests {
         assert!(!crossed.attributes.is_default_big());
     }
 
-    /// The register file the seam deliberately leaves alone stays untouched, so
-    /// an export cannot quietly zero state the shadow processor still owns.
+    /// The register file this exchange leaves to [`crate::xsave`] stays
+    /// untouched, so an export cannot quietly zero the fields the area fills
+    /// in afterwards.
     #[test]
     fn the_vector_file_is_not_carried_and_is_not_disturbed() {
         let vp = Recorder::default();

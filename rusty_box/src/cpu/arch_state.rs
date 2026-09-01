@@ -456,6 +456,23 @@ impl<T: Instrumentation> BxCpuC<T> {
         self.enter_sleep_state(CpuActivityState::Hlt);
     }
 
+    /// Drop every decoded trace this processor holds.
+    ///
+    /// For an engine whose guest also executes outside this interpreter. The
+    /// interpreter's self-modifying-code tracking sees a write only when it
+    /// makes one, so a store the hardware makes to the shared guest memory
+    /// bumps no page stamp — and a trace decoded before the hardware ran may
+    /// describe bytes that are no longer there. A kernel that patches its own
+    /// text is enough: the transient `INT3` a live patch site holds must not
+    /// outlive the patch inside a cached trace. Called at the hand-back,
+    /// before this processor executes again. (Bochs icache.h
+    /// `flushICacheEntries`, the same conservative flush the SMC
+    /// pending-queue overflow takes.)
+    pub fn discard_decoded_traces(&mut self) {
+        self.i_cache.flush_all();
+        self.invalidate_prefetch_q();
+    }
+
     /// Lift the interpreter's trace bookkeeping out of the way, and hand it
     /// back to be restored.
     ///
