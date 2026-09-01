@@ -570,6 +570,35 @@ impl<T: Instrumentation> BxCpuC<T> {
             || (self.lapic.intr && self.interrupts_enabled())
     }
 
+    /// Whether an external interrupt EXISTS — asserted line or pending LAPIC
+    /// vector — regardless of whether it may be taken now. IF-blind on
+    /// purpose: an engine that injects has to arm an interrupt window for a
+    /// vector the guest is masking, and a probe that consulted IF would never
+    /// arm one. Only [`DeliverableInterrupt::MASK`]'s bits count; an SMI, an
+    /// NMI or an INIT is not an external interrupt and never reaches an
+    /// injection path.
+    #[must_use]
+    pub fn has_deliverable_ext_int(&self) -> bool {
+        self.pending_event & DeliverableInterrupt::MASK != 0 || self.lapic.intr
+    }
+
+    /// Whether something OTHER than an external interrupt is deliverable —
+    /// the events an engine must still hand to the shadow (SMI, NMI, INIT,
+    /// shutdown), with each event's own masking preserved.
+    #[must_use]
+    pub fn has_non_ext_int_event(&self) -> bool {
+        self.is_unmasked_event_pending(!DeliverableInterrupt::MASK)
+    }
+
+    /// The task-priority register as `MOV CR8` writes it: the top four bits
+    /// of the local APIC's TPR. A guest's `MOV CR8` retires on the hardware
+    /// without an exit, so the engine refreshes this from the exit header
+    /// before any delivery decision — the same route `import_arch_state`
+    /// takes for the whole-state exchange.
+    pub fn set_lapic_tpr_from_cr8(&mut self, cr8: u8) {
+        self.lapic.set_tpr((cr8 & 0xF) << 4);
+    }
+
     /// Whether this processor is inside system-management mode.
     ///
     /// An engine running the guest on the host's own processor has to ask,
@@ -1155,5 +1184,46 @@ mod tests {
             "a refused import must write nothing, including the register it \
              would have got to before reaching the bad segment"
         );
+    }
+
+    /// The window-arming probe is IF-blind: a line asserted under CLI is still
+    /// a reason to arm an interrupt window, and only delivery is gated on IF.
+    #[test]
+    fn a_pending_external_interrupt_is_reported_even_with_interrupts_masked() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+        cpu.set_rflags_for_api(0x2); // IF = 0
+        assert!(
+            cpu.has_deliverable_ext_int(),
+            "raw pending must not consult IF"
+        );
+        assert!(
+            !cpu.has_an_event_to_deliver(),
+            "the deliverable question still says no"
+        );
+    }
+
+    /// SMI is not an external interrupt: it must show on the non-ext probe and
+    /// never on the ext probe.
+    #[test]
+    fn an_smi_is_not_an_external_interrupt() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_SMI);
+        assert!(!cpu.has_deliverable_ext_int());
+        assert!(cpu.has_non_ext_int_event());
+    }
+
+    /// CR8 is the top four TPR bits, exactly as `export_arch_state` reads them
+    /// back (`lapic.get_tpr() >> 4`).
+    #[test]
+    fn cr8_lands_in_the_task_priority_register() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+        cpu.set_lapic_tpr_from_cr8(0x9);
+        let mut state = VcpuArchState::default();
+        cpu.export_arch_state(&mut state);
+        assert_eq!(state.cr8, 0x9);
     }
 }
