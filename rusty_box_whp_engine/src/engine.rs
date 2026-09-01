@@ -457,6 +457,18 @@ struct Started {
     /// is a `general protection: 0000` on `IRET`, which is exactly how a DLX
     /// boot died once IDE interrupts started flowing.
     shadowed: bool,
+    /// Whether the guest had NMIs masked when the hardware last handed it
+    /// back — bit 1 of `WHvRegisterInterruptState`, read beside
+    /// [`Self::shadowed`].
+    ///
+    /// Kept so [`impose_the_shadow`] can write that register's inhibit bit
+    /// without clobbering this one: the mask is the hardware's own record of
+    /// a guest inside an NMI handler, no architectural register the exchange
+    /// carries holds it, and a blind zero would unmask NMIs mid-handler.
+    /// Between the read-back that fills it and any imposition that writes the
+    /// register the partition never runs, so the copy is current at every
+    /// write.
+    nmi_masked: bool,
     /// What the platform's registers hold, as far as this engine knows.
     ///
     /// Written at exactly the two moments the answer is certain: after reading
@@ -829,8 +841,10 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                 partition,
                 state: VcpuArchState::default(),
                 installed,
-                // A processor that has never run cannot be mid-instruction.
+                // A processor that has never run cannot be mid-instruction,
+                // and NMIs are unmasked at reset.
                 shadowed: false,
+                nmi_masked: false,
                 consecutive_mmio: 0,
                 // Nothing has been read from this processor yet.
                 held: None,
@@ -1396,6 +1410,7 @@ fn install_the_shadow<T: Instrumentation>(
         state,
         installed: _,
         shadowed: _,
+        nmi_masked,
         consecutive_mmio: _,
         held,
         xsave,
@@ -1438,27 +1453,50 @@ fn install_the_shadow<T: Instrumentation>(
             return Ok(());
         }
     }
-    impose_the_shadow(partition, state, xsave, held.as_ref())?;
+    impose_the_shadow(partition, state, xsave, held.as_ref(), *nmi_masked)?;
     *held = Some(state.clone());
     Ok(())
 }
 
-/// Write the shadow processor into the partition — the named registers and,
-/// when it moved, the vector file.
+/// Write the shadow processor into the partition — the named registers, the
+/// interruptibility the exchange cannot carry and, when it moved, the vector
+/// file.
 ///
 /// `previous` is the last state the two sides agreed on. The named registers
 /// go every time — the caller already knows they changed — but the x87 and
 /// vector file is a whole-area transfer, and most exchanges move a `RIP` and
 /// a flag word while that file sat still, so it goes only when it differs.
 /// With no agreement to compare against, everything goes.
+///
+/// `WHvRegisterInterruptState` goes every time, and the inhibit bit goes as
+/// LIVE. An imposition means the shadow retired instructions — or the machine
+/// wrote state — since the read-back the partition's own bit dates from, so
+/// that bit is stale in both directions: a stretch may have retired the
+/// instruction a set bit was protecting (a partition still refusing delivery
+/// would reject an injection at entry with `WHV_E_INVALID_VP_STATE` the
+/// moment the gate correctly said yes), or retired a `MOV SS`/`POP SS`/`STI`
+/// as its LAST instruction and left an inhibit this crate cannot read (a
+/// clear bit would open an armed window at entry and the fresh header would
+/// pass the gate — an injection into the shadowing window, the new-`SS`
+/// old-`ESP` frame [`Started::shadowed`]'s doc records). Unknown means
+/// blocked, so the partition is told what the gate is told: inhibited, for
+/// the one instruction the architecture gives an inhibit, after which the
+/// hardware clears the bit itself and every later header answers truthfully.
+/// The NMI mask rides along unchanged from the last read-back
+/// ([`Started::nmi_masked`]); zeroing it would unmask NMIs mid-handler.
 fn impose_the_shadow(
     partition: &Partition,
     state: &VcpuArchState,
     xsave: &mut XsaveArea,
     previous: Option<&VcpuArchState>,
+    nmi_masked: bool,
 ) -> Result<()> {
-    state::import(&Vp::new(partition, BOOT_VP), state)
-        .map_err(|error| refused_state(error, state))?;
+    let vp = Vp::new(partition, BOOT_VP);
+    state::import(&vp, state).map_err(|error| refused_state(error, state))?;
+    // Bit 0 is the interrupt shadow, bit 1 the NMI mask.
+    let interrupt_state = 1u64 | (u64::from(nmi_masked) << 1);
+    vp.write_words(&[Reg::InterruptState], &[interrupt_state])
+        .map_err(platform_failed)?;
     if previous.is_none_or(|held| xsave::vector_file_differs(state, held)) {
         xsave.patch(state).map_err(uncarried)?;
         xsave.write_to(partition, BOOT_VP).map_err(platform_failed)?;
@@ -1495,6 +1533,7 @@ fn read_back_into_the_shadow<T: Instrumentation>(
         state,
         installed: _,
         shadowed,
+        nmi_masked,
         consecutive_mmio: _,
         held,
         xsave,
@@ -1521,6 +1560,7 @@ fn read_back_into_the_shadow<T: Instrumentation>(
     vp.read_words(&[rusty_box_whp::Reg::InterruptState], &mut interrupt_state)
         .map_err(platform_failed)?;
     *shadowed = interrupt_state[0] & 1 != 0;
+    *nmi_masked = interrupt_state[0] & 2 != 0;
 
     cpu.import_arch_state(state).map_err(|error| {
         tracing::error!("the hypervisor returned a state this port refuses: {error:?}");
@@ -2448,6 +2488,7 @@ fn impose_after_errand<T: Instrumentation>(
         state,
         installed: _,
         shadowed: _,
+        nmi_masked,
         consecutive_mmio: _,
         held,
         xsave,
@@ -2459,7 +2500,7 @@ fn impose_after_errand<T: Instrumentation>(
     if let Trapped::Cpuid { leaf } = trapped {
         withhold_virtualisation_from(state, leaf);
     }
-    impose_the_shadow(partition, state, xsave, held.as_ref())?;
+    impose_the_shadow(partition, state, xsave, held.as_ref(), *nmi_masked)?;
     *held = Some(state.clone());
     Ok(())
 }
