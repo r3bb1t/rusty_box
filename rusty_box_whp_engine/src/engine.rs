@@ -22,8 +22,9 @@
 use core::time::Duration;
 
 use rusty_box_whp::{
-    Exit, ExitReason, ExtendedVmExits, InterceptCounters, LocalApicMode, MsrExits, Partition,
-    PartitionConfig, RuntimeCounters, VpContext, WhpError,
+    Exit, ExitReason, ExtendedVmExits, InterceptCounters, InterruptionType, LocalApicMode,
+    MsrExits, Partition, PartitionConfig, PendingInterruption, Reg, RuntimeCounters, VpContext,
+    WhpError,
 };
 
 use super::alarm::Alarm;
@@ -293,13 +294,7 @@ fn platform_failed(error: WhpError) -> CpuError {
 /// an injection decision consults is already in hand the moment
 /// `WHvRunVirtualProcessor` returns, so consulting it costs zero platform
 /// calls — where a register read would cost the very exchange injection is
-/// meant to avoid.
-// The fields' production reader is the injection decision this cache exists
-// to answer, which is `stage_injection`'s — owned by a later task; until it
-// lands their only readers are the unit tests. Targeted rather than
-// file-level (ci ratchets blanket allows) so any other unread item beside
-// this one still warns.
-#[allow(dead_code)]
+/// meant to avoid. The reader is [`stage_injection`].
 struct InjectState {
     /// `ExecutionState` bit 6, `InterruptionPending` — a delivery the platform
     /// has begun and not landed. From the exit header alone, never a register
@@ -313,8 +308,8 @@ struct InjectState {
     cr8: u8,
     /// A `DeliverabilityNotifications` request armed at this priority and not
     /// yet answered by a window exit. NOT refreshed from headers — no header
-    /// reports it back. It is owned by the injection logic (`stage_injection`
-    /// and the window arm), which a later task adds; a refresh leaves it
+    /// reports it back. It is owned by the injection logic — [`stage_injection`]
+    /// arms it, the `InterruptWindow` arm clears it — and a refresh leaves it
     /// exactly as it stands.
     window: Option<u8>,
 }
@@ -925,7 +920,9 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
 
     // Delivery is this engine's: the partition has no local APIC of its own
     // and the hardware knows nothing of this machine's 8259 pair, so a vector
-    // reaches the guest only by the shadow taking it at the head of a slice.
+    // reaches the guest only from this side — injected into the partition
+    // mid-slice by `stage_injection`, or taken by the shadow at the head of
+    // a slice.
     const EVENT_DELIVERY: EventDelivery = EventDelivery::Engine;
 
     fn memory_map_changed(&mut self, memory: &mut BxMemC) -> Result<()> {
@@ -1014,9 +1011,11 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // interpreter means a guest's interrupt frame is what it would be with
         // no hypervisor in the picture.
         //
-        // Which is also why this engine never writes
-        // `WHvRegisterPendingInterruption`: there is nothing for the platform
-        // to inject that the shadow has not already delivered.
+        // Mid-slice the story is [`stage_injection`]'s: an external vector
+        // that becomes deliverable between exits crosses to the partition as
+        // a register write — the one place this engine writes
+        // `WHvRegisterPendingInterruption` — instead of ending the slice to
+        // run the delivery here.
         // Make the processor's view of the bus current BEFORE asking whether
         // it has anything to deliver. The 8259's interrupt line is a level,
         // and what the processor holds is a latched copy of it: a line the
@@ -1068,7 +1067,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // here rather than being handed over half-entered.
         run_the_shadow_out_of_smm(cpu, &mut io)?;
 
-        let Self { started, exits, census, history, inject_census: _ } = self;
+        let Self { started, exits, census, history, inject_census } = self;
         let started = start(started, &mut io)?;
 
         // The shadow describes the processor; the platform runs it.
@@ -1082,6 +1081,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             request.instructions(),
             ips,
             exits,
+            inject_census,
             history,
         );
 
@@ -1123,8 +1123,8 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             // the approach. What led here is only readable now: the last
             // exits the hardware took (`o`/`i` port writes and reads, `S` a
             // string or repeated one, `m` memory, `c`/`r` CPUID and MSR, `h`
-            // a halt, `x` a cancellation), and the processor the shadow was
-            // left holding.
+            // a halt, `x` a cancellation, `w` an interrupt window), and the
+            // processor the shadow was left holding.
             let trail: std::vec::Vec<std::string::String> = self
                 .history
                 .replay()
@@ -1441,12 +1441,14 @@ fn run_until_the_machine_is_needed<T: Instrumentation>(
     budget: u64,
     ips: u64,
     counts: &mut ExitCounts,
+    inject_census: &mut InjectCensus,
     history: &mut ExitHistory,
 ) -> Result<SliceOutcome> {
     let mut ran = Duration::ZERO;
     let mut exits = 0u64;
     let yielded = run_the_exit_loop(
-        started, cpu, io, deadline, budget, ips, counts, &mut ran, &mut exits, history,
+        started, cpu, io, deadline, budget, ips, counts, inject_census, &mut ran, &mut exits,
+        history,
     );
     // The alarm is armed per run inside the loop, so an error path can leave
     // one armed against a processor nobody is running. Disarming here is what
@@ -1465,6 +1467,7 @@ fn run_the_exit_loop<T: Instrumentation>(
     budget: u64,
     ips: u64,
     counts: &mut ExitCounts,
+    inject_census: &mut InjectCensus,
     ran: &mut Duration,
     exits: &mut u64,
     history: &mut ExitHistory,
@@ -1599,6 +1602,7 @@ fn run_the_exit_loop<T: Instrumentation>(
                 ExitReason::MsrAccess(_) => b'r',
                 ExitReason::Halt => b'h',
                 ExitReason::Canceled { .. } => b'x',
+                ExitReason::InterruptWindow => b'w',
                 _ => b'?',
             },
         );
@@ -1687,7 +1691,17 @@ fn run_the_exit_loop<T: Instrumentation>(
             ExitReason::MsrAccess(_) => {
                 finish_on_the_shadow(started, cpu, io, Trapped::Access)?;
             }
-            ExitReason::InterruptWindow => return Err(unserviced("interrupt window", &exit)),
+            // The platform's answer to a notification `stage_injection`
+            // armed: delivery has just become possible. No injection happens
+            // in this arm — QEMU's whpx accelerator keeps the window exit a
+            // pure notification too (QEMU whpx-all.c `whpx_vcpu_post_run`
+            // only clears its `window_registered` flag) — because the
+            // staging below runs with this exit's own header and re-asks
+            // every gate rather than trusting a stale answer.
+            ExitReason::InterruptWindow => {
+                counts.window += 1;
+                started.inject.window = None;
+            }
             ExitReason::Exception => {
                 // The platform hands a trapped fault back instead of
                 // delivering it, so the processor still stands on the
@@ -1752,24 +1766,164 @@ fn run_the_exit_loop<T: Instrumentation>(
         // nobody moved onto the processor is a line the guest never sees.
         io.sync_io_events(cpu);
 
-        // An interrupt that has become deliverable ends the slice.
-        //
-        // This engine delivers only at the head of a slice, on the shadow, so
-        // a vector raised mid-slice waits for whatever remains of it. Measured
-        // on a DLX boot, that wait had a median of 158 microseconds of host
-        // time — about 1.5 MILLION ticks of this machine's guest time, against
-        // the one instruction boundary the interpreter takes. A disk driver
-        // polls its status, finishes the command and tears down its handler
-        // inside a window that size, and the interrupt then arrives for a
-        // command nobody is waiting on: `hda: unexpected_intr`.
-        //
-        // Ending here costs one architectural state exchange and hands the
-        // vector to the guest at the next slice entry, which is immediately.
+        // An NMI, SMI or INIT outranks any maskable vector (the order Bochs
+        // event.cc keeps at its own boundary) and is the shadow's to
+        // deliver, so no external interrupt is staged over one: the slice
+        // ends below and the head delivers in the architecture's own order.
+        if !cpu.has_non_ext_int_event() {
+            match stage_injection(started, cpu, io, inject_census)? {
+                Staged::Injected(vector) => {
+                    tracing::debug!(
+                        target: "irq",
+                        "CPU: vector {vector:#04x} injected into the partition at {:#x}",
+                        exit.vp.rip
+                    );
+                    // The acknowledge changed the controllers' lines; the
+                    // processor's latched copy follows before anything asks.
+                    io.sync_io_events(cpu);
+                    // The injected event is the platform's until it lands, so
+                    // the slice may not end before the guest runs again — the
+                    // same standdown an in-flight cancellation gets.
+                    delivery_in_flight = true;
+                    continue;
+                }
+                // Delivery is blocked and a window stands armed: straight
+                // back to the hardware, whose window exit is the next word
+                // on the subject. The budget checks at the loop's head still
+                // bound the wait.
+                Staged::Windowed => continue,
+                Staged::Nothing => {}
+            }
+        }
+
+        // An event still deliverable HERE ends the slice: everything
+        // injection cannot carry — an NMI, an SMI, an INIT, each the
+        // shadow's to deliver at the head of a slice — and any external
+        // vector staging had to leave with the machine. Ending costs one
+        // architectural state exchange; the deliverable maskable vector,
+        // the common case, was injected above and never pays it.
         if cpu.has_an_event_to_deliver() {
             counts.boundary += 1;
             return Ok(Yielded::Boundary(BoundaryReason::EventToDeliver));
         }
     }
+}
+
+/// What staging an injection decided — a named outcome, so a caller cannot
+/// mistake "armed a window and the vector waits" for "there was nothing to
+/// do", which a bool or a bare `Option` would let it.
+enum Staged {
+    /// Nothing was handed to the partition: no deliverable external vector
+    /// exists, a delivery the platform has begun is still in flight, or the
+    /// acknowledge found only a stale line to reconcile.
+    Nothing,
+    /// Delivery is blocked right now — an interrupt shadow, or `IF` clear —
+    /// so a deliverability notification stands armed and the vector stays
+    /// with the machine's controllers until the window opens.
+    Windowed,
+    /// This vector was acknowledged at the machine's controllers and written
+    /// into the partition's pending-event slot.
+    Injected(u8),
+}
+
+/// `WHV_DELIVERABILITY_NOTIFICATIONS_REGISTER`'s `InterruptNotification`
+/// bit, from the SDK's `WinHvPlatformDefs.h` (the AMD64 layout:
+/// `NmiNotification` bit 0, `InterruptNotification` bit 1,
+/// `InterruptPriority` bits 2..6). The windows-sys bindings collapse the
+/// layout into one opaque bitfield, so the word is built by hand.
+const INTERRUPT_NOTIFICATION: u64 = 1 << 1;
+
+/// Hand a deliverable external interrupt to the partition as a register
+/// write, or arm a window to be told the moment the guest could take one.
+///
+/// The gate is QEMU's, transcribed from `target/i386/whpx/whpx-all.c`
+/// `whpx_vcpu_pre_run` (userspace-irqchip path): inject only when no
+/// delivery is already in flight, the guest is not in an interrupt shadow,
+/// and `IF` is set — and acknowledge at the machine's own controllers only
+/// after every gate has passed, because the pop IS the INTA moment and a
+/// vector acknowledged cannot be put back.
+///
+/// The ONE place this engine writes `WHvRegisterPendingInterruption` (R5).
+/// A second injection site would be a second acknowledge path, and
+/// [`InjectCensus::injected`] could no longer equal the interrupt fabric's
+/// own acknowledge count.
+///
+/// External interrupts only: `has_deliverable_ext_int` answers for the
+/// maskable external vectors alone, so an NMI, SMI or INIT never reaches
+/// the acknowledge below — those end the slice and the shadow delivers
+/// them at its head.
+fn stage_injection<T: Instrumentation>(
+    started: &mut Started,
+    cpu: &mut BxCpuC<T>,
+    io: &mut PcIo<'_>,
+    census: &mut InjectCensus,
+) -> Result<Staged> {
+    // A delivery the platform has begun is the partition's until it lands;
+    // staging over it would replace an event the guest was owed.
+    if started.inject.in_flight {
+        return Ok(Staged::Nothing);
+    }
+    // The only fresh TPR there is: a guest `MOV CR8` retires on hardware
+    // without an exit, so the shadow's copy is stale until the header's
+    // nibble is written back — and the acknowledge below prioritises
+    // against the TPR.
+    cpu.set_lapic_tpr_from_cr8(started.inject.cr8);
+    if !cpu.has_deliverable_ext_int() {
+        return Ok(Staged::Nothing);
+    }
+    // Blocked right now — an interrupt shadow, or IF clear. Ask the
+    // platform to exit the moment delivery becomes possible, and leave the
+    // vector with the machine's controllers: nothing is acknowledged for a
+    // delivery that cannot happen yet.
+    if started.shadowed || !started.inject.if_flag {
+        // Priority 0: notify on ANY deliverable interrupt. QEMU derives
+        // `irr >> 4` by reading its own APIC's request register without
+        // acknowledging; this machine's local APIC and 8259 export no
+        // acknowledge-free read of the pending vector across this seam —
+        // the popper below IS the INTA — so the widest ask is armed
+        // instead. A priority lower than the pending vector's only makes
+        // the notification arrive sooner than a filtered one would; it can
+        // never miss a deliverable vector.
+        const ANY_PRIORITY: u8 = 0;
+        // QEMU's dedup, same function: a window already armed at (or above)
+        // this priority is not re-armed. Only priority 0 is ever armed
+        // here, so any recorded window already covers this ask.
+        if started.inject.window.is_none() {
+            let word = INTERRUPT_NOTIFICATION | (u64::from(ANY_PRIORITY & 0xF) << 2);
+            Vp::new(&started.partition, BOOT_VP)
+                .write_words(&[Reg::DeliverabilityNotifications], &[word])
+                .map_err(platform_failed)?;
+            census.windows_armed += 1;
+            started.inject.window = Some(ANY_PRIORITY);
+        }
+        return Ok(Staged::Windowed);
+    }
+    // THE INTA MOMENT — reached only with every gate passed. LAPIC before
+    // 8259, the fabric's counted acknowledge, spurious vectors and the
+    // deasserted-pin reconcile included: the same body the interpreter
+    // acknowledges through, which is what keeps the two engines
+    // acknowledging in one order.
+    let Some(vector) = io.pop_deliverable_vector(cpu) else {
+        return Ok(Staged::Nothing);
+    };
+    started
+        .partition
+        .inject(
+            BOOT_VP,
+            PendingInterruption {
+                kind: InterruptionType::Interrupt,
+                vector: u16::from(vector),
+                error_code: None,
+            },
+        )
+        .map_err(platform_failed)?;
+    // The platform holds a delivery now. The next exit's header will say so
+    // itself; until one arrives, this is the record.
+    started.inject.in_flight = true;
+    census.injected += 1;
+    census.injected_per_vector[usize::from(vector)] =
+        census.injected_per_vector[usize::from(vector)].saturating_add(1);
+    Ok(Staged::Injected(vector))
 }
 
 /// How many instructions a system-management handler may take before this
@@ -1948,7 +2102,8 @@ fn report_the_fault<T: Instrumentation>(
         exit.vp.cs.base
     );
     // What the guest was doing on the way here. `o`/`i` are port writes and
-    // reads, `S` a string or repeated one, `m` memory, `h` a halt.
+    // reads, `S` a string or repeated one, `m` memory, `h` a halt, `w` an
+    // interrupt window.
     let trail: std::vec::Vec<std::string::String> =
         history.replay().map(|(rip, kind)| std::format!("{}@{rip:#x}", kind as char)).collect();
     tracing::error!("  exits leading here (oldest first): {}", trail.join(" "));

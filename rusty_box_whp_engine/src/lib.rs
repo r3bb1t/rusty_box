@@ -111,7 +111,8 @@ mod tests {
     use super::WhpEngine;
     use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
     use rusty_box::emulator::{
-        Emulator, EmulatorConfig, EngineRefusal, MemorySize, RunBudget, StopReason,
+        Emulator, EmulatorConfig, EngineRefusal, MachineBuilder, MemorySize, RunBudget,
+        StopReason,
     };
     use rusty_box::Error;
 
@@ -133,6 +134,30 @@ mod tests {
         let mut machine =
             Emulator::<(), WhpEngine>::with_engine(config, CpuSetupMode::RealMode)
                 .expect("machine");
+        machine.mem_write(CODE, code).expect("load");
+        machine.reg_write(X86Reg::Rip, CODE);
+        machine
+    }
+
+    /// A real-mode machine with the FULL device set — the 8259 pair, the PIT,
+    /// their port registrations and their timers — on this engine.
+    ///
+    /// [`machine_running`] deliberately skips hardware initialisation, which
+    /// serves a guest that only touches the debug port; a guest that programs
+    /// the PIC and the PIT needs the machine [`MachineBuilder`] furnishes,
+    /// where those ports are registered and answer. No BIOS is loaded — the
+    /// processor is re-pointed at the test's own code instead.
+    fn machine_with_devices(code: &[u8]) -> std::boxed::Box<Emulator<(), WhpEngine>> {
+        let config = EmulatorConfig {
+            memory: MemorySize::bytes(8 * 1024 * 1024),
+            ..EmulatorConfig::default()
+        };
+        let mut machine = MachineBuilder::new(config)
+            .build_on::<WhpEngine>()
+            .expect("machine");
+        machine
+            .setup_cpu_mode(CpuSetupMode::RealMode)
+            .expect("real mode");
         machine.mem_write(CODE, code).expect("load");
         machine.reg_write(X86Reg::Rip, CODE);
         machine
@@ -452,5 +477,128 @@ mod tests {
             Err(Error::Engine(EngineRefusal::NoInstructionCount)) => {}
             other => panic!("an instruction budget must be refused, not accepted: {other:?}"),
         }
+    }
+
+    /// A device interrupt reaches a guest running on hardware BY INJECTION —
+    /// written into the partition's pending-event slot — not by ending the
+    /// slice so the shadow can deliver it.
+    ///
+    /// The guest exercises the whole delivery stack end to end: it points the
+    /// real-mode IVT entry for the PIT's vector (IRQ0 at the master 8259's
+    /// power-on offset 8, so IVT slot 8 at physical 0x20) at its own ISR,
+    /// unmasks IRQ0 alone, programs PIT channel 0 as a rate generator, and
+    /// then runs TRIALS: each trial polls the 8259's IRR with interrupts
+    /// disabled until a tick is pending — so the tick can never be taken at
+    /// a slice head — and only then runs `STI`. Delivery becomes possible in
+    /// the middle of a slice, which is exactly the moment the engine must
+    /// arm a window, take the window exit, acknowledge, and inject.
+    ///
+    /// Many trials rather than one, because which processor runs a given
+    /// stretch is the engine's own business: a slice whose budget is nearer
+    /// than the hardware's resolution runs on the shadow (this machine's
+    /// 8042 serial-delay timer ticks every 150 microseconds, so such slices
+    /// are routine), and a trial the shadow happens to carry is delivered by
+    /// the interpreter, legitimately, with nothing to inject. Each trial the
+    /// HARDWARE carries must inject; one success proves the path, and thirty-two
+    /// trials make the chance that every one landed on the shadow vanish.
+    ///
+    /// The first assertion — MARK at the debug port — proves the vector
+    /// genuinely reached the guest's own handler. The census assertions
+    /// prove HOW: through the partition's pending-event slot. They are what
+    /// tell injection apart from the slice-ending shadow path, which
+    /// delivers the same MARK and would pass the first assertion alone.
+    #[test]
+    fn a_device_interrupt_reaches_a_hardware_guest_by_injection() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        let _turn = a_turn_on_the_hardware();
+        // The ISR lives inside the loaded blob, at CODE + 0x35; the IVT entry
+        // the guest writes names that absolute offset (CS base is 0).
+        const ISR: [u8; 2] = [0x35, 0x10];
+        let mut machine = machine_with_devices(&[
+            0x31, 0xC0, //                   xor ax, ax
+            0x8E, 0xD8, //                   mov ds, ax
+            0xC7, 0x06, 0x20, 0x00, ISR[0], ISR[1], // mov word [0x20], isr
+            0xC7, 0x06, 0x22, 0x00, 0x00, 0x00, //     mov word [0x22], 0
+            0xB0, 0xFE, //                   mov al, 0xFE — unmask IRQ0 alone
+            0xE6, 0x21, //                   out 0x21, al  (OCW1)
+            0xB0, 0x34, //                   mov al, 0x34 — ch0, lo/hi, mode 2
+            0xE6, 0x43, //                   out 0x43, al
+            0xB0, 0x00, //                   mov al, 0x00 — count 0x0400, low
+            0xE6, 0x40, //                   out 0x40, al
+            0xB0, 0x04, //                   mov al, 0x04 — count 0x0400, high
+            0xE6, 0x40, //                   out 0x40, al
+            0xB0, 0x0A, //                   mov al, 0x0A — OCW3: reads answer IRR
+            0xE6, 0x20, //                   out 0x20, al
+            0xB9, 0x20, 0x00, //             mov cx, 32 — the trials
+            // trial (CODE+0x27):
+            0xFA, //                         cli — the tick must wait for STI
+            // poll (CODE+0x28):
+            0xE4, 0x20, //                   in al, 0x20 — the IRR
+            0xA8, 0x01, //                   test al, 1  — is IRQ0 pending?
+            0x74, 0xFA, //                   jz poll
+            0xFB, //                         sti — delivery opens MID-SLICE
+            0x90, //                         nop — the STI shadow lapses; the
+            //                               tick is taken here, one way or the
+            //                               other
+            0xE2, 0xF5, //                   loop trial
+            // park (CODE+0x32):
+            0xF4, //                         hlt
+            0xEB, 0xFD, //                   jmp park
+            // isr (CODE+0x35):
+            0xB0, MARK, //                   mov al, MARK
+            0xE6, DEBUG_PORT, //             out 0xE9, al
+            0xB0, 0x20, //                   mov al, 0x20
+            0xE6, 0x20, //                   out 0x20, al — non-specific EOI
+            0xCF, //                         iret
+        ]);
+        // A halted or budget-spent machine hands each budget back to its
+        // caller; stepping again is the caller's half of that contract.
+        // Bounded, so a guest whose ticks never arrive fails the assertion
+        // instead of hanging the suite. Stops early once an injection has
+        // happened and the handler has spoken — the properties under test.
+        let mut written: std::vec::Vec<u8> = std::vec::Vec::new();
+        for _ in 0..16 {
+            machine
+                .step(RunBudget::Ticks(2_000_000))
+                .expect("the hypervisor runs the guest and its ticks reach it");
+            written.extend(machine.debug_port().take_output());
+            if !written.is_empty() && machine.engine().inject_census().injected >= 1 {
+                break;
+            }
+        }
+        assert!(
+            !written.is_empty() && written.iter().all(|byte| *byte == MARK),
+            "the PIT's ticks must reach the guest's own ISR, and nothing else may \
+             write the debug port: {written:#04x?}"
+        );
+        let census = machine.engine().inject_census();
+        assert!(
+            census.injected >= 1,
+            "the vector must have crossed as a register write — an injection — not \
+             as a shadow delivery at a slice head; census: injected {}, windows \
+             armed {} (slices {:?}, exits {:?})",
+            census.injected,
+            census.windows_armed,
+            machine.engine().census(),
+            machine.engine().exits(),
+        );
+        assert!(
+            census.injected_per_vector[8] >= 1,
+            "what was injected must be the PIT's own vector — IRQ0 at the master \
+             8259's power-on offset, 8"
+        );
+        assert!(
+            census.windows_armed >= 1,
+            "the tick became pending while IF was clear, so a deliverability \
+             window must have been armed before the STI opened delivery"
+        );
+        assert!(
+            machine.engine().exits().window >= 1,
+            "the armed window must have been answered by an interrupt-window \
+             exit — armed and never answered is a wedged guest"
+        );
     }
 }
