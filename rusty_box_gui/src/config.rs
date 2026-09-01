@@ -918,7 +918,14 @@ impl CpuCapabilities {
                 if carried & AVX_STATE == 0 {
                     narrowed = narrowed.excluding(X86Feature::IsaAvx);
                 }
-                narrowed
+                // `MONITOR`/`MWAIT` unconditionally, whatever the host's own
+                // processor can do: the guest does not run on the host's
+                // processor directly, it runs in a partition, and the platform
+                // does not offer the instruction pair to one. A guest told it
+                // has them commits to them permanently — Linux selects
+                // `mwait_idle` at boot and never reconsiders — so this cannot
+                // be discovered and worked around later.
+                narrowed.excluding(X86Feature::IsaMonitorMwait)
             }
         }
     }

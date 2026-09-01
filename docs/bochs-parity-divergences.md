@@ -313,3 +313,48 @@ parking, remove the need to ask `pc_system` a second question that the
 `STOP_TRACE` bit was already answering, and make both engines say what they
 mean. It touches every `async_event` site in `cpu/`, which is why it was not
 done under a boot bring-up.
+
+## H4 — A machine may be narrowed to the processor every engine can run
+
+**Off by default.** `--cpu-capabilities preset` is the default and answers
+`CPUID` byte for byte as Bochs does; the divergence exists only when a caller
+asks for `host-shared`.
+
+### What the guest observes
+
+Fewer feature bits than this port's `cpudb` model describes. On the host this
+was measured against, a 12th Gen Core i5-12450H: no AVX-512 (the silicon has
+none) and no `MONITOR`/`MWAIT` (the platform has no way to give a partition
+either instruction — `WHV_PROCESSOR_FEATURES` has no such field).
+
+### Why it is not merely a smaller machine
+
+Because the alternative is not a larger machine, it is a dead one. A guest reads
+`CPUID` once and commits: Linux selects `mwait_idle` at boot and never
+reconsiders, and enables `XCR0` components the instant it sees the bits. Measured
+consequences of advertising what could not be executed — an
+`WHV_E_INVALID_VP_STATE` on the next register write for AVX-512, and
+`Oops: invalid opcode` in `swapper/0` ending in "Attempted to kill the idle task"
+for `MWAIT`. Neither failure names its cause.
+
+Every hypervisor narrows `CPUID` for this reason; `CPUID` exits unconditionally
+under VMX, so none of them has the option not to. KVM masks to host support;
+VMware's EVC masks to a cluster baseline precisely so a guest survives the
+hardware under it changing, which here is a switch between engines.
+
+### Why it is a machine setting and not an engine one
+
+A guest keeps what it enabled across a switch from the hypervisor to the
+interpreter. If the two engines offered different processors, the switch would
+change the hardware under a running guest — and the switch is the point: drive
+the guest fast on hardware, then interpret it.
+
+### Price of closing it
+
+Nothing to close on the interpreter, which is exact under the default. Closing it
+on the hypervisor would need the platform to gain what it lacks — AVX-512 on
+silicon that has none is not a software matter, and `MONITOR`/`MWAIT` has no
+partition property at all.
+
+Full reasoning, the three terms that bound what may be offered, the two `CPUID`
+answer paths, and what other hypervisors do: `docs/whp-guest-capabilities.md`.

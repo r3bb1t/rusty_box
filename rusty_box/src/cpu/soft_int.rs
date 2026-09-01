@@ -31,6 +31,8 @@ const CPUID_LEAF_FEATURE_INFO: u32 = 0x0000_0001;
 const CPUID_LEAF_EXTENDED_TOPOLOGY: u32 = 0x0000_000B;
 const CPUID_OSXSAVE_ECX_BIT: u32 = 1 << 27;
 const CPUID_APIC_EDX_BIT: u32 = 1 << 9;
+/// `CPUID.1:ECX[3]`, `MONITOR`/`MWAIT`.
+const CPUID_MONITOR_ECX_BIT: u32 = 1 << 3;
 const CPUID_LEAF1_EBX_LOW_FIELDS_MASK: u32 = 0x0000_FFFF;
 const CPUID_LEAF1_LOGICAL_COUNT_SHIFT: u32 = 16;
 const CPUID_LEAF1_APIC_ID_SHIFT: u32 = 24;
@@ -1253,6 +1255,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 // Bochs cpuid.cc
                 if self.lapic.get_mode() == super::apic::ApicMode::GloballyDisabled {
                     edx &= !CPUID_APIC_EDX_BIT;
+                }
+
+                // ECX bit 3 (MONITOR), withdrawn with the instructions it
+                // promises. A guest believes this bit for the rest of its life:
+                // Linux picks `mwait_idle` at boot and idles there forever, so
+                // a `MONITOR` that is advertised and then faults does not
+                // produce a retry, it produces an invalid opcode in the idle
+                // task and a kernel that panics with "Attempted to kill the
+                // idle task".
+                if !self.bx_cpuid_support_isa_extension(
+                    super::decoder::features::X86Feature::IsaMonitorMwait,
+                ) {
+                    ecx &= !CPUID_MONITOR_ECX_BIT;
                 }
 
                 let topology = self.cpu_topology();
