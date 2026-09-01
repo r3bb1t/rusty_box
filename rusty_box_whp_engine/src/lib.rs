@@ -51,7 +51,7 @@ mod engine;
 mod state;
 mod xsave;
 
-pub use engine::{ExitCounts, PlatformCounters, SliceCensus, WhpEngine};
+pub use engine::{ExitCounts, InjectCensus, PlatformCounters, SliceCensus, WhpEngine};
 
 /// Re-exported so a caller reading [`WhpEngine::platform_counters`] need not
 /// also name the platform crate to spell what it returns. These are that

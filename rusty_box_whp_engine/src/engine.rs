@@ -369,6 +369,13 @@ pub struct ExitCounts {
     pub canceled: u64,
     /// A device dispatch asked for the machine's boundary to be serviced.
     pub boundary: u64,
+    /// An interrupt window the engine armed opened. The platform raises this
+    /// exit only when asked, and the engine asks only when delivery was
+    /// blocked — an interrupt shadow, or IF clear — at the moment it wanted
+    /// to inject; a guest whose delivery is open at that moment never pays
+    /// one. Read beside [`InjectCensus::windows_armed`], which counts the
+    /// asks this counts the answers to.
+    pub window: u64,
 }
 
 /// How the guest's time divided into slices, and what ended each one.
@@ -458,6 +465,52 @@ impl SliceCensus {
     }
 }
 
+/// What this engine has put into the partition's pending-event slot, and how
+/// often it had to arm a window and wait for the guest to become able to
+/// take it.
+///
+/// [`ExitCounts`] and [`SliceCensus`] measure what the guest asked the
+/// hardware for; this measures what the machine pushed in. Every field here
+/// is one half of a comparison whose other half is kept by an independent
+/// party — the interrupt fabric, or the platform's own exit stream — because
+/// the defect class these counters exist to catch is a vector acknowledged
+/// on one side and lost or doubled on the other, and a counter shows that
+/// only by disagreeing with an account that does not share its bugs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InjectCensus {
+    /// Interrupts injected into the partition.
+    ///
+    /// Must equal the interrupt fabric's `acknowledge_count` delta
+    /// attributable to injection: every injection acknowledges exactly one
+    /// vector at the fabric, so a shortfall here is a vector acknowledged
+    /// and lost, and an excess is one delivered twice.
+    pub injected: u64,
+    /// Interrupt windows armed because delivery was blocked — an interrupt
+    /// shadow, or IF clear — at the moment the engine wanted to inject.
+    ///
+    /// Paired with [`ExitCounts::window`]: every armed window must
+    /// eventually be answered by a window exit, so armed-with-no-exits is
+    /// not a quiet guest but a wedged one, holding a vector it will never
+    /// take.
+    pub windows_armed: u64,
+    /// [`Self::injected`], split by vector.
+    ///
+    /// The aggregate can balance while two vectors trade places; matching
+    /// this against the fabric's `vectors_acknowledged` histogram is the
+    /// comparison that catches a swap.
+    pub injected_per_vector: [u32; 256],
+}
+
+/// Everything zero: nothing injected, no window armed. Written by hand
+/// because this toolchain derives `Default` for arrays only up to 32
+/// elements, and the per-vector histogram holds 256.
+impl Default for InjectCensus {
+    fn default() -> Self {
+        Self { injected: 0, windows_armed: 0, injected_per_vector: [0; 256] }
+    }
+}
+
 /// Runs guest code on the Windows Hypervisor Platform.
 ///
 /// Starts unconfigured because a machine constructs its engine before it has
@@ -469,6 +522,7 @@ pub struct WhpEngine {
     started: Option<Started>,
     exits: ExitCounts,
     census: SliceCensus,
+    inject_census: InjectCensus,
     /// Diagnostic; see [`ExitHistory`]. Lives here rather than in a slice
     /// because a guest's path to a fault crosses slice boundaries — a handler
     /// that traps for its own port I/O is several slices old by the time it
@@ -492,6 +546,16 @@ impl WhpEngine {
     #[must_use]
     pub const fn census(&self) -> SliceCensus {
         self.census
+    }
+
+    /// What this engine has put into the partition's pending-event slot, and
+    /// how often it had to arm a window and wait.
+    ///
+    /// Returned by reference rather than by value: the per-vector histogram
+    /// makes a copy a kilobyte, not a pair of words.
+    #[must_use]
+    pub const fn inject_census(&self) -> &InjectCensus {
+        &self.inject_census
     }
 
     /// What the hypervisor itself charged this guest, beside what this engine
@@ -929,7 +993,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // here rather than being handed over half-entered.
         run_the_shadow_out_of_smm(cpu, &mut io)?;
 
-        let Self { started, exits, census, history } = self;
+        let Self { started, exits, census, history, inject_census: _ } = self;
         let started = start(started, &mut io)?;
 
         // The shadow describes the processor; the platform runs it.
@@ -1498,7 +1562,11 @@ fn run_the_exit_loop<T: Instrumentation>(
                 // delivered after the shadow had moved the guest on, at an
                 // address whose patch record was already retired. So the
                 // processor goes straight back until the delivery lands —
-                // the same rule wtf's WHP backend follows.
+                // the rule QEMU's whpx accelerator keeps: in
+                // target/i386/whpx/whpx-all.c, `whpx_vcpu_post_run` caches
+                // the exit header's `InterruptionPending` bit and
+                // `whpx_vcpu_pre_run` refuses to stage a new injection over
+                // it.
                 if (exit.vp.execution_state >> 6) & 1 == 1 {
                     delivery_in_flight = true;
                     continue;
