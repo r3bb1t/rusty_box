@@ -187,6 +187,46 @@ gates plus an A/B, and the cliff is a throughput dip, not a correctness problem.
 
 ---
 
+## D4 — SYSRET writes the flat SS the SDM describes
+
+**Bochs:** `cpu/proc_ctrl.cc SYSRET` updates the SS selector and writes
+`valid`, `p`, `dpl`, `segment` and `type` into the cache, with the comment
+"SS base, limit, attributes unchanged" — base, limit, D/B and G keep whatever
+the previous stack segment held. That is AMD's reading of SYSRET (the APM
+leaves the SS descriptor cache alone); Intel's SDM (vol. 2, SYSRET operation)
+writes the whole flat segment: `SS.Base := 0; SS.Limit := FFFFFH; SS.B := 1;
+SS.G := 1` alongside the type, DPL and P that Bochs does set.
+
+**rusty_box:** `cpu/proc_ctrl.rs sysret` calls `setup_flat_ss(3)` in both the
+64-bit and the compatibility arm — the same fixed flat setup this port's own
+`SYSCALL` already performs (`setup_flat_ss(0)`), so the pair is symmetric and
+Intel-correct. The modelled processor is an Intel one.
+
+### What the guest observes
+
+On the interpreter: a guest returning to 32-bit compatibility mode via SYSRET
+gets the architectural 4-GiB flat stack segment instead of whichever limit the
+previous SS happened to hold, so stack-limit checks after the return match
+Intel silicon. In 64-bit mode nothing is observable — limits are not checked.
+
+### Why the divergence is the correct side
+
+Measured, not hypothetical: under the hypervisor engine, SS crosses the seam
+as the full descriptor cache and the platform validates it against the
+architecture's entry checks. Windows 7's first SYSRET to user mode inherited a
+stack segment the platform's null-SS convention had left as effective limit
+`0xFFFFFFFF` with byte granularity — a combination no descriptor can encode —
+and `WHvRunVirtualProcessor` refused the processor outright
+(`InvalidVpRegisterValue`, the state dump showing
+`ss attr=0x00f3 limit=0xffffffff`). Intel's fixed flat write cannot produce an
+unencodable segment, whatever SS held before.
+
+### Price of closing it
+
+Restoring Bochs's arms would re-introduce the un-enterable state under the
+hypervisor engine and the wrong compat-mode stack limit under the interpreter;
+there is nothing on the other side of the trade.
+
 # Hypervisor-engine divergences (`H<n>`)
 
 A machine running its guest on `rusty_box_whp_engine` executes on the host's

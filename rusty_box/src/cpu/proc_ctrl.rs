@@ -2416,27 +2416,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 temp_rip = self.ecx() as u64;
             }
 
-            // SS: (star >> 48) + 8) | 3 — base, limit, attributes unchanged (Bochs proc_ctrl.cc)
+            // SS: (star >> 48) + 8) | 3, then the whole flat segment the SDM
+            // writes — base 0, limit 4G, G=1, B=1 (Intel SDM vol. 2 SYSRET;
+            // divergence "SYSRET writes the flat SS the SDM describes" in
+            // docs/bochs-parity-divergences.md — Bochs leaves base, limit and
+            // granularity as they were, which is AMD's reading, leaves a
+            // 4-GiB limit claiming byte granularity when the previous SS came
+            // from a hypervisor's null-segment convention, and is the same
+            // fixed setup this port's own SYSCALL already performs).
             super::segment_ctrl_pro::parse_selector(
                 ((((self.msr.star >> 48) + 8) & 0xFFFC) | 3) as u16,
                 &mut self.sregs[super::decoder::BxSegregs::Ss as usize].selector,
             );
-            {
-                use super::descriptor::{
-                    SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G,
-                    SEG_VALID_CACHE,
-                };
-                let ss_idx = super::decoder::BxSegregs::Ss as usize;
-                self.sregs[ss_idx].cache.valid = SEG_VALID_CACHE
-                    | SEG_ACCESS_ROK
-                    | SEG_ACCESS_WOK
-                    | SEG_ACCESS_ROK4_G
-                    | SEG_ACCESS_WOK4_G;
-                self.sregs[ss_idx].cache.p = true;
-                self.sregs[ss_idx].cache.dpl = 3;
-                self.sregs[ss_idx].cache.segment = true;
-                self.sregs[ss_idx].cache.r#type = 0x3;
-            }
+            self.setup_flat_ss(3);
 
             // Bochs proc_ctrl.cc — restore RFLAGS from R11
             let r11 = self.r11() as u32;
@@ -2450,27 +2442,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             );
             self.setup_flat_cs(3, false);
 
-            // SS: (star >> 48) + 8) | 3 — base, limit, attributes unchanged (Bochs proc_ctrl.cc)
+            // SS as in the 64-bit arm above: the SDM's whole flat segment,
+            // not Bochs's attributes-unchanged reading — see the divergence
+            // note there.
             super::segment_ctrl_pro::parse_selector(
                 ((((self.msr.star >> 48) + 8) & 0xFFFC) | 3) as u16,
                 &mut self.sregs[super::decoder::BxSegregs::Ss as usize].selector,
             );
-            {
-                use super::descriptor::{
-                    SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G,
-                    SEG_VALID_CACHE,
-                };
-                let ss_idx = super::decoder::BxSegregs::Ss as usize;
-                self.sregs[ss_idx].cache.valid = SEG_VALID_CACHE
-                    | SEG_ACCESS_ROK
-                    | SEG_ACCESS_WOK
-                    | SEG_ACCESS_ROK4_G
-                    | SEG_ACCESS_WOK4_G;
-                self.sregs[ss_idx].cache.p = true;
-                self.sregs[ss_idx].cache.dpl = 3;
-                self.sregs[ss_idx].cache.segment = true;
-                self.sregs[ss_idx].cache.r#type = 0x3;
-            }
+            self.setup_flat_ss(3);
 
             // Bochs proc_ctrl.cc — assert_IF()
             self.eflags.insert(super::eflags::EFlags::IF_);
