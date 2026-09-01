@@ -28,9 +28,21 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     pub(super) fn cpu_runnable_for_batch(&self, index: usize) -> bool {
         let cpu = self.cpu_ref(index);
         match cpu.activity_state {
+            // Whether to hand this processor a slice — NOT whether it may
+            // wake. `handle_wait_for_event` (cpu/event.rs) is the only
+            // architectural answer to that, and a processor let through here
+            // asks it first thing, so a false positive costs one empty slice
+            // and can never produce an early wake. A false negative WOULD be a
+            // hang, so the test below is deliberately the whole event word
+            // rather than a copy of Bochs' wake set: a wake source added to
+            // event.cc's list cannot be forgotten here.
+            //
+            // The pacing this costs when it guesses wide — round-robin slices
+            // instead of a jump to the next deadline — is registered
+            // divergence D1.
+            //
             // Bochs event.cc handleWaitForEvent: only WAIT_FOR_SIPI returns to
-            // the caller without wake checks. SHUTDOWN shares the HLT wake set
-            // below (unmasked NMI/SMI/INIT, or INTR/LAPIC-INTR with IF).
+            // the caller with no wake check at all. SHUTDOWN is gated like HLT.
             CpuActivityState::WaitForSipi => false,
             CpuActivityState::Active => true,
             CpuActivityState::MwaitIf => {
@@ -120,9 +132,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // runnable event, do not require round-robin slices. Keep CPU0's
         // single-CPU HLT/MWAIT pacing path available in those states; otherwise
         // idle APs make the emulator bounce through trace-sized batches.
-        // SHUTDOWN is runnability-gated like HLT (Bochs event.cc
-        // handleWaitForEvent wakes it on unmasked NMI/SMI/INIT), so a shutdown
-        // AP holding a pending wake event must not be fast-forwarded past.
+        // SHUTDOWN is runnability-gated like HLT, so a shutdown AP holding a
+        // pending wake event must not be fast-forwarded past. What counts as
+        // one is `cpu_runnable_for_batch`'s whole-event-word test, above.
         //
         // Bochs itself never fast-forwards in SMP mode — it grinds empty
         // rounds crediting each idle CPU one quantum. Jumping straight to the

@@ -57,48 +57,52 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             CpuActivityState::Mwait | CpuActivityState::MwaitIf
         );
 
-        // SMI/INIT wake HLT/MWAIT regardless of IF (Bochs event.cc
-        // handleWaitForEvent checks unmasked BX_EVENT_SMI | BX_EVENT_INIT).
-        if self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_SMI | BxCpuC::<T>::BX_EVENT_INIT) {
-            if in_mwait {
-                self.monitor.reset_monitor();
-            }
-            self.inhibit_mask = 0;
-            return false; // Continue to SMI/INIT delivery
-        }
+        // The interrupt-class events, which need EFLAGS.IF — or the MWAIT_IF
+        // state that MWAIT's ECX[0] asks for. Bochs event.cc tests these with
+        // `is_pending`, not the unmasked form. `lapic.intr` is this port's
+        // mirror of the LAPIC's INTR line and is read alongside the event bit
+        // so a raise that has not been synced yet still ends the wait.
+        let interrupt_pending = self.pending_event
+            & (BxCpuC::<T>::BX_EVENT_PENDING_INTR
+                | BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR
+                | BxCpuC::<T>::BX_EVENT_PENDING_UINTR)
+            != 0
+            || self.lapic.intr;
 
-        // NMI can wake from HLT/MWAIT only when unmasked (Bochs event.cc).
-        if self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_NMI) {
-            // Bochs event.cc: reset monitor when waking from MWAIT
-            if in_mwait {
-                self.monitor.reset_monitor();
-            }
-            self.inhibit_mask = 0;
-            return false; // Continue to NMI delivery
-        }
+        // Everything else that ends the wait: delivered asynchronously and
+        // therefore independent of IF, but only while unmasked. The VMX
+        // members are events whose only answer is a VMEXIT, and
+        // `handle_async_event` returns the moment this function says "still
+        // halted" — so an event left out here is one the processor can never
+        // reach, not merely one it reaches late.
+        let wake_on_unmasked: u32 = BxCpuC::<T>::BX_EVENT_NMI
+            | BxCpuC::<T>::BX_EVENT_SMI
+            | BxCpuC::<T>::BX_EVENT_INIT
+            | BxCpuC::<T>::BX_EVENT_VMX_VTPR_UPDATE
+            | BxCpuC::<T>::BX_EVENT_VMX_VEOI_UPDATE
+            | BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_APIC_WRITE
+            | BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG
+            | BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI;
 
-        // PIC interrupt can wake from HLT/MWAIT if IF=1
-        if self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_INTR != 0
-            && (self.eflags.contains(EFlags::IF_) || mwait_if)
+        if (interrupt_pending && (self.eflags.contains(EFlags::IF_) || mwait_if))
+            || self.is_unmasked_event_pending(wake_on_unmasked)
         {
-            // Bochs event.cc: reset monitor when waking from MWAIT
+            // Bochs event.cc: reset the monitor when waking out of MWAIT, and
+            // clear the inhibits so the resumed instruction stream starts
+            // clean.
             if in_mwait {
                 self.monitor.reset_monitor();
             }
             self.inhibit_mask = 0;
-            return false; // Continue to interrupt delivery
+            return false; // Continue to delivery
         }
 
-        // LAPIC interrupt can also wake from HLT/MWAIT if IF=1
-        if (self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR != 0 || self.lapic.intr)
-            && (self.eflags.contains(EFlags::IF_) || mwait_if)
-        {
-            // Bochs event.cc: reset monitor when waking from MWAIT
-            if in_mwait {
-                self.monitor.reset_monitor();
-            }
-            self.inhibit_mask = 0;
-            return false; // Continue to LAPIC interrupt delivery
+        // Bochs event.cc gives the expired preemption timer a branch of its
+        // own, and deliberately not the two side effects above: nothing was
+        // delivered, so the MONITOR stays armed and the inhibits stand. The
+        // wait ends only so the VMEXIT can be taken.
+        if self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED) {
+            return false;
         }
 
         // Monitor triggered by a write (wakeup_monitor set activity_state to
@@ -1550,6 +1554,102 @@ mod tests {
             cpu.lapic.read_aligned(LAPIC_VECTOR_IRR_OFFSET, 0) & LAPIC_VECTOR_REG_BIT,
             LAPIC_VECTOR_REG_BIT,
             "the TPR-blocked request is not dropped"
+        );
+    }
+
+    /// A halted processor is woken by every event Bochs wakes it for.
+    ///
+    /// `handleWaitForEvent` (event.cc) ends the wait for NMI/SMI/INIT *and*
+    /// for the events only a VMEXIT can answer — the virtual-APIC updates,
+    /// the monitor trap flag and the virtual NMI. `handleAsyncEvent` calls
+    /// it first and returns immediately when it says "still halted", so an
+    /// event missing from this condition is one the processor can never
+    /// reach: the VMEXIT below it never runs.
+    #[test]
+    fn a_halted_processor_wakes_for_the_events_only_a_vmexit_can_answer() {
+        for event in [
+            BxCpuC::<()>::BX_EVENT_VMX_MONITOR_TRAP_FLAG,
+            BxCpuC::<()>::BX_EVENT_VMX_VIRTUAL_NMI,
+            BxCpuC::<()>::BX_EVENT_VMX_VTPR_UPDATE,
+            BxCpuC::<()>::BX_EVENT_VMX_VEOI_UPDATE,
+            BxCpuC::<()>::BX_EVENT_VMX_VIRTUAL_APIC_WRITE,
+        ] {
+            let mut cpu = make_cpu(0);
+            let mut bus = TestBus::new();
+            cpu.reset(ResetReason::Hardware);
+            cpu.activity_state = CpuActivityState::Hlt;
+            cpu.unmask_event(event);
+            cpu.signal_event(event);
+
+            let mut ctx = bus.ctx(&mut cpu);
+
+            assert!(
+                !ctx.handle_wait_for_event(),
+                "event {event:#x} must end the wait so its VMEXIT can be taken"
+            );
+        }
+    }
+
+    /// The expired VMX preemption timer ends the wait without the side
+    /// effects an interrupt wake has.
+    ///
+    /// Bochs event.cc gives it a branch of its own, after the interrupt
+    /// condition: it breaks out of the wait loop but does not reset the
+    /// MONITOR and does not clear the inhibit mask, because nothing was
+    /// delivered — the processor is only being let go so the VMEXIT can run.
+    #[test]
+    fn an_expired_preemption_timer_ends_the_wait_without_clearing_inhibits() {
+        const INHIBITED: u32 = 1;
+
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        cpu.reset(ResetReason::Hardware);
+        cpu.activity_state = CpuActivityState::Mwait;
+        cpu.monitor.arm(0x1000, crate::cpu::cpu::BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.inhibit_mask = INHIBITED;
+        cpu.unmask_event(BxCpuC::<()>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+
+        let mut ctx = bus.ctx(&mut cpu);
+        assert!(
+            !ctx.handle_wait_for_event(),
+            "an expired preemption timer ends the wait"
+        );
+
+        assert!(
+            cpu.monitor.armed(),
+            "the preemption timer delivered nothing, so the MONITOR stays armed"
+        );
+        assert_eq!(
+            cpu.inhibit_mask, INHIBITED,
+            "the preemption timer does not clear the inhibits an interrupt wake clears"
+        );
+    }
+
+    /// A user interrupt wakes a halted processor on the same terms as any
+    /// other interrupt: Bochs event.cc puts `BX_EVENT_PENDING_UINTR` in the
+    /// group gated on EFLAGS.IF (or the MWAIT_IF state MWAIT's ECX[0] asks
+    /// for), alongside the 8259's and the LAPIC's.
+    #[test]
+    fn a_user_interrupt_wakes_a_halted_processor_only_when_interrupts_are_enabled() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        cpu.reset(ResetReason::Hardware);
+        cpu.activity_state = CpuActivityState::Hlt;
+        cpu.eflags.remove(super::super::eflags::EFlags::IF_);
+        cpu.unmask_event(BxCpuC::<()>::BX_EVENT_PENDING_UINTR);
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_UINTR);
+
+        assert!(
+            bus.ctx(&mut cpu).handle_wait_for_event(),
+            "with interrupts disabled the wait continues"
+        );
+
+        cpu.eflags.insert(super::super::eflags::EFlags::IF_);
+
+        assert!(
+            !bus.ctx(&mut cpu).handle_wait_for_event(),
+            "with interrupts enabled the user interrupt ends the wait"
         );
     }
 }
