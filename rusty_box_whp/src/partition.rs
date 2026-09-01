@@ -653,6 +653,29 @@ impl Partition {
         sys::set_words(self.handle.0, index, regs, words)
     }
 
+    /// Read a processor's whole extended-state area — the x87 and vector file
+    /// as the architecture's own XSAVE layout — answering how many bytes the
+    /// platform wrote.
+    ///
+    /// The one shape the platform offers that file in: its register names stop
+    /// at the XMM halves, so the YMM and ZMM state crosses here or not at all.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the platform refuses — a buffer
+    /// too small for the area is one such refusal.
+    pub fn read_xsave(&self, index: u32, out: &mut [u8]) -> WhpResult<usize> {
+        sys::get_xsave(self.handle.0, index, out)
+    }
+
+    /// Write a processor's whole extended-state area — the counterpart of
+    /// [`Partition::read_xsave`], taking the same layout back.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the platform refuses the area.
+    pub fn write_xsave(&self, index: u32, area: &[u8]) -> WhpResult<()> {
+        sys::set_xsave(self.handle.0, index, area)
+    }
+
     /// Read registers of mixed shape — words, segments and descriptor tables —
     /// in a single call.
     ///
@@ -1079,6 +1102,64 @@ mod tests {
             matches!(exit.reason, crate::ExitReason::Halt),
             "the guest must reach its HLT, not {:?}",
             exit.reason
+        );
+    }
+
+    /// The extended-state area round-trips through the platform, and the
+    /// legacy region sits where the architecture says it does.
+    ///
+    /// This is the contract the engine's state exchange rests on: the area a
+    /// `read_xsave` returns can be patched and handed back through
+    /// `write_xsave`, and a patch to the legacy `XMM0` slot (offset 160, the
+    /// same in the standard and the compacted layout) is a write to that
+    /// register. The header prints rather than asserts — whether this host
+    /// hands out the standard or the compacted form is measured here, not
+    /// assumed anywhere.
+    #[test]
+    fn the_extended_state_area_round_trips_and_a_legacy_patch_is_a_register_write() {
+        if !crate::hypervisor_present().unwrap_or(false) {
+            eprintln!("skipped: this host has no Windows Hypervisor Platform");
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let partition = halting_partition().expect("a partition");
+
+        let mut area = [0u8; 4096];
+        let written = partition.read_xsave(0, &mut area).expect("the area reads");
+        assert!(
+            written >= 576,
+            "an XSAVE area is at least the legacy region plus its header, got {written}"
+        );
+
+        let xstate_bv = u64::from_le_bytes(area[512..520].try_into().expect("eight bytes"));
+        let xcomp_bv = u64::from_le_bytes(area[520..528].try_into().expect("eight bytes"));
+        eprintln!(
+            "measured: {written} bytes, XSTATE_BV {xstate_bv:#x}, XCOMP_BV {xcomp_bv:#x} \
+             ({} form)",
+            if xcomp_bv >> 63 != 0 { "compacted" } else { "standard" }
+        );
+
+        // Identical put-back first: the exchange's common case.
+        partition.write_xsave(0, &area[..written]).expect("the unchanged area writes");
+
+        // Now the patch: XMM0's sixteen legacy bytes, with the SSE component
+        // marked live so the platform treats them as state rather than init.
+        const XMM0: usize = 160;
+        const SSE_LIVE: u64 = 1 << 1;
+        let pattern: [u8; 16] = *b"\xA5\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x5A";
+        area[XMM0..XMM0 + 16].copy_from_slice(&pattern);
+        let marked = (xstate_bv | SSE_LIVE).to_le_bytes();
+        area[512..520].copy_from_slice(&marked);
+        partition.write_xsave(0, &area[..written]).expect("the patched area writes");
+
+        let mut back = [0u8; 4096];
+        let again = partition.read_xsave(0, &mut back).expect("the area reads back");
+        assert!(again >= 576);
+        assert_eq!(
+            back[XMM0..XMM0 + 16],
+            pattern,
+            "the patched XMM0 must come back as written, or the legacy region is not \
+             where the exchange thinks it is"
         );
     }
 

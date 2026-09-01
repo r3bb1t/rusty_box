@@ -108,6 +108,18 @@ pub(crate) fn get_counters(
     Err(WhpError::unsupported(CALL))
 }
 
+pub(crate) fn get_xsave(
+    _partition: RawPartition,
+    _index: u32,
+    _out: &mut [u8],
+) -> WhpResult<usize> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub(crate) fn set_xsave(_partition: RawPartition, _index: u32, _area: &[u8]) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
 pub(crate) fn get_words(
     _partition: RawPartition,
     _index: u32,

@@ -511,6 +511,68 @@ pub(crate) fn get_counters(
     usize::try_from(written).map_err(|_| WhpError::contract(CALL))
 }
 
+/// Read the processor's whole extended-state area, answering how many bytes
+/// the platform wrote.
+///
+/// The buffer is the guest's XSAVE area exactly as the architecture lays it
+/// out — legacy `FXSAVE` region, header, then components — because that is the
+/// only shape the platform offers the x87 and vector file in:
+/// `WHV_REGISTER_NAME` stops at the XMM names and carries no YMM or ZMM
+/// register at all.
+pub(crate) fn get_xsave(
+    partition: RawPartition,
+    index: u32,
+    out: &mut [u8],
+) -> WhpResult<usize> {
+    const CALL: &str = "WHvGetVirtualProcessorXsaveState";
+    let Ok(len) = u32::try_from(out.len()) else {
+        return Err(WhpError::contract(CALL));
+    };
+    let mut written = 0u32;
+    // SAFETY: the platform writes at most `len` bytes, and `len` is exactly
+    // what the slice owns; `written` is a live, correctly typed out-parameter.
+    // The buffer outlives the call because it is borrowed for it.
+    check(
+        unsafe {
+            WHvGetVirtualProcessorXsaveState(
+                partition.get(),
+                index,
+                out.as_mut_ptr().cast(),
+                len,
+                &mut written,
+            )
+        },
+        CALL,
+    )?;
+    // The architecture's least XSAVE area: the 512-byte legacy region plus
+    // its 64-byte header. An answer shorter than its own header is outside
+    // the contract, and refusing it here is what lets a caller index the
+    // header without doubting it.
+    match usize::try_from(written) {
+        Ok(bytes) if bytes >= 576 => Ok(bytes),
+        _ => Err(WhpError::contract(CALL)),
+    }
+}
+
+/// Write the processor's whole extended-state area — the counterpart of
+/// [`get_xsave`], taking the same layout back.
+pub(crate) fn set_xsave(partition: RawPartition, index: u32, area: &[u8]) -> WhpResult<()> {
+    const CALL: &str = "WHvSetVirtualProcessorXsaveState";
+    let Ok(len) = u32::try_from(area.len()) else {
+        return Err(WhpError::contract(CALL));
+    };
+    // SAFETY: the platform reads at most `len` bytes, and `len` is exactly
+    // what the slice owns; the buffer outlives the call because it is borrowed
+    // for it.
+    check(
+        unsafe {
+            WHvSetVirtualProcessorXsaveState(partition.get(), index, area.as_ptr().cast(), len)
+        },
+        CALL,
+    )?;
+    Ok(())
+}
+
 /// The register-read choke point (R5), mirroring `set_values`: every typed
 /// getter converges here, so the length agreement and the aligned buffer are
 /// established once and each getter differs only in which member of the value

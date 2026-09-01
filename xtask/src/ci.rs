@@ -101,7 +101,14 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // rest: the block is in `sys/windows.rs`, the buffer it hands over is a
     // borrowed `u64` slice whose length is what bounds the write, and the
     // structure is parsed in safe code above the seam.
-    ("rusty_box_whp/src", 36),
+    //
+    // 36 -> 38: `WHvGetVirtualProcessorXsaveState` and its `Set` counterpart —
+    // the platform's only window onto the x87 and vector file, which its
+    // register names cannot address past the XMM halves. Confined as ever:
+    // both blocks in `sys/windows.rs`, each handing over a borrowed byte
+    // slice whose length bounds the transfer, with the area parsed in safe
+    // code above the seam (R1).
+    ("rusty_box_whp/src", 38),
     // The adapter between the machine and the leaf. ONE: installing the
     // machine's memory into a partition hands the hypervisor host addresses
     // that outlive the borrow they came from, and no lifetime can say

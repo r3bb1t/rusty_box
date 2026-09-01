@@ -132,9 +132,10 @@ pub struct GvaTranslation {
 
 pub(crate) use imp::{
     cancel_vp, capability, create_partition, create_vp, delete_partition, delete_vp,
-    dirty_bitmap, get_counters, get_registers, get_segments, get_tables, get_words,
+    dirty_bitmap, get_counters, get_registers, get_segments, get_tables, get_words, get_xsave,
     hypervisor_present, map_gpa, request_interrupt, run_vp, set_cpuid_exit_list, set_property,
-    set_registers, set_segments, set_tables, set_words, setup, translate_gva, unmap_gpa,
+    set_registers, set_segments, set_tables, set_words, set_xsave, setup, translate_gva,
+    unmap_gpa,
 };
 
 /// Every function `imp` must provide, stated once so the two implementations
@@ -157,6 +158,8 @@ const _IMP_IS_COMPLETE: ImpSignatures = ImpSignatures {
     cancel_vp: imp::cancel_vp,
     request_interrupt: imp::request_interrupt,
     get_counters: imp::get_counters,
+    get_xsave: imp::get_xsave,
+    set_xsave: imp::set_xsave,
     get_registers: imp::get_registers,
     set_registers: imp::set_registers,
     get_words: imp::get_words,
@@ -193,6 +196,8 @@ struct ImpSignatures {
     cancel_vp: fn(RawPartition, u32) -> WhpResult<()>,
     request_interrupt: fn(RawPartition, InterruptRequest) -> WhpResult<()>,
     get_counters: fn(RawPartition, u32, CounterSet, &mut [u64]) -> WhpResult<usize>,
+    get_xsave: fn(RawPartition, u32, &mut [u8]) -> WhpResult<usize>,
+    set_xsave: fn(RawPartition, u32, &[u8]) -> WhpResult<()>,
     get_registers: fn(RawPartition, u32, &[Reg], &mut [RegisterValue]) -> WhpResult<()>,
     set_registers: fn(RawPartition, u32, &[Reg], &[RegisterValue]) -> WhpResult<()>,
     get_words: fn(RawPartition, u32, &[Reg], &mut [u64]) -> WhpResult<()>,
