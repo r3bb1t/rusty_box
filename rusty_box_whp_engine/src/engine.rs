@@ -1502,6 +1502,16 @@ fn install_the_shadow<T: Instrumentation>(
 /// consumes the imposed bit still delivers its single-step trap, in order —
 /// the write is transparent to `TF` stepping here, and the test stands guard
 /// on that answer.
+///
+/// What a consumer that CAN read its interpreter's inhibit writes instead is
+/// the real value: VirtualBox's NEM backend exports
+/// `CPUMIsInInterruptShadow` into this register, anchors the shadow to the
+/// `RIP` fetched beside it on import so a shadow never outlives its
+/// instruction, and skips the write when the previous and current values are
+/// both clear (VirtualBox `NEMAllNativeTemplate-win.cpp.h`
+/// `nemHCWinCopyStateToHyperV` / `nemHCWinCopyStateFromHyperV`). That
+/// accessor is exactly what rusty_box keeps crate-private, so the honest
+/// value available on this side of the seam is the presumption above.
 fn impose_the_shadow(
     partition: &Partition,
     state: &VcpuArchState,
