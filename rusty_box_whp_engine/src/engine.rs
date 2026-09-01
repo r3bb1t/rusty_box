@@ -297,11 +297,12 @@ fn platform_failed(error: WhpError) -> CpuError {
 ///
 /// ## The freshness contract
 ///
-/// The decision runs at the tail of a loop iteration; between the exit and
-/// the tail the engine may SERVICE the exit on the shadow interpreter, and a
-/// serviced instruction can change `IF` (a `CLI`, or a fault entering a gate)
-/// and leave the guest at a fresh boundary. So the cache has two authorities,
-/// and which one is current depends on whether an errand ran this iteration:
+/// The decision runs at the tail of a loop iteration and at the head of a
+/// slice; between an exit and its tail the engine may SERVICE the exit on the
+/// shadow interpreter, and a serviced instruction can change `IF` (a `CLI`,
+/// or a fault entering a gate) and leave the guest at a fresh boundary. So
+/// the cache has two authorities, and which one is current depends on whether
+/// the shadow is what the next entry runs:
 ///
 /// - **No errand** (a raw port write, an interrupt-window exit): the exit
 ///   header describes the processor the tail will re-enter, so
@@ -316,6 +317,12 @@ fn platform_failed(error: WhpError) -> CpuError {
 ///   interpreter and PRESUMES the interrupt shadow live — the interpreter's
 ///   inhibit bookkeeping is invisible to this crate, and unknown means
 ///   blocked, never permitted.
+/// - **A slice head** (`install_the_shadow`) is the errand case writ large:
+///   whatever the cache holds predates everything the machine did between
+///   slices — shadow-converted slices, deliveries, state the machine wrote —
+///   or there was never a header at all. The install is an imposition, so it
+///   carries the same republish, and the head's staging decision always runs
+///   on the shadow's own `IF` with the inhibit presumed live.
 ///
 /// The property both together guarantee: at the instant `stage_injection`
 /// pops a vector — an irreversible acknowledge — the gate holds POSITIVE
@@ -377,12 +384,13 @@ impl InjectState {
         self.cr8 = vp.cr8;
     }
 
-    /// Republish deliverability from the shadow — the authority for an
-    /// iteration in which an errand ran.
+    /// Republish deliverability from the shadow — the authority whenever the
+    /// shadow is what the next VM entry runs.
     ///
     /// Called at the end of every path that emulates before the injection
     /// tail, once `impose_the_shadow` has made the partition identical to the
-    /// interpreter, with the shadow's live `IF` (`cpu.interrupts_enabled()`).
+    /// interpreter, and by `install_the_shadow` at every slice head — always
+    /// with the shadow's live `IF` (`cpu.interrupts_enabled()`).
     ///
     /// `shadowed` is set TRUE — unknown, therefore blocked. The
     /// interpreter's one-instruction interrupt inhibit (`STI` / `MOV SS` /
@@ -1080,19 +1088,18 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             return run_slice_on_the_shadow(cpu, &mut io, request, &mut self.census, shadowed);
         }
 
-        // An interrupt to deliver, a halt to wake from, any work the
-        // interpreter does at a trace boundary: it happens HERE, on the
+        // What injection cannot carry — an NMI, an SMI, an INIT, a shutdown,
+        // a processor asleep in a wait state — is delivered HERE, on the
         // shadow, before the hardware is given the processor. The partition
         // was created with no local APIC of its own precisely so that delivery
-        // stays on this side (REPLAN decision 6), and running it through the
-        // interpreter means a guest's interrupt frame is what it would be with
-        // no hypervisor in the picture.
+        // stays on this side (REPLAN decision 6), and running these through
+        // the interpreter means the guest's frame is what it would be with no
+        // hypervisor in the picture.
         //
-        // Mid-slice the story is [`stage_injection`]'s: an external vector
-        // that becomes deliverable between exits crosses to the partition as
-        // a register write — the one place this engine writes
-        // `WHvRegisterPendingInterruption` — instead of ending the slice to
-        // run the delivery here.
+        // A deliverable external vector is NOT among them: at the head
+        // exactly as at an exit's tail, it is [`stage_injection`]'s — staged
+        // below, once the shadow is installed, and it crosses to the
+        // partition as a register write instead of an interpreted delivery.
         // Make the processor's view of the bus current BEFORE asking whether
         // it has anything to deliver. The 8259's interrupt line is a level,
         // and what the processor holds is a latched copy of it: a line the
@@ -1101,21 +1108,28 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // longer has. The interpreter never has this problem because it syncs
         // inside its own loop, at every instruction boundary.
         io.sync_io_events(cpu);
-        // An interrupt shadow the hardware is still holding forbids delivery
-        // here, however ready the machine's own controller is. The shadowing
-        // instruction retires the moment the guest runs again, so the vector
-        // waits exactly one slice — which is what the architecture asks for
-        // and what the interpreter does with its own inhibit mask.
+        // An interrupt shadow the hardware is still holding forbids the
+        // interpreter delivering here, however ready the machine's own
+        // controller is. The shadowing instruction retires the moment the
+        // guest runs again, so the event waits exactly one slice — which is
+        // what the architecture asks for and what the interpreter does with
+        // its own inhibit mask.
         let shadowed = self.started.as_ref().is_some_and(|started| started.shadowed);
         if shadowed {
-            tracing::debug!(target: "irq", "CPU: delivery held off — the guest is in an interrupt shadow");
+            tracing::debug!(target: "irq", "CPU: shadow delivery held off — the guest is in an interrupt shadow");
         }
-        if !shadowed && cpu.has_an_event_to_deliver() {
-            // The head of a slice is the only place this engine delivers, so
-            // it is also the only place the delay between a device raising a
-            // line and a guest seeing it can be measured. Both RIPs, because a
-            // delivery that happened shows as a jump to a handler and one that
-            // did not shows as an ordinary instruction.
+        // A processor in a wait state wakes through the interpreter whatever
+        // the pending event: `handle_wait_for_event` (rusty_box cpu/event.rs)
+        // is the one place the wake rules live, and wake-then-deliver at the
+        // loop head is Bochs's own halt sequence. A guest that was asleep was
+        // idle — it is not paying the mid-run interruption cost injection
+        // exists to remove — so its delivery keeps the interpreted path.
+        let asleep = !matches!(cpu.activity_state, CpuActivityState::Active);
+        if !shadowed
+            && (cpu.has_non_ext_int_event() || (asleep && cpu.has_an_event_to_deliver()))
+        {
+            // Both RIPs, because a delivery that happened shows as a jump to a
+            // handler and one that did not shows as an ordinary instruction.
             let before = cpu.rip();
             let rsp_before = {
                 let mut state = VcpuArchState::default();
@@ -1149,6 +1163,42 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
 
         // The shadow describes the processor; the platform runs it.
         install_the_shadow(started, cpu)?;
+
+        // A deliverable external vector is offered to the hardware, not to
+        // the interpreter — staged only now, because the state must be on the
+        // partition before an injection is staged against it, and judged by
+        // the same gate as at an exit's tail. `install_the_shadow` has just
+        // republished deliverability from the shadow, so the gate holds the
+        // honest answer a head can give: `IF` is the shadow's own, fresh and
+        // positive, while the inhibit is UNKNOWN — the interpreter's
+        // one-instruction inhibit is invisible to this crate, and
+        // `started.shadowed` above is only as fresh as the last read-back,
+        // which predates any errand's retirement — so the gate is told
+        // BLOCKED and a head-pending vector defers to a window the next
+        // exit's header answers. The deferral costs one window exit; nothing
+        // irreversible happens on the unknown.
+        //
+        // The guard mirrors the exit tail's: an NMI, SMI or INIT outranks any
+        // maskable vector (the order Bochs event.cc keeps at its own
+        // boundary) and is the shadow's to deliver, so no external interrupt
+        // is staged over one.
+        if !cpu.has_non_ext_int_event() {
+            match stage_injection(started, cpu, &mut io, inject_census)? {
+                Staged::Injected(vector) => {
+                    tracing::debug!(
+                        target: "irq",
+                        "CPU: vector {vector:#04x} injected at a slice head"
+                    );
+                    // The acknowledge changed the controllers' lines; the
+                    // processor's latched copy follows before anything asks.
+                    io.sync_io_events(cpu);
+                }
+                // Blocked or nothing to carry: the run below is the next
+                // word — a window exit if one was armed, and the exit tail
+                // re-asks every gate with a fresh header.
+                Staged::Windowed | Staged::Nothing => {}
+            }
+        }
 
         let outcome = run_until_the_machine_is_needed(
             started,
@@ -1321,6 +1371,17 @@ fn run_slice_on_the_shadow<T: Instrumentation>(
 /// in two places now — around a whole slice, and around each exit the shadow
 /// has to finish. Writing them out twice is how the two could drift.
 ///
+/// Also republishes deliverability from the shadow, for the same reason
+/// [`impose_after_errand`] does (R5): the head's staging decision runs next,
+/// and the processor the next VM entry runs is the shadow being installed
+/// here — not whatever exit header the cache still holds, which at a head may
+/// be a slice old or may never have existed. `IF` and `CR8` come fresh from
+/// the export below; the inhibit is presumed live, because between the last
+/// read-back and this head the shadow may have retired instructions whose
+/// inhibit bookkeeping this crate cannot read — see [`InjectState`]'s
+/// freshness contract. Republished on the unchanged early return too: an
+/// untouched shadow is still what the entry runs.
+///
 /// # Errors
 /// A register the platform refused to take.
 fn install_the_shadow<T: Instrumentation>(
@@ -1338,10 +1399,18 @@ fn install_the_shadow<T: Instrumentation>(
         consecutive_mmio: _,
         held,
         xsave,
-        // What the last exit header said; a state exchange does not change it.
-        inject: _,
+        // Republished from the shadow just below; the state exchange itself
+        // does not change it again.
+        inject,
     } = started;
     cpu.export_arch_state(state);
+    inject.refresh_from_shadow(cpu.interrupts_enabled());
+    // At a head the shadow's `CR8` is the freshest there is — the partition
+    // has not run since the read-back that produced it, and any `MOV CR8` a
+    // shadow stretch retired since landed in the shadow alone — so the header
+    // copy is superseded here, unlike at an errand tail where the header
+    // still stands.
+    inject.cr8 = (state.cr8 & 0xF) as u8;
     // A slice that ended with the guest on hardware left the processor holding
     // exactly what the read-back then copied into the shadow, so installing it
     // again writes every register back unchanged. That is the common case —
@@ -1549,11 +1618,13 @@ fn run_the_exit_loop<T: Instrumentation>(
     exits: &mut u64,
     history: &mut ExitHistory,
 ) -> Result<Yielded> {
-    // Whether the last exit left the platform holding an interruption it had
-    // begun delivering. While it does, the slice may not end — see the
-    // `Canceled` arm — so the budget checks below stand down for exactly one
-    // more entry.
-    let mut delivery_in_flight = false;
+    // Whether the platform holds an interruption it has begun — or been
+    // handed — and not yet delivered. While it does, the slice may not end —
+    // see the `Canceled` arm — so the budget checks below stand down for
+    // exactly one more entry. Seeded from the engine's own record rather than
+    // from `false`, so a delivery staged at the slice head is owed its entry
+    // by the very first iteration.
+    let mut delivery_in_flight = started.inject.in_flight;
     loop {
         // Checked before running rather than after, so a slice whose budget is
         // already spent hands the machine back without another exit's worth of

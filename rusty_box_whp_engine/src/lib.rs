@@ -605,6 +605,152 @@ mod tests {
         );
     }
 
+    /// A vector pending AT A SLICE HEAD reaches an active guest by injection,
+    /// not by the interpreter delivering before the hardware runs.
+    ///
+    /// The guest is built so the head is the ONLY staging opportunity: after
+    /// programming the PIT it spins in a pure computation loop — no port
+    /// touches, no device memory — so a running slice takes no exits until
+    /// its budget cancels it. Every tick therefore becomes deliverable while
+    /// the machine owns the processor between slices, and is pending when the
+    /// next slice starts. A head that delivers through the shadow shows MARKs
+    /// with injections stalled at the incidental few — this guest measured
+    /// 2 injections against 131 MARKs on the interpreter-delivering head,
+    /// 1.5% of the traffic, all of it ticks that happened to land on windows
+    /// armed earlier — so the discriminator is the SHARE injection carries,
+    /// not its mere occurrence.
+    ///
+    /// HOW the head injects is part of the claim: at a head the engine cannot
+    /// see the interpreter's one-instruction inhibit, so the gate holds no
+    /// positive evidence that delivery is permitted and must defer — arm a
+    /// deliverability window, enter, and let the window exit's authoritative
+    /// header answer. So a head-pending vector costs one window exit and then
+    /// crosses as a register write: `windows_armed` and `exits().window` rise
+    /// with `injected`, and nothing is acknowledged on unknown evidence.
+    ///
+    /// The ISR runs `STI` before anything else for the same reason the
+    /// errand-deferral test's does: after an injection the processor's
+    /// latched pin is stale until the next acknowledge attempt reconciles
+    /// it, and an `IF=0` handler tail would arm one spurious window per
+    /// injection, muddying the very counters under assertion.
+    ///
+    /// Trials repeat across steps because a stretch the shadow legitimately
+    /// carries (a budget nearer than the hardware's resolution) delivers
+    /// through the interpreter with nothing to inject; only a head the
+    /// HARDWARE follows exercises the path under test.
+    #[test]
+    fn a_vector_pending_at_a_slice_head_is_injected_not_shadow_delivered() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        let _turn = a_turn_on_the_hardware();
+        // isr at CODE+0x2A (CS base is 0).
+        let mut machine = machine_with_devices(&[
+            0x31, 0xC0, //             xor ax, ax
+            0x8E, 0xD8, //             mov ds, ax
+            0x8E, 0xD0, //             mov ss, ax
+            0xBC, 0x00, 0x70, //       mov sp, 0x7000
+            0xC7, 0x06, 0x20, 0x00, 0x2A, 0x10, // mov word [0x20], isr (IVT[8])
+            0xC7, 0x06, 0x22, 0x00, 0x00, 0x00, //  mov word [0x22], 0
+            0xB0, 0xFE, //             mov al, 0xFE — unmask IRQ0 alone
+            0xE6, 0x21, //             out 0x21, al  (OCW1)
+            0xB0, 0x34, //             mov al, 0x34 — ch0, lo/hi, mode 2
+            0xE6, 0x43, //             out 0x43, al
+            0xB0, 0x00, //             mov al, 0x00 — count 0x0400, low
+            0xE6, 0x40, //             out 0x40, al
+            0xB0, 0x04, //             mov al, 0x04 — count 0x0400, high
+            0xE6, 0x40, //             out 0x40, al
+            0xFB, //                   sti — IF=1 for the whole busy loop
+            // busy (CODE+0x27): pure computation, exit-free — the tick can
+            // only be found pending at a slice head
+            0x40, //                   inc ax
+            0xEB, 0xFD, //             jmp busy
+            // isr (CODE+0x2A): STI first — see the doc above — then report
+            0xFB, //                   sti
+            0x90, //                   nop — the STI shadow lapses
+            0xB0, MARK, //             mov al, MARK
+            0xE6, DEBUG_PORT, //       out 0xE9, al
+            0xB0, 0x20, //             mov al, 0x20
+            0xE6, 0x20, //             out 0x20, al — non-specific EOI
+            0xCF, //                   iret
+        ]);
+        // The guest never halts, so each step returns on budget and the next
+        // resumes it; the PIT's ticks land across the steps. Bounded so a
+        // wedge fails assertions instead of hanging the suite; stops early
+        // once several deliveries AND several injections stand, so the census
+        // comparison below is made of more than one event.
+        let mut written: std::vec::Vec<u8> = std::vec::Vec::new();
+        for _ in 0..48 {
+            machine
+                .step(RunBudget::Ticks(2_000_000))
+                .expect("the hypervisor runs the guest and its ticks reach it");
+            written.extend(machine.debug_port().take_output());
+            if written.len() >= 8 && machine.engine().inject_census().injected >= 6 {
+                break;
+            }
+        }
+        assert!(
+            !written.is_empty() && written.iter().all(|byte| *byte == MARK),
+            "the PIT's ticks must reach the guest's own ISR, and nothing else may \
+             write the debug port: {written:#04x?}"
+        );
+        let census = machine.engine().inject_census();
+        let exits = machine.engine().exits();
+        let slices = machine.engine().census();
+        // The measured numbers, for the record beside the assertions: MARKs
+        // are the guest-visible acknowledge count — one per delivered vector.
+        eprintln!(
+            "head-injection census: marks {}, injected {} (vector 8: {}), windows \
+             armed {}, window exits {}, slices {}, ended_event_to_deliver {}",
+            written.len(),
+            census.injected,
+            census.injected_per_vector[8],
+            census.windows_armed,
+            exits.window,
+            slices.slices,
+            slices.ended_event_to_deliver,
+        );
+        assert!(
+            census.injected >= 4 && census.injected_per_vector[8] >= 4,
+            "a vector pending at a slice head must cross as a register write — \
+             injected {} (vector 8: {}), windows armed {}: injections stalling \
+             while MARKs pile up is the retired head delivering through the \
+             interpreter",
+            census.injected,
+            census.injected_per_vector[8],
+            census.windows_armed,
+        );
+        // The traffic split is the claim, not one lucky event. Deliveries the
+        // shadow legitimately carries (a budget nearer than the hardware's
+        // resolution converts the whole slice, and its head delivers
+        // interpreted) keep this below 100%; measured here the hardware
+        // carries a quarter to a third of the ticks, where the
+        // interpreter-delivering head measured 1.5% — incidental injections
+        // only. One-sixth keeps an order of magnitude over the broken head
+        // and headroom under the measured mix.
+        assert!(
+            census.injected * 6 >= written.len() as u64,
+            "injection must carry the hardware-slice traffic, not be incidental \
+             to it: injected {} of {} deliveries",
+            census.injected,
+            written.len(),
+        );
+        assert!(
+            census.windows_armed >= 1,
+            "the head holds no positive evidence about the interpreter's inhibit, \
+             so a head-pending vector must be deferred to a window, never \
+             acknowledged on the unknown; windows armed {}",
+            census.windows_armed,
+        );
+        assert!(
+            exits.window >= 1,
+            "an armed window must be answered by a window exit — armed and never \
+             answered is a wedged guest; window exits {}",
+            exits.window,
+        );
+    }
+
     /// A vector is never delivered into a context whose `IF` a shadow errand
     /// cleared between the exit and the staging decision.
     ///
@@ -855,8 +1001,8 @@ mod tests {
         // Every tick still arrives — the presumption defers, it never loses.
         // How each deferred vector lands is the engine's business: the window
         // exit's follow-up stages it, and a slice whose budget expires first
-        // hands it to the next slice head instead, where the shadow delivers
-        // it. Either way the guest sees its interrupt; a wedge would show
+        // hands it to the next slice head instead, which stages it the same
+        // way. Either way the guest sees its interrupt; a wedge would show
         // here as missing MARKs.
         assert!(
             !written.is_empty() && written.iter().all(|byte| *byte == MARK),
