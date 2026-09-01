@@ -172,6 +172,12 @@ pub struct Capabilities {
     pub supported_exits: ExtendedVmExits,
     /// Guest-physical address width in bits, as the host reports it.
     pub physical_address_width: u32,
+    /// The processor features the host banks, `WHV_PROCESSOR_FEATURES` as one
+    /// raw word. What [`crate::PartitionConfig::processor_features`] may offer
+    /// a guest: a partition left at the platform's default gets a narrower
+    /// set, and a guest touching a feature the partition was not told about
+    /// faults on hardware while working under an interpreter.
+    pub processor_features: u64,
 }
 
 /// Whether a hypervisor is present and usable from this process.
@@ -193,6 +199,7 @@ pub fn capabilities() -> WhpResult<Capabilities> {
     }
     let features_word = sys::capability(sys::CapabilityCode::Features)?;
     let exits_word = sys::capability(sys::CapabilityCode::ExtendedVmExits)?;
+    let processor_features = sys::capability(sys::CapabilityCode::ProcessorFeatures)?;
     // `WHvCapabilityCodePhysicalAddressWidth` is newer than the rest; a host
     // that does not know it refuses rather than answering zero, and 0 is the
     // honest report for "the host would not say".
@@ -210,6 +217,7 @@ pub fn capabilities() -> WhpResult<Capabilities> {
         },
         supported_exits: ExtendedVmExits::from_word(exits_word),
         physical_address_width: width as u32,
+        processor_features,
     })
 }
 

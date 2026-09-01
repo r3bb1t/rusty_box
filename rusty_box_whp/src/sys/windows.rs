@@ -137,6 +137,7 @@ const fn capability_code(code: CapabilityCode) -> (WHV_CAPABILITY_CODE, u32) {
         CapabilityCode::Features => (WHvCapabilityCodeFeatures, 8),
         CapabilityCode::ExtendedVmExits => (WHvCapabilityCodeExtendedVmExits, 8),
         CapabilityCode::PhysicalAddressWidth => (CAPABILITY_PHYSICAL_ADDRESS_WIDTH, 4),
+        CapabilityCode::ProcessorFeatures => (WHvCapabilityCodeProcessorFeatures, 8),
     }
 }
 
@@ -154,6 +155,7 @@ const fn property_code(code: PropertyCode) -> (WHV_PARTITION_PROPERTY_CODE, u32)
         PropertyCode::LocalApicEmulationMode => {
             (WHvPartitionPropertyCodeLocalApicEmulationMode, 4)
         }
+        PropertyCode::ProcessorFeatures => (WHvPartitionPropertyCodeProcessorFeatures, 8),
     }
 }
 

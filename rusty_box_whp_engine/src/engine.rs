@@ -616,9 +616,21 @@ pub struct PlatformCounters {
 fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a mut Started> {
     {
         if started.is_none() {
+            // The guest is offered exactly the processor features the host
+            // banks. A partition that is never told falls back to the
+            // platform's default set, which is narrower than the host's: a
+            // guest touching a feature the host has but the partition was not
+            // told about faults on hardware while working under the
+            // interpreter — a `wrmsr IA32_SPEC_CTRL` #GP that no shadow run
+            // ever shows.
+            let banked = rusty_box_whp::capabilities()
+                .map_err(platform_failed)?
+                .processor_features;
             let mut config = PartitionConfig::new().map_err(platform_failed)?;
             config
                 .processor_count(1)
+                .map_err(platform_failed)?
+                .processor_features(banked)
                 .map_err(platform_failed)?
                 // No APIC in the partition: this port's own `cpu/apic.rs` is
                 // the guest's local APIC, its 8259 pair stays in host memory,

@@ -235,6 +235,23 @@ impl PartitionConfig {
         Ok(self)
     }
 
+    /// Which processor features the guest may use, as the raw
+    /// `WHV_PROCESSOR_FEATURES` word — normally exactly
+    /// [`crate::Capabilities::processor_features`], the bank the host reports.
+    ///
+    /// A partition that never sets this gets the platform's own default set,
+    /// which is narrower than what the host banks; a guest touching a feature
+    /// the partition was not told about faults on hardware while working under
+    /// an interpreter (a `wrmsr IA32_SPEC_CTRL` is the classic casualty).
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the host refuses the set, which it
+    /// does when a feature beyond its own bank is asked for.
+    pub fn processor_features(&mut self, features: u64) -> WhpResult<&mut Self> {
+        sys::set_property(self.handle.0, PropertyCode::ProcessorFeatures, features)?;
+        Ok(self)
+    }
+
     /// Which local APIC, if any, the hypervisor emulates.
     ///
     /// # Errors
@@ -1276,6 +1293,56 @@ mod tests {
         assert_eq!(
             RuntimeCounters::from_words(&[3, 1]),
             Some(RuntimeCounters { total_100ns: 3, hypervisor_100ns: 1 })
+        );
+    }
+
+    /// The host banks processor features, and a partition told exactly that
+    /// bank sets up and runs a guest.
+    ///
+    /// The single-word `ProcessorFeatures` property is the form under test:
+    /// the platform also offers a multi-bank form, and this asserts the
+    /// one-word one is accepted end to end — property set, `setup`, and a
+    /// guest reaching its `HLT` on the hardware. The bank is printed rather
+    /// than asserted bit by bit because which features a host has is a fact
+    /// about the host, not about this port.
+    #[test]
+    fn a_partition_accepts_the_processor_features_the_host_banks() {
+        if !crate::hypervisor_present().unwrap_or(false) {
+            eprintln!("skipped: this host has no Windows Hypervisor Platform");
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+
+        let features = crate::capabilities()
+            .expect("a host with a hypervisor answers its capability queries")
+            .processor_features;
+        assert_ne!(
+            features, 0,
+            "a host with a hypervisor banks at least one processor feature"
+        );
+        eprintln!("measured: WHV_PROCESSOR_FEATURES {features:#018x}");
+
+        let mut config = PartitionConfig::new().expect("a configurable partition");
+        config
+            .processor_count(1)
+            .expect("the processor count")
+            .processor_features(features)
+            .expect("the single-word ProcessorFeatures property, set to the host's own bank")
+            .local_apic(LocalApicMode::None)
+            .expect("no emulated APIC");
+        let mut partition =
+            config.setup().expect("setup succeeds with the banked features offered");
+
+        let mut pages = HostPages::new(2).expect("guest pages");
+        pages.bytes_mut()[GUEST_IP as usize] = 0xF4;
+        partition.map(RESET_CS_BASE, pages, GpaPerms::RWX).expect("the guest map");
+        partition.create_processor(0).expect("the processor");
+        partition.write_reg(0, Reg::Rip, GUEST_IP).expect("the entry point");
+        let exit = partition.run(0).expect("the guest runs");
+        assert!(
+            matches!(exit.reason, crate::ExitReason::Halt),
+            "the guest must reach its HLT under the widened feature set, not {:?}",
+            exit.reason
         );
     }
 

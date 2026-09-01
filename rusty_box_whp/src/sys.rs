@@ -50,6 +50,9 @@ pub(crate) enum CapabilityCode {
     Features,
     ExtendedVmExits,
     PhysicalAddressWidth,
+    /// The host's banked processor features, `WHV_PROCESSOR_FEATURES` as one
+    /// word. What the partition property of the same name may be set to.
+    ProcessorFeatures,
 }
 
 /// The `WHV_PARTITION_PROPERTY_CODE` values this port sets, restricted to the
@@ -66,6 +69,10 @@ pub(crate) enum PropertyCode {
     ExceptionExitBitmap,
     SeparateSecurityDomain,
     LocalApicEmulationMode,
+    /// Which processor features the guest may use, `WHV_PROCESSOR_FEATURES`
+    /// as one word. Left unset, the platform chooses its own default set,
+    /// which is narrower than what the host banks.
+    ProcessorFeatures,
 }
 
 /// Which counter set `WHvGetVirtualProcessorCounters` should report.
