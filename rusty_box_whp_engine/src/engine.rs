@@ -1493,6 +1493,15 @@ fn install_the_shadow<T: Instrumentation>(
 /// hardware clears the bit itself and every later header answers truthfully.
 /// The NMI mask rides along unchanged from the last read-back
 /// ([`Started::nmi_masked`]); zeroing it would unmask NMIs mid-handler.
+///
+/// The one direction where "always live" could have been optimistic rather
+/// than pessimistic is debug exceptions: VMX's MOV-SS-type blocking also
+/// SUPPRESSES the single-step `#DB` after the next instruction, and a
+/// suppressed step is lost, not deferred. Measured on this platform
+/// (`a_single_step_trap_survives_the_imposed_inhibit`): the instruction that
+/// consumes the imposed bit still delivers its single-step trap, in order —
+/// the write is transparent to `TF` stepping here, and the test stands guard
+/// on that answer.
 fn impose_the_shadow(
     partition: &Partition,
     state: &VcpuArchState,

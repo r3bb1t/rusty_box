@@ -605,6 +605,246 @@ mod tests {
         );
     }
 
+    /// The inhibit `impose_the_shadow` writes does not suppress the
+    /// single-step `#DB` of the instruction that consumes it — measured, not
+    /// argued from the SDM.
+    ///
+    /// The question this answers: WHP exposes ONE `InterruptShadow` bit where
+    /// VMX distinguishes STI-blocking from MOV-SS-blocking, and MOV-SS-type
+    /// blocking also suppresses the single-step trap after the next
+    /// instruction — a suppressed step is LOST, not deferred. Every
+    /// imposition writes that bit as 1, so if the platform gave it
+    /// MOV-SS-type semantics, a TF-stepping guest would silently miss one
+    /// step per imposition. Measured here instead: the first
+    /// hardware-retired instruction after an errand's imposition (s4, trap
+    /// frame IP 0x102B) delivers its `#DB`, in order — the imposed bit is
+    /// delay-only for interrupts AND transparent to single-step on this
+    /// platform.
+    ///
+    /// Two baselines make the probe honest. TF-stepping with no errand
+    /// proves native real-mode `#DB` delivery agrees between the engines
+    /// byte for byte. And the errand guest's SECOND device-memory touch,
+    /// with TF already clear, proves the one step that IS missing (below)
+    /// was lost rather than deferred: a lingering trap latch would fire
+    /// there, misattributed, as a duplicate 0x1033 entry — the subsequence
+    /// assertion would catch it, and none appears.
+    ///
+    /// KNOWN, deliberately unasserted: the errand-retired instruction's OWN
+    /// step (frame IP 0x102A) does not arrive on hardware. The interpreter
+    /// latches it in CPU-local state for a boundary a one-instruction errand
+    /// never reaches, and the seam carries no pending-debug register — a
+    /// defect that predates injection entirely and has nothing to do with
+    /// the imposed bit (it reproduces with the InterruptState write absent).
+    /// Asserting its absence would cement it; it is reported as its own
+    /// finding instead, and the assertions here stay true when it is fixed.
+    #[test]
+    fn a_single_step_trap_survives_the_imposed_inhibit() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        // Probe 1: TF-stepping across plain instructions, no errand — the
+        // baseline that native real-mode #DB delivery works on both engines.
+        let baseline: &[u8] = &[
+            0x31, 0xC0, // xor ax,ax
+            0x8E, 0xD8, // mov ds,ax
+            0x8E, 0xD0, // mov ss,ax
+            0xBC, 0x00, 0x70, // mov sp,0x7000
+            0xC7, 0x06, 0x04, 0x00, 0x36, 0x10, // mov word[0x0004], isr(0x1036)
+            0xC7, 0x06, 0x06, 0x00, 0x00, 0x00, // mov word[0x0006], 0
+            0xBF, 0x00, 0x60, // mov di,0x6000
+            0x9C, 0x58, // pushf; pop ax
+            0x80, 0xCC, 0x01, // or ah,1
+            0x50, 0x9D, // push ax; popf — TF=1
+            0x43, // inc bx (0x1F)
+            0x43, // inc bx (0x20)
+            0x43, // inc bx (0x21)
+            0x43, // inc bx (0x22)
+            0x9C, // pushf (0x23)
+            0x58, // pop ax (0x24)
+            0x80, 0xE4, 0xFE, // and ah,0xFE (0x25)
+            0x50, // push ax (0x28)
+            0x9D, // popf — TF=0 (0x29)
+            0x89, 0xF8, // mov ax,di
+            0x2D, 0x00, 0x60, // sub ax,0x6000
+            0xD1, 0xE8, // shr ax,1
+            0xE6, DEBUG_PORT, // out 0xE9,al — trap count
+            0xF4, // hlt (0x33)
+            0xEB, 0xFD, // jmp hlt
+            // isr (0x36):
+            0x55, // push bp
+            0x89, 0xE5, // mov bp,sp
+            0x50, // push ax
+            0x8B, 0x46, 0x02, // mov ax,[bp+2] — saved IP
+            0x89, 0x05, // mov [di],ax
+            0x83, 0xC7, 0x02, // add di,2
+            0x58, // pop ax
+            0x5D, // pop bp
+            0xCF, // iret
+        ];
+
+        // Probe 2: identical stepping but one instruction (s3) reads VGA
+        // memory — a memory exit, an errand, an imposition. s3 retires on the
+        // shadow owing its step (saved IP 0x102A); s4 is the first
+        // hardware-retired instruction after the imposition, owing its own
+        // step (saved IP 0x102B) — the imposed-bit question.
+        let with_errand: &[u8] = &[
+            0x31, 0xC0, // xor ax,ax
+            0x8E, 0xD8, // mov ds,ax
+            0x8E, 0xD0, // mov ss,ax
+            0xBC, 0x00, 0x70, // mov sp,0x7000
+            0xC7, 0x06, 0x04, 0x00, 0x43, 0x10, // mov word[0x0004], isr(0x1043)
+            0xC7, 0x06, 0x06, 0x00, 0x00, 0x00, // mov word[0x0006], 0
+            0xBF, 0x00, 0x60, // mov di,0x6000
+            0xB8, 0x00, 0xB8, // mov ax,0xB800
+            0x8E, 0xC0, // mov es,ax
+            0x9C, 0x58, // pushf; pop ax
+            0x80, 0xCC, 0x01, // or ah,1
+            0x50, 0x9D, // push ax; popf — TF=1
+            0x43, // s1 inc bx (0x24) -> trap IP 0x25
+            0x43, // s2 inc bx (0x25) -> 0x26
+            0x26, 0xA0, 0x00, 0x00, // s3 mov al,[es:0] (0x26) ERRAND -> 0x2A
+            0x43, // s4 inc bx (0x2A) -> 0x2B  <- the imposed-bit probe point
+            0x43, // s5 inc bx (0x2B) -> 0x2C
+            0x9C, // pushf (0x2C)
+            0x58, // pop ax (0x2D)
+            0x80, 0xE4, 0xFE, // and ah,0xFE (0x2E)
+            0x50, // push ax (0x31)
+            0x9D, // popf — TF=0 (0x32)
+            0x26, 0xA0, 0x00, 0x00, // mov al,[es:0] (0x33) — second errand,
+            // TF=0: if s3's undelivered step lingers in the interpreter's
+            // trap latch, it fires HERE, misattributed — a duplicate 0x1033
+            // entry — instead of being merely lost
+            0x89, 0xF8, // mov ax,di
+            0x2D, 0x00, 0x60, // sub ax,0x6000
+            0xD1, 0xE8, // shr ax,1
+            0xE6, DEBUG_PORT, // out 0xE9,al
+            0xF4, // hlt (0x40)
+            0xEB, 0xFD, // jmp hlt
+            // isr (0x43):
+            0x55, 0x89, 0xE5, 0x50, // push bp; mov bp,sp; push ax
+            0x8B, 0x46, 0x02, // mov ax,[bp+2]
+            0x89, 0x05, // mov [di],ax
+            0x83, 0xC7, 0x02, // add di,2
+            0x58, 0x5D, 0xCF, // pop ax; pop bp; iret
+        ];
+
+        fn trace_on_interpreter(code: &[u8]) -> (u8, std::vec::Vec<u16>) {
+            let config = EmulatorConfig {
+                memory: MemorySize::bytes(8 * 1024 * 1024),
+                ..EmulatorConfig::default()
+            };
+            let mut machine =
+                Emulator::new_with_mode(config, CpuSetupMode::RealMode).expect("machine");
+            machine.mem_write(CODE, code).expect("load");
+            machine.reg_write(X86Reg::Rip, CODE);
+            for _ in 0..8 {
+                let outcome = machine
+                    .step(RunBudget::Ticks(1_000_000))
+                    .expect("the interpreter runs the guest");
+                if outcome.stop == StopReason::Halted {
+                    break;
+                }
+            }
+            read_trace(&mut machine)
+        }
+
+        fn read_trace<E: rusty_box::emulator::SliceEngine<()>>(
+            machine: &mut Emulator<(), E>,
+        ) -> (u8, std::vec::Vec<u16>) {
+            let count: std::vec::Vec<u8> = machine.debug_port().take_output().collect();
+            let count = *count.last().expect("the guest reported its trap count");
+            let raw = machine
+                .mem_read_vec(0x6000, usize::from(count) * 2)
+                .expect("the record buffer is readable");
+            let ips = raw
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            (count, ips)
+        }
+
+        let (int_base_count, int_base) = trace_on_interpreter(baseline);
+        let (int_err_count, int_err) = trace_on_interpreter(with_errand);
+
+        let _turn = a_turn_on_the_hardware();
+        let (hw_base_count, hw_base) = {
+            let mut machine = machine_running(baseline);
+            for _ in 0..8 {
+                let outcome = machine
+                    .step(RunBudget::Ticks(1_000_000))
+                    .expect("the hypervisor runs the guest");
+                if outcome.stop == StopReason::Halted {
+                    break;
+                }
+            }
+            read_trace(&mut machine)
+        };
+        let (hw_err_count, hw_err, hw_err_memory_exits) = {
+            let mut machine = machine_running(with_errand);
+            for _ in 0..8 {
+                let outcome = machine
+                    .step(RunBudget::Ticks(1_000_000))
+                    .expect("the hypervisor runs the guest");
+                if outcome.stop == StopReason::Halted {
+                    break;
+                }
+            }
+            let (count, ips) = read_trace(&mut machine);
+            (count, ips, machine.engine().exits().memory)
+        };
+
+        eprintln!("baseline  interpreter: count {int_base_count}, trace {int_base:#06x?}");
+        eprintln!("baseline  hardware:    count {hw_base_count}, trace {hw_base:#06x?}");
+        eprintln!("errand    interpreter: count {int_err_count}, trace {int_err:#06x?}");
+        eprintln!(
+            "errand    hardware:    count {hw_err_count}, memory exits \
+             {hw_err_memory_exits}, trace {hw_err:#06x?}"
+        );
+        eprintln!(
+            "errand's own step (frame IP 0x102a) on hardware: {}",
+            if hw_err.contains(&0x102A) { "DELIVERED" } else { "LOST (known seam gap)" }
+        );
+        eprintln!(
+            "first hardware-retired step after the imposition (frame IP 0x102b): {}",
+            if hw_err.contains(&0x102B) { "DELIVERED" } else { "LOST" }
+        );
+
+        assert_eq!(
+            hw_base, int_base,
+            "with no errand in the stepped window, the two engines must deliver \
+             the identical single-step trace — native #DB delivery through the \
+             partition's own IVT is the floor this probe stands on"
+        );
+        assert!(
+            hw_err_memory_exits >= 2,
+            "both device-memory touches must actually exit ({hw_err_memory_exits} \
+             memory exits) — without the errands the probe measures nothing"
+        );
+        assert!(
+            hw_err.contains(&0x102B),
+            "the single-step #DB of the instruction that consumes the imposed \
+             InterruptState inhibit must be delivered — its absence means the \
+             platform's bit carries MOV-SS-type suppression and every imposition \
+             silently eats a step: hardware trace {hw_err:#06x?}"
+        );
+        // Ordered subsequence: the hardware may (today) miss the errand's own
+        // step, but every trap it does deliver must be one the interpreter
+        // delivers, in the same order — no phantom, misattributed or
+        // reordered #DB, and in particular no duplicate 0x1033 from a stale
+        // trap latch firing at the second errand.
+        let mut interpreter_entries = int_err.iter();
+        let subsequence = hw_err
+            .iter()
+            .all(|entry| interpreter_entries.by_ref().any(|reference| reference == entry));
+        assert!(
+            subsequence,
+            "every hardware-delivered trap must appear in the interpreter's \
+             trace, in order — a stray entry is a misattributed or phantom #DB: \
+             hardware {hw_err:#06x?} vs interpreter {int_err:#06x?}"
+        );
+    }
+
     /// A vector pending AT A SLICE HEAD reaches an active guest by injection,
     /// not by the interpreter delivering before the hardware runs.
     ///
