@@ -562,7 +562,11 @@ pub struct SliceCensus {
     pub ended_wants_machine_boundary: u64,
     /// Slices ended because a device had latched work only the machine can do.
     pub ended_needs_boundary: u64,
-    /// Slices ended because an interrupt had become deliverable.
+    /// Slices ended because an event had become deliverable that the slice
+    /// could not deliver itself: on the hardware, an NMI, an SMI or an INIT —
+    /// a maskable external vector is injected mid-slice and never ends one —
+    /// and on a shadow-converted slice, whatever its batch left standing at
+    /// its boundary.
     pub ended_event_to_deliver: u64,
 }
 
@@ -899,15 +903,17 @@ enum Yielded {
 /// Carried as a state rather than tallied at each `return`, because the three
 /// call for different fixes and a single `Boundary` count cannot tell them
 /// apart: a device that latched work wants the drain moved, a processor that
-/// asked for a boundary wants the machine to run, and an interrupt that became
-/// deliverable wants delivery to stop being a slice-entry-only affair.
+/// asked for a boundary wants the machine to run, and a deliverable event
+/// ending slices wants to be rarer than the events themselves — a maskable
+/// vector is injected mid-slice and never ends one.
 enum BoundaryReason {
     /// The processor itself asked for a machine boundary.
     ProcessorAsked,
     /// A device latched work only the machine can do.
     DeviceLatched,
-    /// An interrupt became deliverable, and this engine delivers only at the
-    /// head of a slice.
+    /// An event injection cannot carry — an NMI, an SMI, an INIT — became
+    /// deliverable, and those are the shadow's to deliver at the head of the
+    /// next slice.
     EventToDeliver,
 }
 
@@ -1017,11 +1023,14 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
     // them, so what a slice can report is the time it took. See `ticks_elapsed`.
     const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Ticks;
 
-    // Delivery is this engine's: the partition has no local APIC of its own
-    // and the hardware knows nothing of this machine's 8259 pair, so a vector
-    // reaches the guest only from this side — injected into the partition
-    // mid-slice by `stage_injection`, or taken by the shadow at the head of
-    // a slice.
+    // Delivery is this machine's, not the partition's: the partition has no
+    // local APIC of its own and the hardware knows nothing of this machine's
+    // 8259 pair, so the vector, the acknowledge, the priority and the EOI all
+    // belong to this machine's own controllers wherever the guest happens to
+    // be executing. Only the final push crosses the seam — a maskable vector
+    // as `stage_injection`'s register write, at a slice head or an exit tail
+    // alike; an NMI, SMI or INIT as the shadow's own interpreted delivery at
+    // a head.
     const EVENT_DELIVERY: EventDelivery = EventDelivery::Engine;
 
     fn memory_map_changed(&mut self, memory: &mut BxMemC) -> Result<()> {
