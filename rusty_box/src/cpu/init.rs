@@ -82,6 +82,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.bx_cpuid_support_isa_extension(X86Feature::IsaTscDeadline);
         self.lapic
             .set_tsc_deadline_supported(tsc_deadline_supported);
+        // Bochs apic.cc constructor: `xapic = simulate_xapic`. The processor is
+        // built over a zeroed allocation, so the model it simulates is written
+        // here, before the first `reset` reads it to choose the local APIC's
+        // version register, ID width and spurious-vector layout.
+        self.lapic.set_simulated_apic_model();
         self.cpu_topology = _config.cpu_topology();
 
         // Establish the per-pkey allow-mask invariant documented on `rd_pkey`
@@ -343,7 +348,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.msr.apicbase |= 0x100;
         }
         self.lapic.set_base(self.msr.apicbase);
-        self.lapic.enable_xapic_extensions();
+        // Bochs init.cc: the AMD extended xAPIC registers exist only on a model
+        // whose CPUID claims BX_ISA_XAPIC_EXT.
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaXapicExt) {
+            self.lapic.enable_xapic_extensions();
+        }
         if self.bx_cpuid != 0 {
             // Bochs init.cc: every non-bootstrap CPU is an application
             // processor and halts in WAIT_FOR_SIPI after RESET/INIT. Do not

@@ -617,17 +617,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR);
             let vector = self.lapic.acknowledge_int();
             self.sync_lapic_events();
-            // A zero vector means the LAPIC had nothing after all; the 8259
-            // below still gets its turn this boundary.
-            if vector > 0 {
-                #[cfg(debug_assertions)]
-                {
-                    self.diag_hae_intr_delivered += 1;
-                    self.diag_iac_vectors[vector as usize] += 1;
-                }
-                self.activity_state = CpuActivityState::Active;
-                return AcknowledgedInterrupt::Lapic(vector);
+            // Whatever the LAPIC answered is the answer, spurious vectors
+            // included: Bochs event.cc interrupt_acknowledge hands the result
+            // of acknowledge_int() straight on, and the 8259 sits behind a
+            // LAPIC that raised INTR — it does not get a second INTA cycle
+            // this boundary.
+            #[cfg(debug_assertions)]
+            {
+                self.diag_hae_intr_delivered += 1;
+                self.diag_iac_vectors[vector as usize] += 1;
             }
+            self.activity_state = CpuActivityState::Active;
+            return AcknowledgedInterrupt::Lapic(vector);
         }
 
         // Then check PIC (legacy 8259 path) — only if the LAPIC didn't answer
@@ -1495,19 +1496,18 @@ mod tests {
         assert_eq!(bus.device_manager.irq.vectors_acknowledged(IRQ1_VECTOR), 1);
     }
 
-    /// The vector-0 gate: with the SVR's vector bits programmed to 0 (the
+    /// Vector 0 is a vector. With the SVR's vector bits programmed to 0 (the
     /// xAPIC model keeps all eight writable — Bochs apic.cc
     /// write_spurious_interrupt_register) a nothing-deliverable acknowledge
-    /// answers 0 (Bochs apic.cc acknowledge_int returns spurious_vector).
-    /// The shared body must treat that answer as "nothing from the LAPIC"
-    /// and give the 8259 its turn this boundary — never hand a caller
-    /// vector 0, never answer None while the PIC holds a request.
+    /// answers 0 (Bochs apic.cc acknowledge_int returns spurious_vector), and
+    /// Bochs event.cc interrupt_acknowledge hands that answer on unchanged.
+    /// The 8259 sat behind a LAPIC that raised INTR, so it does not get an
+    /// INTA cycle this boundary — its request stays latched for the next one.
     #[test]
-    fn a_zero_vector_from_the_lapic_falls_through_to_the_pic() {
+    fn a_zero_vector_from_the_lapic_is_delivered_and_the_pic_waits() {
         use crate::cpu::apic::{ApicDeliveryMode, APIC_EDGE_TRIGGERED};
 
         let (mut cpu, mut bus) = machine_with_irq1_raised();
-        cpu.lapic.set_xapic_for_test(true);
         // The guest software-enables the LAPIC with spurious vector 0.
         cpu.lapic.write_aligned(LAPIC_SVR_OFFSET, 0x100, 0);
         // A fixed interrupt raises INTR...
@@ -1531,15 +1531,18 @@ mod tests {
 
         assert_eq!(
             popped,
-            Some(IRQ1_VECTOR),
-            "a zero LAPIC answer must fall through to the 8259's vector"
+            Some(0),
+            "the LAPIC's spurious vector is the answer, zero included"
         );
         assert_eq!(
             bus.device_manager.irq.acknowledge_count(),
-            1,
-            "the fall-through takes the PIC's counted INTA"
+            0,
+            "the 8259 was not acknowledged behind a LAPIC that answered"
         );
-        assert_eq!(bus.device_manager.irq.vectors_acknowledged(IRQ1_VECTOR), 1);
+        assert!(
+            bus.device_manager.irq.int_pin_asserted(),
+            "the 8259 still holds its request for the next boundary"
+        );
         assert!(!cpu.lapic.intr, "the spurious acknowledge lowered INTR");
         // The blocked request stays latched for when TPR drops: the
         // guest-visible IRR word still holds the vector's bit.

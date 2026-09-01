@@ -166,13 +166,7 @@ impl<'a> PcIo<'a> {
     ) -> Option<u8> {
         let mut ctx = ExecCtx::new(cpu, self.reborrow());
         match ctx.acknowledge_external_interrupt() {
-            AcknowledgedInterrupt::Lapic(vector) => {
-                debug_assert!(
-                    vector > 0,
-                    "the shared body gates LAPIC answers on vector > 0"
-                );
-                Some(vector)
-            }
+            AcknowledgedInterrupt::Lapic(vector) => Some(vector),
             AcknowledgedInterrupt::Pic(vector) => Some(vector),
             AcknowledgedInterrupt::None => None,
         }

@@ -47,9 +47,26 @@ const APIC_ID_MASK_XAPIC: u32 = 0xFF;
 
 /// APIC ID mask for legacy mode (4-bit ID)
 const APIC_ID_MASK_LEGACY: u32 = 0x0F;
-/// Bochs sets `simulate_xapic = true` for APIC builds and uses this global
-/// bus mask for broadcast detection, independent of each LAPIC's version ID.
-const APIC_BUS_ID_MASK: u32 = APIC_ID_MASK_XAPIC;
+
+/// Which APIC model every processor of this build simulates.
+///
+/// Bochs' `simulate_xapic` global (main.cc), which `bx_begin_simulation` sets
+/// true for every BX_SUPPORT_APIC build before any CPU is constructed: the
+/// legacy 4-bit-ID APIC is not reachable there, and each `bx_local_apic_c`
+/// takes its `xapic` from it (apic.cc constructor).
+const SIMULATE_XAPIC: bool = true;
+
+/// Bus-wide APIC ID mask used for broadcast detection, independent of any one
+/// LAPIC's version ID. Bochs main.cc: `apic_id_mask = simulate_xapic ? 0xFF : 0xF`.
+const APIC_BUS_ID_MASK: u32 = if SIMULATE_XAPIC {
+    APIC_ID_MASK_XAPIC
+} else {
+    APIC_ID_MASK_LEGACY
+};
+
+/// Extended-xAPIC support bit of the version register, set by
+/// `enable_xapic_extensions` (Bochs apic.cc) and by nothing else.
+const APIC_VERSION_XAPIC_EXT: u32 = 0x8000_0000;
 
 /// APIC error status constants (Bochs: apic.h)
 const APIC_ERR_ILLEGAL_ADDR: u32 = 0x80;
@@ -522,7 +539,7 @@ impl Default for BxLocalApic {
         Self {
             base_addr: BX_LAPIC_BASE_ADDR,
             mode: ApicMode::GloballyDisabled,
-            xapic: false,
+            xapic: SIMULATE_XAPIC,
             xapic_ext: 0,
             apic_id: 0,
             bus_cpu_count: 1,
@@ -753,14 +770,29 @@ impl BxLocalApic {
         self.xapic
     }
 
-    /// Test-only: the xAPIC/legacy model switch Bochs wires at construction
-    /// (Bochs apic.cc constructor: `xapic = simulate_xapic`). Production
-    /// keeps the legacy setting; a test arranges the xAPIC model so the
-    /// SVR's full eight vector bits are writable, the way xAPIC hardware
-    /// (and Bochs apic.cc write_spurious_interrupt_register) has them.
-    #[cfg(test)]
-    pub(crate) fn set_xapic_for_test(&mut self, xapic: bool) {
-        self.xapic = xapic;
+    /// Take the APIC model this build simulates — the `xapic = simulate_xapic`
+    /// line of Bochs' `bx_local_apic_c` constructor (apic.cc).
+    ///
+    /// A processor is built over a zeroed allocation rather than from
+    /// [`Default`], so the model has to be written here for the same reason
+    /// Bochs writes it in the constructor: [`Self::reset`] reads it to choose
+    /// the version register, and every reset afterwards reads it again.
+    #[inline]
+    pub(crate) fn set_simulated_apic_model(&mut self) {
+        self.xapic = SIMULATE_XAPIC;
+    }
+
+    /// Whether this processor implements the AMD extended xAPIC registers.
+    ///
+    /// Bochs asks the CPU at every access (apic.cc read_aligned/write_aligned:
+    /// `cpu->is_cpu_extension_supported(BX_ISA_XAPIC_EXT)`). The answer is
+    /// recorded here in the version register's bit 31, which
+    /// [`Self::enable_xapic_extensions`] sets and nothing else does: the
+    /// register is read-only to the guest and compared on snapshot restore,
+    /// so the bit cannot drift from the model that was built.
+    #[inline]
+    fn xapic_ext_supported(&self) -> bool {
+        self.apic_version_id & APIC_VERSION_XAPIC_EXT != 0
     }
 
     /// Get current mode.
@@ -793,12 +825,29 @@ impl BxLocalApic {
 
     // ─── Register read ───────────────────────────────────────────────────
 
+    /// The register an APIC MMIO offset selects, or an encoding no arm
+    /// matches when the model has no such register.
+    ///
+    /// Bochs apic.cc read_aligned/write_aligned both open with this: the
+    /// 0x400 block is the AMD extended xAPIC, so a processor without
+    /// `BX_ISA_XAPIC_EXT` is given "some obviously invalid register" and
+    /// falls into the illegal-address arm, exactly as an unimplemented
+    /// offset does.
+    #[inline]
+    fn decode_register(&self, addr: BxPhyAddress) -> u32 {
+        let apic_reg = (addr & 0xFF0) as u32;
+        if apic_reg >= 0x400 && !self.xapic_ext_supported() {
+            return u32::MAX;
+        }
+        apic_reg
+    }
+
     /// Read from a 16-byte-aligned APIC register.
     /// Bochs: read_aligned (apic.cc)
     pub(crate) fn read_aligned(&self, addr: BxPhyAddress, cpu_ticks: u64) -> u32 {
         debug_assert!((addr & 0xF) == 0);
         let mut data: u32 = 0;
-        let apic_reg = (addr & 0xFF0) as u32;
+        let apic_reg = self.decode_register(addr);
 
         match apic_reg {
             // Local APIC ID (apic.cc)
@@ -945,7 +994,7 @@ impl BxLocalApic {
         value: u32,
         current_ticks: u64,
     ) {
-        let apic_reg = (addr & 0xFF0) as u32;
+        let apic_reg = self.decode_register(addr);
 
         match apic_reg {
             // TPR (apic.cc)
@@ -2048,7 +2097,7 @@ impl BxLocalApic {
     /// Enables XAPIC extensions (IER and SEOI support).
     /// Bochs: enable_xapic_extensions (apic.cc)
     pub(super) fn enable_xapic_extensions(&mut self) {
-        self.apic_version_id |= 0x80000000;
+        self.apic_version_id |= APIC_VERSION_XAPIC_EXT;
         self.xapic_ext = BX_XAPIC_EXT_SUPPORT_IER | BX_XAPIC_EXT_SUPPORT_SEOI;
     }
 
@@ -2777,13 +2826,15 @@ mod tests {
     const NO_DESTINATION_SHORTHAND: u8 = 0;
 
 
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::CpuModel;
+    use crate::cpu::ResetReason;
     use crate::snapshot::SnapshotReader;
 
     use super::*;
 
     fn make_lapic() -> BxLocalApic {
         let mut lapic = BxLocalApic::default();
-        lapic.xapic = true;
         lapic.set_tsc_deadline_supported(true);
         lapic.reset(0);
         lapic
@@ -3398,5 +3449,97 @@ mod tests {
         source.vmx_timer_active = true;
 
         assert!(restore_v3(&source, &mut make_lapic()).is_ok());
+    }
+
+    /// The local APIC a *built* processor carries is the xAPIC one, because
+    /// that is the only one Bochs builds: `bx_local_apic_c`'s constructor
+    /// takes `xapic = simulate_xapic` (apic.cc) and `bx_begin_simulation`
+    /// sets `simulate_xapic = true` unconditionally for every BX_SUPPORT_APIC
+    /// build (main.cc). Guest-visible consequences, all read here through the
+    /// MMIO window a guest uses: the version register reports P4's six LVT
+    /// entries, and the logical destination register keeps the full eight
+    /// xAPIC ID bits (Bochs apic.cc `ldr & apic_id_mask`, the global mask
+    /// being 0xff).
+    #[test]
+    fn a_built_processor_carries_the_xapic_local_apic_bochs_builds() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+
+        assert!(
+            cpu.lapic.is_xapic(),
+            "every Bochs APIC build simulates the xAPIC model"
+        );
+        assert_eq!(
+            cpu.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x030, 0),
+            0x0005_0014,
+            "the version register reports the P4 xAPIC's six LVT entries"
+        );
+
+        cpu.lapic
+            .write_aligned(BX_LAPIC_BASE_ADDR | 0x0D0, 0xFF00_0000, 0);
+        assert_eq!(
+            cpu.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x0D0, 0),
+            0xFF00_0000,
+            "an xAPIC logical destination is eight bits wide, not four"
+        );
+    }
+
+    /// All eight vector bits of the spurious-interrupt register are the
+    /// guest's on an xAPIC (Bochs apic.cc write_spurious_interrupt_register
+    /// hardwires the low nibble only for the legacy APIC), so a guest can
+    /// program vector 0 and an acknowledge with nothing deliverable can
+    /// answer it.
+    #[test]
+    fn the_xapic_spurious_vector_keeps_every_bit_the_guest_writes() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+
+        cpu.lapic.write_aligned(BX_LAPIC_BASE_ADDR | 0x0F0, 0x100, 0);
+
+        assert_eq!(
+            cpu.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x0F0, 0) & 0xFF,
+            0x00,
+            "the xAPIC's spurious vector is not forced to 0x0f"
+        );
+    }
+
+    /// The AMD extended xAPIC registers answer only on a model whose CPUID
+    /// claims them. Bochs gates both the capability bit and the whole 0x400
+    /// register block on `BX_ISA_XAPIC_EXT` (init.cc `enable_xapic_extensions`
+    /// call site; apic.cc read_aligned/write_aligned), which its cpudb enables
+    /// for Ryzen and not for any Intel model.
+    #[test]
+    fn only_a_model_with_extended_xapic_answers_its_registers() {
+        let mut intel = BxCpuBuilder::new_with_model(CpuModel::corei7_skylake_x())
+            .build()
+            .expect("a processor");
+        intel.reset(ResetReason::Hardware);
+
+        assert_eq!(
+            intel.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x030, 0),
+            0x0005_0014,
+            "a model without extended xAPIC does not set the version's bit 31"
+        );
+        assert_eq!(
+            intel.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x400, 0),
+            0,
+            "the extended feature register is not a register on this model"
+        );
+
+        let mut amd = BxCpuBuilder::new_with_model(CpuModel::amd_ryzen())
+            .build()
+            .expect("a processor");
+        amd.reset(ResetReason::Hardware);
+
+        assert_eq!(
+            amd.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x030, 0),
+            0x8005_0014,
+            "extended xAPIC is advertised in the version register's bit 31"
+        );
+        assert_eq!(
+            amd.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x400, 0),
+            BX_XAPIC_EXT_SUPPORT_IER | BX_XAPIC_EXT_SUPPORT_SEOI,
+            "the extended feature register reports IER and SEOI"
+        );
     }
 }
