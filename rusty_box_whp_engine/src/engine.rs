@@ -23,7 +23,7 @@ use core::time::Duration;
 
 use rusty_box_whp::{
     Exit, ExitReason, ExtendedVmExits, InterceptCounters, LocalApicMode, MsrExits, Partition,
-    PartitionConfig, RuntimeCounters, WhpError,
+    PartitionConfig, RuntimeCounters, VpContext, WhpError,
 };
 
 use super::alarm::Alarm;
@@ -285,6 +285,62 @@ fn platform_failed(error: WhpError) -> CpuError {
     CpuError::UnsupportedCpuOperation { operation: "the hypervisor refused" }
 }
 
+/// What the last exit header said about deliverability — refreshed from
+/// headers, never from register reads (QEMU `target/i386/whpx/whpx-all.c`
+/// `whpx_vcpu_post_run` keeps the same cache for the same reason).
+///
+/// The invariant in that sentence is the reason this type exists: everything
+/// an injection decision consults is already in hand the moment
+/// `WHvRunVirtualProcessor` returns, so consulting it costs zero platform
+/// calls — where a register read would cost the very exchange injection is
+/// meant to avoid.
+// The fields' production reader is the injection decision this cache exists
+// to answer, which is `stage_injection`'s — owned by a later task; until it
+// lands their only readers are the unit tests. Targeted rather than
+// file-level (ci ratchets blanket allows) so any other unread item beside
+// this one still warns.
+#[allow(dead_code)]
+struct InjectState {
+    /// `ExecutionState` bit 6, `InterruptionPending` — a delivery the platform
+    /// has begun and not landed. From the exit header alone, never a register
+    /// read.
+    in_flight: bool,
+    /// `RFLAGS` bit 9 from the exit header, never a register read.
+    if_flag: bool,
+    /// The exit header's `Cr8` field, and the only fresh source there is: a
+    /// guest `MOV CR8` retires on hardware without an exit, so no copy this
+    /// engine keeps between exits can be trusted over the header's.
+    cr8: u8,
+    /// A `DeliverabilityNotifications` request armed at this priority and not
+    /// yet answered by a window exit. NOT refreshed from headers — no header
+    /// reports it back. It is owned by the injection logic (`stage_injection`
+    /// and the window arm), which a later task adds; a refresh leaves it
+    /// exactly as it stands.
+    window: Option<u8>,
+}
+
+impl InjectState {
+    /// A processor that has never run has no exit header to have said
+    /// anything: nothing in flight, `IF` clear — the architectural reset
+    /// value — `CR8` zero, and no window armed.
+    const fn at_reset() -> Self {
+        Self { in_flight: false, if_flag: false, cr8: 0, window: None }
+    }
+
+    /// Cache what an exit header says — and only that.
+    ///
+    /// Sets `in_flight`, `if_flag` and `cr8` from the header; `window` is
+    /// deliberately untouched, because it records a notification this engine
+    /// armed and no header reports one back.
+    fn refresh_from(&mut self, vp: &VpContext) {
+        // `WHV_X64_VP_EXECUTION_STATE`: `InterruptionPending` is bit 6.
+        self.in_flight = (vp.execution_state >> 6) & 1 == 1;
+        // `RFLAGS.IF` is bit 9.
+        self.if_flag = (vp.rflags >> 9) & 1 == 1;
+        self.cr8 = vp.cr8;
+    }
+}
+
 /// A partition that has been configured, given memory and given a processor.
 ///
 /// FIELD ORDER IS LOad-BEARING: `alarm` is declared before `partition` because
@@ -343,6 +399,11 @@ struct Started {
     /// `held` skip, so the two register files a guest can reach never
     /// diverge across the seam.
     xsave: XsaveArea,
+    /// What the last exit's header said about deliverability.
+    ///
+    /// Refreshed before anything else reads a fresh exit, so it is current
+    /// whenever any arm — or a slice's end — consults it.
+    inject: InjectState,
 }
 
 /// What the guest has been leaving the hardware for.
@@ -694,6 +755,8 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                 // Nothing has been read from this processor yet.
                 held: None,
                 xsave,
+                // No exit header has said anything yet.
+                inject: InjectState::at_reset(),
             });
         }
     }
@@ -1198,6 +1261,8 @@ fn install_the_shadow<T: Instrumentation>(
         consecutive_mmio: _,
         held,
         xsave,
+        // What the last exit header said; a state exchange does not change it.
+        inject: _,
     } = started;
     cpu.export_arch_state(state);
     // A slice that ended with the guest on hardware left the processor holding
@@ -1287,6 +1352,8 @@ fn read_back_into_the_shadow<T: Instrumentation>(
         consecutive_mmio: _,
         held,
         xsave,
+        // What the last exit header said; a state exchange does not change it.
+        inject: _,
     } = started;
     let vp = Vp::new(partition, BOOT_VP);
     state::export(&vp, state).map_err(platform_failed)?;
@@ -1471,6 +1538,10 @@ fn run_the_exit_loop<T: Instrumentation>(
         // would otherwise end the next run before it began.
         started.alarm.disarm();
         let exit = exit.map_err(platform_failed)?;
+        // The first thing done with a fresh exit: cache what its header says
+        // about deliverability, so everything below — the tallies, the
+        // history, every arm — runs with the cache already current.
+        started.inject.refresh_from(&exit.vp);
         // Every exit this slice took, whatever its reason. Counted apart from
         // the per-class tally below, whose match leaves some reasons out: what
         // a slice cost is one VM entry plus this many VM exits, and a reason
@@ -2037,6 +2108,8 @@ fn burst_on_the_shadow<T: Instrumentation>(
         consecutive_mmio: _,
         held,
         xsave,
+        // What the last exit header said; a state exchange does not change it.
+        inject: _,
     } = started;
     cpu.export_arch_state(state);
     impose_the_shadow(partition, state, xsave, held.as_ref())?;
@@ -2066,6 +2139,8 @@ fn finish_on_the_shadow<T: Instrumentation>(
         consecutive_mmio: _,
         held,
         xsave,
+        // What the last exit header said; a state exchange does not change it.
+        inject: _,
     } = started;
     cpu.export_arch_state(state);
     if let Trapped::Cpuid { leaf } = trapped {
@@ -2290,6 +2365,42 @@ fn ticks_elapsed(elapsed: Duration, ips: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_box_whp::SegmentRegister;
+
+    /// The cache decodes an exit header and nothing else: `InterruptionPending`
+    /// is `ExecutionState` bit 6, `IF` is `RFLAGS` bit 9, `CR8` arrives as the
+    /// header's own field, and the armed-window record survives every refresh
+    /// because no header reports it. Pure struct decoding — no hypervisor, so
+    /// it runs on any host.
+    #[test]
+    fn the_inject_cache_decodes_exit_headers_alone() {
+        let header = |execution_state: u16, rflags: u64, cr8: u8| VpContext {
+            rip: 0xFFF0,
+            rflags,
+            cs: SegmentRegister::default(),
+            instruction_length: 0,
+            cr8,
+            execution_state,
+        };
+        let mut inject = InjectState::at_reset();
+        assert!(!inject.in_flight);
+        assert!(!inject.if_flag);
+        assert_eq!(inject.cr8, 0);
+        assert_eq!(inject.window, None);
+        inject.window = Some(3);
+
+        inject.refresh_from(&header(0x0040, 0x202, 0x5));
+        assert!(inject.in_flight, "ExecutionState bit 6 is InterruptionPending");
+        assert!(inject.if_flag, "RFLAGS bit 9 is IF");
+        assert_eq!(inject.cr8, 0x5, "the header's CR8 nibble round-trips");
+        assert_eq!(inject.window, Some(3), "no header reports an armed window");
+
+        inject.refresh_from(&header(0x0000, 0x2, 0x0));
+        assert!(!inject.in_flight, "ExecutionState 0 means nothing in flight");
+        assert!(!inject.if_flag, "RFLAGS 0x2 has IF clear");
+        assert_eq!(inject.cr8, 0);
+        assert_eq!(inject.window, Some(3), "a refresh never touches the window");
+    }
 
     /// A tick is a unit of guest time at the machine's own rate, so a second of
     /// host time is `ips` ticks — the same number the software engine would
