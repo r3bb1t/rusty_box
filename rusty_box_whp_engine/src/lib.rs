@@ -532,7 +532,9 @@ mod tests {
             0xE6, 0x40, //                   out 0x40, al
             0xB0, 0x0A, //                   mov al, 0x0A — OCW3: reads answer IRR
             0xE6, 0x20, //                   out 0x20, al
-            0xB9, 0x20, 0x00, //             mov cx, 32 — the trials
+            0xB9, 0x00, 0x40, //             mov cx, 0x4000 — many trials, so a
+            //                               run is never starved of a hardware
+            //                               slice by the shadow-vs-hardware race
             // trial (CODE+0x27):
             0xFA, //                         cli — the tick must wait for STI
             // poll (CODE+0x28):
@@ -554,13 +556,16 @@ mod tests {
             0xE6, 0x20, //                   out 0x20, al — non-specific EOI
             0xCF, //                         iret
         ]);
-        // A halted or budget-spent machine hands each budget back to its
-        // caller; stepping again is the caller's half of that contract.
-        // Bounded, so a guest whose ticks never arrive fails the assertion
-        // instead of hanging the suite. Stops early once an injection has
-        // happened and the handler has spoken — the properties under test.
+        // A budget-spent machine hands each budget back to its caller;
+        // stepping again is the caller's half of that contract, and the
+        // guest's trial loop resumes where it left off. Bounded, so a guest
+        // whose ticks never arrive fails the assertion instead of hanging the
+        // suite. Stops early once an injection has happened and the handler
+        // has spoken — the properties under test. Generously bounded because
+        // whether a given trial runs on hardware or the shadow is a real-time
+        // race, and only a hardware trial injects.
         let mut written: std::vec::Vec<u8> = std::vec::Vec::new();
-        for _ in 0..16 {
+        for _ in 0..40 {
             machine
                 .step(RunBudget::Ticks(2_000_000))
                 .expect("the hypervisor runs the guest and its ticks reach it");
@@ -579,11 +584,9 @@ mod tests {
             census.injected >= 1,
             "the vector must have crossed as a register write — an injection — not \
              as a shadow delivery at a slice head; census: injected {}, windows \
-             armed {} (slices {:?}, exits {:?})",
+             armed {}",
             census.injected,
             census.windows_armed,
-            machine.engine().census(),
-            machine.engine().exits(),
         );
         assert!(
             census.injected_per_vector[8] >= 1,
@@ -599,6 +602,153 @@ mod tests {
             machine.engine().exits().window >= 1,
             "the armed window must have been answered by an interrupt-window \
              exit — armed and never answered is a wedged guest"
+        );
+    }
+
+    /// A vector is never delivered into a context whose `IF` a shadow errand
+    /// cleared between the exit and the staging decision.
+    ///
+    /// This is the freshness contract the Critical review finding is about,
+    /// proven end to end on hardware. The property is guest-visible and
+    /// absolute: a maskable external interrupt only ever interrupts an `IF=1`
+    /// context, so the FLAGS image an interrupt pushes always has bit 9 set.
+    /// A gate that judged from the stale exit header would acknowledge and
+    /// inject after a shadow errand had already cleared `IF` — delivering
+    /// into an `IF=0` context, which the VM-entry checks reject and no real
+    /// processor ever does.
+    ///
+    /// The guest makes every exit an IF-clearing errand: it loops on `WRMSR`
+    /// to a reserved MSR, which `#GP`s. `#GP` is trapped, so each one is
+    /// serviced by `finish_on_the_shadow`, where the shadow re-runs the
+    /// `WRMSR`, faults, and ENTERS the real-mode `#GP` handler — and a
+    /// real-mode gate entry clears `IF` in that single serviced step. So at
+    /// the tail of every `WRMSR` exit the shadow sits at the handler entry
+    /// with `IF` clear, while the exit header that preceded the errand still
+    /// says `IF=1`. A periodic PIT tick, unmasked as IRQ0, becomes pending at
+    /// one of those tails: the engine must see the shadow's cleared `IF` (arm
+    /// a window, deliver later when `IF` reopens) and never the header's.
+    ///
+    /// The `#GP` handler steps the saved IP over the two-byte `WRMSR` and
+    /// returns, restoring `IF=1`, so the loop runs on. The IRQ0 handler reads
+    /// bit 9 off its own pushed FLAGS and reports the verdict: `0xF1` for a
+    /// lawful `IF=1` delivery, `0xF0` for one forced into the `IF=0` handler.
+    /// Whether a given stretch runs on hardware or the shadow is the engine's
+    /// own business — a shadow-carried stretch delivers lawfully (`0xF1`)
+    /// too — so the test collects many deliveries and fails on a single
+    /// `0xF0`.
+    ///
+    /// The test also proves the errand-then-stage path ran on hardware, by
+    /// `windows_armed >= 1`: the gate found a vector deliverable-but-blocked
+    /// after an errand and armed a window to defer it. This is the end-to-end
+    /// hardware exercise of the whole path this fix touches — the shadow
+    /// errand, the republish, the window arm, the deferred delivery when `IF`
+    /// reopens. The BITING proof of the gate's IF source is the unit test
+    /// `engine::a_shadow_errand_republishes_if_over_the_stale_header`, which
+    /// fails the instant the republish is removed; this test is the hardware
+    /// witness that the same machinery delivers correctly on the metal, never
+    /// landing a vector in an `IF=0` frame.
+    #[test]
+    fn a_delivery_never_interrupts_a_context_whose_if_a_shadow_errand_cleared() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        let _turn = a_turn_on_the_hardware();
+        // gp_isr is at CODE+0x3B, irq0_isr at CODE+0x44 (CS base 0).
+        let mut machine = machine_with_devices(&[
+            0x31, 0xC0, //                 xor ax, ax
+            0x8E, 0xD8, //                 mov ds, ax
+            0x8E, 0xD0, //                 mov ss, ax
+            0xBC, 0x00, 0x70, //           mov sp, 0x7000
+            0xC7, 0x06, 0x20, 0x00, 0x44, 0x10, // mov word [0x20], irq0_isr (IVT[8])
+            0xC7, 0x06, 0x22, 0x00, 0x00, 0x00, //  mov word [0x22], 0
+            0xC7, 0x06, 0x34, 0x00, 0x3B, 0x10, //  mov word [0x34], gp_isr  (IVT[13])
+            0xC7, 0x06, 0x36, 0x00, 0x00, 0x00, //  mov word [0x36], 0
+            0xB0, 0xFE, //                 mov al, 0xFE — unmask IRQ0 alone
+            0xE6, 0x21, //                 out 0x21, al
+            0xB0, 0x34, //                 mov al, 0x34 — PIT ch0, lo/hi, mode 2
+            0xE6, 0x43, //                 out 0x43, al
+            0xB0, 0x00, //                 mov al, 0x00 — count 0x0400, low
+            0xE6, 0x40, //                 out 0x40, al
+            0xB0, 0x04, //                 mov al, 0x04 — count 0x0400, high
+            0xE6, 0x40, //                 out 0x40, al
+            // loop_wrmsr (CODE+0x31): every iteration is an IF-clearing errand
+            0x66, 0xB9, 0xFF, 0x0F, 0x00, 0x00, // mov ecx, 0x0FFF — a reserved MSR
+            0x0F, 0x30, //                 wrmsr — #GP, serviced on the shadow
+            0xEB, 0xF6, //                 jmp loop_wrmsr
+            // gp_isr (CODE+0x3B): skip the two-byte WRMSR and return (IF back to 1)
+            0x55, //                       push bp
+            0x89, 0xE5, //                 mov bp, sp
+            0x83, 0x46, 0x02, 0x02, //     add word [bp+2], 2 — saved IP past the WRMSR
+            0x5D, //                       pop bp
+            0xCF, //                       iret
+            // irq0_isr (CODE+0x44): report bit 9 of the interrupted FLAGS image
+            0x55, //                       push bp
+            0x89, 0xE5, //                 mov bp, sp
+            0x8B, 0x46, 0x06, //           mov ax, [bp+6] — the pushed FLAGS
+            0xF6, 0xC4, 0x02, //           test ah, 0x02  — FLAGS bit 9, IF
+            0xB0, 0xF0, //                 mov al, 0xF0
+            0x74, 0x02, //                 jz +2 — keep the damning byte
+            0xB0, 0xF1, //                 mov al, 0xF1
+            0xE6, DEBUG_PORT, //           out 0xE9, al — the verdict
+            0xB0, MARK, //                 mov al, MARK
+            0xE6, DEBUG_PORT, //           out 0xE9, al
+            0xB0, 0x20, //                 mov al, 0x20
+            0xE6, 0x20, //                 out 0x20, al — non-specific EOI
+            0x5D, //                       pop bp
+            0xCF, //                       iret
+        ]);
+        // The guest never halts (its WRMSR loop is endless), so each step
+        // returns on budget and the next resumes it; the PIT's periodic ticks
+        // land across the steps. Bounded so a guest that delivers nothing
+        // fails the assertion rather than hanging the suite.
+        let mut written: std::vec::Vec<u8> = std::vec::Vec::new();
+        for _ in 0..48 {
+            machine
+                .step(RunBudget::Ticks(2_000_000))
+                .expect("the hypervisor runs the guest; a delivery into IF=0 would \
+                         be refused here as WHV_E_INVALID_VP_STATE");
+            written.extend(machine.debug_port().take_output());
+            if written.iter().filter(|byte| **byte == MARK).count() >= 8 {
+                break;
+            }
+        }
+        assert!(
+            written.iter().any(|byte| *byte == MARK),
+            "the PIT's ticks must have reached the guest's own ISR at least once: \
+             {written:#04x?}"
+        );
+        // The corruption signature is a single 0xF0 byte — a vector delivered
+        // into a context whose IF a shadow errand had cleared. Its total
+        // absence is the property; every verdict emitted was the lawful 0xF1.
+        // (Checked byte-wise rather than as pairs because a step boundary may
+        // split the ISR between its verdict write and its MARK write, leaving
+        // a lone trailing 0xF1 — harmless, and not a 0xF0.)
+        assert!(
+            !written.iter().any(|byte| *byte == 0xF0),
+            "a delivery reported IF=0 at its interrupt frame (0xF0) — a vector \
+             forced into a context whose IF a shadow errand had cleared: \
+             {written:#04x?}"
+        );
+        assert!(
+            written.iter().any(|byte| *byte == 0xF1),
+            "a lawful IF=1 verdict must have been emitted: {written:#04x?}"
+        );
+        assert!(
+            written.iter().all(|byte| *byte == 0xF1 || *byte == MARK),
+            "the debug port must carry only verdicts and MARKs: {written:#04x?}"
+        );
+        // The gate ran on hardware and took the correct IF=0 path: seeing the
+        // shadow's cleared IF, it armed a window and deferred the vector. The
+        // stale-header gate would have injected into the IF=0 handler instead
+        // — no window, and a 0xF0 verdict or a refused entry above. So an
+        // armed window is the signature that the fixed gate, not the shadow
+        // fallback, is what carried these deliveries.
+        assert!(
+            machine.engine().inject_census().windows_armed >= 1,
+            "the fixed gate must have armed a window for a vector it found \
+             deliverable-but-blocked on hardware; without one this test never \
+             reached the gate and proves nothing"
         );
     }
 }

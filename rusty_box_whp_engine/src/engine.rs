@@ -286,53 +286,113 @@ fn platform_failed(error: WhpError) -> CpuError {
     CpuError::UnsupportedCpuOperation { operation: "the hypervisor refused" }
 }
 
-/// What the last exit header said about deliverability — refreshed from
-/// headers, never from register reads (QEMU `target/i386/whpx/whpx-all.c`
+/// What the injection decision must know about deliverability, kept current
+/// without a single register read (QEMU `target/i386/whpx/whpx-all.c`
 /// `whpx_vcpu_post_run` keeps the same cache for the same reason).
 ///
-/// The invariant in that sentence is the reason this type exists: everything
-/// an injection decision consults is already in hand the moment
-/// `WHvRunVirtualProcessor` returns, so consulting it costs zero platform
-/// calls — where a register read would cost the very exchange injection is
-/// meant to avoid. The reader is [`stage_injection`].
+/// The invariant this type exists for: everything [`stage_injection`]
+/// consults is already in hand the moment it decides, so consulting it costs
+/// zero platform calls — where a register read would cost the very exchange
+/// injection is meant to avoid.
+///
+/// ## The freshness contract
+///
+/// The decision runs at the tail of a loop iteration; between the exit and
+/// the tail the engine may SERVICE the exit on the shadow interpreter, and a
+/// serviced instruction can change `IF` (a `CLI`, or a fault entering a gate)
+/// and leave the guest at a fresh boundary. So the cache has two authorities,
+/// and which one is current depends on whether an errand ran this iteration:
+///
+/// - **No errand** (a raw port write, an interrupt-window exit): the exit
+///   header describes the processor the tail will re-enter, so
+///   [`Self::refresh_from`] — called once per iteration on the fresh header —
+///   is authoritative. It decodes `in_flight`, `if_flag`, `cr8` AND the
+///   interrupt-shadow bit.
+/// - **An errand ran** (`finish_on_the_shadow`, `burst_on_the_shadow`): the
+///   errand's `impose_the_shadow` has just made the partition identical to
+///   the shadow, so the SHADOW is what the next VM entry sees and the header
+///   is stale. Every errand path therefore ends with
+///   [`Self::refresh_from_shadow`], which republishes `if_flag` and the
+///   shadow bit from the interpreter itself.
+///
+/// The property both together guarantee: at the instant `stage_injection`
+/// pops a vector — an irreversible acknowledge — `if_flag` and `shadowed`
+/// describe the processor as it will be at the next VM entry, never as it was
+/// at the last exit. Getting this wrong injects a maskable interrupt into an
+/// `IF=0` or interrupt-shadowed context, which the VM-entry guest-state
+/// checks reject with `WHV_E_INVALID_VP_STATE` and which loses the
+/// acknowledged vector.
 struct InjectState {
     /// `ExecutionState` bit 6, `InterruptionPending` — a delivery the platform
-    /// has begun and not landed. From the exit header alone, never a register
-    /// read.
+    /// has begun and not landed. From the exit header alone.
     in_flight: bool,
-    /// `RFLAGS` bit 9 from the exit header, never a register read.
+    /// Whether interrupts are enabled for the processor the next VM entry will
+    /// run: `RFLAGS` bit 9 from the exit header on an errand-free iteration,
+    /// or `cpu.interrupts_enabled()` republished by [`Self::refresh_from_shadow`]
+    /// after an errand.
     if_flag: bool,
     /// The exit header's `Cr8` field, and the only fresh source there is: a
     /// guest `MOV CR8` retires on hardware without an exit, so no copy this
     /// engine keeps between exits can be trusted over the header's.
     cr8: u8,
+    /// Whether the processor the next VM entry will run is inside an
+    /// interrupt shadow — an `STI` / `MOV SS` / `POP SS` window that blocks
+    /// delivery for one instruction. `ExecutionState` bit 12 from the exit
+    /// header on an errand-free iteration; republished by
+    /// [`Self::refresh_from_shadow`] after an errand.
+    shadowed: bool,
     /// A `DeliverabilityNotifications` request armed at this priority and not
-    /// yet answered by a window exit. NOT refreshed from headers — no header
-    /// reports it back. It is owned by the injection logic — [`stage_injection`]
-    /// arms it, the `InterruptWindow` arm clears it — and a refresh leaves it
-    /// exactly as it stands.
+    /// yet answered by a window exit. NOT touched by either refresh — no
+    /// header or shadow reports it back. It is owned by the injection logic —
+    /// [`stage_injection`] arms it, the `InterruptWindow` arm clears it.
     window: Option<u8>,
 }
 
 impl InjectState {
     /// A processor that has never run has no exit header to have said
     /// anything: nothing in flight, `IF` clear — the architectural reset
-    /// value — `CR8` zero, and no window armed.
+    /// value — not shadowed, `CR8` zero, and no window armed.
     const fn at_reset() -> Self {
-        Self { in_flight: false, if_flag: false, cr8: 0, window: None }
+        Self { in_flight: false, if_flag: false, cr8: 0, shadowed: false, window: None }
     }
 
-    /// Cache what an exit header says — and only that.
+    /// Cache what an exit header says — the authority for an iteration in
+    /// which no shadow errand ran.
     ///
-    /// Sets `in_flight`, `if_flag` and `cr8` from the header; `window` is
+    /// Sets `in_flight`, `if_flag`, `cr8` and `shadowed`; `window` is
     /// deliberately untouched, because it records a notification this engine
     /// armed and no header reports one back.
     fn refresh_from(&mut self, vp: &VpContext) {
-        // `WHV_X64_VP_EXECUTION_STATE`: `InterruptionPending` is bit 6.
+        // `WHV_X64_VP_EXECUTION_STATE`: `InterruptionPending` is bit 6,
+        // `InterruptShadow` is bit 12 (the `unserviced` diagnostic reads the
+        // same two bits).
         self.in_flight = (vp.execution_state >> 6) & 1 == 1;
+        self.shadowed = (vp.execution_state >> 12) & 1 == 1;
         // `RFLAGS.IF` is bit 9.
         self.if_flag = (vp.rflags >> 9) & 1 == 1;
         self.cr8 = vp.cr8;
+    }
+
+    /// Republish `if_flag` and `shadowed` from the shadow — the authority
+    /// for an iteration in which an errand ran.
+    ///
+    /// Called at the end of every path that emulates before the injection
+    /// tail, once `impose_the_shadow` has made the partition identical to the
+    /// interpreter, with the shadow's live `IF` (`cpu.interrupts_enabled()`).
+    /// The interpreter stops an errand only at an instruction boundary where
+    /// delivery is permitted — a fault clears `IF` and lands at a handler
+    /// entry, a burst runs to a trace boundary, and neither leaves the guest
+    /// one instruction into an `STI` / `MOV SS` window — so `shadowed` is
+    /// cleared, and the sole remaining question is that live `IF`.
+    /// `in_flight` and `cr8` are not republished: nothing an errand does
+    /// begins a platform delivery, and the header's `CR8` still stands.
+    ///
+    /// Takes the flag rather than the processor so the freshness rule is
+    /// unit-testable without a constructed `BxCpuC`; the call site reads it
+    /// from the shadow.
+    fn refresh_from_shadow(&mut self, shadow_if: bool) {
+        self.if_flag = shadow_if;
+        self.shadowed = false;
     }
 }
 
@@ -1550,6 +1610,29 @@ fn run_the_exit_loop<T: Instrumentation>(
         // a slice cost is one VM entry plus this many VM exits, and a reason
         // this engine does not classify cost exactly as much as one it does.
         *exits += 1;
+        // A delivery the platform has begun owns the processor until it lands
+        // (`execution_state` bit 6, `InterruptionPending`, now cached). This
+        // is the one choke point for that hazard (R5): before this engine
+        // injected, no exit could carry the bit and it was only a tripwire;
+        // now every serviced exit — a memory access, a `CPUID`, an MSR —
+        // flows into a shadow errand that rewrites the whole VP state, and
+        // doing that underneath a delivery in flight corrupts it. So the
+        // processor goes straight back until the delivery lands, exactly the
+        // standdown a `Canceled` exit takes, and only then is the re-exit —
+        // now without the bit — serviced. The delivery lands on re-entry
+        // because its IDT and stack pushes stay in RAM on this machine and
+        // never themselves exit. (QEMU `target/i386/whpx/whpx-all.c`
+        // `whpx_vcpu_pre_run` refuses to stage over an `InterruptionPending`
+        // for the same reason.)
+        if started.inject.in_flight {
+            tracing::debug!(
+                target: "irq",
+                "exit at {:#x} arrived mid-delivery; re-entering until it lands",
+                exit.vp.rip
+            );
+            delivery_in_flight = true;
+            continue;
+        }
         // How long the current run of memory exits is, maintained in one place
         // (R5) so the two readings — extending a run and ending one — cannot
         // disagree. Any exit that is not a memory access ends the run: the
@@ -1569,21 +1652,6 @@ fn run_the_exit_loop<T: Instrumentation>(
             ExitReason::Halt => counts.halt += 1,
             ExitReason::Canceled { .. } => counts.canceled += 1,
             _ => {}
-        }
-        // An exit that arrives with a delivery already in flight is one this
-        // engine must not rewrite the processor underneath — the `Canceled`
-        // arm below hands the processor straight back for exactly that
-        // reason. The reasons the engine services by rewriting cannot carry
-        // the bit on this machine (a delivery intercepts only when its IDT or
-        // stack pushes leave RAM, and here they never do), so for those it
-        // stays a report — and a report that ever fires is a claim in this
-        // comment proven wrong.
-        if (exit.vp.execution_state >> 6) & 1 == 1 {
-            tracing::warn!(
-                target: "irq",
-                "exit at {:#x} arrived with an interruption already pending",
-                exit.vp.rip
-            );
         }
         history.record(
             exit.vp.rip,
@@ -1638,26 +1706,16 @@ fn run_the_exit_loop<T: Instrumentation>(
             // past the deadline it is this slice's own alarm, which is the
             // budget running out and not an interruption.
             ExitReason::Canceled { .. } => {
-                // An interruption the platform has begun delivering is part
-                // of the processor's in-flight state, and the one holder of
-                // it is the partition (`execution_state` bit 6,
-                // `InterruptionPending`). Ending the slice here hands the
-                // processor to the machine and the shadow, both of which
-                // rewrite it — and the delivery then lands in whatever
-                // context they leave behind. Measured as `Oops: int3` in a
-                // guest: a text-poke `#BP` held pending across a cancel was
-                // delivered after the shadow had moved the guest on, at an
-                // address whose patch record was already retired. So the
-                // processor goes straight back until the delivery lands —
-                // the rule QEMU's whpx accelerator keeps: in
-                // target/i386/whpx/whpx-all.c, `whpx_vcpu_post_run` caches
-                // the exit header's `InterruptionPending` bit and
-                // `whpx_vcpu_pre_run` refuses to stage a new injection over
-                // it.
-                if (exit.vp.execution_state >> 6) & 1 == 1 {
-                    delivery_in_flight = true;
-                    continue;
-                }
+                // A cancel that arrived with a delivery in flight was already
+                // handled by the standdown above (the `in_flight` check after
+                // the refresh), which is why this arm no longer tests bit 6:
+                // a text-poke `#BP` held pending across a cancel and delivered
+                // after the shadow had moved the guest on showed as `Oops:
+                // int3`, so the delivery must land before the slice ends, and
+                // it now does for every exit reason rather than this one alone.
+                // What remains here is the ordinary cancel: past the deadline
+                // it is this slice's own alarm — the budget running out — and
+                // otherwise the host asking for the processor back.
                 return Ok(if *ran >= deadline {
                     Yielded::Budget
                 } else {
@@ -1871,11 +1929,15 @@ fn stage_injection<T: Instrumentation>(
     if !cpu.has_deliverable_ext_int() {
         return Ok(Staged::Nothing);
     }
-    // Blocked right now — an interrupt shadow, or IF clear. Ask the
-    // platform to exit the moment delivery becomes possible, and leave the
-    // vector with the machine's controllers: nothing is acknowledged for a
-    // delivery that cannot happen yet.
-    if started.shadowed || !started.inject.if_flag {
+    // Blocked right now — an interrupt shadow, or IF clear. Both are read
+    // from the freshness cache, which an errand this iteration will have
+    // republished from the shadow (see `InjectState`): the question is
+    // whether the processor the NEXT VM entry runs can take a delivery, not
+    // whether the one at the last exit could. Ask the platform to exit the
+    // moment delivery becomes possible, and leave the vector with the
+    // machine's controllers: nothing is acknowledged for a delivery that
+    // cannot happen yet.
+    if started.inject.shadowed || !started.inject.if_flag {
         // Priority 0: notify on ANY deliverable interrupt. QEMU derives
         // `irr >> 4` by reading its own APIC's request register without
         // acknowledging; this machine's local APIC and 8259 export no
@@ -2253,6 +2315,12 @@ fn burst_on_the_shadow<T: Instrumentation>(
     // Across a burst the interpreter delivers on its own terms, exactly as it
     // does when it owns the machine.
     io.emulate_batch(cpu, BURST_INSTRUCTIONS)?;
+    // The stretch has retired on the shadow; the impose below makes the
+    // partition identical to it, so the shadow's live `IF` and delivery
+    // boundary are what the injection tail must judge against, not the
+    // pre-burst exit header (a `CLI` anywhere in the stretch would make the
+    // header's `IF` a lie). See `InjectState`'s freshness contract.
+    started.inject.refresh_from_shadow(cpu.interrupts_enabled());
 
     let Started {
         alarm: _,
@@ -2263,7 +2331,8 @@ fn burst_on_the_shadow<T: Instrumentation>(
         consecutive_mmio: _,
         held,
         xsave,
-        // What the last exit header said; a state exchange does not change it.
+        // Republished from the shadow just above; the state exchange below
+        // does not change it again.
         inject: _,
     } = started;
     cpu.export_arch_state(state);
@@ -2284,6 +2353,12 @@ fn finish_on_the_shadow<T: Instrumentation>(
     // fault and enters a handler — the processor it leaves behind is the one
     // the platform must continue from.
     io.finish_the_instruction(cpu)?;
+    // The instruction has retired on the shadow, and `impose_the_shadow`
+    // below makes the partition identical to it — so the shadow's live `IF`
+    // and delivery boundary, not the pre-errand exit header, are what the
+    // injection tail must judge against. Republish them now (see
+    // `InjectState`'s freshness contract).
+    started.inject.refresh_from_shadow(cpu.interrupts_enabled());
 
     let Started {
         alarm: _,
@@ -2294,7 +2369,8 @@ fn finish_on_the_shadow<T: Instrumentation>(
         consecutive_mmio: _,
         held,
         xsave,
-        // What the last exit header said; a state exchange does not change it.
+        // Republished from the shadow just above; the state exchange below
+        // does not change it again.
         inject: _,
     } = started;
     cpu.export_arch_state(state);
@@ -2523,10 +2599,10 @@ mod tests {
     use rusty_box_whp::SegmentRegister;
 
     /// The cache decodes an exit header and nothing else: `InterruptionPending`
-    /// is `ExecutionState` bit 6, `IF` is `RFLAGS` bit 9, `CR8` arrives as the
-    /// header's own field, and the armed-window record survives every refresh
-    /// because no header reports it. Pure struct decoding — no hypervisor, so
-    /// it runs on any host.
+    /// is `ExecutionState` bit 6, `InterruptShadow` is bit 12, `IF` is `RFLAGS`
+    /// bit 9, `CR8` arrives as the header's own field, and the armed-window
+    /// record survives every refresh because no header reports it. Pure struct
+    /// decoding — no hypervisor, so it runs on any host.
     #[test]
     fn the_inject_cache_decodes_exit_headers_alone() {
         let header = |execution_state: u16, rflags: u64, cr8: u8| VpContext {
@@ -2540,21 +2616,66 @@ mod tests {
         let mut inject = InjectState::at_reset();
         assert!(!inject.in_flight);
         assert!(!inject.if_flag);
+        assert!(!inject.shadowed);
         assert_eq!(inject.cr8, 0);
         assert_eq!(inject.window, None);
         inject.window = Some(3);
 
-        inject.refresh_from(&header(0x0040, 0x202, 0x5));
+        // Bits 6 and 12 together, IF set.
+        inject.refresh_from(&header(0x1040, 0x202, 0x5));
         assert!(inject.in_flight, "ExecutionState bit 6 is InterruptionPending");
+        assert!(inject.shadowed, "ExecutionState bit 12 is InterruptShadow");
         assert!(inject.if_flag, "RFLAGS bit 9 is IF");
         assert_eq!(inject.cr8, 0x5, "the header's CR8 nibble round-trips");
         assert_eq!(inject.window, Some(3), "no header reports an armed window");
 
         inject.refresh_from(&header(0x0000, 0x2, 0x0));
         assert!(!inject.in_flight, "ExecutionState 0 means nothing in flight");
+        assert!(!inject.shadowed, "ExecutionState 0 means no interrupt shadow");
         assert!(!inject.if_flag, "RFLAGS 0x2 has IF clear");
         assert_eq!(inject.cr8, 0);
         assert_eq!(inject.window, Some(3), "a refresh never touches the window");
+    }
+
+    /// The freshness contract: after an errand, the shadow's `IF` overrides
+    /// whatever the exit header said, and the interrupt shadow is cleared —
+    /// because the interpreter stopped the errand at a boundary where
+    /// delivery is permitted. This is the property the injection gate turns
+    /// on: a `CLI` retired on the shadow between the exit and the staging
+    /// decision must be seen, or a maskable interrupt is injected into an
+    /// `IF=0` context the VM-entry checks reject.
+    #[test]
+    fn a_shadow_errand_republishes_if_over_the_stale_header() {
+        let header = VpContext {
+            rip: 0,
+            // Header carries IF=1 and an interrupt shadow — the processor as
+            // it was at the exit, BEFORE the errand ran.
+            rflags: 0x202,
+            cs: SegmentRegister::default(),
+            instruction_length: 0,
+            cr8: 0,
+            execution_state: 0x1000,
+        };
+        let mut inject = InjectState::at_reset();
+        inject.window = Some(0);
+        inject.refresh_from(&header);
+        assert!(inject.if_flag, "the header's IF is set");
+        assert!(inject.shadowed, "the header's interrupt shadow is set");
+
+        // The errand retired a `CLI` (or entered a fault gate): the shadow's
+        // live IF is now clear, and the interpreter left the guest at a
+        // deliverable boundary.
+        inject.refresh_from_shadow(false);
+        assert!(
+            !inject.if_flag,
+            "the shadow's IF must override the header's — the gate injects on this"
+        );
+        assert!(!inject.shadowed, "an errand ends at a deliverable boundary");
+        // The window record and in-flight state are the errand's to leave
+        // alone: no header or shadow reports the armed notification, and
+        // nothing an errand does begins a platform delivery.
+        assert_eq!(inject.window, Some(0), "an errand never touches the window");
+        assert!(!inject.in_flight, "an errand begins no platform delivery");
     }
 
     /// A tick is a unit of guest time at the machine's own rate, so a second of
