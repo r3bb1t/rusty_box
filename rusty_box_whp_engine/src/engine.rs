@@ -1060,14 +1060,18 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         let progress = (|| {
 
         // A sleeping shadow is in no interrupt shadow, whatever the
-        // partition's register says. The sleep was entered by an instruction
-        // that retired after any `MOV SS` could have shadowed it, so the
-        // interpreter's own inhibit has lapsed; and the bit the read-back
-        // returned after a shadow-retired halt is the one `impose_the_shadow`
-        // writes after every errand — unknown-means-blocked — not a shadow
-        // the guest is in. Read as one it would hold off every wake below and
-        // let the partition run past the halt, so it is consumed here, ahead
-        // of every path that reads it.
+        // partition's register says. The rule that makes it so is the wake's:
+        // `handle_wait_for_event` zeroes `inhibit_mask` when it ends a wait
+        // (Bochs event.cc, "clear inhibits for after resume"), so whatever
+        // inhibit a processor carried into its sleep — none, when `HLT` or
+        // `MWAIT` retired behind the `MOV SS`; one, when a failed `RSM`
+        // assigned the shutdown state without retiring anything — is gone the
+        // moment it runs again. And the bit the read-back returned after a
+        // shadow-retired halt is the one `impose_the_shadow` writes after
+        // every errand — unknown-means-blocked — not a shadow the guest is in.
+        // Read as one it would hold off every wake below and let the
+        // partition run past the halt, so it is consumed here, ahead of every
+        // path that reads it.
         let asleep = !matches!(cpu.activity_state, CpuActivityState::Active);
         if asleep {
             if let Some(started) = self.started.as_mut() {
@@ -1167,9 +1171,18 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // loop head is Bochs's own halt sequence. A guest that was asleep was
         // idle — it is not paying the mid-run interruption cost injection
         // exists to remove — so its delivery keeps the interpreted path.
-        if !shadowed
-            && (cpu.has_non_ext_int_event() || (asleep && cpu.has_an_event_to_deliver()))
-        {
+        //
+        // Asked of EVERY sleeping processor, with no test of its own in
+        // front: the scheduler's runnable test is wider than the wake set on
+        // purpose (`cpu_runnable_for_batch`, divergence D1) — `MwaitIf` is
+        // runnable on a raw pending interrupt with IF clear, because `MWAIT`
+        // with ECX[0] set wakes on one without delivering it — and a gate
+        // here that asked whether an event is DELIVERABLE would never wake
+        // that processor, then end the slice below having retired nothing,
+        // and the machine would hand out the same empty slice forever. Only
+        // `handle_wait_for_event` can say whether this processor wakes; a
+        // shadow that stays asleep retires nothing, and the slice ends below.
+        if !shadowed && (cpu.has_non_ext_int_event() || asleep) {
             // Both RIPs, because a delivery that happened shows as a jump to a
             // handler and one that did not shows as an ordinary instruction.
             let before = cpu.rip();

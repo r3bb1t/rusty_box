@@ -164,6 +164,34 @@ mod tests {
     }
 
     /// Whether this host can run the hypervisor-gated tests below.
+    /// The words a guest recorded at 0x6000, in order, once it has reported
+    /// how many on the debug port. Bounded by steps rather than by a halt,
+    /// because a guest that sleeps mid-way halts twice and only the second
+    /// is final; a guest that never wakes fails here by name.
+    fn trace_of<E: rusty_box::emulator::SliceEngine<()>>(
+        machine: &mut Emulator<(), E>,
+    ) -> std::vec::Vec<u16> {
+        let mut reported: std::vec::Vec<u8> = std::vec::Vec::new();
+        for _ in 0..256 {
+            machine
+                .step(RunBudget::Ticks(1_000_000))
+                .expect("the engine runs the guest and its tick reaches it");
+            reported.extend(machine.debug_port().take_output());
+            if !reported.is_empty() {
+                break;
+            }
+        }
+        let count = *reported
+            .last()
+            .expect("the guest reported its record count — it never woke");
+        machine
+            .mem_read_vec(0x6000, usize::from(count) * 2)
+            .expect("the record buffer is readable")
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect()
+    }
+
     fn hypervisor_here() -> bool {
         if rusty_box_whp::hypervisor_present().unwrap_or(false) {
             return true;
@@ -929,33 +957,6 @@ mod tests {
             0xCF, // iret
         ];
 
-        /// The saved IPs the guest recorded, in order, once it has reported
-        /// how many. Bounded by steps, not by a halt: the guest halts twice,
-        /// and only the second is final.
-        fn trace_of<E: rusty_box::emulator::SliceEngine<()>>(
-            machine: &mut Emulator<(), E>,
-        ) -> std::vec::Vec<u16> {
-            let mut reported: std::vec::Vec<u8> = std::vec::Vec::new();
-            for _ in 0..256 {
-                machine
-                    .step(RunBudget::Ticks(1_000_000))
-                    .expect("the engine runs the guest and its tick reaches it");
-                reported.extend(machine.debug_port().take_output());
-                if !reported.is_empty() {
-                    break;
-                }
-            }
-            let count = *reported
-                .last()
-                .expect("the guest reported its record count — it never woke");
-            machine
-                .mem_read_vec(0x6000, usize::from(count) * 2)
-                .expect("the record buffer is readable")
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                .collect()
-        }
-
         let config = EmulatorConfig {
             memory: MemorySize::bytes(8 * 1024 * 1024),
             ..EmulatorConfig::default()
@@ -1013,6 +1014,169 @@ mod tests {
             "no trial had the device-memory touch exit, so the halt was never \
              retired by an errand's tail on the hardware engine — the property \
              under test was not reached"
+        );
+    }
+
+    /// An `MWAIT` that breaks on interrupts with IF clear wakes on the
+    /// shadow the way it wakes anywhere: the processor runs on, and nothing
+    /// is delivered.
+    ///
+    /// Three claims share this one guest. The slice tail must not overwrite
+    /// a self-entered `MwaitIf` with a plain halt — a halt is never runnable
+    /// on a masked interrupt, and the guest would sleep forever. The slice
+    /// head must let `handle_wait_for_event` decide the wake rather than ask
+    /// whether an event is deliverable — with IF clear nothing is, and a head
+    /// that asked would hand the machine an empty slice forever. And a shadow
+    /// the head woke goes on to the hardware; one it did not ends the slice.
+    /// Linux's `intel_idle` sleeps exactly like this.
+    ///
+    /// The burst is what puts `MONITOR` and `MWAIT` on the shadow: eight
+    /// consecutive device-memory reads make the engine hand the shadow a
+    /// stretch of up to 4096 instructions, and the pair retires inside it
+    /// with no state exchange in between. That matters: a read-back between
+    /// them disarms the monitor (an import flushes the TLB, and a TLB flush
+    /// wakes the monitor), after which `MWAIT` returns at once — permitted
+    /// by the architecture, but not the sleep this test is about. The
+    /// platform never executes either instruction; it has no way to.
+    #[test]
+    fn an_mwait_that_breaks_on_a_masked_interrupt_wakes_the_shadow_without_delivery() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        // The real-mode setup leaves IF set (`set_rflags_for_api(0x202)`), so
+        // the guest clears it first: with IF set the tick would be delivered
+        // through an IVT slot this guest never fills.
+        //
+        // The record is two words. 0xAAAA is written by the instruction after
+        // `MWAIT`, so it exists only if the processor woke and ran on; the
+        // tick's own handler writes 0xFFFF, and it can run only after the
+        // `sti; nop` that follows — pending all along, undelivered until
+        // asked for.
+        //
+        // The PIT is in mode 0, one pulse ever, so the record cannot depend on
+        // how much guest time the `sti; nop` window happens to span: as a
+        // rate generator (mode 2) it put a SECOND pulse inside that window in
+        // one run of twenty — the machine's clock moving a whole period
+        // across a handful of instructions — and a second mark is not what
+        // this test is about.
+        const TICK: u16 = 0x1079;
+        let tick = TICK.to_le_bytes();
+        let code: &[u8] = &[
+            0xFA, // cli
+            0x31, 0xC0, // xor ax,ax
+            0x8E, 0xD8, // mov ds,ax
+            0x8E, 0xD0, // mov ss,ax
+            0xBC, 0x00, 0x70, // mov sp,0x7000
+            0xC7, 0x06, 0x20, 0x00, tick[0], tick[1], // mov word [0x0020], tick (IRQ0)
+            0xC7, 0x06, 0x22, 0x00, 0x00, 0x00, // mov word [0x0022], 0
+            0xBF, 0x00, 0x60, // mov di,0x6000
+            0xB8, 0x00, 0xB8, // mov ax,0xB800
+            0x8E, 0xC0, // mov es,ax
+            0xB0, 0xFE, 0xE6, 0x21, // out 0x21, 0xFE — unmask IRQ0 alone; IF stays clear
+            0xB0, 0x30, 0xE6, 0x43, // out 0x43, 0x30 — ch0, lo/hi, mode 0: ONE tick, ever
+            0xB0, 0x00, 0xE6, 0x40, // out 0x40, 0x00 — count 0x1000, low
+            0xB0, 0x10, 0xE6, 0x40, // out 0x40, 0x10 — count 0x1000, high
+            0xB9, 0x00, 0x40, // mov cx,0x4000 (0x2E) — longer than a shadow slice
+            0xE2, 0xFE, // loop $ (0x31)
+            // Eight device-memory reads in a row (0x33): the eighth exit
+            // engages the burst, and the shadow runs on from there.
+            0x26, 0xA0, 0x00, 0x00, // mov al,[es:0]
+            0x26, 0xA0, 0x00, 0x00, // mov al,[es:0]
+            0x26, 0xA0, 0x00, 0x00, // mov al,[es:0]
+            0x26, 0xA0, 0x00, 0x00, // mov al,[es:0]
+            0x26, 0xA0, 0x00, 0x00, // mov al,[es:0]
+            0x26, 0xA0, 0x00, 0x00, // mov al,[es:0]
+            0x26, 0xA0, 0x00, 0x00, // mov al,[es:0]
+            0x26, 0xA0, 0x00, 0x00, // mov al,[es:0]
+            0xB8, 0x00, 0x61, // mov ax,0x6100 (0x53) — the address MONITOR arms
+            0x31, 0xC9, // xor cx,cx — MONITOR's extensions, none
+            0x31, 0xD2, // xor dx,dx — MONITOR's hints, none
+            0x0F, 0x01, 0xC8, // monitor (0x5A)
+            0xB9, 0x01, 0x00, // mov cx,1 — MWAIT breaks on interrupts with IF clear
+            0x0F, 0x01, 0xC9, // mwait (0x60): the shadow sleeps here
+            0xC7, 0x05, 0xAA, 0xAA, // mov word [di],0xAAAA (0x63) — the wake, undelivered
+            0x83, 0xC7, 0x02, // add di,2
+            0xFB, // sti (0x6A)
+            0x90, // nop (0x6B) — the STI shadow; the tick lands after it -> 0xFFFF
+            0xFA, // cli (0x6C)
+            0x89, 0xF8, // mov ax,di
+            0x2D, 0x00, 0x60, // sub ax,0x6000
+            0xD1, 0xE8, // shr ax,1
+            0xE6, DEBUG_PORT, // out 0xE9,al — record count
+            0xF4, // hlt (0x76); IF is clear, so this one is final
+            0xEB, 0xFD, // jmp hlt
+            // tick (0x79): record a mark, acknowledge the 8259
+            0xC7, 0x05, 0xFF, 0xFF, // mov word [di],0xFFFF
+            0x83, 0xC7, 0x02, // add di,2
+            0x50, // push ax
+            0xB0, 0x20, 0xE6, 0x20, // out 0x20, 0x20 — non-specific EOI
+            0x58, // pop ax
+            0xCF, // iret
+        ];
+
+        let config = EmulatorConfig {
+            memory: MemorySize::bytes(8 * 1024 * 1024),
+            ..EmulatorConfig::default()
+        };
+        let mut interpreted = MachineBuilder::new(config).build().expect("machine");
+        interpreted
+            .setup_cpu_mode(CpuSetupMode::RealMode)
+            .expect("real mode");
+        interpreted.mem_write(CODE, code).expect("load");
+        interpreted.reg_write(X86Reg::Rip, CODE);
+        let int_trace = trace_of(&mut interpreted);
+
+        eprintln!("interpreter: {int_trace:x?}");
+        assert_eq!(
+            int_trace,
+            [0xAAAA, 0xFFFF],
+            "the interpreter is the reference: the processor wakes and runs on \
+             with the interrupt pending and undelivered, and the tick lands only \
+             once IF is set"
+        );
+
+        // Which stretch carries the wake is the same race as the halt's. The
+        // head under test is a HARDWARE head over a sleeping shadow, and it
+        // leaves a mark of its own: woken there with IF clear, the pending
+        // tick is staged into a deliverability window and INJECTED after the
+        // `sti; nop` — whereas a shadow slice that carries the wake delivers
+        // the tick itself and injects nothing. So a trial qualifies by an
+        // injection, and every trial's record must equal the reference
+        // regardless. A head that did not wake the shadow retires nothing,
+        // the machine hands out the same empty slice again, and the guest
+        // never reports — which `trace_of` fails by name.
+        let _turn = a_turn_on_the_hardware();
+        let mut qualifying = None;
+        // A hardware head over the sleeping shadow is the minority outcome
+        // (measured about one trial in six), so the cap is generous; a trial
+        // is a few milliseconds.
+        for trial in 0..64 {
+            let mut on_hardware = machine_with_devices(code);
+            let hw_trace = trace_of(&mut on_hardware);
+            let memory_exits = on_hardware.engine().exits().memory;
+            let injected = on_hardware.engine().inject_census().injected;
+            let census = on_hardware.engine().census();
+            eprintln!(
+                "trial {trial}: hardware {hw_trace:x?} ({memory_exits} memory exits, {} port \
+                 exits, {} slices, {injected} injected)",
+                on_hardware.engine().exits().port,
+                census.slices,
+            );
+            assert_eq!(
+                hw_trace, int_trace,
+                "on every trial, however the stretches fell, the two engines must \
+                 deliver the identical record"
+            );
+            if injected >= 1 {
+                qualifying = Some(trial);
+                break;
+            }
+        }
+        assert!(
+            qualifying.is_some(),
+            "no trial woke the sleeping shadow at a hardware head — the tick was \
+             never injected — so the property under test was not reached"
         );
     }
 
