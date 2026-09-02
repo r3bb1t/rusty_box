@@ -835,6 +835,187 @@ mod tests {
         );
     }
 
+    /// A halt the shadow retires is a halt the guest gets — and the step the
+    /// halting instruction owes waits for the wake, where Bochs delivers it.
+    ///
+    /// The guest steps with TF through `mov ss,[es:0]`, whose device-memory
+    /// source makes it an errand; the errand's tail retires the `hlt` the
+    /// `MOV SS` inhibit shadows, on the shadow, with the step still owed. What
+    /// must follow, on both engines identically: the processor stays halted
+    /// until the PIT's tick; the tick ends the wait; the owed `#DB` lands
+    /// FIRST, with the frame's saved IP after the `hlt` (0x104B); then the
+    /// tick's own handler runs (it records a 0xFFFF mark); then stepping
+    /// resumes. A partition run past the halt shows as the `inc bx` step
+    /// (0x104C) arriving before — or instead of — the halt's, and the kept
+    /// latch firing later against the wrong instruction as a duplicate.
+    ///
+    /// Bochs event.cc handleAsyncEvent: handleWaitForEvent, then Priority 4,
+    /// then Priority 5 — the order this trace encodes.
+    #[test]
+    fn a_halt_retired_by_an_errand_keeps_the_guest_halted_and_its_step_for_the_wake() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        // The `MOV SS` source is the VGA text buffer, untouched before it: the
+        // display's memory is zero out of reset on both engines, so SS loads
+        // 0 either way, and touching the buffer earlier would latch display
+        // work whose boundary shortens the slice that follows into one the
+        // shadow carries — and then the `MOV SS` is no errand.
+        //
+        // The delay loop between the PIT load and the errand is load-bearing
+        // too. A slice whose request is nearer than the hardware's resolution
+        // is carried by the shadow — 2,500 ticks at the default 50 MIPS — and
+        // the machine's device timers make such a request whenever a slice
+        // begins within that distance of a deadline; a shadow slice then
+        // retires up to its whole request, and whole traces, so a straight
+        // line through the `mov ss` would be the interpreter's. The loop is
+        // longer than any request the shadow may carry and each taken `loop`
+        // ends a trace, so a shadow slice that begins before the errand ends
+        // inside the loop, at its deadline, and the slice that reaches the
+        // errand is the hardware's.
+        const ISR: u16 = 0x1060;
+        const TICK: u16 = 0x106F;
+        let isr = ISR.to_le_bytes();
+        let tick = TICK.to_le_bytes();
+        let code: &[u8] = &[
+            0x31, 0xC0, // xor ax,ax
+            0x8E, 0xD8, // mov ds,ax
+            0x8E, 0xD0, // mov ss,ax
+            0xBC, 0x00, 0x70, // mov sp,0x7000
+            0xC7, 0x06, 0x04, 0x00, isr[0], isr[1], // mov word [0x0004], isr
+            0xC7, 0x06, 0x06, 0x00, 0x00, 0x00, // mov word [0x0006], 0
+            0xC7, 0x06, 0x20, 0x00, tick[0], tick[1], // mov word [0x0020], tick (IRQ0)
+            0xC7, 0x06, 0x22, 0x00, 0x00, 0x00, // mov word [0x0022], 0
+            0xBF, 0x00, 0x60, // mov di,0x6000
+            0xB8, 0x00, 0xB8, // mov ax,0xB800
+            0x8E, 0xC0, // mov es,ax
+            0xB0, 0xFE, 0xE6, 0x21, // out 0x21, 0xFE — unmask IRQ0 alone
+            0xB0, 0x34, 0xE6, 0x43, // out 0x43, 0x34 — ch0, lo/hi, mode 2
+            0xB0, 0x00, 0xE6, 0x40, // out 0x40, 0x00 — count 0x1000, low
+            0xB0, 0x10, 0xE6, 0x40, // out 0x40, 0x10 — count 0x1000, high
+            0xB9, 0x00, 0x40, // mov cx,0x4000 (0x39) — longer than a shadow slice
+            0xE2, 0xFE, // loop $ (0x3C) — a trace boundary per iteration
+            0x9C, 0x58, // pushf; pop ax (0x3E)
+            0x80, 0xCC, 0x03, // or ah,3 — TF and IF
+            0x50, 0x9D, // push ax; popf (0x44): stepping starts after the NEXT instruction
+            0x26, 0x8E, 0x16, 0x00, 0x00, // mov ss,[es:0] (0x45) ERRAND; its step is inhibited
+            0xF4, // hlt (0x4A) retired by the errand's tail; owes the merged step -> 0x4B
+            0x43, // inc bx (0x4B) -> 0x4C
+            0x9C, // pushf (0x4C) -> 0x4D
+            0x58, // pop ax (0x4D) -> 0x4E
+            0x80, 0xE4, 0xFE, // and ah,0xFE (0x4E) -> 0x51
+            0x50, // push ax (0x51) -> 0x52
+            0x9D, // popf — TF=0 (0x52) -> 0x53
+            0xFA, // cli (0x53): no tick may land in the report below
+            0x89, 0xF8, // mov ax,di
+            0x2D, 0x00, 0x60, // sub ax,0x6000
+            0xD1, 0xE8, // shr ax,1
+            0xE6, DEBUG_PORT, // out 0xE9,al — record count
+            0xF4, // hlt (0x5D)
+            0xEB, 0xFD, // jmp hlt
+            // isr (0x60): record the frame's saved IP
+            0x55, 0x89, 0xE5, 0x50, // push bp; mov bp,sp; push ax
+            0x8B, 0x46, 0x02, // mov ax,[bp+2]
+            0x89, 0x05, // mov [di],ax
+            0x83, 0xC7, 0x02, // add di,2
+            0x58, 0x5D, 0xCF, // pop ax; pop bp; iret
+            // tick (0x6F): record a mark, acknowledge the 8259
+            0xC7, 0x05, 0xFF, 0xFF, // mov word [di],0xFFFF
+            0x83, 0xC7, 0x02, // add di,2
+            0x50, // push ax
+            0xB0, 0x20, 0xE6, 0x20, // out 0x20, 0x20 — non-specific EOI
+            0x58, // pop ax
+            0xCF, // iret
+        ];
+
+        /// The saved IPs the guest recorded, in order, once it has reported
+        /// how many. Bounded by steps, not by a halt: the guest halts twice,
+        /// and only the second is final.
+        fn trace_of<E: rusty_box::emulator::SliceEngine<()>>(
+            machine: &mut Emulator<(), E>,
+        ) -> std::vec::Vec<u16> {
+            let mut reported: std::vec::Vec<u8> = std::vec::Vec::new();
+            for _ in 0..256 {
+                machine
+                    .step(RunBudget::Ticks(1_000_000))
+                    .expect("the engine runs the guest and its tick reaches it");
+                reported.extend(machine.debug_port().take_output());
+                if !reported.is_empty() {
+                    break;
+                }
+            }
+            let count = *reported
+                .last()
+                .expect("the guest reported its record count — it never woke");
+            machine
+                .mem_read_vec(0x6000, usize::from(count) * 2)
+                .expect("the record buffer is readable")
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect()
+        }
+
+        let config = EmulatorConfig {
+            memory: MemorySize::bytes(8 * 1024 * 1024),
+            ..EmulatorConfig::default()
+        };
+        let mut interpreted = MachineBuilder::new(config).build().expect("machine");
+        interpreted
+            .setup_cpu_mode(CpuSetupMode::RealMode)
+            .expect("real mode");
+        interpreted.mem_write(CODE, code).expect("load");
+        interpreted.reg_write(X86Reg::Rip, CODE);
+        let int_trace = trace_of(&mut interpreted);
+
+        eprintln!("interpreter: {int_trace:x?}");
+        assert_eq!(
+            int_trace,
+            [0x104B, 0xFFFF, 0x104C, 0x104D, 0x104E, 0x1051, 0x1052, 0x1053],
+            "the interpreter is the reference: the halt's step lands at the \
+             wake, before the tick's own handler, and stepping resumes after"
+        );
+
+        // Whether a given stretch runs on the hardware or on the shadow is a
+        // real-time race on a machine with the full device set: a request
+        // nearer than the hardware's resolution is carried by the shadow, and
+        // then the `MOV SS` is no errand and the halt is the interpreter's own.
+        // Only a run in which the device-memory touch exited put the halt on
+        // the shadow through the errand's tail, so trials repeat until one
+        // does — and every trial's trace must equal the reference regardless.
+        let _turn = a_turn_on_the_hardware();
+        let mut qualifying = None;
+        for trial in 0..16 {
+            let mut on_hardware = machine_with_devices(code);
+            let hw_trace = trace_of(&mut on_hardware);
+            let memory_exits = on_hardware.engine().exits().memory;
+            let census = on_hardware.engine().census();
+            // The exit and slice counts say where the stretches fell: a trial
+            // with few port exits and few slices ran mostly on the shadow.
+            eprintln!(
+                "trial {trial}: hardware {hw_trace:x?} ({memory_exits} memory exits, {} port \
+                 exits, {} slices)",
+                on_hardware.engine().exits().port,
+                census.slices,
+            );
+            assert_eq!(
+                hw_trace, int_trace,
+                "on every trial, however the stretches fell, the two engines must \
+                 deliver the identical trace"
+            );
+            if memory_exits >= 1 {
+                qualifying = Some(trial);
+                break;
+            }
+        }
+        assert!(
+            qualifying.is_some(),
+            "no trial had the device-memory touch exit, so the halt was never \
+             retired by an errand's tail on the hardware engine — the property \
+             under test was not reached"
+        );
+    }
+
     /// A vector pending AT A SLICE HEAD reaches an active guest by injection,
     /// not by the interpreter delivering before the hardware runs.
     ///

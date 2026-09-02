@@ -1059,6 +1059,22 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
 
         let progress = (|| {
 
+        // A sleeping shadow is in no interrupt shadow, whatever the
+        // partition's register says. The sleep was entered by an instruction
+        // that retired after any `MOV SS` could have shadowed it, so the
+        // interpreter's own inhibit has lapsed; and the bit the read-back
+        // returned after a shadow-retired halt is the one `impose_the_shadow`
+        // writes after every errand — unknown-means-blocked — not a shadow
+        // the guest is in. Read as one it would hold off every wake below and
+        // let the partition run past the halt, so it is consumed here, ahead
+        // of every path that reads it.
+        let asleep = !matches!(cpu.activity_state, CpuActivityState::Active);
+        if asleep {
+            if let Some(started) = self.started.as_mut() {
+                started.shadowed = false;
+            }
+        }
+
         // DIAGNOSTIC BISECTION, not a shipping mode. `WHP_ALL_SHADOW=1` keeps
         // every part of this engine except the hardware: the same slice
         // budgeting, the same delivery-at-slice-entry policy, the same device
@@ -1151,7 +1167,6 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // loop head is Bochs's own halt sequence. A guest that was asleep was
         // idle — it is not paying the mid-run interruption cost injection
         // exists to remove — so its delivery keeps the interpreted path.
-        let asleep = !matches!(cpu.activity_state, CpuActivityState::Active);
         if !shadowed
             && (cpu.has_non_ext_int_event() || (asleep && cpu.has_an_event_to_deliver()))
         {
@@ -1179,6 +1194,16 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             );
             // Delivery acknowledged the interrupt, which changes the line.
             io.sync_io_events(cpu);
+        }
+        // A sleeping shadow the wake above did not wake goes no further. The
+        // scheduler's runnable test is deliberately wider than the wake set
+        // (divergence D1), so an empty slice can reach here; the partition
+        // holds the instruction after the halt, and running it would carry
+        // the guest past a halt it executed. The slice ends as one, and the
+        // machine's fast-forward brings the event that ends the wait.
+        if !matches!(cpu.activity_state, CpuActivityState::Active) {
+            self.census.record(0, &Yielded::Halted);
+            return Ok(Progress::Ticks(0));
         }
         // An SMI the shadow just took puts the processor in a mode the
         // hardware has no equivalent for, so the handler runs to completion
@@ -1251,8 +1276,9 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             // exchange above; the platform reports it as the reason the run
             // ended, and the shadow is where the machine reads it. A shadow
             // that entered a sleep state itself — an errand retired the `HLT`,
-            // or an `MWAIT`, or shut down on a triple fault — already says so,
-            // in the state it chose, and is not overwritten with a plain halt.
+            // or an `MWAIT` — already says so, in the state it chose, and a
+            // plain halt must not overwrite it: `MwaitIf` wakes on an
+            // interrupt with IF clear, which `Hlt` never does.
             Yielded::Halted => {
                 if matches!(cpu.activity_state, CpuActivityState::Active) {
                     cpu.record_halt();

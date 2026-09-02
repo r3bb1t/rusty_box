@@ -485,11 +485,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Call interrupt handler based on CPU mode
         let vector_u8 = vector as u8;
 
-        // Bochs interrupt() wrapper (exception.cc): a vectored delivery
+        // Bochs exception.cc `exception` ends by calling `interrupt`; this
+        // function reproduces `interrupt`'s delivery sequence inline instead
+        // of calling it, so every effect `interrupt` has must be mirrored here
+        // by hand — an R5 hazard: an effect missing from this copy is missing
+        // from every exception. This is one of them. A vectored delivery
         // resumes execution, whatever state the processor was sleeping in —
         // a `#DB` owed by `HLT` lands when the wait ends and the handler runs
-        // on an active processor. Set here, before delivery, because delivery
-        // can leave through a nested fault and never reach the loop's tail.
+        // on an active processor. Before delivery, because delivery can leave
+        // through a nested fault and never reach the loop's tail.
         self.activity_state = super::cpu::CpuActivityState::Active;
         // Clear debug trap and interrupt inhibition before delivery.
         self.debug_trap = 0;

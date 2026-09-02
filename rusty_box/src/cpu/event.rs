@@ -1948,6 +1948,26 @@ mod tests {
         assert!(!cpu.dr6.bs(), "DR6 reports nothing yet");
         assert!(cpu.owes_a_debug_trap(), "the step is owed, not lost");
 
+        // With nothing pending, the machine's own verb finds it still
+        // waiting: Bochs event.cc handleAsyncEvent asks handleWaitForEvent
+        // before Priority 4, so a halted processor is not woken by the trap
+        // it owes.
+        bus.io()
+            .emulate_one(&mut cpu)
+            .expect("a wait that continues retires nothing");
+        assert_eq!(
+            cpu.activity_state,
+            CpuActivityState::Hlt,
+            "still halted with nothing to wake it"
+        );
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_CODE + 3),
+            "the trap did not end the wait"
+        );
+        assert_eq!(cpu.sp(), TRAP_STACK_TOP, "still no frame");
+        assert!(cpu.owes_a_debug_trap(), "the step is still owed");
+
         // The machine wakes it the way the slice head does: an event arrives
         // and the halted processor is handed one interpreted instruction.
         cpu.signal_event(BxCpuC::<()>::BX_EVENT_NMI);

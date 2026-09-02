@@ -256,15 +256,18 @@ BAR. The engine's exit tail (`rusty_box_whp_engine/src/engine.rs`,
 `run_the_exit_loop`) asks `wants_a_machine_boundary` and only THEN stages an
 injection: `stage_injection` → `PcIo::pop_deliverable_vector` →
 `acknowledge_external_interrupt` → `sync_lapic_events`, which can raise the
-bit after the check, and `sync_io_events` right after it can raise it for a
-latch on the 8259's side. The guest then runs on the hardware with the request
-on the shadow's word; the next exit's `read_back_into_the_shadow` →
-`import_arch_state` → `set_rflags_for_api`, and a stepping guest has TF set.
-A literal `= 1` there zeroes the request; the tail after that exit finds
-nothing to hand back, and the machine services the device a whole slice late —
-a disk interrupt landing after the driver has polled the data and finished,
-the `hda: unexpected_intr` failure class this port has already met from a
-dropped boundary.
+bit after the check, and the `sync_io_events` right after it raises it for
+any device's latch (`take_scheduler_boundary_requested`). The guest then runs
+on the hardware with the request on the shadow's word. When the next exit is
+an errand — a memory access, `CPUID`, an MSR, a string or repeated port
+access — `read_back_into_the_shadow` → `import_arch_state` →
+`set_rflags_for_api`, and a stepping guest has TF set. A literal `= 1` there
+zeroes the request; the tail after that exit finds nothing to hand back, and
+the machine services the device a whole slice late — a disk interrupt landing
+after the driver has polled the data and finished, the `hda: unexpected_intr`
+failure class this port has already met from a dropped boundary. A plain port
+exit finished by `service_port_access` reads nothing back, so it cannot
+clobber; the reach is exactly the errand exits.
 
 The interpreter's site, `set_eflags_internal`, has no reachable clobber today
 and its `|=` is defensive: the trace loop leaves the trace the moment the word
