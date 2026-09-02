@@ -701,7 +701,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             self.device_manager.irq.pic_mut().reconcile_deasserted_intr();
             self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
             if self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR == 0 {
-                self.async_event = super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                // An assignment, so the request the stale pin raised is
+                // dropped with the pin. `BX_ASYNC_EVENT_SCHEDULER_BOUNDARY`
+                // is carried across because it latches a machine boundary
+                // that Bochs, having no analogue, cannot lose in the first
+                // place — the rule `enter_sleep_state` (proc_ctrl.rs) applies
+                // to its own assignment, and the reason the bit is in
+                // `TraceBookkeeping::MASK` (arch_state.rs).
+                self.async_event = (self.async_event
+                    & super::cpu::BX_ASYNC_EVENT_SCHEDULER_BOUNDARY)
+                    | super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
             }
             #[cfg(debug_assertions)]
             {
@@ -955,6 +964,38 @@ mod tests {
                 &mut self.pc_system,
             )
         }
+    }
+
+    /// An acknowledge that finds no controller holding a vector drops the
+    /// request the stale pin raised, and drops nothing else: a scheduler
+    /// boundary latched on the same word survives it, because the device
+    /// that asked for that boundary is still waiting for the machine to take
+    /// it.
+    #[test]
+    fn an_empty_acknowledge_keeps_the_scheduler_boundary_latched() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        cpu.reset(ResetReason::Hardware);
+        cpu.raise_async_event();
+        cpu.request_scheduler_boundary();
+
+        let acknowledged = bus.ctx(&mut cpu).acknowledge_external_interrupt();
+
+        assert_eq!(
+            acknowledged,
+            AcknowledgedInterrupt::None,
+            "neither the LAPIC nor the 8259 holds a vector after a hardware reset"
+        );
+        assert!(
+            cpu.wants_a_machine_boundary(),
+            "the boundary the machine owes is latched on async_event and must \
+             survive an acknowledge that found nothing to deliver"
+        );
+        assert_ne!(
+            cpu.async_event & crate::cpu::cpu::BX_ASYNC_EVENT_STOP_TRACE,
+            0,
+            "the running trace still stops, so the loop re-scans at its boundary"
+        );
     }
 
     #[test]
