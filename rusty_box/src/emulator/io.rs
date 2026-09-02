@@ -19,7 +19,10 @@
 //! else).
 
 use crate::{
-    cpu::{cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentation, AcknowledgedInterrupt},
+    cpu::{
+        cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentation, AcknowledgedInterrupt,
+        TrapDischarge,
+    },
     iodev::{devices::DeviceManager, BxDevicesC},
     memory::BxMemC,
     pc_system::BxPcSystemC,
@@ -275,6 +278,48 @@ impl<'a> PcIo<'a> {
         cpu.resume_trace_bookkeeping(parked);
         cpu.resume_deliverable_interrupt(held);
         outcome
+    }
+
+    /// Deliver the trap the instruction just retired on `cpu` owes, if any.
+    ///
+    /// A single-step `#DB` is delivered at the head of the instruction AFTER
+    /// the one that ran with TF set (Bochs event.cc handleAsyncEvent,
+    /// Priority 4). An engine that retires one instruction on the shadow —
+    /// or the last of a burst — never reaches that head: the processor goes
+    /// back to the hardware, which arms its own trap for its own next
+    /// instruction and knows nothing of the one the shadow owes. So the
+    /// errand's tail takes the boundary here, through the same body the
+    /// interpreter's head uses ([`ExecCtx::discharge_the_trap_owed`]), and
+    /// the guest sees the handler entered with the frame the interpreter
+    /// would have pushed.
+    ///
+    /// The `MOV SS` corner is answered rather than stranded. `MOV SS` and
+    /// `POP SS` hold the trap off for exactly one instruction, and a second
+    /// `MOV SS` does not extend the window (Bochs cpu.h
+    /// `BX_INHIBIT_INTERRUPTS_BY_MOVSS`, `inhibit_interrupts`). The
+    /// interpreter answers by skipping the boundary and returning at the
+    /// next; this verb has no next, so it retires the one instruction the
+    /// inhibit covers and takes the boundary then — the frame's saved IP is
+    /// past both instructions, as it is under the interpreter.
+    ///
+    /// Afterwards the processor owes nothing: `debug_trap` is zero on every
+    /// `Ok` path, so no latch survives into a later errand to fire against
+    /// an instruction that never owed it.
+    ///
+    /// # Errors
+    /// Whatever the delivery, or the one shadowed instruction, raised that
+    /// the processor could not take.
+    pub fn deliver_the_trap_owed<T: Instrumentation>(
+        &mut self,
+        cpu: &mut BxCpuC<T>,
+    ) -> crate::cpu::Result<()> {
+        if cpu.owes_a_debug_trap() && cpu.debug_trap_inhibited() {
+            self.finish_the_instruction(cpu)?;
+        }
+        let mut ctx = ExecCtx::new(cpu, self.reborrow());
+        match ctx.discharge_the_trap_owed()? {
+            TrapDischarge::Delivered | TrapDischarge::NothingOwed => Ok(()),
+        }
     }
 
     /// How many items of one repeated instruction are executed before the

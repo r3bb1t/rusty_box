@@ -103,6 +103,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // the machine could not take an external interrupt at all, however
         // correctly the controller asserted it.
         self.handle_interrupt_mask_change();
+        // TF set implies the boundary is armed: the single-step latch is set
+        // only in `handle_async_event`'s tail, which the loop reaches only
+        // when this word is non-zero — Bochs flag_ctrl_pro.cc setEFlags,
+        // `if (get_TF()) async_event = 1`. Raised rather than assigned,
+        // divergence D5.
+        if self.eflags.contains(super::eflags::EFlags::TF) {
+            self.raise_async_event();
+        }
     }
 
     // ── Segment selectors (raw) ────────────────────────────────────────

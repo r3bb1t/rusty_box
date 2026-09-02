@@ -39,9 +39,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.invalidate_prefetch_q();
         }
 
-        // TF set => schedule debug trap
+        // TF set => the next boundary arms the single-step trap. Bochs
+        // flag_ctrl_pro.cc setEFlags assigns `async_event = 1`; this port
+        // raises the bit and keeps the rest of the word, because here the
+        // word also carries the scheduler boundary a device may have just
+        // requested — divergence D5.
         if new_flags.contains(EFlags::TF) {
-            self.async_event = 1;
+            self.raise_async_event();
         }
 
         // IF changed => handle interrupt mask change

@@ -227,6 +227,62 @@ Restoring Bochs's arms would re-introduce the un-enterable state under the
 hypervisor engine and the wrong compat-mode stack limit under the interpreter;
 there is nothing on the other side of the trade.
 
+---
+
+## D5 — Setting TF raises `async_event` without clearing the rest of the word
+
+**Bochs:** `cpu/flag_ctrl_pro.cc setEFlags`: `if (get_TF()) async_event = 1;`,
+and the `assert_TF` / `set_TF` accessors in `cpu/cpu.h` store the same
+constant. An assignment, not an OR, over a word whose own declaration says it
+is kept 32-bit so that `BX_ASYNC_EVENT_STOP_TRACE` (bit 31) fits in it — so
+upstream's store already discards its own trace-stop hint. Upstream can afford
+to: its `cpu_loop` asks the word only whether it is non-zero, and `1` answers
+that exactly as `1 | (1 << 31)` does.
+
+**rusty_box:** `cpu/flag_ctrl_pro.rs set_eflags_internal` and
+`cpu/api_bridge.rs set_rflags_for_api` call `raise_async_event`, which is
+`async_event |= 1`. The bit Bochs sets is set; the bits Bochs's store would
+have cleared survive.
+
+### What the guest observes
+
+Under upstream's form, in this port: a lost machine boundary. This port's word
+carries a bit Bochs has no counterpart for, `BX_ASYNC_EVENT_SCHEDULER_BOUNDARY`
+(`cpu/cpu.rs`), which a device latches when it has work only the scheduler can
+do — a completion timer armed while answering a port write, a PAM flip, a
+relocated BAR — and which `cpu_loop_n_impl` tests for by name so the processor
+is handed back before its next instruction. A `POPF` or `IRET` that sets TF in
+the instruction after such a write would zero that bit and the request with
+it. The machine then services the device a whole slice late, and a disk
+interrupt lands after the driver has polled the data and finished — the
+`hda: unexpected_intr` failure class this port has already met from a dropped
+boundary.
+
+Under this port's form: nothing that differs from Bochs. The word is non-zero
+after the write, which is all Bochs's loop asks; `STOP_TRACE` surviving means
+the trace is not chained across the flags write, and Bochs's loop does not
+chain it either, because its word is non-zero too.
+
+### Why the divergence is the correct side
+
+The assignment is a Bochs idiom for "make the word non-zero", written when the
+word held nothing else worth keeping. Read as that intent, `|= 1` is the
+faithful port. Read as the literal store, it ports an upstream defect (the
+bit-31 clobber is real there, merely harmless) onto a word where it is no
+longer harmless.
+
+### Price of closing it
+
+None to pay: adopting the literal store re-introduces the dropped boundary. The
+other closure — moving trace bookkeeping and the scheduler boundary out of
+`async_event` into a word of their own, so that `= 1` could be written
+literally and mean what Bochs means — is the OPEN QUESTION below, and touches
+every `async_event` site in `cpu/`.
+
+**Status:** open and deliberate. The literal `= 1` stores that remain in this
+port (`signal_event`, `unmask_event`, and the FRED, SVM and task-switch paths)
+are Bochs-faithful, carry the same hazard, and are outside this entry.
+
 # Hypervisor-engine divergences (`H<n>`)
 
 A machine running its guest on `rusty_box_whp_engine` executes on the host's

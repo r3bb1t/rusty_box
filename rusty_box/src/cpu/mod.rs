@@ -82,7 +82,7 @@ pub(super) mod descriptor;
 pub(super) mod dispatcher;
 pub mod eflags;
 pub(super) mod event;
-pub(crate) use event::AcknowledgedInterrupt;
+pub(crate) use event::{AcknowledgedInterrupt, TrapDischarge};
 pub(super) mod exception;
 pub(super) mod flag_ctrl;
 pub(super) mod flag_ctrl_pro;

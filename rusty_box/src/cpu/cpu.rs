@@ -1254,6 +1254,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) const BX_DEBUG_TRAP_HIT: u32 = 1 << 12; // internal "a breakpoint fired" flag
     pub(super) const BX_DEBUG_SINGLE_STEP_BIT: u32 = 1 << 14; // BS flag in DR6 (bit 14)
     pub(super) const BX_DEBUG_TRAP_TASK_SWITCH_BIT: u32 = 0x8000; // BT flag in DR6
+    /// The bits of `debug_trap` a `#DB` reports — DR6[15:12]: hit, DR access,
+    /// single step, task switch. The B0–B3 match bits below them deliver
+    /// nothing on their own. Bochs event.cc handleAsyncEvent `debug_trap & 0xf000`.
+    pub(super) const BX_DEBUG_TRAP_DELIVERABLE: u32 = 0xF000;
 
     // ── Hardware debug (DR7 R/W field) breakpoint type ──
     // Bochs cpu.h enum: instruction-execution breakpoint (R/W == 00b).
@@ -1288,6 +1292,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Bochs event.cc: `(inhibit_mask & mask) == mask` — ALL bits must match.
     pub(crate) fn interrupts_inhibited(&self, mask: u32) -> bool {
         self.icount <= self.inhibit_icount && (self.inhibit_mask & mask) == mask
+    }
+
+    /// Whether the trap the previous instruction owes may not be delivered
+    /// at this boundary: `MOV SS` and `POP SS` hold it off for exactly one
+    /// instruction. Bochs event.cc handleAsyncEvent, the Priority-4 guard.
+    #[inline]
+    pub(crate) fn debug_trap_inhibited(&self) -> bool {
+        self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG)
+    }
+
+    /// Whether `debug_trap` holds something a `#DB` will report.
+    ///
+    /// The one reading of the latch (R5): the interpreter's boundary and an
+    /// execution engine's errand tail both decide "deliver or clear" by this.
+    #[inline]
+    pub(crate) fn owes_a_debug_trap(&self) -> bool {
+        self.debug_trap & Self::BX_DEBUG_TRAP_DELIVERABLE != 0
     }
 }
 

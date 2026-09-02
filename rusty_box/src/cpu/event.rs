@@ -21,6 +21,17 @@ pub(crate) enum AcknowledgedInterrupt {
     None,
 }
 
+/// What discharging the trap the previous instruction owed produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "a delivered #DB moved the processor; what the caller does next depends on which this was"]
+pub(crate) enum TrapDischarge {
+    /// The trap was taken: the processor stands at its `#DB` handler's entry,
+    /// or wherever an intercept exited to.
+    Delivered,
+    /// Nothing was owed, and the latch is clear.
+    NothingOwed,
+}
+
 /// Async-event servicing runs on the execution context: interrupt delivery
 /// reads the IDT and pushes stack frames, and the hold-acknowledge path hands
 /// guest memory to the DMA controller. Bochs `handleAsyncEvent` (event.cc)
@@ -246,26 +257,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
 
         // Priority 4: Debug trap exceptions (TF single-step, data/I/O breakpoints)
         // Bochs event.cc — check inhibition FIRST, then debug_trap
-        if !self.interrupts_inhibited(BxCpuC::<T>::BX_INHIBIT_DEBUG) {
-            // Bochs event.cc: OR code breakpoint matches into debug_trap
+        if !self.debug_trap_inhibited() {
+            // Bochs event.cc: OR code breakpoint matches into debug_trap.
+            // Here and not inside the discharge: this tests the address of
+            // the instruction ABOUT to run against DR0–DR3, a check an engine
+            // running that instruction on hardware gets from the hardware.
             self.debug_trap |= self.pending_code_breakpoint_trap();
-            if self.debug_trap & 0xF000 != 0 {
-                // BX_DEBUG_SINGLE_STEP_BIT or BX_DEBUG_DR_ACCESS_BIT set
-                // Bochs: exception() longjmps — propagate restart
-                if let Err(super::error::CpuError::CpuLoopRestart) =
-                    self.exception(super::cpu::Exception::Db, 0)
-                {
-                    // Bochs's longjmp lands in cpu_loop's setjmp handler,
-                    // which commits `prev_rip = RIP` before resuming (cpu.cc).
-                    // Every other delivery arm here does the same; without it
-                    // the #DB handler runs with prev_rip still pointing at the
-                    // interrupted instruction, so the next fault inside the
-                    // handler reports the wrong address.
-                    self.prev_rip = self.rip();
-                    return false;
-                }
-            } else {
-                self.debug_trap = 0;
+            match self.discharge_the_trap_owed() {
+                Ok(TrapDischarge::Delivered) => return false,
+                Ok(TrapDischarge::NothingOwed) => {}
+                Err(error) => tracing::warn!("#DB delivery failed: {:?}", error),
             }
         }
 
@@ -605,6 +606,50 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         false // Continue execution
     }
 
+    /// Deliver the trap the previous instruction owes, or clear the latch.
+    ///
+    /// Bochs event.cc handleAsyncEvent, Priority 4, past its guards:
+    /// `if (debug_trap & 0xf000) exception(BX_DB_EXCEPTION, 0); else
+    /// debug_trap = 0;`. The ONE body for that decision (R5). The interpreter
+    /// takes it at the head of every instruction; an execution engine takes
+    /// it at the end of an errand, because the errand's instruction retired
+    /// on the shadow and the head it would have been delivered at belongs to
+    /// the hardware.
+    ///
+    /// The guards stay with the caller, which must know both: the `MOV SS`
+    /// inhibit ([`BxCpuC::debug_trap_inhibited`]), which the interpreter
+    /// answers by skipping this boundary and an engine by retiring one more
+    /// instruction; and the code-breakpoint match, which tests the NEXT
+    /// instruction's address against DR0–DR3 — hardware makes that check
+    /// itself, so an engine does not OR it in.
+    ///
+    /// On every `Ok` path `debug_trap` is zero afterwards: a delivered `#DB`
+    /// commits the latch to DR6 and clears it (Bochs exception.cc), and
+    /// nothing owed is cleared here. Deliberately NOT the whole of
+    /// `handle_async_event`: its tail re-arms the single step from the TF the
+    /// processor holds NOW, the wrong flag for an instruction that has
+    /// already retired — and a stranded latch when that instruction was the
+    /// `POPF` or `IRET` that set it.
+    pub(crate) fn discharge_the_trap_owed(&mut self) -> super::Result<TrapDischarge> {
+        if !self.owes_a_debug_trap() {
+            self.debug_trap = 0;
+            return Ok(TrapDischarge::NothingOwed);
+        }
+        match self.exception(super::cpu::Exception::Db, 0) {
+            // Bochs `exception` longjmps into cpu_loop's setjmp handler, which
+            // commits `prev_rip = RIP` before resuming (cpu.cc); this port's
+            // `CpuLoopRestart` is that longjmp, and the commit belongs to
+            // whoever catches it. Without it the #DB handler runs with
+            // prev_rip still on the interrupted instruction, and the next
+            // fault inside the handler reports the wrong address.
+            Ok(()) | Err(super::error::CpuError::CpuLoopRestart) => {
+                self.prev_rip = self.rip();
+                Ok(TrapDischarge::Delivered)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// One interrupt-acknowledge moment: LAPIC first, then the 8259, in the
     /// priority order Bochs event.cc HandleExtInterrupt takes them.
     ///
@@ -834,6 +879,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::arch_state::VcpuArchState;
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::ResetReason;
     use crate::params::{BxParams, CpuTopology};
@@ -1651,5 +1697,220 @@ mod tests {
             !bus.ctx(&mut cpu).handle_wait_for_event(),
             "with interrupts enabled the user interrupt ends the wait"
         );
+    }
+
+    // ── The trap an errand owes ─────────────────────────────────────────
+    //
+    // An execution engine hands ONE instruction to the shadow processor to
+    // service an access the hardware cannot finish, and takes the processor
+    // back the moment it retires. The interpreter delivers a single-step
+    // `#DB` at the head of the NEXT instruction (Bochs event.cc
+    // handleAsyncEvent, Priority 4) — a head an errand never reaches — so the
+    // errand's tail asks for the trap by name. These tests drive the two
+    // verbs the tail uses, in the tail's order, and assert only what the
+    // guest can see (R9).
+
+    /// Where the trap tests' real-mode guest lives: its code, its `#DB`
+    /// handler, its stack, and the IVT slot vector 1 occupies.
+    const TRAP_CODE: u16 = 0x1000;
+    const TRAP_HANDLER: u16 = 0x1100;
+    const TRAP_STACK_TOP: u16 = 0x7000;
+    const IVT_VECTOR_1: u64 = 1 * 4;
+    /// EFLAGS bit 1 reads as one; the rest of the word starts clear.
+    const RFLAGS_RESERVED: u64 = 0x2;
+    const RFLAGS_TF: u64 = 1 << 8;
+    /// `VcpuArchState::gprs` is in the processor's own order; RSP is fourth.
+    const GPR_RSP: usize = 4;
+    /// A real-mode interrupt frame: FLAGS, CS, IP — three words.
+    const REAL_MODE_FRAME: u16 = 6;
+
+    /// Load `code` at 0:TRAP_CODE and point IVT vector 1 at a handler that
+    /// is a lone `iret` — never reached by these tests, which stop at its
+    /// entry.
+    fn install_real_mode_guest(bus: &mut TestBus, code: &[u8]) {
+        bus.memory
+            .write_ram(u64::from(TRAP_CODE), code)
+            .expect("the guest's code is RAM");
+        bus.memory
+            .write_ram(u64::from(TRAP_HANDLER), &[0xCF])
+            .expect("the handler is RAM");
+        let mut vector = [0u8; 4];
+        vector[..2].copy_from_slice(&TRAP_HANDLER.to_le_bytes());
+        bus.memory
+            .write_ram(IVT_VECTOR_1, &vector)
+            .expect("the IVT is RAM");
+    }
+
+    /// Bring a processor to 0:TRAP_CODE with SS:SP = 0:TRAP_STACK_TOP and
+    /// `rflags`, the way an errand begins: through the architectural state
+    /// exchange (`import_arch_state`), which is the path whose flags write
+    /// has to arm the boundary.
+    fn reset_into_real_mode_at(cpu: &mut BxCpuC, rflags: u64) {
+        cpu.reset(ResetReason::Hardware);
+        let mut state = VcpuArchState::default();
+        cpu.export_arch_state(&mut state);
+        state.rip = u64::from(TRAP_CODE);
+        state.rflags = rflags;
+        state.gprs[GPR_RSP] = u64::from(TRAP_STACK_TOP);
+        let cs = &mut state.segments[BxSegregs::Cs as usize];
+        cs.selector = 0;
+        cs.base = 0;
+        cpu.import_arch_state(&state)
+            .expect("a reset state moved to low memory imports");
+    }
+
+    /// The seam re-reads the processor from the hardware before every errand;
+    /// this is that read-back with only the flags changed.
+    fn reimport_with_rflags(cpu: &mut BxCpuC, rflags: u64) {
+        let mut state = VcpuArchState::default();
+        cpu.export_arch_state(&mut state);
+        state.rflags = rflags;
+        cpu.import_arch_state(&state)
+            .expect("a state the processor just exported imports");
+    }
+
+    fn read_word(bus: &mut TestBus, addr: u64) -> u16 {
+        let mut word = [0u8; 2];
+        let read = bus
+            .memory
+            .read_ram(addr, &mut word)
+            .expect("the stack is RAM");
+        assert_eq!(read, word.len(), "a whole word is readable at {addr:#x}");
+        u16::from_le_bytes(word)
+    }
+
+    /// The errand's tail, in the engine's order: retire the trapped
+    /// instruction whole, then deliver whatever trap it owes.
+    fn run_one_errand(bus: &mut TestBus, cpu: &mut BxCpuC) {
+        bus.io()
+            .finish_the_instruction(cpu)
+            .expect("the errand's instruction retires");
+        bus.io()
+            .deliver_the_trap_owed(cpu)
+            .expect("the trap owed is discharged");
+    }
+
+    /// An instruction retired by an errand with TF set is owed a single-step
+    /// `#DB`, and the guest sees it exactly as it would under the interpreter:
+    /// the handler entered, the frame's saved IP past the retired
+    /// instruction, DR6.BS set, TF clear for the handler.
+    #[test]
+    fn an_errand_delivers_the_step_the_retired_instruction_owes() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        // inc bx
+        install_real_mode_guest(&mut bus, &[0x43]);
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED | RFLAGS_TF);
+
+        run_one_errand(&mut bus, &mut cpu);
+
+        assert_eq!(cpu.bx(), 1, "the errand's instruction retired");
+        assert_eq!(cpu.get_cs_base(), 0, "the handler's segment is the IVT's");
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_HANDLER),
+            "the processor stands at the #DB handler's entry"
+        );
+        assert_eq!(
+            cpu.sp(),
+            TRAP_STACK_TOP - REAL_MODE_FRAME,
+            "one real-mode interrupt frame was pushed"
+        );
+        assert_eq!(
+            read_word(&mut bus, u64::from(TRAP_STACK_TOP - REAL_MODE_FRAME)),
+            TRAP_CODE + 1,
+            "the saved IP is the address after the retired instruction"
+        );
+        assert!(cpu.dr6.bs(), "DR6.BS reports a single step");
+        assert!(
+            !cpu.eflags.contains(EFlags::TF),
+            "TF is clear for the handler"
+        );
+        assert_eq!(cpu.debug_trap, 0, "nothing is left latched for the next errand");
+    }
+
+    /// An errand whose instruction SETS TF owes nothing, and leaves nothing
+    /// behind to fire at the next errand.
+    ///
+    /// x86 traps after the instruction that RAN with TF set, not after the
+    /// one that set it — Bochs event.cc handleAsyncEvent arms
+    /// `BX_DEBUG_SINGLE_STEP_BIT` at the boundary before an instruction, from
+    /// the TF it starts with. `POPF` and `IRET` are what a stepping debugger
+    /// runs, so an errand retiring one is the ordinary case. A discharge that
+    /// re-armed from the new TF would strand a latch in the shadow; the
+    /// hardware then runs the guest and delivers that step itself, and the
+    /// latch fires at whatever the next errand happens to be.
+    #[test]
+    fn an_errand_that_sets_tf_strands_no_step_for_the_next_errand() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        // popf ; inc bx — the second is the next errand's instruction.
+        install_real_mode_guest(&mut bus, &[0x9D, 0x43]);
+        // The word POPF pops: TF set.
+        bus.memory
+            .write_ram(
+                u64::from(TRAP_STACK_TOP),
+                &((RFLAGS_RESERVED | RFLAGS_TF) as u16).to_le_bytes(),
+            )
+            .expect("the stack is RAM");
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED);
+
+        run_one_errand(&mut bus, &mut cpu);
+
+        assert!(cpu.eflags.contains(EFlags::TF), "POPF set TF");
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_CODE + 1),
+            "no trap after the instruction that set TF"
+        );
+        assert_eq!(cpu.sp(), TRAP_STACK_TOP + 2, "POPF popped and nothing was pushed");
+        assert_eq!(cpu.debug_trap, 0, "no latch survives the errand");
+
+        // The hardware runs the guest from here and takes the next step
+        // itself; when the next errand arrives the exit header says TF is
+        // clear.
+        reimport_with_rflags(&mut cpu, RFLAGS_RESERVED);
+
+        run_one_errand(&mut bus, &mut cpu);
+
+        assert_eq!(cpu.bx(), 1, "the next errand's instruction retired");
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_CODE + 2),
+            "no stranded step fires against the next errand's instruction"
+        );
+        assert_eq!(cpu.sp(), TRAP_STACK_TOP + 2, "no frame was pushed");
+        assert!(!cpu.dr6.bs(), "DR6.BS never reported a step");
+        assert_eq!(cpu.debug_trap, 0, "no latch survives the second errand either");
+    }
+
+    /// `MOV SS` inhibits the trap for exactly one instruction (Bochs cpu.h
+    /// `BX_INHIBIT_INTERRUPTS_BY_MOVSS`; `inhibit_interrupts` refuses to
+    /// extend the window), so the errand's tail retires that one instruction
+    /// and delivers then — the frame's saved IP is past BOTH instructions,
+    /// as it is under the interpreter, and no step is stranded or lost.
+    #[test]
+    fn a_step_owed_by_mov_ss_is_delivered_after_the_instruction_it_shadows() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        // mov ss,ax (AX is zero out of reset, so SS stays 0) ; inc bx
+        install_real_mode_guest(&mut bus, &[0x8E, 0xD0, 0x43]);
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED | RFLAGS_TF);
+
+        run_one_errand(&mut bus, &mut cpu);
+
+        assert_eq!(cpu.bx(), 1, "the shadowed instruction retired before the trap");
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_HANDLER),
+            "the processor stands at the #DB handler's entry"
+        );
+        assert_eq!(
+            read_word(&mut bus, u64::from(TRAP_STACK_TOP - REAL_MODE_FRAME)),
+            TRAP_CODE + 3,
+            "the saved IP is past the instruction MOV SS shadowed"
+        );
+        assert!(cpu.dr6.bs(), "DR6.BS reports a single step");
+        assert_eq!(cpu.debug_trap, 0, "nothing is left latched for the next errand");
     }
 }

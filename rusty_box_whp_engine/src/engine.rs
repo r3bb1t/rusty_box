@@ -49,6 +49,10 @@ use rusty_box::GpaWindow;
 /// one and pretending.
 const BOOT_VP: u32 = 0;
 
+/// RFLAGS.TF, the trap flag. A guest with it set owes a single-step `#DB`
+/// after every instruction — including one this engine finishes for it.
+const RFLAGS_TF: u64 = 1 << 8;
+
 /// Every `CPUID` leaf this engine takes away from the host.
 ///
 /// A leaf that is not here executes on the host's own processor and answers
@@ -1835,7 +1839,11 @@ fn run_the_exit_loop<T: Instrumentation>(
             // RAX all arrive in the exit, so no decoder is involved and the
             // machine's own device dispatch answers it directly.
             ExitReason::IoPortAccess(access) => {
-                if access.string_op || access.rep_prefix || ports_on_the_shadow() {
+                if access.string_op
+                    || access.rep_prefix
+                    || ports_on_the_shadow()
+                    || exit.vp.rflags & RFLAGS_TF != 0
+                {
                     // A string or repeated port access moves memory as well as
                     // a register, and the exit describes only the register.
                     // Finishing it from the exit alone would transfer one item
@@ -1844,6 +1852,13 @@ fn run_the_exit_loop<T: Instrumentation>(
                     // would never know. The shadow runs the instruction whole,
                     // through the machine's own dispatch, exactly as the
                     // interpreter would.
+                    //
+                    // A guest single-stepping owes a `#DB` after this
+                    // instruction as well, and finishing it from the exit —
+                    // RIP arithmetic, no shadow instruction — leaves nobody
+                    // to deliver it. The shadow retires it and its tail takes
+                    // the trap. TF is read from the exit header, already
+                    // here, so a guest that is not stepping pays nothing.
                     finish_on_the_shadow(started, cpu, io, Trapped::Access)?;
                 } else {
                     service_port_access(started, io, &exit, access)?;
@@ -2471,7 +2486,7 @@ fn burst_on_the_shadow<T: Instrumentation>(
     // Across a burst the interpreter delivers on its own terms, exactly as it
     // does when it owns the machine.
     io.emulate_batch(cpu, BURST_INSTRUCTIONS)?;
-    impose_after_errand(started, cpu, Trapped::Access)
+    impose_after_errand(started, cpu, io, Trapped::Access)
 }
 
 fn finish_on_the_shadow<T: Instrumentation>(
@@ -2486,23 +2501,34 @@ fn finish_on_the_shadow<T: Instrumentation>(
     // fault and enters a handler — the processor it leaves behind is the one
     // the platform must continue from.
     io.finish_the_instruction(cpu)?;
-    impose_after_errand(started, cpu, trapped)
+    impose_after_errand(started, cpu, io, trapped)
 }
 
-/// The end every errand shares: republish deliverability from the shadow,
-/// then write the shadow into the partition.
+/// The end every errand shares: deliver the trap the errand owes, republish
+/// deliverability from the shadow, then write the shadow into the partition.
 ///
 /// One function rather than a tail repeated in `finish_on_the_shadow` and
-/// `burst_on_the_shadow`, because the republish is a safety obligation (R5):
-/// the injection tail runs next, and a gate that reads the pre-errand header
-/// after the interpreter has moved `IF` acknowledges vectors it must not.
-/// With the obligation living here, no errand can skip it without every
-/// errand losing it — which is a rewrite, not a slip.
+/// `burst_on_the_shadow`, because both obligations are safety obligations
+/// (R5): the injection tail runs next, and a gate that reads the pre-errand
+/// header after the interpreter has moved `IF` acknowledges vectors it must
+/// not. With the obligations living here, no errand can skip one without
+/// every errand losing it — which is a rewrite, not a slip.
 fn impose_after_errand<T: Instrumentation>(
     started: &mut Started,
-    cpu: &BxCpuC<T>,
+    cpu: &mut BxCpuC<T>,
+    io: &mut PcIo<'_>,
     trapped: Trapped,
 ) -> Result<()> {
+    // The trap the retired instruction owes, first. A single-step `#DB` is
+    // delivered at the head of the NEXT instruction, and that head belongs
+    // to the hardware, which arms a step for its own instruction and knows
+    // nothing of the shadow's — so the shadow takes the boundary before it
+    // is written into the partition, and what the partition receives is the
+    // handler's entry. Here rather than in `finish_the_instruction` because
+    // every errand ends here: a one-instruction finish and a burst's last
+    // instruction owe the same step.
+    io.deliver_the_trap_owed(cpu)?;
+
     // The errand has retired on the shadow, and `impose_the_shadow` below
     // makes the partition identical to it — so the shadow's live `IF`, not
     // the pre-errand exit header, is what the injection tail must judge

@@ -624,19 +624,15 @@ mod tests {
     /// Two baselines make the probe honest. TF-stepping with no errand
     /// proves native real-mode `#DB` delivery agrees between the engines
     /// byte for byte. And the errand guest's SECOND device-memory touch,
-    /// with TF already clear, proves the one step that IS missing (below)
-    /// was lost rather than deferred: a lingering trap latch would fire
-    /// there, misattributed, as a duplicate 0x1033 entry — the subsequence
-    /// assertion would catch it, and none appears.
+    /// with TF already clear, is where a latch stranded in the shadow by the
+    /// first errand would fire, misattributed, as a duplicate 0x1033 entry —
+    /// which the whole-trace equality shows.
     ///
-    /// KNOWN, deliberately unasserted: the errand-retired instruction's OWN
-    /// step (frame IP 0x102A) does not arrive on hardware. The interpreter
-    /// latches it in CPU-local state for a boundary a one-instruction errand
-    /// never reaches, and the seam carries no pending-debug register — a
-    /// defect that predates injection entirely and has nothing to do with
-    /// the imposed bit (it reproduces with the InterruptState write absent).
-    /// Asserting its absence would cement it; it is reported as its own
-    /// finding instead, and the assertions here stay true when it is fixed.
+    /// The errand-retired instruction's OWN step (frame IP 0x102A) is part
+    /// of the same equality. The interpreter latches it for a boundary a
+    /// one-instruction errand never reaches, so the errand's tail takes that
+    /// boundary itself (`PcIo::deliver_the_trap_owed`), and the hardware
+    /// trace carries the step exactly where the interpreter's does.
     #[test]
     fn a_single_step_trap_survives_the_imposed_inhibit() {
         if !hypervisor_here() {
@@ -803,7 +799,7 @@ mod tests {
         );
         eprintln!(
             "errand's own step (frame IP 0x102a) on hardware: {}",
-            if hw_err.contains(&0x102A) { "DELIVERED" } else { "LOST (known seam gap)" }
+            if hw_err.contains(&0x102A) { "DELIVERED" } else { "LOST" }
         );
         eprintln!(
             "first hardware-retired step after the imposition (frame IP 0x102b): {}",
@@ -828,20 +824,14 @@ mod tests {
              platform's bit carries MOV-SS-type suppression and every imposition \
              silently eats a step: hardware trace {hw_err:#06x?}"
         );
-        // Ordered subsequence: the hardware may (today) miss the errand's own
-        // step, but every trap it does deliver must be one the interpreter
-        // delivers, in the same order — no phantom, misattributed or
-        // reordered #DB, and in particular no duplicate 0x1033 from a stale
-        // trap latch firing at the second errand.
-        let mut interpreter_entries = int_err.iter();
-        let subsequence = hw_err
-            .iter()
-            .all(|entry| interpreter_entries.by_ref().any(|reference| reference == entry));
-        assert!(
-            subsequence,
-            "every hardware-delivered trap must appear in the interpreter's \
-             trace, in order — a stray entry is a misattributed or phantom #DB: \
-             hardware {hw_err:#06x?} vs interpreter {int_err:#06x?}"
+        // The whole trace, in order. One equality catches a lost step, a
+        // duplicate from a latch stranded in the shadow, and a double
+        // delivery alike — anything a stepping guest could observe
+        // differently between the engines.
+        assert_eq!(
+            hw_err, int_err,
+            "with an errand in the stepped window, the two engines must still \
+             deliver the identical single-step trace"
         );
     }
 
