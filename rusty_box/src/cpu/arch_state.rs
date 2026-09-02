@@ -599,6 +599,50 @@ impl<T: Instrumentation> BxCpuC<T> {
         self.lapic.set_tpr((cr8 & 0xF) << 4);
     }
 
+    /// Whether an interrupt inhibit is live at the boundary this processor
+    /// stands on — the one-instruction window after `STI`, `MOV SS` or
+    /// `POP SS` in which a maskable external interrupt is not taken. The
+    /// same test this processor's own delivery gate runs at every boundary
+    /// (Bochs event.cc handleAsyncEvent, Priority 5:
+    /// `interrupts_inhibited(BX_INHIBIT_INTERRUPTS)`), so an engine that
+    /// injects on this answer injects exactly where the interpreter would
+    /// have delivered.
+    ///
+    /// Answered for the CURRENT retired-instruction count. The inhibit is
+    /// bookkept as "the instruction after the one that armed it" (Bochs
+    /// cpu.h `inhibit_interrupts`: `inhibit_icount = icount + 1`), so this is
+    /// exact while this interpreter is the processor that last retired an
+    /// instruction for the guest, and says nothing about instructions
+    /// another engine retired since — that count does not move while the
+    /// hardware runs. An engine that ran the guest elsewhere must lapse a
+    /// consumed inhibit through [`Self::lapse_interrupt_inhibit`] when it
+    /// takes the processor back, and must ask its own hardware about any
+    /// shadow the hardware entered.
+    #[must_use]
+    pub fn in_interrupt_shadow(&self) -> bool {
+        self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS)
+    }
+
+    /// Lapse whatever interrupt inhibit this processor holds: the instruction
+    /// it protected has retired on another engine, so the window is over.
+    ///
+    /// An inhibit is anchored to this interpreter's own retired-instruction
+    /// count, which does not move while the hardware retires the guest's
+    /// instructions, so an inhibit armed by the shadow's last instruction
+    /// would otherwise stand for as long as the hardware kept the processor.
+    /// VirtualBox anchors its shadow to `RIP` and drops it on import when the
+    /// hardware reports none (`NEMAllNativeTemplate-win.cpp.h`
+    /// `nemHCWinCopyStateFromHyperV`, `CPUMUpdateInterruptShadowEx`); here
+    /// the engine says so explicitly, at the read-back that found the
+    /// hardware's shadow bit clear. Same body as the wake's "clear inhibits
+    /// for after resume" (Bochs event.cc handleWaitForEvent), and for the
+    /// same reason: the instruction stream resumes at a boundary no shadow
+    /// covers. The debug-trap inhibit goes with it — both name the one
+    /// shadowed instruction, and it has retired.
+    pub fn lapse_interrupt_inhibit(&mut self) {
+        self.inhibit_mask = 0;
+    }
+
     /// Whether this processor is inside system-management mode.
     ///
     /// An engine running the guest on the host's own processor has to ask,

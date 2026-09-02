@@ -317,24 +317,30 @@ fn platform_failed(error: WhpError) -> CpuError {
 ///   errand's `impose_the_shadow` has just made the partition identical to
 ///   the shadow, so the SHADOW is what the next VM entry sees and the header
 ///   is stale. Every errand path therefore ends with
-///   [`Self::refresh_from_shadow`], which republishes `if_flag` from the
-///   interpreter and PRESUMES the interrupt shadow live — the interpreter's
-///   inhibit bookkeeping is invisible to this crate, and unknown means
-///   blocked, never permitted.
+///   [`Self::refresh_from_shadow`], which republishes `if_flag` AND the
+///   interrupt shadow from the interpreter's own bookkeeping
+///   (`BxCpuC::in_interrupt_shadow`) — the inhibit the errand's last
+///   retired instruction armed, or none.
 /// - **A slice head** (`install_the_shadow`) is the errand case writ large:
 ///   whatever the cache holds predates everything the machine did between
 ///   slices — shadow-converted slices, deliveries, state the machine wrote —
 ///   or there was never a header at all. The install is an imposition, so it
-///   carries the same republish, and the head's staging decision always runs
-///   on the shadow's own `IF` with the inhibit presumed live.
+///   carries the same republish, from the shadow's own `IF` and from BOTH
+///   parties that can hold a shadow at a head: the interpreter's inhibit,
+///   and the partition's own bit as the last read-back left it.
 ///
 /// The property both together guarantee: at the instant `stage_injection`
 /// pops a vector — an irreversible acknowledge — the gate holds POSITIVE
 /// evidence that delivery is permitted, never merely the absence of evidence
-/// that it is blocked. Getting this wrong injects a maskable interrupt into
-/// an `IF=0` or interrupt-shadowed context, which the VM-entry guest-state
+/// that it is blocked. The interpreter's inhibit is that evidence for the
+/// shadow exactly as its `IF` is: the value its own delivery gate consults at
+/// this boundary (Bochs event.cc handleAsyncEvent, Priority 5), read rather
+/// than guessed. Getting this wrong injects a maskable interrupt into an
+/// `IF=0` or interrupt-shadowed context, which the VM-entry guest-state
 /// checks reject with `WHV_E_INVALID_VP_STATE` and which loses the
-/// acknowledged vector.
+/// acknowledged vector. Guessing "blocked" instead is safe and is not free:
+/// every guess defers the vector to a deliverability window and pays a
+/// window exit to learn what the interpreter already knew.
 struct InjectState {
     /// `ExecutionState` bit 6, `InterruptionPending` — a delivery the platform
     /// has begun and not landed. From the exit header alone.
@@ -348,13 +354,12 @@ struct InjectState {
     /// guest `MOV CR8` retires on hardware without an exit, so no copy this
     /// engine keeps between exits can be trusted over the header's.
     cr8: u8,
-    /// Whether the processor the next VM entry will run may be inside an
+    /// Whether the processor the next VM entry will run is inside an
     /// interrupt shadow — an `STI` / `MOV SS` / `POP SS` window that blocks
     /// delivery for one instruction. `ExecutionState` bit 12 from the exit
-    /// header on an errand-free iteration; PRESUMED true by
-    /// [`Self::refresh_from_shadow`] after an errand, because the
-    /// interpreter's inhibit state is invisible to this crate and the gate
-    /// may only act on positive permission.
+    /// header on an errand-free iteration; the interpreter's own inhibit
+    /// (`BxCpuC::in_interrupt_shadow`), republished by
+    /// [`Self::refresh_from_shadow`] after an errand and at a slice head.
     shadowed: bool,
     /// A `DeliverabilityNotifications` request armed at this priority and not
     /// yet answered by a window exit. NOT touched by either refresh — no
@@ -394,34 +399,69 @@ impl InjectState {
     /// Called at the end of every path that emulates before the injection
     /// tail, once `impose_the_shadow` has made the partition identical to the
     /// interpreter, and by `install_the_shadow` at every slice head — always
-    /// with the shadow's live `IF` (`cpu.interrupts_enabled()`).
+    /// with the shadow's live `IF` (`cpu.interrupts_enabled()`) and its live
+    /// inhibit.
     ///
-    /// `shadowed` is set TRUE — unknown, therefore blocked. The
-    /// interpreter's one-instruction interrupt inhibit (`STI` / `MOV SS` /
-    /// `POP SS`) is crate-private bookkeeping this crate cannot read, and an
-    /// errand CAN stop with one live: the batch loop breaks on its
-    /// instruction budget at the loop head, before the async-event handling
-    /// that would lapse an inhibit (rusty_box `cpu.rs` `cpu_loop_n_impl`,
-    /// `inhibit_interrupts`), so a stretch whose last retired instruction is
-    /// a shadower returns mid-window, and a single trapped `MOV SS`/`POP SS`
-    /// with a device-memory operand does the same in one step. Claiming "not
-    /// shadowed" there would hand the gate positive permission it does not
-    /// have, and the gate acknowledges on it — an irreversible INTA — before
-    /// injecting into a live shadow. So the gate is told BLOCKED, the vector
-    /// is deferred to a window, and the NEXT exit's header bit 12 —
-    /// authoritative and free — answers truthfully. The cost of the
-    /// presumption is one deferred injection resolved by one window exit;
-    /// nothing irreversible happens on the unknown.
+    /// `shadowed` is the interpreter's own answer, and that is what makes it
+    /// admissible where a guess would not be. The gate acknowledges on this
+    /// value — an irreversible INTA — so it must be positive evidence that
+    /// delivery is permitted: `BxCpuC::in_interrupt_shadow` is the very test
+    /// the interpreter's delivery gate runs at this boundary
+    /// (`interrupts_inhibited(BX_INHIBIT_INTERRUPTS)`, Bochs event.cc
+    /// handleAsyncEvent Priority 5), current for the instruction the shadow
+    /// retired last. An errand CAN stop with an inhibit live — the batch
+    /// loop breaks on its instruction budget at the loop head, before the
+    /// async-event handling that would consume one (rusty_box `cpu.rs`
+    /// `cpu_loop_n_impl`), so a burst whose last instruction is `STI`
+    /// returns mid-window, and a trapped `MOV SS`/`POP SS` with a
+    /// device-memory operand does the same in one step — and then the answer
+    /// is "blocked", the vector defers to a window, and the NEXT exit's
+    /// header bit 12 answers again. Every other errand answers "open", and
+    /// the vector is injected at the tail with no window and no window exit.
+    /// VirtualBox's NEM backend exports the same interpreter-side answer into
+    /// the same register (`NEMAllNativeTemplate-win.cpp.h`
+    /// `nemHCWinCopyStateToHyperV`, `CPUMIsInInterruptShadow`).
+    ///
+    /// At a slice head the caller ORs in the partition's own bit from the
+    /// last read-back: the interpreter cannot know of a shadow the hardware
+    /// entered, and a head is the one place both can be live.
     ///
     /// `in_flight` and `cr8` are not republished: nothing an errand does
     /// begins a platform delivery, and the header's `CR8` still stands.
     ///
-    /// Takes the flag rather than the processor so the freshness rule is
-    /// unit-testable without a constructed `BxCpuC`; the call site reads it
+    /// Takes the flags rather than the processor so the freshness rule is
+    /// unit-testable without a constructed `BxCpuC`; the call sites read them
     /// from the shadow.
-    fn refresh_from_shadow(&mut self, shadow_if: bool) {
+    fn refresh_from_shadow(&mut self, shadow_if: bool, shadow_inhibit: bool) {
         self.if_flag = shadow_if;
-        self.shadowed = true;
+        self.shadowed = shadow_inhibit;
+    }
+}
+
+/// `WHvRegisterInterruptState` as this engine exchanges it: bit 0 the
+/// interrupt shadow, bit 1 the NMI mask (`WHV_X64_INTERRUPT_STATE_REGISTER`).
+/// The one place the word is decoded and encoded (R5), so the read-back and
+/// the imposition cannot disagree about which bit is which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InterruptStateWord {
+    /// The guest stands inside an `STI` / `MOV SS` / `POP SS` window.
+    shadow: bool,
+    /// NMIs are masked — the hardware's own record of a guest inside an NMI
+    /// handler, which no architectural register the exchange carries holds.
+    nmi_masked: bool,
+}
+
+impl InterruptStateWord {
+    /// A processor that has never run: it cannot be mid-instruction, and
+    /// NMIs are unmasked at reset.
+    const AT_RESET: Self = Self { shadow: false, nmi_masked: false };
+
+    const fn decode(word: u64) -> Self {
+        Self { shadow: word & 1 != 0, nmi_masked: word & 2 != 0 }
+    }
+
+    fn encode(self) -> u64 {
+        u64::from(self.shadow) | (u64::from(self.nmi_masked) << 1)
     }
 }
 
@@ -460,19 +500,24 @@ struct Started {
     /// `IRET` that ends the handler pops whatever happened to be there. That
     /// is a `general protection: 0000` on `IRET`, which is exactly how a DLX
     /// boot died once IDE interrupts started flowing.
-    shadowed: bool,
-    /// Whether the guest had NMIs masked when the hardware last handed it
-    /// back — bit 1 of `WHvRegisterInterruptState`, read beside
-    /// [`Self::shadowed`].
     ///
-    /// Kept so [`impose_the_shadow`] can write that register's inhibit bit
-    /// without clobbering this one: the mask is the hardware's own record of
-    /// a guest inside an NMI handler, no architectural register the exchange
-    /// carries holds it, and a blind zero would unmask NMIs mid-handler.
-    /// Between the read-back that fills it and any imposition that writes the
-    /// register the partition never runs, so the copy is current at every
-    /// write.
-    nmi_masked: bool,
+    /// TAKEN, not merely read, by every shadow path that retires the
+    /// shadowed instruction itself (a converted slice, a burst), so that it
+    /// is stale in neither direction wherever it is consulted; the
+    /// partition-side record that is never taken is
+    /// [`Self::held_interrupt_state`].
+    shadowed: bool,
+    /// What the partition's `WHvRegisterInterruptState` holds, as far as this
+    /// engine knows: the interrupt shadow and the NMI mask.
+    ///
+    /// Written at exactly the two moments the answer is certain — the
+    /// read-back that reads the register, and the imposition that writes it
+    /// — and between a read-back and any imposition the partition never
+    /// runs, so the copy is current at every write. It is what lets
+    /// [`impose_the_shadow`] carry the NMI mask through unchanged (a blind
+    /// zero would unmask NMIs mid-handler) and skip a write that would
+    /// change nothing.
+    held_interrupt_state: InterruptStateWord,
     /// What the platform's registers hold, as far as this engine knows.
     ///
     /// Written at exactly the two moments the answer is certain: after reading
@@ -849,10 +894,9 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                 partition,
                 state: VcpuArchState::default(),
                 installed,
-                // A processor that has never run cannot be mid-instruction,
-                // and NMIs are unmasked at reset.
+                // A processor that has never run cannot be mid-instruction.
                 shadowed: false,
-                nmi_masked: false,
+                held_interrupt_state: InterruptStateWord::AT_RESET,
                 consecutive_mmio: 0,
                 // Nothing has been read from this processor yet.
                 held: None,
@@ -1067,11 +1111,11 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // `MWAIT` retired behind the `MOV SS`; one, when a failed `RSM`
         // assigned the shutdown state without retiring anything — is gone the
         // moment it runs again. And the bit the read-back returned after a
-        // shadow-retired halt is the one `impose_the_shadow` writes after
-        // every errand — unknown-means-blocked — not a shadow the guest is in.
-        // Read as one it would hold off every wake below and let the
-        // partition run past the halt, so it is consumed here, ahead of every
-        // path that reads it.
+        // shadow-retired halt is the inhibit `impose_the_shadow` carried
+        // across when the sleeper was imposed — the one the wake lapses —
+        // not a shadow the guest is in. Read as one it would hold off every
+        // wake below and let the partition run past the halt, so it is
+        // consumed here, ahead of every path that reads it.
         let asleep = !matches!(cpu.activity_state, CpuActivityState::Active);
         if asleep {
             if let Some(started) = self.started.as_mut() {
@@ -1234,14 +1278,13 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // partition before an injection is staged against it, and judged by
         // the same gate as at an exit's tail. `install_the_shadow` has just
         // republished deliverability from the shadow, so the gate holds the
-        // honest answer a head can give: `IF` is the shadow's own, fresh and
-        // positive, while the inhibit is UNKNOWN — the interpreter's
-        // one-instruction inhibit is invisible to this crate, and
-        // `started.shadowed` above is only as fresh as the last read-back,
-        // which predates any errand's retirement — so the gate is told
-        // BLOCKED and a head-pending vector defers to a window the next
-        // exit's header answers. The deferral costs one window exit; nothing
-        // irreversible happens on the unknown.
+        // head's own positive evidence: `IF` is the shadow's, and the inhibit
+        // is the interpreter's own bookkeeping ORed with the partition's bit
+        // as the last read-back left it — live only behind a shadower the
+        // shadow retired last, or one the hardware retired last. A
+        // head-pending vector with both clear is injected here, with no
+        // window and no window exit; one with either set defers to a window
+        // the next exit's header answers.
         //
         // The guard mirrors the exit tail's: an NMI, SMI or INIT outranks any
         // maskable vector (the order Bochs event.cc keeps at its own
@@ -1449,11 +1492,10 @@ fn run_slice_on_the_shadow<T: Instrumentation>(
 /// and the processor the next VM entry runs is the shadow being installed
 /// here — not whatever exit header the cache still holds, which at a head may
 /// be a slice old or may never have existed. `IF` and `CR8` come fresh from
-/// the export below; the inhibit is presumed live, because between the last
-/// read-back and this head the shadow may have retired instructions whose
-/// inhibit bookkeeping this crate cannot read — see [`InjectState`]'s
-/// freshness contract. Republished on the unchanged early return too: an
-/// untouched shadow is still what the entry runs.
+/// the export below; the inhibit comes from both parties that can hold one at
+/// a head — see [`InjectState`]'s freshness contract. Republished on the
+/// unchanged early return too: an untouched shadow is still what the entry
+/// runs.
 ///
 /// # Errors
 /// A register the platform refused to take.
@@ -1468,8 +1510,8 @@ fn install_the_shadow<T: Instrumentation>(
         partition,
         state,
         installed: _,
-        shadowed: _,
-        nmi_masked,
+        shadowed,
+        held_interrupt_state,
         consecutive_mmio: _,
         held,
         xsave,
@@ -1478,7 +1520,16 @@ fn install_the_shadow<T: Instrumentation>(
         inject,
     } = started;
     cpu.export_arch_state(state);
-    inject.refresh_from_shadow(cpu.interrupts_enabled());
+    // Both parties that can hold a shadow at a head. The interpreter's own
+    // inhibit is current for whatever the shadow retired since the last
+    // read-back, and that read-back lapsed any inhibit the hardware had
+    // consumed, so it is stale in neither direction. The partition's bit, as
+    // the read-back left it, is a shadow the hardware entered and handed
+    // back unconsumed — a run canceled behind an `STI` — which the
+    // interpreter cannot know of; every shadow path that retires the
+    // shadowed instruction takes the flag, so a set bit here is a live one.
+    let shadow = *shadowed || cpu.in_interrupt_shadow();
+    inject.refresh_from_shadow(cpu.interrupts_enabled(), shadow);
     // At a head the shadow's `CR8` is the freshest there is — the partition
     // has not run since the read-back that produced it, and any `MOV CR8` a
     // shadow stretch retired since landed in the shadow alone — so the header
@@ -1512,7 +1563,7 @@ fn install_the_shadow<T: Instrumentation>(
             return Ok(());
         }
     }
-    impose_the_shadow(partition, state, xsave, held.as_ref(), *nmi_masked)?;
+    impose_the_shadow(partition, state, xsave, held.as_ref(), held_interrupt_state, shadow)?;
     *held = Some(state.clone());
     Ok(())
 }
@@ -1527,54 +1578,49 @@ fn install_the_shadow<T: Instrumentation>(
 /// a flag word while that file sat still, so it goes only when it differs.
 /// With no agreement to compare against, everything goes.
 ///
-/// `WHvRegisterInterruptState` goes every time, and the inhibit bit goes as
-/// LIVE. An imposition means the shadow retired instructions — or the machine
-/// wrote state — since the read-back the partition's own bit dates from, so
-/// that bit is stale in both directions: a stretch may have retired the
-/// instruction a set bit was protecting (a partition still refusing delivery
-/// would reject an injection at entry with `WHV_E_INVALID_VP_STATE` the
-/// moment the gate correctly said yes), or retired a `MOV SS`/`POP SS`/`STI`
-/// as its LAST instruction and left an inhibit this crate cannot read (a
-/// clear bit would open an armed window at entry and the fresh header would
-/// pass the gate — an injection into the shadowing window, the new-`SS`
-/// old-`ESP` frame [`Started::shadowed`]'s doc records). Unknown means
-/// blocked, so the partition is told what the gate is told: inhibited, for
-/// the one instruction the architecture gives an inhibit, after which the
-/// hardware clears the bit itself and every later header answers truthfully.
-/// The NMI mask rides along unchanged from the last read-back
-/// ([`Started::nmi_masked`]); zeroing it would unmask NMIs mid-handler.
+/// `WHvRegisterInterruptState` carries what the exchange cannot. `shadow` is
+/// the interpreter's own inhibit at this boundary (`BxCpuC::in_interrupt_shadow`;
+/// at a head, ORed with the partition's own unconsumed bit), and it goes in
+/// as the real value: live behind a `MOV SS`/`POP SS`/`STI` the shadow
+/// retired last, so the hardware holds delivery off for the one instruction
+/// the architecture gives an inhibit and clears the bit itself; clear behind
+/// anything else, so a vector injected at this same tail enters with the
+/// interruptibility the VM-entry checks demand. That is what VirtualBox's
+/// NEM backend writes here (`NEMAllNativeTemplate-win.cpp.h`
+/// `nemHCWinCopyStateToHyperV`, `CPUMIsInInterruptShadow`), and the write is
+/// skipped as VirtualBox skips it when it would change nothing — VirtualBox
+/// tests `fLastInterruptShadow || CPUMIsInInterruptShadow`, which differs
+/// from equality only in rewriting a set bit as set. `held_interrupt_state`
+/// is what the partition's register holds and is brought up to date by the
+/// write. The NMI mask rides along unchanged from the last read-back;
+/// zeroing it would unmask NMIs mid-handler.
 ///
-/// The one direction where "always live" could have been optimistic rather
-/// than pessimistic is debug exceptions: VMX's MOV-SS-type blocking also
-/// SUPPRESSES the single-step `#DB` after the next instruction, and a
-/// suppressed step is lost, not deferred. Measured on this platform
-/// (`a_single_step_trap_survives_the_imposed_inhibit`): the instruction that
-/// consumes the imposed bit still delivers its single-step trap, in order —
-/// the write is transparent to `TF` stepping here, and the test stands guard
-/// on that answer.
-///
-/// What a consumer that CAN read its interpreter's inhibit writes instead is
-/// the real value: VirtualBox's NEM backend exports
-/// `CPUMIsInInterruptShadow` into this register, anchors the shadow to the
-/// `RIP` fetched beside it on import so a shadow never outlives its
-/// instruction, and skips the write when the previous and current values are
-/// both clear (VirtualBox `NEMAllNativeTemplate-win.cpp.h`
-/// `nemHCWinCopyStateToHyperV` / `nemHCWinCopyStateFromHyperV`). That
-/// accessor is exactly what rusty_box keeps crate-private, so the honest
-/// value available on this side of the seam is the presumption above.
+/// Debug exceptions are the direction in which a set bit costs more than a
+/// deferred delivery: VMX's MOV-SS-type blocking also SUPPRESSES the
+/// single-step `#DB` after the next instruction, and a suppressed step is
+/// lost, not deferred, where the platform's single `InterruptShadow` bit
+/// does not say which kind it is. No imposition under `TF` writes a set bit:
+/// an errand's tail retires the instruction a `MOV SS` shadows and delivers
+/// the owed step before imposing (`PcIo::deliver_the_trap_owed`), and taking
+/// a trap ends any inhibit (Bochs exception.cc `interrupt`,
+/// `inhibit_mask = 0`) — `a_single_step_trap_survives_the_imposed_inhibit`
+/// holds the stepped traces of the two engines equal across an errand.
 fn impose_the_shadow(
     partition: &Partition,
     state: &VcpuArchState,
     xsave: &mut XsaveArea,
     previous: Option<&VcpuArchState>,
-    nmi_masked: bool,
+    held_interrupt_state: &mut InterruptStateWord,
+    shadow: bool,
 ) -> Result<()> {
     let vp = Vp::new(partition, BOOT_VP);
     state::import(&vp, state).map_err(|error| refused_state(error, state))?;
-    // Bit 0 is the interrupt shadow, bit 1 the NMI mask.
-    let interrupt_state = 1u64 | (u64::from(nmi_masked) << 1);
-    vp.write_words(&[Reg::InterruptState], &[interrupt_state])
-        .map_err(platform_failed)?;
+    let next = InterruptStateWord { shadow, nmi_masked: held_interrupt_state.nmi_masked };
+    if next != *held_interrupt_state {
+        vp.write_words(&[Reg::InterruptState], &[next.encode()])
+            .map_err(platform_failed)?;
+        *held_interrupt_state = next;
+    }
     if previous.is_none_or(|held| xsave::vector_file_differs(state, held)) {
         xsave.patch(state).map_err(uncarried)?;
         xsave.write_to(partition, BOOT_VP).map_err(platform_failed)?;
@@ -1611,7 +1657,7 @@ fn read_back_into_the_shadow<T: Instrumentation>(
         state,
         installed: _,
         shadowed,
-        nmi_masked,
+        held_interrupt_state,
         consecutive_mmio: _,
         held,
         xsave,
@@ -1632,18 +1678,30 @@ fn read_back_into_the_shadow<T: Instrumentation>(
 
     // Read alongside the architectural state, because it is not part of it:
     // the interrupt shadow is a property of where the guest stopped, and the
-    // only place it exists is the partition. Bit 0 of
-    // `WHvRegisterInterruptState` is the shadow; bit 1 is the NMI mask.
+    // only place it exists is the partition.
     let mut interrupt_state = [0u64; 1];
     vp.read_words(&[rusty_box_whp::Reg::InterruptState], &mut interrupt_state)
         .map_err(platform_failed)?;
-    *shadowed = interrupt_state[0] & 1 != 0;
-    *nmi_masked = interrupt_state[0] & 2 != 0;
+    let word = InterruptStateWord::decode(interrupt_state[0]);
+    *held_interrupt_state = word;
+    *shadowed = word.shadow;
 
     cpu.import_arch_state(state).map_err(|error| {
         tracing::error!("the hypervisor returned a state this port refuses: {error:?}");
         CpuError::UnsupportedCpuOperation { operation: "hypervisor state refused on import" }
     })?;
+    // The shadow's own inhibit is anchored to its retired-instruction count,
+    // which did not move while the hardware held the guest; the hardware's
+    // clear bit says the instruction that inhibit protected has retired. A
+    // set bit is left to `shadowed` above — the interpreter is not told of a
+    // shadow the hardware entered, because the shadow paths that retire the
+    // shadowed instruction hold delivery off on that flag themselves.
+    // VirtualBox anchors the same shadow to `RIP` on import
+    // (`NEMAllNativeTemplate-win.cpp.h` `nemHCWinCopyStateFromHyperV`,
+    // `CPUMUpdateInterruptShadowEx`).
+    if !word.shadow {
+        cpu.lapse_interrupt_inhibit();
+    }
     // The hardware may have written any page of the shared memory while it
     // held the guest, and no write of its makes it into the interpreter's
     // self-modifying-code stamps. Whatever the shadow decoded before this
@@ -2162,13 +2220,13 @@ fn stage_injection<T: Instrumentation>(
         return Ok(Staged::Nothing);
     }
     // Blocked right now — an interrupt shadow, or IF clear. Both are read
-    // from the freshness cache, which an errand this iteration will have
-    // republished from the shadow (see `InjectState`): the question is
-    // whether the processor the NEXT VM entry runs can take a delivery, not
-    // whether the one at the last exit could. Ask the platform to exit the
-    // moment delivery becomes possible, and leave the vector with the
-    // machine's controllers: nothing is acknowledged for a delivery that
-    // cannot happen yet.
+    // from the freshness cache: the exit header's own bits on an errand-free
+    // iteration, the shadow's live `IF` and inhibit after an errand or at a
+    // head (see `InjectState`). The question is whether the processor the
+    // NEXT VM entry runs can take a delivery, not whether the one at the
+    // last exit could. Ask the platform to exit the moment delivery becomes
+    // possible, and leave the vector with the machine's controllers: nothing
+    // is acknowledged for a delivery that cannot happen yet.
     if started.inject.shadowed || !started.inject.if_flag {
         // Priority 0: notify on ANY deliverable interrupt. QEMU derives
         // `irr >> 4` by reading its own APIC's request register without
@@ -2183,6 +2241,12 @@ fn stage_injection<T: Instrumentation>(
         // this priority is not re-armed. Only priority 0 is ever armed
         // here, so any recorded window already covers this ask.
         if started.inject.window.is_none() {
+            tracing::debug!(
+                target: "irq",
+                "CPU: delivery blocked (shadowed {}, IF {}); window armed",
+                started.inject.shadowed,
+                started.inject.if_flag
+            );
             let word = INTERRUPT_NOTIFICATION | (u64::from(ANY_PRIORITY & 0xF) << 2);
             Vp::new(&started.partition, BOOT_VP)
                 .write_words(&[Reg::DeliverabilityNotifications], &[word])
@@ -2593,11 +2657,16 @@ fn impose_after_errand<T: Instrumentation>(
     io.deliver_the_trap_owed(cpu)?;
 
     // The errand has retired on the shadow, and `impose_the_shadow` below
-    // makes the partition identical to it — so the shadow's live `IF`, not
-    // the pre-errand exit header, is what the injection tail must judge
-    // against, and the inhibit the errand may have armed is presumed live.
-    // See `InjectState`'s freshness contract.
-    started.inject.refresh_from_shadow(cpu.interrupts_enabled());
+    // makes the partition identical to it — so the shadow's live `IF` and
+    // its live inhibit, not the pre-errand exit header, are what the
+    // injection tail judges against. The inhibit is the interpreter's own,
+    // current for the instruction the errand retired last: live behind a
+    // trapped `MOV SS`/`POP SS` or a burst ending on `STI`, clear behind
+    // everything else — including the instruction a shadow the HARDWARE
+    // entered was protecting, which the errand has just retired. See
+    // `InjectState`'s freshness contract.
+    let shadow = cpu.in_interrupt_shadow();
+    started.inject.refresh_from_shadow(cpu.interrupts_enabled(), shadow);
 
     let Started {
         alarm: _,
@@ -2605,7 +2674,7 @@ fn impose_after_errand<T: Instrumentation>(
         state,
         installed: _,
         shadowed: _,
-        nmi_masked,
+        held_interrupt_state,
         consecutive_mmio: _,
         held,
         xsave,
@@ -2617,7 +2686,7 @@ fn impose_after_errand<T: Instrumentation>(
     if let Trapped::Cpuid { leaf } = trapped {
         withhold_virtualisation_from(state, leaf);
     }
-    impose_the_shadow(partition, state, xsave, held.as_ref(), *nmi_masked)?;
+    impose_the_shadow(partition, state, xsave, held.as_ref(), held_interrupt_state, shadow)?;
     *held = Some(state.clone());
     Ok(())
 }
@@ -2877,17 +2946,16 @@ mod tests {
         assert_eq!(inject.window, Some(3), "a refresh never touches the window");
     }
 
-    /// The freshness contract: after an errand, the shadow's `IF` overrides
-    /// whatever the exit header said, and the interrupt shadow is presumed
-    /// LIVE — unknown-therefore-blocked. The interpreter's one-instruction
-    /// inhibit is bookkeeping this crate cannot read, and an errand can stop
-    /// with one armed, so the gate gets no claim that delivery is permitted;
-    /// the next exit's header answers truthfully and for free. This is the
-    /// property the injection gate turns on: a `CLI` retired on the shadow
-    /// between the exit and the staging decision must be seen, and an
-    /// invisible `STI`/`MOV SS` window must never be injected into.
+    /// The freshness contract: after an errand, the shadow's `IF` and the
+    /// shadow's own inhibit override whatever the exit header said — both
+    /// read from the interpreter, neither presumed. This is the property the
+    /// injection gate turns on: a `CLI` retired on the shadow between the
+    /// exit and the staging decision must be seen; a `MOV SS` retired there
+    /// must block; and an errand that armed nothing must NOT be told
+    /// "blocked", because that is one window exit per errand for evidence
+    /// the interpreter already holds.
     #[test]
-    fn a_shadow_errand_republishes_if_and_presumes_the_inhibit() {
+    fn a_shadow_errand_republishes_if_and_the_inhibit_it_read() {
         let mut inject = InjectState::at_reset();
         inject.window = Some(0);
         // Header carries IF=1 and NO interrupt shadow — the processor as it
@@ -2904,17 +2972,16 @@ mod tests {
         assert!(!inject.shadowed, "the header reports no interrupt shadow");
 
         // The errand retired a `CLI` (or entered a fault gate): the shadow's
-        // live IF is now clear — and whether its last instruction armed an
-        // inhibit is unknowable from this crate.
-        inject.refresh_from_shadow(false);
+        // live IF is now clear, and its last instruction armed no inhibit.
+        inject.refresh_from_shadow(false, false);
         assert!(
             !inject.if_flag,
             "the shadow's IF must override the header's — the gate injects on this"
         );
         assert!(
-            inject.shadowed,
-            "an errand's inhibit state is unknown, so the gate must be told \
-             BLOCKED — never that delivery is permitted without evidence"
+            !inject.shadowed,
+            "an errand that armed no inhibit leaves delivery open — the gate \
+             must be told so, or every errand pays a window exit"
         );
         // The window record and in-flight state are the errand's to leave
         // alone: no header or shadow reports the armed notification, and
@@ -2922,9 +2989,18 @@ mod tests {
         assert_eq!(inject.window, Some(0), "an errand never touches the window");
         assert!(!inject.in_flight, "an errand begins no platform delivery");
 
-        // The next exit's header is authoritative again: bit 12 clear lifts
-        // the presumption, which is how a deferred injection resolves after
-        // exactly one more exit.
+        // The errand retired a `MOV SS` from device memory: IF as the header
+        // had it, the interpreter's inhibit live for the next instruction.
+        inject.refresh_from_shadow(true, true);
+        assert!(inject.if_flag);
+        assert!(
+            inject.shadowed,
+            "a shadower retired last on the shadow blocks the gate — an \
+             injection here lands the new-SS old-ESP frame"
+        );
+
+        // The next exit's header is authoritative again: bit 12 clear is how
+        // a deferred injection resolves after exactly one more exit.
         inject.refresh_from(&VpContext {
             rip: 0,
             rflags: 0x202,
@@ -2933,8 +3009,28 @@ mod tests {
             cr8: 0,
             execution_state: 0x0000,
         });
-        assert!(!inject.shadowed, "the next header's truth lifts the presumption");
+        assert!(!inject.shadowed, "the next header's truth lifts the shadow");
         assert!(inject.if_flag);
+    }
+
+    /// `WHvRegisterInterruptState` round-trips through the one decoder and
+    /// encoder: bit 0 is the interrupt shadow, bit 1 the NMI mask, and the
+    /// bits above them are not this engine's to carry.
+    #[test]
+    fn the_interrupt_state_word_round_trips_its_two_bits() {
+        assert_eq!(InterruptStateWord::decode(0), InterruptStateWord::AT_RESET);
+        for (word, shadow, nmi_masked) in
+            [(0b00u64, false, false), (0b01, true, false), (0b10, false, true), (0b11, true, true)]
+        {
+            let decoded = InterruptStateWord::decode(word);
+            assert_eq!(decoded, InterruptStateWord { shadow, nmi_masked });
+            assert_eq!(decoded.encode(), word);
+        }
+        assert_eq!(
+            InterruptStateWord::decode(0xFFFF_FFFF_FFFF_FFFC),
+            InterruptStateWord::AT_RESET,
+            "only the two low bits are read"
+        );
     }
 
     /// A tick is a unit of guest time at the machine's own rate, so a second of

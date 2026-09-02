@@ -633,21 +633,24 @@ mod tests {
         );
     }
 
-    /// The inhibit `impose_the_shadow` writes does not suppress the
-    /// single-step `#DB` of the instruction that consumes it — measured, not
-    /// argued from the SDM.
+    /// The `WHvRegisterInterruptState` word an errand's imposition writes
+    /// does not disturb single-step delivery: the stepped traces of the two
+    /// engines are identical across an errand, and the first
+    /// hardware-retired instruction after the imposition delivers its own
+    /// `#DB`, in order.
     ///
-    /// The question this answers: WHP exposes ONE `InterruptShadow` bit where
-    /// VMX distinguishes STI-blocking from MOV-SS-blocking, and MOV-SS-type
-    /// blocking also suppresses the single-step trap after the next
-    /// instruction — a suppressed step is LOST, not deferred. Every
-    /// imposition writes that bit as 1, so if the platform gave it
-    /// MOV-SS-type semantics, a TF-stepping guest would silently miss one
-    /// step per imposition. Measured here instead: the first
-    /// hardware-retired instruction after an errand's imposition (s4, trap
-    /// frame IP 0x102B) delivers its `#DB`, in order — the imposed bit is
-    /// delay-only for interrupts AND transparent to single-step on this
-    /// platform.
+    /// The question this stands guard over: WHP exposes ONE `InterruptShadow`
+    /// bit where VMX distinguishes STI-blocking from MOV-SS-blocking, and
+    /// MOV-SS-type blocking also suppresses the single-step trap after the
+    /// next instruction — a suppressed step is LOST, not deferred. The
+    /// imposition writes the interpreter's own inhibit into that bit, and
+    /// under `TF` that inhibit is clear by the time it is written: the
+    /// errand's tail retires the instruction a `MOV SS` shadows and delivers
+    /// the owed step before imposing (`PcIo::deliver_the_trap_owed`), and
+    /// taking a trap ends any inhibit (Bochs exception.cc `interrupt`). So
+    /// the word written after s3 carries no shadow, and s4 (trap frame IP
+    /// 0x102B) — the first hardware-retired instruction after the
+    /// imposition — steps exactly as the interpreter steps it.
     ///
     /// Two baselines make the probe honest. TF-stepping with no errand
     /// proves native real-mode `#DB` delivery agrees between the engines
@@ -1195,19 +1198,21 @@ mod tests {
     /// armed earlier — so the discriminator is the SHARE injection carries,
     /// not its mere occurrence.
     ///
-    /// HOW the head injects is part of the claim: at a head the engine cannot
-    /// see the interpreter's one-instruction inhibit, so the gate holds no
-    /// positive evidence that delivery is permitted and must defer — arm a
-    /// deliverability window, enter, and let the window exit's authoritative
-    /// header answer. So a head-pending vector costs one window exit and then
-    /// crosses as a register write: `windows_armed` and `exits().window` rise
-    /// with `injected`, and nothing is acknowledged on unknown evidence.
+    /// HOW the head injects is part of the claim: the head reads the
+    /// interpreter's own one-instruction inhibit and the partition's own
+    /// shadow bit, so with `IF` set and neither live it holds positive
+    /// evidence that delivery is permitted and injects THERE — no
+    /// deliverability window, no window exit. `windows_armed` stays at a
+    /// small fraction of `injected` (measured zero: this guest never leaves
+    /// a shadower as the last instruction the shadow retires); a head that
+    /// deferred every vector on a presumed inhibit would drive the two
+    /// counters level.
     ///
     /// The ISR runs `STI` before anything else for the same reason the
-    /// errand-deferral test's does: after an injection the processor's
-    /// latched pin is stale until the next acknowledge attempt reconciles
-    /// it, and an `IF=0` handler tail would arm one spurious window per
-    /// injection, muddying the very counters under assertion.
+    /// errand-tail test's does: after an injection the processor's latched
+    /// pin is stale until the next acknowledge attempt reconciles it, and an
+    /// `IF=0` handler tail would arm one spurious window per injection,
+    /// muddying the very counters under assertion.
     ///
     /// Trials repeat across steps because a stretch the shadow legitimately
     /// carries (a budget nearer than the hardware's resolution) delivers
@@ -1220,13 +1225,13 @@ mod tests {
         }
 
         let _turn = a_turn_on_the_hardware();
-        // isr at CODE+0x2A (CS base is 0).
+        // isr at CODE+0x29 (CS base is 0).
         let mut machine = machine_with_devices(&[
             0x31, 0xC0, //             xor ax, ax
             0x8E, 0xD8, //             mov ds, ax
             0x8E, 0xD0, //             mov ss, ax
             0xBC, 0x00, 0x70, //       mov sp, 0x7000
-            0xC7, 0x06, 0x20, 0x00, 0x2A, 0x10, // mov word [0x20], isr (IVT[8])
+            0xC7, 0x06, 0x20, 0x00, 0x29, 0x10, // mov word [0x20], isr (IVT[8])
             0xC7, 0x06, 0x22, 0x00, 0x00, 0x00, //  mov word [0x22], 0
             0xB0, 0xFE, //             mov al, 0xFE — unmask IRQ0 alone
             0xE6, 0x21, //             out 0x21, al  (OCW1)
@@ -1236,12 +1241,12 @@ mod tests {
             0xE6, 0x40, //             out 0x40, al
             0xB0, 0x04, //             mov al, 0x04 — count 0x0400, high
             0xE6, 0x40, //             out 0x40, al
-            0xFB, //                   sti — IF=1 for the whole busy loop
-            // busy (CODE+0x27): pure computation, exit-free — the tick can
+            0xFB, //                   sti (CODE+0x25) — IF=1 for the whole busy loop
+            // busy (CODE+0x26): pure computation, exit-free — the tick can
             // only be found pending at a slice head
             0x40, //                   inc ax
             0xEB, 0xFD, //             jmp busy
-            // isr (CODE+0x2A): STI first — see the doc above — then report
+            // isr (CODE+0x29): STI first — see the doc above — then report
             0xFB, //                   sti
             0x90, //                   nop — the STI shadow lapses
             0xB0, MARK, //             mov al, MARK
@@ -1311,18 +1316,18 @@ mod tests {
             census.injected,
             written.len(),
         );
+        // The head's evidence is read, not presumed: a vector pending with
+        // IF set and no shadow live on either side is injected at the head
+        // itself. A quarter, not zero, because a shadow-carried stretch can
+        // end on an `STI` with the next tick already pending, and that head
+        // is genuinely blocked for one instruction.
         assert!(
-            census.windows_armed >= 1,
-            "the head holds no positive evidence about the interpreter's inhibit, \
-             so a head-pending vector must be deferred to a window, never \
-             acknowledged on the unknown; windows armed {}",
+            census.windows_armed * 4 <= census.injected,
+            "a head-pending vector must be injected on the head's own evidence, \
+             not deferred to a window: windows armed {} against {} injections — \
+             level counters are a head presuming an inhibit it could have read",
             census.windows_armed,
-        );
-        assert!(
-            exits.window >= 1,
-            "an armed window must be answered by a window exit — armed and never \
-             answered is a wedged guest; window exits {}",
-            exits.window,
+            census.injected,
         );
     }
 
@@ -1364,7 +1369,7 @@ mod tests {
     /// hardware exercise of the whole path this fix touches — the shadow
     /// errand, the republish, the window arm, the deferred delivery when `IF`
     /// reopens. The BITING proof of the gate's IF source is the unit test
-    /// `engine::a_shadow_errand_republishes_if_over_the_stale_header`, which
+    /// `engine::a_shadow_errand_republishes_if_and_the_inhibit_it_read`, which
     /// fails the instant the republish is removed; this test is the hardware
     /// witness that the same machinery delivers correctly on the metal, never
     /// landing a vector in an `IF=0` frame.
@@ -1473,44 +1478,36 @@ mod tests {
         );
     }
 
-    /// A vector that becomes deliverable AT AN ERRAND'S TAIL is deferred to a
-    /// window — the wiring proof that every errand republishes the cache
-    /// before the staging decision reads it.
+    /// A vector that becomes deliverable AT AN ERRAND'S TAIL is injected
+    /// there, on the shadow's own evidence — no window armed, no window exit
+    /// paid.
     ///
-    /// After an errand the engine cannot see the interpreter's inhibit state,
-    /// so the freshness contract presumes it live: the staging gate must find
-    /// `shadowed` set, arm a deliverability window, and let the NEXT exit's
-    /// authoritative header lift the presumption — one deferred injection,
-    /// one window exit, nothing acknowledged on unknown evidence.
-    ///
-    /// The guest manufactures exactly that moment, once per trial: a PIT tick
-    /// is latched at the 8259 but MASKED (`IF=1` the whole time, so every
-    /// exit header carries `IF=1` and no shadow), and the instruction that
-    /// unmasks it is `OUTSB` to port 0x21 — a string port write, which the
-    /// engine always services as a shadow errand (`finish_on_the_shadow`).
-    /// The vector becomes deliverable during that errand and the tail stages
-    /// with everything permitting EXCEPT the post-errand presumption. With
-    /// the errand republish wired, the engine arms a window and defers; with
-    /// a republish call site missing, the cache still holds the header's
-    /// `IF=1`/no-shadow and the engine injects DIRECTLY at the tail, arming
-    /// no window at all. `windows_armed >= 1` is therefore the discriminator
-    /// this test exists for: deleting the `refresh_from_shadow` call site in
-    /// `finish_on_the_shadow` drives it to zero deterministically. Trials
-    /// repeat because a stretch the shadow happens to carry delivers through
-    /// the interpreter (no window, legitimately); only a hardware trial
-    /// exercises the errand tail, and many trials make missing them all
-    /// vanishingly unlikely.
+    /// After an errand the engine reads the interpreter's inhibit instead of
+    /// presuming one: an `OUTSB` arms none, so the tail finds `IF=1` and no
+    /// shadow, acknowledges, and injects directly. The guest manufactures
+    /// exactly that moment, once per trial: a PIT tick is latched at the 8259
+    /// but MASKED (`IF=1` the whole time, so every exit header carries `IF=1`
+    /// and no shadow), and the instruction that unmasks it is `OUTSB` to port
+    /// 0x21 — a string port write, which the engine always services as a
+    /// shadow errand (`finish_on_the_shadow`). The vector becomes deliverable
+    /// during that errand, and nothing else in the guest ever finds a vector
+    /// deliverable-but-blocked, so every armed window would be one the tail
+    /// armed on a presumption. `windows_armed * 4 <= injected` is the
+    /// discriminator (measured zero windows): presuming the inhibit live
+    /// drives the two counters level. Trials repeat because a stretch the
+    /// shadow happens to carry delivers through the interpreter (no
+    /// injection, legitimately); only a hardware trial exercises the errand
+    /// tail, and many trials make missing them all vanishingly unlikely.
     ///
     /// The ISR runs `STI` before anything else, deliberately: after any
     /// injection the processor's latched interrupt pin is stale until the
     /// next acknowledge attempt reconciles it, and an `IF=0` handler exit
     /// would present stale-pin-plus-blocked to the gate and arm a spurious
-    /// window — on either build — burying the discriminator. With `IF=1`
-    /// inside the handler, the gate reaches the acknowledge, finds the 8259
-    /// empty, and the reconcile clears the stale pin without arming
-    /// anything.
+    /// window, burying the discriminator. With `IF=1` inside the handler,
+    /// the gate reaches the acknowledge, finds the 8259 empty, and the
+    /// reconcile clears the stale pin without arming anything.
     #[test]
-    fn a_vector_raised_inside_an_errand_is_deferred_to_a_window() {
+    fn a_vector_raised_inside_an_errand_is_injected_at_its_tail() {
         if !hypervisor_here() {
             return;
         }
@@ -1569,29 +1566,186 @@ mod tests {
                 .step(RunBudget::Ticks(2_000_000))
                 .expect("the hypervisor runs the guest and its ticks reach it");
             written.extend(machine.debug_port().take_output());
-            if !written.is_empty() && machine.engine().inject_census().windows_armed >= 1 {
+            if written.len() >= 4 && machine.engine().inject_census().injected >= 2 {
                 break;
             }
         }
-        // Every tick still arrives — the presumption defers, it never loses.
-        // How each deferred vector lands is the engine's business: the window
-        // exit's follow-up stages it, and a slice whose budget expires first
-        // hands it to the next slice head instead, which stages it the same
-        // way. Either way the guest sees its interrupt; a wedge would show
-        // here as missing MARKs.
+        // Every tick arrives, whichever engine carried its trial; a wedge
+        // would show here as missing MARKs.
         assert!(
             !written.is_empty() && written.iter().all(|byte| *byte == MARK),
             "every trial's tick must reach the guest's own ISR and nothing else \
              may write the debug port: {written:#04x?}"
         );
         let census = machine.engine().inject_census();
-        assert!(
-            census.windows_armed >= 1,
-            "a vector that became deliverable inside an errand must be DEFERRED \
-             to a window — injecting directly at the errand tail means the gate \
-             read a cache no errand republished; census: windows armed {}, \
-             injected {}",
+        eprintln!(
+            "errand-tail census: marks {}, injected {}, windows armed {}",
+            written.len(),
+            census.injected,
             census.windows_armed,
+        );
+        assert!(
+            census.injected >= 1,
+            "at least one trial's errand must have run on the hardware and its \
+             tail must have injected the vector it made deliverable; marks {}",
+            written.len(),
+        );
+        assert!(
+            census.windows_armed * 4 <= census.injected,
+            "a vector that became deliverable inside an errand must be injected \
+             at the errand's tail on the shadow's own evidence — a window per \
+             injection is the tail presuming an inhibit the errand never armed; \
+             census: windows armed {}, injected {}",
+            census.windows_armed,
+            census.injected,
+        );
+    }
+
+    /// A vector pending behind an errand's `MOV SS` lands after the stack
+    /// switch the `MOV SS` began — never on the new `SS` with the old `SP`.
+    ///
+    /// The one errand whose tail IS inside an interrupt shadow: the trapped
+    /// instruction is `mov ss,[es:0]`, a device-memory load, so the shadow
+    /// retires it and the interpreter's own inhibit is live for the `mov sp`
+    /// that follows. The tail's gate reads that inhibit and defers the
+    /// pending tick to a window; the hardware retires the `mov sp` with the
+    /// imposed shadow bit set, clears it, and the window exit's header lets
+    /// the tick in — on the new stack. A gate that read "no shadow" there
+    /// (an accessor answering for the wrong instruction, or a tail that
+    /// wrote the shadow bit clear beneath an injection) would inject between
+    /// the two halves of the switch, and the interrupt frame would go to the
+    /// old `SP` — the `general protection: 0000` on `IRET` that
+    /// `Started::shadowed`'s doc records.
+    ///
+    /// The verdict is guest-visible: the ISR reports the high byte of `SP`
+    /// at entry. `mov sp,0x9000` makes every lawful frame land at
+    /// `0x8FFA` (0x8F); a frame pushed inside the `MOV SS` shadow lands at
+    /// `0x6FFA` (0x6F), the old stack's top. `IF` is set only from the
+    /// `sti` that immediately precedes the `mov ss`, so no delivery can
+    /// lawfully precede the switch: 0x8F is the only lawful verdict, and a
+    /// single 0x6F fails the test. The trial's `sti` also puts the hardware's
+    /// own STI shadow over the errand's exit header, which is the second half
+    /// of what the tail must get right: a shadow the HARDWARE entered is
+    /// consumed by the errand retiring the instruction it protected, while
+    /// the `MOV SS` shadow the SHADOW entered is live for the next one.
+    ///
+    /// Trials repeat until one `mov ss` exits on the hardware (a stretch the
+    /// shadow carries delivers lawfully through the interpreter's own
+    /// inhibit, which exercises nothing here), so `exits().memory >= 1` is
+    /// what proves the property was reached.
+    #[test]
+    fn a_vector_pending_behind_an_errands_mov_ss_lands_after_the_stack_switch() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        let _turn = a_turn_on_the_hardware();
+        // isr at CODE+0x4F (CS base is 0).
+        let mut machine = machine_with_devices(&[
+            0x31, 0xC0, //             xor ax, ax
+            0x8E, 0xD8, //             mov ds, ax
+            0x8E, 0xD0, //             mov ss, ax
+            0xBC, 0x00, 0x70, //       mov sp, 0x7000
+            0xC7, 0x06, 0x20, 0x00, 0x4F, 0x10, // mov word [0x20], isr (IVT[8])
+            0xC7, 0x06, 0x22, 0x00, 0x00, 0x00, //  mov word [0x22], 0
+            0xB8, 0x00, 0xB8, //       mov ax, 0xB800 — the text-mode video segment
+            0x8E, 0xC0, //             mov es, ax
+            0xB0, 0xFE, //             mov al, 0xFE — unmask IRQ0 alone
+            0xE6, 0x21, //             out 0x21, al  (OCW1)
+            0xB0, 0x34, //             mov al, 0x34 — ch0, lo/hi, mode 2
+            0xE6, 0x43, //             out 0x43, al
+            0xB0, 0x00, //             mov al, 0x00 — count 0x0400, low
+            0xE6, 0x40, //             out 0x40, al
+            0xB0, 0x04, //             mov al, 0x04 — count 0x0400, high
+            0xE6, 0x40, //             out 0x40, al
+            0xB0, 0x0A, //             mov al, 0x0A — OCW3: reads answer IRR
+            0xE6, 0x20, //             out 0x20, al
+            0xB9, 0x00, 0x40, //       mov cx, 0x4000 — many trials, so a run
+            //                         is never starved of a hardware trial
+            // trial (CODE+0x31): back on the old stack, interrupts closed
+            0xFA, //                   cli
+            0x31, 0xC0, //             xor ax, ax
+            0x8E, 0xD0, //             mov ss, ax
+            0xBC, 0x00, 0x70, //       mov sp, 0x7000
+            // poll (CODE+0x39): wait for a tick to be pending at the 8259
+            0xE4, 0x20, //             in al, 0x20 — the IRR
+            0xA8, 0x01, //             test al, 1
+            0x74, 0xFA, //             jz poll
+            0xFB, //                   sti — IF=1; its shadow covers the errand
+            0x26, 0x8E, 0x16, 0x00, 0x00, // mov ss,[es:0] — THE ERRAND: SS=0
+            //                         from the display's memory, and the
+            //                         MOV SS shadow over the next instruction
+            0xBC, 0x00, 0x90, //       mov sp, 0x9000 — the other half of the
+            //                         switch; the tick lands after it
+            0x90, //                   nop
+            0x90, //                   nop
+            0xE2, 0xE5, //             loop trial
+            // park (CODE+0x4C):
+            0xF4, //                   hlt
+            0xEB, 0xFD, //             jmp park
+            // isr (CODE+0x4F): STI first (the stale-pin rule the other
+            // injection tests follow), then the verdict, then a MARK
+            0xFB, //                   sti
+            0x90, //                   nop — the STI shadow lapses
+            0x89, 0xE0, //             mov ax, sp — after the 6-byte frame
+            0x88, 0xE0, //             mov al, ah — 0x8F lawful, 0x6F the old-SP frame
+            0xE6, DEBUG_PORT, //       out 0xE9, al — the verdict
+            0xB0, MARK, //             mov al, MARK
+            0xE6, DEBUG_PORT, //       out 0xE9, al
+            0xB0, 0x20, //             mov al, 0x20
+            0xE6, 0x20, //             out 0x20, al — non-specific EOI
+            0xCF, //                   iret
+        ]);
+        let mut written: std::vec::Vec<u8> = std::vec::Vec::new();
+        for _ in 0..48 {
+            machine
+                .step(RunBudget::Ticks(2_000_000))
+                .expect("the hypervisor runs the guest; an injection into the MOV SS \
+                         shadow would be refused here as WHV_E_INVALID_VP_STATE");
+            written.extend(machine.debug_port().take_output());
+            let marks = written.iter().filter(|byte| **byte == MARK).count();
+            if marks >= 8 && machine.engine().exits().memory >= 1 {
+                break;
+            }
+        }
+        let census = machine.engine().inject_census();
+        let exits = machine.engine().exits();
+        eprintln!(
+            "mov-ss census: bytes {}, injected {}, windows armed {}, memory exits {}",
+            written.len(),
+            census.injected,
+            census.windows_armed,
+            exits.memory,
+        );
+        assert!(
+            written.iter().any(|byte| *byte == MARK),
+            "the PIT's ticks must have reached the guest's own ISR at least once: \
+             {written:#04x?}"
+        );
+        assert!(
+            !written.iter().any(|byte| *byte == 0x6F),
+            "a tick was delivered inside the MOV SS shadow — its frame went to \
+             the old SP (0x6F) between the two halves of the stack switch: \
+             {written:#04x?}"
+        );
+        assert!(
+            written.iter().any(|byte| *byte == 0x8F),
+            "a lawful verdict (0x8F, the frame on the switched stack) must have \
+             been emitted: {written:#04x?}"
+        );
+        assert!(
+            written.iter().all(|byte| *byte == 0x8F || *byte == MARK),
+            "the debug port must carry only lawful verdicts and MARKs: {written:#04x?}"
+        );
+        assert!(
+            exits.memory >= 1,
+            "no trial's MOV SS exited on the hardware, so no errand tail ever \
+             stood inside a MOV SS shadow — the property under test was not \
+             reached"
+        );
+        assert!(
+            census.injected >= 1,
+            "the hardware trials must have injected their ticks; injected {}",
             census.injected,
         );
     }
