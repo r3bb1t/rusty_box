@@ -371,7 +371,7 @@ fn one_line_census(census: &SliceCensus) -> String {
         .collect();
     format!(
         "slices: {} [exits/slice {}] ended: halted {} canceled {} budget {} \
-         boundary(processor {} device {} event {})",
+         boundary(processor {} device {} event {}) read-backs skipped {}",
         census.slices,
         histogram.join(" "),
         census.ended_halted,
@@ -380,6 +380,7 @@ fn one_line_census(census: &SliceCensus) -> String {
         census.ended_wants_machine_boundary,
         census.ended_needs_boundary,
         census.ended_event_to_deliver,
+        census.read_backs_skipped,
     )
 }
 

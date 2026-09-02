@@ -505,7 +505,10 @@ struct Started {
     /// shadowed instruction itself (a converted slice, a burst), so that it
     /// is stale in neither direction wherever it is consulted; the
     /// partition-side record that is never taken is
-    /// [`Self::held_interrupt_state`].
+    /// [`Self::held_interrupt_state`]. Written at the read-back that reads
+    /// the partition's bit and at the errand imposition that writes it
+    /// (`impose_after_errand`), so a slice that ends at an errand with no
+    /// read-back holds what a read-back would have read.
     shadowed: bool,
     /// What the partition's `WHvRegisterInterruptState` holds, as far as this
     /// engine knows: the interrupt shadow and the NMI mask.
@@ -522,11 +525,27 @@ struct Started {
     ///
     /// Written at exactly the two moments the answer is certain: after reading
     /// the processor, and after writing it. Every other platform register write
-    /// this engine makes happens inside a slice, before the read-back that ends
-    /// it, so this is accurate by the time the next slice consults it.
+    /// this engine makes answers an exit, so it follows a run — and a slice
+    /// whose hardware has run ends in a read-back (see
+    /// [`Self::ran_since_read_back`]), so this is accurate by the time the next
+    /// slice consults it.
     ///
     /// `None` until the first read, which is the honest reading of "not known".
     held: Option<VcpuArchState>,
+    /// Whether the hardware has run the guest since the shadow was last read
+    /// back from the partition.
+    ///
+    /// The one fact that decides whether a read-back has anything to learn.
+    /// Set the moment `WHvRunVirtualProcessor` returns — whatever it returns,
+    /// since the guest may have run before the platform refused — and cleared
+    /// in exactly one place, the tail of [`read_back_into_the_shadow`] (R5),
+    /// so no run goes unrecorded and no read-back leaves it standing. While
+    /// it is clear, every write the partition has taken since that read-back
+    /// is one of this engine's own impositions, each of which made the
+    /// partition identical to the shadow: the shadow already describes the
+    /// processor, and a read-back would only copy it back onto itself — a
+    /// 52-register exchange and a 1.5 MiB decoded-trace flush, for nothing.
+    ran_since_read_back: bool,
     /// How many memory exits in a row this partition has taken.
     ///
     /// A guest that touched device memory once produces one; a guest clearing
@@ -617,6 +636,16 @@ pub struct SliceCensus {
     /// and on a shadow-converted slice, whatever its batch left standing at
     /// its boundary.
     pub ended_event_to_deliver: u64,
+    /// Hardware slices that ended without reading the processor back from
+    /// the partition, because the hardware had not run since the last
+    /// read-back: every exit after it was serviced on the shadow and imposed,
+    /// so the shadow already described the processor.
+    ///
+    /// Counted among [`Self::slices`], never beside them. Each one is a full
+    /// architectural state exchange and a decoded-trace flush the slice end
+    /// did not pay; a run of serviced exits that shows none here is a run in
+    /// which the skip is not firing, which is a defect and not a quiet guest.
+    pub read_backs_skipped: u64,
 }
 
 impl SliceCensus {
@@ -900,6 +929,8 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                 consecutive_mmio: 0,
                 // Nothing has been read from this processor yet.
                 held: None,
+                // Nor has it run.
+                ran_since_read_back: false,
                 xsave,
                 // No exit header has said anything yet.
                 inject: InjectState::at_reset(),
@@ -1323,10 +1354,26 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // Whatever ended the run, the shadow must describe the processor again
         // before the machine looks at it: the scheduler reads activity state,
         // the interrupt fabric reads IF, and a snapshot reads all of it.
-        read_back_into_the_shadow(started, cpu, io.pc_system.time_ticks())?;
+        //
+        // It already does when the hardware has not run since the last
+        // read-back. The run then ended on the tail of a serviced exit — an
+        // errand whose imposition made the partition identical to the shadow,
+        // the shadow's own `RIP`, `RFLAGS`, `CR8` and activity state being
+        // the ones imposed — or on an exit whose servicing wrote nothing the
+        // shadow lacks; a raw port exit writes `RIP` and `RAX`, but it
+        // follows a run, so it is never on this path. Reading back would
+        // re-import the state this engine just exported and flush a decoded
+        // trace cache nothing invalidated.
+        let read_back_skipped = !started.ran_since_read_back;
+        if !read_back_skipped {
+            read_back_into_the_shadow(started, cpu, io.pc_system.time_ticks())?;
+        }
 
         let SliceOutcome { yielded, ran, exits: exits_held } = outcome?;
         census.record(exits_held, &yielded);
+        if read_back_skipped {
+            census.read_backs_skipped += 1;
+        }
         match yielded {
             // Halting is not architectural state, so it does not arrive in the
             // exchange above; the platform reports it as the reason the run
@@ -1514,6 +1561,8 @@ fn install_the_shadow<T: Instrumentation>(
         held_interrupt_state,
         consecutive_mmio: _,
         held,
+        // An imposition; the partition does not run here.
+        ran_since_read_back: _,
         xsave,
         // Republished from the shadow just below; the state exchange itself
         // does not change it again.
@@ -1643,6 +1692,11 @@ fn uncarried(refused: xsave::UncarriedComponent) -> CpuError {
 
 /// Describe the shadow from the platform's processor.
 ///
+/// The one place [`Started::ran_since_read_back`] is cleared (R5): from here
+/// until the hardware next runs, the shadow describes the processor, and
+/// every write the partition takes in between is an imposition of that
+/// shadow.
+///
 /// # Errors
 /// A register the platform refused to hand over, or a state this port will not
 /// import — a segment whose attributes describe no descriptor it can build.
@@ -1660,6 +1714,7 @@ fn read_back_into_the_shadow<T: Instrumentation>(
         held_interrupt_state,
         consecutive_mmio: _,
         held,
+        ran_since_read_back,
         xsave,
         // What the last exit header said; a state exchange does not change it.
         inject: _,
@@ -1726,6 +1781,11 @@ fn read_back_into_the_shadow<T: Instrumentation>(
     // once, because the two run at different rates and only the handoffs are
     // points where they are known to agree.
     cpu.set_tsc(state.msrs.tsc, machine_ticks);
+
+    // Cleared last, once every read above has succeeded: a read-back that
+    // failed part-way leaves the flag standing, and the next slice end reads
+    // again rather than trusting a shadow that was never completed.
+    *ran_since_read_back = false;
 
     Ok(())
 }
@@ -1859,6 +1919,10 @@ fn run_the_exit_loop<T: Instrumentation>(
         let entered = std::time::Instant::now();
         let exit = started.partition.run(BOOT_VP);
         *ran += entered.elapsed();
+        // Recorded before the result is examined: a run the platform refused
+        // may still have retired guest instructions first, and the shadow
+        // must not be believed over a processor that has moved.
+        started.ran_since_read_back = true;
         // Disarmed before the error is propagated, so no path leaves an alarm
         // pointed at a processor that is no longer running. A cancellation
         // that lands between the run returning and this call is sticky and
@@ -2419,20 +2483,25 @@ fn report_the_state_the_platform_refused(held: &VcpuArchState) {
 /// was found, at `0xE1E80` in `rombios32`.
 ///
 /// Registered as divergence H3.
-fn withhold_virtualisation_from(state: &mut VcpuArchState, leaf: u32) {
-    /// `CPUID` leaves its answers in RAX, RBX, RCX, RDX; the state carries the
-    /// register file in the processor's own order, where RCX is second.
-    const RCX: usize = 1;
+///
+/// Applied to the shadow processor that just retired the `CPUID`, not to a
+/// copy of its answer: the shadow is what the next imposition installs, so
+/// the withheld bit has to be gone from the register the guest reads on
+/// every processor that will ever describe it.
+fn withhold_virtualisation_from<T: Instrumentation>(cpu: &mut BxCpuC<T>, leaf: u32) {
     /// `CPUID.1:ECX[5]`, Intel's VMX.
     const VMX: u64 = 1 << 5;
     /// `CPUID.80000001:ECX[2]`, AMD's SVM.
     const SVM: u64 = 1 << 2;
 
-    match leaf {
-        1 => state.gprs[RCX] &= !VMX,
-        0x8000_0001 => state.gprs[RCX] &= !SVM,
-        _ => {}
-    }
+    let withheld = match leaf {
+        1 => VMX,
+        0x8000_0001 => SVM,
+        _ => return,
+    };
+    // `CPUID` leaves its answer in RCX.
+    let rcx = cpu.rcx();
+    cpu.set_rcx(rcx & !withheld);
 }
 
 /// Describe a trapped fault while the processor is still standing on it.
@@ -2668,26 +2737,41 @@ fn impose_after_errand<T: Instrumentation>(
     let shadow = cpu.in_interrupt_shadow();
     started.inject.refresh_from_shadow(cpu.interrupts_enabled(), shadow);
 
+    // Withheld on the shadow ITSELF, before the export, so that what the
+    // partition receives and what the shadow keeps are one processor. A
+    // slice may end at this errand with no read-back (the partition has not
+    // run since — see `Started::ran_since_read_back`), and the next head
+    // installs whatever the shadow holds: a bit withheld from the export
+    // alone would be back in the partition one slice later.
+    if let Trapped::Cpuid { leaf } = trapped {
+        withhold_virtualisation_from(cpu, leaf);
+    }
+
     let Started {
         alarm: _,
         partition,
         state,
         installed: _,
-        shadowed: _,
+        shadowed,
         held_interrupt_state,
         consecutive_mmio: _,
         held,
+        // An imposition; the partition does not run here.
+        ran_since_read_back: _,
         xsave,
         // Republished from the shadow just above; the state exchange below
         // does not change it again.
         inject: _,
     } = started;
     cpu.export_arch_state(state);
-    if let Trapped::Cpuid { leaf } = trapped {
-        withhold_virtualisation_from(state, leaf);
-    }
     impose_the_shadow(partition, state, xsave, held.as_ref(), held_interrupt_state, shadow)?;
     *held = Some(state.clone());
+    // The partition's shadow bit is `shadow` from here, and this is the
+    // record of that bit: the same value a read-back would read, kept
+    // current so that a slice ending at this errand without one hands the
+    // next head the truth rather than the bit the hardware reported at the
+    // exit — a shadow whose instruction the errand has just retired.
+    *shadowed = shadow;
     Ok(())
 }
 

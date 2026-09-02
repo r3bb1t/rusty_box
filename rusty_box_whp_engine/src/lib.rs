@@ -492,6 +492,98 @@ mod tests {
         );
     }
 
+    /// A slice that ends on the tail of a shadow errand ends WITHOUT reading
+    /// the processor back from the partition — the hardware has not run
+    /// since the errand's imposition, so the shadow already describes it —
+    /// and the machine reads the same processor the interpreter leaves.
+    ///
+    /// The guest stores into video memory eight times, one device-memory
+    /// exit each, which is the run length at which the engine stops finishing
+    /// them one at a time and bursts the rest onto the shadow; the burst then
+    /// carries the load, the port write and the `HLT`. That halt is the
+    /// shadow's own, not a hardware `Halt` exit — the halt-exit count says
+    /// so — and the slice ends at the errand's tail. The byte at the debug
+    /// port, the halt reaching the machine and a `RIP` equal to the
+    /// interpreter's are the guest-visible half; `read_backs_skipped` is the
+    /// proof that the skip fired rather than merely compiled. This engine
+    /// once carried a skip that never fired, because it compared a register
+    /// the exchange never sends.
+    #[test]
+    fn a_slice_ending_on_an_errand_skips_the_read_back_and_the_machine_reads_the_shadow() {
+        if !hypervisor_here() {
+            return;
+        }
+
+        let code: &[u8] = &[
+            0xB8, 0x00, 0xB8, // mov ax, 0xB800 — the text-mode video segment
+            0x8E, 0xC0, //       mov es, ax
+            // Eight stores to device memory: one memory exit each, and the
+            // eighth is the one the engine bursts from.
+            0x26, 0xC6, 0x06, 0x00, 0x00, MARK, // mov byte [es:0], MARK
+            0x26, 0xC6, 0x06, 0x00, 0x00, MARK,
+            0x26, 0xC6, 0x06, 0x00, 0x00, MARK,
+            0x26, 0xC6, 0x06, 0x00, 0x00, MARK,
+            0x26, 0xC6, 0x06, 0x00, 0x00, MARK,
+            0x26, 0xC6, 0x06, 0x00, 0x00, MARK,
+            0x26, 0xC6, 0x06, 0x00, 0x00, MARK,
+            0x26, 0xC6, 0x06, 0x00, 0x00, MARK,
+            0x26, 0xA0, 0x00, 0x00, //           mov al, [es:0]
+            0xE6, DEBUG_PORT, //                 out 0xE9, al
+            0xF4, //                             hlt
+        ];
+
+        let config = EmulatorConfig {
+            memory: MemorySize::bytes(8 * 1024 * 1024),
+            ..EmulatorConfig::default()
+        };
+        let mut interpreted =
+            Emulator::new_with_mode(config, CpuSetupMode::RealMode).expect("machine");
+        interpreted.mem_write(CODE, code).expect("load");
+        interpreted.reg_write(X86Reg::Rip, CODE);
+        interpreted
+            .step(RunBudget::Ticks(1_000_000))
+            .expect("the interpreter runs the guest");
+        let by_the_interpreter: std::vec::Vec<u8> =
+            interpreted.debug_port().take_output().collect();
+        let rip_by_the_interpreter = interpreted.rip();
+
+        let _turn = a_turn_on_the_hardware();
+        let mut machine = machine_running(code);
+        let outcome = machine
+            .step(RunBudget::Ticks(1_000_000))
+            .expect("the hypervisor runs the guest and the shadow bursts its accesses");
+
+        let written: std::vec::Vec<u8> = machine.debug_port().take_output().collect();
+        assert_eq!(written, by_the_interpreter, "the byte must arrive under both engines");
+        assert_eq!(
+            outcome.stop,
+            StopReason::Halted,
+            "the shadow's own halt must reach the machine exactly as a hardware halt does"
+        );
+        assert_eq!(
+            machine.rip(),
+            rip_by_the_interpreter,
+            "with no read-back, the shadow is what the machine reads, and it must be \
+             the processor the errand left — identical to the interpreter's"
+        );
+
+        let exits = machine.engine().exits();
+        let census = machine.engine().census();
+        assert_eq!(
+            exits.halt, 0,
+            "the halt must be the shadow's — retired inside the burst — or the slice \
+             did not end on an errand's tail and the property under test was not \
+             reached; exits were {exits:?}"
+        );
+        assert_eq!(census.slices, 1, "one step is one slice; census was {census:?}");
+        assert_eq!(census.ended_halted, 1, "the shadow's halt ended it; census was {census:?}");
+        assert_eq!(
+            census.read_backs_skipped, 1,
+            "a slice that ends on an errand's tail must skip the read-back — a skip \
+             that never fires is a failed change, not a neutral one; census was {census:?}"
+        );
+    }
+
     /// An instruction budget is refused, not silently never spent.
     ///
     /// Nothing this machine can measure advances per instruction, so the loop
