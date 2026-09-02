@@ -246,17 +246,33 @@ have cleared survive.
 
 ### What the guest observes
 
-Under upstream's form, in this port: a lost machine boundary. This port's word
-carries a bit Bochs has no counterpart for, `BX_ASYNC_EVENT_SCHEDULER_BOUNDARY`
-(`cpu/cpu.rs`), which a device latches when it has work only the scheduler can
-do — a completion timer armed while answering a port write, a PAM flip, a
-relocated BAR — and which `cpu_loop_n_impl` tests for by name so the processor
-is handed back before its next instruction. A `POPF` or `IRET` that sets TF in
-the instruction after such a write would zero that bit and the request with
-it. The machine then services the device a whole slice late, and a disk
-interrupt lands after the driver has polled the data and finished — the
-`hda: unexpected_intr` failure class this port has already met from a dropped
-boundary.
+Under upstream's form, in this port: a lost machine boundary — on the
+hypervisor engine, through the API site. This port's word carries a bit Bochs
+has no counterpart for, `BX_ASYNC_EVENT_SCHEDULER_BOUNDARY` (`cpu/cpu.rs`),
+raised by `sync_lapic_events` (`cpu/cpu.rs`) and `PcIo::sync_io_events`
+(`emulator/io.rs`) when a device has work only the scheduler can do — a
+completion timer armed while answering a port write, a PAM flip, a relocated
+BAR. The engine's exit tail (`rusty_box_whp_engine/src/engine.rs`,
+`run_the_exit_loop`) asks `wants_a_machine_boundary` and only THEN stages an
+injection: `stage_injection` → `PcIo::pop_deliverable_vector` →
+`acknowledge_external_interrupt` → `sync_lapic_events`, which can raise the
+bit after the check, and `sync_io_events` right after it can raise it for a
+latch on the 8259's side. The guest then runs on the hardware with the request
+on the shadow's word; the next exit's `read_back_into_the_shadow` →
+`import_arch_state` → `set_rflags_for_api`, and a stepping guest has TF set.
+A literal `= 1` there zeroes the request; the tail after that exit finds
+nothing to hand back, and the machine services the device a whole slice late —
+a disk interrupt landing after the driver has polled the data and finished,
+the `hda: unexpected_intr` failure class this port has already met from a
+dropped boundary.
+
+The interpreter's site, `set_eflags_internal`, has no reachable clobber today
+and its `|=` is defensive: the trace loop leaves the trace the moment the word
+is non-zero (`cpu_loop_n_impl`, the post-instruction `async_event != 0`
+break), and the loop head hands the processor to the scheduler on the boundary
+bit before another instruction runs — so no `POPF` or `IRET` can retire with
+the bit already latched. No single instruction both raises the bit and writes
+TF.
 
 Under this port's form: nothing that differs from Bochs. The word is non-zero
 after the write, which is all Bochs's loop asks; `STOP_TRACE` surviving means

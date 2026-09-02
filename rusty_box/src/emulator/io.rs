@@ -20,8 +20,10 @@
 
 use crate::{
     cpu::{
-        cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentation, AcknowledgedInterrupt,
-        TrapDischarge,
+        cpu::{BxCpuC, CpuActivityState},
+        exec_ctx::ExecCtx,
+        instrumentation::Instrumentation,
+        AcknowledgedInterrupt, TrapDischarge,
     },
     iodev::{devices::DeviceManager, BxDevicesC},
     memory::BxMemC,
@@ -302,9 +304,19 @@ impl<'a> PcIo<'a> {
     /// inhibit covers and takes the boundary then — the frame's saved IP is
     /// past both instructions, as it is under the interpreter.
     ///
-    /// Afterwards the processor owes nothing: `debug_trap` is zero on every
-    /// `Ok` path, so no latch survives into a later errand to fire against
-    /// an instruction that never owed it.
+    /// A processor that went to sleep — the instruction was `HLT`, or the one
+    /// a `MOV SS` shadowed was — keeps its latch. Delivering into a halt
+    /// would end it: entering any handler makes the processor active. Bochs
+    /// event.cc handleAsyncEvent runs handleWaitForEvent BEFORE Priority 4,
+    /// so a halted processor is never woken by its own trap; the trap lands
+    /// when the wait ends, first thing. That is the sequence the slice head
+    /// runs when the machine wakes a sleeping shadow through
+    /// [`Self::emulate_one`], so the latch is left for it.
+    ///
+    /// Afterwards an active processor owes nothing: `debug_trap` is zero on
+    /// every `Ok` path that found it awake, so no latch survives into a later
+    /// errand to fire against an instruction that never owed it. A sleeping
+    /// one owes exactly what it owed, until it wakes.
     ///
     /// # Errors
     /// Whatever the delivery, or the one shadowed instruction, raised that
@@ -315,6 +327,9 @@ impl<'a> PcIo<'a> {
     ) -> crate::cpu::Result<()> {
         if cpu.owes_a_debug_trap() && cpu.debug_trap_inhibited() {
             self.finish_the_instruction(cpu)?;
+        }
+        if !matches!(cpu.activity_state, CpuActivityState::Active) {
+            return Ok(());
         }
         let mut ctx = ExecCtx::new(cpu, self.reborrow());
         match ctx.discharge_the_trap_owed()? {

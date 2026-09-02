@@ -1913,4 +1913,65 @@ mod tests {
         assert!(cpu.dr6.bs(), "DR6.BS reports a single step");
         assert_eq!(cpu.debug_trap, 0, "nothing is left latched for the next errand");
     }
+
+    /// A processor that goes to sleep owing a step keeps the step for its
+    /// wake. Bochs event.cc handleAsyncEvent runs handleWaitForEvent before
+    /// Priority 4, so a halted processor is not woken by its own trap: the
+    /// errand's tail leaves the latch in place, the processor stays halted,
+    /// and the interpreted instruction the slice head hands a woken
+    /// processor delivers the trap first — ahead of the event that woke it.
+    #[test]
+    fn a_step_owed_by_a_halted_processor_is_kept_for_the_wake() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        // mov ss,ax ; hlt — the instruction the inhibit shadows halts.
+        install_real_mode_guest(&mut bus, &[0x8E, 0xD0, 0xF4]);
+        // The handler: inc cx ; iret — its first instruction marks the wake.
+        bus.memory
+            .write_ram(u64::from(TRAP_HANDLER), &[0x41, 0xCF])
+            .expect("the handler is RAM");
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED | RFLAGS_TF);
+
+        run_one_errand(&mut bus, &mut cpu);
+
+        assert_eq!(
+            cpu.activity_state,
+            CpuActivityState::Hlt,
+            "the processor stays halted"
+        );
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_CODE + 3),
+            "no handler was entered"
+        );
+        assert_eq!(cpu.sp(), TRAP_STACK_TOP, "no frame was pushed");
+        assert!(!cpu.dr6.bs(), "DR6 reports nothing yet");
+        assert!(cpu.owes_a_debug_trap(), "the step is owed, not lost");
+
+        // The machine wakes it the way the slice head does: an event arrives
+        // and the halted processor is handed one interpreted instruction.
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_NMI);
+        bus.io()
+            .emulate_one(&mut cpu)
+            .expect("the wake retires");
+
+        assert_eq!(cpu.activity_state, CpuActivityState::Active);
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_HANDLER + 1),
+            "the #DB handler was entered and its first instruction retired"
+        );
+        assert_eq!(cpu.cx(), 1, "that instruction was the handler's");
+        assert_eq!(
+            read_word(&mut bus, u64::from(TRAP_STACK_TOP - REAL_MODE_FRAME)),
+            TRAP_CODE + 3,
+            "the saved IP is past the HLT"
+        );
+        assert!(cpu.dr6.bs(), "DR6.BS reports the single step");
+        assert_eq!(cpu.debug_trap, 0, "the latch was consumed by the wake");
+        assert!(
+            cpu.is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_NMI),
+            "the NMI that ended the wait is still pending: the trap outranks it"
+        );
+    }
 }

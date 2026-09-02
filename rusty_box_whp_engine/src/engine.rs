@@ -1249,8 +1249,15 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         match yielded {
             // Halting is not architectural state, so it does not arrive in the
             // exchange above; the platform reports it as the reason the run
-            // ended, and the shadow is where the machine reads it.
-            Yielded::Halted => cpu.record_halt(),
+            // ended, and the shadow is where the machine reads it. A shadow
+            // that entered a sleep state itself — an errand retired the `HLT`,
+            // or an `MWAIT`, or shut down on a triple fault — already says so,
+            // in the state it chose, and is not overwritten with a plain halt.
+            Yielded::Halted => {
+                if matches!(cpu.activity_state, CpuActivityState::Active) {
+                    cpu.record_halt();
+                }
+            }
             // A boundary request is already on the processor, where the
             // scheduler takes it the moment this slice returns; ending the
             // slice is the whole of what this engine owes it. The other two
@@ -1995,6 +2002,21 @@ fn run_the_exit_loop<T: Instrumentation>(
         // nobody moved onto the processor is a line the guest never sees.
         io.sync_io_events(cpu);
 
+        // An errand that put the shadow to sleep — a burst that reached
+        // `HLT`, or the instruction a `MOV SS` shadowed being one — ends the
+        // slice exactly as a hardware `Halt` exit does. The partition now
+        // holds the state after the `HLT`, and running it would carry the
+        // guest past a halt it executed. The shadow's own activity state is
+        // what the machine reads, its fast-forward decides when the guest
+        // may run again, and the wake goes through the slice head's
+        // interpreted delivery — so a trap the halting instruction owes
+        // lands where Bochs lands it, after the wait ends and before anything
+        // else (event.cc handleAsyncEvent: handleWaitForEvent, then
+        // Priority 4). Nothing is staged into a halted processor.
+        if !matches!(cpu.activity_state, CpuActivityState::Active) {
+            return Ok(Yielded::Halted);
+        }
+
         // An NMI, SMI or INIT outranks any maskable vector (the order Bochs
         // event.cc keeps at its own boundary) and is the shadow's to
         // deliver, so no external interrupt is staged over one: the slice
@@ -2524,9 +2546,11 @@ fn impose_after_errand<T: Instrumentation>(
     // to the hardware, which arms a step for its own instruction and knows
     // nothing of the shadow's — so the shadow takes the boundary before it
     // is written into the partition, and what the partition receives is the
-    // handler's entry. Here rather than in `finish_the_instruction` because
-    // every errand ends here: a one-instruction finish and a burst's last
-    // instruction owe the same step.
+    // handler's entry (or, for a shadow that went to sleep, the halt with its
+    // trap kept for the wake — the exit loop ends the slice on it). Here
+    // rather than in `finish_the_instruction` because every errand ends
+    // here: a one-instruction finish and a burst's last instruction owe the
+    // same step.
     io.deliver_the_trap_owed(cpu)?;
 
     // The errand has retired on the shadow, and `impose_the_shadow` below
