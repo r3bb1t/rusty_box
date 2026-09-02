@@ -1629,10 +1629,14 @@ mod tests {
     /// consumed by the errand retiring the instruction it protected, while
     /// the `MOV SS` shadow the SHADOW entered is live for the next one.
     ///
-    /// Trials repeat until one `mov ss` exits on the hardware (a stretch the
-    /// shadow carries delivers lawfully through the interpreter's own
-    /// inhibit, which exercises nothing here), so `exits().memory >= 1` is
-    /// what proves the property was reached.
+    /// Trials repeat until one `mov ss` has exited on the hardware AND a
+    /// deferred tick has been injected: a stretch the shadow carries delivers
+    /// lawfully through the interpreter's own inhibit, which exercises
+    /// nothing here, and a tick deferred at a tail is delivered by whichever
+    /// engine next finds it deliverable — the interpreter, when the slice
+    /// ends at that tail — so a run can retire several hardware trials before
+    /// one window exit lets the hardware inject. `exits().memory >= 1` and
+    /// `injected >= 1` together prove the property was reached.
     #[test]
     fn a_vector_pending_behind_an_errands_mov_ss_lands_after_the_stack_switch() {
         if !hypervisor_here() {
@@ -1704,17 +1708,21 @@ mod tests {
                          shadow would be refused here as WHV_E_INVALID_VP_STATE");
             written.extend(machine.debug_port().take_output());
             let marks = written.iter().filter(|byte| **byte == MARK).count();
-            if marks >= 8 && machine.engine().exits().memory >= 1 {
+            if marks >= 8
+                && machine.engine().exits().memory >= 1
+                && machine.engine().inject_census().injected >= 1
+            {
                 break;
             }
         }
         let census = machine.engine().inject_census();
         let exits = machine.engine().exits();
         eprintln!(
-            "mov-ss census: bytes {}, injected {}, windows armed {}, memory exits {}",
+            "mov-ss census: bytes {}, injected {}, windows armed {}, window exits {}, memory exits {}",
             written.len(),
             census.injected,
             census.windows_armed,
+            exits.window,
             exits.memory,
         );
         assert!(
