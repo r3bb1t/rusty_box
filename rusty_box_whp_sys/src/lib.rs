@@ -1,20 +1,66 @@
 //! The platform seam.
 //!
 //! Everything below this line is host FFI; everything above it is ordinary
-//! Rust. The two implementations expose the identical function set, so no
-//! caller ever carries a `cfg` — the selection happens once, here.
+//! Rust. This is the host-FFI leaf: the one crate in the workspace that calls
+//! an operating system directly, and therefore the one allowed to say `unsafe`
+//! — and every host call is confined to `windows.rs`, the one file that lifts
+//! the workspace's `deny` on `unsafe_code` wholesale. Elsewhere the `deny`
+//! stands and is lifted only one item at a time, for the three verbs whose
+//! obligations are stated in a signature. Holding that permission is this
+//! crate's whole job, which is what lets `rusty_box_whp` wrap it without
+//! performing a host call of its own (R1).
+//!
+//! The two implementations expose the identical function set, so no caller ever
+//! carries a `cfg` — the selection happens once, here. The crate compiles on
+//! every target: on anything but Windows every verb answers
+//! [`WhpErrorKind::Unsupported`] and [`hypervisor_present`] answers `false`, so
+//! a machine parameterised over an execution engine still type-checks on a host
+//! that has no hypervisor.
+//!
+//! # Surface
+//!
+//! The verbs and the handle, capability, property and counter codes are public
+//! because the wrapper crate is a different crate: a seam's surface is public
+//! to whoever wraps it, by construction. What is *not* public is the platform
+//! itself — no `WHV_` type, no `HRESULT` and no union crosses this boundary.
+//! [`Exit`] and [`ExitReason`] are this port's exhaustive reading of
+//! `WHV_RUN_VP_EXIT_CONTEXT`; the platform union is decoded once, behind the
+//! seam.
+//!
+//! Three verbs are `unsafe fn` because a public surface cannot name a
+//! particular caller: [`map_gpa`] leaves the hypervisor holding a host address
+//! past the borrow it was given, and [`delete_partition`] and [`delete_vp`]
+//! release a resource the `Copy` handle cannot stop anyone releasing twice.
+//! Each states the obligation in terms of its caller, which is what a seam's
+//! contract is. Every other verb copies within the call and keeps nothing, so
+//! it is safe to call with any handle this crate produced.
+//!
+//! # Provenance
+//!
+//! Every constant, bitfield position and structure layout is transcribed from
+//! the Windows SDK's `WinHvPlatformDefs.h`, and each is attributed to the union
+//! or enum it came from at the point of use. The bindings themselves are
+//! Microsoft's `windows-sys`, linked with `raw-dylib`, so building needs no SDK
+//! installed.
 
 use rusty_box_core::GpaPerms;
 
-use crate::error::{WhpError, WhpResult};
-use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister, TableRegister};
+mod error;
+mod vcpu;
+
+pub use error::{WhpError, WhpErrorKind, WhpResult};
+pub use vcpu::{
+    AccessType, CpuidAccess, DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind,
+    InterruptRequest, InterruptionType, IoPortAccess, MemoryAccess, MsrAccess,
+    PendingInterruption, Reg, SegmentRegister, TableRegister, TriggerMode, VpContext, ALL_REGS,
+};
 
 #[cfg(windows)]
-#[path = "sys/windows.rs"]
+#[path = "windows.rs"]
 mod imp;
 
 #[cfg(not(windows))]
-#[path = "sys/unsupported.rs"]
+#[path = "unsupported.rs"]
 mod imp;
 
 /// A live `WHV_PARTITION_HANDLE`.
@@ -24,9 +70,13 @@ mod imp;
 /// rejects the other, so a value of this type is a handle the platform vouched
 /// for. Being a plain integer is also what lets `Send` and `Sync` derive
 /// rather than be promised (R6).
+///
+/// The wrapper crate stores one and hands it back to the verbs; minting one and
+/// reading the word out of it stay inside this crate, so a handle can only come
+/// from a platform call that produced it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(transparent)]
-pub(crate) struct RawPartition(core::num::NonZeroIsize);
+pub struct RawPartition(core::num::NonZeroIsize);
 
 impl RawPartition {
     /// Accept a handle the platform just returned, or refuse it as a contract
@@ -43,9 +93,21 @@ impl RawPartition {
     }
 }
 
+/// The two layout claims the handle's doc comment makes, checked rather than
+/// trusted. `repr(transparent)` over a `NonZeroIsize` is what lets this type
+/// be passed where the SDK expects its own signed word, and the niche is what
+/// makes an absent handle cost nothing — so an `Option<RawPartition>` is still
+/// one word. Both are properties of the layout, which no runtime test on a
+/// single target can pin, and both would break silently if the field were ever
+/// widened or wrapped.
+const _: () = {
+    assert!(core::mem::size_of::<RawPartition>() == core::mem::size_of::<isize>());
+    assert!(core::mem::size_of::<Option<RawPartition>>() == core::mem::size_of::<isize>());
+};
+
 /// The `WHV_CAPABILITY_CODE` values this port asks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum CapabilityCode {
+pub enum CapabilityCode {
     HypervisorPresent,
     Features,
     ExtendedVmExits,
@@ -59,7 +121,7 @@ pub(crate) enum CapabilityCode {
 /// ones whose payload is a single word. `CpuidExitList` is a list and gets its
 /// own verb.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum PropertyCode {
+pub enum PropertyCode {
     ProcessorCount,
     ExtendedVmExits,
     MsrExitBitmap,
@@ -81,7 +143,7 @@ pub(crate) enum PropertyCode {
 /// the two whose payload this port reads, and each names a different structure,
 /// so the set chosen and the structure parsed are decided together.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum CounterSet {
+pub enum CounterSet {
     /// Per-intercept-class count and time,
     /// `WHV_PROCESSOR_INTERCEPT_COUNTERS`.
     Intercepts,
@@ -137,7 +199,7 @@ pub struct GvaTranslation {
     pub gpa: u64,
 }
 
-pub(crate) use imp::{
+pub use imp::{
     cancel_vp, capability, create_partition, create_vp, delete_partition, delete_vp,
     dirty_bitmap, get_counters, get_registers, get_segments, get_tables, get_words, get_xsave,
     hypervisor_present, map_gpa, request_interrupt, run_vp, set_cpuid_exit_list, set_property,
@@ -147,7 +209,9 @@ pub(crate) use imp::{
 
 /// Every function `imp` must provide, stated once so the two implementations
 /// cannot drift apart silently: a missing or mis-typed one fails this
-/// coercion rather than only failing on the platform nobody built today.
+/// coercion rather than only failing on the platform nobody built today. Three
+/// of the fields are `unsafe fn` types, so an implementation that quietly
+/// dropped an obligation would fail here too.
 const _IMP_IS_COMPLETE: ImpSignatures = ImpSignatures {
     hypervisor_present: imp::hypervisor_present,
     capability: imp::capability,
@@ -190,15 +254,15 @@ struct ImpSignatures {
     hypervisor_present: fn() -> WhpResult<bool>,
     capability: fn(CapabilityCode) -> WhpResult<u64>,
     create_partition: fn() -> WhpResult<RawPartition>,
-    delete_partition: fn(RawPartition),
+    delete_partition: unsafe fn(RawPartition),
     set_property: fn(RawPartition, PropertyCode, u64) -> WhpResult<()>,
     set_cpuid_exit_list: fn(RawPartition, &[u32]) -> WhpResult<()>,
     setup: fn(RawPartition) -> WhpResult<()>,
-    map_gpa: fn(RawPartition, &mut [u8], u64, GpaPerms) -> WhpResult<()>,
+    map_gpa: unsafe fn(RawPartition, &mut [u8], u64, GpaPerms) -> WhpResult<()>,
     unmap_gpa: fn(RawPartition, u64, u64) -> WhpResult<()>,
     dirty_bitmap: fn(RawPartition, u64, u64, &mut [u64]) -> WhpResult<()>,
     create_vp: fn(RawPartition, u32) -> WhpResult<()>,
-    delete_vp: fn(RawPartition, u32),
+    delete_vp: unsafe fn(RawPartition, u32),
     run_vp: fn(RawPartition, u32) -> WhpResult<Exit>,
     cancel_vp: fn(RawPartition, u32) -> WhpResult<()>,
     request_interrupt: fn(RawPartition, InterruptRequest) -> WhpResult<()>,

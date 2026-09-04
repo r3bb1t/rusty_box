@@ -1,6 +1,6 @@
 //! The seam on every target that is not Windows.
 //!
-//! This exists so `rusty_box_whp`'s types are nameable everywhere. A machine
+//! This exists so this crate's types are nameable everywhere. A machine
 //! parameterised over a hypervisor engine has to type-check on a host that has
 //! no hypervisor, and a caller has to be able to ask whether one is available
 //! without a `cfg` of its own; both need the crate to compile, not to vanish.
@@ -11,7 +11,7 @@
 //! result, and the reason the other verbs are never reached here.
 
 use crate::error::{WhpError, WhpResult};
-use crate::sys::{
+use crate::{
     CapabilityCode, CounterSet, GpaPerms, GvaTranslation, PropertyCode, RawPartition,
     RegisterValue,
 };
@@ -21,24 +21,36 @@ use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister, TableRegister};
 /// itself is what is missing rather than any particular call.
 const CALL: &str = "WinHvPlatform";
 
-pub(crate) fn hypervisor_present() -> WhpResult<bool> {
+pub fn hypervisor_present() -> WhpResult<bool> {
     Ok(false)
 }
 
-pub(crate) fn capability(_code: CapabilityCode) -> WhpResult<u64> {
+pub fn capability(_code: CapabilityCode) -> WhpResult<u64> {
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn create_partition() -> WhpResult<RawPartition> {
+pub fn create_partition() -> WhpResult<RawPartition> {
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn delete_partition(_partition: RawPartition) {
+/// # Safety
+/// As the Windows implementation states it. This body does nothing, but the
+/// two implementations must present one signature, and an obligation that
+/// disappears on the target where it happens to be vacuous is an obligation a
+/// caller can be written against and then broken by a rebuild.
+// UNSAFETY: a signature, not an operation — nothing here is unsafe on this
+// target, and the `expect` is targeted at the one item rather than lifting the
+// workspace `deny` for the file (R1).
+#[expect(
+    unsafe_code,
+    reason = "the seam presents one signature on every target, obligations included"
+)]
+pub unsafe fn delete_partition(_partition: RawPartition) {
     // Unreachable: a `RawPartition` can only come from `create_partition`,
     // which never succeeds here.
 }
 
-pub(crate) fn set_property(
+pub fn set_property(
     _partition: RawPartition,
     _code: PropertyCode,
     _value: u64,
@@ -46,15 +58,22 @@ pub(crate) fn set_property(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn set_cpuid_exit_list(_partition: RawPartition, _leaves: &[u32]) -> WhpResult<()> {
+pub fn set_cpuid_exit_list(_partition: RawPartition, _leaves: &[u32]) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn setup(_partition: RawPartition) -> WhpResult<()> {
+pub fn setup(_partition: RawPartition) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn map_gpa(
+/// # Safety
+/// As the Windows implementation states it, and declared here for the reason
+/// [`delete_partition`] gives.
+#[expect(
+    unsafe_code,
+    reason = "the seam presents one signature on every target, obligations included"
+)]
+pub unsafe fn map_gpa(
     _partition: RawPartition,
     _host: &mut [u8],
     _gpa: u64,
@@ -63,11 +82,11 @@ pub(crate) fn map_gpa(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn unmap_gpa(_partition: RawPartition, _gpa: u64, _len: u64) -> WhpResult<()> {
+pub fn unmap_gpa(_partition: RawPartition, _gpa: u64, _len: u64) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn dirty_bitmap(
+pub fn dirty_bitmap(
     _partition: RawPartition,
     _gpa: u64,
     _len: u64,
@@ -76,30 +95,37 @@ pub(crate) fn dirty_bitmap(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn create_vp(_partition: RawPartition, _index: u32) -> WhpResult<()> {
+pub fn create_vp(_partition: RawPartition, _index: u32) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn delete_vp(_partition: RawPartition, _index: u32) {
+/// # Safety
+/// As the Windows implementation states it, and declared here for the reason
+/// [`delete_partition`] gives.
+#[expect(
+    unsafe_code,
+    reason = "the seam presents one signature on every target, obligations included"
+)]
+pub unsafe fn delete_vp(_partition: RawPartition, _index: u32) {
     // Unreachable, for the same reason as `delete_partition`.
 }
 
-pub(crate) fn run_vp(_partition: RawPartition, _index: u32) -> WhpResult<Exit> {
+pub fn run_vp(_partition: RawPartition, _index: u32) -> WhpResult<Exit> {
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn cancel_vp(_partition: RawPartition, _index: u32) -> WhpResult<()> {
+pub fn cancel_vp(_partition: RawPartition, _index: u32) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn request_interrupt(
+pub fn request_interrupt(
     _partition: RawPartition,
     _request: InterruptRequest,
 ) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn get_counters(
+pub fn get_counters(
     _partition: RawPartition,
     _index: u32,
     _set: CounterSet,
@@ -108,7 +134,7 @@ pub(crate) fn get_counters(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn get_xsave(
+pub fn get_xsave(
     _partition: RawPartition,
     _index: u32,
     _out: &mut [u8],
@@ -116,11 +142,11 @@ pub(crate) fn get_xsave(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn set_xsave(_partition: RawPartition, _index: u32, _area: &[u8]) -> WhpResult<()> {
+pub fn set_xsave(_partition: RawPartition, _index: u32, _area: &[u8]) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn get_words(
+pub fn get_words(
     _partition: RawPartition,
     _index: u32,
     _regs: &[Reg],
@@ -129,7 +155,7 @@ pub(crate) fn get_words(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn get_registers(
+pub fn get_registers(
     _partition: RawPartition,
     _index: u32,
     _regs: &[Reg],
@@ -138,7 +164,7 @@ pub(crate) fn get_registers(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn set_registers(
+pub fn set_registers(
     _partition: RawPartition,
     _index: u32,
     _regs: &[Reg],
@@ -147,7 +173,7 @@ pub(crate) fn set_registers(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn set_words(
+pub fn set_words(
     _partition: RawPartition,
     _index: u32,
     _regs: &[Reg],
@@ -156,7 +182,7 @@ pub(crate) fn set_words(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn get_segments(
+pub fn get_segments(
     _partition: RawPartition,
     _index: u32,
     _regs: &[Reg],
@@ -165,7 +191,7 @@ pub(crate) fn get_segments(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn set_segments(
+pub fn set_segments(
     _partition: RawPartition,
     _index: u32,
     _regs: &[Reg],
@@ -174,7 +200,7 @@ pub(crate) fn set_segments(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn get_tables(
+pub fn get_tables(
     _partition: RawPartition,
     _index: u32,
     _regs: &[Reg],
@@ -183,7 +209,7 @@ pub(crate) fn get_tables(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn set_tables(
+pub fn set_tables(
     _partition: RawPartition,
     _index: u32,
     _regs: &[Reg],
@@ -192,7 +218,7 @@ pub(crate) fn set_tables(
     Err(WhpError::unsupported(CALL))
 }
 
-pub(crate) fn translate_gva(
+pub fn translate_gva(
     _partition: RawPartition,
     _index: u32,
     _gva: u64,

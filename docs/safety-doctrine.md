@@ -51,11 +51,15 @@ enum whose completeness depends on the build.
 Every `unsafe` block carries a `// SAFETY:` comment naming **who owns the invariant** it
 relies on. The per-crate count of `unsafe` tokens may never increase; when work removes some,
 the baseline in `xtask/src/ci.rs` is tightened in the same commit. End state (campaign P8):
-`#![forbid(unsafe_code)]` on every library crate, with no_alloc placement delegated to the
-vetted `static_cell` crate so the one unavoidable `unsafe` lives outside this tree.
+`#![forbid(unsafe_code)]` on every library crate but the host-FFI leaf, with no_alloc
+placement delegated to the vetted `static_cell` crate so the one unavoidable `unsafe` lives
+outside this tree. The leaf, `rusty_box_whp_sys`, is a permanent exception and is registered
+below.
 
 *Enforcement (mechanical):* the `doctrine ratchets` ci step counts comment-stripped `unsafe`
-tokens per crate against the baseline and fails on any increase.
+tokens per crate against the baseline and fails on any increase. A rise is not impossible,
+only impossible quietly: ci passes again only when that crate's baseline is raised in the
+same commit, under a comment saying what the new tokens are and why.
 
 ## R2 — States are types, not flags
 
@@ -216,12 +220,42 @@ recalled: `dyn` in `rusty_box/src` is 43 occurrences, and every one of them is b
 - `ExecCtx::slice_parts` — internal 6-tuple destructure (R0 scope note).
 - `static_cell` — the one `unsafe` dependency for no_alloc placement (R1), outside this tree.
 - no-alloc `Emulator` is `!Send` — documented caller-outlives contract (R6).
+- `rusty_box_whp_sys` — the host-FFI leaf, permanently outside R1's `forbid` end state; the
+  section below is its registration.
+
+## The registered R1 exception: the host-FFI leaf
+
+`rusty_box_whp_sys` holds the Windows Hypervisor Platform FFI and its vocabulary types, and
+`rusty_box_whp` is the typed wrapper above it — the conventional `-sys` shape. The leaf
+**cannot** carry `#![forbid(unsafe_code)]`: holding the host calls is its entire purpose. It
+is a permanent, deliberate exception to R1's end state, not a crate that has yet to reach it.
+What the ratchet buys here is **confinement**, not zero: the workspace lint table denies
+`unsafe_code`, `rusty_box_whp_sys/src/windows.rs` is the one file that lifts the deny
+wholesale, and everywhere else it is lifted a single item at a time under a named `#[expect]`.
+
+**What the counts count.** The baselines are `rusty_box_whp_sys/src` 43 and `rusty_box_whp/src`
+4 — 47 against the 38 of the single crate they replace. The number of unsafe *operations* is
+unchanged: the same 37 host calls and union reads, all still in `windows.rs`. What rose is
+markers. A public seam cannot lean on module privacy, so the three verbs carrying an
+obligation no type can express state it in their signatures — `map_gpa`, which leaves the
+hypervisor holding a host address past the borrow, and `delete_partition` / `delete_vp`, which
+release a resource a `Copy` handle cannot stop anyone releasing twice. In `rusty_box_whp` the
+three tokens that *discharge* those obligations sit where a signature cannot go: two `Drop`
+bodies, because a destructor cannot be an `unsafe fn`, and `map_range`, the crate's single
+door onto the retaining verb — R5's shape, reached by R5's argument.
+
+R1 counts markers and operations with one number, so it reads this rise as a regression where
+an implicit obligation in fact became explicit and compiler-enforced. The rule stands as
+written and no second counting scheme is introduced; a reader who meets that wall has this
+precedent to reason from. The way through is the one the ratchet already provides — a
+re-baseline in the same commit, under a comment saying which tokens are markers and which are
+operations.
 
 ## Running the mechanical enforcement
 
 - `cargo xtask ci` — includes the `doctrine ratchets` step (unsafe count + unsafe-impl count
   vs the baselines in `xtask/src/ci.rs`; fails on any increase; tighten baselines in the same
-  commit that lowers a count).
+  commit that lowers a count, and justify one in the same commit that raises it).
 - `cargo test -p rusty_box --test compile_fail --features std` — the trybuild fixture
   registry. Deliberately *not* part of the release gate matrix (fixture goldens track the
   local toolchain; regenerate with `TRYBUILD=overwrite` after a toolchain bump).

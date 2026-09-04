@@ -3816,8 +3816,7 @@ name = "rusty_box_whp"
 version = "0.0.3"
 dependencies = [
  "rusty_box_core",
- "tracing",
- "windows-sys 0.61.2",
+ "rusty_box_whp_sys",
 ]
 
 [[package]]
@@ -3828,6 +3827,15 @@ dependencies = [
  "rusty_box_whp",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rusty_box_whp_sys"
+version = "0.0.3"
+dependencies = [
+ "rusty_box_core",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

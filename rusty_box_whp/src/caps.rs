@@ -7,8 +7,7 @@
 //! makes them exactly the kind of spec-defined table that is worth reading off
 //! the header rather than recalling.
 
-use crate::error::WhpResult;
-use crate::sys;
+use crate::sys::{self, WhpResult};
 
 /// Bit positions within `WHV_CAPABILITY_FEATURES` (AMD64 layout).
 mod feature_bit {

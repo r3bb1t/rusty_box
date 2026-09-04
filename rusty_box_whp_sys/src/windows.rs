@@ -23,7 +23,7 @@
 use windows_sys::Win32::System::Hypervisor::*;
 
 use crate::error::{WhpError, WhpResult};
-use crate::sys::{
+use crate::{
     shape_of, CapabilityCode, CounterSet, GpaPerms, GvaTranslation, PropertyCode, RawPartition,
     RegisterValue,
 };
@@ -238,7 +238,7 @@ const fn map_flags(perms: GpaPerms) -> WHV_MAP_GPA_RANGE_FLAGS {
     flags
 }
 
-pub(crate) fn hypervisor_present() -> WhpResult<bool> {
+pub fn hypervisor_present() -> WhpResult<bool> {
     // A machine without the platform feature installed has no
     // `winhvplatform.dll` to load at all, and raw-dylib linkage turns that
     // into a load failure rather than a return code. The capability query is
@@ -255,7 +255,7 @@ pub(crate) fn hypervisor_present() -> WhpResult<bool> {
     }
 }
 
-pub(crate) fn capability(code: CapabilityCode) -> WhpResult<u64> {
+pub fn capability(code: CapabilityCode) -> WhpResult<u64> {
     const CALL: &str = "WHvGetCapability";
     let (raw, len) = capability_code(code);
     let mut buffer = 0u64;
@@ -277,7 +277,7 @@ pub(crate) fn capability(code: CapabilityCode) -> WhpResult<u64> {
     Ok(buffer)
 }
 
-pub(crate) fn create_partition() -> WhpResult<RawPartition> {
+pub fn create_partition() -> WhpResult<RawPartition> {
     const CALL: &str = "WHvCreatePartition";
     let mut handle: WHV_PARTITION_HANDLE = 0;
     // SAFETY: `handle` is a live, correctly typed out-parameter.
@@ -285,15 +285,21 @@ pub(crate) fn create_partition() -> WhpResult<RawPartition> {
     RawPartition::new(handle, CALL)
 }
 
-pub(crate) fn delete_partition(partition: RawPartition) {
-    // SAFETY: the handle came from `WHvCreatePartition` and this is its only
-    // deletion — `Partition`'s `Drop` is the sole caller and consumes the
-    // owner, so no second delete of the same handle is reachable.
-    //
-    // The result is deliberately not propagated: this runs from `Drop`, which
-    // cannot report, and the only documented failure is an already-invalid
-    // handle. It is logged rather than discarded so a leak is still visible.
-    let hresult = unsafe { WHvDeletePartition(partition.get()) };
+/// Release a partition and every host resource behind it.
+///
+/// # Safety
+/// The caller owns the uniqueness this call cannot check. `partition` must be
+/// a handle [`create_partition`] returned, must not have been deleted already,
+/// and this must be its last use — no verb below may name it afterwards.
+/// [`RawPartition`] is `Copy`, so the type system tracks none of that; a
+/// second delete, or any later call on the same word, hands the platform a
+/// stale handle.
+pub unsafe fn delete_partition(partition: RawPartition) {
+    // The result is deliberately not propagated: a deletion is the last thing
+    // that happens to a handle, so there is nobody left to report to, and the
+    // only documented failure is a handle that was already invalid. It is
+    // logged rather than discarded so a leaked partition is still visible.
+    let hresult = WHvDeletePartition(partition.get());
     if hresult < 0 {
         tracing::warn!(
             hresult = format_args!("{:#010x}", hresult as u32),
@@ -302,7 +308,7 @@ pub(crate) fn delete_partition(partition: RawPartition) {
     }
 }
 
-pub(crate) fn set_property(
+pub fn set_property(
     partition: RawPartition,
     code: PropertyCode,
     value: u64,
@@ -323,7 +329,7 @@ pub(crate) fn set_property(
     )
 }
 
-pub(crate) fn set_cpuid_exit_list(partition: RawPartition, leaves: &[u32]) -> WhpResult<()> {
+pub fn set_cpuid_exit_list(partition: RawPartition, leaves: &[u32]) -> WhpResult<()> {
     const CALL: &str = "WHvSetPartitionProperty(CpuidExitList)";
     let bytes = core::mem::size_of_val(leaves);
     let Ok(len) = u32::try_from(bytes) else {
@@ -343,42 +349,50 @@ pub(crate) fn set_cpuid_exit_list(partition: RawPartition, leaves: &[u32]) -> Wh
     )
 }
 
-pub(crate) fn setup(partition: RawPartition) -> WhpResult<()> {
+pub fn setup(partition: RawPartition) -> WhpResult<()> {
     // SAFETY: a handle from `WHvCreatePartition` that has not been deleted.
     check(unsafe { WHvSetupPartition(partition.get()) }, "WHvSetupPartition")
 }
 
-pub(crate) fn map_gpa(
+/// Give a guest-physical range the host bytes behind it.
+///
+/// `host` must be page-aligned and a whole number of pages, and `gpa`
+/// page-aligned; the platform refuses the call otherwise, which is an error
+/// rather than a hazard.
+///
+/// # Safety
+/// This is the platform's one *retaining* verb: the hypervisor keeps `host`'s
+/// address past the call and reads and writes through it while the guest runs,
+/// so the borrow in this signature ends long before the access does. The
+/// caller owns that lifetime — `host` must stay allocated, at the same
+/// address, and unmoved, until the range is unmapped or the partition is
+/// deleted, whichever comes first. Freeing or reallocating mapped memory
+/// leaves the guest running against pages the host no longer owns.
+pub unsafe fn map_gpa(
     partition: RawPartition,
     host: &mut [u8],
     gpa: u64,
     perms: GpaPerms,
 ) -> WhpResult<()> {
     const CALL: &str = "WHvMapGpaRange";
-    // SAFETY: `host` is a live, page-aligned, page-multiple allocation whose
-    // lifetime the caller ties to the mapping — `Partition::map` owns the
-    // pages it maps, so the host memory cannot outlive or predecease the
-    // partition that reads it.
     check(
-        unsafe {
-            WHvMapGpaRange(
-                partition.get(),
-                host.as_mut_ptr().cast(),
-                gpa,
-                host.len() as u64,
-                map_flags(perms),
-            )
-        },
+        WHvMapGpaRange(
+            partition.get(),
+            host.as_mut_ptr().cast(),
+            gpa,
+            host.len() as u64,
+            map_flags(perms),
+        ),
         CALL,
     )
 }
 
-pub(crate) fn unmap_gpa(partition: RawPartition, gpa: u64, len: u64) -> WhpResult<()> {
+pub fn unmap_gpa(partition: RawPartition, gpa: u64, len: u64) -> WhpResult<()> {
     // SAFETY: no pointer crosses; the partition handle is live.
     check(unsafe { WHvUnmapGpaRange(partition.get(), gpa, len) }, "WHvUnmapGpaRange")
 }
 
-pub(crate) fn dirty_bitmap(
+pub fn dirty_bitmap(
     partition: RawPartition,
     gpa: u64,
     len: u64,
@@ -399,7 +413,7 @@ pub(crate) fn dirty_bitmap(
     )
 }
 
-pub(crate) fn create_vp(partition: RawPartition, index: u32) -> WhpResult<()> {
+pub fn create_vp(partition: RawPartition, index: u32) -> WhpResult<()> {
     // SAFETY: the handle is live and the flags word is the documented zero.
     check(
         unsafe { WHvCreateVirtualProcessor(partition.get(), index, 0) },
@@ -407,10 +421,16 @@ pub(crate) fn create_vp(partition: RawPartition, index: u32) -> WhpResult<()> {
     )
 }
 
-pub(crate) fn delete_vp(partition: RawPartition, index: u32) {
-    // SAFETY: as `delete_partition` — reached only from `Drop`, once per
-    // created processor. Logged rather than propagated for the same reason.
-    let hresult = unsafe { WHvDeleteVirtualProcessor(partition.get(), index) };
+/// Release one virtual processor.
+///
+/// # Safety
+/// As [`delete_partition`], and owned by the caller for the same reason:
+/// `partition` must still be live, `index` must name a processor
+/// [`create_vp`] created and that has not been deleted, and this must be its
+/// last use.
+pub unsafe fn delete_vp(partition: RawPartition, index: u32) {
+    // Logged rather than propagated, for the reason `delete_partition` gives.
+    let hresult = WHvDeleteVirtualProcessor(partition.get(), index);
     if hresult < 0 {
         tracing::warn!(
             index,
@@ -420,7 +440,7 @@ pub(crate) fn delete_vp(partition: RawPartition, index: u32) {
     }
 }
 
-pub(crate) fn run_vp(partition: RawPartition, index: u32) -> WhpResult<Exit> {
+pub fn run_vp(partition: RawPartition, index: u32) -> WhpResult<Exit> {
     const CALL: &str = "WHvRunVirtualProcessor";
     // SAFETY: every field of the exit context is plain data for which the
     // all-zero pattern is valid, and the platform overwrites what it uses.
@@ -441,7 +461,7 @@ pub(crate) fn run_vp(partition: RawPartition, index: u32) -> WhpResult<Exit> {
     Ok(decode_exit(&context))
 }
 
-pub(crate) fn cancel_vp(partition: RawPartition, index: u32) -> WhpResult<()> {
+pub fn cancel_vp(partition: RawPartition, index: u32) -> WhpResult<()> {
     // SAFETY: the handle is live and the flags word is the documented zero.
     // This is the one verb the platform documents as callable from a thread
     // other than the one inside `WHvRunVirtualProcessor`.
@@ -451,7 +471,7 @@ pub(crate) fn cancel_vp(partition: RawPartition, index: u32) -> WhpResult<()> {
     )
 }
 
-pub(crate) fn request_interrupt(
+pub fn request_interrupt(
     partition: RawPartition,
     request: InterruptRequest,
 ) -> WhpResult<()> {
@@ -483,7 +503,7 @@ const fn counter_set_code(set: CounterSet) -> WHV_PROCESSOR_COUNTER_SET {
 /// The buffer is `u64`-shaped because every counter structure the platform
 /// defines is a run of `u64`s; a byte buffer would carry no guarantee of the
 /// alignment those words are read back at.
-pub(crate) fn get_counters(
+pub fn get_counters(
     partition: RawPartition,
     index: u32,
     set: CounterSet,
@@ -521,7 +541,7 @@ pub(crate) fn get_counters(
 /// only shape the platform offers the x87 and vector file in:
 /// `WHV_REGISTER_NAME` stops at the XMM names and carries no YMM or ZMM
 /// register at all.
-pub(crate) fn get_xsave(
+pub fn get_xsave(
     partition: RawPartition,
     index: u32,
     out: &mut [u8],
@@ -558,7 +578,7 @@ pub(crate) fn get_xsave(
 
 /// Write the processor's whole extended-state area — the counterpart of
 /// [`get_xsave`], taking the same layout back.
-pub(crate) fn set_xsave(partition: RawPartition, index: u32, area: &[u8]) -> WhpResult<()> {
+pub fn set_xsave(partition: RawPartition, index: u32, area: &[u8]) -> WhpResult<()> {
     const CALL: &str = "WHvSetVirtualProcessorXsaveState";
     let Ok(len) = u32::try_from(area.len()) else {
         return Err(WhpError::contract(CALL));
@@ -612,7 +632,7 @@ fn get_values(
     Ok(values)
 }
 
-pub(crate) fn get_words(
+pub fn get_words(
     partition: RawPartition,
     index: u32,
     regs: &[Reg],
@@ -632,7 +652,7 @@ pub(crate) fn get_words(
 /// per slice and the cost is the call rather than what it carries. Each value
 /// is taken from the union member its register names, decided by
 /// [`sys::shape_of`] so a caller cannot ask for the wrong one.
-pub(crate) fn get_registers(
+pub fn get_registers(
     partition: RawPartition,
     index: u32,
     regs: &[Reg],
@@ -651,7 +671,7 @@ pub(crate) fn get_registers(
 
 /// Write registers of mixed shape in one call. The counterpart of
 /// [`get_registers`].
-pub(crate) fn set_registers(
+pub fn set_registers(
     partition: RawPartition,
     index: u32,
     regs: &[Reg],
@@ -671,7 +691,7 @@ pub(crate) fn set_registers(
     set_values(partition, index, regs, values.len(), &raw)
 }
 
-pub(crate) fn get_segments(
+pub fn get_segments(
     partition: RawPartition,
     index: u32,
     regs: &[Reg],
@@ -684,7 +704,7 @@ pub(crate) fn get_segments(
     Ok(())
 }
 
-pub(crate) fn get_tables(
+pub fn get_tables(
     partition: RawPartition,
     index: u32,
     regs: &[Reg],
@@ -697,7 +717,7 @@ pub(crate) fn get_tables(
     Ok(())
 }
 
-pub(crate) fn set_words(
+pub fn set_words(
     partition: RawPartition,
     index: u32,
     regs: &[Reg],
@@ -710,7 +730,7 @@ pub(crate) fn set_words(
     set_values(partition, index, regs, words.len(), &values)
 }
 
-pub(crate) fn set_segments(
+pub fn set_segments(
     partition: RawPartition,
     index: u32,
     regs: &[Reg],
@@ -723,7 +743,7 @@ pub(crate) fn set_segments(
     set_values(partition, index, regs, segments.len(), &values)
 }
 
-pub(crate) fn set_tables(
+pub fn set_tables(
     partition: RawPartition,
     index: u32,
     regs: &[Reg],
@@ -781,7 +801,7 @@ fn set_values(
     )
 }
 
-pub(crate) fn translate_gva(
+pub fn translate_gva(
     partition: RawPartition,
     index: u32,
     gva: u64,

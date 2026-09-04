@@ -1,0 +1,43 @@
+[package]
+name = "rusty_box_whp_sys"
+description = "The Windows Hypervisor Platform seam: host FFI and the ABI vocabulary it speaks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# Microsoft's own bindings, and the raw tier of them on purpose. WHP is a plain
+# C API with no COM and no strings, so everything the full `windows` crate adds
+# over `windows-sys` — `windows_core::Result`, a `Free` impl on the partition
+# handle — is something this crate immediately discards for its own `WhpError`
+# and its own `Drop`. `windows-sys` also unifies with the version the workspace
+# already resolves, so the leaf adds no new dependency version at all, and it is
+# what Microsoft's own WHP wrapper in OpenVMM depends on.
+#
+# Windows-only, so no other target resolves or compiles it; `unsupported`
+# answers there instead. Linkage is `raw-dylib`, so no Windows SDK is required
+# to build.
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = ["Win32_System_Hypervisor"]
+
+[dependencies]
+# The engine seam's vocabulary. A permission on a guest-physical window means
+# the same thing to every backend, so it is defined once rather than per
+# backend — this crate having a real use for it is what keeps that honest.
+rusty_box_core = { workspace = true, features = ["std"] }
+# Only for the two teardown paths, which run from `Drop` and so have no caller
+# to report to. A refused delete leaks host resources; saying so is the whole
+# reaction available, and it beats discarding the result.
+tracing = { workspace = true }
+
+# Opted in deliberately, even though this crate is the host-FFI leaf and so the
+# one place in the workspace that must call `unsafe`. Keeping the workspace
+# `deny` on means every `unsafe` outside `windows.rs` is a hard error; that one
+# file carries an `#![expect(unsafe_code, …)]` naming who owns the invariants.
+# An `expect` also warns when it goes unfulfilled, so the day the file stops
+# needing unsafe the lint says so — R1's ratchet, written as a lint.
+[lints]
+workspace = true

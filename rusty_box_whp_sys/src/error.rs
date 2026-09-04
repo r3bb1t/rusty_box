@@ -1,4 +1,4 @@
-//! The one error type every entry point in this crate returns.
+//! The one error type every entry point across the WHP seam returns.
 
 use core::fmt;
 
@@ -49,12 +49,12 @@ impl WhpError {
     }
 
     /// The platform answered, but with something its own contract forbids.
-    pub(crate) const fn contract(call: &'static str) -> Self {
+    pub const fn contract(call: &'static str) -> Self {
         Self { kind: WhpErrorKind::Contract, hresult: 0, call }
     }
 
     /// Host memory for a guest-physical range could not be obtained.
-    pub(crate) const fn host_memory(call: &'static str) -> Self {
+    pub const fn host_memory(call: &'static str) -> Self {
         Self { kind: WhpErrorKind::HostMemory, hresult: 0, call }
     }
 
@@ -105,5 +105,5 @@ impl fmt::Debug for WhpError {
 
 impl std::error::Error for WhpError {}
 
-/// Every fallible verb in this crate returns this.
+/// Every fallible verb across the WHP seam returns this.
 pub type WhpResult<T> = Result<T, WhpError>;

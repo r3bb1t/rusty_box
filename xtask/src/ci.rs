@@ -77,19 +77,23 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     ("rusty_box_devices/src", 0),
     // The host-FFI leaf, and the one crate whose baseline is not zero and is
     // not aiming there: calling the WinHvPlatform C API is its whole purpose.
-    // What the ratchet enforces here is CONFINEMENT — every one of these lives
-    // in `sys/windows.rs`, which is the only file that lifts the workspace's
-    // `deny(unsafe_code)`, and each block names the invariant it rests on. A
-    // rise means either a new platform call or unsafe that escaped the seam.
+    // What the ratchet enforces here is CONFINEMENT — every host call lives in
+    // `windows.rs`, the only file that lifts the workspace's
+    // `deny(unsafe_code)` wholesale, and each block names the invariant it
+    // rests on. The remaining tokens are signature markers, and every one of
+    // them lifts the `deny` for a single item so the ratchet's own directory
+    // total cannot hide unsafe migrating between files. A rise means either a
+    // new platform call, a new obligation stated in a signature, or unsafe that
+    // escaped the seam.
     //
     // 31 -> 34: reading a segment or a descriptor-table register back out of
     // the platform's value union. The union is how `WHV_REGISTER_VALUE` is
     // defined, so a read of any member is unsafe by construction — `as_word`
     // was already one — and these three are the export half of a state
-    // exchange that previously only wrote. Still confined to `sys/windows.rs`.
+    // exchange that previously only wrote. Still confined to `windows.rs`.
     //
     // 34 -> 35: `Partition::map_borrowed` is `unsafe fn`, and it is the ONE
-    // token outside `sys/windows.rs`. It performs no unsafe operation of its
+    // token outside the platform seam. It performs no unsafe operation of its
     // own — the `unsafe` is the signature, carrying a contract no lifetime can
     // express: the host bytes must outlive the mapping, and a partition stored
     // beside the memory it maps cannot borrow its sibling. Stating it here is
@@ -98,17 +102,59 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // 35 -> 36: `WHvGetVirtualProcessorCounters`, the platform's own per-class
     // intercept and runtime accounting. A new platform call is the one reason
     // this crate's count rises, and this one is confined the same way as the
-    // rest: the block is in `sys/windows.rs`, the buffer it hands over is a
+    // rest: the block is in `windows.rs`, the buffer it hands over is a
     // borrowed `u64` slice whose length is what bounds the write, and the
     // structure is parsed in safe code above the seam.
     //
     // 36 -> 38: `WHvGetVirtualProcessorXsaveState` and its `Set` counterpart —
     // the platform's only window onto the x87 and vector file, which its
     // register names cannot address past the XMM halves. Confined as ever:
-    // both blocks in `sys/windows.rs`, each handing over a borrowed byte
+    // both blocks in `windows.rs`, each handing over a borrowed byte
     // slice whose length bounds the transfer, with the area parsed in safe
     // code above the seam (R1).
-    ("rusty_box_whp/src", 38),
+    //
+    // 38 -> 37 + 1: the seam is its own crate. The sum is unchanged, and so is
+    // every block; what changed is that the 37 platform calls are now confined
+    // by a crate boundary as well as by a file, which is what lets the wrapper
+    // bind new entry points without either crate's count moving.
+    //
+    // 37 -> 43: three verbs became `unsafe fn`, and a signature costs a token
+    // wherever it is written. The count of unsafe OPERATIONS is unchanged — the
+    // same 37 platform calls, still all in `windows.rs`, and `windows.rs` is
+    // still 37, because each of the three lost the block it used to wrap (the
+    // body of an `unsafe fn` needs none) exactly as it gained the marker. The 6
+    // new tokens are 3 signatures in `unsupported.rs`, which performs no unsafe
+    // operation at all and carries a targeted `#[expect]` on each, and the 3
+    // `unsafe fn` field types in `_IMP_IS_COMPLETE` that pin them for both
+    // targets. The obligations are `map_gpa`, which leaves the hypervisor
+    // holding a host address past the borrow, and `delete_partition` /
+    // `delete_vp`, which release a resource a `Copy` handle cannot stop anyone
+    // releasing twice. A `pub` seam cannot name a particular caller, so each
+    // states the obligation as the caller's.
+    ("rusty_box_whp_sys/src", 43),
+    // The safe wrapper over that leaf. FOUR: one signature and three blocks,
+    // and the split is the point.
+    //
+    // The signature is `Partition::map_borrowed`, which performs no unsafe
+    // operation of its own — it states a contract no lifetime can express, that
+    // the host bytes outlive the mapping, and deleting it would delete the
+    // obligation while the hazard remained.
+    //
+    // The three blocks are where this crate DISCHARGES what the seam asks of a
+    // caller, and each is somewhere a signature cannot go. Two are destructors:
+    // `Drop::drop` is not an `unsafe fn` and cannot be made one, so
+    // `OwnedPartition` and `Partition` state their one-delete guarantee in a
+    // block instead. The third is `map_range`, the crate's single door onto the
+    // platform's one retaining verb (R5) — `map` and `remap` discharge it by
+    // owning the pages, `map_borrowed` forwards it to its own caller.
+    //
+    // A rise means a fourth place reaching an unsafe operation DIRECTLY, or
+    // unsafe that escaped the seam crate for some other reason. It is not a
+    // count of who discharges the mapping obligation: `map_range` is a safe
+    // `fn`, so a fourth caller of it needs no marker and moves this number not
+    // at all — R5's single door, not this baseline, is what holds that
+    // obligation in one place.
+    ("rusty_box_whp/src", 4),
     // The adapter between the machine and the leaf. ONE: installing the
     // machine's memory into a partition hands the hypervisor host addresses
     // that outlive the borrow they came from, and no lifetime can say
@@ -511,12 +557,21 @@ const MATRIX: &[Step] = &[
         envs: &[],
         stdout_marker: None,
     },
-    // The Windows Hypervisor Platform leaf. Its tests need no hypervisor —
+    // The Windows Hypervisor Platform seam. Its tests need no hypervisor —
     // they cover the bitfield layouts transcribed from the SDK, which is
     // exactly the part a reader cannot check by eye — so this step runs
     // everywhere, including on a host where `hypervisor_present()` is false.
-    // Building the probe too, because an example outside the gate is an
-    // example that rots.
+    // A separate step from the wrapper's because it is a separate crate, and
+    // a crate no step names is a crate whose tests stop running.
+    Step {
+        name: "WHP sys tests",
+        args: &["test", "--release", "-p", "rusty_box_whp_sys"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    // The safe wrapper: the two lifecycle types, the counters and the page
+    // arithmetic. Building the probe too, because an example outside the gate
+    // is an example that rots.
     Step {
         name: "WHP leaf tests",
         args: &["test", "--release", "-p", "rusty_box_whp"],

@@ -17,13 +17,12 @@
 //! measuring is what the probe is meant to prevent.
 
 use crate::caps::MsrExits;
-use crate::error::{WhpError, WhpResult};
 use rusty_box_core::GpaPerms;
 
-use crate::sys::{self, GvaTranslation, PropertyCode, RawPartition, RegisterValue};
-use crate::vcpu::{
-    Exit, InternalActivity, InterruptRequest, PendingInterruption, Reg, SegmentRegister,
-    TableRegister,
+use crate::sys::{
+    self, Exit, GvaTranslation, InternalActivity, InterruptRequest, PendingInterruption,
+    PropertyCode, RawPartition, Reg, RegisterValue, SegmentRegister, TableRegister, WhpError,
+    WhpResult,
 };
 
 /// Guest-physical pages are 4 KiB, and every WHP range must start and end on
@@ -134,8 +133,19 @@ struct Region {
 struct OwnedPartition(RawPartition);
 
 impl Drop for OwnedPartition {
+    // UNSAFETY: `sys::delete_partition` asks its caller to own the uniqueness
+    // a `Copy` handle cannot carry, and this type is that owner. Other types
+    // here hold a `RawPartition` too — `Canceller` and `InterruptRequester`
+    // carry one across threads — but this destructor is the crate's only path
+    // to the deletion verb, and the value it deletes cannot be duplicated: the
+    // field is private to this module and the type is neither `Copy` nor
+    // `Clone`. So the handle is deleted exactly once, here, as the value dies.
+    #[expect(
+        unsafe_code,
+        reason = "a destructor cannot carry the marker in its signature, so it states the guarantee here"
+    )]
     fn drop(&mut self) {
-        sys::delete_partition(self.0);
+        unsafe { sys::delete_partition(self.0) };
     }
 }
 
@@ -426,13 +436,51 @@ pub struct Partition {
 }
 
 impl Drop for Partition {
+    // UNSAFETY: `sys::delete_vp` asks its caller to own two things the handle
+    // cannot carry — that the partition is still live, and that each processor
+    // is released once. This body owns both. It runs before the handle's own
+    // `Drop`, which follows because it belongs to a field, so the partition is
+    // still live throughout; and `self.processors` is private to this module,
+    // records exactly the indices `create_vp` succeeded for, and is read for
+    // deletion nowhere else, so each index reaches the verb once.
+    #[expect(
+        unsafe_code,
+        reason = "a destructor cannot carry the marker in its signature, so it states the guarantee here"
+    )]
     fn drop(&mut self) {
-        // Before the handle's own `Drop`, which runs after this body because
-        // it belongs to a field.
         for index in &self.processors {
-            sys::delete_vp(self.handle.0, *index);
+            unsafe { sys::delete_vp(self.handle.0, *index) };
         }
     }
+}
+
+/// The crate's single door onto the platform's one retaining verb.
+///
+/// `sys::map_gpa` leaves the hypervisor holding `host`'s address after the
+/// borrow ends, so every mapping this crate performs answers the same question
+/// — who keeps those bytes alive — and answering it in one place is what makes
+/// the three answers comparable (R5).
+// UNSAFETY: the obligation `sys::map_gpa` states is discharged by each of the
+// three callers below, and this is the only code in the crate that reaches the
+// verb:
+//   - `Partition::map` moves its `HostPages` into `self.regions` on success, so
+//     the partition owns the allocation it just mapped and cannot drop it while
+//     the mapping stands;
+//   - `Partition::remap` re-maps pages `self.regions` already owns, covered by
+//     that same ownership;
+//   - `Partition::map_borrowed` owns nothing and forwards the obligation to its
+//     own caller, which is exactly what its `unsafe` signature says.
+#[expect(
+    unsafe_code,
+    reason = "the crate's one call to the retaining verb, discharged by each of its three callers"
+)]
+fn map_range(
+    handle: RawPartition,
+    host: &mut [u8],
+    gpa: u64,
+    perms: GpaPerms,
+) -> WhpResult<()> {
+    unsafe { sys::map_gpa(handle, host, gpa, perms) }
 }
 
 impl Partition {
@@ -450,7 +498,7 @@ impl Partition {
         if gpa % PAGE_SIZE as u64 != 0 {
             return Err(WhpError::contract(CALL));
         }
-        sys::map_gpa(self.handle.0, pages.bytes_mut(), gpa, perms)?;
+        map_range(self.handle.0, pages.bytes_mut(), gpa, perms)?;
         self.regions.push(Region { gpa, perms, pages });
         Ok(())
     }
@@ -474,10 +522,12 @@ impl Partition {
     /// # Errors
     /// [`crate::WhpErrorKind::Contract`] if `gpa` or the buffer is not
     /// page-shaped, otherwise [`crate::WhpErrorKind::Platform`].
-    // UNSAFETY: the one `unsafe` outside `sys/`, and it is a signature rather
-    // than a block — this function performs no unsafe operation itself. It is
-    // marked so because it hands the hypervisor host addresses that outlive the
-    // borrow, which is an obligation only a caller can discharge.
+    // UNSAFETY: a signature rather than a block — this function performs no
+    // unsafe operation itself, and reaches the seam through `map_range` like
+    // every other mapping. It is marked so because it is the one mapping the
+    // partition does not own the memory for: it hands the hypervisor host
+    // addresses that outlive the borrow, which is an obligation only a caller
+    // can discharge.
     #[expect(
         unsafe_code,
         reason = "the mapping outlives the borrow, so the contract belongs in the signature"
@@ -492,7 +542,7 @@ impl Partition {
         if gpa % PAGE_SIZE as u64 != 0 || host.is_empty() || host.len() % PAGE_SIZE != 0 {
             return Err(WhpError::contract(CALL));
         }
-        sys::map_gpa(self.handle.0, host, gpa, perms)
+        map_range(self.handle.0, host, gpa, perms)
     }
 
     /// Change the permissions of an already-mapped range without disturbing
@@ -510,7 +560,7 @@ impl Partition {
             .iter_mut()
             .find(|region| region.gpa == gpa)
             .ok_or(WhpError::contract(CALL))?;
-        sys::map_gpa(handle, region.pages.bytes_mut(), gpa, perms)?;
+        map_range(handle, region.pages.bytes_mut(), gpa, perms)?;
         region.perms = perms;
         Ok(())
     }

@@ -1,7 +1,7 @@
 //! Virtual-processor state and the exits it produces.
 //!
-//! Nothing here calls the platform; these are the portable shapes both
-//! [`crate::sys`] implementations speak in, so the decoding of a raw
+//! Nothing here calls the platform; these are the portable shapes both of this
+//! crate's platform implementations speak in, so the decoding of a raw
 //! `WHV_RUN_VP_EXIT_CONTEXT` happens once, behind the seam, and no caller ever
 //! matches on a `cfg`.
 
@@ -240,8 +240,8 @@ pub enum TriggerMode {
 /// straight into a processor.
 ///
 /// This is the delivery path that exists only when the hypervisor emulates a
-/// local APIC; with [`crate::LocalApicMode::None`] there is no APIC to accept
-/// it.
+/// local APIC; where the partition's local-APIC emulation mode is `None` there
+/// is no APIC to accept it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct InterruptRequest {
     pub kind: InterruptKind,
