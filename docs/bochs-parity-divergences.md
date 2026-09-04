@@ -473,3 +473,289 @@ partition property at all.
 
 Full reasoning, the three terms that bound what may be offered, the two `CPUID`
 answer paths, and what other hypervisors do: `docs/whp-guest-capabilities.md`.
+
+## H5 — Device time is host time, and a tick is a unit rather than an instruction
+
+**Fast mode and precise mode.** H5 through H8 name the two engines as the
+resident-driver design names them: *fast mode* is a machine on
+`rusty_box_whp_engine`, *precise mode* is the same machine on the interpreter.
+
+**Bochs:** `pc_system.h bx_pc_system_c::tick1` is called once per retired
+instruction and `pc_system.cc bx_pc_system_c::countdownEvent` advances
+`ticksTotal` by the period it just crossed, so the machine's tick count IS its
+instruction count. Every device deadline is stored as an absolute `ticksTotal`
+value, and `pc_system.cc bx_pc_system_c::time_usec` divides that count by the
+configured `ips` to answer in microseconds. An emulated second is however long
+the host takes to retire `ips` instructions.
+
+**rusty_box in fast mode:** `ticks_total` (`pc_system.rs`) is advanced by the
+device thread from elapsed host time multiplied by `ips`. The guest's
+instructions retire on the host's processor and contribute nothing. `ips` names
+the size of a tick — how many ticks a host second is worth — and no longer names
+a speed. Precise mode is unchanged: `tick1` there is still one tick per retired
+instruction.
+
+### What the guest observes
+
+A machine whose second is the host's second. Every counter the guest can read —
+the PIT, the ACPI PM timer, the HPET, the RTC — advances at its architectural
+frequency against wall time, and `RDTSC`, which is already the host's counter
+(H2), advances against those counters at the true ratio. Under the interpreter's
+rule the same guest sees all of them advance at whatever rate instructions
+happen to retire.
+
+Deadlines are unaffected in the unit they are expressed in. A timer armed at
+absolute tick N fires at tick N under either driver, so the per-timer snapshot
+record — flags, period, absolute `time_to_fire`, owner, id — means the same thing
+on both. The snapshot section also carries `ips` and its restore rejects a
+mismatch, so an image restores only into a machine whose tick is the same size.
+
+### Why the divergence is the correct side
+
+Every guest-visible clock must be a fixed-ratio function of ONE monotonic time
+base. On this engine two of them are settled before the device clock gets a
+vote: the TSC is the host's (H2) and the LAPIC timer is the hypervisor's. Putting
+the device clock on any other base is the two-clocks failure, enumerated in
+`docs/research/whp-2026-09-03/05-guest-timekeeping.md` §4 — Linux's `check_timer`
+panics with "IO-APIC + timer doesn't work!" when the PIT lags TSC-time;
+`pit_hpet_ptimer_calibrate_cpu` reports "PIT calibration deviates" and keeps a
+`tsc_khz` that is wrong by the PIT/TSC ratio, which then scales `udelay`,
+`loops_per_jiffy` and every driver timeout; the clocksource watchdog demotes the
+TSC on skew above 0.4 % per half second. Windows 7 calibrates the TSC against
+the platform timers and, on an MP guest, bugchecks 0x101
+(`CLOCK_WATCHDOG_TIMEOUT`) when a secondary processor misses its clock tick.
+
+### Price of closing it
+
+None, because closing it IS precise mode. A machine that wants Bochs's
+instruction-count clock runs on the interpreter, where it is exact. Asking the
+hypervisor for the same thing means counting the guest's retired instructions,
+which is precisely what handing the guest to hardware gives up.
+
+**Status:** open and deliberate; fast mode only. Registered ahead of the driver
+that introduces it — `docs/superpowers/plans/2026-09-03-whp-vmm-shape.md`.
+
+## H6 — The 8042's serial delay is a one-shot
+
+**Bochs:** `iodev/keyboard.cc bx_keyb_c::init` registers the controller's timer
+continuous and already active, at the `serial_delay` the configuration names
+(`config.cc`, 150 µs by default). `bx_keyb_c::timer_handler` calls
+`bx_keyb_c::periodic(1)` on every fire; `periodic` collects and clears whichever
+of `irq1_requested` / `irq12_requested` is latched, raises it, and then returns
+having done nothing further when `timer_pending` is zero. A byte moved into the
+output buffer during one fire has its interrupt raised on the next, one period
+later.
+
+**rusty_box in fast mode:** the same 150 µs delay (`KBD_SERIAL_DELAY_USEC`,
+`iodev/keyboard.rs`) is armed as a one-shot from ONE choke point (R5): every time
+the device-time service runs, it reads the controller's state —
+`timer_pending != 0 || irq1_requested || irq12_requested`, the predicate
+`BxKeyboardC::needs_serial_tick` — and arms the one-shot for one period when that
+state holds and the timer is not already armed. Whatever latches host input pokes
+the device thread when it does so, so the evaluation happens then rather than at
+the thread's next unrelated deadline. Precise mode keeps Bochs's continuous
+registration.
+
+Arming at the sites that latch the work instead would be wrong, and structurally
+so. `activate_timer` has six callers in `iodev/keyboard.rs`, and two of them —
+`kbd_enq` and `mouse_enq` — are reached when the HOST queues a keystroke or a
+mouse packet, a path no guest port write passes through. An implementation that
+armed only where the guest touches port 0x60/0x64 would leave that byte latched
+with nothing armed to carry it, and IRQ1 would not fire until some unrelated port
+access happened to arm the one-shot; at an idle shell prompt that is a dead
+keyboard. The single site sits downstream of all six, and of any latch site added
+later.
+
+### What the guest observes
+
+IRQ1 and IRQ12 at the same delay after the byte that causes them, to within one
+150 µs period — which is the tolerance the continuous timer already imposes,
+since a latch can land anywhere inside a period. Nothing else differs: the
+controller's registers, its status bits, the output-port mirrors and the order in
+which bytes move are the `periodic` path in both forms.
+
+Both directions of the arming hold, and both are worth stating because only one
+of them is obvious. Work always gets a fire: the state the one-shot is armed from
+is the state every latch path has already written when the service reads it, and
+the service reads it on every run. A fire that is not scheduled is one that would
+have found nothing to do: the predicate is the same state `periodic` acts on, and
+`periodic` returns early when it is clear.
+
+### Why the divergence is the correct side
+
+On host time the continuous form is a real cost rather than a bookkeeping one,
+and the reason is structural rather than statistical: while that timer is
+registered, an idle 8042 puts a deadline on the wheel at least every 150 µs for
+the life of the machine regardless of what else is armed, so the device thread
+can never sleep past 150 µs whatever the guest is doing. The machine's floor on
+wake rate is then set by a controller with nothing to say rather than by any
+deadline a guest asked for. Under the interpreter the same deadline is an
+instruction count the CPU walks past anyway, which is why upstream can afford to
+write the timer this way; on a host clock it is a thread that has to be woken.
+
+**The cost of one such wake is not measured here.** No figure in this tree
+covers it — the ≈ 4 µs in
+`docs/research/whp-2026-09-03/05-guest-timekeeping.md` is the cost of a halt exit
+to the VMM and does not transfer to a device-thread wake — so this entry rests on
+the structural claim above and on nothing numeric. A measured wake cost, or a
+wake count observed over a boot, would settle it permanently; until one exists,
+read the justification as being about which party sets the floor, not about how
+expensive the floor is.
+
+### Price of closing it
+
+Those wakes. Restoring the continuous timer on host time costs a device-thread
+wake every 150 µs for the life of the machine and buys nothing a guest can see.
+
+**Status:** open and deliberate; fast mode only. Registered ahead of the driver
+that introduces it — `docs/superpowers/plans/2026-09-03-whp-vmm-shape.md`.
+
+## H7 — The time-stamp counter's rate changes across an engine transfer
+
+**Bochs:** `cpu/proc_ctrl.cc BX_CPU_C::get_TSC` returns
+`bx_pc_system.time_ticks() + tsc_adjust` — the machine's own tick count, which is
+one per retired instruction. There is a single rate and it never changes.
+
+**rusty_box:** in fast mode the counter is the host's (H2).
+
+The direction into precise mode exists today. The engine reads
+`WHvX64RegisterTsc` and hands the value to `set_tsc`
+(`rusty_box_whp_engine/src/engine.rs`) at every read-back, not only at a
+transfer, so the interpreter's counter continues from exactly where the
+hardware's stood and from there advances at one tick per retired instruction.
+
+The direction back does not exist yet, and today's seam refuses it on purpose:
+`rusty_box_whp_engine/src/state.rs` puts `Reg::Tsc` last in `MSR_REGS`, at
+`TSC_SLOT`, and the whole-state write skips that one register by index rather
+than by truncating a list, so no write reaches it at all — the test
+`the_time_stamp_counter_is_never_written_to_the_processor` asserts exactly
+that, on the recorder rather than on a read-back. What this entry registers is
+the transfer back: it writes the interpreter's value into the partition, so the
+hardware's counter resumes from where the interpreter left it and returns to the
+host's rate. Until the driver the Status line names lands, that exclusion and its
+test are what the code does, and this paragraph is what it is to do.
+
+### What the guest observes
+
+A change of rate at the instant of a transfer, with no step and no reversal: the
+counter is continuous and monotonic across the boundary, and the counts per
+second before it differ from the counts per second after. Time per instruction
+changes with it, for the same reason.
+
+A guest that has calibrated the TSC against a platform timer holds a frequency
+that was true of the engine it calibrated on. It learns the new rate at its next
+calibration; in between, Linux's clocksource watchdog is the thing that notices,
+and what it does about a TSC that no longer agrees with the HPET or the PM timer
+is demote it.
+
+### Why the divergence is the correct side
+
+The rate is not a property of the counter but of which engine holds the guest,
+and no counter can be both the host's cycle count and this machine's instruction
+count at once. Fast mode takes the host's for the reasons H2 records, and the
+discontinuity follows from that choice — from where fast mode's TSC comes from,
+not from having a precise mode at all. The part that is not up for negotiation is
+the value: continuity is taken, because a counter that stepped backwards across a
+transfer would break every guest that treats the TSC as monotonic.
+
+### Price of closing it
+
+Buyable, and H2 has already priced it. The rate a guest can compare is the TSC
+against its own timers, never against host seconds. That ratio is `cpu_hz : ips`
+in fast mode — H2 keeps the TSC on host cycles while H5 puts device time on host
+time × `ips` — and `1 : 1` in precise mode, where both are the instruction count.
+The difference between those two ratios IS the observable this entry registers,
+and H2's named cross-engine TSC bridge removes it: drive this port's counter from
+elapsed host time at the machine's own rate and fast mode's ratio is `1 : 1` as
+well, leaving a guest no rate change to see across a transfer — only the uniform
+dilation of the whole machine that H5 already accepts for every other clock.
+
+So the price is H2's, quoted there: an `X64RdtscExit` on the hottest instruction
+a calibrating guest executes, the two TSC bits in the MSR exit bitmap
+(`rusty_box_whp::MsrExits`), and a measurement before it is worth having. What
+stays unbuyable is a fast-mode TSC that is both the host's cycle count and the
+machine's instruction count; the bridge closes the discontinuity by giving the
+first of those up.
+
+**Status:** open and deliberate; both engines, since the divergence is the
+boundary between them. Registered ahead of the driver that introduces it —
+`docs/superpowers/plans/2026-09-03-whp-vmm-shape.md`, whose Stage 3 builds the
+transfer (`FastMachine::into_precise` / `from_precise`) and the write back that
+carries the value across it. No transfer exists yet, so nothing asserts the
+continuity of the value today; Stage 3's G4 live-transfer gate — Alpine at
+`login:`, fast → precise → fast, with `date` still advancing at wall rate and no
+clocksource demotion in `dmesg` — is where that invariant has to be held.
+
+## H8 — A level-triggered IOAPIC entry is re-serviced on the guest's EOI
+
+**Bochs:** `iodev/ioapic.cc bx_ioapic_c::receive_eoi` is a single `BX_DEBUG` and
+does nothing else. The remote-IRR accessors in `iodev/ioapic.h`
+(`set_remote_irr`, `clear_remote_irr`) have no callers, so the bit is never set
+and never consulted. `bx_ioapic_c::service_ioapic` keeps a level entry's `irr`
+bit through delivery — it clears the bit only when `entry->trigger_mode()` is 0 —
+and `bx_ioapic_c::set_irq_level` clears it only when the line itself drops. A
+level line still asserted after the handler's EOI is therefore re-serviced, but
+not until some unrelated event runs the next `service_ioapic` scan.
+
+**rusty_box in precise mode:** identical. `iodev/ioapic.rs receive_eoi` logs and
+returns; `set_remote_irr` has no caller here either; `service` clears `irr` for a
+pin only when its trigger mode is edge, and `set_pin_level` clears it for a level
+pin only on deassert.
+
+**rusty_box in fast mode:** the platform owns the LAPIC and reports the EOI of a
+level-triggered vector as an `X64ApicEoi` exit carrying
+`ApicEoi.InterruptVector`. `IrqFabric::resample_on_eoi(vector)` (`iodev/irq.rs`)
+answers it by re-servicing every level entry whose vector matches and whose line
+is still asserted, re-issuing the request at once.
+
+**Provenance (R7):** QEMU `hw/intc/ioapic.c ioapic_eoi_broadcast`, which QEMU's
+WHP accelerator calls from exactly this exit. Bochs has no counterpart symbol to
+depart from, because nothing in Bochs is told that an EOI happened.
+
+### What the guest observes
+
+In fast mode: a level interrupt whose line is still asserted when the handler
+writes EOI is re-delivered immediately, instead of waiting for a scan that some
+other device's activity happens to trigger. That is what the hardware does — a
+level entry re-asserts for as long as the line is held, which is how a shared PCI
+line drives its handler around the loop until every device on it is quiet. Under
+the Bochs rule the second delivery arrives late and at an unrelated moment, and a
+driver that quiesces its own device inside the handler and expects the next
+assertion promptly waits.
+
+Nothing changes for an edge entry, which produces no EOI exit at all — and edge
+is what the ISA lines are under normal programming. Nothing changes for a line
+the handler did quiesce: the resample finds it low and issues nothing.
+
+### Why the divergence is the correct side
+
+The engine is the only place in this port that is told an EOI occurred, and it is
+told for exactly the level vectors that need it. Declining to act on that means
+the faster engine deliberately holding an interrupt the hardware would have
+delivered — a divergence in the direction of being wrong, whose symptom is a hung
+device rather than a message. Every hypervisor-backed VMM that owns an IOAPIC
+behind a platform LAPIC resolves it the same way, which is why QEMU's function
+exists to be borrowed.
+
+### Price of closing it
+
+Paid in the other direction: the exit arrives whether or not the resample runs,
+so ignoring it restores the Bochs timing at no saving. The scan the resample runs
+is the same `service` the fabric already runs on every other request.
+
+**The cost of keeping it is a guard this port does not borrow.** QEMU's
+`ioapic_eoi_broadcast` is not a bare re-service: it defers roughly 10 ms
+(`timer_mod_anticipate`) once about ten thousand successive interrupts have
+arrived on the same vector (`SUCCESSIVE_IRQ_MAX_COUNT`), recorded in
+`docs/research/whp-2026-09-03/02-qemu-whpx.md`. This port borrows the function
+without that back-off, and that omission is deliberate rather than overlooked, so
+its consequence belongs here: a level line that the handler cannot quiesce
+becomes an EOI → re-deliver loop with nothing damping it, where the Bochs rule
+would have spaced the re-deliveries out by whatever unrelated event ran the next
+scan. Whoever finds such a loop should add the back-off as part of the borrowed
+behaviour under R7, not treat the resample itself as the defect.
+
+**Status:** open and deliberate; fast mode only. Registered ahead of the driver
+that introduces it — `docs/superpowers/plans/2026-09-03-whp-vmm-shape.md`, whose
+Task 1.6 proves the resample hypervisor-free and whose Stage 2 proves it on
+hardware.
