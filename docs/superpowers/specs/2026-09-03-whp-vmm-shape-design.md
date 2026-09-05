@@ -251,8 +251,12 @@ writes if trapped [01 A.1]. Consequences and rules:
 - **Our LAPIC model (`cpu/apic.rs`) is unchanged as the precise mode's LAPIC and becomes a
   mirror in fast mode**: loaded from the 4 KiB `InterruptControllerState2` page at pause,
   snapshot and transfer-out; written back at resume and transfer-in. The page's layout is
-  QEMU's `whpx_lapic_state`: one 32-bit register per 16-byte slot indexed by `offset >> 4`, so a
-  register's byte offset in the page equals its xAPIC MMIO offset; first 1 KiB meaningful; QEMU and OpenVMM
+  **the packed `HV_X64_INTERRUPT_CONTROLLER_STATE`** — consecutive 32-bit fields in a fixed
+  order, NOT addressed by xAPIC MMIO offset and NOT QEMU's 16-byte-slot `whpx_lapic_state`.
+  Measured on this host from a fresh x2APIC processor's reset state: version `0x00050014` at
+  byte 4, destination format all-ones at 0xC, spurious `0xFF` at 0x10, six masked local-vector
+  entries at 0x80–0x98. Read with a 16-byte stride the same bytes are nonsense and the version
+  register reads zero. Address it by a named register enum, never by an offset; QEMU and OpenVMM
   agree on it and both require the full 4096-byte buffer [01 A.3]. Hyperlight reports that
   individual APIC register writes through `WHvSetVirtualProcessorRegisters` fail with
   `ACCESS_DENIED` on its hosts while emulation is on and uses the page as its only write path
