@@ -3824,6 +3824,7 @@ name = "rusty_box_whp_engine"
 version = "0.0.3"
 dependencies = [
  "rusty_box",
+ "rusty_box_core",
  "rusty_box_whp",
  "tracing",
  "tracing-subscriber",

@@ -22,6 +22,10 @@ path = "src/lib.rs"
 # hypervisor and without pulling an emulator in behind it.
 [dependencies]
 rusty_box = { path = "../rusty_box", features = ["std"] }
+# The tree's time vocabulary. The engine's clock answers a `VmInstant` at the
+# machine's `ClockHz`, so it names the same types the devices read rather than
+# a unit of its own.
+rusty_box_core.workspace = true
 rusty_box_whp = { path = "../rusty_box_whp" }
 tracing.workspace = true
 

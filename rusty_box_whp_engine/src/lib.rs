@@ -49,9 +49,67 @@
 mod alarm;
 mod engine;
 mod state;
+mod vm_clock;
 mod xsave;
 
+/// Parts several test modules in this crate share.
+///
+/// Crate-level rather than nested in the module that first needed them: a
+/// `#[cfg(test)] mod tests` item is reachable only from inside its own module,
+/// and these are exercised from more than one.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use rusty_box_core::time::{HostClock, HostInstant};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    /// A `HostClock` two owners can advance — the test and the source under
+    /// test. Every handle cloned from one reads and moves the same nanosecond
+    /// counter, which is what a clock source taking its host clock by value
+    /// leaves a test no other way to do.
+    ///
+    /// Atomic rather than a cell, so a handle can cross to the thread whose
+    /// clock it is: a test that drives a device thread holds one side and the
+    /// thread the other. Release on the advance pairs with acquire on the
+    /// reading, so a reader that sees a nanosecond span also sees whatever the
+    /// advancer set up before granting it.
+    #[derive(Clone, Default)]
+    pub(crate) struct SharedClock(Arc<AtomicU64>);
+
+    impl SharedClock {
+        /// Saturating, matching `ManualClock::advance_nanos` in
+        /// `rusty_box_core::time` — a clock that wrapped would run backwards.
+        pub(crate) fn advance_nanos(&self, n: u64) {
+            let mut nanos = self.0.load(Ordering::Acquire);
+            while let Err(seen) = self.0.compare_exchange_weak(
+                nanos,
+                nanos.saturating_add(n),
+                Ordering::Release,
+                Ordering::Acquire,
+            ) {
+                nanos = seen;
+            }
+        }
+    }
+
+    impl HostClock for SharedClock {
+        fn now(&self) -> HostInstant {
+            HostInstant::from_nanos(self.0.load(Ordering::Acquire))
+        }
+    }
+
+    /// A clock source over this handle is what a device-thread test moves onto
+    /// the thread, so the handle's `Send` is load-bearing rather than incidental.
+    /// Pinned here, in the tree's own idiom, because the property is invisible
+    /// until the test that needs it exists.
+    const _: () = {
+        const fn is_send<T: Send>() {}
+        is_send::<crate::VmClockSource<SharedClock>>();
+    };
+}
+
 pub use engine::{ExitCounts, InjectCensus, PlatformCounters, SliceCensus, WhpEngine};
+pub use vm_clock::{StdClock, VmClockSource};
 
 /// Re-exported so a caller reading [`WhpEngine::platform_counters`] need not
 /// also name the platform crate to spell what it returns. These are that
