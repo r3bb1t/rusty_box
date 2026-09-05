@@ -469,7 +469,7 @@ Follow D5's shape exactly (`**Bochs:**`, `**rusty_box:**`, `### What the guest o
 
 - [ ] **Step 2: Write entry H6 — the 8042 serial delay is a one-shot on the fast engine**
 
-Bochs `keyboard.cc bx_keyb_c::init` registers `timer_handler` continuous at `serial_delay` (150 µs) and `timer_handler` calls `periodic(1)` every fire. rusty_box fast mode: the same 150 µs delay armed as a one-shot whenever the controller has work for it — `timer_pending != 0 || irq1_requested || irq12_requested` — and re-armed after each fire while that still holds; the interpreter keeps the continuous timer. Guest observes: identical IRQ1/IRQ12 timing to within one period; nothing else. Correct side: on host time the continuous form is 6,700 device-thread wakes a second that call `periodic(1)` on a controller with nothing pending. Price of closing it: those wakes.
+Bochs `keyboard.cc bx_keyb_c::init` registers `timer_handler` continuous at `serial_delay` (150 µs) and `timer_handler` calls `periodic(1)` every fire. rusty_box fast mode: the same 150 µs delay armed as a one-shot whenever the controller has work for it — `timer_pending != 0 || irq1_requested || irq12_requested` — evaluated at ONE site, the device-time service, so that every `activate_timer` caller is covered including `kbd_enQ` and `mouse_enQ`, which host input reaches and no guest port write does; the interpreter keeps the continuous timer. **State the wake cost as measured, not as arithmetic** — this file's standard is evidence, so quote a device-thread wake count from a run rather than dividing a second by the period. Guest observes: identical IRQ1/IRQ12 timing to within one period; nothing else. Correct side: on host time the continuous form is 6,700 device-thread wakes a second that call `periodic(1)` on a controller with nothing pending. Price of closing it: those wakes.
 
 - [ ] **Step 3: Write entry H7 — the TSC's rate changes across an engine transfer**
 
@@ -611,10 +611,9 @@ fn a_vcpu_runs_on_another_thread_while_the_partition_is_held_here() {
 
 ```rust
 /// A host clock over `std::time::Instant` — the `HostClock` the engine runs on.
-/// Nanoseconds since the clock was created; `instant_of` turns a `HostInstant`
-/// back into something a thread can sleep until.
+/// Nanoseconds since the clock was created.
 pub struct StdClock { epoch: std::time::Instant }
-impl StdClock { pub fn new() -> Self; pub fn instant_of(&self, at: HostInstant) -> std::time::Instant; }
+impl StdClock { pub fn new() -> Self; }
 impl HostClock for StdClock { fn now(&self) -> HostInstant; }
 
 /// Whether the clock is running (R2: a state is a type).
@@ -622,18 +621,19 @@ enum State { Running { vm_at: VmInstant, host_at: HostInstant }, Stopped { vm_at
 
 /// The spec's "VmTime": guest time that advances only while the guest may run,
 /// answered in the tree's own unit. `now()` is `vm_at` plus the ticks the host
-/// clock has earned since the anchor at `rate` (floor; the anchor moves on each
-/// `stop`, so at most one tick is lost per pause, never per read).
-pub struct VmClockSource<H: HostClock> { state: State, rate: ClockHz, host: H }
+/// clock has earned since the anchor at `rate`.
+pub struct VmClockSource<H: HostClock> { state: State, rate: ClockHz, /* + whatever private state carries the sub-tick remainder */ host: H }
 impl<H: HostClock> VmClockSource<H> {
     pub fn stopped_at(vm_at: VmInstant, rate: ClockHz, host: H) -> Self;
-    pub fn now(&self) -> VmInstant;                     // Running: vm_at + rate.ticks_from_nanos_floor(host.now().nanos_since(host_at)); Stopped: vm_at
+    pub fn now(&self) -> VmInstant;                     // Running: vm_at + ticks earned from (carry_nanos + elapsed); Stopped: vm_at
     pub fn start(&mut self);                            // Stopped → Running anchored at host.now(); idempotent
-    pub fn stop(&mut self) -> VmInstant;                // Running → Stopped at now(); idempotent; returns the frozen value
+    pub fn stop(&mut self) -> VmInstant;                // Running → Stopped at now(); idempotent; returns the frozen value; KEEPS the sub-tick remainder in carry_nanos
     pub fn is_running(&self) -> bool;
     pub fn rate(&self) -> ClockHz;
-    /// The host instant at which `at` will be `now()`. `None` while Stopped — the device thread has nothing to wait for.
-    pub fn host_instant_of(&self, at: VmInstant) -> Option<HostInstant>;   // host_at + rate.nanos_at(VmInstant::from_ticks(at.since(vm_at).ticks()))
+    /// How long from now until `at` becomes `now()`; `Some(ZERO)` when it already has.
+    /// `None` while Stopped — the device thread has nothing to wait for. Rounded UP, so a
+    /// waiter never wakes before the tick it is waiting for has actually arrived.
+    pub fn time_until(&self, at: VmInstant) -> Option<Duration>;
 }
 ```
 
@@ -683,17 +683,45 @@ fn ticks_are_earned_at_the_machines_rate() {
 }
 
 #[test]
-fn a_host_instant_exists_for_a_future_vm_time_only_while_running() {
+fn a_wait_exists_for_a_future_vm_time_only_while_running() {
     let host = SharedClock::default();
     let mut clock = VmClockSource::stopped_at(VmInstant::from_ticks(0), mhz(50_000_000), host.clone());
-    assert!(clock.host_instant_of(VmInstant::from_ticks(5)).is_none());
+    assert!(clock.time_until(VmInstant::from_ticks(5)).is_none());
     clock.start();
-    assert_eq!(clock.host_instant_of(VmInstant::from_ticks(5)), Some(HostInstant::from_nanos(100)), "5 ticks at 50 MHz is 100 ns after the anchor");
+    assert_eq!(clock.time_until(VmInstant::from_ticks(5)), Some(Duration::from_nanos(100)), "5 ticks at 50 MHz is 100 ns away");
+}
+
+/// The rate the harnesses actually run at does not divide a second, and rounding down
+/// there wakes a waiter before its tick exists.
+#[test]
+fn a_wait_never_ends_before_the_tick_it_waits_for() {
+    let host = SharedClock::default();
+    let mut clock = VmClockSource::stopped_at(VmInstant::from_ticks(0), mhz(300_000_000), host.clone()); // alpine_probe's rate: 10/3 ns per tick
+    clock.start();
+    let wait = clock.time_until(VmInstant::from_ticks(1)).expect("running");
+    assert_eq!(wait, Duration::from_nanos(4), "one tick is 3.33 ns, so the wait rounds UP to 4 — waking at 3 would arrive before the tick");
+    host.advance_nanos(wait.as_nanos() as u64);
+    assert!(clock.now().ticks() >= 1, "after waiting, the tick has genuinely arrived");
+}
+
+/// A pause must not cost the machine time. Sub-tick remainders carry, so many pauses
+/// lose no more than one tick in total — not one each.
+#[test]
+fn sub_tick_remainders_survive_a_pause() {
+    let host = SharedClock::default();
+    let mut clock = VmClockSource::stopped_at(VmInstant::from_ticks(0), mhz(1_000_000_000), host.clone()); // 1 tick = 1 ns
+    for _ in 0..10 {
+        clock.start();
+        host.advance_nanos(3);
+        clock.stop();
+        host.advance_nanos(1_000);          // paused: invisible
+    }
+    assert_eq!(clock.now().ticks(), 30, "ten running intervals of 3 ns each");
 }
 ```
 
 - [ ] **Step 2: Run to verify failure** — `cargo test --release -p rusty_box_whp_engine vm_clock`. Expected: module missing.
-- [ ] **Step 3: Implement** as the Interfaces block says; `StdClock::instant_of(at) = self.epoch + Duration::from_nanos(at.as_nanos())`.
+- [ ] **Step 3: Implement** as the Interfaces block says. Three rules the arithmetic must obey, each with a test above: `now()` rounds ticks DOWN (a tick that has not fully elapsed has not happened); `time_until` rounds the wait UP (a waiter must never wake before its tick exists); and a pause must cost the machine no time at all — otherwise it runs below its nominal rate, which `SEC_ACPI` validates against. **Accumulate exact host nanoseconds across running intervals and apply the floor ONCE, at read time.** Do not compute a remainder by converting the earned ticks back to nanoseconds and subtracting: that round trip floors on the way back, so each pause injects up to a nanosecond of time the guest never earned, and the clock drifts FORWARD by O(pauses) — at 300 MHz over ten pauses it answers 16 ticks where 15 is true, and at some rates it gains a tick between a `stop` and the `start` after it with zero host time in between. `core::time`'s PIT carry is the tree's own instance of the right pattern: it keeps an exact modulus, not a floored difference. There is deliberately no absolute-host-instant accessor: returning a `Duration` is what `wait_timeout` and `park_timeout` take, and it removes the `Instant + Duration` overflow that has no honest fallback.
 - [ ] **Step 4: Run to verify pass.**
 - [ ] **Step 5: Commit** — `git commit -m "feat(whp): a pausable host clock that earns the machine's ticks while its guest is on hardware"`.
 
@@ -1300,7 +1328,7 @@ pub fn spawn<T: Instrumentation + Send>(machine: Arc<Mutex<Box<Emulator<T, WhpEn
 pub(crate) fn service_once<T: Instrumentation, E: SliceEngine<T>, H: HostClock>(machine: &mut Emulator<T, E>, clock: &VmClockSource<H>) -> CpuResult<DeviceTime>;   // generic in the engine: the unit test drives an interpreter machine (`build()` returns Box<Emulator<T, SoftwareEngine>>, builder.rs:437), the device thread a WhpEngine one
 // elapsed = clock.now().ticks().saturating_sub(machine.ticks()); machine.service_device_time(elapsed)
 // The loop: (1) lock `wake`; wait while !(run || stop); stop → exit. (2) lock `clock` ALONE (never while holding the
-// machine): host_deadline = host_instant_of(next_deadline); unlock. (3) wait on `wake` until host_deadline or a
+// machine): wait = time_until(next_deadline); unlock. (3) wait on `wake` for `wait` or until a
 // notification (deadline_moved_earlier/pause/stop) — the two-phase wait from alarm.rs (sleep beyond 2 ms, spin the
 // remainder), moved here, not rewritten. (4) lock machine; service_once (which locks clock inside — order machine → clock);
 // unlock machine. (5) Ok(dt): next_deadline = dt.next_deadline; dt.stop == Some(GuestPowerOff) → every vcpu.request_park
@@ -1450,7 +1478,13 @@ fn a_pit_read_sees_time_pass_between_two_reads() {
 }
 ```
 - [ ] **Step 2: Run to verify failure.**
-- [ ] **Step 3: Implement** `device_thread.rs` and `fast_machine.rs`. **The per-exit wheel catch-up (spec §3.2):** in `VcpuThread::service`, after taking the machine lock and before dispatching any `IoPortAccess`/`MemoryAccess` arm, `service_once(&mut machine, &clock)?` (the thread holds a clone of the `Arc<Mutex<VmClockSource>>`; `service_once` locks the clock INSIDE the machine lock — order machine → clock) so a PIT/PM-timer/HPET read answers from the wheel at this instant; the no-work fast path in `service_scheduler_boundary` keeps this cheap when nothing is due. Then the H6 arming: `rearm_device_timers_after_hardware_reset` (timers.rs:177) registers the keyboard continuous under `Ticks` and does NOT arm it under `HostTime`; `BxKeyboardC::needs_serial_tick(&self) -> bool` = `timer_pending != 0 || irq1_requested || irq12_requested`; the port-dispatch tail in `BxDevicesC` (iodev/mod.rs, where `scheduler_boundary_requested` is latched at 620/823) enqueues `TimerRequest::Activate { deadline_ticks: now + KBD_SERIAL_DELAY_USEC × ips / 1e6, period_ticks: 0, continuous: false }` for `DeviceTimerOwner::Keyboard` when `device_clock == HostTime && needs_serial_tick()` and the timer is not already armed; `fire_keyboard_timer` (482) re-arms the same way while `needs_serial_tick()` still holds after the fires. Then DELETE the slice engine as listed; `WhpEngine::run_slice` becomes `Err(CpuError::UnsupportedCpuOperation { operation: "a machine on the hypervisor is driven by FastMachine, not by slices" })` — it is never called once the machine is adopted (the scheduler runs only under `Emulator::step`, which `FastMachine` never calls), and the refusal is the R5 choke point for a caller that forgot to adopt. Send assertions in `lib.rs`: `ss::<DeviceThreadControl>(); s::<FastMachine<()>>();`.
+- [ ] **Step 3: Implement** `device_thread.rs` and `fast_machine.rs`. **The per-exit wheel catch-up (spec §3.2):** in `VcpuThread::service`, after taking the machine lock and before dispatching any `IoPortAccess`/`MemoryAccess` arm, `service_once(&mut machine, &clock)?` (the thread holds a clone of the `Arc<Mutex<VmClockSource>>`; `service_once` locks the clock INSIDE the machine lock — order machine → clock) so a PIT/PM-timer/HPET read answers from the wheel at this instant; the no-work fast path in `service_scheduler_boundary` keeps this cheap when nothing is due. Then the H6 arming: `rearm_device_timers_after_hardware_reset` (timers.rs:177) registers the keyboard continuous under `Ticks` and does NOT arm it under `HostTime`; `BxKeyboardC::needs_serial_tick(&self) -> bool` = `timer_pending != 0 || irq1_requested || irq12_requested`.
+
+**Arm from ONE choke point, not from the port-dispatch tail (R5).** `activate_timer` has six callers (keyboard.rs:753, 778, 1184, 1213, 1884, 1896), and two of them — `kbd_enQ` (1184) and `mouse_enQ` (1213) — are reached when the HOST queues a keystroke or a mouse packet, which no guest port write passes through. Arming only where the guest touches a port therefore drops host input entirely whenever the guest is idle: the byte sits latched, the one-shot is never armed, and IRQ1 never fires until some unrelated port access happens to arm it. At an idle shell prompt that is a dead keyboard.
+
+So `service_device_time` evaluates the arming, every time it runs: when `device_clock == HostTime && needs_serial_tick()` and the keyboard timer is not already armed, it enqueues `TimerRequest::Activate { deadline_ticks: now + KBD_SERIAL_DELAY_USEC × ips / 1e6, period_ticks: 0, continuous: false }` for `DeviceTimerOwner::Keyboard`. One site covers all six latch paths and any latch site added later, which the port-dispatch tail structurally cannot. `fire_keyboard_timer` (482) needs no special case — the next service re-arms while `needs_serial_tick()` still holds.
+
+**And the input path must poke the device thread.** Evaluating on service is only prompt if a service happens; a keystroke arriving while the thread sleeps until a distant deadline would otherwise wait for it. Whatever injects host input — it already holds the machine lock to do so — calls `DeviceThreadControl::deadline_moved_earlier(clock.now())` afterwards, so the arming is evaluated immediately. Test this: with the guest idle and no device deadline within a second, inject a keystroke and assert IRQ1 reaches the guest within one serial-delay period, not at the next unrelated deadline. Then DELETE the slice engine as listed; `WhpEngine::run_slice` becomes `Err(CpuError::UnsupportedCpuOperation { operation: "a machine on the hypervisor is driven by FastMachine, not by slices" })` — it is never called once the machine is adopted (the scheduler runs only under `Emulator::step`, which `FastMachine` never calls), and the refusal is the R5 choke point for a caller that forgot to adopt. Send assertions in `lib.rs`: `ss::<DeviceThreadControl>(); s::<FastMachine<()>>();`.
 - [ ] **Step 4: Move the engine crate's tests** onto `FastMachine` (`machine_running`/`machine_with_devices` gain a `HostTime` twin `machine_with_devices_on`; the slice-loop tests either become `step`-driven with the same guests and assertions or are named in the commit with the property that replaced them — `a_port_write_and_a_halt_are_two_exits_in_one_slice` and `a_slice_ending_on_an_errand_skips_the_read_back_and_the_machine_reads_the_shadow` have no subject without slices and are removed with that justification; `trace_of` uses `step(Ticks)` on a `FastMachine`). Every retained test passes.
 - [ ] **Step 5: `cargo test --release -p rusty_box --lib --features std` and `cargo check --release --no-default-features -p rusty_box`** (keyboard.rs, iodev/mod.rs, timers.rs, pc_system.rs are no_std-compiled).
 - [ ] **Step 6: Gates and commit** — `cargo xtask ci`; `git commit -m "feat(whp): the machine runs its devices on host time and its guest on an unbounded processor"`.
