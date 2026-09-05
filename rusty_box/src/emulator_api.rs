@@ -909,9 +909,15 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
             // could not see a guest power-off at all and could not tell a
             // halted machine from a batch that simply retired nothing.
             match outcome.stop {
-                StopReason::GuestPowerOff | StopReason::StopRequested => {
-                    return Ok(EmuStopReason::Stopped)
-                }
+                // An engine refusal reaches a batch's verdict only when the
+                // boundary's own error had nowhere to go; the flag it raised is
+                // the same one this loop tests on entry, and answers `Stopped`
+                // there. The fault itself travels as `CpuError::EngineFault`
+                // out of `step_exactly`/`step` above, which is the path a
+                // refusal takes on every machine that is running one.
+                StopReason::GuestPowerOff
+                | StopReason::StopRequested
+                | StopReason::EngineFault => return Ok(EmuStopReason::Stopped),
                 StopReason::CpuShutdown => return Ok(EmuStopReason::Shutdown),
                 StopReason::Halted => return Ok(EmuStopReason::Halted),
                 StopReason::BudgetExhausted => {}

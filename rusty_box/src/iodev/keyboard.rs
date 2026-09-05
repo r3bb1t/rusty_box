@@ -574,6 +574,14 @@ pub struct BxKeyboardC {
     /// System software reset requested via controller command 0xFE or output-port reset.
     /// Checked by emulator loop to trigger Bochs-compatible software reset.
     pub(crate) reset_requested: Option<crate::cpu::ResetReason>,
+    /// Serial-delay periods this controller has been run for.
+    ///
+    /// The 8042's timer is continuous, so this counts periods of guest time
+    /// that actually elapsed — which is what a test asserting that a large
+    /// advance of device time replayed every missed period reads, rather than
+    /// asserting only that the clock moved.
+    #[cfg(test)]
+    pub(crate) serial_fires_seen: u64,
 }
 
 impl Default for BxKeyboardC {
@@ -656,6 +664,8 @@ impl BxKeyboardC {
             kbd_initialized: false,
             scancode_escaped: false,
             reset_requested: None,
+            #[cfg(test)]
+            serial_fires_seen: 0,
         }
     }
 
@@ -2727,6 +2737,10 @@ impl rusty_box_devices::api::TimedDevice for BxKeyboardC {
         fires: u32,
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
+        #[cfg(test)]
+        {
+            self.serial_fires_seen += u64::from(fires);
+        }
         for _ in 0..fires {
             let irq_mask = self.timer_callback();
             self.raise_latched(irq_mask, ctx);

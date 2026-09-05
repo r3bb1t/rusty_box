@@ -17,8 +17,102 @@
 
 use rusty_box_devices::api::{IrqLine, IrqSink};
 
-use super::ioapic::BxIoApic;
+use super::ioapic::{BxIoApic, IoApicDeliveryMode, PendingIoApicDelivery};
 use crate::pic::BxPicC;
+
+/// How an I/O APIC entry's interrupt is asserted.
+///
+/// Bochs ioapic.h `bx_io_redirect_entry_t::trigger_mode` — bit 15 of the low
+/// word, one bit with two meanings, so it is two states here (R2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IoApicTrigger {
+    /// Delivered once per assertion.
+    Edge,
+    /// Held until the destination writes EOI; the entry's remote-IRR mirrors it.
+    Level,
+}
+
+impl IoApicTrigger {
+    /// The redirection entry's own encoding: 0 edge, 1 level.
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Self {
+        if raw & 1 == 0 {
+            Self::Edge
+        } else {
+            Self::Level
+        }
+    }
+}
+
+/// How an I/O APIC entry's destination field names its target.
+///
+/// Bochs ioapic.h `bx_io_redirect_entry_t::destination_mode` — bit 11 of the
+/// low word.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IoApicDestinationMode {
+    /// The destination is a Local APIC ID.
+    Physical,
+    /// The destination is a mask matched against each Local APIC's logical
+    /// destination register.
+    Logical,
+}
+
+impl IoApicDestinationMode {
+    /// The redirection entry's own encoding: 0 physical, 1 logical.
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Self {
+        if raw & 1 == 0 {
+            Self::Physical
+        } else {
+            Self::Logical
+        }
+    }
+}
+
+/// One I/O APIC message, as whoever delivers it needs to see it.
+///
+/// The queued record the machine drains carries two more fields — the pin it
+/// came from, and whether its vector still owes an 8259 acknowledge — and both
+/// are the fabric's own bookkeeping, settled before anything can be delivered.
+/// What is left is the message itself, which is why this is the shape offered
+/// to an engine whose backend owns the Local APICs instead of this machine.
+///
+/// Every field that has more than one meaning is the type of that meaning (R2):
+/// a backend must branch on all three modes, and this record crosses a crate
+/// boundary to reach one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct IoApicDelivery {
+    /// Interrupt vector — Bochs ioapic.h `bx_io_redirect_entry_t::vector`.
+    /// Ignored by the SMI, NMI and INIT delivery modes, and supplied by the
+    /// 8259's own acknowledge for ExtINT.
+    pub vector: u8,
+    /// What kind of message this is: fixed, lowest-priority, SMI, NMI, INIT or
+    /// ExtINT.
+    pub delivery_mode: IoApicDeliveryMode,
+    /// Whether the line is edge- or level-triggered.
+    pub trigger_mode: IoApicTrigger,
+    /// The entry's destination field, read as [`Self::dest_mode`] says.
+    pub dest: u32,
+    /// How `dest` names its target.
+    pub dest_mode: IoApicDestinationMode,
+}
+
+impl IoApicDelivery {
+    /// The routable part of a queued message.
+    ///
+    /// The one conversion (R5), so the two records cannot drift apart field by
+    /// field, and the one place the entry's raw encodings become states.
+    #[inline]
+    pub(crate) fn from_pending(pending: PendingIoApicDelivery) -> Self {
+        Self {
+            vector: pending.vector,
+            delivery_mode: IoApicDeliveryMode::from_raw(pending.delivery_mode),
+            trigger_mode: IoApicTrigger::from_raw(pending.trigger_mode),
+            dest: pending.dest,
+            dest_mode: IoApicDestinationMode::from_raw(pending.dest_mode),
+        }
+    }
+}
 
 /// Whether an 8259 line transition is one the I/O APIC pin must also see.
 ///

@@ -95,16 +95,16 @@ impl<T: Instrumentation, E: SliceEngine<T>> Power<'_, T, E> {
     }
 
     /// The machine's current power state.
-    pub fn state(&self) -> PowerState {
+    ///
+    /// Takes `&mut self` because reading why the machine stopped is what
+    /// retires a cause whose raise no longer stands — see
+    /// [`Emulator::stop_in_force`]. A faulted machine reads `Running`: it is
+    /// powered on and stopped, which is not the same as switched off.
+    pub fn state(&mut self) -> PowerState {
         if self.machine.cpu_ref(0).is_in_shutdown() {
             return PowerState::CpuShutdown;
         }
-        if self
-            .machine
-            .stop_flag
-            .load(core::sync::atomic::Ordering::Relaxed)
-            && self.machine.stop_cause == StopCause::GuestPowerOff
-        {
+        if self.machine.stop_in_force() == Some(StopCause::GuestPowerOff) {
             return PowerState::PoweredOff;
         }
         PowerState::Running
@@ -256,6 +256,15 @@ pub enum StopReason {
     /// that is the 15 ms wall-clock budget, not `batch_instructions` — see
     /// `Emulator::step_batch`.
     BudgetExhausted,
+    /// The machine's engine refused something the machine cannot do itself —
+    /// an I/O APIC message its backend would not take, an interrupt edge it
+    /// could not be told about — and the machine stopped rather than run a
+    /// guest waiting on an interrupt nothing will deliver.
+    ///
+    /// The fault itself travels as `CpuError::EngineFault` from the boundary
+    /// that heard it. This is what a caller sees when the boundary's error had
+    /// nowhere to go, which is the case on every path that only logs one.
+    EngineFault,
 }
 
 /// What bounds one run.
@@ -401,13 +410,17 @@ impl BatchOutcome {
     /// Whether the machine should not be stepped again without host action.
     ///
     /// `Halted` and `BudgetExhausted` are ordinary yields — the guest is still
-    /// live and stepping again makes progress. The other three mean the guest
-    /// or the host has asked execution to end, and a caller that keeps stepping
-    /// is spinning.
+    /// live and stepping again makes progress. The other four mean execution
+    /// has ended: the guest or the host asked, the processor is in shutdown, or
+    /// the engine refused work the machine cannot do without it. A caller that
+    /// keeps stepping past any of them is spinning.
     #[inline]
     pub fn is_terminal(&self) -> bool {
         match self.stop {
-            StopReason::GuestPowerOff | StopReason::StopRequested | StopReason::CpuShutdown => true,
+            StopReason::GuestPowerOff
+            | StopReason::StopRequested
+            | StopReason::CpuShutdown
+            | StopReason::EngineFault => true,
             StopReason::Halted | StopReason::BudgetExhausted => false,
         }
     }
@@ -426,6 +439,54 @@ pub(crate) enum StopCause {
     HostRequested,
     /// The guest executed an ACPI S5 transition or the port-0x8900 protocol.
     GuestPowerOff,
+    /// The machine's engine refused work the machine cannot do without it, so
+    /// the boundary that heard the refusal stopped the machine beneath it.
+    EngineFault,
+}
+
+impl StopCause {
+    /// Whether this cause takes the field from `recorded`, when both describe
+    /// the same raised flag.
+    ///
+    /// One boundary can produce two of these: a guest power-off is drained at
+    /// its head and an engine refusal is surfaced at its tail. One field holds
+    /// one answer, so the order is fixed here rather than by which write ran
+    /// last.
+    ///
+    /// A guest power-off outranks everything. It is a terminal fact about the
+    /// machine and it is consumed where it is drained — no later boundary can
+    /// rediscover it, and a caller that is told anything else keeps a machine
+    /// alive that the guest switched off. An engine refusal loses nothing by
+    /// yielding: it is returned whole on the same call, and the work it refused
+    /// is still owed. A refused pin edge is offered again at the next boundary,
+    /// which runs the tail unconditionally; a refused I/O APIC delivery is put
+    /// back in the IRR and offered again at the next assertion of that line or
+    /// the next redirection-entry write, because nothing re-runs the delivery
+    /// path per boundary. A refusal in turn
+    /// outranks a bare host request, which is the absence of a machine cause
+    /// rather than a cause of its own.
+    const fn displaces(self, recorded: Self) -> bool {
+        match (recorded, self) {
+            (Self::GuestPowerOff, _) => false,
+            (_, Self::GuestPowerOff) => true,
+            (Self::HostRequested, Self::EngineFault) => true,
+            (Self::HostRequested, Self::HostRequested)
+            | (Self::EngineFault, Self::EngineFault)
+            | (Self::EngineFault, Self::HostRequested) => false,
+        }
+    }
+}
+
+impl From<StopCause> for StopReason {
+    /// The one place the machine's private vocabulary for "why did the flag go
+    /// up" becomes the one its callers read (R5), so the two cannot drift.
+    fn from(cause: StopCause) -> Self {
+        match cause {
+            StopCause::HostRequested => Self::StopRequested,
+            StopCause::GuestPowerOff => Self::GuestPowerOff,
+            StopCause::EngineFault => Self::EngineFault,
+        }
+    }
 }
 
 impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
@@ -519,9 +580,12 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             self.drain_serial_effects(0, current_ticks);
         }
         // A reset applied here needs no branch: host input reaches a machine
-        // that resumes at the reset vector either way.
+        // that resumes at the reset vector either way. A failure has nowhere to
+        // go from an input pump the idle waits call for responsiveness, so it
+        // is logged — and the boundary that raised it raised the machine's stop
+        // flag with it, so the loop that called this ends on that instead.
         if let Err(error) = self.service_scheduler_boundary(0) {
-            tracing::error!("host-input scheduler boundary failed: {error:?}");
+            tracing::error!("host-input scheduler boundary failed: {error}");
         }
     }
 
@@ -734,7 +798,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             // multiprocessor it always does — so in practice this is the
             // uniprocessor path, where a retired instruction is a tick.
             if !self.batch_advanced_pc_system {
-                self.advance_pc_system_after_cpu_ticks(progress.count());
+                self.advance_pc_system_after_cpu_ticks(progress.count())
+                    .map_err(crate::error::Error::Cpu)?;
             }
 
             // --- HLT/MWAIT: advance time until interrupt ---
@@ -891,7 +956,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             .run_cpu_batch_with_strict_limit(instructions, true)
             .map_err(crate::error::Error::Cpu)?;
         if !self.batch_advanced_pc_system {
-            self.advance_pc_system_after_cpu_ticks(progress.count());
+            self.advance_pc_system_after_cpu_ticks(progress.count())
+                .map_err(crate::error::Error::Cpu)?;
         }
         self.pump_gui_input();
         Ok(BatchOutcome {
@@ -968,6 +1034,58 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.pc_system.ticks_to_next_timer_deadline()
     }
 
+    /// Stop the machine, recording why.
+    ///
+    /// The one place the flag goes up with a cause of the machine's own (R5) —
+    /// a host request raises the bare flag instead, and is read back from the
+    /// absence of a machine cause. Going through here is what keeps the cause
+    /// honest when one boundary produces two of them: [`StopCause::displaces`]
+    /// decides which survives, so neither write has to know what the other did
+    /// or which of them ran last.
+    ///
+    /// A flag that is already down carries no cause — [`Self::stop_in_force`]
+    /// retires the field whenever it finds the flag lowered — so the incoming
+    /// cause simply takes it.
+    pub(super) fn raise_stop(&mut self, cause: StopCause) {
+        let cause_in_force = self.stop_flag.load(core::sync::atomic::Ordering::Relaxed);
+        if !cause_in_force || cause.displaces(self.stop_cause) {
+            self.stop_cause = cause;
+        }
+        self.stop_flag
+            .store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The machine cause in force right now, or `None` when the flag is down.
+    ///
+    /// The other half of [`Self::raise_stop`]'s choke point (R5): a cause means
+    /// something only while the raise that recorded it still stands, so the one
+    /// place that reads the field is also the one place that retires it. That
+    /// pairing is what a shared flag makes necessary. A host holds it as a bare
+    /// `&AtomicBool` and both lowers and raises it without touching the cause,
+    /// so a cause left behind by a machine raise would otherwise be read back as
+    /// the reason for the host's next bare one — reporting a guest power-off, or
+    /// an engine fault, for a machine the host merely paused.
+    ///
+    /// Every reader goes through here — the batch loop's classifier, the
+    /// device-time boundary a guest-off-thread driver runs, and
+    /// [`Power::state`] — so any of them retires a spent cause for all of them.
+    /// What that buys is bounded by reading rather than absolute. The flag is
+    /// lowered in several places and none of them retires the cause — a host
+    /// through its own clone, `emu_start` and `step_one` before they run — so a
+    /// cause standing at a lower survives until the next read, and a raise that
+    /// beats that read is answered with it; a bare `AtomicBool` carries nothing
+    /// that could tell two raises apart. That is a bound on what a reader can
+    /// be told, not on the machine: a driver that never asks — the interactive
+    /// loop services boundaries and reads no cause at all — cannot be misled by
+    /// one.
+    pub(super) fn stop_in_force(&mut self) -> Option<StopCause> {
+        if self.stop_flag.load(core::sync::atomic::Ordering::Relaxed) {
+            return Some(self.stop_cause);
+        }
+        self.stop_cause = StopCause::HostRequested;
+        None
+    }
+
     /// Why the batch loop above just ended.
     ///
     /// Asked once, after the loop, from state that is still live — which is
@@ -976,17 +1094,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// budget has to be reported as powering off, because the budget renews on
     /// the next call and the power-off request does not.
     fn classify_batch_stop(&mut self) -> StopReason {
-        if self.stop_flag.load(core::sync::atomic::Ordering::Relaxed) {
-            return match self.stop_cause {
-                StopCause::GuestPowerOff => StopReason::GuestPowerOff,
-                StopCause::HostRequested => StopReason::StopRequested,
-            };
+        if let Some(cause) = self.stop_in_force() {
+            return cause.into();
         }
-        // The flag is down, so nothing the machine recorded about a previous
-        // raise still applies. Clearing here is what keeps a stale guest cause
-        // from being read back the next time a HOST holder of the shared flag
-        // raises it — that holder writes the bool and nothing else.
-        self.stop_cause = StopCause::HostRequested;
 
         if self.cpu_ref(0).is_in_shutdown() {
             return StopReason::CpuShutdown;

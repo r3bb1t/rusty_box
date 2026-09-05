@@ -6,9 +6,49 @@ use crate::{
     pc_system::TimerOwner, Result,
 };
 
-use super::{Emulator, SliceEngine};
+use super::{Emulator, SliceEngine, StopReason};
 #[cfg(feature = "std")]
 use super::SLOWDOWN_QUANTUM_USEC;
+use crate::cpu::Result as CpuResult;
+
+/// What one advance of device time did (R0).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DeviceTime {
+    /// The wheel's next deadline as an absolute tick, `None` with nothing
+    /// armed. What a driver sleeps until.
+    pub next_deadline: Option<u64>,
+    /// A hardware reset was applied, and the advance was discarded with
+    /// everything else the pre-reset machine had queued.
+    pub reset_applied: bool,
+    /// The machine's stop flag is up, and why. `None` while it is down.
+    ///
+    /// The same [`StopReason`] a batch reports, so a driver that already
+    /// dispatches on one does not learn a second vocabulary for the same
+    /// question.
+    pub stop: Option<StopReason>,
+}
+
+impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
+    /// Advance device time by `elapsed_ticks`, and do everything a scheduler
+    /// boundary does with it.
+    ///
+    /// The same body the interpreter's boundary runs, for a machine whose
+    /// guest is not on this thread: the wheel is fed in deadline-sized steps,
+    /// so a periodic timer that fell several periods behind fires once per
+    /// period it missed rather than once for the whole jump.
+    ///
+    /// # Errors
+    /// Whatever the boundary could not complete — a chipset effect that would
+    /// not settle, or a delivery this machine's engine refused.
+    pub fn service_device_time(&mut self, elapsed_ticks: u64) -> CpuResult<DeviceTime> {
+        let reset_applied = self.service_scheduler_boundary(elapsed_ticks)?;
+        Ok(DeviceTime {
+            next_deadline: self.pc_system.next_timer_deadline_at(),
+            reset_applied,
+            stop: self.stop_in_force().map(StopReason::from),
+        })
+    }
+}
 
 impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Give every device that needs one a slot in the timer wheel, and hand
@@ -241,13 +281,20 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.drain_hpet_pending();
     }
 
+    /// Commit the ticks a CPU slice retired to device time.
+    ///
+    /// # Errors
+    /// Whatever the boundary could not complete — a chipset effect that would
+    /// not settle, or a refusal by this machine's engine. Propagated rather
+    /// than logged: this is the per-slice commit, so it is the path an engine's
+    /// refusal takes on every running machine, and a caller that runs on past
+    /// one is running a guest whose interrupt was never delivered.
     #[inline]
-    pub(super) fn advance_pc_system_after_cpu_ticks(&mut self, ticks: u64) {
+    pub(super) fn advance_pc_system_after_cpu_ticks(&mut self, ticks: u64) -> CpuResult<()> {
         // On reset the boundary discards `ticks` itself; execution resumes at
         // the reset vector, so both outcomes continue identically here.
-        if let Err(error) = self.service_scheduler_boundary(ticks) {
-            tracing::error!("scheduler tick commit failed: {error:?}");
-        }
+        self.service_scheduler_boundary(ticks)?;
+        Ok(())
     }
 
     /// Dispatch timer fires accumulated by `pc_system.tickn()`.

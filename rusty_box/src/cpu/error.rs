@@ -51,6 +51,17 @@ pub enum CpuError {
     #[error("machine boundary effect failed")]
     MachineBoundaryFailed,
 
+    /// The machine's engine refused work the machine cannot do without it: an
+    /// I/O APIC message its backend would not take, an interrupt edge it could
+    /// not be told about.
+    ///
+    /// Carried whole rather than reduced to the operation that failed. The
+    /// fault's kind and the backend's own error number are what separate a
+    /// mapping that could not be applied from a processor that would not run,
+    /// and a refused interrupt leaves no other trace to read.
+    #[error("engine fault: {0}")]
+    EngineFault(rusty_box_core::EngineFault),
+
     /// Bochs-style control flow: exceptions/interrupt delivery longjmp back to the
     /// main decode loop. We model that by unwinding the current instruction/trace
     /// and restarting decode.

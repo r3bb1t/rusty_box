@@ -22,8 +22,10 @@
 
 use super::{PcIo, Progress};
 use crate::cpu::{cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentation, Result};
+use crate::iodev::irq::IoApicDelivery;
 #[cfg(doc)]
 use crate::memory::plan::MemoryPlan;
+use rusty_box_core::EngineFault;
 
 /// One bounded stretch of guest execution, as the machine asks for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +118,24 @@ pub enum EventDelivery {
     Engine,
 }
 
+/// Where an I/O APIC delivery went.
+///
+/// Three outcomes and not two, because the third is the one that must not be
+/// lost: a backend that refused the message leaves it undelivered, and a
+/// machine that read the answer as "not delivered by me, so delivered by
+/// someone" would strand an interrupt with nothing said. The machine matches
+/// all three (R5).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeliveryRoute {
+    /// The machine writes the model's IRR as it does today.
+    Model,
+    /// The engine delivered it elsewhere; the machine does nothing.
+    Backend,
+    /// The engine's backend refused it. The machine leaves the message pending
+    /// (the I/O APIC's stuck path) and returns the fault from the boundary.
+    Refused(EngineFault),
+}
+
 /// Whatever runs guest code for one processor.
 ///
 /// Not dyn-compatible and deliberately so (R8): a machine knows its engine at
@@ -176,11 +196,50 @@ pub trait SliceEngine<T: Instrumentation> {
     /// execute the ROM it thought it had replaced.
     ///
     /// # Errors
-    /// Whatever prevented the new map from being installed. A machine treats
-    /// that as a boundary failure rather than continuing, because a guest
-    /// running against a stale map is worse than a guest that stopped.
-    fn memory_map_changed(&mut self, memory: &mut crate::memory::BxMemC) -> Result<()> {
+    /// [`EngineFault`] when the new map could not be installed — normally
+    /// [`Memory`](rusty_box_core::EngineFaultKind::Memory), carrying the
+    /// backend's own code. A machine
+    /// treats that as a boundary failure rather than continuing, because a
+    /// guest running against a stale map is worse than a guest that stopped:
+    /// it raises the stop through the same choke point as a refused pin edge,
+    /// so a caller with no error channel of its own still stops.
+    fn memory_map_changed(
+        &mut self,
+        memory: &mut crate::memory::BxMemC,
+    ) -> core::result::Result<(), EngineFault> {
         let _ = memory;
+        Ok(())
+    }
+
+    /// Where an I/O APIC delivery goes.
+    ///
+    /// Defaulted to [`DeliveryRoute::Model`] — this port's Local APICs live on
+    /// its processors, and the machine writes them itself. An engine whose
+    /// backend owns the Local APICs answers [`DeliveryRoute::Backend`] and
+    /// takes the message; one whose backend refused it answers
+    /// [`DeliveryRoute::Refused`], and the machine leaves the message pending
+    /// and surfaces the fault from the boundary.
+    fn route_ioapic_delivery(&mut self, delivery: IoApicDelivery) -> DeliveryRoute {
+        let _ = delivery;
+        DeliveryRoute::Model
+    }
+
+    /// The 8259's INT pin to the boot processor CHANGED level.
+    ///
+    /// An edge, not a level: the machine calls this only on a transition. A
+    /// pin that stays asserted while the guest has not yet acknowledged it is
+    /// the ordinary case, and an engine told about it on every boundary would
+    /// cancel a running processor thousands of times a second for one
+    /// interrupt.
+    ///
+    /// Defaulted to nothing, which is what this port's interpreter needs: it
+    /// reads the processor's event word, which the same boundary publishes.
+    ///
+    /// # Errors
+    /// Whatever the engine's backend refused. The machine surfaces it from the
+    /// boundary rather than continuing with an engine that missed the edge.
+    fn pic_pin_changed(&mut self, asserted: bool) -> core::result::Result<(), EngineFault> {
+        let _ = asserted;
         Ok(())
     }
 }

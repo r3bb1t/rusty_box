@@ -9,7 +9,9 @@ use crate::{
 };
 
 
-use super::{CpuMask, Emulator, Progress, SliceEngine, SliceRequest, BOCHS_APIC_BUS_ID_MASK};
+use super::{
+    CpuMask, DeliveryRoute, Emulator, Progress, SliceEngine, SliceRequest, BOCHS_APIC_BUS_ID_MASK,
+};
 
 impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Invalidate every host pointer and decoded trace before memory backing
@@ -711,7 +713,34 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         );
     }
 
+    /// Route one queued I/O APIC message, wherever this machine's engine says
+    /// it goes.
+    ///
+    /// Only this path asks: the ICR-IPI path shares
+    /// [`Self::deliver_lapic_bus_interrupt`] and is a processor writing another
+    /// processor's Local APIC, not a message from the fabric.
     fn deliver_ioapic_to_lapics(
+        &mut self,
+        delivery: crate::iodev::ioapic::PendingIoApicDelivery,
+    ) -> bool {
+        match <E as SliceEngine<T>>::route_ioapic_delivery(
+            &mut self.engine,
+            crate::iodev::irq::IoApicDelivery::from_pending(delivery),
+        ) {
+            DeliveryRoute::Model => self.deliver_ioapic_to_model_lapics(delivery),
+            // The engine took it; this machine's Local APIC models are not the
+            // ones the guest is reading, so writing them would deliver twice.
+            DeliveryRoute::Backend => true,
+            DeliveryRoute::Refused(fault) => {
+                // Undelivered, and said so: the caller leaves the message on
+                // the I/O APIC's stuck path and the boundary returns the fault.
+                self.engine_fault = Some(fault);
+                false
+            }
+        }
+    }
+
+    fn deliver_ioapic_to_model_lapics(
         &mut self,
         delivery: crate::iodev::ioapic::PendingIoApicDelivery,
     ) -> bool {
@@ -982,9 +1011,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // stop request; the flag itself is shared and cannot carry it.
         if self.devices.take_shutdown_request() {
             tracing::info!("port 0x8900 shutdown protocol complete — stopping emulation");
-            self.stop_cause = crate::emulator::StopCause::GuestPowerOff;
-            self.stop_flag
-                .store(true, core::sync::atomic::Ordering::Relaxed);
+            self.raise_stop(crate::emulator::StopCause::GuestPowerOff);
         }
 
         // Bochs acpi.cc PM1_CNT SLP_EN with SLP_TYP=0 (S5 soft power off) sets
@@ -994,9 +1021,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // convergence check on has_pending_machine_boundary.
         if core::mem::take(&mut self.device_manager.acpi.soft_off_pending) {
             tracing::info!("ACPI S5 soft power off — stopping emulation");
-            self.stop_cause = crate::emulator::StopCause::GuestPowerOff;
-            self.stop_flag
-                .store(true, core::sync::atomic::Ordering::Relaxed);
+            self.raise_stop(crate::emulator::StopCause::GuestPowerOff);
         }
 
         // No-work fast path: when nothing is queued anywhere, every drain in
@@ -1012,6 +1037,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // win over software requests from the same boundary.
         let reset_applied = match self.check_and_handle_resets() {
             Ok(applied) => applied,
+            // A refusal reset drained on its way out already carries its kind,
+            // its backend code and the operation it failed at. Flattening it
+            // into a nameless boundary failure would cost the caller exactly
+            // what `EngineFault` exists to carry, so it crosses whole. Every
+            // other way reset can fail is a chipset effect that would not
+            // settle, which has no name of its own to lose.
+            Err(crate::Error::Cpu(fault @ CpuError::EngineFault(_))) => return Err(fault),
             Err(error) => {
                 tracing::error!("machine boundary reset handling failed: {error:?}");
                 return Err(CpuError::MachineBoundaryFailed);
@@ -1024,6 +1056,21 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             // (or ticking elapsed_ticks) would let pre-reset state leak into
             // the fresh machine — e.g. a rearmed timer firing before the
             // first instruction at the reset vector.
+            //
+            // Stopping on a refusal is not "anything further": reset itself
+            // tells the engine the interrupt pin fell, so this exit is one a
+            // refusal can be raised on, and it is the only one that would carry
+            // the fault past its own boundary.
+            //
+            // Leaving by the error channel costs the caller the `true` below:
+            // a boundary that both resets and refuses reports the refusal, not
+            // the reset. That is the inverse of the trade `StopCause::displaces`
+            // makes, and deliberate for the same reason read the other way —
+            // the fault is the fact this call cannot re-offer, while the machine
+            // it hands back is unambiguously reset whether or not the flag says
+            // so, and a caller that stops on the error inspects it before it
+            // could act on a reset.
+            self.stop_on_engine_refusal()?;
             #[cfg(test)]
             self.assert_cpu_masks_match_scan();
             return Ok(true);
@@ -1127,7 +1174,17 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             // knows it moved — every producer of a topology change
             // (PAM, SMRAM, the BIOS-write gate, a relocated BAR, A20) is
             // aggregated above (R5).
-            <E as SliceEngine<T>>::memory_map_changed(&mut self.engine, &mut self.memory)?;
+            if let Err(fault) =
+                <E as SliceEngine<T>>::memory_map_changed(&mut self.engine, &mut self.memory)
+            {
+                self.engine_fault = Some(fault);
+            }
+            // A map the engine could not install leaves by the same choke point
+            // as the other two fallible engine calls (R5), so it raises a stop
+            // rather than only propagating: the three callers with no error
+            // channel log the fault and continue, and continuing here would run
+            // a guest against a map only the model believes in.
+            self.stop_on_engine_refusal()?;
         }
         self.drain_device_timer_requests();
         } // had_work prologue
@@ -1170,9 +1227,43 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.drain_device_timer_requests();
         self.drain_pending_smc();
         self.sync_final_event_levels();
+        self.stop_on_engine_refusal()?;
         #[cfg(test)]
         self.assert_cpu_masks_match_scan();
         Ok(false)
+    }
+
+    /// Stop the machine on whatever the engine refused, and clear it.
+    ///
+    /// The single place a refusal becomes a consequence (R5), for both kinds —
+    /// a delivery the backend would not take, and an interrupt edge it could
+    /// not be told about. It does two things because one is not enough:
+    ///
+    /// - the fault is returned whole, so a caller with an error channel acts on
+    ///   it at once;
+    /// - and the machine's stop flag goes up beneath it, because most of this
+    ///   boundary's callers have nowhere to put an error and would otherwise
+    ///   log the refusal and run on. A guest whose interrupt was refused is
+    ///   waiting for one that will never arrive; stopping is the honest answer,
+    ///   and it is the answer every caller already reads.
+    ///
+    /// The stop goes up through [`Emulator::raise_stop`], so a power-off this
+    /// boundary already drained keeps the field: a refusal is reported here and
+    /// now on the error channel, while the power-off has no second chance to be
+    /// heard.
+    ///
+    /// Clearing here rather than latching is what lets a host that clears the
+    /// stop flag resume: the pin edge is still owed, so the next boundary
+    /// offers it again.
+    ///
+    /// # Errors
+    /// [`CpuError::EngineFault`] carrying the refusal, when there was one.
+    pub(super) fn stop_on_engine_refusal(&mut self) -> CpuResult<()> {
+        let Some(fault) = self.engine_fault.take() else {
+            return Ok(());
+        };
+        self.raise_stop(crate::emulator::StopCause::EngineFault);
+        Err(CpuError::EngineFault(fault))
     }
 
     pub(super) fn apply_lapic_cpu_event(&mut self, target: usize, event: Option<LocalApicCpuEvent>) {
@@ -1228,6 +1319,23 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             self.cpu_mut().signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         } else {
             self.cpu_mut().clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+        }
+        // The engine hears the same pin as an EDGE. A level republished every
+        // commit is what the processor's event word wants — it is overwritten
+        // in place, so a repeat costs nothing. An engine's is not: telling one
+        // "asserted" cancels the processor it is running, and an interrupt the
+        // guest has not acknowledged yet keeps this pin high across every
+        // boundary until it does.
+        //
+        // The remembered level moves only once the engine has taken the edge.
+        // Recording it first would record an edge that was never published:
+        // every later boundary would find no transition to report, and the
+        // interrupt would be owed forever by a machine that believes it paid.
+        if asserted != self.pic_pin_published {
+            match <E as SliceEngine<T>>::pic_pin_changed(&mut self.engine, asserted) {
+                Ok(()) => self.pic_pin_published = asserted,
+                Err(fault) => self.engine_fault = Some(fault),
+            }
         }
 
         // The I/O APIC's levels are already current — the fabric moved them
@@ -1291,9 +1399,15 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Legacy public entry point: host/UI callers now join the same central
     /// zero-time commit used between CPU slices. A reset applied here needs
     /// no branch: the next batch starts at the reset vector.
+    ///
+    /// A boundary failure has nowhere to go from a host callback that expects
+    /// none, so it is logged — and it is not lost, because the boundary that
+    /// raised it also raised the machine's stop flag
+    /// ([`Self::stop_on_engine_refusal`]). The next batch ends on it and reports
+    /// the reason.
     pub fn sync_event_flags(&mut self) {
         if let Err(error) = self.service_scheduler_boundary(0) {
-            tracing::error!("scheduler boundary event synchronization failed: {error:?}");
+            tracing::error!("scheduler boundary event synchronization failed: {error}");
         }
     }
 }

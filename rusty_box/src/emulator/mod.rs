@@ -47,7 +47,9 @@ pub use display::{
 pub mod cpu_store;
 use cpu_store::CpuStore;
 pub(crate) mod engine;
-pub use engine::{EventDelivery, ProgressUnit, SliceEngine, SliceRequest, SoftwareEngine};
+pub use engine::{
+    DeliveryRoute, EventDelivery, ProgressUnit, SliceEngine, SliceRequest, SoftwareEngine,
+};
 pub(crate) mod io;
 pub use io::PcIo;
 mod interactive;
@@ -59,6 +61,7 @@ pub use run::{
 pub(crate) use run::StopCause;
 mod scheduler;
 mod timers;
+pub use timers::DeviceTime;
 
 const BOCHS_APIC_BUS_ID_MASK: u32 = 0xFF;
 
@@ -286,6 +289,24 @@ pub struct EmulatorConfig {
     /// shows host local wall-clock time; `Utc` or a fixed timestamp are
     /// available for UTC guests / deterministic boots.
     pub rtc_time0: crate::iodev::cmos::RtcInitTime,
+    /// Which clock this machine's devices run on. See [`DeviceClock`].
+    pub device_clock: DeviceClock,
+}
+
+/// Which clock the machine's devices run on (R2).
+///
+/// A property of the driver rather than of the guest, which is why a snapshot
+/// does not carry it: the same guest image is correct under either, and the
+/// machine that restores it is the one that knows who is turning its wheel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DeviceClock {
+    /// The wheel advances as the scheduler retires guest instructions — this
+    /// port's interpreter, and any engine that runs a slice for the machine.
+    #[default]
+    Ticks,
+    /// The wheel is driven from a host clock by a thread of its own, so device
+    /// time keeps running while the guest is on the host's processor.
+    HostTime,
 }
 
 impl Default for EmulatorConfig {
@@ -302,6 +323,7 @@ impl Default for EmulatorConfig {
             smp_quantum: 16,
             cpuid_freq: CpuidFreq::default(),
             rtc_time0: crate::iodev::cmos::RtcInitTime::default(),
+            device_clock: DeviceClock::Ticks,
         }
     }
 }
@@ -533,9 +555,38 @@ pub struct Emulator<T: Instrumentation = (), E = SoftwareEngine> {
     /// Why *this machine* last raised `stop_flag`. The flag is shared with
     /// whatever host thread holds a clone, so it can only ever be a bool;
     /// this says which of the causes behind it applies when the machine is the
-    /// one that raised it. Read only while the flag is up, and reset whenever
+    /// one that raised it. Read only while the flag is up, and retired whenever
     /// it is found down, so a host raise is never attributed to a guest.
-    pub(crate) stop_cause: StopCause,
+    ///
+    /// Private so the pairing is confined rather than crate-wide: `raise_stop`
+    /// is the only writer of a cause and `stop_in_force` the only reader.
+    /// Confinement is not closure — a descendant module can still name a
+    /// private field, the way `engine_fault` beside it is written from
+    /// `scheduler.rs` — so what holds the invariant is that these two methods
+    /// are the only code anywhere that touches the field (R5).
+    stop_cause: StopCause,
+    /// The 8259 INT pin level this machine last told its engine about, and the
+    /// engine acknowledged.
+    ///
+    /// The pin itself is republished to the boot processor on every commit;
+    /// the engine hears only transitions, and this is what a transition is
+    /// measured against. It moves only when the engine accepted the edge, so
+    /// an edge the engine refused stays owed and is offered again at the next
+    /// boundary. Reset publishes the fall through the same rule rather than
+    /// clearing the flag, so an engine that latched the assertion is told.
+    pic_pin_published: bool,
+    /// What the engine refused, until a boundary turns it into the machine's
+    /// answer.
+    ///
+    /// One field for both refusals — a delivery the backend would not take and
+    /// an edge it could not be told about — because there is one place that
+    /// acts on either (R5): `service_scheduler_boundary` returns it as
+    /// `CpuError::EngineFault` *and* stops the machine beneath it, so a caller
+    /// with nowhere to put the error still cannot keep running a guest that is
+    /// waiting on an interrupt nothing will deliver. Only one error can be
+    /// returned, so a second refusal in the same boundary replaces the first;
+    /// both stop the machine, which is the part that matters.
+    engine_fault: Option<rusty_box_core::EngineFault>,
 }
 
 /// Every field of a machine, named once, so that adding one cannot be silent.
@@ -579,7 +630,25 @@ fn every_machine_field_is_accounted_for<T: Instrumentation>(machine: Emulator<T>
         vga_vertical_period_usec: _,
         stop_flag: _,
         stop_cause: _,
+        pic_pin_published: _,
+        engine_fault: _,
     } = machine;
+}
+
+/// One processor and the parts it executes against, lent by a machine.
+///
+/// An engine servicing an exit needs the processor, the machine's memory and
+/// devices, and its own state — all three live at the same time. They are
+/// separate fields of one machine, which is what makes that possible, and
+/// [`Emulator::processor`] is the destructuring that says so.
+pub struct Processor<'a, T: Instrumentation, E> {
+    /// The processor itself, at the index that was asked for.
+    pub cpu: &'a mut BxCpuC<T>,
+    /// Memory, the port bus, the device models and the PC system.
+    pub io: PcIo<'a>,
+    /// The engine, so a servicer can reach the state it keeps for this
+    /// processor without going back through the machine it borrowed from.
+    pub engine: &'a mut E,
 }
 
 impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
@@ -649,6 +718,51 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             PcIo::new(memory, devices, device_manager, pc_system),
             request,
         )
+    }
+
+    /// Lend one processor, the parts it executes against, and the engine.
+    ///
+    /// The same destructuring [`Self::run_slice`] performs, reachable by a
+    /// caller — an engine driving its own exits needs exactly these three live
+    /// at once, and cannot assemble them itself (R3: the parts come from a
+    /// machine destructuring its own `&mut self`, and from nowhere else).
+    pub fn processor(&mut self, index: usize) -> Processor<'_, T, E> {
+        let Self {
+            engine,
+            cpus,
+            memory,
+            devices,
+            device_manager,
+            pc_system,
+            ..
+        } = self;
+        Processor {
+            cpu: cpus.get_mut(index),
+            io: PcIo::new(memory, devices, device_manager, pc_system),
+            engine,
+        }
+    }
+
+    /// The engine value, mutably.
+    ///
+    /// [`Self::engine`] is the shared half, for asking an engine how it is
+    /// faring. This is what a resident engine's own driver needs: its state
+    /// lives in the engine, and reaching it means reaching through the machine
+    /// that owns it.
+    pub fn engine_mut(&mut self) -> &mut E {
+        &mut self.engine
+    }
+
+    /// Which clock this machine's devices run on. See [`DeviceClock`].
+    #[must_use]
+    pub fn device_clock(&self) -> DeviceClock {
+        self.config.device_clock
+    }
+
+    /// The configuration this machine was built from.
+    #[must_use]
+    pub fn config(&self) -> &EmulatorConfig {
+        &self.config
     }
 
 
@@ -954,6 +1068,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(Arc::new(AtomicBool::new(false)));
             core::ptr::addr_of_mut!((*ptr).stop_cause).write(StopCause::default());
+            core::ptr::addr_of_mut!((*ptr).pic_pin_published).write(false);
+            core::ptr::addr_of_mut!((*ptr).engine_fault).write(None);
             Ok(alloc::boxed::Box::from_raw(ptr))
         }
     }
@@ -1027,6 +1143,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
             core::ptr::addr_of_mut!((*ptr).stop_cause).write(StopCause::default());
+            core::ptr::addr_of_mut!((*ptr).pic_pin_published).write(false);
+            core::ptr::addr_of_mut!((*ptr).engine_fault).write(None);
             Ok(&mut *ptr)
         }
     }
@@ -1371,6 +1489,20 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         let recovering_failed_snapshot = self.snapshot_restore_failed;
         tracing::debug!("Emulator reset ({:?})", reset_type);
         self.devices.discard_scheduler_boundary_work();
+        // The 8259 comes up with its INT pin low, and the engine is not reset
+        // with the machine — so the fall is PUBLISHED rather than forgotten. An
+        // engine that latches ExtINT and is only told the pin went low by the
+        // next transition would hold it asserted into a guest that has just
+        // come up, and a machine that merely cleared this flag would owe it an
+        // edge it can no longer name. The remembered level moves only once the
+        // engine has the edge (see `sync_final_event_levels`), so a refusal
+        // leaves the fall to be re-offered at the next boundary.
+        if self.pic_pin_published {
+            match <E as SliceEngine<T>>::pic_pin_changed(&mut self.engine, false) {
+                Ok(()) => self.pic_pin_published = false,
+                Err(fault) => self.engine_fault = Some(fault),
+            }
+        }
 
         // Reset PC system (enables A20)
         self.pc_system.reset(reset_type);
@@ -1455,6 +1587,12 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             self.initialized = true;
         }
         self.snapshot_restore_failed = false;
+        // A refusal recorded above is reported by the call that provoked it,
+        // not left for whichever boundary runs next to attribute to itself.
+        // Drained last so the reset completes first: a machine half-reset
+        // because its engine would not take the pin's fall is worse than one
+        // fully reset whose caller is told the engine refused.
+        self.stop_on_engine_refusal()?;
         Ok(())
     }
 
@@ -1580,6 +1718,11 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
     /// Queue Port 92 A20/reset work through the central machine boundary.
     /// Returns whether a reset was applied at this boundary.
+    ///
+    /// A port write answers with the reset it requested and has no channel for
+    /// a boundary failure, so one is logged — and the boundary that raised it
+    /// raised the machine's stop flag with it, so the run loop ends on that
+    /// rather than continuing past a refusal.
     pub fn write_port_92h(&mut self, value: u8) -> bool {
         self.device_manager.port92.write(value);
         let a20_changed = self.device_manager.port92.a20_change_pending;
@@ -1588,7 +1731,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             match self.service_scheduler_boundary(0) {
                 Ok(reset_applied) => return reset_applied,
                 Err(error) => {
-                    tracing::error!("Port 92 scheduler boundary failed: {error:?}");
+                    tracing::error!("Port 92 scheduler boundary failed: {error}");
                 }
             }
         }

@@ -40,6 +40,8 @@ use rusty_box::cpu::{
 use rusty_box::emulator::{
     EventDelivery, PcIo, Progress, ProgressUnit, SliceEngine, SliceRequest,
 };
+use rusty_box_core::{EngineFault, EngineFaultKind};
+
 use rusty_box::memory::plan::MemoryPlan;
 use rusty_box::memory::BxMemC;
 use rusty_box::GpaWindow;
@@ -902,7 +904,8 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                 .map_err(platform_failed)?;
             let mut partition = config.setup().map_err(platform_failed)?;
 
-            let installed = install_the_machines_map(&mut partition, io.memory(), None)?;
+            let installed = install_the_machines_map(&mut partition, io.memory(), None)
+                .map_err(CpuError::EngineFault)?;
             partition.create_processor(BOOT_VP).map_err(platform_failed)?;
 
             // The fresh processor's own area, read once here so every later
@@ -996,6 +999,17 @@ enum BoundaryReason {
     EventToDeliver,
 }
 
+/// The machine's vocabulary for a mapping this engine could not apply.
+///
+/// Keeps what [`platform_failed`] cannot: the failing API and the platform's
+/// own `HRESULT` both survive into the fault the machine reports, which is the
+/// difference between a reader who can trace a refusal to the platform and one
+/// who is told only that something was unsupported.
+fn mapping_failed(error: &WhpError) -> EngineFault {
+    tracing::error!("installing this machine's guest-physical map failed: {error}");
+    EngineFault::with_code(EngineFaultKind::Memory, error.call(), error.hresult())
+}
+
 /// Install the machine's guest-physical map into the partition, replacing
 /// whatever `installed` describes, and report what is now installed.
 ///
@@ -1024,12 +1038,10 @@ fn install_the_machines_map(
     partition: &mut Partition,
     memory: &mut BxMemC,
     installed: Option<&MemoryPlan>,
-) -> Result<MemoryPlan> {
+) -> core::result::Result<MemoryPlan, EngineFault> {
     let plan = MemoryPlan::derive(memory).map_err(|error| {
         tracing::error!("this machine has no stable guest-physical map: {error:?}");
-        CpuError::UnsupportedCpuOperation {
-            operation: "a partially resident machine has no map to install",
-        }
+        EngineFault::new(EngineFaultKind::Memory, "deriving a partially resident machine's map")
     })?;
     let old: &[GpaWindow] = installed.map_or(&[], MemoryPlan::windows);
     if old == plan.windows() {
@@ -1042,7 +1054,7 @@ fn install_the_machines_map(
         }
         partition
             .unmap_subrange(window.gpa, window.len)
-            .map_err(platform_failed)?;
+            .map_err(|error| mapping_failed(&error))?;
     }
 
     for window in plan.windows() {
@@ -1051,9 +1063,10 @@ fn install_the_machines_map(
         }
         let host = memory
             .allocation_slice(window.host.get(), window.len)
-            .ok_or(CpuError::UnsupportedCpuOperation {
-                operation: "a plan window fell outside the machine's allocation",
-            })?;
+            .ok_or(EngineFault::new(
+                EngineFaultKind::Memory,
+                "a plan window fell outside the machine's allocation",
+            ))?;
         // The machine owns this allocation in a boxed slice that never moves,
         // and owns this engine beside it, so the mapping cannot outlive the
         // memory — which is the obligation `map_borrowed` names. Discharging it
@@ -1077,7 +1090,7 @@ fn map_window(
     gpa: u64,
     host: &mut [u8],
     perms: rusty_box_whp::GpaPerms,
-) -> Result<()> {
+) -> core::result::Result<(), EngineFault> {
     // SAFETY: as above — the mapped bytes belong to the machine that owns this
     // partition, and neither the allocation nor its address changes while the
     // machine lives.
@@ -1091,9 +1104,7 @@ fn map_window(
             "installing guest memory at {gpa:#x} failed: {error}. One process runs one \
              machine on this engine; a second needs a second process."
         );
-        CpuError::UnsupportedCpuOperation {
-            operation: "the hypervisor would not take this machine's memory",
-        }
+        EngineFault::with_code(EngineFaultKind::Memory, error.call(), error.hresult())
     })
 }
 
@@ -1112,7 +1123,10 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
     // a head.
     const EVENT_DELIVERY: EventDelivery = EventDelivery::Engine;
 
-    fn memory_map_changed(&mut self, memory: &mut BxMemC) -> Result<()> {
+    fn memory_map_changed(
+        &mut self,
+        memory: &mut BxMemC,
+    ) -> core::result::Result<(), EngineFault> {
         // Before the first slice there is no partition and nothing installed;
         // the map this would have installed is the one `start` derives, so a
         // change now is not a change to anything.

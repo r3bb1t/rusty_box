@@ -26,6 +26,15 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const AP_TRAMPOLINE_LEN: usize = 32;
     const AP_BATCH_INSTRUCTIONS: u64 = 16;
 
+    /// What a hypervisor answers when it cannot take a guest-physical range —
+    /// a different kind and code from [`REFUSAL`], so a test can tell which of
+    /// the engine's calls a fault came out of.
+    const MAP_REFUSAL: rusty_box_core::EngineFault = rusty_box_core::EngineFault::with_code(
+        rusty_box_core::EngineFaultKind::Memory,
+        "the test engine cannot install a map",
+        0x0BAD_0A11u32 as i32,
+    );
+
     /// An engine that runs the guest exactly as the interpreter does, and
     /// counts the times the machine told it the guest-physical map moved.
     ///
@@ -35,6 +44,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     #[derive(Default)]
     struct MapWatchingEngine {
         installs: core::sync::atomic::AtomicUsize,
+        /// When set, no map can be installed — the way a hypervisor that
+        /// refuses a guest-physical range installs none.
+        refuse_map: bool,
+        /// Every 8259 INT pin transition this engine was told about, in order.
+        /// A recorder rather than a counter, so a test can say both how many
+        /// times it heard and which way the pin went each time.
+        pic_edges: Vec<bool>,
     }
 
     impl MapWatchingEngine {
@@ -58,10 +74,638 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         fn memory_map_changed(
             &mut self,
             _memory: &mut crate::memory::BxMemC,
-        ) -> crate::cpu::Result<()> {
+        ) -> core::result::Result<(), rusty_box_core::EngineFault> {
             self.installs
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if self.refuse_map {
+                return Err(MAP_REFUSAL);
+            }
             Ok(())
+        }
+
+        fn pic_pin_changed(
+            &mut self,
+            asserted: bool,
+        ) -> core::result::Result<(), rusty_box_core::EngineFault> {
+            self.pic_edges.push(asserted);
+            Ok(())
+        }
+    }
+
+    /// The fault [`RefusingEngine`] refuses with.
+    ///
+    /// Its kind and its backend code are asserted on the far side of the
+    /// machine, so a boundary that reduced the fault to the operation it
+    /// failed at would fail the test.
+    const REFUSAL: rusty_box_core::EngineFault = rusty_box_core::EngineFault::with_code(
+        rusty_box_core::EngineFaultKind::Vcpu,
+        "the test engine's backend refuses",
+        0x0BAD_F00Du32 as i32,
+    );
+
+    /// What a [`RefusingEngine`]'s backend does with what the machine offers.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    enum Backend {
+        /// Every offer is refused. The default, because a machine built on this
+        /// engine exists to reach the path an accepting engine cannot.
+        #[default]
+        Refusing,
+        /// Every offer is taken.
+        Accepting,
+    }
+
+    /// An engine whose backend refuses, until a test lets it accept.
+    ///
+    /// The only way the refusal path executes at all: on an engine that always
+    /// accepts, `DeliveryRoute::Refused` is unconstructible, the machine's
+    /// `engine_fault` is permanently `None`, and its drain runs in no test.
+    #[derive(Default)]
+    struct RefusingEngine {
+        backend: Backend,
+        /// Every 8259 INT pin transition OFFERED, in order — refused offers
+        /// included, so a test can say whether a refused edge came back.
+        pic_offers: Vec<bool>,
+        /// Every I/O APIC message offered, in order.
+        deliveries: Vec<crate::iodev::irq::IoApicDelivery>,
+    }
+
+    impl<T: Instrumentation> SliceEngine<T> for RefusingEngine {
+        const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Instructions;
+
+        fn run_slice(
+            &mut self,
+            cpu: &mut BxCpuC<T>,
+            io: super::PcIo<'_>,
+            request: SliceRequest,
+        ) -> crate::cpu::Result<Progress> {
+            SoftwareEngine.run_slice(cpu, io, request)
+        }
+
+        fn route_ioapic_delivery(
+            &mut self,
+            delivery: crate::iodev::irq::IoApicDelivery,
+        ) -> DeliveryRoute {
+            self.deliveries.push(delivery);
+            match self.backend {
+                Backend::Refusing => DeliveryRoute::Refused(REFUSAL),
+                Backend::Accepting => DeliveryRoute::Backend,
+            }
+        }
+
+        fn pic_pin_changed(
+            &mut self,
+            asserted: bool,
+        ) -> core::result::Result<(), rusty_box_core::EngineFault> {
+            self.pic_offers.push(asserted);
+            match self.backend {
+                Backend::Refusing => Err(REFUSAL),
+                Backend::Accepting => Ok(()),
+            }
+        }
+    }
+
+    /// One tick is one microsecond, so a period in microseconds is a period in
+    /// ticks and the timer arithmetic below reads as itself.
+    const FURNISHED_IPS: u32 = 1_000_000;
+
+    /// A machine with its devices brought up, its timer wheel armed, and
+    /// nothing else: no firmware, no media, no guest.
+    ///
+    /// The 8042's continuous serial-delay timer is running, which is what makes
+    /// this the machine to advance device time against — it is the one device
+    /// whose period is short enough that a large jump has many of them to
+    /// replay.
+    fn furnished_machine_on<E: SliceEngine<()> + Default>() -> Box<Emulator<(), E>> {
+        let cfg = EmulatorConfig {
+            ips: Ips::new(FURNISHED_IPS),
+            ..EmulatorConfig::default()
+        };
+        let mut machine = Emulator::<(), E>::with_engine(cfg, CpuSetupMode::FlatProtected32)
+            .expect("a machine on the named engine");
+        machine.devices.init(&mut machine.memory).expect("port bus");
+        machine
+            .device_manager
+            .init(&mut machine.devices, &mut machine.memory)
+            .expect("device models");
+        machine.pc_system.initialize(FURNISHED_IPS);
+        machine.devices.set_timer_ips(u64::from(FURNISHED_IPS));
+        machine.register_timer_owners().expect("timer wheel slots");
+        machine.rearm_device_timers_after_hardware_reset();
+        machine
+    }
+
+    /// The same machine on this port's own interpreter.
+    fn furnished_machine() -> Box<Emulator<(), SoftwareEngine>> {
+        furnished_machine_on::<SoftwareEngine>()
+    }
+
+    /// Program one I/O APIC redirection entry the way a guest does: select the
+    /// register through IOREGSEL, then write the data window. Fixed delivery,
+    /// physical destination 0, edge triggered, unmasked.
+    fn program_ioapic_entry<E: SliceEngine<()>>(
+        machine: &mut Emulator<(), E>,
+        pin: u8,
+        vector: u8,
+    ) {
+        let low_index = 0x10u32 + u32::from(pin) * 2;
+        for (offset, value) in [
+            (0x00u64, low_index),
+            (0x10, u32::from(vector)),
+            (0x00, low_index + 1),
+            (0x10, 0x00),
+        ] {
+            machine
+                .device_manager
+                .irq
+                .mmio_write(offset, 4, &value.to_ne_bytes());
+        }
+    }
+
+    /// The default route is the model: an engine that says nothing about a
+    /// delivery leaves it to land in the boot processor's own Local APIC.
+    #[test]
+    fn the_default_ioapic_route_writes_the_model_lapic() {
+        let mut machine = furnished_machine();
+        let now = machine.pc_system.time_ticks();
+        machine.cpu_mut().lapic.write_aligned(0xF0, 0x1FF, now); // software-enable the LAPIC
+        // ISA line 1 is I/O APIC pin 1 — only line 0 is remapped, to pin 2
+        // (ioapic.rs set_pin_level).
+        program_ioapic_entry(&mut machine, 1, 0x31);
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(1));
+        let outcome = machine.service_device_time(0).unwrap();
+        assert!(!outcome.reset_applied && outcome.stop.is_none());
+        assert_ne!(
+            machine.cpu_ref(0).pending_event & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR,
+            0,
+            "the model route raised LAPIC INTR"
+        );
+        assert_eq!(
+            machine.cpu_mut().lapic.acknowledge_int(),
+            0x31,
+            "and it carried the entry's vector"
+        );
+    }
+
+    /// `service_device_time` replays every missed 8042 period and names the
+    /// next deadline.
+    ///
+    /// What this pins is the outcome at the API surface, not the mechanism
+    /// underneath it. The machine replays missed periods twice over — `tickn`
+    /// runs one `countdown_event` per period whatever the span, and the
+    /// boundary caps each `tickn` at the next deadline so re-arming callbacks
+    /// dispatch between crossings — so disabling either one alone still
+    /// produces every fire, and no single-mechanism mutation can falsify the
+    /// count below. It falsifies against a `service_device_time` that jumps the
+    /// clock and coalesces the span into one fire, which is the shape a
+    /// host-time driver would reach for.
+    #[test]
+    fn service_device_time_fires_every_due_period_and_names_the_next_deadline() {
+        let mut machine = furnished_machine();
+        let ips = machine.config.ips.per_second_u64();
+        // 150 ticks at this rate; derived from ips, so any rate holds.
+        let period = ips * u64::from(crate::iodev::keyboard::KBD_SERIAL_DELAY_USEC) / 1_000_000;
+        let before = machine.pc_system.time_ticks();
+        let elapsed = 1_000_000;
+        let outcome = machine.service_device_time(elapsed).unwrap();
+        assert_eq!(machine.pc_system.time_ticks(), before + elapsed);
+        assert_eq!(
+            machine.device_manager.keyboard.serial_fires_seen,
+            elapsed / period,
+            "one serial-delay fire per period the advance crossed, not one for \
+             the whole advance"
+        );
+        assert_eq!(
+            outcome.next_deadline,
+            Some(before + (elapsed / period + 1) * period),
+            "the next deadline is the 8042's next period"
+        );
+    }
+
+    /// The engine hears the PIC pin as an edge: once per transition, not once
+    /// per boundary.
+    #[test]
+    fn the_pic_pin_reaches_the_engine_once_per_transition() {
+        let mut machine = furnished_machine_on::<MapWatchingEngine>();
+        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(0));
+        machine.service_device_time(0).unwrap();
+        machine.service_device_time(0).unwrap();
+        machine.service_device_time(0).unwrap();
+        assert_eq!(
+            machine.engine().pic_edges,
+            vec![true],
+            "three boundaries with the pin high published one rising edge"
+        );
+        // The INTA takes the vector and lowers the pin.
+        assert_eq!(
+            machine.device_manager.irq.acknowledge(),
+            0x08,
+            "IRQ0 acknowledges to the master 8259's reset offset"
+        );
+        machine.service_device_time(0).unwrap();
+        assert_eq!(machine.engine().pic_edges, vec![true, false]);
+    }
+
+    /// A refusal reaches a caller that acts on it, even through a caller that
+    /// can do nothing but log.
+    ///
+    /// `sync_event_flags` is one of the boundary's callers with nowhere to put
+    /// an error. What makes the refusal survive it is the stop the boundary
+    /// raised underneath the error: the machine is stopped, and says why.
+    #[test]
+    fn a_refused_delivery_stops_a_machine_whose_caller_can_only_log() {
+        let mut machine = furnished_machine_on::<RefusingEngine>();
+        let now = machine.pc_system.time_ticks();
+        machine.cpu_mut().lapic.write_aligned(0xF0, 0x1FF, now); // software-enable the LAPIC
+        program_ioapic_entry(&mut machine, 1, 0x31);
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(1));
+
+        machine.sync_event_flags();
+
+        assert_eq!(
+            machine.engine().deliveries.len(),
+            1,
+            "the message was offered to the engine"
+        );
+        assert_eq!(
+            machine.cpu_ref(0).pending_event & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR,
+            0,
+            "a message the backend refused is not also written to the model LAPIC"
+        );
+        assert_ne!(
+            machine.device_manager.irq.ioapic().irr_value() & (1 << 1),
+            0,
+            "and it stays pending on the I/O APIC rather than being consumed"
+        );
+        assert!(
+            machine.stop_flag.load(core::sync::atomic::Ordering::Relaxed),
+            "the refusal stopped the machine instead of being logged and dropped"
+        );
+
+        // What a caller that CAN act reads back: the machine is stopped, and
+        // the reason names the engine.
+        machine.engine_mut().backend = Backend::Accepting;
+        let outcome = machine
+            .service_device_time(0)
+            .expect("a boundary with nothing left to refuse");
+        assert_eq!(outcome.stop, Some(StopReason::EngineFault));
+    }
+
+    /// A refused pin edge is still owed, so the machine offers it again.
+    ///
+    /// The level is remembered only once the engine has taken the edge.
+    /// Remembering it first would record an edge that was never published, and
+    /// no later boundary would find a transition to report.
+    #[test]
+    fn a_refused_pic_edge_is_offered_again_at_the_next_boundary() {
+        let mut machine = furnished_machine_on::<RefusingEngine>();
+        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(0));
+
+        let refusal = machine
+            .service_device_time(0)
+            .expect_err("the boundary returns what the engine refused");
+        match refusal {
+            crate::cpu::CpuError::EngineFault(fault) => {
+                assert_eq!(
+                    fault.kind(),
+                    rusty_box_core::EngineFaultKind::Vcpu,
+                    "the fault crossed the boundary whole, kind included"
+                );
+                assert_eq!(fault.code(), REFUSAL.code(), "and carrying its backend code");
+                assert_eq!(fault.at(), REFUSAL.at());
+            }
+            other => panic!("the refusal reached the caller as {other}"),
+        }
+        assert_eq!(
+            machine.engine().pic_offers,
+            vec![true],
+            "the rising edge was offered once, and refused"
+        );
+
+        // The backend recovers, and the host clears the stop the refusal
+        // raised. The edge was never taken, so the machine still owes it.
+        machine.engine_mut().backend = Backend::Accepting;
+        machine
+            .stop_flag
+            .store(false, core::sync::atomic::Ordering::Relaxed);
+        let outcome = machine
+            .service_device_time(0)
+            .expect("the edge is taken this time");
+        assert_eq!(
+            machine.engine().pic_offers,
+            vec![true, true],
+            "the refused edge came back at the next boundary"
+        );
+        assert_eq!(outcome.stop, None, "and nothing is stopping the machine");
+
+        // Taken means remembered: the pin has not moved since, so nothing more
+        // is owed and the engine hears nothing further.
+        machine.service_device_time(0).expect("a quiet boundary");
+        assert_eq!(machine.engine().pic_offers, vec![true, true]);
+    }
+
+    /// Reset publishes the fall of the interrupt pin rather than forgetting it.
+    ///
+    /// The engine is not reset with the machine. One that latched the assertion
+    /// and was only told by the next transition would hold it into a guest that
+    /// has just come up — and a stale assertion self-corrects at the next
+    /// boundary only while the pin stays low, which is not a promise the 8259
+    /// makes.
+    #[test]
+    fn reset_tells_the_engine_the_interrupt_pin_fell() {
+        let mut machine = furnished_machine_on::<RefusingEngine>();
+        machine.engine_mut().backend = Backend::Accepting;
+        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(0));
+        machine.service_device_time(0).expect("the rising edge");
+        assert_eq!(machine.engine().pic_offers, vec![true]);
+
+        machine
+            .power()
+            .reset(crate::cpu::ResetReason::Hardware)
+            .expect("a hardware reset");
+
+        assert_eq!(
+            machine.engine().pic_offers,
+            vec![true, false],
+            "reset published the fall, so an engine holding the assertion is told"
+        );
+    }
+
+    /// A guest that switched itself off is reported as switched off, even when
+    /// the engine refuses something in the same boundary.
+    ///
+    /// Both facts want the one field that says why the machine stopped. The
+    /// power-off is drained at the head of the boundary and consumed there, so
+    /// no later call can rediscover it; the refusal is handed back on this very
+    /// call and the edge it refused is still owed. So the power-off keeps the
+    /// field, and the refusal loses nothing by yielding it.
+    #[test]
+    fn a_guest_power_off_outranks_a_refusal_from_the_same_boundary() {
+        let mut machine = furnished_machine_on::<RefusingEngine>();
+        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(0));
+        // What a guest's PM1_CNT write with SLP_TYP = S5 leaves behind; that
+        // half is pinned by `acpi_s5_requests_soft_power_off` in acpi.rs.
+        machine.device_manager.acpi.soft_off_pending = true;
+
+        let refusal = machine
+            .service_device_time(0)
+            .expect_err("the boundary still hands back what the engine refused");
+        match refusal {
+            crate::cpu::CpuError::EngineFault(fault) => assert_eq!(
+                fault.code(),
+                REFUSAL.code(),
+                "the refusal is not the fact that vanishes — it is the answer"
+            ),
+            other => panic!("the refusal reached the caller as {other}"),
+        }
+        assert_eq!(
+            machine.engine().pic_offers,
+            vec![true],
+            "and it was a real refusal: the rising edge was offered and declined"
+        );
+        assert_eq!(
+            machine.power().state(),
+            PowerState::PoweredOff,
+            "a machine the guest switched off does not report itself running"
+        );
+    }
+
+    /// A refusal raised while the machine resets leaves by the boundary that
+    /// reset, not by the one after it.
+    ///
+    /// Reset takes the boundary's early exit, which discards everything queued
+    /// before it. The refusal is the exception, because reset itself is what
+    /// offered the engine the falling edge — an exit that walked past it would
+    /// carry the fault into a boundary that knows nothing about it.
+    #[test]
+    fn a_refusal_raised_during_a_reset_leaves_by_the_resetting_boundary() {
+        let mut machine = furnished_machine_on::<RefusingEngine>();
+        machine.engine_mut().backend = Backend::Accepting;
+        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(0));
+        machine
+            .service_device_time(0)
+            .expect("the rising edge is taken");
+        assert_eq!(machine.engine().pic_offers, vec![true]);
+
+        // The backend fails, and the guest's port-92h reset lands in the same
+        // boundary that has to tell the engine the pin fell.
+        machine.engine_mut().backend = Backend::Refusing;
+        machine.device_manager.port92.reset_request = Some(crate::cpu::ResetReason::Software);
+
+        let refusal = machine
+            .service_device_time(0)
+            .expect_err("the reset's falling edge was refused, and this boundary says so");
+        match refusal {
+            crate::cpu::CpuError::EngineFault(fault) => {
+                assert_eq!(fault.code(), REFUSAL.code(), "the fault crossed whole");
+            }
+            other => panic!("the refusal reached the caller as {other}"),
+        }
+        assert_eq!(
+            machine.engine().pic_offers,
+            vec![true, false],
+            "reset offered the fall, which is what there was to refuse"
+        );
+        assert!(
+            machine.stop_flag.load(core::sync::atomic::Ordering::Relaxed),
+            "and the machine is stopped, not merely told"
+        );
+    }
+
+    /// A reset the engine refuses is reported by the reset, not by whichever
+    /// boundary happens to run next.
+    ///
+    /// Reset tells the engine the 8259's INT pin fell, so it is one of the
+    /// places a refusal can be raised — and a host that calls it directly never
+    /// reaches the boundary that would otherwise drain the fault. Returning
+    /// `Ok` there would hand back a machine that owes a refusal, and attribute
+    /// it later to a boundary that did nothing wrong.
+    #[test]
+    fn a_reset_the_engine_refuses_is_reported_by_the_reset() {
+        let mut machine = furnished_machine_on::<RefusingEngine>();
+        machine.engine_mut().backend = Backend::Accepting;
+        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(0));
+        machine
+            .service_device_time(0)
+            .expect("the rising edge is taken, so the fall is owed at reset");
+
+        machine.engine_mut().backend = Backend::Refusing;
+        let refusal = machine
+            .power()
+            .reset(crate::cpu::ResetReason::Hardware)
+            .expect_err("the engine would not take the pin's fall");
+        match refusal {
+            crate::Error::Cpu(crate::cpu::CpuError::EngineFault(fault)) => {
+                assert_eq!(fault.code(), REFUSAL.code(), "the fault crossed whole");
+                assert_eq!(fault.at(), REFUSAL.at());
+            }
+            other => panic!("the refusal reached the caller as {other}"),
+        }
+        assert!(
+            machine.stop_flag.load(core::sync::atomic::Ordering::Relaxed),
+            "and the machine is stopped, not merely told"
+        );
+        assert_eq!(
+            machine.engine().pic_offers,
+            vec![true, false],
+            "the reset still ran and still offered the fall"
+        );
+    }
+
+    /// A machine cause outlives its own raise no longer than the machine's next
+    /// look at the flag.
+    ///
+    /// The stop flag is shared with a host that writes the bool and nothing
+    /// else, so a cause left standing after a resume would be read back as the
+    /// reason for the host's next plain pause — telling a caller its machine was
+    /// switched off by the guest when it was only paused. Reading the cause is
+    /// what retires it, which is why every reader goes through one accessor.
+    #[test]
+    fn a_cause_whose_raise_no_longer_stands_is_not_read_back_for_a_host_stop() {
+        use core::sync::atomic::Ordering::Relaxed;
+
+        let mut machine = furnished_machine_on::<RefusingEngine>();
+
+        // The machine stops itself, with a cause only it can know.
+        machine.raise_stop(StopCause::GuestPowerOff);
+        assert_eq!(
+            machine
+                .service_device_time(0)
+                .expect("no engine work is owed")
+                .stop,
+            Some(StopReason::GuestPowerOff),
+        );
+        assert_eq!(machine.power().state(), PowerState::PoweredOff);
+
+        // The host resumes it: it clears the bool it shares, and the machine
+        // runs on. This is the boundary that retires the cause.
+        machine.stop_flag.store(false, Relaxed);
+        assert_eq!(
+            machine
+                .service_device_time(0)
+                .expect("no engine work is owed")
+                .stop,
+            None,
+            "a lowered flag is no stop at all"
+        );
+
+        // Later the host pauses it, writing the bool and nothing else.
+        machine.stop_flag.store(true, Relaxed);
+        assert_eq!(
+            machine
+                .service_device_time(0)
+                .expect("no engine work is owed")
+                .stop,
+            Some(StopReason::StopRequested),
+            "the host asked; the guest's spent power-off is not the answer"
+        );
+        assert_eq!(
+            machine.power().state(),
+            PowerState::Running,
+            "and a paused machine is not a switched-off one"
+        );
+    }
+
+    /// A message the engine takes is the engine's: the machine neither writes
+    /// it to the model Local APIC nor leaves it pending on the I/O APIC.
+    ///
+    /// The accepted route, which is what a machine driving a hypervisor takes
+    /// on every interrupt. Both halves matter: modelling it too would deliver
+    /// the vector twice, and leaving the pin's request outstanding would stick
+    /// the entry so the next assertion of the same line never queues.
+    #[test]
+    fn a_delivery_the_engine_takes_is_neither_modelled_nor_left_pending() {
+        let mut machine = furnished_machine_on::<RefusingEngine>();
+        machine.engine_mut().backend = Backend::Accepting;
+        let now = machine.pc_system.time_ticks();
+        machine.cpu_mut().lapic.write_aligned(0xF0, 0x1FF, now); // software-enable the LAPIC
+        program_ioapic_entry(&mut machine, 1, 0x31);
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(1));
+
+        let outcome = machine
+            .service_device_time(0)
+            .expect("an engine that takes the message refuses nothing");
+
+        assert_eq!(outcome.stop, None, "nothing stopped the machine");
+        assert_eq!(
+            machine.engine().deliveries.len(),
+            1,
+            "the message was offered to the engine once"
+        );
+        assert_eq!(
+            machine.engine().deliveries[0].vector,
+            0x31,
+            "carrying the redirection entry's vector"
+        );
+        assert_eq!(
+            machine.cpu_ref(0).pending_event & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR,
+            0,
+            "a message the backend took is not also written to the model LAPIC"
+        );
+        assert_eq!(
+            machine.device_manager.irq.ioapic().irr_value() & (1 << 1),
+            0,
+            "and the I/O APIC counts it delivered rather than leaving it stuck"
+        );
+    }
+
+    /// The per-slice tick commit hands a boundary failure back rather than
+    /// logging it.
+    ///
+    /// This is the commit every running machine goes through between CPU
+    /// slices, and a caller told nothing runs a guest whose interrupt was never
+    /// delivered. What it propagates is whatever the boundary could not do —
+    /// the `?` does not read the error, so a chipset effect that would not
+    /// settle takes the same route out as the refusal driven here.
+    #[test]
+    fn the_per_slice_tick_commit_propagates_a_boundary_failure() {
+        let mut machine = furnished_machine_on::<RefusingEngine>();
+        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(0));
+
+        let error = machine
+            .advance_pc_system_after_cpu_ticks(0)
+            .expect_err("the commit does not swallow what the boundary reported");
+        match error {
+            crate::cpu::CpuError::EngineFault(fault) => {
+                assert_eq!(fault.code(), REFUSAL.code(), "the fault crossed whole");
+            }
+            other => panic!("the boundary failure reached the caller as {other}"),
         }
     }
 
@@ -792,6 +1436,58 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     settled + 1,
                     "a PAM write moves the map, and an engine holding one has to \
                      be told exactly once"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A map the engine will not install stops the machine, and stops it with
+    /// the fault as the reason.
+    ///
+    /// The `?` alone is not enough. Three of the machine's callers have no error
+    /// channel — `sync_event_flags`, `pump_gui_input` and `write_port_92h` — so
+    /// a boundary that only propagated would leave them logging the refusal and
+    /// running the guest on against a map only the model believes in, which is
+    /// the one outcome the seam exists to prevent. Asserting the flag and the
+    /// reason is what distinguishes the two.
+    #[test]
+    fn a_map_the_engine_refuses_stops_the_machine() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut emu = Emulator::<(), MapWatchingEngine>::with_engine(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+
+                // The first boundary after device init applies the routing the
+                // chipset came up with, so it is the one that moves the map.
+                emu.engine_mut().refuse_map = true;
+                let refusal = emu
+                    .service_scheduler_boundary(0)
+                    .expect_err("the engine could not install the map, and said so");
+                match refusal {
+                    crate::cpu::CpuError::EngineFault(fault) => {
+                        assert_eq!(fault.code(), MAP_REFUSAL.code(), "the fault crossed whole");
+                        assert_eq!(fault.at(), MAP_REFUSAL.at());
+                    }
+                    other => panic!("the refusal reached the caller as {other}"),
+                }
+                assert!(
+                    emu.stop_flag.load(core::sync::atomic::Ordering::Relaxed),
+                    "and the machine is stopped, not merely told"
+                );
+                assert_eq!(
+                    emu.stop_in_force().map(StopReason::from),
+                    Some(StopReason::EngineFault),
+                    "stopped for the reason it actually stopped for"
                 );
             })
             .unwrap()
@@ -1835,7 +2531,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 for _ in 0..16 {
                     let executed = emu.run_cpu_batch_retiring(100_000).unwrap();
                     if !emu.batch_advanced_pc_system {
-                        emu.advance_pc_system_after_cpu_ticks(executed);
+                        emu.advance_pc_system_after_cpu_ticks(executed)
+                            .expect("the tick commit");
                     }
 
                     if emu.virt_read_u8(0x2000).unwrap() != 0 {

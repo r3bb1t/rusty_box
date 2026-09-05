@@ -472,7 +472,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                                     instructions_executed =
                                         self.cpu_ref(0).icount.saturating_sub(icount_at_start);
                                     if !self.batch_advanced_pc_system {
-                                        self.advance_pc_system_after_cpu_ticks(progress2.count());
+                                        self.advance_pc_system_after_cpu_ticks(progress2.count())?;
                                     }
                                 } else {
                                     break;
@@ -527,7 +527,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
                     // Drive pc_system timers via Bochs-exact tickn() mechanism.
                     if !self.batch_advanced_pc_system {
-                        self.advance_pc_system_after_cpu_ticks(executed);
+                        self.advance_pc_system_after_cpu_ticks(executed)?;
                     }
 
 
