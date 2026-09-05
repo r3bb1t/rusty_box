@@ -19,6 +19,10 @@ rusty_box_whp_sys = { path = "../rusty_box_whp_sys", version = "0.0.3" }
 # the same thing to every backend, so it is defined once rather than per
 # backend — this crate having a real use for it is what keeps that honest.
 rusty_box_core = { workspace = true, features = ["std"] }
+# `SyntheticFeatures` is one named bit per header bitfield plus the composite
+# the design asks for, and `from_bits_retain` / `iter_names` are what let a bank
+# a newer host sets survive into a report instead of being truncated away.
+bitflags = { workspace = true }
 
 # The workspace `deny` on `unsafe_code` is what makes this crate's one token
 # deliberate: `Partition::map_borrowed` carries an `#[expect(unsafe_code, …)]`

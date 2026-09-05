@@ -12,8 +12,8 @@
 
 use crate::error::{WhpError, WhpResult};
 use crate::{
-    CapabilityCode, CounterSet, GpaPerms, GvaTranslation, PropertyCode, RawPartition,
-    RegisterValue,
+    CapabilityCode, CounterSet, FeatureBanks, GpaPerms, GvaTranslation, PropertyCode,
+    RawPartition, RegisterValue, VpStateType,
 };
 use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister, TableRegister};
 
@@ -26,6 +26,10 @@ pub fn hypervisor_present() -> WhpResult<bool> {
 }
 
 pub fn capability(_code: CapabilityCode) -> WhpResult<u64> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub fn capability_banks(_code: CapabilityCode) -> WhpResult<FeatureBanks> {
     Err(WhpError::unsupported(CALL))
 }
 
@@ -54,6 +58,44 @@ pub fn set_property(
     _partition: RawPartition,
     _code: PropertyCode,
     _value: u64,
+) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub fn set_property_bytes(
+    _partition: RawPartition,
+    _code: PropertyCode,
+    _payload: &[u8],
+) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub fn get_property_word(_partition: RawPartition, _code: PropertyCode) -> WhpResult<u64> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub fn suspend_time(_partition: RawPartition) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub fn resume_time(_partition: RawPartition) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub fn get_vp_state(
+    _partition: RawPartition,
+    _index: u32,
+    _state: VpStateType,
+    _out: &mut [u8],
+) -> WhpResult<usize> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub fn set_vp_state(
+    _partition: RawPartition,
+    _index: u32,
+    _state: VpStateType,
+    _blob: &[u8],
 ) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }

@@ -16,13 +16,13 @@
 //! how many mappings a partition tolerates. Choosing the sharing before
 //! measuring is what the probe is meant to prevent.
 
-use crate::caps::MsrExits;
+use crate::caps::{MsrExits, SyntheticFeatures};
 use rusty_box_core::GpaPerms;
 
 use crate::sys::{
-    self, Exit, GvaTranslation, InternalActivity, InterruptRequest, PendingInterruption,
-    PropertyCode, RawPartition, Reg, RegisterValue, SegmentRegister, TableRegister, WhpError,
-    WhpResult,
+    self, ApicStatePage, Exit, GvaTranslation, InternalActivity, InterruptRequest,
+    PendingInterruption, PropertyCode, RawPartition, Reg, RegisterValue, SegmentRegister,
+    TableRegister, VpStateType, WhpError, WhpResult,
 };
 
 /// Guest-physical pages are 4 KiB, and every WHP range must start and end on
@@ -259,6 +259,36 @@ impl PartitionConfig {
     /// does when a feature beyond its own bank is asked for.
     pub fn processor_features(&mut self, features: u64) -> WhpResult<&mut Self> {
         sys::set_property(self.handle.0, PropertyCode::ProcessorFeatures, features)?;
+        Ok(self)
+    }
+
+    /// Which Hyper-V enlightenments the guest may use.
+    ///
+    /// The payload is `WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS`: a bank count,
+    /// a reserved word and the single bank the SDK declares. Normally
+    /// [`SyntheticFeatures::OPENVMM_VTL0`] narrowed to what
+    /// [`crate::Capabilities::synthetic_features`] reports, because a bank the
+    /// host does not allow is refused whole rather than per flag.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the host refuses the set — which
+    /// it does for any flag beyond its own bank, naming none of them, so a
+    /// caller wanting to know WHICH flag offended must compare against the
+    /// capability itself.
+    pub fn synthetic_features(
+        &mut self,
+        bank0: SyntheticFeatures,
+    ) -> WhpResult<&mut Self> {
+        // BanksCount in the low half of the first word, Reserved0 in the high
+        // half, then the bank — the structure's own little-endian layout.
+        let mut payload = [0u8; 16];
+        payload[..4].copy_from_slice(&1u32.to_le_bytes());
+        payload[8..].copy_from_slice(&bank0.bits().to_le_bytes());
+        sys::set_property_bytes(
+            self.handle.0,
+            PropertyCode::SyntheticProcessorFeaturesBanks,
+            &payload,
+        )?;
         Ok(self)
     }
 
@@ -945,6 +975,119 @@ impl Partition {
     pub fn set_property_late(&mut self, code: LateProperty, value: u64) -> WhpResult<()> {
         sys::set_property(self.handle.0, code.into_code(), value)
     }
+
+    /// The partition's reference time, in the platform's own 100-nanosecond
+    /// units.
+    ///
+    /// This is the clock the guest reads through the platform's enlightened
+    /// time sources, and the one [`Partition::suspend_time`] stops — so it is
+    /// also the only way to observe that a suspend took effect.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the host refuses the read.
+    pub fn reference_time_100ns(&self) -> WhpResult<u64> {
+        sys::get_property_word(self.handle.0, PropertyCode::ReferenceTime)
+    }
+
+    /// Stop the partition's reference clock.
+    ///
+    /// What lets a host hold a guest's sense of time still while the host is
+    /// doing something the guest must not see the duration of. Paired with
+    /// [`Partition::resume_time`]; the platform, not this type, owns the count
+    /// of outstanding suspends.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the host refuses.
+    pub fn suspend_time(&self) -> WhpResult<()> {
+        sys::suspend_time(self.handle.0)
+    }
+
+    /// Start it again, from where [`Partition::suspend_time`] stopped it.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the host refuses — which it does
+    /// for a resume with no matching suspend.
+    pub fn resume_time(&self) -> WhpResult<()> {
+        sys::resume_time(self.handle.0)
+    }
+
+    /// Read a processor's local-APIC state into `page`.
+    ///
+    /// The whole model in one blob, which is the only shape the platform
+    /// offers it in: an offloaded APIC has no register names in
+    /// `WHV_REGISTER_NAME`, so its state crosses here or not at all. See
+    /// [`ApicStatePage`] for how a register's offset maps into the page.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the host refuses — which it does
+    /// when the partition has no APIC to have state.
+    pub fn read_apic_state(&self, index: u32, page: &mut ApicStatePage) -> WhpResult<()> {
+        const CALL: &str = "WHvGetVirtualProcessorState(InterruptControllerState2)";
+        let written = sys::get_vp_state(
+            self.handle.0,
+            index,
+            VpStateType::InterruptControllerState2,
+            page.0.as_mut_slice(),
+        )?;
+        // A short answer would leave the tail of the page holding whatever the
+        // caller's buffer held before, which a later write would hand back to
+        // the platform as if it were state the platform itself produced.
+        if written != ApicStatePage::BYTES {
+            return Err(WhpError::contract(CALL));
+        }
+        Ok(())
+    }
+
+    /// Write a processor's local-APIC state back — the counterpart of
+    /// [`Partition::read_apic_state`], taking the same page at the same size.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the host refuses the page.
+    pub fn write_apic_state(&self, index: u32, page: &ApicStatePage) -> WhpResult<()> {
+        sys::set_vp_state(
+            self.handle.0,
+            index,
+            VpStateType::InterruptControllerState2,
+            page.0.as_slice(),
+        )
+    }
+
+    /// Read a 128-bit register — today, [`crate::Reg::PendingEvent`].
+    ///
+    /// Separate from [`Partition::read_reg`] because the platform keeps the
+    /// whole sixteen bytes and a word read would return the low half and drop
+    /// the rest silently. Which registers those are is
+    /// [`crate::shape_of`]'s answer, not the caller's, so asking for a
+    /// word-shaped register here is refused rather than misread.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Contract`] if `reg` is not 128 bits wide,
+    /// otherwise [`crate::WhpErrorKind::Platform`].
+    pub fn read_words128(&self, index: u32, reg: Reg) -> WhpResult<[u64; 2]> {
+        const CALL: &str = "WHvGetVirtualProcessorRegisters(128-bit)";
+        let mut out = [RegisterValue::Words128([0; 2])];
+        sys::get_registers(self.handle.0, index, &[reg], &mut out)?;
+        match out[0] {
+            RegisterValue::Words128(words) => Ok(words),
+            RegisterValue::Word(_) | RegisterValue::Segment(_) | RegisterValue::Table(_) => {
+                Err(WhpError::contract(CALL))
+            }
+        }
+    }
+
+    /// Write a 128-bit register — the counterpart of
+    /// [`Partition::read_words128`].
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Contract`] if `reg` is not 128 bits wide,
+    /// otherwise [`crate::WhpErrorKind::Platform`].
+    pub fn write_words128(&self, index: u32, reg: Reg, words: [u64; 2]) -> WhpResult<()> {
+        const CALL: &str = "WHvSetVirtualProcessorRegisters(128-bit)";
+        if !reg.is_words128() {
+            return Err(WhpError::contract(CALL));
+        }
+        sys::set_registers(self.handle.0, index, &[reg], &[RegisterValue::Words128(words)])
+    }
 }
 
 /// One of the two things this crate lets another thread do to a running
@@ -1126,6 +1269,339 @@ mod tests {
             }
         }
         panic!("the measurement guest ran past {EXIT_CEILING} exits without halting");
+    }
+
+    /// How long the clock tests hold real time still while watching the
+    /// partition's own. Five milliseconds is fifty thousand of the clock's
+    /// 100-nanosecond units, so a clock that is running cannot be mistaken for
+    /// one that is held, whatever the host's scheduling does to the delay.
+    #[cfg(test)]
+    const CLOCK_WINDOW: std::time::Duration = std::time::Duration::from_millis(5);
+
+    /// Let real time pass without yielding the processor.
+    ///
+    /// A sleep would hand the thread back to the host scheduler, which is what
+    /// this measurement is trying to hold constant; the point is to observe the
+    /// PARTITION's clock across a known stretch of real time.
+    #[cfg(test)]
+    fn while_real_time_passes() {
+        let until = std::time::Instant::now();
+        while until.elapsed() < CLOCK_WINDOW {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// The partition's reference clock starts when a processor first runs, and
+    /// a suspend holds it still.
+    ///
+    /// The guest-visible property the two verbs exist for (R9): a host that
+    /// suspends partition time and then does something slow must not have the
+    /// guest see the delay. Reading the clock through a partition property is
+    /// also the only observation of it a host outside the guest has.
+    ///
+    /// The first assertion is a platform fact worth pinning on its own — the
+    /// clock counts the partition's OWN time, so it reads zero until a
+    /// processor has run, and a host that anchored a guest's timebase to it
+    /// before the first run would anchor to nothing.
+    #[test]
+    fn the_partitions_reference_clock_starts_with_the_guest_and_a_suspend_holds_it() {
+        if !crate::hypervisor_present().unwrap_or(false) {
+            eprintln!("skipped: this host has no Windows Hypervisor Platform");
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut partition = halting_partition().expect("a partition");
+
+        assert_eq!(
+            partition.reference_time_100ns().expect("the reference clock is readable"),
+            0,
+            "a partition whose processor has never run has accumulated no time"
+        );
+        let exit = partition.run(0).expect("the guest runs");
+        assert!(matches!(exit.reason, crate::ExitReason::Halt), "{:?}", exit.reason);
+
+        let started = partition.reference_time_100ns().expect("readable after the run");
+        assert!(started > 0, "running the guest started the partition's clock");
+        while_real_time_passes();
+        let running = partition.reference_time_100ns().expect("readable again");
+        assert!(
+            running > started,
+            "the clock advances with real time once started: {started} then {running}"
+        );
+
+        partition.suspend_time().expect("partition time suspends");
+        let held = partition.reference_time_100ns().expect("readable while suspended");
+        while_real_time_passes();
+        assert_eq!(
+            partition.reference_time_100ns().expect("readable while suspended"),
+            held,
+            "a suspended partition's clock does not advance, however long the host takes"
+        );
+
+        partition.resume_time().expect("partition time resumes");
+        while_real_time_passes();
+        let resumed = partition.reference_time_100ns().expect("readable after the resume");
+        assert!(
+            resumed > held,
+            "the clock picks up from where it was held: {held} then {resumed}"
+        );
+    }
+
+    /// The host names the enlightenments it will grant, and a partition that
+    /// asks for exactly those is accepted.
+    ///
+    /// Both halves matter: the capability read is banked rather than a word, so
+    /// a wrong parse would report the bank COUNT as a feature set, and the
+    /// property is a 16-byte structure whose first word is that same count.
+    #[test]
+    fn a_partition_may_ask_for_the_synthetic_features_the_host_allows() {
+        if !crate::hypervisor_present().unwrap_or(false) {
+            eprintln!("skipped: this host has no Windows Hypervisor Platform");
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let caps = crate::capabilities().expect("the host's capabilities");
+        let allowed = caps.synthetic_features;
+        assert!(
+            allowed.contains(crate::SyntheticFeatures::HYPERVISOR_PRESENT),
+            "a host running WHP allows a partition to report a hypervisor: {allowed:?}"
+        );
+        assert!(
+            caps.processor_clock_hz > 0,
+            "the platform reports how fast its processor clock runs"
+        );
+        assert!(
+            caps.interrupt_clock_hz > 0,
+            "and how fast its interrupt clock runs"
+        );
+        println!(
+            "P2: synthetic bank 0 = {:#x}, unnamed bits {:#x}; processor clock {} Hz, \
+             interrupt clock {} Hz, TSC deadline timer {}",
+            allowed.bits(),
+            allowed.bits() & !crate::SyntheticFeatures::all().bits(),
+            caps.processor_clock_hz,
+            caps.interrupt_clock_hz,
+            caps.tsc_deadline_timer,
+        );
+
+        let wanted = crate::SyntheticFeatures::OPENVMM_VTL0.intersection(allowed);
+        let mut config = PartitionConfig::new().expect("a partition");
+        config
+            .processor_count(1)
+            .expect("one processor")
+            .synthetic_features(wanted)
+            .expect("the host accepts the bank it just said it allows");
+    }
+
+    /// The 128-bit pending-event slot takes an ExtINT and gives it back.
+    ///
+    /// The register the design needs and the word exchange cannot carry: read
+    /// as a word it would return its low half, which happens to contain the
+    /// whole encoding and so would look right until a field moved above bit 64.
+    #[test]
+    fn the_pending_event_slot_carries_an_ext_int_whole() {
+        if !crate::hypervisor_present().unwrap_or(false) {
+            eprintln!("skipped: this host has no Windows Hypervisor Platform");
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let partition = halting_partition().expect("a partition");
+        assert_eq!(
+            partition.read_words128(0, Reg::PendingEvent).expect("the slot is readable"),
+            [0; 2],
+            "a processor that has never run holds no pending event"
+        );
+
+        let event = crate::PendingExtIntEvent { vector: 0x20 };
+        partition
+            .write_words128(0, Reg::PendingEvent, event.as_words())
+            .expect("the platform accepts an ExtINT in the pending-event slot");
+        let read_back =
+            partition.read_words128(0, Reg::PendingEvent).expect("readable after the write");
+        assert_eq!(
+            crate::PendingExtIntEvent::from_words(read_back),
+            Some(event),
+            "the vector and the event type survive the platform: {read_back:?}"
+        );
+
+        // A word-shaped verb must refuse the register rather than truncate it.
+        assert_eq!(
+            partition
+                .write_words128(0, Reg::Rax, [0; 2])
+                .expect_err("RAX is not 128 bits wide")
+                .kind(),
+            crate::WhpErrorKind::Contract,
+        );
+    }
+
+    /// The state page round-trips through the platform unchanged, at its exact
+    /// size — and its layout is what [`ApicStatePage`] claims.
+    ///
+    /// The layout cannot be checked against the SDK: `WinHvPlatformDefs.h`
+    /// declares no x64 structure for this state type at all. So it is checked
+    /// against the platform, which is the stronger oracle anyway. A fresh
+    /// processor's APIC is at its architectural reset state, and three of those
+    /// values are distinctive enough to pin the field order on their own — a
+    /// version word reporting six LVT entries, a destination format of all
+    /// ones, a spurious vector of 0xFF — with the six masked LVT entries then
+    /// landing exactly where three eight-word bitmaps and the ICR put them.
+    /// Under any other stride those bytes would fall somewhere else.
+    #[test]
+    fn the_apic_state_page_round_trips_through_the_platform() {
+        if !crate::hypervisor_present().unwrap_or(false) {
+            eprintln!("skipped: this host has no Windows Hypervisor Platform");
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut config = PartitionConfig::new().expect("a partition");
+        config
+            .processor_count(1)
+            .expect("one processor")
+            .local_apic(LocalApicMode::X2Apic)
+            .expect("an x2APIC");
+        let mut partition = config.setup().expect("setup");
+        partition.create_processor(0).expect("a processor");
+        let mut page = ApicStatePage::zeroed();
+        partition
+            .read_apic_state(0, &mut page)
+            .expect("a fresh processor's APIC page is readable");
+
+        let version = page.register(crate::ApicRegister::Version);
+        assert_ne!(
+            version, 0,
+            "a fresh VP's version register is populated; the page is not a zero buffer"
+        );
+        // Bits 0..8 are the version and 16..24 the highest LVT index, so a
+        // hypervisor APIC with the six architectural entries reports 5 here.
+        let lvt_entries = (version >> 16 & 0xFF) + 1;
+        assert_eq!(
+            page.register(crate::ApicRegister::Dfr),
+            u32::MAX,
+            "the destination format register resets to all ones"
+        );
+        assert_eq!(
+            page.register(crate::ApicRegister::Spurious),
+            0xFF,
+            "the spurious vector resets to 0xFF with the APIC software-disabled"
+        );
+        // Each LVT entry resets masked, and there are exactly as many of them
+        // as the version register just said — which is only true if the three
+        // interrupt bitmaps sit between the spurious vector and the ICR.
+        for lvt in [
+            crate::ApicRegister::LvtTimer,
+            crate::ApicRegister::LvtThermal,
+            crate::ApicRegister::LvtPerfmon,
+            crate::ApicRegister::LvtLint0,
+            crate::ApicRegister::LvtLint1,
+            crate::ApicRegister::LvtError,
+        ] {
+            assert_eq!(
+                page.register(lvt),
+                1 << 16,
+                "{lvt:?} resets masked and nothing else"
+            );
+        }
+        assert_eq!(lvt_entries, 6, "the version register agrees with the six entries above");
+        assert_eq!(
+            page.vector(crate::ApicVector::Request),
+            [0; 8],
+            "nothing is pending on a processor that has never run"
+        );
+        // Recorded for the probe document, not asserted: the version a host's
+        // offloaded APIC reports is the host's to choose.
+        println!("P2: hypervisor LAPIC version register = {version:#x}");
+
+        partition
+            .write_apic_state(0, &page)
+            .expect("the same page is accepted back at its exact size");
+        let mut back = ApicStatePage::zeroed();
+        partition.read_apic_state(0, &mut back).expect("readable again");
+        assert_eq!(
+            page.0[..1024],
+            back.0[..1024],
+            "the first KiB — every register the model owns — survives the round trip"
+        );
+    }
+
+    /// Where the request bitmap sits, measured rather than transcribed.
+    ///
+    /// The reset-state evidence pins words 0, 1, 3, 4 and 32..38 by value and
+    /// forces words 5..32 to be a 27-word run, but says nothing about what is
+    /// *inside* that run: the three bitmaps could be in any order and the
+    /// `Esr`/`IcrHigh`/`IcrLow` group could have its two ICR halves either way
+    /// round. This test makes the platform write one bit into the middle of the
+    /// run and checks it lands where [`ApicVector::Request`] says, which pins
+    /// that bitmap by observation and leaves the other two only their two
+    /// remaining slots.
+    ///
+    /// The vector is deliberately 0x41 rather than something under 32: word
+    /// `0x41 / 32` is 2, so the bit lands in the third word of the bitmap and a
+    /// reading whose words ran the other way would put it somewhere else.
+    #[test]
+    fn a_requested_vector_appears_in_the_pages_request_bitmap() {
+        if !crate::hypervisor_present().unwrap_or(false) {
+            eprintln!("skipped: this host has no Windows Hypervisor Platform");
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut config = PartitionConfig::new().expect("a partition");
+        config
+            .processor_count(1)
+            .expect("one processor")
+            .local_apic(LocalApicMode::X2Apic)
+            .expect("an x2APIC");
+        let mut partition = config.setup().expect("setup");
+        // Mapping is where the platform materialises the partition underneath,
+        // so an APIC request before it has nothing to arbitrate against.
+        let pages = HostPages::new(1).expect("one page");
+        partition.map(RESET_CS_BASE, pages, GpaPerms::RWX).expect("a mapped page");
+        partition.create_processor(0).expect("a processor");
+
+        // An APIC resets software-disabled — SVR is 0xFF, with the enable bit 8
+        // clear — and a disabled APIC drops a fixed vector instead of latching
+        // it. `whp_probe`'s wake measurement records the same thing from the
+        // guest's side: a real-mode guest never enables its APIC and never sees
+        // the vector, while an NMI still arrives. So the page has to be written
+        // back software-enabled before the request has anywhere to land.
+        let mut page = ApicStatePage::zeroed();
+        partition.read_apic_state(0, &mut page).expect("the APIC page is readable");
+        page.set_register(crate::ApicRegister::Spurious, 0x1FF);
+        partition.write_apic_state(0, &page).expect("the APIC accepts being enabled");
+
+        const VECTOR: u32 = 0x41;
+        partition
+            .request_interrupt(InterruptRequest {
+                kind: crate::InterruptKind::Fixed,
+                destination_mode: crate::DestinationMode::Physical,
+                trigger_mode: crate::TriggerMode::Edge,
+                destination: 0,
+                vector: VECTOR,
+            })
+            .expect("the emulated APIC accepts a fixed vector for processor 0");
+
+        partition.read_apic_state(0, &mut page).expect("the APIC page is readable again");
+
+        // The processor has never run, so nothing has moved the vector out of
+        // the request bitmap and into the in-service one.
+        let mut expected = [0u32; 8];
+        expected[VECTOR as usize / 32] = 1 << (VECTOR % 32);
+        assert_eq!(
+            page.vector(crate::ApicVector::Request),
+            expected,
+            "the requested vector sits at bit {} of word {} of the request bitmap",
+            VECTOR % 32,
+            VECTOR / 32
+        );
+        assert_eq!(
+            page.vector(crate::ApicVector::InService),
+            [0; 8],
+            "a processor that has never run has accepted nothing"
+        );
+        assert_eq!(
+            page.vector(crate::ApicVector::TriggerMode),
+            [0; 8],
+            "the request was edge-triggered, so no trigger-mode bit is set"
+        );
     }
 
     /// **A process holds one partition at a time.** Measured, not read.

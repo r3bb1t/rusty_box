@@ -510,6 +510,16 @@ mod tests {
                         self.read_tables(&[*reg], &mut table)?;
                         RegisterValue::Table(table[0])
                     }
+                    // The whole-state exchange carries no 128-bit register, and
+                    // the seam's `the_exchange_list_holds_no_register_a_word_
+                    // transfer_would_truncate` is what keeps it that way. A
+                    // recorder that invented a value here would let a caller
+                    // reach one anyway and pass.
+                    RegisterValue::Words128(_) => {
+                        return Err(rusty_box_whp::WhpError::contract(
+                            "the whole-state exchange holds no 128-bit register",
+                        ))
+                    }
                 };
             }
             Ok(())
@@ -521,6 +531,12 @@ mod tests {
                     RegisterValue::Word(word) => self.write_words(&[*reg], &[word])?,
                     RegisterValue::Segment(seg) => self.write_segments(&[*reg], &[seg])?,
                     RegisterValue::Table(table) => self.write_tables(&[*reg], &[table])?,
+                    // Refused for the reason `read_registers` gives.
+                    RegisterValue::Words128(_) => {
+                        return Err(rusty_box_whp::WhpError::contract(
+                            "the whole-state exchange holds no 128-bit register",
+                        ))
+                    }
                 }
             }
             Ok(())

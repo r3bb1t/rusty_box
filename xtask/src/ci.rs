@@ -131,7 +131,18 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // `delete_vp`, which release a resource a `Copy` handle cannot stop anyone
     // releasing twice. A `pub` seam cannot name a particular caller, so each
     // states the obligation as the caller's.
-    ("rusty_box_whp_sys/src", 43),
+    //
+    // NINE more for the platform facilities the VMM shape needs, every one a
+    // block in `windows.rs` around a single C call whose buffer the line above
+    // it sizes: the two partition-property verbs (`WHvGetPartitionProperty` and
+    // the byte-buffer `WHvSetPartitionProperty`), the two that stop and start
+    // partition time, the two that move a processor's interrupt-controller
+    // state page, the banked capability read, and the two places the 128-bit
+    // member of the register union is touched — reading it back out of a
+    // `RegVal`, and reading the APIC-write context off an exit. `unsupported.rs`
+    // and `lib.rs` do not move: the new verbs carry no obligation a caller must
+    // discharge, so their signatures are safe `fn`s on both targets.
+    ("rusty_box_whp_sys/src", 52),
     // The safe wrapper over that leaf. FOUR: one signature and three blocks,
     // and the split is the point.
     //

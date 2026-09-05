@@ -50,9 +50,11 @@ mod vcpu;
 
 pub use error::{WhpError, WhpErrorKind, WhpResult};
 pub use vcpu::{
-    AccessType, CpuidAccess, DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind,
-    InterruptRequest, InterruptionType, IoPortAccess, MemoryAccess, MsrAccess,
+    AccessType, ApicRegister, ApicStatePage, ApicVector, ApicWriteType, CpuidAccess,
+    DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind, InterruptRequest,
+    InterruptionType, IoPortAccess, MemoryAccess, MsrAccess, PendingExtIntEvent,
     PendingInterruption, Reg, SegmentRegister, TableRegister, TriggerMode, VpContext, ALL_REGS,
+    UNEXCHANGED_REGS,
 };
 
 #[cfg(windows)]
@@ -115,6 +117,69 @@ pub enum CapabilityCode {
     /// The host's banked processor features, `WHV_PROCESSOR_FEATURES` as one
     /// word. What the partition property of the same name may be set to.
     ProcessorFeatures,
+    /// How fast the platform's virtual processor clock runs, in hertz.
+    ProcessorClockFrequency,
+    /// How fast the platform's interrupt (APIC timer) clock runs, in hertz.
+    /// Distinct from the processor clock, and the divisor a guest's APIC timer
+    /// counts against.
+    InterruptClockFrequency,
+    /// `WHV_PROCESSOR_FEATURES_BANKS`: two banks rather than one word, which is
+    /// where the features that outgrew the original word live. Read with
+    /// [`capability_banks`], not [`capability`].
+    ProcessorFeaturesBanks,
+    /// `WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS`: which Hyper-V enlightenments
+    /// this host will let a partition offer its guest. Read with
+    /// [`capability_banks`].
+    SyntheticProcessorFeaturesBanks,
+}
+
+impl CapabilityCode {
+    /// Whether this capability answers with a `WHV_*_FEATURES_BANKS` structure
+    /// rather than a value that fits in a word.
+    ///
+    /// The split [`capability`] and [`capability_banks`] rest on: a banked
+    /// capability read through the word verb would be refused for a short
+    /// buffer, and a word capability read through the banked one would be
+    /// misparsed as a count and a bank.
+    #[must_use]
+    pub const fn is_banked(self) -> bool {
+        matches!(self, Self::ProcessorFeaturesBanks | Self::SyntheticProcessorFeaturesBanks)
+    }
+}
+
+/// A `WHV_*_FEATURES_BANKS` answer: how many banks the platform filled in, and
+/// the banks themselves.
+///
+/// Two banks is every bank either capability declares —
+/// `WHV_PROCESSOR_FEATURES_BANKS` has two and
+/// `WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS` one — so a fixed array is the whole
+/// structure rather than a window on it. `count` is the platform's own, and a
+/// caller must not read a bank beyond it: the bytes are there but the host
+/// never wrote them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct FeatureBanks {
+    /// How many of [`Self::banks`] the platform populated.
+    pub count: u32,
+    pub banks: [u64; FeatureBanks::MAX],
+}
+
+impl FeatureBanks {
+    /// How many banks either structure can hold.
+    pub const MAX: usize = 2;
+
+    /// Bank `index`, or zero when the platform did not fill it in.
+    ///
+    /// Zero is the honest answer for an unpopulated bank — it is what "no
+    /// feature in this bank" means — so a caller reading one bank further than
+    /// the host offers gets an empty set rather than uninitialised bytes.
+    #[must_use]
+    pub const fn bank(self, index: usize) -> u64 {
+        if index < Self::MAX && index < self.count as usize {
+            self.banks[index]
+        } else {
+            0
+        }
+    }
 }
 
 /// The `WHV_PARTITION_PROPERTY_CODE` values this port sets, restricted to the
@@ -135,6 +200,31 @@ pub enum PropertyCode {
     /// as one word. Left unset, the platform chooses its own default set,
     /// which is narrower than what the host banks.
     ProcessorFeatures,
+    /// Which Hyper-V enlightenments the guest may use,
+    /// `WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS`. Sixteen bytes rather than a
+    /// word, so it is set with [`set_property_bytes`] rather than
+    /// [`set_property`].
+    SyntheticProcessorFeaturesBanks,
+    /// The partition's reference time in 100-nanosecond units — a read-only
+    /// property, and the clock [`suspend_time`] and [`resume_time`] stop and
+    /// start. Read with [`get_property_word`]; setting it is refused by the
+    /// platform.
+    ReferenceTime,
+}
+
+/// Which per-processor state blob [`get_vp_state`] and [`set_vp_state`] move.
+///
+/// The platform declares several in `WHV_VIRTUAL_PROCESSOR_STATE_TYPE`; this is
+/// the one whose layout this port knows. Exhaustive (R5): a state type added
+/// here must be sized and shaped at the same time, because each names a
+/// different structure and a wrong pairing is a wrong buffer rather than a type
+/// error.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VpStateType {
+    /// `WHvVirtualProcessorStateTypeInterruptControllerState2` — the local
+    /// APIC's registers as one 4096-byte page. See [`ApicStatePage`] for the
+    /// layout and [`ApicStatePage::BYTES`] for the size the setter demands.
+    InterruptControllerState2,
 }
 
 /// Which counter set `WHvGetVirtualProcessorCounters` should report.
@@ -160,13 +250,17 @@ pub enum CounterSet {
 /// the segments and the descriptor tables in one call — can cross this seam
 /// without the union crossing it too.
 /// Exhaustive on purpose (R5): these are the union members this port reads, and
-/// a fourth would have to be handled everywhere a batch is parsed. A `_` arm
+/// a fifth would have to be handled everywhere a batch is parsed. A `_` arm
 /// would let one be added and silently misread instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RegisterValue {
     Word(u64),
     Segment(SegmentRegister),
     Table(TableRegister),
+    /// The whole sixteen bytes, low half first. The union's widest member, and
+    /// the only shape that loses nothing — which is why the one register that
+    /// needs it, [`Reg::PendingEvent`], is kept out of the word exchange.
+    Words128([u64; 2]),
 }
 
 /// Which member of the platform's value union a register name means.
@@ -185,6 +279,7 @@ pub const fn shape_of(reg: Reg) -> RegisterValue {
             })
         }
         Reg::Gdtr | Reg::Idtr => RegisterValue::Table(TableRegister { base: 0, limit: 0 }),
+        Reg::PendingEvent => RegisterValue::Words128([0; 2]),
         _ => RegisterValue::Word(0),
     }
 }
@@ -200,11 +295,12 @@ pub struct GvaTranslation {
 }
 
 pub use imp::{
-    cancel_vp, capability, create_partition, create_vp, delete_partition, delete_vp,
-    dirty_bitmap, get_counters, get_registers, get_segments, get_tables, get_words, get_xsave,
-    hypervisor_present, map_gpa, request_interrupt, run_vp, set_cpuid_exit_list, set_property,
-    set_registers, set_segments, set_tables, set_words, set_xsave, setup, translate_gva,
-    unmap_gpa,
+    cancel_vp, capability, capability_banks, create_partition, create_vp, delete_partition,
+    delete_vp, dirty_bitmap, get_counters, get_property_word, get_registers, get_segments,
+    get_tables, get_vp_state, get_words, get_xsave, hypervisor_present, map_gpa,
+    request_interrupt, resume_time, run_vp, set_cpuid_exit_list, set_property,
+    set_property_bytes, set_registers, set_segments, set_tables, set_vp_state, set_words,
+    set_xsave, setup, suspend_time, translate_gva, unmap_gpa,
 };
 
 /// Every function `imp` must provide, stated once so the two implementations
@@ -215,9 +311,16 @@ pub use imp::{
 const _IMP_IS_COMPLETE: ImpSignatures = ImpSignatures {
     hypervisor_present: imp::hypervisor_present,
     capability: imp::capability,
+    capability_banks: imp::capability_banks,
     create_partition: imp::create_partition,
     delete_partition: imp::delete_partition,
     set_property: imp::set_property,
+    set_property_bytes: imp::set_property_bytes,
+    get_property_word: imp::get_property_word,
+    suspend_time: imp::suspend_time,
+    resume_time: imp::resume_time,
+    get_vp_state: imp::get_vp_state,
+    set_vp_state: imp::set_vp_state,
     set_cpuid_exit_list: imp::set_cpuid_exit_list,
     setup: imp::setup,
     map_gpa: imp::map_gpa,
@@ -253,9 +356,16 @@ const _IMP_IS_COMPLETE: ImpSignatures = ImpSignatures {
 struct ImpSignatures {
     hypervisor_present: fn() -> WhpResult<bool>,
     capability: fn(CapabilityCode) -> WhpResult<u64>,
+    capability_banks: fn(CapabilityCode) -> WhpResult<FeatureBanks>,
     create_partition: fn() -> WhpResult<RawPartition>,
     delete_partition: unsafe fn(RawPartition),
     set_property: fn(RawPartition, PropertyCode, u64) -> WhpResult<()>,
+    set_property_bytes: fn(RawPartition, PropertyCode, &[u8]) -> WhpResult<()>,
+    get_property_word: fn(RawPartition, PropertyCode) -> WhpResult<u64>,
+    suspend_time: fn(RawPartition) -> WhpResult<()>,
+    resume_time: fn(RawPartition) -> WhpResult<()>,
+    get_vp_state: fn(RawPartition, u32, VpStateType, &mut [u8]) -> WhpResult<usize>,
+    set_vp_state: fn(RawPartition, u32, VpStateType, &[u8]) -> WhpResult<()>,
     set_cpuid_exit_list: fn(RawPartition, &[u32]) -> WhpResult<()>,
     setup: fn(RawPartition) -> WhpResult<()>,
     map_gpa: unsafe fn(RawPartition, &mut [u8], u64, GpaPerms) -> WhpResult<()>,

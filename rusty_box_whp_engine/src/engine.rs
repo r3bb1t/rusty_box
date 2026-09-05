@@ -2133,7 +2133,7 @@ fn run_the_exit_loop<T: Instrumentation>(
             ExitReason::ApicEoi { .. }
             | ExitReason::ApicSmiTrap
             | ExitReason::ApicInitSipiTrap
-            | ExitReason::ApicWriteTrap
+            | ExitReason::ApicWriteTrap { .. }
             | ExitReason::SynicSintDeliverable
             | ExitReason::Hypercall => return Err(unserviced("a partition-APIC exit", &exit)),
             ExitReason::Unrecognized(code) => {

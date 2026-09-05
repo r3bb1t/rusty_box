@@ -82,7 +82,76 @@ mod exit_bit {
     pub(super) const RDTSC: u32 = 3;
     pub(super) const APIC_SMI_TRAP: u32 = 4;
     pub(super) const HYPERCALL: u32 = 5;
+    pub(super) const APIC_INIT_SIPI_TRAP: u32 = 6;
+    pub(super) const APIC_WRITE_LINT0_TRAP: u32 = 7;
+    pub(super) const APIC_WRITE_LINT1_TRAP: u32 = 8;
+    pub(super) const APIC_WRITE_SVR_TRAP: u32 = 9;
+    // 10 and 11 are `UnknownSynicConnection` and `RetargetUnknownVpciDevice`,
+    // neither of which this port has a use for.
+    pub(super) const APIC_WRITE_LDR_TRAP: u32 = 12;
+    pub(super) const APIC_WRITE_DFR_TRAP: u32 = 13;
     pub(super) const GPA_ACCESS_FAULT: u32 = 14;
+}
+
+/// Bit positions within `WHV_X64_PROCESSOR_FEATURES1`, the second bank of
+/// `WHvCapabilityCodeProcessorFeaturesBanks`.
+mod processor_feature1_bit {
+    /// `TscDeadlineTmrSupport`, the eighteenth field the union declares.
+    pub(super) const TSC_DEADLINE_TIMER: u32 = 17;
+}
+
+bitflags::bitflags! {
+    /// `WHV_SYNTHETIC_PROCESSOR_FEATURES` bank 0. One flag per header bitfield, in the
+    /// header's order; the composite at the end is OpenVMM's VTL0 set, the one the design
+    /// exposes. `repr(transparent)` because the word crosses the FFI as the bank's `Bank0`
+    /// field (bitflags does not add it on its own).
+    ///
+    /// The header names further fields above bit 30 — `RestoreTime`, `EnlightenedVmcs`,
+    /// `NestedDebugCtl`, `SyntheticTimeUnhaltedTimer`, `IdleSpecCtrl`, `WakeVps` and
+    /// `AccessVpRegs`. They are deliberately absent: this type is the set a VTL0 guest is
+    /// offered, not a transcription of the union, and a host that sets one of them is still
+    /// reported through [`SyntheticFeatures::from_bits_retain`].
+    #[repr(transparent)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct SyntheticFeatures: u64 {
+        /// CPUID leaves 0x40000000 and 0x40000001 are supported.
+        const HYPERVISOR_PRESENT = 1 << 0;
+        /// CPUID leaves 0x40000000–0x40000006 (the Hv#1 interface).
+        const HV1 = 1 << 1;
+        const ACCESS_VP_RUNTIME_REG = 1 << 2;
+        const ACCESS_PARTITION_REFERENCE_COUNTER = 1 << 3;
+        const ACCESS_SYNIC_REGS = 1 << 4;
+        const ACCESS_SYNTHETIC_TIMER_REGS = 1 << 5;
+        /// The VP assist page and, on x64, the APIC EOI/ICR/TPR MSRs.
+        const ACCESS_INTR_CTRL_REGS = 1 << 6;
+        const ACCESS_HYPERCALL_REGS = 1 << 7;
+        const ACCESS_VP_INDEX = 1 << 8;
+        const ACCESS_PARTITION_REFERENCE_TSC = 1 << 9;
+        const ACCESS_GUEST_IDLE_REG = 1 << 10;
+        const ACCESS_FREQUENCY_REGS = 1 << 11;
+        const EXTENDED_GVA_RANGES_FOR_FLUSH = 1 << 15;
+        const FAST_HYPERCALL_OUTPUT = 1 << 18;
+        const DIRECT_SYNTHETIC_TIMERS = 1 << 22;
+        const EXTENDED_PROCESSOR_MASKS = 1 << 24;
+        const TB_FLUSH_HYPERCALLS = 1 << 25;
+        const SYNTHETIC_CLUSTER_IPI = 1 << 26;
+        const NOTIFY_LONG_SPIN_WAIT = 1 << 27;
+        const QUERY_NUMA_DISTANCE = 1 << 28;
+        const SIGNAL_EVENTS = 1 << 29;
+        const RETARGET_DEVICE_INTERRUPT = 1 << 30;
+        /// What OpenVMM grants a VTL0 guest with the offloaded APIC — every bit above.
+        const OPENVMM_VTL0 = Self::HYPERVISOR_PRESENT.bits() | Self::HV1.bits()
+            | Self::ACCESS_VP_RUNTIME_REG.bits() | Self::ACCESS_PARTITION_REFERENCE_COUNTER.bits()
+            | Self::ACCESS_SYNIC_REGS.bits() | Self::ACCESS_SYNTHETIC_TIMER_REGS.bits()
+            | Self::ACCESS_INTR_CTRL_REGS.bits() | Self::ACCESS_HYPERCALL_REGS.bits()
+            | Self::ACCESS_VP_INDEX.bits() | Self::ACCESS_PARTITION_REFERENCE_TSC.bits()
+            | Self::ACCESS_GUEST_IDLE_REG.bits() | Self::ACCESS_FREQUENCY_REGS.bits()
+            | Self::EXTENDED_GVA_RANGES_FOR_FLUSH.bits() | Self::FAST_HYPERCALL_OUTPUT.bits()
+            | Self::DIRECT_SYNTHETIC_TIMERS.bits() | Self::EXTENDED_PROCESSOR_MASKS.bits()
+            | Self::TB_FLUSH_HYPERCALLS.bits() | Self::SYNTHETIC_CLUSTER_IPI.bits()
+            | Self::NOTIFY_LONG_SPIN_WAIT.bits() | Self::QUERY_NUMA_DISTANCE.bits()
+            | Self::SIGNAL_EVENTS.bits() | Self::RETARGET_DEVICE_INTERRUPT.bits();
+    }
 }
 
 /// The subset of `WHV_CAPABILITY_FEATURES` this port has a use for.
@@ -124,6 +193,24 @@ pub struct ExtendedVmExits {
     pub apic_smi_trap: bool,
     /// `VMCALL`/`VMMCALL` exits.
     pub hypercall: bool,
+    /// An APIC-written INIT or SIPI traps out instead of being delivered — how
+    /// a host owns processor startup while the hypervisor owns the APIC.
+    pub apic_init_sipi_trap: bool,
+    /// A guest write to the local APIC's LINT0 entry traps out. The bit that
+    /// lets a host see a guest reprogramming the pin its 8259 drives.
+    pub apic_write_lint0_trap: bool,
+    /// The same for LINT1, the NMI pin.
+    pub apic_write_lint1_trap: bool,
+    /// A guest write to the spurious-interrupt vector register traps out,
+    /// which is where the software enable of the whole APIC lives.
+    pub apic_write_svr_trap: bool,
+    /// A guest write to the logical-destination register traps out. With
+    /// [`Self::apic_write_dfr_trap`] this is how a host watching an offloaded
+    /// APIC learns that logical IPI routing has been reprogrammed.
+    pub apic_write_ldr_trap: bool,
+    /// The same for the destination-format register, which chooses between the
+    /// flat and clustered logical models.
+    pub apic_write_dfr_trap: bool,
     /// A second-level page fault against a *mapped* range exits, rather than
     /// being turned into a guest fault. This is the bit that decides whether a
     /// write to a read-only shadowed-ROM window can be serviced by the host.
@@ -140,6 +227,12 @@ impl ExtendedVmExits {
             | (self.rdtsc as u64) << exit_bit::RDTSC
             | (self.apic_smi_trap as u64) << exit_bit::APIC_SMI_TRAP
             | (self.hypercall as u64) << exit_bit::HYPERCALL
+            | (self.apic_init_sipi_trap as u64) << exit_bit::APIC_INIT_SIPI_TRAP
+            | (self.apic_write_lint0_trap as u64) << exit_bit::APIC_WRITE_LINT0_TRAP
+            | (self.apic_write_lint1_trap as u64) << exit_bit::APIC_WRITE_LINT1_TRAP
+            | (self.apic_write_svr_trap as u64) << exit_bit::APIC_WRITE_SVR_TRAP
+            | (self.apic_write_ldr_trap as u64) << exit_bit::APIC_WRITE_LDR_TRAP
+            | (self.apic_write_dfr_trap as u64) << exit_bit::APIC_WRITE_DFR_TRAP
             | (self.gpa_access_fault as u64) << exit_bit::GPA_ACCESS_FAULT
     }
 
@@ -156,6 +249,12 @@ impl ExtendedVmExits {
             rdtsc: bit(word, exit_bit::RDTSC),
             apic_smi_trap: bit(word, exit_bit::APIC_SMI_TRAP),
             hypercall: bit(word, exit_bit::HYPERCALL),
+            apic_init_sipi_trap: bit(word, exit_bit::APIC_INIT_SIPI_TRAP),
+            apic_write_lint0_trap: bit(word, exit_bit::APIC_WRITE_LINT0_TRAP),
+            apic_write_lint1_trap: bit(word, exit_bit::APIC_WRITE_LINT1_TRAP),
+            apic_write_svr_trap: bit(word, exit_bit::APIC_WRITE_SVR_TRAP),
+            apic_write_ldr_trap: bit(word, exit_bit::APIC_WRITE_LDR_TRAP),
+            apic_write_dfr_trap: bit(word, exit_bit::APIC_WRITE_DFR_TRAP),
             gpa_access_fault: bit(word, exit_bit::GPA_ACCESS_FAULT),
         }
     }
@@ -177,6 +276,23 @@ pub struct Capabilities {
     /// set, and a guest touching a feature the partition was not told about
     /// faults on hardware while working under an interpreter.
     pub processor_features: u64,
+    /// Which Hyper-V enlightenments this host will let a partition offer its
+    /// guest, `WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS` bank 0. Read with
+    /// [`SyntheticFeatures::from_bits_retain`], so a bit newer than this
+    /// port's SDK header survives into a report instead of being dropped; the
+    /// unnamed remainder is `bits() & !SyntheticFeatures::all().bits()`.
+    pub synthetic_features: SyntheticFeatures,
+    /// How fast the platform's virtual processor clock runs, in hertz. Zero
+    /// when the host declines the question.
+    pub processor_clock_hz: u64,
+    /// How fast the platform's interrupt clock runs, in hertz — what a guest's
+    /// APIC timer counts against. Zero when the host declines the question.
+    pub interrupt_clock_hz: u64,
+    /// `WHV_X64_PROCESSOR_FEATURES1.TscDeadlineTmrSupport`: whether the host
+    /// will let a guest arm its APIC timer by TSC deadline rather than by
+    /// count. Read from bank 1 of the banked processor features, which is
+    /// where the features that outgrew the original word live.
+    pub tsc_deadline_timer: bool,
 }
 
 /// Whether a hypervisor is present and usable from this process.
@@ -201,8 +317,19 @@ pub fn capabilities() -> WhpResult<Capabilities> {
     let processor_features = sys::capability(sys::CapabilityCode::ProcessorFeatures)?;
     // `WHvCapabilityCodePhysicalAddressWidth` is newer than the rest; a host
     // that does not know it refuses rather than answering zero, and 0 is the
-    // honest report for "the host would not say".
+    // honest report for "the host would not say". The two clock frequencies
+    // and the two banked reads are newer still and treated the same way: an
+    // absent answer is an empty one, and only the capabilities every host has
+    // had since this API shipped are allowed to fail the whole query.
     let width = sys::capability(sys::CapabilityCode::PhysicalAddressWidth).unwrap_or(0);
+    let processor_clock_hz =
+        sys::capability(sys::CapabilityCode::ProcessorClockFrequency).unwrap_or(0);
+    let interrupt_clock_hz =
+        sys::capability(sys::CapabilityCode::InterruptClockFrequency).unwrap_or(0);
+    let synthetic = sys::capability_banks(sys::CapabilityCode::SyntheticProcessorFeaturesBanks)
+        .unwrap_or_default();
+    let banked = sys::capability_banks(sys::CapabilityCode::ProcessorFeaturesBanks)
+        .unwrap_or_default();
     Ok(Capabilities {
         features: Features {
             partial_unmap: bit(features_word, feature_bit::PARTIAL_UNMAP),
@@ -217,6 +344,12 @@ pub fn capabilities() -> WhpResult<Capabilities> {
         supported_exits: ExtendedVmExits::from_word(exits_word),
         physical_address_width: width as u32,
         processor_features,
+        // Retained rather than truncated: a bit this SDK's header does not name
+        // is still something a probe report must be able to show.
+        synthetic_features: SyntheticFeatures::from_bits_retain(synthetic.bank(0)),
+        processor_clock_hz,
+        interrupt_clock_hz,
+        tsc_deadline_timer: bit(banked.bank(1), processor_feature1_bit::TSC_DEADLINE_TIMER),
     })
 }
 
@@ -263,14 +396,75 @@ mod tests {
     fn a_word_survives_a_round_trip_through_the_named_bits() {
         let asked = ExtendedVmExits {
             cpuid: true,
-            msr: false,
-            exception: false,
             rdtsc: true,
-            apic_smi_trap: false,
-            hypercall: false,
+            apic_write_lint1_trap: true,
             gpa_access_fault: true,
+            ..ExtendedVmExits::default()
         };
         assert_eq!(ExtendedVmExits::from_word(asked.as_word()), asked);
+    }
+
+    #[test]
+    fn the_extended_exits_word_carries_the_apic_traps_where_the_header_puts_them() {
+        let asked = ExtendedVmExits {
+            apic_write_lint0_trap: true,
+            hypercall: true,
+            ..ExtendedVmExits::default()
+        };
+        assert_eq!(asked.as_word(), (1 << 7) | (1 << 5));
+        assert_eq!(ExtendedVmExits::from_word(asked.as_word()), asked);
+        // LDR and DFR sit above the two exits this port has no use for, so
+        // their positions are the ones a reader is most likely to guess wrong.
+        // Every `ApicWriteType` variant needs its trap here to be producible.
+        let ldr = ExtendedVmExits { apic_write_ldr_trap: true, ..ExtendedVmExits::default() };
+        assert_eq!(ldr.as_word(), 1 << 12);
+        assert_eq!(ExtendedVmExits::from_word(ldr.as_word()), ldr);
+        let dfr = ExtendedVmExits { apic_write_dfr_trap: true, ..ExtendedVmExits::default() };
+        assert_eq!(dfr.as_word(), 1 << 13);
+        assert_eq!(ExtendedVmExits::from_word(dfr.as_word()), dfr);
+    }
+
+    #[test]
+    fn the_openvmm_vtl0_synthetic_set_is_every_named_flag_and_nothing_else() {
+        // A ratchet, not a header check: the composite is defined as the union of the named
+        // flags, so this can only fail when a flag is added without joining the composite.
+        assert_eq!(SyntheticFeatures::OPENVMM_VTL0, SyntheticFeatures::all());
+        // The check that catches a DROPPED constituent. bitflags 2's `IterNames` yields a
+        // defined flag only while it still covers bits no earlier flag has yielded
+        // (`src/iter.rs`: "When flags fully overlap, such as in convenience flags that are a
+        // shorthand for others, we won't yield both flags"), so the composite defined last is
+        // NOT yielded after its 22 constituents.
+        assert_eq!(SyntheticFeatures::OPENVMM_VTL0.iter_names().count(), 22);
+        // The header's bit positions, spot-checked where the numbering has gaps.
+        assert_eq!(SyntheticFeatures::EXTENDED_GVA_RANGES_FOR_FLUSH.bits(), 1 << 15);
+        assert_eq!(SyntheticFeatures::FAST_HYPERCALL_OUTPUT.bits(), 1 << 18);
+        assert_eq!(SyntheticFeatures::DIRECT_SYNTHETIC_TIMERS.bits(), 1 << 22);
+        assert_eq!(SyntheticFeatures::RETARGET_DEVICE_INTERRUPT.bits(), 1 << 30);
+    }
+
+    #[test]
+    fn a_host_bank_with_a_bit_this_header_does_not_name_is_kept_not_dropped() {
+        // A newer host may set a bit our SDK does not define (OpenVMM's ABI copy already has one
+        // more). The capability read keeps it so the probe report can show it.
+        let word = SyntheticFeatures::HV1.bits() | (1 << 40);
+        let bank = SyntheticFeatures::from_bits_retain(word);
+        assert!(bank.contains(SyntheticFeatures::HV1));
+        assert_eq!(
+            bank.bits() & !SyntheticFeatures::all().bits(),
+            1 << 40,
+            "the unknown bit survives"
+        );
+        assert_eq!(SyntheticFeatures::from_bits(word), None, "and strict parsing refuses it");
+        assert_eq!(SyntheticFeatures::from_bits_truncate(word), SyntheticFeatures::HV1);
+    }
+
+    #[test]
+    fn asking_for_more_than_the_host_allows_names_the_refused_flags() {
+        let allowed = SyntheticFeatures::HYPERVISOR_PRESENT | SyntheticFeatures::HV1;
+        let wanted = SyntheticFeatures::OPENVMM_VTL0;
+        let refused = wanted.difference(allowed);
+        assert!(refused.contains(SyntheticFeatures::ACCESS_SYNTHETIC_TIMER_REGS));
+        assert!(!refused.contains(SyntheticFeatures::HV1));
     }
 
     /// A partition may only ask for exits the host advertises, so the two uses

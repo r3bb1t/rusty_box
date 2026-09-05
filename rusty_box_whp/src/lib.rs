@@ -51,6 +51,7 @@ use rusty_box_whp_sys as sys;
 
 pub use caps::{
     capabilities, hypervisor_present, Capabilities, ExtendedVmExits, Features, MsrExits,
+    SyntheticFeatures,
 };
 pub use partition::{
     Canceller, HostPages, InterceptCounter, InterceptCounters, InterruptRequester, LateProperty,
@@ -58,12 +59,14 @@ pub use partition::{
 };
 // The seam's three vocabularies — register shapes, errors, and the exits a
 // processor produces — under the names a caller of this crate uses them by.
-pub use rusty_box_whp_sys::{shape_of, GvaTranslation, RegisterValue};
+pub use rusty_box_whp_sys::{shape_of, FeatureBanks, GvaTranslation, RegisterValue};
 pub use rusty_box_whp_sys::{WhpError, WhpErrorKind, WhpResult};
 pub use rusty_box_whp_sys::{
-    AccessType, CpuidAccess, DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind,
-    InterruptRequest, InterruptionType, IoPortAccess, MemoryAccess, MsrAccess,
+    AccessType, ApicRegister, ApicStatePage, ApicVector, ApicWriteType, CpuidAccess,
+    DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind, InterruptRequest,
+    InterruptionType, IoPortAccess, MemoryAccess, MsrAccess, PendingExtIntEvent,
     PendingInterruption, Reg, SegmentRegister, TableRegister, TriggerMode, VpContext, ALL_REGS,
+    UNEXCHANGED_REGS,
 };
 
 /// Re-exported so a caller mapping memory into a partition need not also name

@@ -24,12 +24,12 @@ use windows_sys::Win32::System::Hypervisor::*;
 
 use crate::error::{WhpError, WhpResult};
 use crate::{
-    shape_of, CapabilityCode, CounterSet, GpaPerms, GvaTranslation, PropertyCode, RawPartition,
-    RegisterValue,
+    shape_of, CapabilityCode, CounterSet, FeatureBanks, GpaPerms, GvaTranslation, PropertyCode,
+    RawPartition, RegisterValue, VpStateType,
 };
 use crate::vcpu::{
-    AccessType, CpuidAccess, Exit, ExitReason, InterruptRequest, IoPortAccess, MemoryAccess,
-    MsrAccess, Reg, SegmentRegister, TableRegister, VpContext,
+    AccessType, ApicWriteType, CpuidAccess, Exit, ExitReason, InterruptRequest, IoPortAccess,
+    MemoryAccess, MsrAccess, Reg, SegmentRegister, TableRegister, VpContext,
 };
 
 /// `WHvCapabilityCodePhysicalAddressWidth`, which the SDK header defines but
@@ -110,6 +110,22 @@ impl RegVal {
             limit: table.Limit,
         }
     }
+
+    const fn words128(words: [u64; 2]) -> Self {
+        Self(WHV_REGISTER_VALUE {
+            Reg128: WHV_UINT128 {
+                Anonymous: WHV_UINT128_0 { Low64: words[0], High64: words[1] },
+            },
+        })
+    }
+
+    fn as_words128(self) -> [u64; 2] {
+        // SAFETY: `Reg128` is the union's widest member, so every byte of the
+        // value is part of it whatever the platform wrote; its own two members
+        // are this pair of words and the same sixteen bytes as four `u32`s.
+        let wide = unsafe { self.0.Reg128.Anonymous };
+        [wide.Low64, wide.High64]
+    }
 }
 
 /// `WHV_E_UNSUPPORTED_HYPERVISOR_CONFIG` from the SDK's `winerror.h`. The
@@ -138,6 +154,18 @@ const fn capability_code(code: CapabilityCode) -> (WHV_CAPABILITY_CODE, u32) {
         CapabilityCode::ExtendedVmExits => (WHvCapabilityCodeExtendedVmExits, 8),
         CapabilityCode::PhysicalAddressWidth => (CAPABILITY_PHYSICAL_ADDRESS_WIDTH, 4),
         CapabilityCode::ProcessorFeatures => (WHvCapabilityCodeProcessorFeatures, 8),
+        // `WHV_CAPABILITY.ProcessorClockFrequency` and `InterruptClockFrequency`
+        // are `UINT64` hertz counts.
+        CapabilityCode::ProcessorClockFrequency => (WHvCapabilityCodeProcessorClockFrequency, 8),
+        CapabilityCode::InterruptClockFrequency => (WHvCapabilityCodeInterruptClockFrequency, 8),
+        // The two banked answers, sized as the whole structure: a count word, a
+        // reserved word, then `FeatureBanks::MAX` banks. `capability` refuses
+        // them on the strength of `is_banked` before this table is reached, so
+        // the size here is the one `capability_banks` asks for.
+        CapabilityCode::ProcessorFeaturesBanks => (WHvCapabilityCodeProcessorFeaturesBanks, 24),
+        CapabilityCode::SyntheticProcessorFeaturesBanks => {
+            (WHvCapabilityCodeSyntheticProcessorFeaturesBanks, 16)
+        }
     }
 }
 
@@ -156,6 +184,26 @@ const fn property_code(code: PropertyCode) -> (WHV_PARTITION_PROPERTY_CODE, u32)
             (WHvPartitionPropertyCodeLocalApicEmulationMode, 4)
         }
         PropertyCode::ProcessorFeatures => (WHvPartitionPropertyCodeProcessorFeatures, 8),
+        // `WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS`: a count word, a reserved
+        // word and the single bank the SDK declares
+        // (`WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS_COUNT` is 1).
+        PropertyCode::SyntheticProcessorFeaturesBanks => {
+            (WHvPartitionPropertyCodeSyntheticProcessorFeaturesBanks, 16)
+        }
+        PropertyCode::ReferenceTime => (WHvPartitionPropertyCodeReferenceTime, 8),
+    }
+}
+
+/// The platform value for each per-processor state blob this port moves.
+/// Exhaustive (R5), and paired with the buffer size the platform demands for
+/// it: the two are decided together because a state type read into a buffer
+/// sized for another is a refusal at best.
+const fn vp_state_code(state: VpStateType) -> (WHV_VIRTUAL_PROCESSOR_STATE_TYPE, usize) {
+    match state {
+        VpStateType::InterruptControllerState2 => (
+            WHvVirtualProcessorStateTypeInterruptControllerState2,
+            crate::ApicStatePage::BYTES,
+        ),
     }
 }
 
@@ -218,6 +266,8 @@ const fn register_name(reg: Reg) -> WHV_REGISTER_NAME {
         Reg::InterruptState => WHvRegisterInterruptState,
         Reg::InternalActivityState => WHvRegisterInternalActivityState,
         Reg::DeliverabilityNotifications => WHvX64RegisterDeliverabilityNotifications,
+        Reg::PendingEvent => WHvRegisterPendingEvent,
+        Reg::ApicTpr => WHvX64RegisterApicTpr,
     }
 }
 
@@ -257,6 +307,11 @@ pub fn hypervisor_present() -> WhpResult<bool> {
 
 pub fn capability(code: CapabilityCode) -> WhpResult<u64> {
     const CALL: &str = "WHvGetCapability";
+    if code.is_banked() {
+        // A banked answer does not fit a word, and truncating it here would
+        // report a count as a feature set. `capability_banks` is the verb.
+        return Err(WhpError::contract(CALL));
+    }
     let (raw, len) = capability_code(code);
     let mut buffer = 0u64;
     let mut written = 0u32;
@@ -275,6 +330,206 @@ pub fn capability(code: CapabilityCode) -> WhpResult<u64> {
     // The platform writes `len` little-endian bytes, so a 4-byte answer
     // leaves the high half of the word zero and needs no masking.
     Ok(buffer)
+}
+
+/// Read a capability whose answer is a `WHV_*_FEATURES_BANKS` structure.
+///
+/// Separate from [`capability`] because the payload is a count and a run of
+/// banks rather than a value: the count says how many banks the host actually
+/// wrote, and a caller reading past it would be reading bytes nobody set.
+pub fn capability_banks(code: CapabilityCode) -> WhpResult<FeatureBanks> {
+    const CALL: &str = "WHvGetCapability(FeaturesBanks)";
+    if !code.is_banked() {
+        return Err(WhpError::contract(CALL));
+    }
+    let (raw, len) = capability_code(code);
+    // The structure is a `u32` count, a `u32` reserved, then the banks — one
+    // `u64`-aligned run, which is what makes this array both correctly aligned
+    // for the platform and readable back as words.
+    let mut buffer = [0u64; 1 + FeatureBanks::MAX];
+    let mut written = 0u32;
+    if len as usize > core::mem::size_of_val(&buffer) {
+        return Err(WhpError::contract(CALL));
+    }
+    // SAFETY: the platform writes at most `len` bytes, and the guard above
+    // establishes that `len` fits the buffer this borrow keeps alive for the
+    // call; `written` is a live, correctly typed out-parameter.
+    check(
+        unsafe {
+            WHvGetCapability(raw, buffer.as_mut_ptr().cast(), len, &mut written)
+        },
+        CALL,
+    )?;
+    if written < len {
+        return Err(WhpError::contract(CALL));
+    }
+    // The count is the low half of the first word and the reserved half is the
+    // high one, both little-endian, so the banks start at word 1.
+    let count = buffer[0] as u32;
+    if count as usize > FeatureBanks::MAX {
+        // A host reporting more banks than the SDK declares has an ABI this
+        // port cannot read; saying so beats silently keeping the first two.
+        return Err(WhpError::contract(CALL));
+    }
+    Ok(FeatureBanks { count, banks: [buffer[1], buffer[2]] })
+}
+
+/// Read a partition property that fits in a word.
+///
+/// The counterpart of [`set_property`], and the only way to reach a property
+/// the platform makes read-only — `ReferenceTime` is set by the partition's own
+/// clock, never by a caller.
+pub fn get_property_word(partition: RawPartition, code: PropertyCode) -> WhpResult<u64> {
+    const CALL: &str = "WHvGetPartitionProperty";
+    let (raw, len) = property_code(code);
+    let mut buffer = 0u64;
+    let mut written = 0u32;
+    if len as usize > core::mem::size_of_val(&buffer) {
+        // A property wider than a word has no word to be read into; the caller
+        // wants a shaped verb, as `SyntheticProcessorFeaturesBanks` does.
+        return Err(WhpError::contract(CALL));
+    }
+    // SAFETY: the buffer is a live `u64` and the guard above establishes that
+    // `len` is at most its 8 bytes; `written` is a live `u32`. A short write is
+    // caught below rather than trusted.
+    check(
+        unsafe {
+            WHvGetPartitionProperty(
+                partition.get(),
+                raw,
+                core::ptr::from_mut(&mut buffer).cast(),
+                len,
+                &mut written,
+            )
+        },
+        CALL,
+    )?;
+    if written < len {
+        return Err(WhpError::contract(CALL));
+    }
+    // The platform writes `len` little-endian bytes, so a 4-byte answer leaves
+    // the high half of the word zero and needs no masking.
+    Ok(buffer)
+}
+
+/// Set a partition property whose payload is a structure rather than a word.
+///
+/// The buffer must be exactly the width the property's own table declares: the
+/// platform reads a fixed structure, and a shorter buffer would have it read
+/// past what the caller owns while a longer one hides a caller that built the
+/// wrong shape.
+pub fn set_property_bytes(
+    partition: RawPartition,
+    code: PropertyCode,
+    payload: &[u8],
+) -> WhpResult<()> {
+    const CALL: &str = "WHvSetPartitionProperty(bytes)";
+    let (raw, len) = property_code(code);
+    if payload.len() != len as usize {
+        return Err(WhpError::contract(CALL));
+    }
+    // SAFETY: the platform reads exactly `len` bytes, and the guard above
+    // establishes that `len` is exactly what the slice owns; the slice outlives
+    // the call because it is borrowed for it.
+    check(
+        unsafe {
+            WHvSetPartitionProperty(partition.get(), raw, payload.as_ptr().cast(), len)
+        },
+        CALL,
+    )
+}
+
+/// Stop the partition's reference clock, and with it every timer the guest
+/// reads through the platform.
+pub fn suspend_time(partition: RawPartition) -> WhpResult<()> {
+    // SAFETY: no pointer crosses; the partition handle is live.
+    check(
+        unsafe { WHvSuspendPartitionTime(partition.get()) },
+        "WHvSuspendPartitionTime",
+    )
+}
+
+/// Start it again, from where [`suspend_time`] stopped it.
+pub fn resume_time(partition: RawPartition) -> WhpResult<()> {
+    // SAFETY: no pointer crosses; the partition handle is live.
+    check(
+        unsafe { WHvResumePartitionTime(partition.get()) },
+        "WHvResumePartitionTime",
+    )
+}
+
+/// Read one per-processor state blob, answering how many bytes the platform
+/// wrote.
+///
+/// The buffer must be exactly the size the state type declares — the platform
+/// refuses a shorter one, and a longer one would hide a caller that sized it
+/// from the wrong structure.
+pub fn get_vp_state(
+    partition: RawPartition,
+    index: u32,
+    state: VpStateType,
+    out: &mut [u8],
+) -> WhpResult<usize> {
+    const CALL: &str = "WHvGetVirtualProcessorState";
+    let (raw, bytes) = vp_state_code(state);
+    if out.len() != bytes {
+        return Err(WhpError::contract(CALL));
+    }
+    let Ok(len) = u32::try_from(bytes) else {
+        return Err(WhpError::contract(CALL));
+    };
+    let mut written = 0u32;
+    // SAFETY: the platform writes at most `len` bytes, and the guard above
+    // establishes that `len` is exactly what the slice owns; `written` is a
+    // live, correctly typed out-parameter. The buffer outlives the call because
+    // it is borrowed for it.
+    check(
+        unsafe {
+            WHvGetVirtualProcessorState(
+                partition.get(),
+                index,
+                raw,
+                out.as_mut_ptr().cast(),
+                len,
+                &mut written,
+            )
+        },
+        CALL,
+    )?;
+    usize::try_from(written).map_err(|_| WhpError::contract(CALL))
+}
+
+/// Write one per-processor state blob — the counterpart of [`get_vp_state`],
+/// taking the same buffer back at the same size.
+pub fn set_vp_state(
+    partition: RawPartition,
+    index: u32,
+    state: VpStateType,
+    blob: &[u8],
+) -> WhpResult<()> {
+    const CALL: &str = "WHvSetVirtualProcessorState";
+    let (raw, bytes) = vp_state_code(state);
+    if blob.len() != bytes {
+        return Err(WhpError::contract(CALL));
+    }
+    let Ok(len) = u32::try_from(bytes) else {
+        return Err(WhpError::contract(CALL));
+    };
+    // SAFETY: the platform reads exactly `len` bytes, and the guard above
+    // establishes that `len` is exactly what the slice owns; the slice outlives
+    // the call because it is borrowed for it.
+    check(
+        unsafe {
+            WHvSetVirtualProcessorState(
+                partition.get(),
+                index,
+                raw,
+                blob.as_ptr().cast(),
+                len,
+            )
+        },
+        CALL,
+    )
 }
 
 pub fn create_partition() -> WhpResult<RawPartition> {
@@ -308,14 +563,25 @@ pub unsafe fn delete_partition(partition: RawPartition) {
     }
 }
 
+/// Set a partition property that fits in a word.
+///
+/// The counterpart of [`get_property_word`], and the symmetric guard: a
+/// property whose table entry is wider than a word has no word to be written
+/// from, and the caller wants a shaped verb — [`set_property_bytes`], as
+/// `SyntheticProcessorFeaturesBanks` does.
 pub fn set_property(
     partition: RawPartition,
     code: PropertyCode,
     value: u64,
 ) -> WhpResult<()> {
+    const CALL: &str = "WHvSetPartitionProperty";
     let (raw, len) = property_code(code);
-    // SAFETY: the platform reads `len` bytes, and `len` is at most the 8 this
-    // local holds — `property_code` guarantees that pairing.
+    if len as usize > core::mem::size_of_val(&value) {
+        return Err(WhpError::contract(CALL));
+    }
+    // SAFETY: the platform reads `len` bytes, and the guard above establishes
+    // that `len` is at most the 8 bytes this local holds; the local outlives the
+    // call because it is borrowed for it.
     check(
         unsafe {
             WHvSetPartitionProperty(
@@ -325,7 +591,7 @@ pub fn set_property(
                 len,
             )
         },
-        "WHvSetPartitionProperty",
+        CALL,
     )
 }
 
@@ -664,6 +930,7 @@ pub fn get_registers(
             RegisterValue::Word(_) => RegisterValue::Word(value.as_word()),
             RegisterValue::Segment(_) => RegisterValue::Segment(value.as_segment()),
             RegisterValue::Table(_) => RegisterValue::Table(value.as_table()),
+            RegisterValue::Words128(_) => RegisterValue::Words128(value.as_words128()),
         };
     }
     Ok(())
@@ -686,6 +953,7 @@ pub fn set_registers(
             RegisterValue::Word(word) => RegVal::word(word),
             RegisterValue::Segment(seg) => RegVal::segment(seg),
             RegisterValue::Table(table) => RegVal::table(table),
+            RegisterValue::Words128(words) => RegVal::words128(words),
         };
     }
     set_values(partition, index, regs, values.len(), &raw)
@@ -826,6 +1094,30 @@ pub fn translate_gva(
     Ok(GvaTranslation { result_code: result.ResultCode, gpa })
 }
 
+/// Which APIC register a `WHV_X64_APIC_WRITE_TYPE` names, or `None` for a value
+/// the SDK does not define.
+///
+/// The five constants are the xAPIC MMIO offsets themselves, which
+/// [`ApicWriteType::mmio_offset`] restates on the other side; this pairing is
+/// what keeps the two from drifting, and the test below checks it.
+#[allow(
+    non_upper_case_globals,
+    reason = "\
+        the match arms are the SDK's own `WHvX64ApicWriteType*` constants used \
+        as patterns; spelling them any other way would cost the grep that \
+        connects each arm to WinHvPlatformDefs.h"
+)]
+const fn apic_write_type(raw: WHV_X64_APIC_WRITE_TYPE) -> Option<ApicWriteType> {
+    match raw {
+        WHvX64ApicWriteTypeLdr => Some(ApicWriteType::Ldr),
+        WHvX64ApicWriteTypeDfr => Some(ApicWriteType::Dfr),
+        WHvX64ApicWriteTypeSvr => Some(ApicWriteType::Svr),
+        WHvX64ApicWriteTypeLint0 => Some(ApicWriteType::Lint0),
+        WHvX64ApicWriteTypeLint1 => Some(ApicWriteType::Lint1),
+        _ => None,
+    }
+}
+
 /// Read the platform's exit union into this crate's exhaustive enum. The one
 /// place a `WHV_RUN_VP_EXIT_CONTEXT` is ever inspected.
 #[allow(
@@ -940,7 +1232,19 @@ fn decode_exit(context: &WHV_RUN_VP_EXIT_CONTEXT) -> Exit {
         WHvRunVpExitReasonX64ApicSmiTrap => ExitReason::ApicSmiTrap,
         WHvRunVpExitReasonHypercall => ExitReason::Hypercall,
         WHvRunVpExitReasonX64ApicInitSipiTrap => ExitReason::ApicInitSipiTrap,
-        WHvRunVpExitReasonX64ApicWriteTrap => ExitReason::ApicWriteTrap,
+        WHvRunVpExitReasonX64ApicWriteTrap => {
+            let write = unsafe { context.Anonymous.ApicWrite };
+            match apic_write_type(write.Type) {
+                Some(register) => {
+                    ExitReason::ApicWriteTrap { register, value: write.WriteValue }
+                }
+                // A `WHV_X64_APIC_WRITE_TYPE` outside the five the SDK names.
+                // Reported as the raw exit rather than guessed at, because
+                // mirroring a write into the wrong APIC register is worse than
+                // refusing the exit.
+                None => ExitReason::Unrecognized(context.ExitReason),
+            }
+        }
         WHvRunVpExitReasonCanceled => {
             let cancel = unsafe { context.Anonymous.CancelReason };
             ExitReason::Canceled { reason: cancel.CancelReason }
@@ -953,7 +1257,7 @@ fn decode_exit(context: &WHV_RUN_VP_EXIT_CONTEXT) -> Exit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vcpu::ALL_REGS;
+    use crate::vcpu::{ALL_REGS, UNEXCHANGED_REGS};
 
     /// No two registers may share a platform name.
     ///
@@ -961,12 +1265,15 @@ mod tests {
     /// register added to the enum cannot be forgotten — the compiler refuses.
     /// What the compiler cannot see is a copy-paste slip WITHIN it: writing
     /// `Reg::R11 => WHvX64RegisterR10` type-checks perfectly and silently
-    /// transfers the wrong register, which is the failure this catches.
+    /// transfers the wrong register, which is the failure this catches. Both
+    /// lists are swept, so a register outside the per-slice exchange is held to
+    /// the same rule.
     #[test]
     fn every_register_names_a_different_platform_register() {
-        for (position, reg) in ALL_REGS.iter().enumerate() {
+        let every: Vec<Reg> = ALL_REGS.iter().chain(UNEXCHANGED_REGS).copied().collect();
+        for (position, reg) in every.iter().enumerate() {
             let name = register_name(*reg);
-            for other in &ALL_REGS[position + 1..] {
+            for other in &every[position + 1..] {
                 assert_ne!(
                     name,
                     register_name(*other),
@@ -974,6 +1281,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The SDK's `WHV_X64_APIC_WRITE_TYPE` values ARE the xAPIC MMIO offsets,
+    /// which is the identity [`ApicWriteType::mmio_offset`] rests on. Pinned
+    /// here because the two are transcribed in different files: a decode arm
+    /// that named the wrong register would still produce a plausible exit, and
+    /// the host would mirror a LINT0 write into its SVR.
+    #[test]
+    fn each_apic_write_type_is_its_own_mmio_offset() {
+        let each = [
+            (WHvX64ApicWriteTypeLdr, ApicWriteType::Ldr),
+            (WHvX64ApicWriteTypeDfr, ApicWriteType::Dfr),
+            (WHvX64ApicWriteTypeSvr, ApicWriteType::Svr),
+            (WHvX64ApicWriteTypeLint0, ApicWriteType::Lint0),
+            (WHvX64ApicWriteTypeLint1, ApicWriteType::Lint1),
+        ];
+        for (raw, register) in each {
+            assert_eq!(apic_write_type(raw), Some(register));
+            assert_eq!(
+                i32::from(register.mmio_offset()),
+                raw,
+                "{register:?}'s platform value is its MMIO offset"
+            );
+        }
+        assert_eq!(apic_write_type(-1), None, "a value the SDK does not name");
+    }
+
+    /// The 128-bit member is the whole value, so a pair of words survives the
+    /// union and comes back in the order it went in — a swapped pair would put
+    /// a pending event's reserved half where its vector belongs.
+    #[test]
+    fn a_hundred_and_twenty_eight_bit_value_round_trips_low_half_first() {
+        let words = [0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210];
+        assert_eq!(RegVal::words128(words).as_words128(), words);
+        // The low half is the same eight bytes a word-shaped read would return,
+        // which is what makes reading a 128-bit register as a word a silent
+        // truncation rather than a visible error.
+        assert_eq!(RegVal::words128(words).as_word(), words[0]);
     }
 
     /// The general-purpose registers are consecutive in the platform's own
