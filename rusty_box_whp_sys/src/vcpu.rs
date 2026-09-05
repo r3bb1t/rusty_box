@@ -441,8 +441,10 @@ impl ApicVector {
 ///
 /// `WinHvPlatformDefs.h` declares no x64 structure for this state type at all —
 /// only the ARM64 ones — so the field order above is Hyper-V's published
-/// interrupt-controller state, held against this platform by two measurements
-/// (R7). What each one settles, and what neither does:
+/// interrupt-controller state, held against this platform by measurement (R7).
+/// Two tests here pin the structure's shape and the request bitmap's position;
+/// what they leave open, the platform probe closes. What each settles, and what
+/// none of them does:
 ///
 /// - `the_apic_state_page_round_trips_through_the_platform` reads a fresh
 ///   processor's page. It pins words 0, 1, 3 and 4 BY VALUE — 0x00050014 at
@@ -459,11 +461,28 @@ impl ApicVector {
 ///   then have only the two remaining eight-word slots between them, and
 ///   `Esr`, `IcrHigh` and `IcrLow` only the three words after those.
 ///
-/// So the order of the two remaining bitmaps, and of the ICR's two halves
-/// (the xAPIC memory map has the low half first, this structure the high),
-/// remain transcribed rather than measured. Everything from
-/// [`ApicRegister::LvtCmci`] on is likewise transcribed, and reads as zero at
-/// reset, so no measurement here bears on it either.
+/// - The order of the two remaining bitmaps is **measured**, by the platform
+///   probe's P9 (`whp_probe.rs`, `q18_in_service_versus_trigger_mode`;
+///   recorded in `docs/whp-platform-probe-2026-09-03.md`). A symmetric test
+///   cannot settle it — a conversion that reads and writes through one wrong
+///   mapping agrees with itself — so the probe took two observations in which
+///   the platform treats the two fields differently, and both select this
+///   order. A level-triggered request into a processor that has never run sets
+///   [`ApicVector::TriggerMode`] and not [`ApicVector::InService`], while the
+///   same request edge-triggered sets neither; and a vector the guest accepts
+///   without acknowledging leaves the request bitmap for
+///   [`ApicVector::InService`], with trigger-mode clear for that edge delivery.
+///   Each is the opposite of what the swapped arrangement predicts. Do not
+///   "correct" this order back.
+///
+/// The order of the ICR's two halves (the xAPIC memory map has the low half
+/// first, this structure the high) remains transcribed rather than measured:
+/// both words read zero in every page the probe took, so nothing distinguishes
+/// them. Everything from [`ApicRegister::LvtCmci`] on is likewise transcribed
+/// and reads as zero at reset, so no measurement bears on it either — including
+/// the duplication of [`ApicRegister::Esr`] at word 29 with
+/// [`ApicRegister::ErrorStatus`] at word 39, which must be settled against the
+/// SDK's own field order before either is converted in anger.
 ///
 /// Boxed because it is a whole page: a `Partition` verb takes it by reference,
 /// and a page-sized value passed by move would land on the stack of whatever

@@ -267,7 +267,23 @@ pub struct Capabilities {
     pub features: Features,
     /// Which extended exits the host is willing to be asked for. A partition
     /// may only request a subset of these.
+    ///
+    /// This carries only the bits [`ExtendedVmExits`] declares a field for, so
+    /// it cannot on its own distinguish an exit the host does not offer from
+    /// one this port has no name for. Read it beside
+    /// [`Self::extended_exits_raw`] whenever the question is what the host
+    /// offers rather than what this port can ask for.
     pub supported_exits: ExtendedVmExits,
+    /// The whole `WHV_EXTENDED_VM_EXITS` word, exactly as the host answered it.
+    ///
+    /// [`ExtendedVmExits::from_word`] can only report a bit it has a field for,
+    /// and this port deliberately names none for bits 10 and 11 while a host
+    /// newer than this SDK header may set positions above 14. Keeping the word
+    /// means such a bit is visible rather than silently dropped: the remainder
+    /// this port cannot name is
+    /// `extended_exits_raw & !supported_exits.as_word()`, the same shape as the
+    /// unnamed remainder of [`Self::synthetic_features`].
+    pub extended_exits_raw: u64,
     /// Guest-physical address width in bits, as the host reports it.
     pub physical_address_width: u32,
     /// The processor features the host banks, `WHV_PROCESSOR_FEATURES` as one
@@ -342,6 +358,10 @@ pub fn capabilities() -> WhpResult<Capabilities> {
             raw: features_word,
         },
         supported_exits: ExtendedVmExits::from_word(exits_word),
+        // Kept whole beside the decoded bits: a decode drops every position it
+        // has no field for, and a report that shows only the decode cannot say
+        // whether an absent exit was absent from the host or from this port.
+        extended_exits_raw: exits_word,
         physical_address_width: width as u32,
         processor_features,
         // Retained rather than truncated: a bit this SDK's header does not name
@@ -465,6 +485,31 @@ mod tests {
         let refused = wanted.difference(allowed);
         assert!(refused.contains(SyntheticFeatures::ACCESS_SYNTHETIC_TIMER_REGS));
         assert!(!refused.contains(SyntheticFeatures::HV1));
+    }
+
+    /// An exit bit this port declares no field for is still recoverable from
+    /// [`Capabilities::extended_exits_raw`].
+    ///
+    /// The decode is lossy by construction — it yields one `bool` per declared
+    /// field and nothing for the rest — so the raw word is the only place an
+    /// unnamed offer can be read back from. Asserted against both kinds of
+    /// unnamed bit: one this port skips on purpose, and one above every
+    /// position this SDK header declares.
+    #[test]
+    fn an_exit_bit_this_port_does_not_name_survives_in_the_raw_word() {
+        let word = (1 << exit_bit::CPUID) | (1 << 10) | (1 << 40);
+        let named = ExtendedVmExits::from_word(word);
+        assert!(named.cpuid);
+        assert_eq!(
+            named.as_word(),
+            1 << exit_bit::CPUID,
+            "the decode carries only the positions it declares"
+        );
+        assert_eq!(
+            word & !named.as_word(),
+            (1 << 10) | (1 << 40),
+            "and the raw word still carries every position the decode dropped"
+        );
     }
 
     /// A partition may only ask for exits the host advertises, so the two uses

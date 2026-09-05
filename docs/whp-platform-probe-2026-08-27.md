@@ -8,6 +8,14 @@ These answers exist to unblock the WHP engine's signatures. Four of them
 contradict what the plan assumed, and one closes a question the documentation
 answers ambiguously.
 
+**Three entries below have since been superseded**, by
+[the 2026-09-03 probe](whp-platform-probe-2026-09-03.md) on this same host: the
+host table's extended-exit list, finding 3's claim that
+`WHvRegisterInternalActivityState` cannot be written, and finding 10's
+conclusion that direct injection is unreachable. Each carries a note at the
+point where it is wrong. Everything else here stands, and the 2026-09-03 probe
+re-ran all ten of these and reproduced them.
+
 ## The host
 
 | | |
@@ -19,6 +27,16 @@ answers ambiguously.
 | idle suspend | yes |
 | physical address width | 39 bits |
 | extended exits offered | cpuid, msr, exception, rdtsc, apic_smi_trap, hypercall, gpa_access_fault |
+
+**Superseded — the exits row was this port's vocabulary, not the host's answer.**
+The host offers fifteen bit positions, `0x7fff`; on the day this table was
+written `ExtendedVmExits` declared fields for only seven of them, and
+`from_word` can report no bit it has no field for, so the six APIC traps the
+host was already offering dropped out silently. Their names were transcribed
+later, in commit `0e4974d`. `Capabilities` now keeps the raw
+`WHV_EXTENDED_VM_EXITS` word beside the decode for exactly this reason, and
+[the 2026-09-03 probe](whp-platform-probe-2026-09-03.md) prints both. The
+correct row is there.
 
 ## Answers
 
@@ -70,6 +88,18 @@ instruction — verified by both marker bytes the guest writes.
 clear; and `WHvRegisterInternalActivityState` **cannot be written at all** on
 this host — the attempt returns `0xC0350006` (`ERROR_HV_ACCESS_DENIED`). Any
 design that plans to clear halt suspend must be abandoned, not merely skipped.
+
+**Superseded — the refusal belongs to the mode, not to the host.** Both
+observations above are real, and both are `LocalApicEmulationMode::None`'s: this
+experiment used no emulated APIC, and that is the one mode in which the question
+does not arise. [The 2026-09-03 probe](whp-platform-probe-2026-09-03.md) P1 ran
+the same guest under `LocalApicEmulationMode::X2Apic` on this same host and
+found `halt_suspend` **set** when a processor parks and the register **writable**
+— and the clear is what wakes the parked processor. Its control B reproduces the
+`0xC0350006` here under `None`, which is what identifies the difference as the
+mode. So the last sentence is wrong as written: a design that plans to clear
+halt suspend is sound wherever the hypervisor owns the APIC, and merely has
+nothing to do where it does not.
 
 ### 4. An exit costs about 4 µs
 
@@ -165,6 +195,26 @@ Read together:
 - The control shows the refusals mean something: without an APIC the same call
   is denied outright.
 
+**Superseded — the first bullet's reasoning does not hold.** What this
+experiment observed is exact: the run never returned on its own, so the
+processor never stopped *by itself*. The step from there to "direct injection is
+unreachable" assumes a halted processor cannot be stopped at all, and it can —
+by a cancel from another thread.
+[The 2026-09-03 probe](whp-platform-probe-2026-09-03.md) measures the whole
+route under `LocalApicEmulationMode::X2Apic`, the sibling emulated-APIC mode:
+P3 shows the cancel is what ends a parked run, P4 shows a cancel cannot lose the
+race against the run beginning, and P1 then performs two register writes on the
+stopped processor — a pending ExtINT and a cleared `halt_suspend` — and the
+guest resumes past its halt and runs the handler. Injection through a register
+write is therefore reachable on a parked processor, contrary to the bullet.
+
+The measurement was taken under `X2Apic`, not under the `XApic` this finding
+used, and the route was not re-run there. So what is established is that the
+*argument* fails; the `XApic` conclusion is untested rather than disproved, and
+should not be cited as a platform limit. The threading consequence below is
+unaffected either way — it follows from the halted processor not exiting, which
+still stands.
+
 **The consequence for the design is bigger than the answer.** Under `XApic` the
 machine thread sits inside `WHvRunVirtualProcessor` for as long as the guest
 runs, and a halted guest never gives it back. So the timer wheel and the device
@@ -187,7 +237,7 @@ buys a threading model that REPLAN decision 9 spent effort avoiding.
 |---|---|
 | §7 Q1 `GpaAccessFaultExit` needed for read-only windows | **Refuted** — not needed, and harmful |
 | §7 Q2 instruction bytes / `WHvTranslateGva` in real mode | Answered; translation works, bytes are absent for the case that needs them most |
-| §7 Q3 clearing `HaltSuspend` | **Refuted** — never set, and unwritable |
+| §7 Q3 clearing `HaltSuspend` | **Refuted** — never set, and unwritable. *Superseded:* true only under `LocalApicEmulationMode::None`; under `X2Apic` the bit is set and the register is writable, and clearing it is what wakes a parked processor ([2026-09-03](whp-platform-probe-2026-09-03.md) P1) |
 | §7 Q4 per-exit latency | 4 µs, inside the assumed range |
 | §7 Q5 map cost and `PartialUnmap` | Answered; both cheap |
 | §7 Q6 `SeparateSecurityDomain` gain | **Closed** — no measurable cost either way |
