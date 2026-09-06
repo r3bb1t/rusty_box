@@ -48,7 +48,9 @@
 
 mod alarm;
 mod engine;
+mod exchange;
 mod state;
+mod vcpu_thread;
 mod vm_clock;
 mod xsave;
 
@@ -59,9 +61,87 @@ mod xsave;
 /// and these are exercised from more than one.
 #[cfg(test)]
 pub(crate) mod fixtures {
+    use crate::WhpEngine;
+    use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
+    use rusty_box::emulator::{Emulator, EmulatorConfig, MachineBuilder, MemorySize};
     use rusty_box_core::time::{HostClock, HostInstant};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+
+    /// Where the guest's code goes, and the port it writes to.
+    pub(crate) const CODE: u64 = 0x1000;
+    /// Port 0xE9, the chipset debug console: a byte written here reaches the
+    /// machine's own debug port, which is host-readable — so the assertion is
+    /// about what the GUEST did, not about what the engine returned.
+    pub(crate) const DEBUG_PORT: u8 = 0xE9;
+    pub(crate) const MARK: u8 = 0x5A;
+
+    /// A real-mode machine on this engine, with `code` loaded at [`CODE`] and
+    /// its processor pointed at it.
+    pub(crate) fn machine_running(code: &[u8]) -> std::boxed::Box<Emulator<(), WhpEngine>> {
+        let config = EmulatorConfig {
+            memory: MemorySize::bytes(8 * 1024 * 1024),
+            ..EmulatorConfig::default()
+        };
+        let mut machine =
+            Emulator::<(), WhpEngine>::with_engine(config, CpuSetupMode::RealMode)
+                .expect("machine");
+        machine.mem_write(CODE, code).expect("load");
+        machine.reg_write(X86Reg::Rip, CODE);
+        machine
+    }
+
+    /// A real-mode machine with the FULL device set — the 8259 pair, the PIT,
+    /// their port registrations and their timers — on this engine.
+    ///
+    /// [`machine_running`] deliberately skips hardware initialisation, which
+    /// serves a guest that only touches the debug port; a guest that programs
+    /// the PIC and the PIT needs the machine [`MachineBuilder`] furnishes,
+    /// where those ports are registered and answer. No BIOS is loaded — the
+    /// processor is re-pointed at the test's own code instead.
+    pub(crate) fn machine_with_devices(code: &[u8]) -> std::boxed::Box<Emulator<(), WhpEngine>> {
+        let config = EmulatorConfig {
+            memory: MemorySize::bytes(8 * 1024 * 1024),
+            ..EmulatorConfig::default()
+        };
+        let mut machine = MachineBuilder::new(config)
+            .build_on::<WhpEngine>()
+            .expect("machine");
+        machine
+            .setup_cpu_mode(CpuSetupMode::RealMode)
+            .expect("real mode");
+        machine.mem_write(CODE, code).expect("load");
+        machine.reg_write(X86Reg::Rip, CODE);
+        machine
+    }
+
+    /// Whether this host can run the hypervisor-gated tests.
+    pub(crate) fn hypervisor_here() -> bool {
+        if rusty_box_whp::hypervisor_present().unwrap_or(false) {
+            return true;
+        }
+        eprintln!("skipped: this host has no Windows Hypervisor Platform");
+        false
+    }
+
+    /// The turn a test takes before starting a machine on hardware.
+    ///
+    /// A process holds one partition at a time — measured in `rusty_box_whp`'s
+    /// `a_process_holds_one_partition_at_a_time`, where a second live
+    /// partition's first map is refused with
+    /// `ERROR_VID_PARTITION_ALREADY_EXISTS`. Libtest runs tests on several
+    /// threads, so without this two machines would start their engines at once
+    /// and the platform would refuse one of them. That is a fact about the
+    /// platform rather than about anything under test, so the tests take turns.
+    ///
+    /// Taken before the machine is built, so the machine — and with it the
+    /// partition — is dropped before the turn passes on.
+    pub(crate) fn a_turn_on_the_hardware() -> std::sync::MutexGuard<'static, ()> {
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // A test that panicked while holding the turn poisoned nothing: the
+        // guard protects an ordering, not a value.
+        TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     /// A `HostClock` two owners can advance — the test and the source under
     /// test. Every handle cloned from one reads and moves the same nanosecond
@@ -106,10 +186,161 @@ pub(crate) mod fixtures {
         const fn is_send<T: Send>() {}
         is_send::<crate::VmClockSource<SharedClock>>();
     };
+
+    /// Start a machine's partition and hand back the machine behind a lock
+    /// beside the processor a thread will run.
+    ///
+    /// The two halves a threaded machine is made of, and they must be produced
+    /// together: the processor is taken out of the engine exactly once, and the
+    /// machine that keeps the partition alive is what everyone else reaches
+    /// through. The lock is the machine's, not the engine's — a vCPU thread
+    /// takes it to service an exit and the test takes it to read a device.
+    pub(crate) fn shared(
+        mut machine: std::boxed::Box<Emulator<(), WhpEngine>>,
+    ) -> (Arc<std::sync::Mutex<std::boxed::Box<Emulator<(), WhpEngine>>>>, rusty_box_whp::Vcpu)
+    {
+        let vcpu = crate::engine::bring_up(&mut machine).expect("the partition starts");
+        (Arc::new(std::sync::Mutex::new(machine)), vcpu)
+    }
+
+    /// A vCPU thread that is stopped and joined however its test ends.
+    ///
+    /// A panicking test that left its thread running would leave the machine
+    /// alive for the rest of the process — the thread holds a clone of the
+    /// `Arc` — and with the machine goes the partition. One process holds one
+    /// partition, so every later hardware test would fail at its first map with
+    /// `ERROR_VID_PARTITION_ALREADY_EXISTS`, reporting a platform refusal where
+    /// the real defect was an assertion in a test that had already finished.
+    /// Measured: one failed assertion here took ten unrelated tests with it.
+    pub(crate) struct RunningVcpu {
+        control: crate::vcpu_thread::VcpuControl,
+        /// Taken by [`Self::stop_and_join`], so the drop below is the net
+        /// rather than a second join.
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl RunningVcpu {
+        /// Move `vcpu` onto a thread and hold the means to end it.
+        pub(crate) fn spawn(
+            vcpu: rusty_box_whp::Vcpu,
+            index: usize,
+            machine: Arc<std::sync::Mutex<std::boxed::Box<Emulator<(), WhpEngine>>>>,
+        ) -> Self {
+            let (join, control) = crate::vcpu_thread::VcpuThread::spawn(vcpu, index, machine)
+                .expect("the vCPU thread starts");
+            Self { control, join: Some(join) }
+        }
+
+        pub(crate) fn control(&self) -> &crate::vcpu_thread::VcpuControl {
+            &self.control
+        }
+
+        /// Stop the thread and wait for it, which is what releases the
+        /// processor handle before the partition it names is destroyed.
+        pub(crate) fn stop_and_join(mut self) {
+            self.control.stop().expect("the stop reaches the platform");
+            if let Some(join) = self.join.take() {
+                join.join().expect("the vCPU thread ended without panicking");
+            }
+        }
+    }
+
+    impl Drop for RunningVcpu {
+        fn drop(&mut self) {
+            let Some(join) = self.join.take() else {
+                return;
+            };
+            match self.control.stop() {
+                Ok(()) => {}
+                // Reported rather than propagated: a drop running during an
+                // unwind cannot panic again, and a stop the platform refused
+                // is exactly what a reader chasing the hang below needs to see.
+                Err(error) => eprintln!("stopping a vCPU thread failed: {error}"),
+            }
+            // Bounded, then DETACHED — never an unconditional join. A drop can
+            // run while this scope still holds the machine lock (a test that
+            // binds the guard before the fixture, or one that panics holding
+            // it), and the thread cannot finish servicing an exit until that
+            // lock is free, so joining here would deadlock the two against each
+            // other. A thread wedged inside `run()` has the same shape. Letting
+            // it go leaks a thread for the length of the test process, which is
+            // what the suite can afford; hanging is what it cannot. Task 1.7's
+            // `FastMachine::drop` detaches a wedged thread for the same reason.
+            if !wait_until_thread_ends(&join, std::time::Duration::from_secs(5)) {
+                eprintln!(
+                    "a vCPU thread did not end within 5 s and was detached; its next platform \
+                     call fails with an invalid handle and it returns"
+                );
+                return;
+            }
+            match join.join() {
+                Ok(()) => {}
+                Err(_) => eprintln!("a vCPU thread panicked"),
+            }
+        }
+    }
+
+    /// Whether `join` has finished within `within`, without consuming it.
+    ///
+    /// `JoinHandle::is_finished` is the only way to ask without committing to
+    /// the wait that `join` is.
+    fn wait_until_thread_ends(
+        join: &std::thread::JoinHandle<()>,
+        within: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if join.is_finished() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        join.is_finished()
+    }
+
+    /// Poll `ready` until it answers true, or fail by name once `within` has
+    /// passed.
+    ///
+    /// Bounded rather than a bare loop because every caller waits on another
+    /// THREAD: a condition that never arrives is a defect to be reported at the
+    /// assertion that named it, and a test that hangs instead reports nothing
+    /// at all and takes the suite with it.
+    pub(crate) fn wait_until(
+        mut ready: impl FnMut() -> bool,
+        within: std::time::Duration,
+        what: &str,
+    ) {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if ready() {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!("{what}: never happened within {within:?}");
+    }
 }
 
 pub use engine::{ExitCounts, InjectCensus, PlatformCounters, SliceCensus, WhpEngine};
 pub use vm_clock::{StdClock, VmClockSource};
+
+/// What has to be true for a machine to be run by a thread of its own, pinned
+/// where the machine and the thread meet.
+///
+/// `rusty_box`'s own assertions cover `Emulator<()>` — the software engine —
+/// and cannot see this one: the engine is a type parameter, and a `Send` that
+/// holds for an interpreter says nothing about a partition handle. The
+/// `Emulator<(), WhpEngine>` is what goes into the `Arc<Mutex<_>>` every thread
+/// reaches the machine through; the control is what they reach the vCPU thread
+/// through, from several threads at once; and the thread itself is what moves
+/// onto a thread in the first place.
+const _: () = {
+    const fn s<M: Send>() {}
+    const fn ss<M: Send + Sync>() {}
+    s::<rusty_box::emulator::Emulator<(), WhpEngine>>();
+    ss::<vcpu_thread::VcpuControl>();
+    s::<vcpu_thread::VcpuThread<()>>();
+};
 
 /// Re-exported so a caller reading [`WhpEngine::platform_counters`] need not
 /// also name the platform crate to spell what it returns. These are that
@@ -130,7 +361,11 @@ pub use rusty_box_whp::hypervisor_present;
 
 #[cfg(test)]
 mod tests {
-    use super::WhpEngine;
+    use crate::fixtures::{
+        a_turn_on_the_hardware, hypervisor_here, machine_running, machine_with_devices, shared,
+        wait_until, RunningVcpu, CODE, DEBUG_PORT, MARK,
+    };
+    use crate::vcpu_thread::Parked;
     use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
     use rusty_box::emulator::{
         Emulator, EmulatorConfig, EngineRefusal, MachineBuilder, MemorySize, RunBudget,
@@ -138,54 +373,6 @@ mod tests {
     };
     use rusty_box::Error;
 
-    /// Where the guest's code goes, and the port it writes to.
-    const CODE: u64 = 0x1000;
-    /// Port 0xE9, the chipset debug console: a byte written here reaches the
-    /// machine's own debug port, which is host-readable — so the assertion is
-    /// about what the GUEST did, not about what the engine returned.
-    const DEBUG_PORT: u8 = 0xE9;
-    const MARK: u8 = 0x5A;
-
-    /// A real-mode machine on this engine, with `code` loaded at [`CODE`] and
-    /// its processor pointed at it.
-    fn machine_running(code: &[u8]) -> std::boxed::Box<Emulator<(), WhpEngine>> {
-        let config = EmulatorConfig {
-            memory: MemorySize::bytes(8 * 1024 * 1024),
-            ..EmulatorConfig::default()
-        };
-        let mut machine =
-            Emulator::<(), WhpEngine>::with_engine(config, CpuSetupMode::RealMode)
-                .expect("machine");
-        machine.mem_write(CODE, code).expect("load");
-        machine.reg_write(X86Reg::Rip, CODE);
-        machine
-    }
-
-    /// A real-mode machine with the FULL device set — the 8259 pair, the PIT,
-    /// their port registrations and their timers — on this engine.
-    ///
-    /// [`machine_running`] deliberately skips hardware initialisation, which
-    /// serves a guest that only touches the debug port; a guest that programs
-    /// the PIC and the PIT needs the machine [`MachineBuilder`] furnishes,
-    /// where those ports are registered and answer. No BIOS is loaded — the
-    /// processor is re-pointed at the test's own code instead.
-    fn machine_with_devices(code: &[u8]) -> std::boxed::Box<Emulator<(), WhpEngine>> {
-        let config = EmulatorConfig {
-            memory: MemorySize::bytes(8 * 1024 * 1024),
-            ..EmulatorConfig::default()
-        };
-        let mut machine = MachineBuilder::new(config)
-            .build_on::<WhpEngine>()
-            .expect("machine");
-        machine
-            .setup_cpu_mode(CpuSetupMode::RealMode)
-            .expect("real mode");
-        machine.mem_write(CODE, code).expect("load");
-        machine.reg_write(X86Reg::Rip, CODE);
-        machine
-    }
-
-    /// Whether this host can run the hypervisor-gated tests below.
     /// The words a guest recorded at 0x6000, in order, once it has reported
     /// how many on the debug port. Bounded by steps rather than by a halt,
     /// because a guest that sleeps mid-way halts twice and only the second
@@ -212,33 +399,6 @@ mod tests {
             .chunks_exact(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect()
-    }
-
-    fn hypervisor_here() -> bool {
-        if rusty_box_whp::hypervisor_present().unwrap_or(false) {
-            return true;
-        }
-        eprintln!("skipped: this host has no Windows Hypervisor Platform");
-        false
-    }
-
-    /// The turn a test takes before starting a machine on hardware.
-    ///
-    /// A process holds one partition at a time — measured in `rusty_box_whp`'s
-    /// `a_process_holds_one_partition_at_a_time`, where a second live
-    /// partition's first map is refused with
-    /// `ERROR_VID_PARTITION_ALREADY_EXISTS`. Libtest runs tests on several
-    /// threads, so without this two machines would start their engines at once
-    /// and the platform would refuse one of them. That is a fact about the
-    /// platform rather than about anything under test, so the tests take turns.
-    ///
-    /// Taken before the machine is built, so the machine — and with it the
-    /// partition — is dropped before the turn passes on.
-    fn a_turn_on_the_hardware() -> std::sync::MutexGuard<'static, ()> {
-        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        // A test that panicked while holding the turn poisoned nothing: the
-        // guard protects an ordering, not a value.
-        TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A machine running on the host's hypervisor executes a guest, and its
@@ -1870,5 +2030,168 @@ mod tests {
             "the hardware trials must have injected their ticks; injected {}",
             census.injected,
         );
+    }
+
+    /// A CPUID exit on the thread imports the groups it needs, answers on the
+    /// shadow, and exports the answer back to the partition.
+    ///
+    /// The port test covers the one arm that moves NO architectural state.
+    /// This covers the cheapest arm that does, and it covers it the only way
+    /// worth having: the guest reads `CPUID`'s own answer back out of `EBX`
+    /// and sends it to a device. A byte arriving proves all three halves —
+    /// the import put the leaf in the shadow, the shadow answered it, and the
+    /// export put the answer where the guest could read it. An export that
+    /// silently moved nothing would leave `BL` holding whatever the register
+    /// happened to contain, and the guest would spin having sent a zero.
+    #[test]
+    fn a_cpuid_exit_on_the_thread_answers_on_the_shadow_and_exports_the_answer() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        // mov eax, 0 ; cpuid ; mov al, bl ; out DEBUG_PORT, al ; jmp $
+        // Leaf 0 is inside `TRAPPED_CPUID_LEAVES`, so it exits rather than
+        // being answered by the hardware; its `EBX` is the first four bytes of
+        // the vendor string, which no model leaves zero.
+        let (machine, vcpu) = shared(machine_running(&[
+            0x66, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x0F, 0xA2, 0x88, 0xD8, 0xE6, DEBUG_PORT, 0xEB,
+            0xFE,
+        ]));
+        let running = RunningVcpu::spawn(vcpu, 0, machine.clone());
+        let control = running.control().clone();
+
+        let mut seen: std::vec::Vec<u8> = std::vec::Vec::new();
+        wait_until(
+            || {
+                seen.extend(machine.lock().expect("the machine's lock").debug_port().take_output());
+                !seen.is_empty()
+            },
+            std::time::Duration::from_secs(2),
+            "the guest sent CPUID's own EBX to the debug port",
+        );
+        assert_ne!(
+            seen[0], 0,
+            "the low byte of leaf 0's EBX reached the guest, so the answer crossed back out of \
+             the shadow rather than the export moving nothing"
+        );
+
+        control.request_park(Parked::Paused).expect("the park request reaches the platform");
+        assert_eq!(
+            control.wait_parked_by(std::time::Duration::from_secs(5)),
+            Some(Parked::Paused),
+        );
+        let census = control.census();
+        assert_eq!(census.exits.cpuid, 1, "one CPUID exit, not a repeated one: {census:?}");
+        assert_eq!(census.exits.port, 1, "and the one port write that carried its answer");
+        assert!(
+            census.export_calls >= 1,
+            "a CPUID exit imports and exports register groups, unlike a plain port exit: \
+             {census:?}"
+        );
+        running.stop_and_join();
+    }
+
+    /// A guest on the vCPU thread writes a byte to the debug port and spins;
+    /// the byte reaches the machine's device and the thread parks on request.
+    ///
+    /// The whole shape of the engine from here on, in one test: the thread
+    /// enters the partition and STAYS there, taking the machine's lock only to
+    /// service the one exit the guest produces, and leaving the run only
+    /// because the host asked for the processor back. The debug port is read
+    /// from the test's own thread through that same lock, which is what makes
+    /// the byte proof that the two threads met at the machine rather than
+    /// racing past each other.
+    #[test]
+    fn a_vcpu_thread_services_a_port_exit_under_the_machine_lock() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        // mov al, MARK ; out DEBUG_PORT, al ; jmp $
+        let (machine, vcpu) =
+            shared(machine_running(&[0xB0, MARK, 0xE6, DEBUG_PORT, 0xEB, 0xFE]));
+        let running = RunningVcpu::spawn(vcpu, 0, machine.clone());
+        let control = running.control().clone();
+        // The control the front end and the device thread reach the thread
+        // through lives on the engine, which is where Task 1.6's interrupt
+        // edge will look for it.
+        machine
+            .lock()
+            .expect("the machine's lock")
+            .engine_mut()
+            .install_control(control.clone());
+        assert_eq!(
+            machine.lock().expect("the machine's lock").engine().controls().len(),
+            1,
+            "the engine holds the control for the processor a thread is running"
+        );
+
+        let mut seen: std::vec::Vec<u8> = std::vec::Vec::new();
+        wait_until(
+            || {
+                seen.extend(machine.lock().expect("the machine's lock").debug_port().take_output());
+                seen.contains(&MARK)
+            },
+            std::time::Duration::from_secs(2),
+            "the guest's MARK reached the debug port",
+        );
+
+        control.request_park(Parked::Paused).expect("the park request reaches the platform");
+        assert_eq!(
+            control.wait_parked_by(std::time::Duration::from_secs(5)),
+            Some(Parked::Paused),
+            "the thread parked within 5 s — a cancel that never stuck"
+        );
+        let census = control.census();
+        assert!(
+            census.runs >= 1 && census.exits.port == 1 && census.in_run_nanos > 0,
+            "{census:?}"
+        );
+        assert_eq!(
+            census.export_calls, 0,
+            "a plain port exit moves no architectural state: the platform decoded it, the \
+             device answered it, and RIP and RAX went back as two words — {census:?}"
+        );
+        assert!(
+            census.platform_at_last_park.is_some(),
+            "the park refreshed the platform's own counters, which only the thread holding the \
+             processor can read: {census:?}"
+        );
+
+        // A resumed thread goes back into the partition rather than parking
+        // again on the request that stopped it: the resume clears the flag
+        // before it clears the park slot, and a thread that woke with the flag
+        // still set would come straight back out without ever entering.
+        //
+        // Waited for rather than asserted straight after the resume, because
+        // the thread has to be observed INSIDE the partition before the second
+        // park request is made — a request that raced the wake would be
+        // answered at the loop head, and the entry the test is about would
+        // never happen. `runs` is counted at the entry, so it moves while the
+        // guest is still spinning.
+        let entries = census.runs;
+        let cancels = census.exits.canceled;
+        control.resume();
+        wait_until(
+            || control.census().runs > entries,
+            std::time::Duration::from_secs(5),
+            "the resumed thread entered the partition again",
+        );
+        control.request_park(Parked::Paused).expect("the second park request reaches the platform");
+        assert_eq!(
+            control.wait_parked_by(std::time::Duration::from_secs(5)),
+            Some(Parked::Paused),
+            "a resumed thread can be parked again"
+        );
+        assert!(
+            control.census().exits.canceled > cancels,
+            "the second park fetched the thread out of a run it was already inside, which is \
+             what a cancel is for"
+        );
+
+        // A parked thread told to stop returns from its run loop, and the join
+        // is what discharges the obligation the `Vcpu` carries onto the thread:
+        // the handle names a partition this machine is about to drop.
+        running.stop_and_join();
     }
 }

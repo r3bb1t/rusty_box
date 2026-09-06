@@ -37,9 +37,11 @@ use rusty_box::cpu::{
     CpuError, Result,
 };
 use rusty_box::emulator::{
-    EventDelivery, PcIo, Progress, ProgressUnit, SliceEngine, SliceRequest,
+    Emulator, EventDelivery, PcIo, Processor, Progress, ProgressUnit, SliceEngine, SliceRequest,
 };
 use rusty_box_core::{EngineFault, EngineFaultKind};
+
+use super::vcpu_thread::VcpuControl;
 
 use rusty_box::memory::plan::MemoryPlan;
 use rusty_box::memory::BxMemC;
@@ -52,7 +54,7 @@ const BOOT_VP: u32 = 0;
 
 /// RFLAGS.TF, the trap flag. A guest with it set owes a single-step `#DB`
 /// after every instruction — including one this engine finishes for it.
-const RFLAGS_TF: u64 = 1 << 8;
+pub(crate) const RFLAGS_TF: u64 = 1 << 8;
 
 /// Every `CPUID` leaf this engine takes away from the host.
 ///
@@ -126,7 +128,7 @@ const TRAPPED_MSRS: MsrExits = MsrExits {
 /// cannot be serviced, so it costs a store and an increment.
 ///
 /// DIAGNOSTIC, alongside `WHP_TRAP_EXCEPTIONS`, and inert without it.
-struct ExitHistory {
+pub(crate) struct ExitHistory {
     entries: [(u64, u8); Self::DEPTH],
     at: usize,
     seen: usize,
@@ -141,7 +143,7 @@ impl Default for ExitHistory {
 impl ExitHistory {
     const DEPTH: usize = 64;
 
-    fn record(&mut self, rip: u64, reason: u8) {
+    pub(crate) fn record(&mut self, rip: u64, reason: u8) {
         self.entries[self.at] = (rip, reason);
         self.at = (self.at + 1) % Self::DEPTH;
         self.seen += 1;
@@ -152,6 +154,32 @@ impl ExitHistory {
         let held = self.seen.min(Self::DEPTH);
         let first = if self.seen > Self::DEPTH { self.at } else { 0 };
         (0..held).map(move |step| self.entries[(first + step) % Self::DEPTH])
+    }
+}
+
+/// The single character an exit leaves in the history.
+///
+/// One mapping (R5) for the two owners that write the history — the slice loop
+/// and the vCPU thread — because the trail is one machine's and a reader who
+/// had to know which of them wrote a character could not read it.
+pub(crate) const fn history_mark(reason: ExitReason) -> u8 {
+    match reason {
+        ExitReason::IoPortAccess(access) => {
+            if access.string_op || access.rep_prefix {
+                b'S'
+            } else if access.is_write {
+                b'o'
+            } else {
+                b'i'
+            }
+        }
+        ExitReason::MemoryAccess(_) => b'm',
+        ExitReason::Cpuid(_) => b'c',
+        ExitReason::MsrAccess(_) => b'r',
+        ExitReason::Halt => b'h',
+        ExitReason::Canceled { .. } => b'x',
+        ExitReason::InterruptWindow => b'w',
+        _ => b'?',
     }
 }
 
@@ -195,7 +223,7 @@ fn trapped_exceptions() -> u64 {
 ///
 /// Off unless asked for: servicing one is ordinary work, and a guest takes
 /// exceptions as part of running correctly.
-fn reports_each_fault() -> bool {
+pub(crate) fn reports_each_fault() -> bool {
     static SETTING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SETTING.get_or_init(|| std::env::var_os("WHP_TRAP_EXCEPTIONS").is_some())
 }
@@ -213,7 +241,7 @@ fn everything_on_the_shadow() -> bool {
 /// Whether every port access is finished on the shadow rather than from the
 /// exit. Read once, and asked once per port exit — the most frequent exit a
 /// booting guest takes.
-fn ports_on_the_shadow() -> bool {
+pub(crate) fn ports_on_the_shadow() -> bool {
     static SETTING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SETTING.get_or_init(|| std::env::var_os("WHP_PORTS_ON_SHADOW").is_some())
 }
@@ -259,7 +287,7 @@ fn unserviced(what: &'static str, exit: &Exit) -> CpuError {
 /// described. The fields are the ones a platform validates against each other:
 /// the mode bits, the paging registers, and every segment, since a descriptor
 /// this port can build is not always one the platform will accept.
-fn refused_state(error: WhpError, state: &VcpuArchState) -> CpuError {
+pub(crate) fn refused_state(error: WhpError, state: &VcpuArchState) -> CpuError {
     tracing::error!(
         "the hypervisor refused a processor state: {error}; rip {:#x} rflags {:#x} \
          cr0 {:#x} cr2 {:#x} cr3 {:#x} cr4 {:#x} efer {:#x} xcr0 {:#x} apic_base {:#x}",
@@ -286,9 +314,20 @@ fn refused_state(error: WhpError, state: &VcpuArchState) -> CpuError {
     platform_failed(error)
 }
 
-fn platform_failed(error: WhpError) -> CpuError {
+pub(crate) fn platform_failed(error: WhpError) -> CpuError {
     tracing::error!("WHP platform call failed: {error}");
     CpuError::UnsupportedCpuOperation { operation: "the hypervisor refused" }
+}
+
+/// A state the platform handed back that this port will not load — a segment
+/// whose attributes describe no descriptor it can build.
+///
+/// The one place that refusal becomes a machine error (R5), so an import
+/// through the whole-state path and one through a group mask report it the
+/// same way.
+pub(crate) fn refused_import(error: rusty_box::cpu::arch_state::ArchStateError) -> CpuError {
+    tracing::error!("the hypervisor returned a state this port refuses: {error}");
+    CpuError::UnsupportedCpuOperation { operation: "hypervisor state refused on import" }
 }
 
 /// What the injection decision must know about deliverability, kept current
@@ -342,7 +381,7 @@ fn platform_failed(error: WhpError) -> CpuError {
 /// acknowledged vector. Guessing "blocked" instead is safe and is not free:
 /// every guess defers the vector to a deliverability window and pays a
 /// window exit to learn what the interpreter already knew.
-struct InjectState {
+pub(crate) struct InjectState {
     /// `ExecutionState` bit 6, `InterruptionPending` — a delivery the platform
     /// has begun and not landed. From the exit header alone.
     in_flight: bool,
@@ -366,14 +405,14 @@ struct InjectState {
     /// yet answered by a window exit. NOT touched by either refresh — no
     /// header or shadow reports it back. It is owned by the injection logic —
     /// [`stage_injection`] arms it, the `InterruptWindow` arm clears it.
-    window: Option<u8>,
+    pub(crate) window: Option<u8>,
 }
 
 impl InjectState {
     /// A processor that has never run has no exit header to have said
     /// anything: nothing in flight, `IF` clear — the architectural reset
     /// value — not shadowed, `CR8` zero, and no window armed.
-    const fn at_reset() -> Self {
+    pub(crate) const fn at_reset() -> Self {
         Self { in_flight: false, if_flag: false, cr8: 0, shadowed: false, window: None }
     }
 
@@ -383,7 +422,7 @@ impl InjectState {
     /// Sets `in_flight`, `if_flag`, `cr8` and `shadowed`; `window` is
     /// deliberately untouched, because it records a notification this engine
     /// armed and no header reports one back.
-    fn refresh_from(&mut self, vp: &VpContext) {
+    pub(crate) fn refresh_from(&mut self, vp: &VpContext) {
         // `WHV_X64_VP_EXECUTION_STATE`: `InterruptionPending` is bit 6,
         // `InterruptShadow` is bit 12 (the `unserviced` diagnostic reads the
         // same two bits).
@@ -433,7 +472,7 @@ impl InjectState {
     /// Takes the flags rather than the processor so the freshness rule is
     /// unit-testable without a constructed `BxCpuC`; the call sites read them
     /// from the shadow.
-    fn refresh_from_shadow(&mut self, shadow_if: bool, shadow_inhibit: bool) {
+    pub(crate) fn refresh_from_shadow(&mut self, shadow_if: bool, shadow_inhibit: bool) {
         self.if_flag = shadow_if;
         self.shadowed = shadow_inhibit;
     }
@@ -444,24 +483,24 @@ impl InjectState {
 /// The one place the word is decoded and encoded (R5), so the read-back and
 /// the imposition cannot disagree about which bit is which.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct InterruptStateWord {
+pub(crate) struct InterruptStateWord {
     /// The guest stands inside an `STI` / `MOV SS` / `POP SS` window.
-    shadow: bool,
+    pub(crate) shadow: bool,
     /// NMIs are masked — the hardware's own record of a guest inside an NMI
     /// handler, which no architectural register the exchange carries holds.
-    nmi_masked: bool,
+    pub(crate) nmi_masked: bool,
 }
 
 impl InterruptStateWord {
     /// A processor that has never run: it cannot be mid-instruction, and
     /// NMIs are unmasked at reset.
-    const AT_RESET: Self = Self { shadow: false, nmi_masked: false };
+    pub(crate) const AT_RESET: Self = Self { shadow: false, nmi_masked: false };
 
-    const fn decode(word: u64) -> Self {
+    pub(crate) const fn decode(word: u64) -> Self {
         Self { shadow: word & 1 != 0, nmi_masked: word & 2 != 0 }
     }
 
-    fn encode(self) -> u64 {
+    pub(crate) fn encode(self) -> u64 {
         u64::from(self.shadow) | (u64::from(self.nmi_masked) << 1)
     }
 }
@@ -473,13 +512,25 @@ impl InterruptStateWord {
 /// this partition's handle — the alarm's thread through a canceller, the
 /// processor through its own. Joining that thread and releasing both handles
 /// before the partition is destroyed is the whole of the ordering obligation,
-/// and this is where it is discharged.
+/// and this is where it is discharged for the handles this struct still holds.
 struct Started {
     alarm: Alarm,
-    /// The processor, taken from the partition once and held here for the life
-    /// of the engine. Every register this engine reads or writes goes through
-    /// it; the partition beside it answers only for the map and the clock.
-    vcpu: Vcpu,
+    /// The processor, taken from the partition once — `None` once a vCPU
+    /// thread has taken it in turn.
+    ///
+    /// Two owners can want this processor and only one may run it: the slice
+    /// loop below, which reads and writes its registers between runs, and a
+    /// [`crate::vcpu_thread::VcpuThread`], which owns it outright for the life
+    /// of the thread. [`bring_up`] is the one place it leaves, and it leaves by
+    /// being TAKEN, so a slice asked for afterwards refuses through
+    /// [`Started::vcpu`] rather than racing a thread for the same registers.
+    ///
+    /// The ordering obligation leaves with it. While the handle is here it dies
+    /// before the partition by field order; once a thread holds it, that
+    /// thread's owner must join the thread before this machine drops — the
+    /// obligation `rusty_box_whp::Vcpu` states, transferred to whoever called
+    /// `bring_up`.
+    vcpu: Option<Vcpu>,
     partition: Partition,
     /// Reused across slices so a state exchange allocates nothing per exit.
     state: VcpuArchState,
@@ -572,6 +623,33 @@ struct Started {
     inject: InjectState,
 }
 
+impl Started {
+    /// The processor, while this engine still holds it.
+    ///
+    /// # Errors
+    /// [`CpuError::UnsupportedCpuOperation`] once [`bring_up`] has handed the
+    /// processor to a thread.
+    fn vcpu(&self) -> Result<&Vcpu> {
+        still_held(&self.vcpu)
+    }
+}
+
+/// Turn an absent processor into a refusal.
+///
+/// The one place that absence is named (R5), so no path can reach for a
+/// processor a thread is running by unwrapping an `Option` — including the
+/// paths that destructure [`Started`] whole and so cannot go through
+/// [`Started::vcpu`].
+///
+/// # Errors
+/// [`CpuError::UnsupportedCpuOperation`] once [`bring_up`] has handed the
+/// processor to a thread.
+fn still_held(vcpu: &Option<Vcpu>) -> Result<&Vcpu> {
+    vcpu.as_ref().ok_or(CpuError::UnsupportedCpuOperation {
+        operation: "the processor was taken by a thread",
+    })
+}
+
 /// What the guest has been leaving the hardware for.
 ///
 /// An exit is the unit of cost of this whole design — measured at roughly four
@@ -590,6 +668,9 @@ pub struct ExitCounts {
     pub cpuid: u64,
     /// An MSR access, answered from this port's own register file.
     pub msr: u64,
+    /// A fault the partition handed back rather than delivering, which only
+    /// happens when `WHP_TRAP_EXCEPTIONS` asked for it.
+    pub exception: u64,
     /// The guest halted.
     pub halt: u64,
     /// The host asked for the processor back mid-run.
@@ -603,6 +684,45 @@ pub struct ExitCounts {
     /// one. Read beside [`InjectCensus::windows_armed`], which counts the
     /// asks this counts the answers to.
     pub window: u64,
+    /// The guest ended an interrupt at a local APIC the hypervisor owns.
+    pub apic_eoi: u64,
+    /// The guest wrote a local-APIC register the partition asked to trap.
+    pub apic_write: u64,
+    /// An exit no arm of the service match answers, which is a fault and
+    /// therefore at most one per processor.
+    ///
+    /// Its own bucket rather than silence, because "no exit of class X" is
+    /// only assertable when every class has somewhere to be counted: a total
+    /// that does not add up is how a reason falling through the tally is
+    /// found.
+    pub other: u64,
+}
+
+impl ExitCounts {
+    /// Every exit counted here, whatever its class.
+    ///
+    /// The cross-check on the individual buckets: one VM entry and one VM exit
+    /// per unit, so this is what a stretch of guest time cost in round trips.
+    ///
+    /// [`Self::boundary`] is deliberately left out. It counts a slice that
+    /// ended because the machine had work to do, which is a decision taken
+    /// AFTER an exit already counted elsewhere — adding it would count that
+    /// exit twice and make the total disagree with the platform's own
+    /// intercept count.
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.port
+            + self.memory
+            + self.cpuid
+            + self.msr
+            + self.exception
+            + self.halt
+            + self.canceled
+            + self.window
+            + self.apic_eoi
+            + self.apic_write
+            + self.other
+    }
 }
 
 /// How the guest's time divided into slices, and what ended each one.
@@ -760,6 +880,22 @@ impl Default for InjectCensus {
 /// guest-physical map.
 #[derive(Default)]
 pub struct WhpEngine {
+    /// How to reach each processor's thread, installed by whoever spawned
+    /// them.
+    ///
+    /// Empty until then, which is the state the slice loop runs in and the
+    /// state a machine is reset and restored in — so anything that speaks to a
+    /// thread must be a no-op over an empty list rather than an assertion that
+    /// one exists.
+    ///
+    /// **Declared before `started`, and the order is the point.** Each control
+    /// holds a `Canceller`, which names this partition's handle, and a struct
+    /// drops its fields in declaration order — so the controls go first and no
+    /// canceller outlives the partition it names. Nothing today would notice
+    /// (a `Canceller` is `Copy` and has no `Drop`), which is exactly why the
+    /// order is stated rather than left to be rediscovered. `Started` carries
+    /// the same banner for the same relationship.
+    controls: std::vec::Vec<VcpuControl>,
     started: Option<Started>,
     exits: ExitCounts,
     census: SliceCensus,
@@ -768,7 +904,11 @@ pub struct WhpEngine {
     /// because a guest's path to a fault crosses slice boundaries — a handler
     /// that traps for its own port I/O is several slices old by the time it
     /// faults, and a per-slice history shows only the fault itself.
-    history: ExitHistory,
+    ///
+    /// Shared with the vCPU thread, which records into it under the machine's
+    /// lock: one history per machine, whichever of the two ran the guest, so a
+    /// trail never breaks at the seam between them.
+    pub(crate) history: ExitHistory,
 }
 
 impl WhpEngine {
@@ -777,6 +917,28 @@ impl WhpEngine {
     #[must_use]
     pub const fn exits(&self) -> ExitCounts {
         self.exits
+    }
+
+    /// Record how to reach the thread running the next processor.
+    ///
+    /// Called by whoever spawned the threads, once per processor, in processor
+    /// order — which is the order they are spawned in. The position is the
+    /// list's own length rather than an argument, because an index that could
+    /// disagree with it would admit a gap: a processor whose thread nobody
+    /// started, which is not a state this engine has (R2). The list grows to
+    /// fit rather than being sized at construction, since an engine is built
+    /// before its machine has memory and long before anyone knows whether a
+    /// thread will run it at all.
+    pub(crate) fn install_control(&mut self, control: VcpuControl) {
+        self.controls.push(control);
+    }
+
+    /// The threads running this machine's processors, in processor order.
+    ///
+    /// Empty while the slice loop owns the guest, which is what makes anything
+    /// that speaks to a thread a no-op until one exists.
+    pub(crate) fn controls(&self) -> &[VcpuControl] {
+        &self.controls
     }
 
     /// How the guest's time has been divided into slices, and what ended each.
@@ -825,7 +987,7 @@ impl WhpEngine {
         let started = self.started.as_ref().ok_or(CpuError::UnsupportedCpuOperation {
             operation: "the partition did not start",
         })?;
-        let counters = started.vcpu.counters();
+        let counters = started.vcpu()?.counters();
         Ok(PlatformCounters {
             intercepts: counters.intercept_counters().map_err(platform_failed)?,
             runtime: counters.runtime_counters().map_err(platform_failed)?,
@@ -925,7 +1087,7 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
             let alarm = Alarm::watching(vcpu.canceller());
             *started = Some(Started {
                 alarm,
-                vcpu,
+                vcpu: Some(vcpu),
                 partition,
                 state: VcpuArchState::default(),
                 installed,
@@ -948,6 +1110,33 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
     // host's process to say it.
     started.as_mut().ok_or(CpuError::UnsupportedCpuOperation {
         operation: "the partition did not start",
+    })
+}
+
+/// Build the partition, map the machine into it, create the boot processor and
+/// hand its handle out.
+///
+/// What [`SliceEngine::run_slice`] does on its first call, reachable without a
+/// slice: a machine that will be run by a thread never asks for one, and the
+/// partition still has to exist before the thread can enter it.
+///
+/// The processor LEAVES the engine here. Whoever takes it owns the obligation
+/// `rusty_box_whp::Vcpu` states — the handle names a partition this machine
+/// destroys when it drops, so the thread holding it must be joined first — and
+/// the engine refuses every later slice rather than running a processor it no
+/// longer holds.
+///
+/// # Errors
+/// Whatever [`start`] refused, or
+/// [`CpuError::UnsupportedCpuOperation`] if the processor has already been
+/// taken: one processor has one runner.
+pub(crate) fn bring_up<T: Instrumentation>(
+    machine: &mut Emulator<T, WhpEngine>,
+) -> Result<Vcpu> {
+    let Processor { mut io, engine, .. } = machine.processor(BOOT_VP as usize);
+    let started = start(&mut engine.started, &mut io)?;
+    started.vcpu.take().ok_or(CpuError::UnsupportedCpuOperation {
+        operation: "the processor was already taken by a thread",
     })
 }
 
@@ -1315,7 +1504,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         // here rather than being handed over half-entered.
         run_the_shadow_out_of_smm(cpu, &mut io)?;
 
-        let Self { started, exits, census, history, inject_census } = self;
+        let Self { started, exits, census, history, inject_census, controls: _ } = self;
         let started = start(started, &mut io)?;
 
         // The shadow describes the processor; the platform runs it.
@@ -1586,6 +1775,7 @@ fn install_the_shadow<T: Instrumentation>(
         // does not change it again.
         inject,
     } = started;
+    let vcpu = still_held(vcpu)?;
     cpu.export_arch_state(state);
     // Both parties that can hold a shadow at a head. The interpreter's own
     // inhibit is current for whatever the shadow retired since the last
@@ -1697,7 +1887,7 @@ fn impose_the_shadow(
 /// The shadow holds extended state the partition's area has no place for —
 /// a defect in what this engine offered the guest, reported rather than
 /// silently dropped on the floor.
-fn uncarried(refused: xsave::UncarriedComponent) -> CpuError {
+pub(crate) fn uncarried(refused: xsave::UncarriedComponent) -> CpuError {
     tracing::error!(
         "the shadow holds extended-state component {} and the partition's area cannot carry it",
         refused.index
@@ -1737,6 +1927,7 @@ fn read_back_into_the_shadow<T: Instrumentation>(
         // What the last exit header said; a state exchange does not change it.
         inject: _,
     } = started;
+    let vcpu = still_held(vcpu)?;
     state::export(vcpu, state).map_err(platform_failed)?;
     // The x87 and vector file arrives beside the named registers, so the
     // shadow starts from everything the hardware left behind — not just what
@@ -1758,10 +1949,7 @@ fn read_back_into_the_shadow<T: Instrumentation>(
     *held_interrupt_state = word;
     *shadowed = word.shadow;
 
-    cpu.import_arch_state(state).map_err(|error| {
-        tracing::error!("the hypervisor returned a state this port refuses: {error:?}");
-        CpuError::UnsupportedCpuOperation { operation: "hypervisor state refused on import" }
-    })?;
+    cpu.import_arch_state(state).map_err(refused_import)?;
     // The shadow's own inhibit is anchored to its retired-instruction count,
     // which did not move while the hardware held the guest; the hardware's
     // clear bit says the instruction that inhibit protected has retired. A
@@ -1934,7 +2122,7 @@ fn run_the_exit_loop<T: Instrumentation>(
         // servicing an exit, which is time the budget never bought.
         started.alarm.arm(std::time::Instant::now() + left);
         let entered = std::time::Instant::now();
-        let exit = started.vcpu.run();
+        let exit = started.vcpu()?.run();
         *ran += entered.elapsed();
         // Recorded before the result is examined: a run the platform refused
         // may still have retired guest instructions first, and the shadow
@@ -1998,27 +2186,7 @@ fn run_the_exit_loop<T: Instrumentation>(
             ExitReason::Canceled { .. } => counts.canceled += 1,
             _ => {}
         }
-        history.record(
-            exit.vp.rip,
-            match exit.reason {
-                ExitReason::IoPortAccess(access) => {
-                    if access.string_op || access.rep_prefix {
-                        b'S'
-                    } else if access.is_write {
-                        b'o'
-                    } else {
-                        b'i'
-                    }
-                }
-                ExitReason::MemoryAccess(_) => b'm',
-                ExitReason::Cpuid(_) => b'c',
-                ExitReason::MsrAccess(_) => b'r',
-                ExitReason::Halt => b'h',
-                ExitReason::Canceled { .. } => b'x',
-                ExitReason::InterruptWindow => b'w',
-                _ => b'?',
-            },
-        );
+        history.record(exit.vp.rip, history_mark(exit.reason));
         match exit.reason {
             // The one exit the platform pre-decodes: port, width, direction and
             // RAX all arrive in the exit, so no decoder is involved and the
@@ -2046,7 +2214,12 @@ fn run_the_exit_loop<T: Instrumentation>(
                     // here, so a guest that is not stepping pays nothing.
                     finish_on_the_shadow(started, cpu, io, Trapped::Access)?;
                 } else {
-                    service_port_access(started, io, &exit, access)?;
+                    crate::vcpu_thread::service_port_access(
+                        started.vcpu()?,
+                        io,
+                        &exit,
+                        access,
+                    )?;
                 }
                 // A device answering that write may have latched something on
                 // the bus — an interrupt line, a hold request, a machine
@@ -2330,7 +2503,7 @@ fn stage_injection<T: Instrumentation>(
             );
             let word = INTERRUPT_NOTIFICATION | (u64::from(ANY_PRIORITY & 0xF) << 2);
             started
-                .vcpu
+                .vcpu()?
                 .write_words(&[Reg::DeliverabilityNotifications], &[word])
                 .map_err(platform_failed)?;
             census.windows_armed += 1;
@@ -2347,7 +2520,7 @@ fn stage_injection<T: Instrumentation>(
         return Ok(Staged::Nothing);
     };
     started
-        .vcpu
+        .vcpu()?
         .inject(PendingInterruption {
             kind: InterruptionType::Interrupt,
             vector: u16::from(vector),
@@ -2415,7 +2588,7 @@ fn run_the_shadow_out_of_smm<T: Instrumentation>(
 /// adjusts on the way out, because it is the one thing that describes what the
 /// machine can do rather than reporting what it did.
 #[derive(Clone, Copy, Debug)]
-enum Trapped {
+pub(crate) enum Trapped {
     /// A memory access, or a model-specific register. Whatever the shadow made
     /// of it is what the guest gets.
     Access,
@@ -2426,7 +2599,7 @@ enum Trapped {
 /// Report the whole state the platform refused to run, so the register that
 /// broke an architectural entry check can be found by inspection — the
 /// refusal itself names nothing.
-fn report_the_state_the_platform_refused(held: &VcpuArchState) {
+pub(crate) fn report_the_state_the_platform_refused(held: &VcpuArchState) {
     tracing::error!("the platform refuses this processor; the state last written:");
     const NAMES: [&str; 6] = ["es", "cs", "ss", "ds", "fs", "gs"];
     for (name, seg) in NAMES.iter().zip(held.segments.iter()) {
@@ -2503,7 +2676,7 @@ fn report_the_state_the_platform_refused(held: &VcpuArchState) {
 /// copy of its answer: the shadow is what the next imposition installs, so
 /// the withheld bit has to be gone from the register the guest reads on
 /// every processor that will ever describe it.
-fn withhold_virtualisation_from<T: Instrumentation>(cpu: &mut BxCpuC<T>, leaf: u32) {
+pub(crate) fn withhold_virtualisation_from<T: Instrumentation>(cpu: &mut BxCpuC<T>, leaf: u32) {
     /// `CPUID.1:ECX[5]`, Intel's VMX.
     const VMX: u64 = 1 << 5;
     /// `CPUID.80000001:ECX[2]`, AMD's SVM.
@@ -2535,6 +2708,25 @@ fn report_the_fault<T: Instrumentation>(
     history: &ExitHistory,
 ) -> Result<()> {
     read_back_into_the_shadow(started, cpu, io.pc_system.time_ticks())?;
+    describe_the_fault(started.vcpu()?, cpu, io, exit, history);
+    Ok(())
+}
+
+/// The report itself, over a shadow that already holds the faulting state.
+///
+/// Split from [`report_the_fault`] because the two engines reach this point by
+/// different routes and only one of them owes a read-back: the slice loop must
+/// pull the whole processor into the shadow first, while the vCPU thread has
+/// already imported exactly what an [`crate::exchange::ExitClass::Exception`]
+/// needs. The description is one body either way, so the two cannot drift into
+/// reporting different things about the same fault.
+pub(crate) fn describe_the_fault<T: Instrumentation>(
+    vcpu: &Vcpu,
+    cpu: &mut BxCpuC<T>,
+    io: &mut PcIo<'_>,
+    exit: &Exit,
+    history: &ExitHistory,
+) {
     let mut state = VcpuArchState::default();
     cpu.export_arch_state(&mut state);
     tracing::error!(
@@ -2589,7 +2781,7 @@ fn report_the_fault<T: Instrumentation>(
     for (what, linear, len) in
         [("before", before, 0x60u64), ("code", code, 16u64), ("stack", stack, 24u64)]
     {
-        match started.vcpu.translate_gva(linear) {
+        match vcpu.translate_gva(linear) {
             Ok(translation) if translation.result_code == 0 => {
                 // Straight out of the allocation at the guest-physical
                 // address: RAM below the PCI hole is identity-mapped, which
@@ -2616,7 +2808,6 @@ fn report_the_fault<T: Instrumentation>(
             }
         }
     }
-    Ok(())
 }
 
 /// Execute the trapped instruction on the shadow processor.
@@ -2779,6 +2970,7 @@ fn impose_after_errand<T: Instrumentation>(
         // does not change it again.
         inject: _,
     } = started;
+    let vcpu = still_held(vcpu)?;
     cpu.export_arch_state(state);
     impose_the_shadow(vcpu, state, xsave, held.as_ref(), held_interrupt_state, shadow)?;
     *held = Some(state.clone());
@@ -2789,61 +2981,6 @@ fn impose_after_errand<T: Instrumentation>(
     // exit — a shadow whose instruction the errand has just retired.
     *shadowed = shadow;
     Ok(())
-}
-
-/// Answer a port access out of the machine's own device set, then step the
-/// processor past the instruction that caused it.
-fn service_port_access(
-    started: &mut Started,
-    io: &mut PcIo<'_>,
-    exit: &Exit,
-    access: rusty_box_whp::IoPortAccess,
-) -> Result<()> {
-    let ticks = io.pc_system.time_ticks();
-    let port = access.port;
-    let width = access.access_size;
-
-    // The platform hands back RAX WHOLE, whatever the access width, so both
-    // directions have to narrow it themselves. An `OUT DX, AL` that handed a
-    // device the other three bytes of RAX would be telling it something the
-    // guest never wrote, and the interpreter — whose handler passes `AL`,
-    // `AX` or `EAX` and nothing else — would tell it something different for
-    // the same guest instruction.
-    let mask: u64 = match width {
-        1 => 0xFF,
-        2 => 0xFFFF,
-        _ => 0xFFFF_FFFF,
-    };
-
-    let rax = if access.is_write {
-        io.devices.outp(
-            port,
-            (access.rax & mask) as u32,
-            width,
-            ticks,
-            io.pc_system,
-            io.device_manager,
-            io.memory,
-        );
-        access.rax
-    } else {
-        let value =
-            io.devices
-                .inp(port, width, ticks, io.pc_system, io.device_manager);
-        // A narrower `IN` leaves the bytes above its width as the guest had
-        // them — the same rule the interpreter's own `port_in` follows.
-        (access.rax & !mask) | (u64::from(value) & mask)
-    };
-
-    // Unlike a memory exit, a port exit DOES report its instruction length and
-    // does not advance RIP itself, so finishing it is arithmetic rather than a
-    // decode (probe finding 2).
-    let resume = exit.vp.rip + u64::from(exit.vp.instruction_length);
-    started.vcpu.write_words(
-        &[rusty_box_whp::Reg::Rip, rusty_box_whp::Reg::Rax],
-        &[resume, rax],
-    )
-    .map_err(platform_failed)
 }
 
 /// How long a slice may run on the host, from what the machine asked for.

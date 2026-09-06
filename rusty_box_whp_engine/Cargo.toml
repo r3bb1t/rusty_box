@@ -14,6 +14,13 @@ categories = ["emulators", "virtualization"]
 name = "rusty_box_whp_engine"
 path = "src/lib.rs"
 
+# Proof-carrying, like every other crate that can be: the one lift is the
+# crate-level `expect(unsafe_code)` in `lib.rs`, which names the single
+# obligation this crate discharges — mapping the machine's own memory into a
+# partition. Its ratchet baseline is 1 and stays there.
+[lints]
+workspace = true
+
 # The adapter between the two, and the only crate that knows both. `rusty_box`
 # depends on neither: an engine is chosen by the binary that builds a machine,
 # so the emulator never depends on a backend (REPLAN decision 12). Keeping this

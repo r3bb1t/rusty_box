@@ -775,6 +775,48 @@ pub enum ExitReason {
     Unrecognized(i32),
 }
 
+impl ExitReason {
+    /// A short, stable name for this reason.
+    ///
+    /// What a host puts in a message when it has no service for an exit. The
+    /// name has to outlive the exit — a fault carries a `&'static str` — so it
+    /// is a constant here rather than a formatted payload, and the payload each
+    /// variant carries is deliberately left out: the reason is what the reader
+    /// needs to know which arm was missing.
+    ///
+    /// Exhaustive (R5), so a variant added above cannot reach a caller
+    /// unnamed.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "X64None",
+            Self::MemoryAccess(_) => "X64MemoryAccess",
+            Self::IoPortAccess(_) => "X64IoPortAccess",
+            Self::UnrecoverableException => "X64UnrecoverableException",
+            Self::InvalidVpRegisterValue => "X64InvalidVpRegisterValue",
+            Self::UnsupportedFeature { .. } => "X64UnsupportedFeature",
+            Self::InterruptWindow => "X64InterruptWindow",
+            Self::Halt => "X64Halt",
+            Self::ApicEoi { .. } => "X64ApicEoi",
+            Self::SynicSintDeliverable => "SynicSintDeliverable",
+            Self::MsrAccess(_) => "X64MsrAccess",
+            Self::Cpuid(_) => "X64Cpuid",
+            Self::Exception => "X64Exception",
+            Self::Rdtsc => "X64Rdtsc",
+            Self::ApicSmiTrap => "X64ApicSmiTrap",
+            Self::Hypercall => "Hypercall",
+            Self::ApicInitSipiTrap => "X64ApicInitSipiTrap",
+            Self::ApicWriteTrap { .. } => "X64ApicWriteTrap",
+            Self::Canceled { .. } => "Canceled",
+            // A platform identifier like every other arm, not a sentence: the
+            // caller puts this in an `EngineFault`'s `at`, beside names it can
+            // look up in the SDK, and a phrase there reads as prose in a field
+            // of identifiers. The code the platform gave is carried separately.
+            Self::Unrecognized(_) => "WHvRunVpExitReasonUnrecognized",
+        }
+    }
+}
+
 /// The processor state every exit carries, whatever its reason.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct VpContext {

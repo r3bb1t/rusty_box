@@ -312,6 +312,12 @@ pub enum EngineFaultKind {
     State,
     /// The engine's host backing failed in a way it cannot classify further.
     Host,
+    /// The engine received an exit it has no service for.
+    ///
+    /// Apart from [`Self::Vcpu`] because the processor is working exactly as
+    /// asked: what is missing is an arm in the host, and the operation the
+    /// fault names is the exit rather than a platform call that refused.
+    Unserviced,
 }
 
 /// An engine refused or failed.
@@ -373,6 +379,7 @@ impl fmt::Display for EngineFault {
             EngineFaultKind::Vcpu => "a processor operation failed",
             EngineFaultKind::State => "architectural state could not be moved",
             EngineFaultKind::Host => "the engine's host backing failed",
+            EngineFaultKind::Unserviced => "the engine has no service for this exit",
         };
         write!(f, "{}: {what}", self.at)?;
         if self.code != 0 {

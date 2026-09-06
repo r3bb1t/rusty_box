@@ -386,6 +386,68 @@ impl Default for VcpuArchState {
     }
 }
 
+bitflags::bitflags! {
+    /// The register groups a processor's architectural state moves in (R2).
+    ///
+    /// In an engine's externalised mask a set bit means "the live value is in
+    /// the partition; the shadow's copy is stale"; [`ArchGroups::all`] is a
+    /// processor the shadow has never read, [`ArchGroups::empty`] one the
+    /// shadow fully describes. Never the time-stamp counter, which no exchange
+    /// carries — the hardware owns it.
+    ///
+    /// The split is by what a backend NAMES, not by what an instruction
+    /// touches: every group here is one contiguous run of a hypervisor's
+    /// register list, so a group is exactly what one platform call can ask
+    /// for. That is why `CR8` sits with the control registers though it is a
+    /// task-priority register, and why `XCR0` sits with the model-specific
+    /// ones though it is neither.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ArchGroups: u16 {
+        /// RAX through R15.
+        const GPRS = 1 << 0;
+        const RIP_RFLAGS = 1 << 1;
+        /// CR0, CR2, CR3, CR4 and CR8.
+        const CONTROL_REGS = 1 << 2;
+        /// DR0 through DR3, DR6 and DR7.
+        const DEBUG_REGS = 1 << 3;
+        /// ES through GS, LDTR and TR.
+        const SEGMENTS = 1 << 4;
+        /// GDTR and IDTR.
+        const TABLES = 1 << 5;
+        /// [`MsrState`], and `XCR0` with it.
+        const MSRS = 1 << 6;
+        /// The x87 stack, the vector file, the opmask registers and `MXCSR` —
+        /// what an XSAVE area carries.
+        const VECTOR = 1 << 7;
+        /// The interrupt shadow and the NMI mask. Not part of
+        /// [`VcpuArchState`]: it is a property of where a processor stopped
+        /// rather than of the processor, and only a backend holds it — so
+        /// nothing in this module reads or writes it, and it is named here
+        /// because a backend's mask is one set, not two.
+        const INTERRUPT_STATE = 1 << 8;
+    }
+}
+
+/// The fields every exit carries in its own header, whatever its reason.
+///
+/// A backend gets these without asking for a register: they come back with the
+/// exit itself, so taking them into the shadow costs nothing. They are also
+/// the fields most likely to have moved — a guest's `MOV CR8` and every branch
+/// retire on the hardware without an exit — which is why an engine takes them
+/// before it decides anything, and why they are named as one value rather than
+/// passed as four arguments (R0).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ExitHeader {
+    pub rip: u64,
+    pub rflags: u64,
+    /// The code segment the guest stands in — `RIP` alone does not say where
+    /// an instruction begins.
+    pub cs: SegmentState,
+    /// The task-priority register as `MOV CR8` writes it: the top four bits of
+    /// the local APIC's TPR.
+    pub cr8: u8,
+}
+
 /// Why a [`VcpuArchState`] could not be loaded into a processor.
 ///
 /// `#[non_exhaustive]` because it crosses a crate boundary and will gain
@@ -403,6 +465,14 @@ pub enum ArchStateError {
     /// A granular segment's limit field does not fit twenty bits, so the
     /// scaled limit it describes is not expressible.
     SegmentLimitOutOfRange { index: usize, limit: u32 },
+    /// A segment claims to be present while saying nothing else about itself,
+    /// and addresses a non-empty range anyway. No descriptor produces that
+    /// word: the type field alone is four bits and a real descriptor sets at
+    /// least one of them or the S bit. What does produce it is a partial or
+    /// mis-shifted read-back, and the processor built from it is believed —
+    /// a segment with type `0` is a null data descriptor, so every access
+    /// through it faults somewhere far from here with nothing to point at.
+    SegmentPresentWithoutAttributes { index: usize },
 }
 
 impl core::fmt::Display for ArchStateError {
@@ -419,6 +489,13 @@ impl core::fmt::Display for ArchStateError {
                     f,
                     "segment {index} is granular with limit field {limit:#x}, \
                      which exceeds twenty bits"
+                )
+            }
+            Self::SegmentPresentWithoutAttributes { index } => {
+                write!(
+                    f,
+                    "segment {index} is present with no other attribute bit set \
+                     and a non-zero limit"
                 )
             }
         }
@@ -663,78 +740,108 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// Pure: nothing about the processor changes, so an engine may export as
     /// often as it likes to compare states.
     pub fn export_arch_state(&self, out: &mut VcpuArchState) {
-        for (slot, reg) in out.gprs.iter_mut().zip(self.gen_reg.iter()) {
-            *slot = reg.rrx();
-        }
-        out.rip = self.rip();
-        out.rflags = u64::from(self.eflags_materialized());
+        self.export_arch_groups(out, ArchGroups::all());
+    }
 
-        for (slot, seg) in SEGMENT_ORDER.iter().enumerate() {
-            out.segments[slot] = segment_out(&self.sregs[*seg as usize]);
+    /// [`Self::export_arch_state`] restricted to `groups`.
+    ///
+    /// A field outside `groups` is left exactly as `out` held it, which is
+    /// what lets an engine build a state from two sources — some groups from
+    /// the partition, the rest from the shadow — without either overwriting
+    /// the other.
+    ///
+    /// [`ArchGroups::INTERRUPT_STATE`] names nothing here: the interrupt
+    /// shadow and the NMI mask are not [`VcpuArchState`] fields, and a
+    /// backend exchanges them itself.
+    pub fn export_arch_groups(&self, out: &mut VcpuArchState, groups: ArchGroups) {
+        if groups.contains(ArchGroups::GPRS) {
+            for (slot, reg) in out.gprs.iter_mut().zip(self.gen_reg.iter()) {
+                *slot = reg.rrx();
+            }
         }
-        out.ldtr = segment_out(&self.ldtr);
-        out.tr = segment_out(&self.tr);
-        out.gdtr = DescriptorTableState {
-            base: self.gdtr.base,
-            limit: self.gdtr.limit,
-        };
-        out.idtr = DescriptorTableState {
-            base: self.idtr.base,
-            limit: self.idtr.limit,
-        };
-
-        out.cr0 = u64::from(self.cr0.bits());
-        out.cr2 = self.cr2;
-        out.cr3 = self.cr3;
-        out.cr4 = self.cr4.bits();
-        out.cr8 = u64::from(self.lapic.get_tpr() >> 4);
-
-        // Only DR0 through DR3 are address registers. The processor's array
-        // carries a fifth slot; DR4 and DR5 alias DR6 and DR7 on the
-        // architecture and are not separate state to hand over.
-        for (slot, reg) in out.dr.iter_mut().zip(self.dr.iter()) {
-            *slot = *reg;
+        if groups.contains(ArchGroups::RIP_RFLAGS) {
+            out.rip = self.rip();
+            out.rflags = u64::from(self.eflags_materialized());
         }
-        out.dr6 = u64::from(self.dr6.bits());
-        out.dr7 = u64::from(self.dr7.bits());
 
-        out.msrs = MsrState {
-            efer: u64::from(self.efer.bits()),
-            apic_base: self.msr.apicbase,
-            star: self.msr.star,
-            lstar: self.msr.lstar,
-            cstar: self.msr.cstar,
-            sfmask: u64::from(self.msr.fmask),
-            kernel_gs_base: self.msr.kernelgsbase,
-            sysenter_cs: u64::from(self.msr.sysenter_cs_msr),
-            sysenter_esp: self.msr.sysenter_esp_msr,
-            sysenter_eip: self.msr.sysenter_eip_msr,
-            pat: self.msr.pat.U64(),
-            tsc: self.cpu_local_ticks(),
-        };
+        if groups.contains(ArchGroups::SEGMENTS) {
+            for (slot, seg) in SEGMENT_ORDER.iter().enumerate() {
+                out.segments[slot] = segment_out(&self.sregs[*seg as usize]);
+            }
+            out.ldtr = segment_out(&self.ldtr);
+            out.tr = segment_out(&self.tr);
+        }
+        if groups.contains(ArchGroups::TABLES) {
+            out.gdtr = DescriptorTableState {
+                base: self.gdtr.base,
+                limit: self.gdtr.limit,
+            };
+            out.idtr = DescriptorTableState {
+                base: self.idtr.base,
+                limit: self.idtr.limit,
+            };
+        }
 
-        out.fpu = FpuState {
-            control_word: self.the_i387.cwd,
-            status_word: self.the_i387.swd,
-            tag_word: self.the_i387.twd,
-            opcode: self.the_i387.foo,
-            instruction_pointer: self.the_i387.fip,
-            data_pointer: self.the_i387.fdp,
-            instruction_selector: self.the_i387.fcs,
-            data_selector: self.the_i387.fds,
-            stack: core::array::from_fn(|i| {
-                let reg = self.the_i387.st_space[i];
-                (reg.signif, reg.sign_exp)
-            }),
-        };
-        for (slot, reg) in out.vector.iter_mut().zip(self.vmm.iter()) {
-            *slot = *reg.raw();
+        if groups.contains(ArchGroups::CONTROL_REGS) {
+            out.cr0 = u64::from(self.cr0.bits());
+            out.cr2 = self.cr2;
+            out.cr3 = self.cr3;
+            out.cr4 = self.cr4.bits();
+            out.cr8 = u64::from(self.lapic.get_tpr() >> 4);
         }
-        for (slot, mask) in out.opmask.iter_mut().zip(self.opmask.iter()) {
-            *slot = mask.rrx();
+
+        if groups.contains(ArchGroups::DEBUG_REGS) {
+            // Only DR0 through DR3 are address registers. The processor's
+            // array carries a fifth slot; DR4 and DR5 alias DR6 and DR7 on the
+            // architecture and are not separate state to hand over.
+            for (slot, reg) in out.dr.iter_mut().zip(self.dr.iter()) {
+                *slot = *reg;
+            }
+            out.dr6 = u64::from(self.dr6.bits());
+            out.dr7 = u64::from(self.dr7.bits());
         }
-        out.mxcsr = self.mxcsr.mxcsr;
-        out.xcr0 = self.xcr0.value;
+
+        if groups.contains(ArchGroups::MSRS) {
+            out.msrs = MsrState {
+                efer: u64::from(self.efer.bits()),
+                apic_base: self.msr.apicbase,
+                star: self.msr.star,
+                lstar: self.msr.lstar,
+                cstar: self.msr.cstar,
+                sfmask: u64::from(self.msr.fmask),
+                kernel_gs_base: self.msr.kernelgsbase,
+                sysenter_cs: u64::from(self.msr.sysenter_cs_msr),
+                sysenter_esp: self.msr.sysenter_esp_msr,
+                sysenter_eip: self.msr.sysenter_eip_msr,
+                pat: self.msr.pat.U64(),
+                tsc: self.cpu_local_ticks(),
+            };
+            out.xcr0 = self.xcr0.value;
+        }
+
+        if groups.contains(ArchGroups::VECTOR) {
+            out.fpu = FpuState {
+                control_word: self.the_i387.cwd,
+                status_word: self.the_i387.swd,
+                tag_word: self.the_i387.twd,
+                opcode: self.the_i387.foo,
+                instruction_pointer: self.the_i387.fip,
+                data_pointer: self.the_i387.fdp,
+                instruction_selector: self.the_i387.fcs,
+                data_selector: self.the_i387.fds,
+                stack: core::array::from_fn(|i| {
+                    let reg = self.the_i387.st_space[i];
+                    (reg.signif, reg.sign_exp)
+                }),
+            };
+            for (slot, reg) in out.vector.iter_mut().zip(self.vmm.iter()) {
+                *slot = *reg.raw();
+            }
+            for (slot, mask) in out.opmask.iter_mut().zip(self.opmask.iter()) {
+                *slot = mask.rrx();
+            }
+            out.mxcsr = self.mxcsr.mxcsr;
+        }
     }
 
     /// Load an architectural state into this processor.
@@ -752,55 +859,146 @@ impl<T: Instrumentation> BxCpuC<T> {
         &mut self,
         state: &VcpuArchState,
     ) -> Result<(), ArchStateError> {
-        for (index, seg) in state
-            .segments
-            .iter()
-            .chain([&state.ldtr, &state.tr])
-            .enumerate()
-        {
-            let attributes = seg.attributes;
-            if attributes.is_long() && attributes.is_default_big() {
-                return Err(ArchStateError::SegmentIsLongAndBig { index });
-            }
-            if attributes.dpl() > 3 {
-                return Err(ArchStateError::SegmentDplOutOfRange {
-                    index,
-                    dpl: attributes.dpl(),
-                });
-            }
-            if attributes.is_granular() && seg.limit > 0x000F_FFFF {
-                return Err(ArchStateError::SegmentLimitOutOfRange {
-                    index,
-                    limit: seg.limit,
-                });
+        self.import_arch_groups(state, ArchGroups::all())
+    }
+
+    /// [`Self::import_arch_state`] restricted to `groups`.
+    ///
+    /// A group left out keeps whatever this processor already held, which is
+    /// what makes an exit able to pay for only the state it uses: the groups
+    /// it never read stay the partition's, and the shadow's stale copy of them
+    /// is never written back over the live value.
+    ///
+    /// The order is the whole-state order and it is load-bearing: control
+    /// registers first, because the CPU mode a segment load derives its
+    /// fetch-mode mask from is decided by CR0 and EFER; then the segments;
+    /// then `RIP` and the flags. A group's write happens where it happens in
+    /// that order or not at all — never sooner.
+    ///
+    /// # Errors
+    /// A segment this processor will not build, when
+    /// [`ArchGroups::SEGMENTS`] is in `groups`. Checked before anything is
+    /// written, so a refused state leaves the processor as it was rather than
+    /// half-loaded.
+    pub fn import_arch_groups(
+        &mut self,
+        state: &VcpuArchState,
+        groups: ArchGroups,
+    ) -> Result<(), ArchStateError> {
+        if groups.contains(ArchGroups::SEGMENTS) {
+            for (index, seg) in state
+                .segments
+                .iter()
+                .chain([&state.ldtr, &state.tr])
+                .enumerate()
+            {
+                check_segment(index, seg)?;
             }
         }
 
-        for (slot, reg) in state.gprs.iter().zip(self.gen_reg.iter_mut()) {
-            reg.set_rrx(*slot);
+        if groups.contains(ArchGroups::GPRS) {
+            for (slot, reg) in state.gprs.iter().zip(self.gen_reg.iter_mut()) {
+                reg.set_rrx(*slot);
+            }
         }
 
         // Control registers before segments and RIP: the CPU mode a segment
-        // load derives its fetch-mode mask from is decided by CR0 and EFER.
-        self.cr0 = super::crregs::BxCr0::from_bits_retain(state.cr0 as u32);
-        self.cr2 = state.cr2;
-        self.cr3 = state.cr3;
-        self.cr4 = super::crregs::BxCr4::from_bits_retain(state.cr4);
-        self.efer = super::crregs::BxEfer::from_bits_retain(state.msrs.efer as u32);
-        self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
-        self.handle_cpu_mode_change();
-
-        for (slot, seg) in SEGMENT_ORDER.iter().enumerate() {
-            self.load_segment(*seg, &state.segments[slot]);
+        // load derives its fetch-mode mask from is decided by CR0 and EFER —
+        // which is why `EFER`, a model-specific register, is written here
+        // rather than beside the rest of its own group.
+        if groups.intersects(ArchGroups::CONTROL_REGS | ArchGroups::MSRS) {
+            if groups.contains(ArchGroups::CONTROL_REGS) {
+                self.cr0 = super::crregs::BxCr0::from_bits_retain(state.cr0 as u32);
+                self.cr2 = state.cr2;
+                self.cr3 = state.cr3;
+                self.cr4 = super::crregs::BxCr4::from_bits_retain(state.cr4);
+                self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
+            }
+            if groups.contains(ArchGroups::MSRS) {
+                self.efer = super::crregs::BxEfer::from_bits_retain(state.msrs.efer as u32);
+            }
+            self.handle_cpu_mode_change();
         }
-        segment_in(&mut self.ldtr, &state.ldtr);
-        segment_in(&mut self.tr, &state.tr);
-        self.gdtr.base = state.gdtr.base;
-        self.gdtr.limit = state.gdtr.limit;
-        self.idtr.base = state.idtr.base;
-        self.idtr.limit = state.idtr.limit;
 
-        self.set_rip(state.rip);
+        if groups.contains(ArchGroups::SEGMENTS) {
+            for (slot, seg) in SEGMENT_ORDER.iter().enumerate() {
+                self.load_segment(*seg, &state.segments[slot]);
+            }
+            segment_in(&mut self.ldtr, &state.ldtr);
+            segment_in(&mut self.tr, &state.tr);
+        }
+        if groups.contains(ArchGroups::TABLES) {
+            self.gdtr.base = state.gdtr.base;
+            self.gdtr.limit = state.gdtr.limit;
+            self.idtr.base = state.idtr.base;
+            self.idtr.limit = state.idtr.limit;
+        }
+
+        if groups.contains(ArchGroups::RIP_RFLAGS) {
+            self.take_rip_and_flags(state.rip, state.rflags);
+        }
+
+        if groups.contains(ArchGroups::DEBUG_REGS) {
+            for (reg, slot) in self.dr.iter_mut().zip(state.dr.iter()) {
+                *reg = *slot;
+            }
+            self.dr6 = super::crregs::BxDr6::from_bits_retain(state.dr6 as u32);
+            self.dr7 = super::crregs::BxDr7::from_bits_retain(state.dr7 as u32);
+        }
+
+        if groups.contains(ArchGroups::MSRS) {
+            self.msr.apicbase = state.msrs.apic_base;
+            self.msr.star = state.msrs.star;
+            self.msr.lstar = state.msrs.lstar;
+            self.msr.cstar = state.msrs.cstar;
+            self.msr.fmask = state.msrs.sfmask as u32;
+            self.msr.kernelgsbase = state.msrs.kernel_gs_base;
+            self.msr.sysenter_cs_msr = state.msrs.sysenter_cs as u32;
+            self.msr.sysenter_esp_msr = state.msrs.sysenter_esp;
+            self.msr.sysenter_eip_msr = state.msrs.sysenter_eip;
+            self.msr.pat.set_U64(state.msrs.pat);
+            self.xcr0.value = state.xcr0;
+        }
+
+        if groups.contains(ArchGroups::CONTROL_REGS) {
+            self.set_lapic_tpr_from_cr8((state.cr8 & 0xF) as u8);
+        }
+
+        if groups.contains(ArchGroups::VECTOR) {
+            self.the_i387.cwd = state.fpu.control_word;
+            self.the_i387.swd = state.fpu.status_word;
+            self.the_i387.twd = state.fpu.tag_word;
+            self.the_i387.foo = state.fpu.opcode;
+            self.the_i387.fip = state.fpu.instruction_pointer;
+            self.the_i387.fdp = state.fpu.data_pointer;
+            self.the_i387.fcs = state.fpu.instruction_selector;
+            self.the_i387.fds = state.fpu.data_selector;
+            for (slot, (signif, sign_exp)) in
+                self.the_i387.st_space.iter_mut().zip(state.fpu.stack)
+            {
+                slot.signif = signif;
+                slot.sign_exp = sign_exp;
+            }
+            for (reg, slot) in self.vmm.iter_mut().zip(state.vector.iter()) {
+                *reg.raw_mut() = *slot;
+            }
+            for (mask, slot) in self.opmask.iter_mut().zip(state.opmask.iter()) {
+                mask.set_rrx(*slot);
+            }
+            self.mxcsr.mxcsr = state.mxcsr;
+        }
+
+        self.rederive_after_import(groups);
+        Ok(())
+    }
+
+    /// Stand this processor at `rip` with `rflags`, as an import or an exit
+    /// header does.
+    ///
+    /// The one place both write that pair (R5), because `prev_rip` travels
+    /// with `rip` and the flags must go through the API path.
+    fn take_rip_and_flags(&mut self, rip: u64, rflags: u64) {
+        self.set_rip(rip);
         // An imported processor stands at an instruction boundary, so the
         // instruction it is about to execute begins where `RIP` points. That is
         // what `prev_rip` means, and it is not architectural state — no
@@ -815,64 +1013,164 @@ impl<T: Instrumentation> BxCpuC<T> {
         // some earlier trap — a `REP INSW` servicing a disk sector jumps into
         // an unrelated interrupt stub mid-transfer, and the guest is lost with
         // no fault to show for it.
-        self.prev_rip = state.rip;
+        self.prev_rip = rip;
         // Through the API path, which calls `handle_interrupt_mask_change`:
         // IF gates the deliverable events, and a flags write that skips that
         // leaves the processor unable to take an interrupt it says it can.
-        self.set_rflags_for_api(state.rflags);
+        self.set_rflags_for_api(rflags);
+    }
 
-        for (reg, slot) in self.dr.iter_mut().zip(state.dr.iter()) {
-            *reg = *slot;
-        }
-        self.dr6 = super::crregs::BxDr6::from_bits_retain(state.dr6 as u32);
-        self.dr7 = super::crregs::BxDr7::from_bits_retain(state.dr7 as u32);
+    /// Take an exit header's fields into this processor.
+    ///
+    /// The free half of an exchange: everything here arrived with the exit, so
+    /// none of it costs a call back to the backend that reported it. It goes
+    /// through the same segment load and the same flags path an import takes,
+    /// so a processor standing on a header and one standing on an imported
+    /// state are the same processor.
+    ///
+    /// # Errors
+    /// A code segment this processor will not build — checked before anything
+    /// is written, as [`Self::import_arch_groups`] checks.
+    pub fn take_exit_header(&mut self, header: &ExitHeader) -> Result<(), ArchStateError> {
+        // The index this segment has in a [`VcpuArchState`], so a refusal here
+        // names the same segment a refused import would.
+        check_segment(BxSegregs::Cs as usize, &header.cs)?;
+        self.load_segment(BxSegregs::Cs, &header.cs);
+        self.take_rip_and_flags(header.rip, header.rflags);
+        self.set_lapic_tpr_from_cr8(header.cr8);
+        // `CR8` is a task priority, not a translation input, so the control
+        // registers are deliberately absent from this set: a header can never
+        // invalidate a TLB entry.
+        self.rederive_after_import(ArchGroups::SEGMENTS | ArchGroups::RIP_RFLAGS);
+        Ok(())
+    }
 
-        self.msr.apicbase = state.msrs.apic_base;
-        self.msr.star = state.msrs.star;
-        self.msr.lstar = state.msrs.lstar;
-        self.msr.cstar = state.msrs.cstar;
-        self.msr.fmask = state.msrs.sfmask as u32;
-        self.msr.kernelgsbase = state.msrs.kernel_gs_base;
-        self.msr.sysenter_cs_msr = state.msrs.sysenter_cs as u32;
-        self.msr.sysenter_esp_msr = state.msrs.sysenter_esp;
-        self.msr.sysenter_eip_msr = state.msrs.sysenter_eip;
-        self.msr.pat.set_U64(state.msrs.pat);
-        // A TPR change can make a pending LAPIC interrupt deliverable, which
-        // is why this goes through the APIC rather than at its register.
-        self.lapic.set_tpr(((state.cr8 & 0xF) as u8) << 4);
-
-        self.the_i387.cwd = state.fpu.control_word;
-        self.the_i387.swd = state.fpu.status_word;
-        self.the_i387.twd = state.fpu.tag_word;
-        self.the_i387.foo = state.fpu.opcode;
-        self.the_i387.fip = state.fpu.instruction_pointer;
-        self.the_i387.fdp = state.fpu.data_pointer;
-        self.the_i387.fcs = state.fpu.instruction_selector;
-        self.the_i387.fds = state.fpu.data_selector;
-        for (slot, (signif, sign_exp)) in
-            self.the_i387.st_space.iter_mut().zip(state.fpu.stack)
-        {
-            slot.signif = signif;
-            slot.sign_exp = sign_exp;
+    /// Rebuild what this processor derives from the groups just written.
+    ///
+    /// Anything cached from state that was replaced describes a processor that
+    /// no longer exists. The first four are recomputations and discards — each
+    /// depends on more than one group, and running one that nothing changed
+    /// costs a recomputation and can never be wrong — so an import of anything
+    /// at all runs them.
+    ///
+    /// The TLB is the exception, because a flush is what a stretch of guest
+    /// execution afterwards pays for. Only a linear-to-physical input can
+    /// invalidate an entry: CR0's paging and write-protect bits, CR3, CR4's
+    /// paging bits and `EFER.NXE`/`LMA`. A segment does not translate — it
+    /// forms the linear address the TLB is keyed on — and neither does `RIP`,
+    /// a general register or the vector file.
+    fn rederive_after_import(&mut self, groups: ArchGroups) {
+        if groups.is_empty() {
+            return;
         }
-        for (reg, slot) in self.vmm.iter_mut().zip(state.vector.iter()) {
-            *reg.raw_mut() = *slot;
-        }
-        for (mask, slot) in self.opmask.iter_mut().zip(state.opmask.iter()) {
-            mask.set_rrx(*slot);
-        }
-        self.mxcsr.mxcsr = state.mxcsr;
-        self.xcr0.value = state.xcr0;
-
-        // Anything cached from the state just replaced describes a processor
-        // that no longer exists.
         self.handle_alignment_check();
         self.update_fetch_mode_mask();
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
-        self.tlb_flush();
-        Ok(())
+        if groups.intersects(ArchGroups::CONTROL_REGS | ArchGroups::MSRS) {
+            self.tlb_flush();
+        }
     }
+
+    /// Whether `bytes` decode to an instruction that reads or writes vector or
+    /// x87 state.
+    ///
+    /// The question an engine asks before finishing a trapped access on the
+    /// shadow: the x87 and vector file crosses the seam as a whole XSAVE area
+    /// rather than as named registers, so it is the one group worth moving
+    /// only when the instruction at hand will actually touch it.
+    ///
+    /// Answered from the decoded opcode's own CPU-state requirement — the
+    /// `BX_PREPARE_*` field of Bochs's `bx_define_opcode`, which
+    /// `state_resolve_opcode` already consults at icache fill — plus the
+    /// state-management instructions the architecture gives no such
+    /// requirement: `FXSAVE`/`FXRSTOR` and the `XSAVE`/`XRSTOR` family move
+    /// the whole file while asking for no vector state to do it, and `FWAIT`
+    /// reads the x87 status word to decide whether to raise `#MF`.
+    ///
+    /// The decode is the raw one, before the ISA gate that would rewrite an
+    /// opcode this model lacks into `#UD`: an unsupported vector instruction
+    /// answers "yes" and costs an import nothing will read, which is the cheap
+    /// direction. Bytes the decoder will not make an instruction of answer
+    /// "yes" for the same reason — importing a file that was not needed costs
+    /// a transfer, while trusting a stale one is a wrong answer. A backend
+    /// reports as much of the instruction as it saw, and a truncated report is
+    /// the ordinary way that happens.
+    ///
+    /// An opcode the architecture DEFINES as undefined — `UD0` and its
+    /// siblings — is not that case. It is an instruction, it raises `#UD`, and
+    /// the delivery touches no vector state.
+    #[must_use]
+    pub fn next_instruction_touches_vector_state(&self, bytes: &[u8]) -> bool {
+        use super::decoder::{decode32, decode64, Opcode};
+        use rusty_box_decoder::opcode_isa::{opcode_state, CpuState};
+
+        let decoded = if self.long64_mode() {
+            decode64::fetch_decode64(bytes)
+        } else {
+            let is_32_bit_mode =
+                self.sregs[BxSegregs::Cs as usize].cache.u.segment_d_b();
+            decode32::fetch_decode32(bytes, is_32_bit_mode)
+        };
+        let Ok(instruction) = decoded else {
+            return true;
+        };
+        let opcode = instruction.get_ia_opcode();
+        match opcode_state(opcode) {
+            CpuState::Fpu | CpuState::Mmx | CpuState::Sse | CpuState::Avx | CpuState::Evex => {
+                true
+            }
+            // No tile register is modelled, so an AMX opcode never survives
+            // the ISA gate and never executes on the shadow.
+            CpuState::Amx => false,
+            CpuState::Base => matches!(
+                opcode,
+                // The decoder's own refusal, reached when a byte sequence
+                // decodes to no instruction at all.
+                Opcode::IaError
+                    | Opcode::Fwait
+                    | Opcode::Fxsave
+                    | Opcode::Fxrstor
+                    | Opcode::Xsave
+                    | Opcode::Xsavec
+                    | Opcode::Xsaveopt
+                    | Opcode::Xsaves
+                    | Opcode::Xrstor
+                    | Opcode::Xrstors
+            ),
+        }
+    }
+}
+
+/// Whether one segment of an imported state describes a descriptor this
+/// processor can build.
+fn check_segment(index: usize, seg: &SegmentState) -> Result<(), ArchStateError> {
+    let attributes = seg.attributes;
+    if attributes.is_long() && attributes.is_default_big() {
+        return Err(ArchStateError::SegmentIsLongAndBig { index });
+    }
+    if attributes.dpl() > 3 {
+        return Err(ArchStateError::SegmentDplOutOfRange {
+            index,
+            dpl: attributes.dpl(),
+        });
+    }
+    if attributes.is_granular() && seg.limit > 0x000F_FFFF {
+        return Err(ArchStateError::SegmentLimitOutOfRange {
+            index,
+            limit: seg.limit,
+        });
+    }
+    // Present, nothing else said, and a range to say it about. The type field
+    // is four bits and the S bit is a fifth; a descriptor that addresses
+    // anything sets at least one of them, so this word is not a descriptor.
+    if attributes.is_present()
+        && attributes.bits() & !SegmentAttributes::PRESENT == 0
+        && seg.limit != 0
+    {
+        return Err(ArchStateError::SegmentPresentWithoutAttributes { index });
+    }
+    Ok(())
 }
 
 /// Read one segment register out of the processor.
@@ -1083,6 +1381,146 @@ mod tests {
         let mut returned = VcpuArchState::default();
         fresh.export_arch_state(&mut returned);
         assert_eq!(returned, original);
+    }
+
+    /// A state built from one segment, for the validity rules.
+    fn state_with_segment(seg: SegmentState) -> VcpuArchState {
+        let mut state = VcpuArchState::default();
+        state.segments[BxSegregs::Es as usize] = seg;
+        state
+    }
+
+    /// A segment that claims to be present and says nothing else about itself
+    /// is corruption, and is refused rather than loaded.
+    ///
+    /// No descriptor produces the word: the type field is four bits and the S
+    /// bit is a fifth, and a descriptor that addresses anything sets at least
+    /// one of them. A partial or mis-shifted read-back does produce it, and a
+    /// processor loaded with it holds a null data descriptor that faults
+    /// somewhere far away with nothing to point at.
+    #[test]
+    fn a_segment_that_is_present_and_nothing_else_is_refused() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+
+        let corrupt = state_with_segment(SegmentState {
+            selector: 0x0010,
+            base: 0,
+            limit: 0xFFFFF,
+            attributes: SegmentAttributes::from_bits(0x0080),
+        });
+        assert_eq!(
+            cpu.import_arch_groups(&corrupt, ArchGroups::SEGMENTS),
+            Err(ArchStateError::SegmentPresentWithoutAttributes {
+                index: BxSegregs::Es as usize
+            })
+        );
+    }
+
+    /// The rule refuses the corruption and nothing legitimate: a real-mode
+    /// data segment and a not-present one both load.
+    ///
+    /// A rule that refuses something a guest really produces is worse than no
+    /// rule, so both controls are asserted here rather than left to a boot.
+    #[test]
+    fn a_real_mode_data_segment_and_a_null_one_are_both_accepted() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+
+        // Present, type 3 (read/write data), S set — what a real-mode guest's
+        // DS looks like the moment the BIOS hands over.
+        let real_mode_data = state_with_segment(SegmentState {
+            selector: 0x0000,
+            base: 0,
+            limit: 0xFFFF,
+            attributes: SegmentAttributes::from_bits(0x0093),
+        });
+        assert_eq!(cpu.import_arch_groups(&real_mode_data, ArchGroups::SEGMENTS), Ok(()));
+
+        // Not present, no limit — what a segment reads back as after a null
+        // selector load, on every exit until the guest loads it again.
+        let null = state_with_segment(SegmentState {
+            selector: 0x0000,
+            base: 0,
+            limit: 0,
+            attributes: SegmentAttributes::from_bits(0),
+        });
+        assert_eq!(cpu.import_arch_groups(&null, ArchGroups::SEGMENTS), Ok(()));
+    }
+
+    /// A group left out of an import keeps whatever the processor already
+    /// held, and a group left out of an export keeps whatever the state
+    /// already held.
+    ///
+    /// The property the whole mask rests on: an engine that imports two groups
+    /// and writes two groups back cannot disturb the other seven, so the
+    /// values the guest left in them stay where they are.
+    #[test]
+    fn a_group_outside_the_mask_is_neither_read_nor_written() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+
+        let mut whole = VcpuArchState::default();
+        cpu.export_arch_state(&mut whole);
+
+        let mut asked = whole.clone();
+        asked.gprs[0] = 0xFEED_FACE;
+        asked.cr3 = 0x0000_5000;
+        asked.dr7 = 0x0000_0400;
+        cpu.import_arch_groups(&asked, ArchGroups::GPRS)
+            .expect("the segments in this state are the processor's own");
+
+        let mut after = VcpuArchState::default();
+        cpu.export_arch_state(&mut after);
+        assert_eq!(after.gprs[0], 0xFEED_FACE, "the group in the mask was imported");
+        assert_eq!(after.cr3, whole.cr3, "CR3 was not in the mask");
+        assert_eq!(after.dr7, whole.dr7, "DR7 was not in the mask");
+
+        // And the export side: a state's untouched fields survive a partial
+        // read-out, which is what lets an engine fill one state from two
+        // sources.
+        let mut partial = VcpuArchState::default();
+        partial.cr3 = 0xDEAD_0000;
+        cpu.export_arch_groups(&mut partial, ArchGroups::GPRS);
+        assert_eq!(partial.gprs[0], 0xFEED_FACE);
+        assert_eq!(partial.cr3, 0xDEAD_0000, "CONTROL_REGS were not asked for");
+    }
+
+    /// The decoder question the lazy vector import rests on.
+    ///
+    /// An instruction that touches the x87 or vector file must answer yes, one
+    /// that cannot must answer no, and bytes that decode to nothing must
+    /// answer yes — the file is imported rather than trusted.
+    #[test]
+    fn only_an_instruction_that_touches_the_vector_file_asks_for_it() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+
+        // out 0xE9, al — a port write, and the commonest exit there is.
+        assert!(!cpu.next_instruction_touches_vector_state(&[0xE6, 0xE9]));
+        // cpuid
+        assert!(!cpu.next_instruction_touches_vector_state(&[0x0F, 0xA2]));
+        // mov ax, [bx]
+        assert!(!cpu.next_instruction_touches_vector_state(&[0x8B, 0x07]));
+
+        // movdqa xmm0, [bx] — SSE state.
+        assert!(cpu.next_instruction_touches_vector_state(&[0x66, 0x0F, 0x6F, 0x07]));
+        // fld dword [bx] — x87 state.
+        assert!(cpu.next_instruction_touches_vector_state(&[0xD9, 0x07]));
+        // fxsave [bx] — moves the whole file, and asks for no vector state to
+        // do it, which is why the opcode is named rather than inferred.
+        assert!(cpu.next_instruction_touches_vector_state(&[0x0F, 0xAE, 0x07]));
+
+        // Nothing at all, and an instruction cut short of the bytes it needs:
+        // both import, because neither says anything about the vector file.
+        // Truncation is the ordinary case — a backend reports as much of the
+        // instruction as it saw.
+        assert!(cpu.next_instruction_touches_vector_state(&[]));
+        assert!(cpu.next_instruction_touches_vector_state(&[0x66, 0x0F, 0x6F]));
+
+        // `UD0` is not that case: the architecture defines it, it raises #UD,
+        // and the delivery touches nothing this group carries.
+        assert!(!cpu.next_instruction_touches_vector_state(&[0x0F, 0xFF]));
     }
 
     /// Importing a state that describes a 16-bit stack gives the processor a
