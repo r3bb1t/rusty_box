@@ -145,6 +145,7 @@ fn main() {
     push(q18_in_service_versus_trigger_mode(), Q18);
     push(q19_the_apic_page_write_path(), Q19);
     push(q20_a_software_disabled_apic_drops_a_vector(), Q20);
+    push(q21_the_interrupt_window_under_an_emulated_apic(), Q21);
 
     println!("== answers ==");
     for finding in &findings {
@@ -191,6 +192,116 @@ const Q19: &str = "P2  Does the APIC state page round-trip through the platform,
                    the ONLY write path — or are the named APIC registers writable too?";
 const Q20: &str = "P2b Does a software-disabled APIC DROP a requested vector, or latch it for\n    \
                    later delivery?";
+
+const Q21: &str = "P10 Does an armed deliverability notification ever produce an\n    \
+                   interrupt-window exit under an emulated local APIC — and does the\n    \
+                   answer depend on the APIC mode, the priority, or when it is armed?";
+
+/// One arming of the deliverability notification, and what came of it.
+///
+/// The guest spins with interrupts OFF for long enough that the notification is
+/// certainly in force, then enables them and spins forever. A working
+/// notification leaves the run with an interrupt-window exit at the `sti`; a
+/// notification that does nothing leaves the rescue as the only way out.
+///
+/// The `sti` matters more than it looks: this asks the platform to report a
+/// TRANSITION into interruptibility, which is the only thing the engine's
+/// legacy path could use. A guest that was interruptible all along would not
+/// distinguish "never fires" from "nothing to report".
+fn window_after_sti(apic: LocalApicMode, armed: u64) -> WhpResult<String> {
+    /// Long enough for a working notification to have fired many times over.
+    const RESCUE_AFTER: Duration = Duration::from_millis(400);
+
+    let mut configured = Ok(());
+    let mut guest = Guest::new(|config| {
+        if let Err(err) = config.local_apic(apic) {
+            configured = Err(err.to_string());
+        }
+        Ok(())
+    })?;
+    if let Err(why) = configured {
+        return Ok(format!("{apic:?}: the platform refused the mode ({why})"));
+    }
+    // cli                          FA
+    // mov ecx, 0x0010_0000         66 B9 00 00 10 00
+    // dec ecx                      66 49          <- the delay, with IF still 0
+    // jnz -4                       75 FC
+    // sti                          FB             <- the transition being measured
+    // jmp $                        EB FE
+    guest.load(&[
+        0xFA, 0x66, 0xB9, 0x00, 0x00, 0x10, 0x00, 0x66, 0x49, 0x75, 0xFC, 0xFB, 0xEB, 0xFE,
+    ])?;
+    // Every step below is reported rather than propagated: a mode that refuses
+    // the register is an ANSWER to this question, and a `?` here would throw
+    // away the three arms that had not run yet.
+    if let Err(err) = guest.vcpu.write_reg(Reg::DeliverabilityNotifications, armed) {
+        return Ok(format!("{apic:?} armed {armed:#06x} -> the platform REFUSED the write: {err}"));
+    }
+    let read_back = match guest.vcpu.read_reg(Reg::DeliverabilityNotifications) {
+        Ok(word) => word,
+        Err(err) => {
+            return Ok(format!("{apic:?} armed {armed:#06x} -> write took, read refused: {err}"))
+        }
+    };
+    let run = run_with_rescue(&mut guest, RESCUE_AFTER)?;
+    let window = matches!(run.exit.reason, ExitReason::InterruptWindow);
+    Ok(format!(
+        "{apic:?} armed {armed:#06x} read back {read_back:#06x} -> {} {}{}",
+        reason_name(&run.exit.reason),
+        if run.rescued { "(rescued)" } else { "(left on its own)" },
+        if window { "  ** WINDOW **" } else { "" },
+    ))
+}
+
+/// Whether the interrupt-window notification is usable at all under an
+/// emulated APIC, and if not, which variable kills it.
+///
+/// Four arms, chosen so a failure names its own cause rather than leaving one:
+/// `None` mode is the control that proves the guest and the arming are right,
+/// and the three emulated-mode arms vary only the priority field and the mode.
+/// QEMU arms this register in both APIC modes with no fallback path at all, so
+/// either it works and this port is arming it wrongly, or QEMU's own legacy
+/// path depends on something that does not hold here.
+fn q21_the_interrupt_window_under_an_emulated_apic() -> WhpResult<Finding> {
+    // Bit 1 is `InterruptNotification`; bits 5:2 are `InterruptPriority`.
+    const NOTIFY_ANY: u64 = 0b10;
+    const NOTIFY_PRIO_15: u64 = 0b10 | (15 << 2);
+
+    let mut detail = String::new();
+    let mut window_in_emulated_mode = false;
+    let mut window_in_none_mode = false;
+    for (apic, armed) in [
+        (LocalApicMode::None, NOTIFY_ANY),
+        (LocalApicMode::X2Apic, NOTIFY_ANY),
+        (LocalApicMode::X2Apic, NOTIFY_PRIO_15),
+        (LocalApicMode::XApic, NOTIFY_ANY),
+    ] {
+        let line = window_after_sti(apic, armed)?;
+        if line.contains("** WINDOW **") {
+            if apic == LocalApicMode::None {
+                window_in_none_mode = true;
+            } else {
+                window_in_emulated_mode = true;
+            }
+        }
+        detail.push_str(&line);
+        detail.push('\n');
+    }
+
+    let answer = match (window_in_none_mode, window_in_emulated_mode) {
+        (_, true) => "YES — the notification DOES fire under an emulated APIC; an engine that \
+                      saw none was arming it wrongly"
+            .to_string(),
+        (true, false) => "NO — it fires under `None` and never under an emulated APIC, on the \
+                          same guest with the same arming. The mode is the variable."
+            .to_string(),
+        (false, false) => "INCONCLUSIVE — no window exit in ANY mode, including the `None` \
+                           control, so this experiment measured the guest or the arming rather \
+                           than the platform"
+            .to_string(),
+    };
+    Ok(Finding { question: Q21, answer, detail })
+}
 
 // ---------------------------------------------------------------- fixtures
 
