@@ -2117,16 +2117,16 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         tracing::trace!("--- PIC State ---");
         tracing::trace!(
             "  master: IMR={:#04x} IRR={:#04x} ISR={:#04x} has_int={}",
-            self.device_manager.pic.master.imr,
-            self.device_manager.pic.master.irr,
-            self.device_manager.pic.master.isr,
-            self.device_manager.pic.has_interrupt()
+            self.device_manager.irq.pic().master.imr,
+            self.device_manager.irq.pic().master.irr,
+            self.device_manager.irq.pic().master.isr,
+            self.device_manager.irq.pic().has_interrupt()
         );
         tracing::trace!(
             "  slave:  IMR={:#04x} IRR={:#04x} ISR={:#04x}",
-            self.device_manager.pic.slave.imr,
-            self.device_manager.pic.slave.irr,
-            self.device_manager.pic.slave.isr
+            self.device_manager.irq.pic().slave.imr,
+            self.device_manager.irq.pic().slave.irr,
+            self.device_manager.irq.pic().slave.isr
         );
         // PIT state
         let pit_c0 = &self.device_manager.pit.counters[0];
@@ -2143,7 +2143,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             "  pit_fires={} irq0_latched={} iac_count={}",
             self.device_manager.pit.diag_fires,
             self.device_manager.pit.diag_irq0_latched,
-            self.device_manager.diag_iac_count
+            self.device_manager.irq.acknowledge_count()
         );
         tracing::trace!(
             "  lapic_timer_fires={} set_initial_count={} timer_masked={}",
