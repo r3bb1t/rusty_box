@@ -55,7 +55,7 @@ pub use caps::{
 };
 pub use partition::{
     Canceller, HostPages, InterceptCounter, InterceptCounters, InterruptRequester, LateProperty,
-    LocalApicMode, Partition, PartitionConfig, RuntimeCounters, PAGE_SIZE,
+    LocalApicMode, Partition, PartitionConfig, RuntimeCounters, Vcpu, VpCounters, PAGE_SIZE,
 };
 // The seam's three vocabularies — register shapes, errors, and the exits a
 // processor produces — under the names a caller of this crate uses them by.
@@ -78,15 +78,21 @@ pub use rusty_box_core::GpaPerms;
 /// A partition handle is a plain integer and the pages behind a mapping are
 /// owned, so a partition moves between threads by derivation rather than by
 /// promise (R6). The platform's own contract is that its calls are safe from
-/// any thread; what Rust adds is that only one place at a time holds the
-/// `&mut` needed to run a processor.
+/// any thread; what Rust adds is that a processor's own verbs are reachable
+/// only through the one [`Vcpu`] that names it.
 const _: () = {
     const fn assert_send<T: Send>() {}
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send::<Partition>();
     assert_send::<PartitionConfig>();
     assert_send::<HostPages>();
-    // The two values meant to cross threads while a processor runs.
+    // A processor MOVES to the thread that runs it. The other half of the
+    // property — that it cannot be SHARED with a second thread — is a
+    // `compile_fail` doctest on [`Vcpu`], because no positive bound can say
+    // that a type is not `Sync`.
+    assert_send::<Vcpu>();
+    // The three values meant to cross threads while a processor runs.
     assert_send_sync::<Canceller>();
     assert_send_sync::<InterruptRequester>();
+    assert_send_sync::<VpCounters>();
 };

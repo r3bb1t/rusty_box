@@ -8,15 +8,19 @@
 //!
 //! ## Scope
 //!
-//! Processors are addressed by index on [`Partition`] rather than handed out
-//! as owned `Vcpu` values. That is deliberate for this stage and not the final
-//! shape: an owned processor wants the partition behind an `Arc` so several
-//! can run at once, and how the guest-physical map is then shared depends on
-//! answers this crate's probe exists to obtain — how much a remap costs and
-//! how many mappings a partition tolerates. Choosing the sharing before
-//! measuring is what the probe is meant to prevent.
+//! A [`Partition`] owns the guest-physical map; a [`Vcpu`] owns one processor.
+//! [`Partition::take_vcpu`] hands a processor out once, and every verb that
+//! reads or writes that processor's state lives on the handle rather than on
+//! the partition. The platform requires a processor to be touched only from
+//! the thread inside its `WHvRunVirtualProcessor` — `WHV_E_INVALID_VP_STATE`
+//! is the error for the alternative — and a handle that is `Send` but not
+//! `Sync` is that rule stated as a type. What another thread may do to a
+//! running processor is then exactly the three copyable tokens
+//! [`Canceller`], [`InterruptRequester`] and [`VpCounters`].
 
 use crate::caps::{MsrExits, SyntheticFeatures};
+use core::cell::Cell;
+use core::marker::PhantomData;
 use rusty_box_core::GpaPerms;
 
 use crate::sys::{
@@ -314,7 +318,12 @@ impl PartitionConfig {
     /// count was set.
     pub fn setup(self) -> WhpResult<Partition> {
         sys::setup(self.handle.0)?;
-        Ok(Partition { handle: self.handle, regions: Vec::new(), processors: Vec::new() })
+        Ok(Partition {
+            handle: self.handle,
+            regions: Vec::new(),
+            processors: Vec::new(),
+            taken: Vec::new(),
+        })
     }
 }
 
@@ -463,6 +472,9 @@ pub struct Partition {
     handle: OwnedPartition,
     regions: Vec<Region>,
     processors: Vec<u32>,
+    /// The processors [`Partition::take_vcpu`] has already handed out, so that
+    /// each is handed out at most once and one processor never has two owners.
+    taken: Vec<u32>,
 }
 
 impl Drop for Partition {
@@ -636,19 +648,32 @@ impl Partition {
     /// A handle that can interrupt a running processor from another thread.
     ///
     /// The platform documents `WHvCancelRunVirtualProcessor` as callable from
-    /// a thread other than the one inside `WHvRunVirtualProcessor`, and this
-    /// is the only capability of this crate that crosses threads.
+    /// a thread other than the one inside `WHvRunVirtualProcessor`. It is one
+    /// of the three capabilities of this crate that cross threads, beside
+    /// [`InterruptRequester`] and [`VpCounters`] — and they are the whole set,
+    /// because a [`Vcpu`] itself is `!Sync` and cannot be shared.
     ///
     /// The returned value is owned rather than borrowed, so that it can be
-    /// moved into a thread while this partition is being run — which is the
-    /// whole point, and impossible for a borrow, since running takes `&mut`.
-    /// It is therefore the caller's job to keep the canceller's life inside
-    /// the partition's; `std::thread::scope` is how to say that. A canceller
+    /// moved into a thread while the processor it names is running on
+    /// another — which is the whole point, and impossible for a borrow, since
+    /// the [`Vcpu`] that runs has itself moved onto that thread. It is
+    /// therefore the caller's job to keep the canceller's life inside the
+    /// partition's; `std::thread::scope` is how to say that. A canceller
     /// outliving its partition names a handle the platform has reclaimed, and
     /// gets a refusal or, worse, a partition that was created since.
-    #[must_use]
-    pub fn canceller(&self, index: u32) -> Canceller {
-        Canceller { handle: self.handle.0, index }
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Contract`] for a processor this partition never
+    /// created — the same answer [`Partition::vp_counters`] gives, and for the
+    /// same reason: a capability naming a processor that does not exist is a
+    /// caller error the partition can detect from its own record, without
+    /// asking the platform.
+    pub fn canceller(&self, index: u32) -> WhpResult<Canceller> {
+        const CALL: &str = "Partition::canceller";
+        if !self.processors.contains(&index) {
+            return Err(WhpError::contract(CALL));
+        }
+        Ok(Canceller { handle: self.handle.0, index })
     }
 
     /// A handle that can deliver an interrupt through the emulated APIC from
@@ -656,7 +681,7 @@ impl Partition {
     ///
     /// Carries the same lifetime obligation as [`Partition::canceller`]. See
     /// [`InterruptRequester`] for why this capability has to exist separately
-    /// from [`Partition::inject`].
+    /// from [`Vcpu::inject`].
     #[must_use]
     pub fn interrupt_requester(&self) -> InterruptRequester {
         InterruptRequester { handle: self.handle.0 }
@@ -706,179 +731,45 @@ impl Partition {
         Ok(())
     }
 
-    /// Run a processor until it exits.
+    /// Hand out a processor, once.
+    ///
+    /// The returned [`Vcpu`] carries every verb that reads or writes that
+    /// processor's state; the partition keeps the map. Handing it out once is
+    /// what makes "one processor, one owner" a fact rather than a rule a caller
+    /// is asked to observe.
     ///
     /// # Errors
-    /// [`crate::WhpErrorKind::Platform`] if the run itself is refused; an
-    /// exit is a success, whatever its reason.
-    pub fn run(&mut self, index: u32) -> WhpResult<Exit> {
-        sys::run_vp(self.handle.0, index)
+    /// [`crate::WhpErrorKind::Contract`] if `index` names a processor
+    /// [`Partition::create_processor`] never brought into existence, or one
+    /// this partition has already handed out. Both are answered from the
+    /// partition's own record, without asking the platform, because the
+    /// partition is the authority on both.
+    pub fn take_vcpu(&mut self, index: u32) -> WhpResult<Vcpu> {
+        const CALL: &str = "Partition::take_vcpu";
+        if !self.processors.contains(&index) || self.taken.contains(&index) {
+            return Err(WhpError::contract(CALL));
+        }
+        self.taken.push(index);
+        Ok(Vcpu { handle: self.handle.0, index, one_thread: PhantomData })
     }
 
-    /// Ask a running processor to exit, from any thread.
+    /// A copyable token for a processor's two counter reads, usable from any
+    /// thread.
+    ///
+    /// The counters are the hypervisor's own accounting rather than processor
+    /// state, so reading them does not need the processor stopped and does not
+    /// need the handle that runs it — which is what lets a supervising thread
+    /// watch a guest that is running.
     ///
     /// # Errors
-    /// [`crate::WhpErrorKind::Platform`] if the platform refuses.
-    pub fn cancel_run(&self, index: u32) -> WhpResult<()> {
-        sys::cancel_vp(self.handle.0, index)
-    }
-
-    /// Read word-shaped registers.
-    ///
-    /// # Errors
-    /// [`crate::WhpErrorKind::Contract`] if the two slices disagree in
-    /// length, otherwise [`crate::WhpErrorKind::Platform`].
-    pub fn read_regs(&self, index: u32, regs: &[Reg], out: &mut [u64]) -> WhpResult<()> {
-        sys::get_words(self.handle.0, index, regs, out)
-    }
-
-    /// Read one word-shaped register.
-    ///
-    /// # Errors
-    /// As [`Partition::read_regs`].
-    pub fn read_reg(&self, index: u32, reg: Reg) -> WhpResult<u64> {
-        let mut out = [0u64; 1];
-        sys::get_words(self.handle.0, index, &[reg], &mut out)?;
-        Ok(out[0])
-    }
-
-    /// Write word-shaped registers.
-    ///
-    /// # Errors
-    /// As [`Partition::read_regs`].
-    pub fn write_regs(&self, index: u32, regs: &[Reg], words: &[u64]) -> WhpResult<()> {
-        sys::set_words(self.handle.0, index, regs, words)
-    }
-
-    /// Read a processor's whole extended-state area — the x87 and vector file
-    /// as the architecture's own XSAVE layout — answering how many bytes the
-    /// platform wrote.
-    ///
-    /// The one shape the platform offers that file in: its register names stop
-    /// at the XMM halves, so the YMM and ZMM state crosses here or not at all.
-    ///
-    /// # Errors
-    /// [`crate::WhpErrorKind::Platform`] if the platform refuses — a buffer
-    /// too small for the area is one such refusal.
-    pub fn read_xsave(&self, index: u32, out: &mut [u8]) -> WhpResult<usize> {
-        sys::get_xsave(self.handle.0, index, out)
-    }
-
-    /// Write a processor's whole extended-state area — the counterpart of
-    /// [`Partition::read_xsave`], taking the same layout back.
-    ///
-    /// # Errors
-    /// [`crate::WhpErrorKind::Platform`] if the platform refuses the area.
-    pub fn write_xsave(&self, index: u32, area: &[u8]) -> WhpResult<()> {
-        sys::set_xsave(self.handle.0, index, area)
-    }
-
-    /// Read registers of mixed shape — words, segments and descriptor tables —
-    /// in a single call.
-    ///
-    /// The whole architectural state of a processor is one transfer rather
-    /// than several. That matters because the cost of a transfer is the call
-    /// and not the registers in it, and a machine running a guest makes one per
-    /// slice: on a DLX boot, a hundred thousand of them. Each value arrives in
-    /// the shape its register names, decided here rather than by the caller.
-    ///
-    /// # Errors
-    /// As [`Partition::read_regs`], and a contract error if the slices
-    /// disagree in length or exceed one call's worth.
-    pub fn read_registers(
-        &self,
-        index: u32,
-        regs: &[Reg],
-        out: &mut [RegisterValue],
-    ) -> WhpResult<()> {
-        sys::get_registers(self.handle.0, index, regs, out)
-    }
-
-    /// Write registers of mixed shape in a single call. The counterpart of
-    /// [`Partition::read_registers`].
-    ///
-    /// # Errors
-    /// As [`Partition::read_registers`].
-    pub fn write_registers(
-        &self,
-        index: u32,
-        regs: &[Reg],
-        values: &[RegisterValue],
-    ) -> WhpResult<()> {
-        sys::set_registers(self.handle.0, index, regs, values)
-    }
-
-    /// Write one word-shaped register.
-    ///
-    /// # Errors
-    /// As [`Partition::read_regs`].
-    pub fn write_reg(&self, index: u32, reg: Reg, word: u64) -> WhpResult<()> {
-        sys::set_words(self.handle.0, index, &[reg], &[word])
-    }
-
-    /// Write segment registers.
-    ///
-    /// # Errors
-    /// As [`Partition::read_regs`].
-    pub fn write_segments(
-        &self,
-        index: u32,
-        regs: &[Reg],
-        segments: &[SegmentRegister],
-    ) -> WhpResult<()> {
-        sys::set_segments(self.handle.0, index, regs, segments)
-    }
-
-    /// Read segment registers.
-    ///
-    /// Separate from [`Partition::read_regs`] because the platform keeps a
-    /// segment in a different member of its value union: reading one as a word
-    /// yields its base and silently drops the limit, selector and attributes.
-    ///
-    /// # Errors
-    /// As [`Partition::read_regs`].
-    pub fn read_segments(
-        &self,
-        index: u32,
-        regs: &[Reg],
-        out: &mut [SegmentRegister],
-    ) -> WhpResult<()> {
-        sys::get_segments(self.handle.0, index, regs, out)
-    }
-
-    /// Read the descriptor-table registers, `GDTR` and `IDTR`.
-    ///
-    /// # Errors
-    /// As [`Partition::read_regs`].
-    pub fn read_tables(
-        &self,
-        index: u32,
-        regs: &[Reg],
-        out: &mut [TableRegister],
-    ) -> WhpResult<()> {
-        sys::get_tables(self.handle.0, index, regs, out)
-    }
-
-    /// Write the descriptor-table registers.
-    ///
-    /// # Errors
-    /// As [`Partition::read_regs`].
-    pub fn write_tables(
-        &self,
-        index: u32,
-        regs: &[Reg],
-        tables: &[TableRegister],
-    ) -> WhpResult<()> {
-        sys::set_tables(self.handle.0, index, regs, tables)
-    }
-
-    /// Hand a processor an interrupt, NMI or exception to take at its next
-    /// opportunity, bypassing any emulated APIC.
-    ///
-    /// # Errors
-    /// As [`Partition::read_regs`].
-    pub fn inject(&self, index: u32, event: PendingInterruption) -> WhpResult<()> {
-        self.write_reg(index, Reg::PendingInterruption, event.as_word())
+    /// [`crate::WhpErrorKind::Contract`] if `index` names a processor that was
+    /// never created.
+    pub fn vp_counters(&self, index: u32) -> WhpResult<VpCounters> {
+        const CALL: &str = "Partition::vp_counters";
+        if !self.processors.contains(&index) {
+            return Err(WhpError::contract(CALL));
+        }
+        Ok(VpCounters { handle: self.handle.0, index })
     }
 
     /// Hand the partition's emulated APIC an interrupt to arbitrate and
@@ -891,74 +782,6 @@ impl Partition {
     /// [`crate::WhpErrorKind::Platform`] if the platform refuses.
     pub fn request_interrupt(&self, request: InterruptRequest) -> WhpResult<()> {
         sys::request_interrupt(self.handle.0, request)
-    }
-
-    /// Why a processor is not executing.
-    ///
-    /// # Errors
-    /// As [`Partition::read_regs`].
-    pub fn internal_activity(&self, index: u32) -> WhpResult<InternalActivity> {
-        Ok(InternalActivity::from_word(
-            self.read_reg(index, Reg::InternalActivityState)?,
-        ))
-    }
-
-    /// Set a processor's activity state — clearing a halt suspend, for
-    /// instance.
-    ///
-    /// # Errors
-    /// As [`Partition::read_regs`].
-    pub fn set_internal_activity(
-        &self,
-        index: u32,
-        activity: InternalActivity,
-    ) -> WhpResult<()> {
-        self.write_reg(index, Reg::InternalActivityState, activity.as_word())
-    }
-
-    /// What the guest has been leaving the hardware for, counted by the
-    /// hypervisor rather than by this port.
-    ///
-    /// The count AND the time per class, so a class that is rare but slow is
-    /// distinguishable from one that is frequent and cheap — which no tally
-    /// this port keeps can tell apart. Being the platform's own accounting is
-    /// the point: a disagreement between it and an engine's census means one of
-    /// the two is measuring something other than what it claims.
-    ///
-    /// # Errors
-    /// [`crate::WhpErrorKind::Platform`] if the platform refuses,
-    /// [`crate::WhpErrorKind::Contract`] if it answers with fewer counters than
-    /// its own structure holds.
-    pub fn intercept_counters(&self, index: u32) -> WhpResult<InterceptCounters> {
-        const CALL: &str = "WHvGetVirtualProcessorCounters(Intercepts)";
-        let mut words = [0u64; InterceptCounters::WORDS];
-        let written =
-            sys::get_counters(self.handle.0, index, sys::CounterSet::Intercepts, &mut words)?;
-        InterceptCounters::from_words(&words[..filled_words(written, words.len())])
-            .ok_or(WhpError::contract(CALL))
-    }
-
-    /// How long a processor has run, and how much of that went to the
-    /// hypervisor rather than to the guest.
-    ///
-    /// # Errors
-    /// As [`Partition::intercept_counters`].
-    pub fn runtime_counters(&self, index: u32) -> WhpResult<RuntimeCounters> {
-        const CALL: &str = "WHvGetVirtualProcessorCounters(Runtime)";
-        let mut words = [0u64; RuntimeCounters::WORDS];
-        let written =
-            sys::get_counters(self.handle.0, index, sys::CounterSet::Runtime, &mut words)?;
-        RuntimeCounters::from_words(&words[..filled_words(written, words.len())])
-            .ok_or(WhpError::contract(CALL))
-    }
-
-    /// Translate a guest linear address through the guest's own paging.
-    ///
-    /// # Errors
-    /// [`crate::WhpErrorKind::Platform`] if the call itself is refused; a
-    /// failed translation is a success carrying a non-zero result code.
-    pub fn translate_gva(&self, index: u32, gva: u64) -> WhpResult<GvaTranslation> {
-        sys::translate_gva(self.handle.0, index, gva)
     }
 
     /// Set a single-word partition property after setup.
@@ -1010,8 +833,267 @@ impl Partition {
     pub fn resume_time(&self) -> WhpResult<()> {
         sys::resume_time(self.handle.0)
     }
+}
 
-    /// Read a processor's local-APIC state into `page`.
+/// One virtual processor of a partition, owned by the thread that runs it.
+///
+/// Not `Copy` and not `Sync`, on purpose: every verb that reads or writes a
+/// processor's state is here and nowhere else, so "only the vCPU thread
+/// touches VP state" — `WHV_E_INVALID_VP_STATE` is what the platform answers
+/// the alternative with — is a property of the type rather than a convention.
+/// A handle therefore MOVES into the thread that runs the processor and
+/// cannot be shared with a second one. What other threads may do to a running
+/// processor is exactly the three copyable tokens: [`Canceller`],
+/// [`InterruptRequester`] and [`VpCounters`].
+///
+/// # Lifetime obligation
+///
+/// A `Vcpu` must not outlive its [`Partition`], for the reason
+/// [`Partition::canceller`] gives: it names a handle the platform reclaims
+/// when the partition is deleted, and a verb issued after that is refused or,
+/// worse, reaches a partition created since. No borrow can say so — a handle
+/// moved into a thread outlives every borrow it could have carried — so an
+/// owner that moves one onto a thread discharges the obligation by JOINING that
+/// thread before the partition drops.
+///
+/// Nothing in this workspace moves one onto a thread today. The engine crate's
+/// `Started` holds its `Vcpu` and its `Partition` in that order, and a struct
+/// drops its fields in declaration order, so the handle dies before the
+/// partition it names without anyone having to remember. An owner that does
+/// hand a `Vcpu` to a thread takes the joining obligation on with it.
+///
+/// A processor moves to the thread that runs it:
+/// ```
+/// # use rusty_box_whp::{Exit, Vcpu, WhpResult};
+/// fn onto_the_vcpu_thread(vcpu: Vcpu) -> std::thread::JoinHandle<WhpResult<Exit>> {
+///     std::thread::spawn(move || vcpu.run())
+/// }
+/// ```
+///
+/// and cannot be shared with a second one:
+/// ```compile_fail
+/// # use rusty_box_whp::Vcpu;
+/// fn share(vcpu: &Vcpu) {
+///     std::thread::scope(|scope| {
+///         scope.spawn(|| vcpu.index());
+///     });
+/// }
+/// ```
+#[derive(Debug)]
+pub struct Vcpu {
+    handle: RawPartition,
+    index: u32,
+    /// `Cell<T>` is `Send` and not `Sync`, which is exactly the pair of
+    /// answers this handle needs, and a zero-sized marker is how a type
+    /// borrows them without borrowing the cell.
+    one_thread: PhantomData<Cell<()>>,
+}
+
+impl Vcpu {
+    /// Which processor of its partition this is.
+    #[must_use]
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// A handle that can interrupt this processor from another thread.
+    ///
+    /// Carries the lifetime obligation [`Partition::canceller`] states.
+    #[must_use]
+    pub const fn canceller(&self) -> Canceller {
+        Canceller { handle: self.handle, index: self.index }
+    }
+
+    /// A copyable token for this processor's counter reads, usable from any
+    /// thread while the processor runs.
+    #[must_use]
+    pub const fn counters(&self) -> VpCounters {
+        VpCounters { handle: self.handle, index: self.index }
+    }
+
+    /// Run the processor until it exits.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the run itself is refused; an
+    /// exit is a success, whatever its reason.
+    pub fn run(&self) -> WhpResult<Exit> {
+        sys::run_vp(self.handle, self.index)
+    }
+
+    /// Ask the processor to leave a run it is not currently in — a cancel the
+    /// owning thread issues for itself, which the platform makes sticky and
+    /// the next run then observes.
+    ///
+    /// [`Canceller`] is how ANOTHER thread ends a run in progress; this thread
+    /// cannot be both inside [`Vcpu::run`] and here.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the platform refuses.
+    pub fn cancel_run(&self) -> WhpResult<()> {
+        sys::cancel_vp(self.handle, self.index)
+    }
+
+    /// Read word-shaped registers.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Contract`] if the two slices disagree in
+    /// length, otherwise [`crate::WhpErrorKind::Platform`].
+    pub fn read_regs(&self, regs: &[Reg], out: &mut [u64]) -> WhpResult<()> {
+        sys::get_words(self.handle, self.index, regs, out)
+    }
+
+    /// Read one word-shaped register.
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_regs`].
+    pub fn read_reg(&self, reg: Reg) -> WhpResult<u64> {
+        let mut out = [0u64; 1];
+        sys::get_words(self.handle, self.index, &[reg], &mut out)?;
+        Ok(out[0])
+    }
+
+    /// Write word-shaped registers.
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_regs`].
+    pub fn write_regs(&self, regs: &[Reg], words: &[u64]) -> WhpResult<()> {
+        sys::set_words(self.handle, self.index, regs, words)
+    }
+
+    /// Write one word-shaped register.
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_regs`].
+    pub fn write_reg(&self, reg: Reg, word: u64) -> WhpResult<()> {
+        sys::set_words(self.handle, self.index, &[reg], &[word])
+    }
+
+    /// Read the processor's whole extended-state area — the x87 and vector
+    /// file as the architecture's own XSAVE layout — answering how many bytes
+    /// the platform wrote.
+    ///
+    /// The one shape the platform offers that file in: its register names stop
+    /// at the XMM halves, so the YMM and ZMM state crosses here or not at all.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the platform refuses — a buffer
+    /// too small for the area is one such refusal.
+    pub fn read_xsave(&self, out: &mut [u8]) -> WhpResult<usize> {
+        sys::get_xsave(self.handle, self.index, out)
+    }
+
+    /// Write the processor's whole extended-state area — the counterpart of
+    /// [`Vcpu::read_xsave`], taking the same layout back.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the platform refuses the area.
+    pub fn write_xsave(&self, area: &[u8]) -> WhpResult<()> {
+        sys::set_xsave(self.handle, self.index, area)
+    }
+
+    /// Read registers of mixed shape — words, segments and descriptor tables —
+    /// in a single call.
+    ///
+    /// The whole architectural state of a processor is one transfer rather
+    /// than several. That matters because the cost of a transfer is the call
+    /// and not the registers in it, and a machine running a guest makes one per
+    /// slice: on a DLX boot, a hundred thousand of them. Each value arrives in
+    /// the shape its register names, decided here rather than by the caller.
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_regs`], and a contract error if the slices disagree in
+    /// length or exceed one call's worth.
+    pub fn read_registers(&self, regs: &[Reg], out: &mut [RegisterValue]) -> WhpResult<()> {
+        sys::get_registers(self.handle, self.index, regs, out)
+    }
+
+    /// Write registers of mixed shape in a single call. The counterpart of
+    /// [`Vcpu::read_registers`].
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_registers`].
+    pub fn write_registers(&self, regs: &[Reg], values: &[RegisterValue]) -> WhpResult<()> {
+        sys::set_registers(self.handle, self.index, regs, values)
+    }
+
+    /// Read segment registers.
+    ///
+    /// Separate from [`Vcpu::read_regs`] because the platform keeps a segment
+    /// in a different member of its value union: reading one as a word yields
+    /// its base and silently drops the limit, selector and attributes.
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_regs`].
+    pub fn read_segments(&self, regs: &[Reg], out: &mut [SegmentRegister]) -> WhpResult<()> {
+        sys::get_segments(self.handle, self.index, regs, out)
+    }
+
+    /// Write segment registers.
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_regs`].
+    pub fn write_segments(
+        &self,
+        regs: &[Reg],
+        segments: &[SegmentRegister],
+    ) -> WhpResult<()> {
+        sys::set_segments(self.handle, self.index, regs, segments)
+    }
+
+    /// Read the descriptor-table registers, `GDTR` and `IDTR`.
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_regs`].
+    pub fn read_tables(&self, regs: &[Reg], out: &mut [TableRegister]) -> WhpResult<()> {
+        sys::get_tables(self.handle, self.index, regs, out)
+    }
+
+    /// Write the descriptor-table registers.
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_regs`].
+    pub fn write_tables(&self, regs: &[Reg], tables: &[TableRegister]) -> WhpResult<()> {
+        sys::set_tables(self.handle, self.index, regs, tables)
+    }
+
+    /// Hand the processor an interrupt, NMI or exception to take at its next
+    /// opportunity, bypassing any emulated APIC.
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_regs`].
+    pub fn inject(&self, event: PendingInterruption) -> WhpResult<()> {
+        self.write_reg(Reg::PendingInterruption, event.as_word())
+    }
+
+    /// Why the processor is not executing.
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_regs`].
+    pub fn internal_activity(&self) -> WhpResult<InternalActivity> {
+        Ok(InternalActivity::from_word(
+            self.read_reg(Reg::InternalActivityState)?,
+        ))
+    }
+
+    /// Set the processor's activity state — clearing a halt suspend, for
+    /// instance.
+    ///
+    /// # Errors
+    /// As [`Vcpu::read_regs`].
+    pub fn set_internal_activity(&self, activity: InternalActivity) -> WhpResult<()> {
+        self.write_reg(Reg::InternalActivityState, activity.as_word())
+    }
+
+    /// Translate a guest linear address through the guest's own paging.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the call itself is refused; a
+    /// failed translation is a success carrying a non-zero result code.
+    pub fn translate_gva(&self, gva: u64) -> WhpResult<GvaTranslation> {
+        sys::translate_gva(self.handle, self.index, gva)
+    }
+
+    /// Read the processor's local-APIC state into `page`.
     ///
     /// The whole model in one blob, which is the only shape the platform
     /// offers it in: an offloaded APIC has no register names in
@@ -1021,11 +1103,11 @@ impl Partition {
     /// # Errors
     /// [`crate::WhpErrorKind::Platform`] if the host refuses — which it does
     /// when the partition has no APIC to have state.
-    pub fn read_apic_state(&self, index: u32, page: &mut ApicStatePage) -> WhpResult<()> {
+    pub fn read_apic_state(&self, page: &mut ApicStatePage) -> WhpResult<()> {
         const CALL: &str = "WHvGetVirtualProcessorState(InterruptControllerState2)";
         let written = sys::get_vp_state(
-            self.handle.0,
-            index,
+            self.handle,
+            self.index,
             VpStateType::InterruptControllerState2,
             page.0.as_mut_slice(),
         )?;
@@ -1038,15 +1120,15 @@ impl Partition {
         Ok(())
     }
 
-    /// Write a processor's local-APIC state back — the counterpart of
-    /// [`Partition::read_apic_state`], taking the same page at the same size.
+    /// Write the processor's local-APIC state back — the counterpart of
+    /// [`Vcpu::read_apic_state`], taking the same page at the same size.
     ///
     /// # Errors
     /// [`crate::WhpErrorKind::Platform`] if the host refuses the page.
-    pub fn write_apic_state(&self, index: u32, page: &ApicStatePage) -> WhpResult<()> {
+    pub fn write_apic_state(&self, page: &ApicStatePage) -> WhpResult<()> {
         sys::set_vp_state(
-            self.handle.0,
-            index,
+            self.handle,
+            self.index,
             VpStateType::InterruptControllerState2,
             page.0.as_slice(),
         )
@@ -1054,19 +1136,19 @@ impl Partition {
 
     /// Read a 128-bit register — today, [`crate::Reg::PendingEvent`].
     ///
-    /// Separate from [`Partition::read_reg`] because the platform keeps the
-    /// whole sixteen bytes and a word read would return the low half and drop
-    /// the rest silently. Which registers those are is
-    /// [`crate::shape_of`]'s answer, not the caller's, so asking for a
-    /// word-shaped register here is refused rather than misread.
+    /// Separate from [`Vcpu::read_reg`] because the platform keeps the whole
+    /// sixteen bytes and a word read would return the low half and drop the
+    /// rest silently. Which registers those are is [`crate::shape_of`]'s
+    /// answer, not the caller's, so asking for a word-shaped register here is
+    /// refused rather than misread.
     ///
     /// # Errors
     /// [`crate::WhpErrorKind::Contract`] if `reg` is not 128 bits wide,
     /// otherwise [`crate::WhpErrorKind::Platform`].
-    pub fn read_words128(&self, index: u32, reg: Reg) -> WhpResult<[u64; 2]> {
+    pub fn read_words128(&self, reg: Reg) -> WhpResult<[u64; 2]> {
         const CALL: &str = "WHvGetVirtualProcessorRegisters(128-bit)";
         let mut out = [RegisterValue::Words128([0; 2])];
-        sys::get_registers(self.handle.0, index, &[reg], &mut out)?;
+        sys::get_registers(self.handle, self.index, &[reg], &mut out)?;
         match out[0] {
             RegisterValue::Words128(words) => Ok(words),
             RegisterValue::Word(_) | RegisterValue::Segment(_) | RegisterValue::Table(_) => {
@@ -1075,18 +1157,82 @@ impl Partition {
         }
     }
 
-    /// Write a 128-bit register — the counterpart of
-    /// [`Partition::read_words128`].
+    /// Write a 128-bit register — the counterpart of [`Vcpu::read_words128`].
     ///
     /// # Errors
     /// [`crate::WhpErrorKind::Contract`] if `reg` is not 128 bits wide,
     /// otherwise [`crate::WhpErrorKind::Platform`].
-    pub fn write_words128(&self, index: u32, reg: Reg, words: [u64; 2]) -> WhpResult<()> {
+    pub fn write_words128(&self, reg: Reg, words: [u64; 2]) -> WhpResult<()> {
         const CALL: &str = "WHvSetVirtualProcessorRegisters(128-bit)";
         if !reg.is_words128() {
             return Err(WhpError::contract(CALL));
         }
-        sys::set_registers(self.handle.0, index, &[reg], &[RegisterValue::Words128(words)])
+        sys::set_registers(
+            self.handle,
+            self.index,
+            &[reg],
+            &[RegisterValue::Words128(words)],
+        )
+    }
+}
+
+/// The hypervisor's own accounting for one processor, readable from any
+/// thread.
+///
+/// Copyable and `Sync` because neither read touches processor state: they ask
+/// the hypervisor what it has charged the processor, which is a question a
+/// supervising thread may ask while the guest is running — and the only
+/// question about a running processor that this crate answers off its own
+/// thread.
+///
+/// Carries the lifetime obligation [`Partition::canceller`] states.
+#[derive(Clone, Copy, Debug)]
+pub struct VpCounters {
+    handle: RawPartition,
+    index: u32,
+}
+
+impl VpCounters {
+    /// Which processor these count.
+    #[must_use]
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// What the guest has been leaving the hardware for, counted by the
+    /// hypervisor rather than by this port.
+    ///
+    /// The count AND the time per class, so a class that is rare but slow is
+    /// distinguishable from one that is frequent and cheap — which no tally
+    /// this port keeps can tell apart. Being the platform's own accounting is
+    /// the point: a disagreement between it and an engine's census means one of
+    /// the two is measuring something other than what it claims.
+    ///
+    /// # Errors
+    /// [`crate::WhpErrorKind::Platform`] if the platform refuses,
+    /// [`crate::WhpErrorKind::Contract`] if it answers with fewer counters than
+    /// its own structure holds.
+    pub fn intercept_counters(&self) -> WhpResult<InterceptCounters> {
+        const CALL: &str = "WHvGetVirtualProcessorCounters(Intercepts)";
+        let mut words = [0u64; InterceptCounters::WORDS];
+        let written =
+            sys::get_counters(self.handle, self.index, sys::CounterSet::Intercepts, &mut words)?;
+        InterceptCounters::from_words(&words[..filled_words(written, words.len())])
+            .ok_or(WhpError::contract(CALL))
+    }
+
+    /// How long the processor has run, and how much of that went to the
+    /// hypervisor rather than to the guest.
+    ///
+    /// # Errors
+    /// As [`VpCounters::intercept_counters`].
+    pub fn runtime_counters(&self) -> WhpResult<RuntimeCounters> {
+        const CALL: &str = "WHvGetVirtualProcessorCounters(Runtime)";
+        let mut words = [0u64; RuntimeCounters::WORDS];
+        let written =
+            sys::get_counters(self.handle, self.index, sys::CounterSet::Runtime, &mut words)?;
+        RuntimeCounters::from_words(&words[..filled_words(written, words.len())])
+            .ok_or(WhpError::contract(CALL))
     }
 }
 
@@ -1123,8 +1269,8 @@ impl Canceller {
 ///
 /// `WHvRequestInterrupt` addresses the partition rather than a stopped
 /// processor's registers, which is what makes it safe to call from another
-/// thread — unlike [`Partition::inject`], whose register write requires the
-/// processor to be stopped.
+/// thread — unlike [`Vcpu::inject`], whose register write requires the
+/// processor to be stopped, and so belongs to the thread that owns it.
 #[derive(Clone, Copy, Debug)]
 pub struct InterruptRequester {
     handle: RawPartition,
@@ -1204,13 +1350,25 @@ mod tests {
     #[cfg(test)]
     const GUEST_IP: u64 = 0x1000;
 
+    /// A partition and its one processor, the processor pointed at a single
+    /// `HLT`.
+    ///
+    /// Both halves, because the map lives on one and the register file on the
+    /// other and a measurement guest needs each.
+    #[cfg(test)]
+    #[derive(Debug)]
+    struct HaltingGuest {
+        vcpu: Vcpu,
+        partition: Partition,
+    }
+
     /// A partition holding one processor pointed at a single `HLT`.
     ///
     /// The smallest thing that proves a partition is live, and the memory is
     /// mapped because mapping is where the platform materialises the partition
     /// underneath — a fact the test below exists to record.
     #[cfg(test)]
-    fn halting_partition() -> WhpResult<Partition> {
+    fn a_halting_guest() -> WhpResult<HaltingGuest> {
         let mut config = PartitionConfig::new()?;
         config.processor_count(1)?.local_apic(LocalApicMode::None)?;
         let mut partition = config.setup()?;
@@ -1219,8 +1377,9 @@ mod tests {
         pages.bytes_mut()[GUEST_IP as usize] = 0xF4;
         partition.map(RESET_CS_BASE, pages, GpaPerms::RWX)?;
         partition.create_processor(0)?;
-        partition.write_reg(0, Reg::Rip, GUEST_IP)?;
-        Ok(partition)
+        let vcpu = partition.take_vcpu(0)?;
+        vcpu.write_reg(Reg::Rip, GUEST_IP)?;
+        Ok(HaltingGuest { vcpu, partition })
     }
 
     /// The turn a test takes before putting a partition on the hardware.
@@ -1244,6 +1403,23 @@ mod tests {
     #[cfg(test)]
     const EXIT_CEILING: usize = 64;
 
+    /// Put `code` where the processor is pointed, and point it there again.
+    ///
+    /// The map is the partition's and the entry point is the processor's, so
+    /// loading a guest needs both halves — which is the whole of why this is
+    /// a function rather than a method on either.
+    #[cfg(test)]
+    fn load_real_mode_code(
+        partition: &mut Partition,
+        vcpu: &Vcpu,
+        code: &[u8],
+    ) -> WhpResult<()> {
+        let start = GUEST_IP as usize;
+        let memory = partition.bytes_at_mut(RESET_CS_BASE).expect("the mapped guest page");
+        memory[start..start + code.len()].copy_from_slice(code);
+        vcpu.write_reg(Reg::Rip, GUEST_IP)
+    }
+
     /// Put `code` where the processor is pointed and run until the guest halts.
     ///
     /// Port accesses are stepped over rather than serviced: no device is behind
@@ -1252,18 +1428,15 @@ mod tests {
     /// an I/O exit, so advancing it by the exit's instruction length is what
     /// lets the guest continue.
     #[cfg(test)]
-    fn run_until_halt_with(partition: &mut Partition, code: &[u8]) -> WhpResult<()> {
-        let start = GUEST_IP as usize;
-        let memory = partition.bytes_at_mut(RESET_CS_BASE).expect("the mapped guest page");
-        memory[start..start + code.len()].copy_from_slice(code);
-        partition.write_reg(0, Reg::Rip, GUEST_IP)?;
+    fn run_until_halt_with(guest: &mut HaltingGuest, code: &[u8]) -> WhpResult<()> {
+        load_real_mode_code(&mut guest.partition, &guest.vcpu, code)?;
 
         for _ in 0..EXIT_CEILING {
-            let exit = partition.run(0)?;
+            let exit = guest.vcpu.run()?;
             match exit.reason {
                 crate::ExitReason::Halt => return Ok(()),
                 crate::ExitReason::IoPortAccess(_) => {
-                    partition.write_reg(0, Reg::Rip, exit.rip_after_instruction())?;
+                    guest.vcpu.write_reg(Reg::Rip, exit.rip_after_instruction())?;
                 }
                 other => panic!("the measurement guest took an unexpected exit: {other:?}"),
             }
@@ -1310,14 +1483,15 @@ mod tests {
             return;
         }
         let _turn = a_turn_on_the_hardware();
-        let mut partition = halting_partition().expect("a partition");
+        let guest = a_halting_guest().expect("a partition");
+        let partition = &guest.partition;
 
         assert_eq!(
             partition.reference_time_100ns().expect("the reference clock is readable"),
             0,
             "a partition whose processor has never run has accumulated no time"
         );
-        let exit = partition.run(0).expect("the guest runs");
+        let exit = guest.vcpu.run().expect("the guest runs");
         assert!(matches!(exit.reason, crate::ExitReason::Halt), "{:?}", exit.reason);
 
         let started = partition.reference_time_100ns().expect("readable after the run");
@@ -1405,19 +1579,20 @@ mod tests {
             return;
         }
         let _turn = a_turn_on_the_hardware();
-        let partition = halting_partition().expect("a partition");
+        let guest = a_halting_guest().expect("a partition");
         assert_eq!(
-            partition.read_words128(0, Reg::PendingEvent).expect("the slot is readable"),
+            guest.vcpu.read_words128(Reg::PendingEvent).expect("the slot is readable"),
             [0; 2],
             "a processor that has never run holds no pending event"
         );
 
         let event = crate::PendingExtIntEvent { vector: 0x20 };
-        partition
-            .write_words128(0, Reg::PendingEvent, event.as_words())
+        guest
+            .vcpu
+            .write_words128(Reg::PendingEvent, event.as_words())
             .expect("the platform accepts an ExtINT in the pending-event slot");
         let read_back =
-            partition.read_words128(0, Reg::PendingEvent).expect("readable after the write");
+            guest.vcpu.read_words128(Reg::PendingEvent).expect("readable after the write");
         assert_eq!(
             crate::PendingExtIntEvent::from_words(read_back),
             Some(event),
@@ -1426,8 +1601,9 @@ mod tests {
 
         // A word-shaped verb must refuse the register rather than truncate it.
         assert_eq!(
-            partition
-                .write_words128(0, Reg::Rax, [0; 2])
+            guest
+                .vcpu
+                .write_words128(Reg::Rax, [0; 2])
                 .expect_err("RAX is not 128 bits wide")
                 .kind(),
             crate::WhpErrorKind::Contract,
@@ -1461,9 +1637,9 @@ mod tests {
             .expect("an x2APIC");
         let mut partition = config.setup().expect("setup");
         partition.create_processor(0).expect("a processor");
+        let vcpu = partition.take_vcpu(0).expect("the processor");
         let mut page = ApicStatePage::zeroed();
-        partition
-            .read_apic_state(0, &mut page)
+        vcpu.read_apic_state(&mut page)
             .expect("a fresh processor's APIC page is readable");
 
         let version = page.register(crate::ApicRegister::Version);
@@ -1511,11 +1687,10 @@ mod tests {
         // offloaded APIC reports is the host's to choose.
         println!("P2: hypervisor LAPIC version register = {version:#x}");
 
-        partition
-            .write_apic_state(0, &page)
+        vcpu.write_apic_state(&page)
             .expect("the same page is accepted back at its exact size");
         let mut back = ApicStatePage::zeroed();
-        partition.read_apic_state(0, &mut back).expect("readable again");
+        vcpu.read_apic_state(&mut back).expect("readable again");
         assert_eq!(
             page.0[..1024],
             back.0[..1024],
@@ -1556,6 +1731,7 @@ mod tests {
         let pages = HostPages::new(1).expect("one page");
         partition.map(RESET_CS_BASE, pages, GpaPerms::RWX).expect("a mapped page");
         partition.create_processor(0).expect("a processor");
+        let vcpu = partition.take_vcpu(0).expect("the processor");
 
         // An APIC resets software-disabled — SVR is 0xFF, with the enable bit 8
         // clear — and a disabled APIC drops a fixed vector instead of latching
@@ -1564,9 +1740,9 @@ mod tests {
         // the vector, while an NMI still arrives. So the page has to be written
         // back software-enabled before the request has anywhere to land.
         let mut page = ApicStatePage::zeroed();
-        partition.read_apic_state(0, &mut page).expect("the APIC page is readable");
+        vcpu.read_apic_state(&mut page).expect("the APIC page is readable");
         page.set_register(crate::ApicRegister::Spurious, 0x1FF);
-        partition.write_apic_state(0, &page).expect("the APIC accepts being enabled");
+        vcpu.write_apic_state(&page).expect("the APIC accepts being enabled");
 
         const VECTOR: u32 = 0x41;
         partition
@@ -1579,7 +1755,7 @@ mod tests {
             })
             .expect("the emulated APIC accepts a fixed vector for processor 0");
 
-        partition.read_apic_state(0, &mut page).expect("the APIC page is readable again");
+        vcpu.read_apic_state(&mut page).expect("the APIC page is readable again");
 
         // The processor has never run, so nothing has moved the vector out of
         // the request bitmap and into the in-service one.
@@ -1627,8 +1803,8 @@ mod tests {
             return;
         }
         let _turn = a_turn_on_the_hardware();
-        let first = halting_partition().expect("the first partition");
-        let refused = halting_partition().expect_err("a second live partition");
+        let first = a_halting_guest().expect("the first partition");
+        let refused = a_halting_guest().expect_err("a second live partition");
         assert_eq!(
             refused.kind(),
             crate::WhpErrorKind::Platform,
@@ -1639,8 +1815,8 @@ mod tests {
         // Dropping the first releases the name, so partitions are serially
         // reusable within one process even though they do not coexist.
         drop(first);
-        let mut again = halting_partition().expect("a partition after the first is gone");
-        let exit = again.run(0).expect("the guest runs");
+        let again = a_halting_guest().expect("a partition after the first is gone");
+        let exit = again.vcpu.run().expect("the guest runs");
         assert!(
             matches!(exit.reason, crate::ExitReason::Halt),
             "the guest must reach its HLT, not {:?}",
@@ -1665,10 +1841,10 @@ mod tests {
             return;
         }
         let _turn = a_turn_on_the_hardware();
-        let partition = halting_partition().expect("a partition");
+        let guest = a_halting_guest().expect("a partition");
 
         let mut area = [0u8; 4096];
-        let written = partition.read_xsave(0, &mut area).expect("the area reads");
+        let written = guest.vcpu.read_xsave(&mut area).expect("the area reads");
         assert!(
             written >= 576,
             "an XSAVE area is at least the legacy region plus its header, got {written}"
@@ -1683,7 +1859,7 @@ mod tests {
         );
 
         // Identical put-back first: the exchange's common case.
-        partition.write_xsave(0, &area[..written]).expect("the unchanged area writes");
+        guest.vcpu.write_xsave(&area[..written]).expect("the unchanged area writes");
 
         // Now the patch: XMM0's sixteen legacy bytes, with the SSE component
         // marked live so the platform treats them as state rather than init.
@@ -1693,10 +1869,10 @@ mod tests {
         area[XMM0..XMM0 + 16].copy_from_slice(&pattern);
         let marked = (xstate_bv | SSE_LIVE).to_le_bytes();
         area[512..520].copy_from_slice(&marked);
-        partition.write_xsave(0, &area[..written]).expect("the patched area writes");
+        guest.vcpu.write_xsave(&area[..written]).expect("the patched area writes");
 
         let mut back = [0u8; 4096];
-        let again = partition.read_xsave(0, &mut back).expect("the area reads back");
+        let again = guest.vcpu.read_xsave(&mut back).expect("the area reads back");
         assert!(again >= 576);
         assert_eq!(
             back[XMM0..XMM0 + 16],
@@ -1733,18 +1909,19 @@ mod tests {
             return;
         }
         let _turn = a_turn_on_the_hardware();
-        let mut partition = halting_partition().expect("a partition");
+        let mut guest = a_halting_guest().expect("a partition");
+        let counters = guest.vcpu.counters();
 
-        let before = partition
-            .intercept_counters(0)
+        let before = counters
+            .intercept_counters()
             .expect("a created processor reports its counters");
 
         // out 0xE9, al ; out 0xE9, al ; out 0xE9, al ; hlt
-        run_until_halt_with(&mut partition, &[0xE6, 0xE9, 0xE6, 0xE9, 0xE6, 0xE9, 0xF4])
+        run_until_halt_with(&mut guest, &[0xE6, 0xE9, 0xE6, 0xE9, 0xE6, 0xE9, 0xF4])
             .expect("the guest runs");
 
-        let after = partition
-            .intercept_counters(0)
+        let after = counters
+            .intercept_counters()
             .expect("a processor that has run reports its counters");
 
         assert_eq!(
@@ -1792,10 +1969,15 @@ mod tests {
             return;
         }
         let _turn = a_turn_on_the_hardware();
-        let mut partition = halting_partition().expect("a partition");
-        run_until_halt_with(&mut partition, &[0xE6, 0xE9, 0xF4]).expect("the guest runs");
+        let mut guest = a_halting_guest().expect("a partition");
+        run_until_halt_with(&mut guest, &[0xE6, 0xE9, 0xF4]).expect("the guest runs");
 
-        let runtime = partition.runtime_counters(0).expect("a processor that has run");
+        let runtime = guest
+            .partition
+            .vp_counters(0)
+            .expect("processor 0 exists")
+            .runtime_counters()
+            .expect("a processor that has run");
         assert!(
             runtime.total_100ns > 0,
             "a processor that executed instructions has spent time: {runtime:?}"
@@ -1863,12 +2045,73 @@ mod tests {
         pages.bytes_mut()[GUEST_IP as usize] = 0xF4;
         partition.map(RESET_CS_BASE, pages, GpaPerms::RWX).expect("the guest map");
         partition.create_processor(0).expect("the processor");
-        partition.write_reg(0, Reg::Rip, GUEST_IP).expect("the entry point");
-        let exit = partition.run(0).expect("the guest runs");
+        let vcpu = partition.take_vcpu(0).expect("the processor is handed out");
+        vcpu.write_reg(Reg::Rip, GUEST_IP).expect("the entry point");
+        let exit = vcpu.run().expect("the guest runs");
         assert!(
             matches!(exit.reason, crate::ExitReason::Halt),
             "the guest must reach its HLT under the widened feature set, not {:?}",
             exit.reason
+        );
+    }
+
+    /// A processor runs from a thread that is not the one holding the
+    /// partition, and is handed out exactly once.
+    ///
+    /// The guest-visible property the split exists for (R9): the map stays
+    /// reachable here while the guest executes elsewhere, which is what a VMM
+    /// shape needs and what a partition-shaped `run` cannot offer. The refusals
+    /// are the other half — a second handle to one processor is what
+    /// `WHV_E_INVALID_VP_STATE` exists to punish, and a handle to a processor
+    /// that was never created names nothing at all.
+    #[test]
+    fn a_vcpu_runs_on_another_thread_while_the_partition_is_held_here() {
+        if !crate::hypervisor_present().unwrap_or(false) {
+            eprintln!("skipped: this host has no Windows Hypervisor Platform");
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let HaltingGuest { vcpu, mut partition } = a_halting_guest().expect("a partition");
+        load_real_mode_code(&mut partition, &vcpu, &[0xF4]).expect("hlt at the entry point");
+
+        let ran = std::thread::spawn(move || vcpu.run())
+            .join()
+            .expect("the vCPU thread finished")
+            .expect("the guest ran");
+        assert!(
+            matches!(ran.reason, crate::ExitReason::Halt),
+            "the guest halted on the other thread: {ran:?}"
+        );
+        assert_eq!(
+            partition.mapped_regions(),
+            1,
+            "the partition was usable here throughout"
+        );
+        assert_eq!(
+            partition.take_vcpu(0).expect_err("a processor is handed out once").kind(),
+            crate::WhpErrorKind::Contract,
+            "a second handle to one processor is refused by this crate, not by the platform"
+        );
+        assert_eq!(
+            partition.take_vcpu(1).expect_err("processor 1 was never created").kind(),
+            crate::WhpErrorKind::Contract,
+            "a handle to a processor that does not exist is refused before the platform \
+             is asked"
+        );
+        // The two cross-thread capabilities the partition hands out answer the
+        // same way, so a caller cannot name a processor that does not exist by
+        // going around `take_vcpu`.
+        assert_eq!(
+            partition.canceller(1).expect_err("processor 1 was never created").kind(),
+            crate::WhpErrorKind::Contract,
+        );
+        assert_eq!(
+            partition.vp_counters(1).expect_err("processor 1 was never created").kind(),
+            crate::WhpErrorKind::Contract,
+        );
+        assert!(
+            partition.canceller(0).is_ok(),
+            "a created processor still yields a canceller after its handle is taken"
         );
     }
 

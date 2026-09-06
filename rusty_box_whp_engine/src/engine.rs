@@ -23,14 +23,13 @@ use core::time::Duration;
 
 use rusty_box_whp::{
     Exit, ExitReason, ExtendedVmExits, InterceptCounters, InterruptionType, LocalApicMode,
-    MsrExits, Partition, PartitionConfig, PendingInterruption, Reg, RuntimeCounters, VpContext,
-    WhpError,
+    MsrExits, Partition, PartitionConfig, PendingInterruption, Reg, RuntimeCounters, Vcpu,
+    VpContext, WhpError,
 };
 
 use super::alarm::Alarm;
 use super::state::{self, VpRegisters};
 use super::xsave::{self, XsaveArea};
-use super::Vp;
 use rusty_box::cpu::arch_state::VcpuArchState;
 use rusty_box::cpu::{
     cpu::{BxCpuC, CpuActivityState},
@@ -469,13 +468,18 @@ impl InterruptStateWord {
 
 /// A partition that has been configured, given memory and given a processor.
 ///
-/// FIELD ORDER IS LOad-BEARING: `alarm` is declared before `partition` because
-/// Rust drops fields in declaration order, and the alarm's thread holds a
-/// canceller naming this partition. Joining that thread before the partition
-/// is destroyed is the whole of the ordering obligation, and this is where it
-/// is discharged.
+/// FIELD ORDER IS LOad-BEARING: `alarm` and `vcpu` are declared before
+/// `partition` because Rust drops fields in declaration order, and both name
+/// this partition's handle — the alarm's thread through a canceller, the
+/// processor through its own. Joining that thread and releasing both handles
+/// before the partition is destroyed is the whole of the ordering obligation,
+/// and this is where it is discharged.
 struct Started {
     alarm: Alarm,
+    /// The processor, taken from the partition once and held here for the life
+    /// of the engine. Every register this engine reads or writes goes through
+    /// it; the partition beside it answers only for the map and the clock.
+    vcpu: Vcpu,
     partition: Partition,
     /// Reused across slices so a state exchange allocates nothing per exit.
     state: VcpuArchState,
@@ -821,9 +825,10 @@ impl WhpEngine {
         let started = self.started.as_ref().ok_or(CpuError::UnsupportedCpuOperation {
             operation: "the partition did not start",
         })?;
+        let counters = started.vcpu.counters();
         Ok(PlatformCounters {
-            intercepts: started.partition.intercept_counters(BOOT_VP).map_err(platform_failed)?,
-            runtime: started.partition.runtime_counters(BOOT_VP).map_err(platform_failed)?,
+            intercepts: counters.intercept_counters().map_err(platform_failed)?,
+            runtime: counters.runtime_counters().map_err(platform_failed)?,
         })
     }
 }
@@ -907,22 +912,20 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
             let installed = install_the_machines_map(&mut partition, io.memory(), None)
                 .map_err(CpuError::EngineFault)?;
             partition.create_processor(BOOT_VP).map_err(platform_failed)?;
+            let vcpu = partition.take_vcpu(BOOT_VP).map_err(platform_failed)?;
 
             // The fresh processor's own area, read once here so every later
             // exchange patches the platform's bytes rather than inventing
             // them — the components this port does not model cross untouched
             // that way. A host that refuses the read cannot keep the two
             // register files agreed, so it refuses the engine.
-            let xsave = XsaveArea::read_from(
-                &partition,
-                BOOT_VP,
-                xsave::HostComponents::of_this_host(),
-            )
-            .map_err(platform_failed)?;
+            let xsave = XsaveArea::read_from(&vcpu, xsave::HostComponents::of_this_host())
+                .map_err(platform_failed)?;
 
-            let alarm = Alarm::watching(partition.canceller(BOOT_VP));
+            let alarm = Alarm::watching(vcpu.canceller());
             *started = Some(Started {
                 alarm,
+                vcpu,
                 partition,
                 state: VcpuArchState::default(),
                 installed,
@@ -1568,7 +1571,8 @@ fn install_the_shadow<T: Instrumentation>(
     // considered here instead of silently ignored.
     let Started {
         alarm: _,
-        partition,
+        vcpu,
+        partition: _,
         state,
         installed: _,
         shadowed,
@@ -1626,7 +1630,7 @@ fn install_the_shadow<T: Instrumentation>(
             return Ok(());
         }
     }
-    impose_the_shadow(partition, state, xsave, held.as_ref(), held_interrupt_state, shadow)?;
+    impose_the_shadow(vcpu, state, xsave, held.as_ref(), held_interrupt_state, shadow)?;
     *held = Some(state.clone());
     Ok(())
 }
@@ -1669,24 +1673,23 @@ fn install_the_shadow<T: Instrumentation>(
 /// `inhibit_mask = 0`) — `a_single_step_trap_survives_the_imposed_inhibit`
 /// holds the stepped traces of the two engines equal across an errand.
 fn impose_the_shadow(
-    partition: &Partition,
+    vcpu: &Vcpu,
     state: &VcpuArchState,
     xsave: &mut XsaveArea,
     previous: Option<&VcpuArchState>,
     held_interrupt_state: &mut InterruptStateWord,
     shadow: bool,
 ) -> Result<()> {
-    let vp = Vp::new(partition, BOOT_VP);
-    state::import(&vp, state).map_err(|error| refused_state(error, state))?;
+    state::import(vcpu, state).map_err(|error| refused_state(error, state))?;
     let next = InterruptStateWord { shadow, nmi_masked: held_interrupt_state.nmi_masked };
     if next != *held_interrupt_state {
-        vp.write_words(&[Reg::InterruptState], &[next.encode()])
+        vcpu.write_words(&[Reg::InterruptState], &[next.encode()])
             .map_err(platform_failed)?;
         *held_interrupt_state = next;
     }
     if previous.is_none_or(|held| xsave::vector_file_differs(state, held)) {
         xsave.patch(state).map_err(uncarried)?;
-        xsave.write_to(partition, BOOT_VP).map_err(platform_failed)?;
+        xsave.write_to(vcpu).map_err(platform_failed)?;
     }
     Ok(())
 }
@@ -1721,7 +1724,8 @@ fn read_back_into_the_shadow<T: Instrumentation>(
 ) -> Result<()> {
     let Started {
         alarm: _,
-        partition,
+        vcpu,
+        partition: _,
         state,
         installed: _,
         shadowed,
@@ -1733,13 +1737,12 @@ fn read_back_into_the_shadow<T: Instrumentation>(
         // What the last exit header said; a state exchange does not change it.
         inject: _,
     } = started;
-    let vp = Vp::new(partition, BOOT_VP);
-    state::export(&vp, state).map_err(platform_failed)?;
+    state::export(vcpu, state).map_err(platform_failed)?;
     // The x87 and vector file arrives beside the named registers, so the
     // shadow starts from everything the hardware left behind — not just what
     // has a register name. A stretch of guest code that lands here mid
     // string routine reads the very bytes the hardware was holding.
-    xsave.refresh_from(partition, BOOT_VP).map_err(platform_failed)?;
+    xsave.refresh_from(vcpu).map_err(platform_failed)?;
     xsave.fill(state);
     // The one moment the two are known to agree, because the shadow was just
     // copied from the processor.
@@ -1749,7 +1752,7 @@ fn read_back_into_the_shadow<T: Instrumentation>(
     // the interrupt shadow is a property of where the guest stopped, and the
     // only place it exists is the partition.
     let mut interrupt_state = [0u64; 1];
-    vp.read_words(&[rusty_box_whp::Reg::InterruptState], &mut interrupt_state)
+    vcpu.read_words(&[rusty_box_whp::Reg::InterruptState], &mut interrupt_state)
         .map_err(platform_failed)?;
     let word = InterruptStateWord::decode(interrupt_state[0]);
     *held_interrupt_state = word;
@@ -1931,7 +1934,7 @@ fn run_the_exit_loop<T: Instrumentation>(
         // servicing an exit, which is time the budget never bought.
         started.alarm.arm(std::time::Instant::now() + left);
         let entered = std::time::Instant::now();
-        let exit = started.partition.run(BOOT_VP);
+        let exit = started.vcpu.run();
         *ran += entered.elapsed();
         // Recorded before the result is examined: a run the platform refused
         // may still have retired guest instructions first, and the shadow
@@ -2326,7 +2329,8 @@ fn stage_injection<T: Instrumentation>(
                 started.inject.if_flag
             );
             let word = INTERRUPT_NOTIFICATION | (u64::from(ANY_PRIORITY & 0xF) << 2);
-            Vp::new(&started.partition, BOOT_VP)
+            started
+                .vcpu
                 .write_words(&[Reg::DeliverabilityNotifications], &[word])
                 .map_err(platform_failed)?;
             census.windows_armed += 1;
@@ -2343,15 +2347,12 @@ fn stage_injection<T: Instrumentation>(
         return Ok(Staged::Nothing);
     };
     started
-        .partition
-        .inject(
-            BOOT_VP,
-            PendingInterruption {
-                kind: InterruptionType::Interrupt,
-                vector: u16::from(vector),
-                error_code: None,
-            },
-        )
+        .vcpu
+        .inject(PendingInterruption {
+            kind: InterruptionType::Interrupt,
+            vector: u16::from(vector),
+            error_code: None,
+        })
         .map_err(platform_failed)?;
     // The platform holds a delivery now. The next exit's header will say so
     // itself; until one arrives, this is the record.
@@ -2588,7 +2589,7 @@ fn report_the_fault<T: Instrumentation>(
     for (what, linear, len) in
         [("before", before, 0x60u64), ("code", code, 16u64), ("stack", stack, 24u64)]
     {
-        match started.partition.translate_gva(BOOT_VP, linear) {
+        match started.vcpu.translate_gva(linear) {
             Ok(translation) if translation.result_code == 0 => {
                 // Straight out of the allocation at the guest-physical
                 // address: RAM below the PCI hole is identity-mapped, which
@@ -2763,7 +2764,8 @@ fn impose_after_errand<T: Instrumentation>(
 
     let Started {
         alarm: _,
-        partition,
+        vcpu,
+        partition: _,
         state,
         installed: _,
         shadowed,
@@ -2778,7 +2780,7 @@ fn impose_after_errand<T: Instrumentation>(
         inject: _,
     } = started;
     cpu.export_arch_state(state);
-    impose_the_shadow(partition, state, xsave, held.as_ref(), held_interrupt_state, shadow)?;
+    impose_the_shadow(vcpu, state, xsave, held.as_ref(), held_interrupt_state, shadow)?;
     *held = Some(state.clone());
     // The partition's shadow bit is `shadow` from here, and this is the
     // record of that bit: the same value a read-back would read, kept
@@ -2833,12 +2835,11 @@ fn service_port_access(
         (access.rax & !mask) | (u64::from(value) & mask)
     };
 
-    let vp = Vp::new(&started.partition, BOOT_VP);
     // Unlike a memory exit, a port exit DOES report its instruction length and
     // does not advance RIP itself, so finishing it is arithmetic rather than a
     // decode (probe finding 2).
     let resume = exit.vp.rip + u64::from(exit.vp.instruction_length);
-    vp.write_words(
+    started.vcpu.write_words(
         &[rusty_box_whp::Reg::Rip, rusty_box_whp::Reg::Rax],
         &[resume, rax],
     )

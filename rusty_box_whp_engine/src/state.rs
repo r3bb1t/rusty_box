@@ -13,7 +13,7 @@
 //! exchange. This module's export leaves those fields of the state exactly as
 //! they were, which is what lets that area fill them afterwards.
 
-use rusty_box_whp::{Reg, RegisterValue, SegmentRegister, TableRegister, WhpResult};
+use rusty_box_whp::{Reg, RegisterValue, SegmentRegister, TableRegister, Vcpu, WhpResult};
 #[cfg(test)]
 use rusty_box_whp::ALL_REGS;
 
@@ -133,8 +133,13 @@ const IDTR_SLOT: usize = 1;
 /// What a state exchange talks to.
 ///
 /// A trait so the exchange can be tested against a processor that records what
-/// it was told rather than one that needs a hypervisor. Implemented for
-/// `Partition`, whose methods these are.
+/// it was told rather than one that needs a hypervisor. The processor a
+/// running engine exchanges with is [`Vcpu`], whose verbs these are; the
+/// recorder in this module's tests is the other implementation.
+///
+/// Everything a slice moves in or out of a processor goes through here, the
+/// vector file included — one seam for the hazard rather than two (R5), so a
+/// caller holding a processor needs no second way to reach it.
 pub(crate) trait VpRegisters {
     fn read_words(&self, regs: &[Reg], out: &mut [u64]) -> WhpResult<()>;
     fn write_words(&self, regs: &[Reg], words: &[u64]) -> WhpResult<()>;
@@ -144,6 +149,42 @@ pub(crate) trait VpRegisters {
     /// processor is exchanged whole or not at all.
     fn read_registers(&self, regs: &[Reg], out: &mut [RegisterValue]) -> WhpResult<()>;
     fn write_registers(&self, regs: &[Reg], values: &[RegisterValue]) -> WhpResult<()>;
+    /// The x87 and vector file as the architecture's own XSAVE area, which is
+    /// the only shape the platform offers it in. Answers how many bytes were
+    /// written.
+    fn read_xsave(&self, out: &mut [u8]) -> WhpResult<usize>;
+    fn write_xsave(&self, area: &[u8]) -> WhpResult<()>;
+}
+
+/// The processor a running engine exchanges with.
+///
+/// Each body names the inherent verb of the same job on [`Vcpu`] — spelled as
+/// a path rather than a method call, so that which of the two is meant is
+/// visible at every line.
+impl VpRegisters for Vcpu {
+    fn read_words(&self, regs: &[Reg], out: &mut [u64]) -> WhpResult<()> {
+        Vcpu::read_regs(self, regs, out)
+    }
+
+    fn write_words(&self, regs: &[Reg], words: &[u64]) -> WhpResult<()> {
+        Vcpu::write_regs(self, regs, words)
+    }
+
+    fn read_registers(&self, regs: &[Reg], out: &mut [RegisterValue]) -> WhpResult<()> {
+        Vcpu::read_registers(self, regs, out)
+    }
+
+    fn write_registers(&self, regs: &[Reg], values: &[RegisterValue]) -> WhpResult<()> {
+        Vcpu::write_registers(self, regs, values)
+    }
+
+    fn read_xsave(&self, out: &mut [u8]) -> WhpResult<usize> {
+        Vcpu::read_xsave(self, out)
+    }
+
+    fn write_xsave(&self, area: &[u8]) -> WhpResult<()> {
+        Vcpu::write_xsave(self, area)
+    }
 }
 
 /// Every register a whole-state exchange moves, in the order the exchange reads
@@ -428,6 +469,10 @@ mod tests {
         words: core::cell::RefCell<BTreeMap<usize, u64>>,
         segments: core::cell::RefCell<BTreeMap<usize, SegmentRegister>>,
         tables: core::cell::RefCell<BTreeMap<usize, TableRegister>>,
+        /// The extended-state area, exactly as it was last written. Empty
+        /// until then, which is what a processor whose area has never been
+        /// written would report: nothing to read.
+        xsave: core::cell::RefCell<std::vec::Vec<u8>>,
     }
 
     /// A stable key per register, so a write and the read that follows it agree
@@ -542,6 +587,33 @@ mod tests {
             Ok(())
         }
 
+        /// Hands back exactly what was written, truncated to what the caller
+        /// offered — the platform's own rule, so an area read from a recorder
+        /// and one read from a processor are read the same way.
+        ///
+        /// A recorder that has never been written holds no area, and refuses
+        /// rather than answering with a zero-length one: a real processor
+        /// always has an area, and the platform refuses an answer too short to
+        /// carry its own header, which is what lets
+        /// [`crate::xsave::XsaveArea`] index that header without doubting it.
+        fn read_xsave(&self, out: &mut [u8]) -> WhpResult<usize> {
+            let stored = self.xsave.borrow();
+            if stored.is_empty() {
+                return Err(rusty_box_whp::WhpError::contract(
+                    "the recorder was never given an extended-state area",
+                ));
+            }
+            let written = stored.len().min(out.len());
+            out[..written].copy_from_slice(&stored[..written]);
+            Ok(written)
+        }
+
+        fn write_xsave(&self, area: &[u8]) -> WhpResult<()> {
+            let mut stored = self.xsave.borrow_mut();
+            stored.clear();
+            stored.extend_from_slice(area);
+            Ok(())
+        }
     }
 
     /// A distinctive state, so a field that lands in the wrong slot shows up as

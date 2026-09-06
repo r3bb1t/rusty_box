@@ -23,7 +23,7 @@ use rusty_box_whp::{
     DestinationMode, Exit, ExitReason, ExtendedVmExits, GpaPerms, HostPages, InternalActivity,
     InterruptKind, InterruptRequest, InterruptionType, LateProperty, LocalApicMode, Partition,
     PartitionConfig, PendingExtIntEvent, PendingInterruption, Reg, SegmentRegister,
-    SyntheticFeatures, TriggerMode, WhpResult, PAGE_SIZE,
+    SyntheticFeatures, TriggerMode, Vcpu, WhpResult, PAGE_SIZE,
 };
 
 /// The guest-physical map every experiment shares.
@@ -194,8 +194,10 @@ const Q20: &str = "P2b Does a software-disabled APIC DROP a requested vector, or
 
 // ---------------------------------------------------------------- fixtures
 
-/// A partition with the standard layout, ready to run real-mode code.
+/// A partition with the standard layout, ready to run real-mode code, and the
+/// one processor it holds.
 struct Guest {
+    vcpu: Vcpu,
     partition: Partition,
 }
 
@@ -213,7 +215,8 @@ impl Guest {
         partition.map(layout::RAM, HostPages::new(layout::RAM_PAGES)?, GpaPerms::RWX)?;
         partition.map(layout::READ_ONLY, HostPages::new(1)?, GpaPerms::RX)?;
         partition.create_processor(0)?;
-        Ok(Self { partition })
+        let vcpu = partition.take_vcpu(0)?;
+        Ok(Self { vcpu, partition })
     }
 
     /// Put the processor in real mode at [`layout::CODE`] with `code` loaded
@@ -223,8 +226,7 @@ impl Guest {
         let ram = self.partition.bytes_at_mut(layout::RAM).expect("RAM is mapped");
         ram[at..at + code.len()].copy_from_slice(code);
 
-        self.partition.write_segments(
-            0,
+        self.vcpu.write_segments(
             &[Reg::Cs, Reg::Ds, Reg::Es, Reg::Ss],
             &[
                 SegmentRegister::real_mode_code(0),
@@ -233,8 +235,7 @@ impl Guest {
                 SegmentRegister::real_mode_data(0),
             ],
         )?;
-        self.partition.write_regs(
-            0,
+        self.vcpu.write_regs(
             &[Reg::Rip, Reg::Rsp, Reg::Rflags],
             // Bit 1 of RFLAGS reads as one on every x86; interrupts stay off
             // until a guest says otherwise.
@@ -243,7 +244,7 @@ impl Guest {
     }
 
     fn run(&mut self) -> WhpResult<Exit> {
-        self.partition.run(0)
+        self.vcpu.run()
     }
 
     fn peek(&self, offset: u16) -> u8 {
@@ -532,7 +533,7 @@ fn q2_instruction_bytes_and_translation() -> WhpResult<Finding> {
     // is a clean test of whether the call works at all with paging off.
     let mut guest = Guest::new(|_| Ok(()))?;
     guest.load(WRITE_READ_ONLY)?;
-    let translation = guest.partition.translate_gva(0, layout::READ_ONLY)?;
+    let translation = guest.vcpu.translate_gva(layout::READ_ONLY)?;
     let _ = writeln!(
         detail,
         "WHvTranslateGva({:#x}) with paging off -> result_code={} gpa={:#x}",
@@ -587,10 +588,10 @@ fn q3_halt_resume() -> WhpResult<Finding> {
             detail: format!("{:?} at rip={:#x}", halted.reason, halted.vp.rip),
         });
     }
-    let activity_at_halt = guest.partition.internal_activity(0)?;
+    let activity_at_halt = guest.vcpu.internal_activity()?;
 
     // The question exactly: inject and nothing else.
-    guest.partition.inject(0, PendingInterruption {
+    guest.vcpu.inject(PendingInterruption {
         kind: InterruptionType::Interrupt,
         vector: 0x40,
         error_code: None,
@@ -621,7 +622,7 @@ fn q3_halt_resume() -> WhpResult<Finding> {
         // unanswered: clear the halt suspend and try once more.
         let mut cleared = activity_at_halt;
         cleared.halt_suspend = false;
-        guest.partition.set_internal_activity(0, cleared)?;
+        guest.vcpu.set_internal_activity(cleared)?;
         let retried = guest.run()?;
         let handler_ran_now = guest.peek(layout::MARKER) == 0xA5;
         let _ = writeln!(
@@ -871,8 +872,7 @@ fn q7_cpuid_and_late_properties(host_offers_cpuid_exit: bool) -> WhpResult<Findi
             } else {
                 cpuid.default_rcx & !HYPERVISOR_PRESENT
             };
-            guest.partition.write_regs(
-                0,
+            guest.vcpu.write_regs(
                 &[Reg::Rax, Reg::Rbx, Reg::Rcx, Reg::Rdx, Reg::Rip],
                 &[
                     cpuid.default_rax,
@@ -884,7 +884,7 @@ fn q7_cpuid_and_late_properties(host_offers_cpuid_exit: bool) -> WhpResult<Findi
             )?;
             let finished = guest.run()?;
             let mut observed = [0u64; 2];
-            guest.partition.read_regs(0, &[Reg::Rax, Reg::Rcx], &mut observed)?;
+            guest.vcpu.read_regs(&[Reg::Rax, Reg::Rcx], &mut observed)?;
             let observed_present = observed[1] & HYPERVISOR_PRESENT != 0;
             let _ = writeln!(
                 detail,
@@ -947,9 +947,9 @@ fn q8_cancel_stickiness() -> WhpResult<Finding> {
     guest.load(SPIN)?;
 
     // Cancel while the processor is definitely NOT running.
-    guest.partition.cancel_run(0)?;
+    guest.vcpu.cancel_run()?;
 
-    let canceller = guest.partition.canceller(0);
+    let canceller = guest.vcpu.canceller();
     let (exit, elapsed) = std::thread::scope(|scope| {
         // The rescue exists so that a cancel which does not stick still ends
         // the probe: without it a guest spinning on `jmp $` never returns.
@@ -1019,7 +1019,7 @@ struct Rescued {
 /// rescue firing after a run had already finished would abort the *next* one
 /// and make every later result read as "never woke".
 fn run_with_rescue(guest: &mut Guest, after: Duration) -> WhpResult<Rescued> {
-    let canceller = guest.partition.canceller(0);
+    let canceller = guest.vcpu.canceller();
     let (finished, wait_for_finish) = std::sync::mpsc::channel::<()>();
     std::thread::scope(|scope| {
         let rescue = scope.spawn(move || match wait_for_finish.recv_timeout(after) {
@@ -1096,7 +1096,7 @@ fn wake_attempt(apic: LocalApicMode, how: Wake) -> WhpResult<Woke> {
     }
 
     let delivered = match how {
-        Wake::Inject => guest.partition.inject(0, PendingInterruption {
+        Wake::Inject => guest.vcpu.inject(PendingInterruption {
             kind: InterruptionType::Interrupt,
             vector: VECTOR,
             error_code: None,
@@ -1317,7 +1317,7 @@ fn wake_during_run(
     install_handler(&mut guest, ivt_vector)?;
 
     let requester = guest.partition.interrupt_requester();
-    let canceller = guest.partition.canceller(0);
+    let canceller = guest.vcpu.canceller();
     let (finished, wait_for_finish) = std::sync::mpsc::channel::<()>();
 
     let outcome = std::thread::scope(|scope| {
@@ -1647,19 +1647,16 @@ fn park_then_wake(apic: LocalApicMode, clear_halt_suspend: bool) -> WhpResult<Pa
 
     let mut runs = vec![timed_run(&mut guest, "run 1: sti; hlt", RESCUE_AFTER)?];
 
-    let activity_at_park =
-        guest.partition.internal_activity(0).map_err(|err| err.to_string());
+    let activity_at_park = guest.vcpu.internal_activity().map_err(|err| err.to_string());
     let pending_event_write = guest
-        .partition
+        .vcpu
         .write_words128(
-            0,
             Reg::PendingEvent,
             PendingExtIntEvent { vector: IRQ0_VECTOR }.as_words(),
         )
         .map_err(|err| err.to_string());
-    let activity_write = clear_halt_suspend.then(|| {
-        guest.partition.set_internal_activity(0, RUNNING).map_err(|err| err.to_string())
-    });
+    let activity_write = clear_halt_suspend
+        .then(|| guest.vcpu.set_internal_activity(RUNNING).map_err(|err| err.to_string()));
 
     runs.push(timed_run(&mut guest, "run 2: after the host's writes", RESCUE_AFTER)?);
 
@@ -1831,7 +1828,7 @@ fn q13_cancel_stickiness_under_x2apic() -> WhpResult<Finding> {
     guest.load(SPIN)?;
 
     // Cancel while the processor is definitely NOT running.
-    guest.partition.cancel_run(0)?;
+    guest.vcpu.cancel_run()?;
     let run = timed_run(&mut guest, "spin, after a cancel issued while stopped", RESCUE_AFTER)?;
 
     let sticky = !run.rescued && run.elapsed < RESCUE_AFTER / 2;
@@ -1900,8 +1897,7 @@ fn lint0_attempt(lvt0: u32, ask_for_the_trap: bool) -> WhpResult<Lint0Attempt> {
     software_enable_the_apic(&guest)?;
     // `Guest::load` leaves every segment flat; the APIC page is out of a
     // real-mode selector's reach, so the base goes in directly.
-    guest.partition.write_segments(
-        0,
+    guest.vcpu.write_segments(
         &[Reg::Ds],
         &[SegmentRegister { base: layout::XAPIC, limit: 0xFFFF, selector: 0, attributes: 0x93 }],
     )?;
@@ -1920,29 +1916,28 @@ fn lint0_attempt(lvt0: u32, ask_for_the_trap: bool) -> WhpResult<Lint0Attempt> {
         runs[0].reason,
         ExitReason::ApicWriteTrap { .. } | ExitReason::MemoryAccess(_)
     );
-    guest.partition.write_segments(0, &[Reg::Ds], &[SegmentRegister::real_mode_data(0)])?;
+    guest.vcpu.write_segments(&[Reg::Ds], &[SegmentRegister::real_mode_data(0)])?;
     if stopped_on_the_store {
-        guest.partition.write_reg(0, Reg::Rip, AFTER_THE_WRITE)?;
+        guest.vcpu.write_reg(Reg::Rip, AFTER_THE_WRITE)?;
         runs.push(timed_run(&mut guest, "run 2: sti; hlt", RESCUE_AFTER)?);
     }
 
     let mut page = ApicStatePage::zeroed();
     let lvt0_in_page = guest
-        .partition
-        .read_apic_state(0, &mut page)
+        .vcpu
+        .read_apic_state(&mut page)
         .map(|()| page.register(ApicRegister::LvtLint0))
         .map_err(|err| err.to_string());
 
     let pending_event_write = guest
-        .partition
+        .vcpu
         .write_words128(
-            0,
             Reg::PendingEvent,
             PendingExtIntEvent { vector: IRQ0_VECTOR }.as_words(),
         )
         .map_err(|err| err.to_string());
     let activity_write =
-        guest.partition.set_internal_activity(0, RUNNING).map_err(|err| err.to_string());
+        guest.vcpu.set_internal_activity(RUNNING).map_err(|err| err.to_string());
     runs.push(timed_run(&mut guest, "run 3: after the host places an ExtINT", RESCUE_AFTER)?);
 
     Ok(Lint0Attempt { lvt0_written: lvt0, runs, lvt0_in_page, pending_event_write, activity_write })
@@ -2105,7 +2100,7 @@ fn q15_synthetic_bank_and_hv1(caps: Capabilities) -> WhpResult<Finding> {
     for (slot, leaf) in read.iter_mut().zip(LEAVES) {
         guest.load(&hv_cpuid_blob(leaf))?;
         let exit = guest.run()?;
-        guest.partition.read_regs(0, &[Reg::Rax, Reg::Rbx, Reg::Rcx, Reg::Rdx], slot)?;
+        guest.vcpu.read_regs(&[Reg::Rax, Reg::Rbx, Reg::Rcx, Reg::Rdx], slot)?;
         let _ = writeln!(
             &mut detail,
             "leaf {leaf:#010x}: left through {} — eax={:#010x} ebx={:#010x} \
@@ -2184,7 +2179,7 @@ fn q16_tsc_deadline_and_apic_clock(caps: Capabilities) -> WhpResult<Finding> {
         let exit = guest.run()?;
         let faulted = guest.peek(layout::MARKER) == 0xA5;
         let mut halves = [0u64; 2];
-        guest.partition.read_regs(0, &[Reg::Rax, Reg::Rdx], &mut halves)?;
+        guest.vcpu.read_regs(&[Reg::Rax, Reg::Rdx], &mut halves)?;
         *slot = if faulted {
             0
         } else {
@@ -2231,22 +2226,22 @@ fn q17_partition_time_and_the_tsc() -> WhpResult<Finding> {
     guest.load(HALT_LOOP)?;
     let halted = guest.run()?;
 
-    let free_start = guest.partition.read_reg(0, Reg::Tsc)?;
+    let free_start = guest.vcpu.read_reg(Reg::Tsc)?;
     let reference_start = guest.partition.reference_time_100ns()?;
     std::thread::sleep(NAP);
-    let free_end = guest.partition.read_reg(0, Reg::Tsc)?;
+    let free_end = guest.vcpu.read_reg(Reg::Tsc)?;
     let reference_free = guest.partition.reference_time_100ns()?;
 
     guest.partition.suspend_time()?;
-    let held_start = guest.partition.read_reg(0, Reg::Tsc)?;
+    let held_start = guest.vcpu.read_reg(Reg::Tsc)?;
     let reference_held_start = guest.partition.reference_time_100ns()?;
     std::thread::sleep(NAP);
-    let held_end = guest.partition.read_reg(0, Reg::Tsc)?;
+    let held_end = guest.vcpu.read_reg(Reg::Tsc)?;
     let reference_held_end = guest.partition.reference_time_100ns()?;
 
     guest.partition.resume_time()?;
     let resumed = guest.run()?;
-    let after_running = guest.partition.read_reg(0, Reg::Tsc)?;
+    let after_running = guest.vcpu.read_reg(Reg::Tsc)?;
 
     let runs_while_stopped = free_end > free_start;
     let frozen = held_end == held_start;
@@ -2337,7 +2332,7 @@ fn accept_without_eoi(vector: u8) -> WhpResult<Accepted> {
     software_enable_the_apic(&guest)?;
 
     let requester = guest.partition.interrupt_requester();
-    let canceller = guest.partition.canceller(0);
+    let canceller = guest.vcpu.canceller();
     let (finished, wait_for_finish) = std::sync::mpsc::channel::<()>();
     let outcome = std::thread::scope(|scope| {
         let helper = scope.spawn(move || {
@@ -2364,7 +2359,7 @@ fn accept_without_eoi(vector: u8) -> WhpResult<Accepted> {
     let (exit, delivered, rescued) = outcome?;
 
     let mut page = ApicStatePage::zeroed();
-    guest.partition.read_apic_state(0, &mut page)?;
+    guest.vcpu.read_apic_state(&mut page)?;
     Ok(Accepted {
         exit_reason: exit.reason,
         delivered: delivered.map_err(|err| err.to_string()),
@@ -2384,10 +2379,10 @@ fn software_enable_the_apic(guest: &Guest) -> WhpResult<()> {
     /// Bit 8 of the spurious-interrupt register.
     const SOFTWARE_ENABLE: u32 = 1 << 8;
     let mut page = ApicStatePage::zeroed();
-    guest.partition.read_apic_state(0, &mut page)?;
+    guest.vcpu.read_apic_state(&mut page)?;
     let spurious = page.register(ApicRegister::Spurious);
     page.set_register(ApicRegister::Spurious, spurious | SOFTWARE_ENABLE);
-    guest.partition.write_apic_state(0, &page)
+    guest.vcpu.write_apic_state(&page)
 }
 
 fn q18_in_service_versus_trigger_mode() -> WhpResult<Finding> {
@@ -2405,7 +2400,7 @@ fn q18_in_service_versus_trigger_mode() -> WhpResult<Finding> {
         software_enable_the_apic(&guest)?;
         guest.partition.request_interrupt(fixed_vector(u32::from(VECTOR), trigger))?;
         let mut page = ApicStatePage::zeroed();
-        guest.partition.read_apic_state(0, &mut page)?;
+        guest.vcpu.read_apic_state(&mut page)?;
         Ok(page)
     }
 
@@ -2524,10 +2519,10 @@ impl NamedRegisterAttempt {
     /// standing, so a register whose legal values depend on its current one can
     /// be moved without asking for an illegal transition.
     fn take(guest: &Guest, reg: Reg, wanted_from: fn(Option<u64>) -> u64) -> Self {
-        let before = guest.partition.read_reg(0, reg).map_err(|err| err.to_string());
+        let before = guest.vcpu.read_reg(reg).map_err(|err| err.to_string());
         let wanted = wanted_from(before.as_ref().ok().copied());
-        let write = guest.partition.write_reg(0, reg, wanted).map_err(|err| err.to_string());
-        let after = guest.partition.read_reg(0, reg).map_err(|err| err.to_string());
+        let write = guest.vcpu.write_reg(reg, wanted).map_err(|err| err.to_string());
+        let after = guest.vcpu.read_reg(reg).map_err(|err| err.to_string());
         Self { reg, before, wanted, write, after }
     }
 
@@ -2587,14 +2582,14 @@ fn q19_the_apic_page_write_path() -> WhpResult<Finding> {
         Ok(())
     })?;
     let mut page = ApicStatePage::zeroed();
-    guest.partition.read_apic_state(0, &mut page)?;
+    guest.vcpu.read_apic_state(&mut page)?;
     let version = page.register(ApicRegister::Version);
     let spurious = page.register(ApicRegister::Spurious);
     let dfr = page.register(ApicRegister::Dfr);
 
-    guest.partition.write_apic_state(0, &page)?;
+    guest.vcpu.write_apic_state(&page)?;
     let mut back = ApicStatePage::zeroed();
-    guest.partition.read_apic_state(0, &mut back)?;
+    guest.vcpu.read_apic_state(&mut back)?;
     let first_kib = page.0[..1024] == back.0[..1024];
     let whole_page = page.0[..] == back.0[..];
 
@@ -2607,8 +2602,8 @@ fn q19_the_apic_page_write_path() -> WhpResult<Finding> {
     // read-back, so an accepted-and-ignored write is distinguishable from an
     // applied one.
     let tpr_write =
-        guest.partition.write_reg(0, Reg::ApicTpr, PRIORITY).map_err(|err| err.to_string());
-    let tpr_read = guest.partition.read_reg(0, Reg::ApicTpr).map_err(|err| err.to_string());
+        guest.vcpu.write_reg(Reg::ApicTpr, PRIORITY).map_err(|err| err.to_string());
+    let tpr_read = guest.vcpu.read_reg(Reg::ApicTpr).map_err(|err| err.to_string());
     let apic_base = NamedRegisterAttempt::take(&guest, Reg::ApicBase, |before| {
         before.unwrap_or(APIC_BASE_RESET) | APIC_BASE_ENABLES
     });
@@ -2714,18 +2709,18 @@ fn q20_a_software_disabled_apic_drops_a_vector() -> WhpResult<Finding> {
         Ok(())
     })?;
     let mut page = ApicStatePage::zeroed();
-    guest.partition.read_apic_state(0, &mut page)?;
+    guest.vcpu.read_apic_state(&mut page)?;
     let spurious_at_reset = page.register(ApicRegister::Spurious);
 
     let while_disabled = guest
         .partition
         .request_interrupt(fixed_vector(VECTOR, TriggerMode::Edge))
         .map_err(|err| err.to_string());
-    guest.partition.read_apic_state(0, &mut page)?;
+    guest.vcpu.read_apic_state(&mut page)?;
     let bitmap_while_disabled = page.vector(ApicVector::Request);
 
     software_enable_the_apic(&guest)?;
-    guest.partition.read_apic_state(0, &mut page)?;
+    guest.vcpu.read_apic_state(&mut page)?;
     let spurious_enabled = page.register(ApicRegister::Spurious);
     let bitmap_after_enabling = page.vector(ApicVector::Request);
 
@@ -2733,7 +2728,7 @@ fn q20_a_software_disabled_apic_drops_a_vector() -> WhpResult<Finding> {
         .partition
         .request_interrupt(fixed_vector(VECTOR, TriggerMode::Edge))
         .map_err(|err| err.to_string());
-    guest.partition.read_apic_state(0, &mut page)?;
+    guest.vcpu.read_apic_state(&mut page)?;
     let bitmap_while_enabled = page.vector(ApicVector::Request);
 
     let mut expected = [0u32; ApicVector::WORDS];

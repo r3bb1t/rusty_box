@@ -186,22 +186,23 @@ fn hypervisor_stepped(code: &[u8]) -> WhpResult<Option<Duration>> {
     pages.bytes_mut()[CODE as usize..CODE as usize + code.len()].copy_from_slice(code);
     partition.map(RESET_CS_BASE, pages, GpaPerms::RWX)?;
     partition.create_processor(0)?;
-    partition.write_reg(0, Reg::Rip, CODE)?;
+    let vcpu = partition.take_vcpu(0)?;
+    vcpu.write_reg(Reg::Rip, CODE)?;
 
     // Arm the trap flag. `#DB` clears it on delivery, so it is re-armed at
     // every stop — which is the second write this technique pays for.
-    let flags = partition.read_reg(0, Reg::Rflags)?;
-    partition.write_reg(0, Reg::Rflags, flags | TRAP_FLAG)?;
+    let flags = vcpu.read_reg(Reg::Rflags)?;
+    vcpu.write_reg(Reg::Rflags, flags | TRAP_FLAG)?;
 
     let began = Instant::now();
     let mut steps = 0u64;
     loop {
-        match partition.run(0)?.reason {
+        match vcpu.run()?.reason {
             ExitReason::Halt => break,
             ExitReason::Exception => {
                 steps += 1;
-                let flags = partition.read_reg(0, Reg::Rflags)?;
-                partition.write_reg(0, Reg::Rflags, flags | TRAP_FLAG)?;
+                let flags = vcpu.read_reg(Reg::Rflags)?;
+                vcpu.write_reg(Reg::Rflags, flags | TRAP_FLAG)?;
             }
             other => {
                 eprintln!("unexpected exit while stepping: {other:?}");

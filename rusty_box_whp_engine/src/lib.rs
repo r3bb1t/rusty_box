@@ -128,42 +128,6 @@ pub use rusty_box_whp::{InterceptCounter, InterceptCounters, RuntimeCounters};
 /// Whatever the platform said when asked.
 pub use rusty_box_whp::hypervisor_present;
 
-use rusty_box_whp::{Partition, Reg, RegisterValue, WhpResult};
-
-/// One virtual processor of a partition, as the state exchange addresses it.
-///
-/// The platform's register calls all take a partition and an index; binding the
-/// two together is what lets [`state`] be written against a processor rather
-/// than against a partition plus a number it has to carry everywhere.
-pub(crate) struct Vp<'a> {
-    partition: &'a Partition,
-    index: u32,
-}
-
-impl<'a> Vp<'a> {
-    pub(crate) const fn new(partition: &'a Partition, index: u32) -> Self {
-        Self { partition, index }
-    }
-}
-
-impl state::VpRegisters for Vp<'_> {
-    fn read_words(&self, regs: &[Reg], out: &mut [u64]) -> WhpResult<()> {
-        self.partition.read_regs(self.index, regs, out)
-    }
-
-    fn write_words(&self, regs: &[Reg], words: &[u64]) -> WhpResult<()> {
-        self.partition.write_regs(self.index, regs, words)
-    }
-
-    fn read_registers(&self, regs: &[Reg], out: &mut [RegisterValue]) -> WhpResult<()> {
-        self.partition.read_registers(self.index, regs, out)
-    }
-
-    fn write_registers(&self, regs: &[Reg], values: &[RegisterValue]) -> WhpResult<()> {
-        self.partition.write_registers(self.index, regs, values)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::WhpEngine;

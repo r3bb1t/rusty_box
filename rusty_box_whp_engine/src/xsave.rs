@@ -26,8 +26,9 @@
 //! holds; the selector halves of the 32-bit form are not carried, and the
 //! shadow's are set to zero on a read-back.
 
+use crate::state::VpRegisters;
 use rusty_box::cpu::arch_state::{FpuState, VcpuArchState};
-use rusty_box_whp::{Partition, WhpResult};
+use rusty_box_whp::WhpResult;
 
 /// Fixed legacy-region offsets, identical in the standard and the compacted
 /// form: only extended components move between the two.
@@ -255,17 +256,13 @@ impl XsaveArea {
     /// The platform's own refusal, or a contract refusal for an area too
     /// short to hold its own header — nothing after this constructor need
     /// doubt the header again.
-    pub(crate) fn read_from(
-        partition: &Partition,
-        index: u32,
-        host: HostComponents,
-    ) -> WhpResult<Self> {
+    pub(crate) fn read_from(vp: &impl VpRegisters, host: HostComponents) -> WhpResult<Self> {
         let mut area = Self {
             bytes: std::vec![0u8; AREA_CAPACITY].into_boxed_slice(),
             len: 0,
             host,
         };
-        area.refresh_from(partition, index)?;
+        area.refresh_from(vp)?;
         Ok(area)
     }
 
@@ -275,8 +272,8 @@ impl XsaveArea {
     /// As [`XsaveArea::read_from`]. The platform's own crate refuses an area
     /// too short to carry its own header, so a length stored here can index
     /// that header without doubting it.
-    pub(crate) fn refresh_from(&mut self, partition: &Partition, index: u32) -> WhpResult<()> {
-        self.len = partition.read_xsave(index, &mut self.bytes)?;
+    pub(crate) fn refresh_from(&mut self, vp: &impl VpRegisters) -> WhpResult<()> {
+        self.len = vp.read_xsave(&mut self.bytes)?;
         Ok(())
     }
 
@@ -284,8 +281,8 @@ impl XsaveArea {
     ///
     /// # Errors
     /// The platform's own refusal.
-    pub(crate) fn write_to(&self, partition: &Partition, index: u32) -> WhpResult<()> {
-        partition.write_xsave(index, self.area())
+    pub(crate) fn write_to(&self, vp: &impl VpRegisters) -> WhpResult<()> {
+        vp.write_xsave(self.area())
     }
 
     fn area(&self) -> &[u8] {
