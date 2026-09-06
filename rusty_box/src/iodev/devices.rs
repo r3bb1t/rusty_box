@@ -410,6 +410,23 @@ impl DeviceManager {
         self.vga.set_preferred_mode(width, height, bpp);
     }
 
+    /// The machine's interrupt fabric.
+    ///
+    /// Offered outside the crate because an engine whose backend owns the
+    /// guest's Local APIC has to reach it: the LINT0 the guest programmed, the
+    /// EOI it wrote and the 8259's INT pin all live here, and an engine is
+    /// handed [`PcIo`](crate::emulator::PcIo) rather than the machine.
+    #[inline]
+    pub fn irq(&self) -> &IrqFabric {
+        &self.irq
+    }
+
+    /// The machine's interrupt fabric, mutably. See [`Self::irq`].
+    #[inline]
+    pub fn irq_mut(&mut self) -> &mut IrqFabric {
+        &mut self.irq
+    }
+
     /// Whether any I/O-produced machine effect must be applied before the
     /// next guest instruction.
     pub(crate) fn has_pending_machine_boundary(&self) -> bool {

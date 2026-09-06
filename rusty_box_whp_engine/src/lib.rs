@@ -63,7 +63,9 @@ mod xsave;
 pub(crate) mod fixtures {
     use crate::WhpEngine;
     use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
-    use rusty_box::emulator::{Emulator, EmulatorConfig, MachineBuilder, MemorySize};
+    use rusty_box::emulator::{
+        DeviceClock, Emulator, EmulatorConfig, MachineBuilder, MemorySize,
+    };
     use rusty_box_core::time::{HostClock, HostInstant};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -100,8 +102,22 @@ pub(crate) mod fixtures {
     /// where those ports are registered and answer. No BIOS is loaded — the
     /// processor is re-pointed at the test's own code instead.
     pub(crate) fn machine_with_devices(code: &[u8]) -> std::boxed::Box<Emulator<(), WhpEngine>> {
+        machine_with_devices_on(DeviceClock::Ticks, code)
+    }
+
+    /// The same machine, with the device clock said out loud.
+    ///
+    /// The clock is what decides who owns the guest's local APIC — see
+    /// `choose_the_local_apic` — so a test that drives its machine from a
+    /// thread of its own asks for [`DeviceClock::HostTime`] and gets the
+    /// hypervisor's APIC with it.
+    pub(crate) fn machine_with_devices_on(
+        clock: DeviceClock,
+        code: &[u8],
+    ) -> std::boxed::Box<Emulator<(), WhpEngine>> {
         let config = EmulatorConfig {
             memory: MemorySize::bytes(8 * 1024 * 1024),
+            device_clock: clock,
             ..EmulatorConfig::default()
         };
         let mut machine = MachineBuilder::new(config)
@@ -113,6 +129,174 @@ pub(crate) mod fixtures {
         machine.mem_write(CODE, code).expect("load");
         machine.reg_write(X86Reg::Rip, CODE);
         machine
+    }
+
+    /// Where the interrupt handler of the protected-mode guests below lives.
+    pub(crate) const HANDLER: u64 = 0x1100;
+
+    /// The prologue both protected-mode guests share: enter protected mode
+    /// against the tables the test wrote, take a flat data segment and a stack,
+    /// and software-enable the local APIC.
+    ///
+    /// Every byte carries its mnemonic, as `whp_probe.rs` annotates its own.
+    /// Addresses are absolute because the far jump needs one: `pm32` is
+    /// `CODE + 0x1B`, and the byte string below is what puts it there.
+    ///
+    /// ```text
+    /// 0x1000  FA                       cli
+    /// 0x1001  0F 01 16 00 1F           lgdt [0x1F00]
+    /// 0x1006  0F 01 1E 08 1F           lidt [0x1F08]
+    /// 0x100B  0F 20 C0                 mov eax, cr0
+    /// 0x100E  0C 01                    or al, 1
+    /// 0x1010  0F 22 C0                 mov cr0, eax
+    /// 0x1013  66 EA 1B 10 00 00 08 00  jmp 0x08:0x101B
+    /// 0x101B  66 B8 10 00              mov ax, 0x10          ; 32-bit from here
+    /// 0x101F  8E D8                    mov ds, ax
+    /// 0x1021  8E C0                    mov es, ax
+    /// 0x1023  8E D0                    mov ss, ax
+    /// 0x1025  BC 00 70 00 00           mov esp, 0x7000
+    /// 0x102A  C7 05 F0 00 E0 FE ...    mov dword [0xFEE000F0], 0x1FF  ; SVR
+    /// 0x1034                           <the guest's own body>
+    /// ```
+    const ENTER_PROTECTED_MODE: [u8; 0x34] = [
+        0xFA, //
+        0x0F, 0x01, 0x16, 0x00, 0x1F, //
+        0x0F, 0x01, 0x1E, 0x08, 0x1F, //
+        0x0F, 0x20, 0xC0, //
+        0x0C, 0x01, //
+        0x0F, 0x22, 0xC0, //
+        0x66, 0xEA, 0x1B, 0x10, 0x00, 0x00, 0x08, 0x00, //
+        0x66, 0xB8, 0x10, 0x00, //
+        0x8E, 0xD8, //
+        0x8E, 0xC0, //
+        0x8E, 0xD0, //
+        0xBC, 0x00, 0x70, 0x00, 0x00, //
+        0xC7, 0x05, 0xF0, 0x00, 0xE0, 0xFE, 0xFF, 0x01, 0x00, 0x00, //
+    ];
+
+    /// A guest that routes the PIT through the I/O APIC and spins.
+    ///
+    /// Body from `CODE + 0x34`:
+    /// ```text
+    /// C7 05 00 00 C0 FE 14 ...   mov dword [0xFEC00000], 0x14  ; IOREGSEL → entry 2 low
+    /// C7 05 10 00 C0 FE 40 ...   mov dword [0xFEC00010], 0x40  ;   vector 0x40, fixed,
+    ///                                                          ;   physical, edge, unmasked
+    /// C7 05 00 00 C0 FE 15 ...   mov dword [0xFEC00000], 0x15  ; IOREGSEL → entry 2 high
+    /// C7 05 10 00 C0 FE 00 ...   mov dword [0xFEC00010], 0     ;   destination APIC 0
+    /// B0 34 / E6 43              mov al, 0x34 ; out 0x43, al   ; PIT ch0, lo/hi, mode 2
+    /// B0 00 / E6 40              count 0x1000 low
+    /// B0 10 / E6 40              count 0x1000 high             ; 3.4 ms per tick
+    /// FB                         sti
+    /// EB FE                      spin: jmp spin                ; no HLT — a delivery must
+    ///                                                          ; interrupt a RUNNING processor
+    /// ```
+    /// Pin 0 is where the PIT's line arrives and `BxIoApic::set_pin_level`
+    /// remaps it to pin 2 (Bochs ioapic.cc, "timer connected to pin #2"), which
+    /// is why entry 2 is the one programmed.
+    pub(crate) fn ioapic_edge_guest() -> std::vec::Vec<u8> {
+        let mut code = ENTER_PROTECTED_MODE.to_vec();
+        code.extend_from_slice(&[
+            0xC7, 0x05, 0x00, 0x00, 0xC0, 0xFE, 0x14, 0x00, 0x00, 0x00, //
+            0xC7, 0x05, 0x10, 0x00, 0xC0, 0xFE, 0x40, 0x00, 0x00, 0x00, //
+            0xC7, 0x05, 0x00, 0x00, 0xC0, 0xFE, 0x15, 0x00, 0x00, 0x00, //
+            0xC7, 0x05, 0x10, 0x00, 0xC0, 0xFE, 0x00, 0x00, 0x00, 0x00, //
+            0xB0, 0x34, 0xE6, 0x43, //
+            0xB0, 0x00, 0xE6, 0x40, //
+            0xB0, 0x10, 0xE6, 0x40, //
+            0xFB, //
+            0xEB, 0xFE, //
+        ]);
+        code
+    }
+
+    /// The same machine with the LEGACY path instead: no I/O APIC entry, IRQ0
+    /// unmasked at the 8259, and LINT0 masked before interrupts are enabled.
+    ///
+    /// Body from `CODE + 0x34`:
+    /// ```text
+    /// C7 05 50 03 E0 FE 00 07 01 00   mov dword [0xFEE00350], 0x10700 ; LVT0 masked, ExtINT
+    /// B0 FE / E6 21                   mov al, 0xFE ; out 0x21, al     ; unmask IRQ0 alone
+    /// B0 34 / E6 43                   PIT ch0, lo/hi, mode 2
+    /// B0 00 / E6 40                   count 0x1000 low
+    /// B0 10 / E6 40                   count 0x1000 high
+    /// FB                              sti
+    /// EB FE                           spin: jmp spin
+    /// ```
+    /// Gate 8 of its IDT points at the same handler, so a vector that reached
+    /// the guest despite the mask would write its MARK and be seen — a guest
+    /// with an empty gate would fault instead and look like success.
+    pub(crate) fn masked_lvt0_guest() -> std::vec::Vec<u8> {
+        let mut code = ENTER_PROTECTED_MODE.to_vec();
+        code.extend_from_slice(&[
+            0xC7, 0x05, 0x50, 0x03, 0xE0, 0xFE, 0x00, 0x07, 0x01, 0x00, //
+            0xB0, 0xFE, 0xE6, 0x21, //
+            0xB0, 0x34, 0xE6, 0x43, //
+            0xB0, 0x00, 0xE6, 0x40, //
+            0xB0, 0x10, 0xE6, 0x40, //
+            0xFB, //
+            0xEB, 0xFE, //
+        ]);
+        code
+    }
+
+    /// The handler both protected-mode guests share: a MARK on the debug port,
+    /// an EOI to the local APIC — which the hypervisor owns, so it costs no
+    /// exit — and back.
+    ///
+    /// ```text
+    /// mov al, MARK                    ; B0 5A
+    /// out 0xE9, al                    ; E6 E9
+    /// mov dword [0xFEE000B0], 0       ; C7 05 B0 00 E0 FE 00 00 00 00 — EOI
+    /// iretd                           ; CF
+    /// ```
+    pub(crate) const APIC_HANDLER: [u8; 15] = [
+        0xB0, MARK, //
+        0xE6, DEBUG_PORT, //
+        0xC7, 0x05, 0xB0, 0x00, 0xE0, 0xFE, 0x00, 0x00, 0x00, 0x00, //
+        0xCF, //
+    ];
+
+    /// Everything the two protected-mode guests need in memory besides their
+    /// code: a flat GDT, an IDT whose only filled gate is `vector`, and the
+    /// two register images `lgdt`/`lidt` read.
+    ///
+    /// Written by the test rather than by the guest because a real-mode guest
+    /// that assembled its own tables would be twice the hand-assembly for
+    /// nothing under test.
+    pub(crate) fn load_the_protected_mode_tables(
+        machine: &mut Emulator<(), WhpEngine>,
+        vector: u8,
+    ) {
+        // Null; code base 0 limit 4 GiB (0x9A, 0xCF); data (0x92, 0xCF).
+        let mut gdt = [0u8; 24];
+        gdt[8..16].copy_from_slice(&[0xFF, 0xFF, 0, 0, 0, 0x9A, 0xCF, 0]);
+        gdt[16..24].copy_from_slice(&[0xFF, 0xFF, 0, 0, 0, 0x92, 0xCF, 0]);
+        machine.mem_write(0x2000, &gdt).expect("the GDT is writable");
+        // limit 0x17, base 0x2000
+        machine
+            .mem_write(0x1F00, &[0x17, 0x00, 0x00, 0x20, 0x00, 0x00])
+            .expect("the GDTR image is writable");
+
+        // 0x41 gates, so a vector up to 0x40 has one; only `vector`'s is
+        // filled. An interrupt gate: offset 0x1100, selector 0x08, type 0x8E.
+        let mut idt = [0u8; 0x208];
+        let at = usize::from(vector) * 8;
+        idt[at..at + 8].copy_from_slice(&[
+            (HANDLER & 0xFF) as u8,
+            (HANDLER >> 8) as u8,
+            0x08,
+            0x00,
+            0x00,
+            0x8E,
+            0x00,
+            0x00,
+        ]);
+        machine.mem_write(0x3000, &idt).expect("the IDT is writable");
+        // limit 0x207, base 0x3000
+        machine
+            .mem_write(0x1F08, &[0x07, 0x02, 0x00, 0x30, 0x00, 0x00])
+            .expect("the IDTR image is writable");
+        machine.mem_write(HANDLER, &APIC_HANDLER).expect("the handler is writable");
     }
 
     /// Whether this host can run the hypervisor-gated tests.
@@ -221,13 +405,25 @@ pub(crate) mod fixtures {
 
     impl RunningVcpu {
         /// Move `vcpu` onto a thread and hold the means to end it.
+        ///
+        /// The control is installed on the engine here, because that is how the
+        /// machine's own boundary reaches the thread: an 8259 edge published by
+        /// whoever turns the wheel becomes a cancel through
+        /// `WhpEngine::pic_pin_changed`, which looks for the control on the
+        /// engine and does nothing at all without one.
         pub(crate) fn spawn(
             vcpu: rusty_box_whp::Vcpu,
             index: usize,
             machine: Arc<std::sync::Mutex<std::boxed::Box<Emulator<(), WhpEngine>>>>,
         ) -> Self {
-            let (join, control) = crate::vcpu_thread::VcpuThread::spawn(vcpu, index, machine)
-                .expect("the vCPU thread starts");
+            let (join, control) =
+                crate::vcpu_thread::VcpuThread::spawn(vcpu, index, machine.clone())
+                    .expect("the vCPU thread starts");
+            machine
+                .lock()
+                .expect("the machine's lock")
+                .engine_mut()
+                .install_control(control.clone());
             Self { control, join: Some(join) }
         }
 
@@ -298,6 +494,73 @@ pub(crate) mod fixtures {
         join.is_finished()
     }
 
+    /// A machine whose guest runs on a thread of its own while the test turns
+    /// its device wheel.
+    ///
+    /// Named rather than a tuple (R0): four things come back and three of them
+    /// are handles whose order nothing would make obvious.
+    pub(crate) struct ThreadedRun {
+        pub(crate) machine: Arc<std::sync::Mutex<std::boxed::Box<Emulator<(), WhpEngine>>>>,
+        pub(crate) control: crate::vcpu_thread::VcpuControl,
+        pub(crate) running: RunningVcpu,
+        /// Everything the guest wrote to the debug port, drained once more
+        /// after the park — so nothing it wrote is missing from the tallies the
+        /// caller compares it against.
+        pub(crate) written: std::vec::Vec<u8>,
+    }
+
+    /// Start `machine` on a vCPU thread, turn its device wheel a millisecond at
+    /// a time until `enough`, then park the processor.
+    ///
+    /// The test IS the device thread here, which is what makes a `HostTime`
+    /// machine run at all: nothing else advances the wheel, so a PIT that never
+    /// sees this loop never ticks. The park before returning is what makes the
+    /// caller's assertions about counters meaningful — a guest still running
+    /// moves every tally between the read and the assertion.
+    ///
+    /// Bounded rather than a bare loop, for the reason [`wait_until`] is: a
+    /// condition that never arrives must be reported at the assertion that
+    /// named it, not by hanging the suite.
+    pub(crate) fn drive_on_a_thread(
+        machine: std::boxed::Box<Emulator<(), WhpEngine>>,
+        within: std::time::Duration,
+        what: &str,
+        mut enough: impl FnMut(&Emulator<(), WhpEngine>, &[u8]) -> bool,
+    ) -> ThreadedRun {
+        let ips = machine.config().ips.per_second_u64();
+        let (machine, vcpu) = shared(machine);
+        let running = RunningVcpu::spawn(vcpu, 0, machine.clone());
+        let control = running.control().clone();
+        let mut written: std::vec::Vec<u8> = std::vec::Vec::new();
+        let deadline = std::time::Instant::now() + within;
+        let mut arrived = false;
+        while !arrived && std::time::Instant::now() < deadline {
+            let mut guard = machine.lock().expect("the machine's lock");
+            guard.service_device_time(ips / 1_000).expect("the wheel turns");
+            written.extend(guard.debug_port().take_output());
+            arrived = enough(&**guard, &written);
+            drop(guard);
+            std::thread::yield_now();
+        }
+        control
+            .request_park(crate::vcpu_thread::Parked::Paused)
+            .expect("the park request reaches the platform");
+        let parked = control.wait_parked_by(std::time::Duration::from_secs(5));
+        written.extend(machine.lock().expect("the machine's lock").debug_port().take_output());
+        assert_eq!(
+            parked,
+            Some(crate::vcpu_thread::Parked::Paused),
+            "the thread parked within 5 s; it wrote {written:#04x?}"
+        );
+        assert!(
+            arrived,
+            "{what}: never happened within {within:?}; wrote {written:#04x?}, and the thread's \
+             own account of the run was {:?}",
+            control.census()
+        );
+        ThreadedRun { machine, control, running, written }
+    }
+
     /// Poll `ready` until it answers true, or fail by name once `within` has
     /// passed.
     ///
@@ -362,14 +625,16 @@ pub use rusty_box_whp::hypervisor_present;
 #[cfg(test)]
 mod tests {
     use crate::fixtures::{
-        a_turn_on_the_hardware, hypervisor_here, machine_running, machine_with_devices, shared,
-        wait_until, RunningVcpu, CODE, DEBUG_PORT, MARK,
+        a_turn_on_the_hardware, drive_on_a_thread, hypervisor_here, ioapic_edge_guest,
+        load_the_protected_mode_tables, machine_running, machine_with_devices,
+        machine_with_devices_on, masked_lvt0_guest, shared, wait_until, RunningVcpu, ThreadedRun,
+        CODE, DEBUG_PORT, MARK,
     };
     use crate::vcpu_thread::Parked;
     use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
     use rusty_box::emulator::{
-        Emulator, EmulatorConfig, EngineRefusal, MachineBuilder, MemorySize, RunBudget,
-        StopReason,
+        DeviceClock, Emulator, EmulatorConfig, EngineRefusal, MachineBuilder, MemorySize,
+        RunBudget, StopReason,
     };
     use rusty_box::Error;
 
@@ -809,6 +1074,13 @@ mod tests {
     /// prove HOW: through the partition's pending-event slot. They are what
     /// tell injection apart from the slice-ending shadow path, which
     /// delivers the same MARK and would pass the first assertion alone.
+    ///
+    /// This guest stays on the slice loop, deliberately. Its `IF=1` stretch is
+    /// two instructions long and contains no exit, so the only thing that could
+    /// ever deliver into it is a deliverability window — and a window is
+    /// measured inert under an emulated APIC (see `stage_the_legacy_interrupt`).
+    /// Under `LocalApicMode::None`, which is what a `Ticks` machine gets, the
+    /// window works and this is the test that says so.
     #[test]
     fn a_device_interrupt_reaches_a_hardware_guest_by_injection() {
         if !hypervisor_here() {
@@ -2091,6 +2363,241 @@ mod tests {
         running.stop_and_join();
     }
 
+    /// An I/O APIC edge reaches a guest whose local APIC is the hypervisor's,
+    /// and the local APIC's own registers are not trapped: the only memory
+    /// exits are the four I/O APIC programming writes.
+    ///
+    /// The whole of Task 1.6's I/O APIC half in one guest. The message leaves
+    /// the fabric as a `WHvRequestInterrupt` on the partition rather than a
+    /// write to this machine's own model, and the guest's `SVR` and `EOI`
+    /// stores — which under a partition with no APIC would each be a memory
+    /// exit into the shadow — cost nothing at all, because the page belongs to
+    /// the hypervisor.
+    #[test]
+    fn an_ioapic_edge_is_delivered_by_the_hypervisor_apic_without_an_exit() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut machine = machine_with_devices_on(DeviceClock::HostTime, &ioapic_edge_guest());
+        load_the_protected_mode_tables(&mut machine, 0x40);
+        let ips = machine.config().ips.per_second_u64();
+        let (machine, vcpu) = shared(machine);
+        let running = RunningVcpu::spawn(vcpu, 0, machine.clone());
+        let control = running.control().clone();
+
+        // The test IS the device thread: one millisecond of wheel per poll,
+        // which is what makes the PIT tick at all under `HostTime`.
+        let mut seen: std::vec::Vec<u8> = std::vec::Vec::new();
+        wait_until(
+            || {
+                let mut m = machine.lock().expect("the machine's lock");
+                m.service_device_time(ips / 1_000).expect("the wheel turns");
+                seen.extend(m.debug_port().take_output());
+                seen.len() >= 3
+            },
+            std::time::Duration::from_secs(5),
+            "three PIT ticks reached the guest's handler through the hypervisor's local APIC",
+        );
+        // Read while the thread still runs: the park's own cancel is an exit,
+        // and "no cancel" is half the claim — a delivery through the
+        // partition's APIC never fetches the processor out of its run, where a
+        // legacy ExtINT costs one cancel per edge.
+        let running_census = control.census();
+        assert_eq!(
+            (
+                running_census.exits.canceled,
+                running_census.exits.window,
+                running_census.exits.halt
+            ),
+            (0, 0, 0),
+            "no cancel, no window, no halt: {running_census:?}"
+        );
+
+        control.request_park(Parked::Paused).expect("the park request reaches the platform");
+        assert_eq!(
+            control.wait_parked_by(std::time::Duration::from_secs(5)),
+            Some(Parked::Paused),
+            "the thread parked within 5 s"
+        );
+        // Drained after the park, so the counts below describe a machine
+        // nothing is still running against.
+        seen.extend(machine.lock().expect("the machine's lock").debug_port().take_output());
+        assert!(seen.iter().all(|byte| *byte == MARK), "{seen:#04x?}");
+        let census = control.census();
+        assert_eq!(
+            census.exits.memory, 4,
+            "IOREGSEL/IOWIN twice each — and NOT the SVR and EOI writes to the local APIC \
+             page, which the hypervisor owns: {census:?}"
+        );
+        assert_eq!(
+            census.exits.port,
+            3 + seen.len() as u64,
+            "three PIT programming writes plus one MARK per tick; the deliveries themselves \
+             cost no exit: {census:?}"
+        );
+        running.stop_and_join();
+    }
+
+    /// The 8259's INTR reaches a guest whose local APIC is the hypervisor's,
+    /// as an ExtINT placed in the partition's pending-event slot.
+    ///
+    /// The positive counterpart of
+    /// [`a_masked_lvt0_keeps_the_legacy_path_closed`], and the whole legacy
+    /// path in one guest: a PIT tick raises the 8259's pin, the machine's
+    /// boundary publishes the edge, the cancel fetches the processor out of its
+    /// run, and the thread's pre-run acknowledges at this machine's own
+    /// controllers and places the vector.
+    ///
+    /// The guest's busy loop is deliberately exit-free with `IF` set
+    /// throughout: the only route a vector has into it is the placement, so
+    /// every MARK is one, and nothing else could have delivered it. The
+    /// acknowledge count is the cross-check — one INTA at the fabric per
+    /// placed vector, which is what says the two halves of a delivery did not
+    /// come apart.
+    #[test]
+    fn a_legacy_8259_vector_reaches_a_hardware_guest_as_a_placed_ext_int() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        // isr at CODE+0x29 (CS base is 0).
+        let machine = machine_with_devices_on(
+            DeviceClock::HostTime,
+            &[
+                0x31, 0xC0, //             xor ax, ax
+                0x8E, 0xD8, //             mov ds, ax
+                0x8E, 0xD0, //             mov ss, ax
+                0xBC, 0x00, 0x70, //       mov sp, 0x7000
+                0xC7, 0x06, 0x20, 0x00, 0x29, 0x10, // mov word [0x20], isr (IVT[8])
+                0xC7, 0x06, 0x22, 0x00, 0x00, 0x00, //  mov word [0x22], 0
+                0xB0, 0xFE, //             mov al, 0xFE — unmask IRQ0 alone
+                0xE6, 0x21, //             out 0x21, al  (OCW1)
+                0xB0, 0x34, //             mov al, 0x34 — ch0, lo/hi, mode 2
+                0xE6, 0x43, //             out 0x43, al
+                0xB0, 0x00, //             mov al, 0x00 — count 0x0400, low
+                0xE6, 0x40, //             out 0x40, al
+                0xB0, 0x04, //             mov al, 0x04 — count 0x0400, high
+                0xE6, 0x40, //             out 0x40, al
+                0xFB, //                   sti (CODE+0x25) — IF=1 for the whole busy loop
+                // busy (CODE+0x26): pure computation, exit-free — the only way
+                // in is a placed event
+                0x40, //                   inc ax
+                0xEB, 0xFD, //             jmp busy
+                // isr (CODE+0x29): STI first, so the handler's own exits carry
+                // IF=1 and the stale pin left by the acknowledge is reconciled
+                // rather than presented as blocked
+                0xFB, //                   sti
+                0x90, //                   nop — the STI shadow lapses
+                0xB0, MARK, //             mov al, MARK
+                0xE6, DEBUG_PORT, //       out 0xE9, al
+                0xB0, 0x20, //             mov al, 0x20
+                0xE6, 0x20, //             out 0x20, al — non-specific EOI
+                0xCF, //                   iret
+            ],
+        );
+        let ThreadedRun { machine, control, running, written } = drive_on_a_thread(
+            machine,
+            std::time::Duration::from_secs(10),
+            "the PIT's ticks reached the guest's own ISR as placed ExtINTs",
+            |m, seen| seen.len() >= 3 && m.engine().inject_census().injected >= 3,
+        );
+        assert!(
+            !written.is_empty() && written.iter().all(|byte| *byte == MARK),
+            "the PIT's ticks must reach the guest's own ISR, and nothing else may write \
+             the debug port: {written:#04x?}"
+        );
+        let mut guard = machine.lock().expect("the machine's lock");
+        let census = *guard.engine().inject_census();
+        assert!(
+            census.injected >= 3 && census.injected_per_vector[8] >= 3,
+            "every delivery must be a vector placed for the partition, and it must be the \
+             PIT's own — IRQ0 at the master 8259's power-on offset, 8: injected {}, of \
+             vector 8 {}",
+            census.injected,
+            census.injected_per_vector[8],
+        );
+        assert_eq!(
+            census.windows_armed, 0,
+            "the thread arms no deliverability window: the notification is measured inert \
+             under an emulated APIC, and the retry is the guest's own next exit"
+        );
+        let acknowledges = guard.processor(0).io.device_manager().irq().acknowledge_count();
+        assert_eq!(
+            acknowledges, census.injected,
+            "one INTA cycle at this machine's own controllers per placed vector — a \
+             mismatch is a vector taken from the 8259 and never delivered, or one \
+             delivered that was never taken"
+        );
+        drop(guard);
+        assert_eq!(
+            control.census().exits.window,
+            0,
+            "and no window exit, since none was ever asked for"
+        );
+        running.stop_and_join();
+    }
+
+    /// A masked LINT0 keeps the legacy path shut.
+    ///
+    /// Measured on this platform: an ExtINT written into a processor's
+    /// pending-event slot is delivered whether or not the guest masked its own
+    /// LINT0. Nothing in the hypervisor honours that mask, so this machine's
+    /// interrupt fabric is the only thing that can — and this test is what
+    /// stands between a masked line and a delivered interrupt.
+    ///
+    /// The guest is the positive control for itself: IRQ0 is unmasked at the
+    /// 8259 and the PIT ticks, so the INT pin genuinely rises and the thread is
+    /// genuinely fetched out of its run to consider it. What must not happen is
+    /// the acknowledge — and the vector's gate is filled, so one that arrived
+    /// anyway would announce itself.
+    #[test]
+    fn a_masked_lvt0_keeps_the_legacy_path_closed() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut machine = machine_with_devices_on(DeviceClock::HostTime, &masked_lvt0_guest());
+        load_the_protected_mode_tables(&mut machine, 0x08);
+        let ips = machine.config().ips.per_second_u64();
+        let (machine, vcpu) = shared(machine);
+        let running = RunningVcpu::spawn(vcpu, 0, machine.clone());
+        let control = running.control().clone();
+
+        // Half a second of wheel — around 145 PIT ticks at this count, every
+        // one of which raises the 8259's INT pin.
+        let mut seen: std::vec::Vec<u8> = std::vec::Vec::new();
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while std::time::Instant::now() < until {
+            let mut m = machine.lock().expect("the machine's lock");
+            m.service_device_time(ips / 1_000).expect("the wheel turns");
+            seen.extend(m.debug_port().take_output());
+            drop(m);
+            std::thread::yield_now();
+        }
+        let census = control.census();
+        assert!(
+            seen.is_empty(),
+            "a vector the guest masked at LINT0 reached its handler: {seen:#04x?}"
+        );
+        assert_eq!(
+            census.exits.window, 0,
+            "no deliverability window may be armed for a vector the fabric must never stage: \
+             {census:?}"
+        );
+        assert!(
+            census.exits.canceled >= 1,
+            "the 8259's pin must have risen and fetched the processor out of its run — without \
+             that this test never reached the gate and proves nothing: {census:?}"
+        );
+        assert_eq!(
+            machine.lock().expect("the machine's lock").engine().inject_census().injected,
+            0,
+            "nothing may be acknowledged at the controllers for a masked line"
+        );
+        running.stop_and_join();
+    }
+
     /// A guest on the vCPU thread writes a byte to the debug port and spins;
     /// the byte reaches the machine's device and the thread parks on request.
     ///
@@ -2112,14 +2619,8 @@ mod tests {
             shared(machine_running(&[0xB0, MARK, 0xE6, DEBUG_PORT, 0xEB, 0xFE]));
         let running = RunningVcpu::spawn(vcpu, 0, machine.clone());
         let control = running.control().clone();
-        // The control the front end and the device thread reach the thread
-        // through lives on the engine, which is where Task 1.6's interrupt
-        // edge will look for it.
-        machine
-            .lock()
-            .expect("the machine's lock")
-            .engine_mut()
-            .install_control(control.clone());
+        // The control the front end, the device thread and the machine's own
+        // interrupt boundary reach the thread through lives on the engine.
         assert_eq!(
             machine.lock().expect("the machine's lock").engine().controls().len(),
             1,

@@ -150,6 +150,22 @@ pub(crate) trait ExtIntVector {
     fn acknowledge(&mut self) -> u8;
 }
 
+/// The Local APIC's LINT0 entry as a legacy PC presents it before a guest
+/// programs the APIC: unmasked, delivery mode ExtINT — the virtual wire that
+/// carries the 8259's INTR to the processor.
+///
+/// The reset value of the field itself, because that is the state the pin is in
+/// for every guest that has not written LVT0: a machine whose fabric started
+/// from the architectural masked value would refuse the 8259 its wire and no
+/// legacy guest would ever take an interrupt.
+const LINT0_VIRTUAL_WIRE: u64 = 0x0000_0700;
+
+/// Bit 16 of an LVT entry, the mask.
+const LVT_MASKED: u64 = 1 << 16;
+/// Bits 10:8 of an LVT entry, the delivery mode; 7 is ExtINT.
+const LVT_DELIVERY_MODE: u64 = 0x7 << 8;
+const LVT_DELIVERY_EXT_INT: u64 = 0x7 << 8;
+
 /// The 8259 pair and the I/O APIC, as one machine part.
 #[derive(Debug)]
 pub struct IrqFabric {
@@ -159,6 +175,17 @@ pub struct IrqFabric {
     acknowledge_count: u64,
     /// How many of those produced each vector.
     vectors_acknowledged: [u32; 256],
+    /// The boot processor's LINT0 entry, as the guest last wrote it.
+    ///
+    /// This port's own Local APIC models keep their own LVT registers and gate
+    /// their own deliveries with them; this copy exists for the guest whose
+    /// Local APIC is a BACKEND's rather than this machine's. Measured on the
+    /// Windows Hypervisor Platform: an ExtINT placed in a processor's pending
+    /// event is delivered whether or not the guest masked LINT0, so nothing but
+    /// this record can honour the mask — see
+    /// [`Self::lint0_admits_ext_int`]. Bochs has no counterpart, because Bochs
+    /// has no backend to offload an APIC to.
+    lint0: u64,
 }
 
 impl Default for IrqFabric {
@@ -174,6 +201,7 @@ impl IrqFabric {
             ioapic: BxIoApic::new(),
             acknowledge_count: 0,
             vectors_acknowledged: [0; 256],
+            lint0: LINT0_VIRTUAL_WIRE,
         }
     }
 
@@ -276,6 +304,9 @@ impl IrqFabric {
             ioapic,
             acknowledge_count,
             vectors_acknowledged,
+            // The Local APIC's own gate, which decides whether a vector may be
+            // PLACED; this scan decides only which entries have one to give.
+            lint0: _,
         } = self;
         ioapic.service(&mut PicAcknowledge {
             pic,
@@ -324,6 +355,59 @@ impl IrqFabric {
     #[inline]
     pub(crate) fn receive_eoi(&mut self, vector: u8) {
         self.ioapic.receive_eoi(vector);
+    }
+
+    // ── The Local APIC a backend owns ──────────────────────────────────────
+    //
+    // Only reached when the guest's Local APIC is not this machine's. The
+    // model LAPICs on the processors gate their own LINT0 and end their own
+    // level interrupts; these two verbs are what a machine has instead when
+    // the register file lives in a hypervisor.
+
+    /// Record what the guest wrote to the boot processor's LINT0 entry.
+    ///
+    /// Called from the trap a backend raises on the write, so this copy stays
+    /// current with the register the guest actually programmed.
+    #[inline]
+    pub fn set_lint0(&mut self, value: u64) {
+        self.lint0 = value;
+    }
+
+    /// Whether the guest's LINT0 still admits the 8259's INTR.
+    ///
+    /// Unmasked AND in ExtINT delivery mode: a guest that masked the entry
+    /// wants no legacy interrupt at all, and one that gave LINT0 a fixed vector
+    /// wants that vector rather than the 8259's — in neither case may a vector
+    /// be acknowledged and placed. The platform delivers a placed ExtINT
+    /// without consulting its own LINT0 (measured), so this is the whole gate.
+    #[inline]
+    #[must_use]
+    pub fn lint0_admits_ext_int(&self) -> bool {
+        self.lint0 & LVT_MASKED == 0 && self.lint0 & LVT_DELIVERY_MODE == LVT_DELIVERY_EXT_INT
+    }
+
+    /// The guest ended `vector`; re-service the I/O APIC if the line that
+    /// raised it is still asserted.
+    ///
+    /// What a Local APIC's EOI does to an I/O APIC on hardware, and what this
+    /// machine has no other way to do once the Local APIC is a backend's: a
+    /// level entry keeps its IRR bit until its line drops, so a line still high
+    /// at the EOI must produce the interrupt again. Answers whether anything
+    /// was queued, so the caller routes only when there is something to route.
+    ///
+    /// Bounded by the guest, not by hope: exactly one servicing scan per EOI,
+    /// no loop, and a scan queues at most one message per pin. A device that
+    /// never drops its line therefore costs one interrupt per handler the guest
+    /// actually runs to completion — which is what an interrupt storm is on
+    /// hardware too, and what makes it the device's defect rather than this
+    /// machine's live-lock.
+    pub fn resample_on_eoi(&mut self, vector: u8) -> bool {
+        if self.ioapic.has_asserted_level_entry(vector) {
+            self.service_ioapic();
+            true
+        } else {
+            false
+        }
     }
 
     // ── Diagnostics ────────────────────────────────────────────────────────
@@ -399,6 +483,72 @@ mod tests {
         let select = 0x10 + u32::from(pin) * 2;
         fabric.mmio_write(0x00, 4, &select.to_ne_bytes());
         fabric.mmio_write(0x10, 4, &low.to_ne_bytes());
+    }
+
+    /// Both words of one redirection entry, the way a guest programs a routed
+    /// line: vector, trigger mode, and a physical destination of APIC 0.
+    fn program_ioapic_pin(fabric: &mut IrqFabric, pin: u8, vector: u8, level: bool) {
+        route_pin(fabric, pin, u32::from(vector) | (u32::from(level) << 15));
+        let select_high = 0x11 + u32::from(pin) * 2;
+        fabric.mmio_write(0x00, 4, &select_high.to_ne_bytes());
+        fabric.mmio_write(0x10, 4, &0u32.to_ne_bytes());
+    }
+
+    /// The hardware behaviour a backend-owned Local APIC expects of us: a level
+    /// entry whose line is still high is re-serviced the moment the guest EOIs
+    /// its vector. The model LAPICs on this machine's processors do this for
+    /// themselves; a guest whose LAPIC is a hypervisor's has nothing else that
+    /// can.
+    #[test]
+    fn an_eoi_re_services_a_level_entry_whose_line_is_still_asserted() {
+        let mut fabric = IrqFabric::new();
+        program_ioapic_pin(&mut fabric, 5, 0x45, true);
+        fabric.set_ioapic_pin(5, true);
+        let (first, n) = fabric.ioapic_mut().take_pending_deliveries();
+        assert_eq!(n, 1);
+        assert_eq!(first[0].vector, 0x45);
+
+        assert!(fabric.resample_on_eoi(0x45), "line still high → re-serviced");
+        let (again, n) = fabric.ioapic_mut().take_pending_deliveries();
+        assert_eq!(n, 1);
+        assert_eq!(again[0].vector, 0x45);
+
+        fabric.set_ioapic_pin(5, false);
+        assert!(!fabric.resample_on_eoi(0x45), "line low → nothing");
+        assert_eq!(fabric.ioapic_mut().take_pending_deliveries().1, 0);
+
+        program_ioapic_pin(&mut fabric, 6, 0x46, false);
+        fabric.set_ioapic_pin(6, true);
+        fabric.ioapic_mut().take_pending_deliveries();
+        assert!(!fabric.resample_on_eoi(0x46), "edge entries are never resampled");
+        assert_eq!(fabric.ioapic_mut().take_pending_deliveries().1, 0);
+    }
+
+    /// The gate that stands between a masked legacy line and a delivered
+    /// interrupt.
+    ///
+    /// Measured on the Windows Hypervisor Platform: an ExtINT written into a
+    /// processor's pending-event slot reaches the guest with LINT0 masked
+    /// exactly as it does with LINT0 unmasked. So this predicate is the only
+    /// thing that honours the mask, and a guest that programmed LINT0 for a
+    /// fixed vector — asking for that vector rather than the 8259's — is
+    /// refused by the same rule.
+    #[test]
+    fn lvt0_gates_the_legacy_path_the_way_the_lapic_would() {
+        let mut fabric = IrqFabric::new();
+        assert!(
+            fabric.lint0_admits_ext_int(),
+            "a machine whose guest has not touched the APIC is a virtual wire: \
+             the 8259's INTR reaches the processor"
+        );
+        fabric.set_lint0(0x0001_0700); // masked, ExtINT
+        assert!(!fabric.lint0_admits_ext_int());
+        fabric.set_lint0(0x0000_0700); // unmasked, ExtINT
+        assert!(fabric.lint0_admits_ext_int());
+        // Unmasked, fixed vector 0x30 — not ExtINT: the guest wants a fixed
+        // vector on LINT0, not the 8259's.
+        fabric.set_lint0(0x0000_0030);
+        assert!(!fabric.lint0_admits_ext_int());
     }
 
     /// The property the fabric exists for: an ISA line raised by a device

@@ -22,6 +22,7 @@ use thiserror::Error;
 use crate::config::BxPhyAddress;
 use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
 use crate::cpu::ResetReason;
+use crate::emulator::DeviceClock;
 
 
 #[cfg(feature = "std")]
@@ -579,6 +580,17 @@ pub struct BxPcSystemC {
     fired_owner_counts: [u32; BX_MAX_TIMERS],
     /// Number of distinct entries in `fired_owners`.
     num_fired: usize,
+    /// Which clock this machine's devices run on.
+    ///
+    /// A copy of the machine's own configuration, kept here because it is what
+    /// an engine can reach: an engine is handed [`PcIo`](crate::emulator::PcIo)
+    /// and never the machine, and the answer decides whether it may hand the
+    /// local APIC to a backend. Written once, by the machine, at
+    /// initialisation; a snapshot does not carry it, for the reason
+    /// [`DeviceClock`] states — the same guest image is correct under either,
+    /// and the machine that restores it is the one that knows who turns its
+    /// wheel.
+    device_clock: DeviceClock,
 }
 
 impl Default for BxPcSystemC {
@@ -616,6 +628,7 @@ impl BxPcSystemC {
             fired_owners: [TimerOwner::NullTimer; BX_MAX_TIMERS],
             fired_owner_counts: [0; BX_MAX_TIMERS],
             num_fired: 0,
+            device_clock: DeviceClock::Ticks,
         };
 
         // Register the null timer as timer 0
@@ -654,6 +667,25 @@ impl BxPcSystemC {
     #[inline]
     pub fn ips(&self) -> u64 {
         self.ips
+    }
+
+    /// Tell this PC system which clock its machine's devices run on.
+    ///
+    /// The machine's own configuration, published here so an engine that is
+    /// handed only [`PcIo`](crate::emulator::PcIo) can read it. Set at machine
+    /// initialisation and never after: the answer decides how the machine's
+    /// interrupts are routed, and a machine that changed it mid-run would have
+    /// two routings live at once.
+    #[inline]
+    pub(crate) fn set_device_clock(&mut self, clock: DeviceClock) {
+        self.device_clock = clock;
+    }
+
+    /// Which clock this machine's devices run on. See [`DeviceClock`].
+    #[inline]
+    #[must_use]
+    pub fn device_clock(&self) -> DeviceClock {
+        self.device_clock
     }
 
     /// The rate emulated time advances at.

@@ -1192,6 +1192,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
         // Step 1: Initialize PC system with IPS (line 1201)
         self.pc_system.initialize(self.config.ips.per_second());
+        // Published where an engine can read it: an engine is handed `PcIo`
+        // and never the machine, and this is what tells it whether the local
+        // APIC is the machine's own or its backend's.
+        self.pc_system.set_device_clock(self.config.device_clock);
         self.devices.set_timer_ips(self.config.ips.per_second_u64());
         self.smp_tick_remainder = 0;
         self.batch_advanced_pc_system = false;
@@ -1221,6 +1225,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     #[cfg(not(feature = "alloc"))]
     pub(crate) fn init_pc_system(&mut self) {
         self.pc_system.initialize(self.config.ips.per_second());
+        self.pc_system.set_device_clock(self.config.device_clock);
         self.smp_tick_remainder = 0;
         self.memory.set_a20_mask(self.pc_system.a20_mask());
     }

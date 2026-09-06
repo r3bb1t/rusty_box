@@ -41,13 +41,14 @@ use rusty_box::cpu::{cpu::BxCpuC, instrumentation::Instrumentation, CpuError, Re
 use rusty_box::emulator::{Emulator, PcIo, Processor};
 use rusty_box_core::{EngineFault, EngineFaultKind};
 use rusty_box_whp::{
-    Canceller, Exit, ExitReason, IoPortAccess, Reg, Vcpu, WhpError, WhpResult,
+    ApicWriteType, Canceller, Exit, ExitReason, InternalActivity, IoPortAccess,
+    PendingExtIntEvent, Reg, Vcpu, WhpError, WhpResult,
 };
 
 use crate::engine::{
     describe_the_fault, history_mark, platform_failed, ports_on_the_shadow, reports_each_fault,
-    report_the_state_the_platform_refused, withhold_virtualisation_from, ExitCounts, InjectState,
-    PlatformCounters, Trapped, WhpEngine, RFLAGS_TF,
+    report_the_state_the_platform_refused, run_the_shadow_out_of_smm, withhold_virtualisation_from,
+    ExitCounts, InjectState, PlatformCounters, Trapped, WhpEngine, RFLAGS_TF,
 };
 use crate::exchange::{Exchange, ExitClass};
 use crate::state::VpRegisters;
@@ -64,14 +65,10 @@ pub(crate) enum Parked {
     Paused,
     /// The guest turned the machine off.
     ///
-    /// Requested by the device thread, which is the only party that sees a
-    /// power-off: it arrives as a stop on the machine's own device time, and
-    /// no exit the processor takes says anything about it.
-    #[expect(
-        dead_code,
-        reason = "the device thread that requests it is Task 1.7; the state it names is the third \
-                  a park can have, and the set is closed here so no arm can be added by accident"
-    )]
+    /// It arrives as a stop on the machine's own device time, and no exit the
+    /// processor takes says anything about it — so whoever turns the wheel is
+    /// who sees it, whether that is the device thread or this thread routing an
+    /// EOI through the machine's own boundary.
     GuestPowerOff,
     /// Something the thread could not service or could not survive.
     Fault(EngineFault),
@@ -234,15 +231,23 @@ pub(crate) struct VcpuControl {
     exit_requested: Arc<AtomicBool>,
     /// A PIC INT pin is high and the thread has not yet staged it.
     ///
-    /// The transition is tracked here rather than at the fabric so a pin that
-    /// stays high across many boundaries costs one cancel, not one per
-    /// boundary.
-    #[expect(
-        dead_code,
-        reason = "the pre-run staging that clears it is Task 1.6, and the interrupt edge that \
-                  sets it arrives with the fabric verbs that gate it"
-    )]
+    /// The dedup lives here rather than at the machine, so a pin reported at
+    /// every boundary costs one cancel per VECTOR — see [`ext_int_request`].
+    /// Cleared by the thread's own pre-run staging, and only there: the flag
+    /// outlives a masked LINT0 and a guest that cannot yet take a delivery, so
+    /// neither loses the interrupt it is owed.
     ext_int_pending: Arc<AtomicBool>,
+    /// Whether the last staging attempt found the guest unable to take the
+    /// vector it is owed.
+    ///
+    /// The thread's answer to a question the platform will not answer: with the
+    /// deliverability notification dead under an emulated APIC (probe P10),
+    /// nothing reports that a blocked guest became ready, so while this stands
+    /// every pin republication cancels the run again instead of trusting the
+    /// dedup. Set only by a guest that WANTED the interrupt and could not take
+    /// it — a masked LINT0 leaves it clear, because a guest that masked its own
+    /// line is not waiting for anything and unmasking it traps anyway.
+    ext_int_blocked: Arc<AtomicBool>,
     canceller: Canceller,
     park: Arc<(Mutex<ParkSlot>, Condvar)>,
     census: Arc<SharedCensus>,
@@ -294,6 +299,54 @@ pub(crate) fn park_request(
     cancel.cancel()
 }
 
+/// One vector owed, one cancel — however many boundaries report the pin.
+///
+/// The machine publishes the 8259's INT pin at every boundary that finds it
+/// asserted, because a level sampled at a boundary can miss the gap between two
+/// interrupts entirely (`SliceEngine::pic_pin_changed`). That makes the dedup
+/// this side's obligation, and this is where it is discharged: the flag moves
+/// false→true exactly once per vector the thread has yet to stage, and only the
+/// thread that moves it pays for a cancel. A pin held high across a thousand
+/// boundaries therefore costs one exit, not a thousand.
+///
+/// A free function over [`CancelRun`] for the same reason [`park_request`] is
+/// one: the property is about what the canceller sees, and a partition cannot
+/// be asked what it was not told.
+///
+/// The dedup has one exception, and without it a vector can be owed forever.
+/// A staging attempt that found the guest unable to take the interrupt sets
+/// `blocked`, and while that stands every request cancels again rather than
+/// returning early. The reason is measured: `WHvX64RegisterDeliverabilityNotifications`
+/// never produces an interrupt-window exit under an emulated local APIC
+/// (`docs/whp-interrupt-window-2026-09-06.md`, probe P10 — the same guest under
+/// `LocalApicEmulationMode::None` takes the window exit on its own), so nothing
+/// tells this engine that a blocked guest became ready. A guest that clears its
+/// own `IF` for a handler and returns with `IRET` — which is no exit at all —
+/// would otherwise never be asked again.
+///
+/// It stays cheap where it matters. The common case is one cancel per vector:
+/// the first request cancels, the thread stages it into a guest that can take
+/// it, and `blocked` is never set. Only a guest that was busy pays a second,
+/// and it pays at its own interrupt rate rather than on a timer.
+///
+/// # Errors
+/// Whatever the platform said about the cancel. The flag is left SET either
+/// way: the interrupt is owed whether or not the processor could be fetched out
+/// to take it, and the thread's next entry stages it regardless.
+pub(crate) fn ext_int_request(
+    pending: &AtomicBool,
+    blocked: &AtomicBool,
+    cancel: &impl CancelRun,
+) -> WhpResult<()> {
+    let first = pending
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    if first || blocked.load(Ordering::Acquire) {
+        return cancel.cancel();
+    }
+    Ok(())
+}
+
 impl VcpuControl {
     /// Ask the thread to leave its run and park with `why`.
     ///
@@ -317,31 +370,18 @@ impl VcpuControl {
         asked
     }
 
-    /// A PIC INT pin rose.
+    /// The 8259's INT pin is asserted.
     ///
-    /// Cancels the processor only on the false→true transition, so a pin that
-    /// stays high across many boundaries costs one exit rather than one per
-    /// boundary. The vector itself is not acknowledged here — nothing is taken
-    /// from the machine's controllers until the thread has positive evidence
-    /// that the guest can take it.
+    /// Cancels the processor only for a vector the thread has not yet staged,
+    /// so a pin reported at every boundary costs one exit rather than one per
+    /// boundary — [`ext_int_request`] is that rule. The vector itself is not
+    /// acknowledged here: nothing is taken from the machine's controllers until
+    /// the thread has positive evidence that the guest can take it.
     ///
     /// # Errors
     /// Whatever the platform said about the cancel.
-    #[expect(
-        dead_code,
-        reason = "the engine's `pic_pin_changed` calls it once Task 1.6 gives the thread a \
-                  pre-run that stages what it raises; raising a cancel nothing consumes would \
-                  be an exit for nothing"
-    )]
     pub(crate) fn raise_ext_int(&self) -> WhpResult<()> {
-        if self
-            .ext_int_pending
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Ok(());
-        }
-        self.canceller.cancel()
+        ext_int_request(&self.ext_int_pending, &self.ext_int_blocked, &self.canceller)
     }
 
     /// Wait for the thread to park, answering what it parked for.
@@ -472,6 +512,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         let control = VcpuControl {
             exit_requested: Arc::new(AtomicBool::new(false)),
             ext_int_pending: Arc::new(AtomicBool::new(false)),
+            ext_int_blocked: Arc::new(AtomicBool::new(false)),
             canceller: vcpu.canceller(),
             park: Arc::new((Mutex::new(ParkSlot::default()), Condvar::new())),
             census: Arc::new(SharedCensus::default()),
@@ -515,6 +556,16 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
                 }
                 continue;
             }
+            // The 8259's INTR, if one is owed and the guest can take it. Here
+            // rather than after an exit because this is the only moment the
+            // answer is about the processor the NEXT entry runs — which is the
+            // processor that would take the vector.
+            if let Continue::Park(why) = self.stage_the_legacy_interrupt() {
+                if self.park(why) == Woke::ToStop {
+                    return;
+                }
+                continue;
+            }
             self.control.census.runs.fetch_add(1, Ordering::Release);
             let entered = Instant::now();
             let exit = self.vcpu.run();
@@ -529,6 +580,118 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
                 }
             }
         }
+    }
+
+    /// Place the 8259's pending vector in the partition, if the guest can take
+    /// one.
+    ///
+    /// The legacy interrupt path in full, and the only one there is once the
+    /// hypervisor owns the local APIC: the platform's `WHV_INTERRUPT_TYPE` has
+    /// no ExtINT, so `WHvRequestInterrupt` cannot carry the 8259's wire and the
+    /// pending-event slot is the whole surface. Measured: a vector placed there
+    /// is delivered whether or not the guest masked LINT0, which is why the
+    /// fabric's own copy of that entry is consulted first — it is the only
+    /// thing that can honour the mask. Measured too: a placement into a guest
+    /// that cannot take an interrupt is not held for later, it makes the next
+    /// entry fail outright with `WHV_E_INVALID_VP_STATE`.
+    ///
+    /// Three gates, in this order, and the order is the freshness contract:
+    /// the fabric's LINT0, then whether the processor the NEXT entry runs can
+    /// take a delivery, and only then the acknowledge. The acknowledge IS the
+    /// INTA moment and cannot be undone, so it happens with positive evidence
+    /// in hand and never on the absence of evidence to the contrary. Nothing is
+    /// taken from the machine's controllers on any other path out.
+    ///
+    /// Costs nothing at all until the pin raises the flag: the atomic is read
+    /// before the machine's lock is taken, so an entry with no interrupt owed
+    /// touches neither the lock nor the platform.
+    fn stage_the_legacy_interrupt(&mut self) -> Continue {
+        if !self.control.ext_int_pending.load(Ordering::Acquire) {
+            return Continue::Run;
+        }
+        let Self { vcpu, index, machine, inject, control, .. } = self;
+        let mut guard = match machine.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Continue::Park(Parked::Fault(EngineFault::new(
+                    EngineFaultKind::Host,
+                    "machine lock poisoned by a panicking peer thread",
+                )))
+            }
+        };
+        let Processor { cpu, mut io, engine } = guard.processor(*index);
+        if !io.device_manager().irq().lint0_admits_ext_int() {
+            // The guest masked its own legacy line, or gave LINT0 a fixed
+            // vector instead. Nothing is acknowledged, and the flag stays up so
+            // the vector is still owed the moment the guest unmasks — the
+            // ordinary case for firmware that opens its line late.
+            return Continue::Run;
+        }
+        if !inject.permits_ext_int() {
+            // Blocked right now — `IF` clear, an interrupt shadow, or a
+            // delivery the platform has begun. Nothing is acknowledged and the
+            // flag stays up, so the vector is still owed.
+            //
+            // Recorded, because nothing else will report the guest becoming
+            // ready. `WHvX64RegisterDeliverabilityNotifications` is accepted
+            // and read back under an emulated APIC and never produces an
+            // interrupt-window exit — measured against a working control in
+            // `None` mode (probe P10, docs/whp-interrupt-window-2026-09-06.md).
+            // With this set, every later republication of the pin cancels the
+            // run again instead of being deduplicated away, which is what
+            // catches the ordinary case: a guest that took one interrupt, is
+            // inside its handler with `IF` clear, and returns with `IRET` —
+            // not an exit, and so not otherwise a moment anyone asks again.
+            control.ext_int_blocked.store(true, Ordering::Release);
+            return Continue::Run;
+        }
+        // Whatever happens below, this attempt was not blocked: the guest could
+        // take a delivery. Cleared before the acknowledge rather than after, so
+        // a fault on the way out cannot leave the flag set and turn every later
+        // boundary into a cancel.
+        control.ext_int_blocked.store(false, Ordering::Release);
+        // THE INTA MOMENT — reached only with every gate passed. The same body
+        // the interpreter acknowledges through, so the LAPIC-before-8259 order,
+        // the fabric's counted acknowledge, the spurious vectors and the
+        // deasserted-pin reconcile are one behaviour across both engines.
+        let Some(vector) = io.pop_deliverable_vector(cpu) else {
+            // Nothing was deliverable after all, and the acknowledge attempt
+            // reconciled the stale pin. The edge is spent.
+            control.ext_int_pending.store(false, Ordering::Release);
+            return Continue::Run;
+        };
+        if let Err(error) =
+            vcpu.write_words128(Reg::PendingEvent, PendingExtIntEvent { vector }.as_words())
+        {
+            return Continue::Park(Parked::Fault(refused_register(&error)));
+        }
+        // Load-bearing, not redundant: measured, a processor parked in `HLT`
+        // under an emulated APIC sets `halt_suspend`, produces no halt exit,
+        // and does NOT run the handler for a placed event until the suspend is
+        // cleared. This processor is the boot processor and never awaits a
+        // SIPI, so the whole register is written running rather than read back
+        // and patched.
+        const RUNNING: InternalActivity = InternalActivity {
+            startup_suspend: false,
+            halt_suspend: false,
+            idle_suspend: false,
+        };
+        if let Err(error) = vcpu.set_internal_activity(RUNNING) {
+            return Continue::Park(Parked::Fault(refused_register(&error)));
+        }
+        // The platform holds a delivery now; the next exit's header will say so
+        // itself, and until one arrives this is the record.
+        inject.note_placed_event();
+        let census = engine.inject_census_mut();
+        census.injected += 1;
+        census.injected_per_vector[usize::from(vector)] =
+            census.injected_per_vector[usize::from(vector)].saturating_add(1);
+        control.ext_int_pending.store(false, Ordering::Release);
+        // The acknowledge changed the controllers' lines; the processor's
+        // latched copy follows before anything asks.
+        io.sync_io_events(cpu);
+        tracing::debug!(target: "irq", "CPU: ExtINT vector {vector:#04x} placed for the partition");
+        Continue::Run
     }
 
     /// Answer one exit, with the machine's lock held for exactly as long as the
@@ -561,6 +724,32 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
                 )))
             }
         };
+        // The one exit whose answer is the MACHINE's own boundary rather than a
+        // processor's, so it is answered here, where the machine is still
+        // undivided. An EOI at a local APIC the hypervisor owns has to reach
+        // the I/O APIC: a level entry whose line is still high owes its vector
+        // again, and only the machine's boundary can route what the resample
+        // queues back through `route_ioapic_delivery`.
+        if let ExitReason::ApicEoi { vector } = exit.reason {
+            let queued = {
+                let Processor { mut io, .. } = guard.processor(*index);
+                io.device_manager().irq_mut().resample_on_eoi(vector as u8)
+            };
+            if queued {
+                match guard.service_device_time(0) {
+                    // The guest asked to be powered off while this EOI was
+                    // being routed. Nothing the processor does afterwards is
+                    // wanted, so it leaves rather than running on.
+                    Ok(time) if time.stop.is_some() => {
+                        return Continue::Park(Parked::GuestPowerOff)
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        return Continue::Park(Parked::Fault(refused_service(&error)))
+                    }
+                }
+            }
+        }
         let Processor { cpu, mut io, engine } = guard.processor(*index);
         engine.history.record(exit.vp.rip, history_mark(exit.reason));
         let mut servicer = Servicer { vcpu, exchange, xsave, inject, control };
@@ -793,12 +982,19 @@ impl Servicer<'_> {
                 self.inject.window = None;
                 Ok(Continue::Run)
             }
-            // Straight back in. The partition has no local APIC of its own
-            // here, so a halted processor leaves the run and re-enters it, and
-            // the wake is an injection the next entry carries. What bounds the
-            // re-entry is the park request that ends it: a halted guest is
-            // still a guest this thread can be asked to stop.
-            ExitReason::Halt => Ok(Continue::Run),
+            // A halt exit means the partition is not in the mode this thread
+            // requires. Measured: under the hypervisor's own local APIC a
+            // `cli; hlt` produces NO halt exit at all — the processor parks
+            // inside the run with `halt_suspend` set, and the pre-run staging's
+            // activity write is what starts it again. So a `Halt` arriving here
+            // says the partition was configured with no APIC, and this thread's
+            // whole interrupt path — the placed ExtINT, the requested I/O APIC
+            // message, the EOI resample — has nothing to deliver through.
+            // Running on would look like a working machine and deliver nothing.
+            ExitReason::Halt => Ok(Continue::Park(Parked::Fault(EngineFault::new(
+                EngineFaultKind::Unserviced,
+                "X64Halt under the hypervisor APIC",
+            )))),
             // Someone asked for the processor back. Which someone matters: a
             // cancel this thread's own controls asked for is a park, and any
             // other is the legacy interrupt path asking for a boundary at which
@@ -810,9 +1006,23 @@ impl Servicer<'_> {
                 }
                 Ok(Continue::Run)
             }
-            // The guest wrote a local-APIC register the partition was asked to
-            // trap. Nothing asks for one here — the partition emulates no APIC
-            // — so the write is the platform's own business and the processor
+            // The guest reprogrammed the pin its 8259 drives. The trap NOTIFIES
+            // — the platform has already applied the value to its own register
+            // — so what is owed here is the fabric's copy, which is the only
+            // gate on the legacy path: a vector placed in the pending-event
+            // slot is delivered whether or not the guest masked this entry.
+            //
+            // RIP is NOT advanced. Measured: an APIC write trap arrives with
+            // RIP already past the store while reporting `instruction_length`
+            // zero — the inverse of a memory exit — so a handler that
+            // recomputed the end of the instruction would step over the one
+            // after it.
+            ExitReason::ApicWriteTrap { register: ApicWriteType::Lint0, value } => {
+                io.device_manager().irq_mut().set_lint0(value);
+                Ok(Continue::Run)
+            }
+            // The partition traps no other APIC register for this engine, so a
+            // write to one is the platform's own business and the processor
             // goes back in.
             ExitReason::ApicWriteTrap { .. } => Ok(Continue::Run),
             // The platform refuses to run the processor it holds, and does not
@@ -832,17 +1042,49 @@ impl Servicer<'_> {
                 }
                 Ok(Continue::Park(unserviced(exit)))
             }
+            // Already answered, before the machine was divided into a
+            // processor and its parts: the resample an EOI owes the I/O APIC
+            // and the boundary that routes it both need the machine whole. See
+            // [`VcpuThread::service`]. The arm stands so this match remains
+            // exhaustive on every reason the platform has (R5).
+            ExitReason::ApicEoi { .. } => Ok(Continue::Run),
             // Exits this engine has not been asked to service. Each is real
             // guest behaviour a complete engine answers; refusing by name is
             // what keeps a half-serviced one from looking like a working
             // machine.
+            // The guest asked its local APIC for a system-management
+            // interrupt and the partition trapped it out rather than taking
+            // it, because `apic_smi_trap` asked it to. That request is only
+            // honest if the handler runs HERE: this machine models SMRAM's
+            // access control in its own chipset, so a handler entered on the
+            // hardware would read a memory view this machine never authorised.
+            //
+            // The whole processor crosses, not a class's groups: an SMI saves
+            // and restores a state-save area covering registers no exit class
+            // names, and the handler runs to completion before the guest is
+            // handed back — a processor cannot be returned to the hardware
+            // half-way into system-management mode, which has no equivalent
+            // there.
+            ExitReason::ApicSmiTrap => {
+                self.exchange.import_everything(self.vcpu, cpu, self.xsave)?;
+                io.deliver_smi(cpu);
+                // Signalled, not yet taken: the event is processed when the
+                // processor next runs, exactly as Bochs decides it.
+                io.emulate_one(cpu)?;
+                io.sync_io_events(cpu);
+                run_the_shadow_out_of_smm(cpu, io)?;
+                let calls = self.exchange.export_imported(self.vcpu, cpu, self.xsave)?;
+                self.control
+                    .census
+                    .export_calls
+                    .fetch_add(u64::try_from(calls).unwrap_or(u64::MAX), Ordering::Release);
+                Ok(Continue::Run)
+            }
             ExitReason::None
             | ExitReason::UnrecoverableException
             | ExitReason::UnsupportedFeature { .. }
-            | ExitReason::ApicEoi { .. }
             | ExitReason::SynicSintDeliverable
             | ExitReason::Rdtsc
-            | ExitReason::ApicSmiTrap
             | ExitReason::Hypercall
             | ExitReason::ApicInitSipiTrap
             | ExitReason::Unrecognized(_) => Ok(Continue::Park(unserviced(exit))),
@@ -991,6 +1233,18 @@ pub(crate) fn service_port_access<V: VpRegisters>(
     vp.write_words(&[Reg::Rip, Reg::Rax], &[resume, rax]).map_err(platform_failed)
 }
 
+/// The fault a register write the staging made parks with.
+///
+/// Separate from [`refused_run`] because the two say different things about the
+/// same processor: one is a run the platform would not start, the other a
+/// register it would not take, and the second is how a mode mismatch shows —
+/// the pending-event slot and the activity register are both refused by a
+/// partition that has no APIC to hold them.
+fn refused_register(error: &WhpError) -> EngineFault {
+    tracing::error!("the platform refused a register this staging wrote: {error}");
+    EngineFault::with_code(EngineFaultKind::Vcpu, error.call(), error.hresult())
+}
+
 /// The fault a run the platform refused parks with.
 fn refused_run(error: &WhpError) -> EngineFault {
     tracing::error!("the platform refused to run this processor: {error}");
@@ -1028,10 +1282,46 @@ fn unserviced(exit: &Exit) -> Parked {
 
 #[cfg(test)]
 mod tests {
-    use super::{park_request, CancelRun};
-    use rusty_box_whp::WhpResult;
+    use super::{ext_int_request, park_request, CancelRun};
+    use crate::engine::ext_int_permitted;
+    use rusty_box_whp::{SegmentRegister, VpContext, WhpResult};
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The three header bits the freshness contract rests on, and nothing else.
+    ///
+    /// The staging acknowledges at the machine's controllers on this answer,
+    /// and an acknowledge cannot be undone — so it must be positive evidence
+    /// that delivery is permitted, never the absence of evidence that it is
+    /// blocked. A predicate that read two of the three would place a vector
+    /// into a context the VM-entry checks reject, and the vector would be lost
+    /// with the entry.
+    #[test]
+    fn the_ext_int_readiness_predicate_reads_the_three_header_bits() {
+        let base = VpContext {
+            rip: 0,
+            rflags: 0x202,
+            cs: SegmentRegister {
+                base: 0,
+                limit: 0xFFFF,
+                selector: 0,
+                attributes: 0x9B,
+            },
+            instruction_length: 0,
+            cr8: 0,
+            execution_state: 0,
+        };
+        assert!(ext_int_permitted(&base), "IF set, no shadow, nothing pending");
+        assert!(!ext_int_permitted(&VpContext { rflags: 0x002, ..base }), "IF clear");
+        assert!(
+            !ext_int_permitted(&VpContext { execution_state: 1 << 12, ..base }),
+            "interrupt shadow"
+        );
+        assert!(
+            !ext_int_permitted(&VpContext { execution_state: 1 << 6, ..base }),
+            "an interruption is already pending"
+        );
+    }
 
     /// A canceller that records what the flag said at the moment it was asked
     /// to cancel.
@@ -1045,6 +1335,75 @@ mod tests {
             self.saw.set(Some(self.flag.load(Ordering::Acquire)));
             Ok(())
         }
+    }
+
+    /// A canceller that counts.
+    struct CountingCancel(Cell<u32>);
+
+    impl CancelRun for CountingCancel {
+        fn cancel(&self) -> WhpResult<()> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+    }
+
+    /// One cancel per vector owed, however many boundaries report the pin.
+    ///
+    /// The machine publishes the 8259's INT pin at every boundary that finds it
+    /// asserted, so this dedup is the only thing between one interrupt and a
+    /// processor fetched out of the hardware thousands of times a second. The
+    /// second half matters as much as the first: once the thread has staged the
+    /// vector and cleared the flag, the NEXT interrupt must cancel again, or a
+    /// guest that takes one interrupt never takes another.
+    #[test]
+    fn a_pin_reported_at_every_boundary_costs_one_cancel_per_vector() {
+        let owed = AtomicBool::new(false);
+        let blocked = AtomicBool::new(false);
+        let cancel = CountingCancel(Cell::new(0));
+        for _ in 0..8 {
+            ext_int_request(&owed, &blocked, &cancel).unwrap();
+        }
+        assert_eq!(cancel.0.get(), 1, "eight boundaries, one interrupt, one cancel");
+        assert!(owed.load(Ordering::Acquire), "and the vector is still owed");
+
+        // The thread staged it and cleared the flag.
+        owed.store(false, Ordering::Release);
+        ext_int_request(&owed, &blocked, &cancel).unwrap();
+        assert_eq!(cancel.0.get(), 2, "the next interrupt fetches the processor out again");
+    }
+
+    /// A guest that could not take the vector is fetched out again at every
+    /// boundary until it can.
+    ///
+    /// The dedup above is right for a guest that simply has not been reached
+    /// yet, and wrong for one that was reached and refused: nothing reports a
+    /// blocked guest becoming ready, because the platform's deliverability
+    /// notification never fires under an emulated APIC (probe P10). The
+    /// ordinary shape of that is a guest inside its own interrupt handler with
+    /// `IF` clear, which returns with `IRET` — not an exit, and so not a moment
+    /// anyone would otherwise ask again. Without this the second interrupt of a
+    /// machine's life is delivered and no later one ever is.
+    #[test]
+    fn a_blocked_guest_is_fetched_out_again_at_every_boundary() {
+        let owed = AtomicBool::new(true);
+        let blocked = AtomicBool::new(true);
+        let cancel = CountingCancel(Cell::new(0));
+        for _ in 0..8 {
+            ext_int_request(&owed, &blocked, &cancel).unwrap();
+        }
+        assert_eq!(
+            cancel.0.get(),
+            8,
+            "the vector was owed and the guest could not take it, so every boundary asks again"
+        );
+
+        // The staging attempt that finds the guest ready clears it, and the
+        // dedup applies once more.
+        blocked.store(false, Ordering::Release);
+        for _ in 0..8 {
+            ext_int_request(&owed, &blocked, &cancel).unwrap();
+        }
+        assert_eq!(cancel.0.get(), 8, "a guest that can take it costs nothing further");
     }
 
     #[test]

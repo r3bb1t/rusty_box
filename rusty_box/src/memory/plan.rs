@@ -40,9 +40,6 @@ use crate::config::BxPhyAddress;
 const VIDEO_APERTURE: core::ops::Range<u64> = 0x000A_0000..0x000C_0000;
 /// The shadowable region the chipset's PAM registers control.
 const SHADOW_REGION: core::ops::Range<u64> = 0x000C_0000..0x0010_0000;
-/// The local APIC's architectural page. Excluded from both the direct read and
-/// the direct write paths, because a CPU answers it, not memory.
-const LOCAL_APIC_REGION: core::ops::Range<u64> = 0xFEE0_0000..0xFEF0_0000;
 /// Bytes per PAM area for the twelve 16 KiB areas below 0xF0000.
 const PAM_AREA: u64 = 0x4000;
 /// Where the last, larger PAM area begins. `(addr >> 14) & 0x0f` saturates at
@@ -112,7 +109,6 @@ impl MemoryPlan {
         if !memory.smram_is_open() {
             carve_outs.add(VIDEO_APERTURE.start, VIDEO_APERTURE.end);
         }
-        carve_outs.add(LOCAL_APIC_REGION.start, LOCAL_APIC_REGION.end);
         for region in memory.mmio.regions() {
             // The map stores an inclusive end; a carve-out is half-open.
             carve_outs.add(region.begin, u64::from(region.end).saturating_add(1));
@@ -703,6 +699,61 @@ mod tests {
             memory.set_memory_type(area, 1, true);
         }
         memory
+    }
+
+    /// The local APIC's architectural page needs no hole in the map.
+    ///
+    /// Nothing a plan derives can reach `0xFEE0_0000..0xFEF0_0000`: RAM below
+    /// the PCI hole is capped at `BX_PCI_HOLE_START`, RAM above it resumes at
+    /// four gigabytes, the shadowable region ends at 1 MiB, and the BIOS window
+    /// is the last `BIOSROMSZ` bytes of the 32-bit space. So a plan that omits
+    /// a carve-out there maps nothing new. What retires the local APIC's memory
+    /// exits under a hypervisor is the partition's own APIC emulation mode; a
+    /// partition without one takes those exits whatever this map says, because
+    /// the page is not backed by guest RAM at all.
+    #[test]
+    fn no_window_a_plan_derives_can_reach_the_local_apic_page() {
+        const LOCAL_APIC: core::ops::Range<u64> = 0xFEE0_0000..0xFEF0_0000;
+
+        assert!(
+            SHADOW_REGION.end <= LOCAL_APIC.start && BX_PCI_HOLE_START <= LOCAL_APIC.start,
+            "RAM below the hole stops at {BX_PCI_HOLE_START:#x}, under the page"
+        );
+        // A machine with eight gigabytes of RAM — the case that has memory
+        // above four, and the one a 32 MiB test machine cannot reach.
+        let above = ram_above_the_hole(8 * 1024 * 1024 * 1024)
+            .expect("eight gigabytes needs a window above the hole");
+        assert!(
+            above.gpa >= LOCAL_APIC.end,
+            "RAM above the hole starts at {:#x}, past the page",
+            above.gpa
+        );
+        assert!(
+            FOUR_GIB - BIOSROMSZ as u64 >= LOCAL_APIC.end,
+            "the largest BIOS image this machine maps still starts above the page"
+        );
+
+        // And a derived plan holds none, which is the property the two facts
+        // above are the reason for.
+        let mut memory = a_machine_like_the_boot_examples();
+        memory.smram_available = true;
+        memory.smram_enable = true;
+        for windows in [
+            MemoryPlan::derive(&memory).expect("a resident machine has a plan"),
+            {
+                memory.smram_enable = false;
+                MemoryPlan::derive(&memory).expect("a resident machine has a plan")
+            },
+        ] {
+            for window in windows.windows() {
+                assert!(
+                    window.gpa >= LOCAL_APIC.end || window.gpa + window.len <= LOCAL_APIC.start,
+                    "window at {:#x}+{:#x} overlaps the local APIC page",
+                    window.gpa,
+                    window.len
+                );
+            }
+        }
     }
 
     #[test]

@@ -284,10 +284,21 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         );
     }
 
-    /// The engine hears the PIC pin as an edge: once per transition, not once
-    /// per boundary.
+    /// The engine hears the PIC pin at every boundary that finds it asserted,
+    /// and once when it falls.
+    ///
+    /// A level and not an edge, because the machine samples the pin here and
+    /// only here: a guest that acknowledges one interrupt on its own thread
+    /// while a device raises the next leaves the level never reading low, and a
+    /// backend told only about transitions would never hear of the second
+    /// interrupt. Deduping is the engine's, which is where it can be done per
+    /// VECTOR rather than per boundary — see `ext_int_request` in
+    /// `rusty_box_whp_engine`.
+    ///
+    /// The fall is reported exactly once, which is what stops a machine at rest
+    /// from calling its engine forever.
     #[test]
-    fn the_pic_pin_reaches_the_engine_once_per_transition() {
+    fn the_pic_pin_reaches_the_engine_at_every_boundary_that_finds_it_high() {
         let mut machine = furnished_machine_on::<MapWatchingEngine>();
         machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
         machine
@@ -299,8 +310,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         machine.service_device_time(0).unwrap();
         assert_eq!(
             machine.engine().pic_edges,
-            vec![true],
-            "three boundaries with the pin high published one rising edge"
+            vec![true, true, true],
+            "an interrupt the guest has not taken is still owed at every boundary"
         );
         // The INTA takes the vector and lowers the pin.
         assert_eq!(
@@ -309,7 +320,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             "IRQ0 acknowledges to the master 8259's reset offset"
         );
         machine.service_device_time(0).unwrap();
-        assert_eq!(machine.engine().pic_edges, vec![true, false]);
+        machine.service_device_time(0).unwrap();
+        assert_eq!(
+            machine.engine().pic_edges,
+            vec![true, true, true, false],
+            "the fall is published once, and a machine at rest says nothing further"
+        );
     }
 
     /// A refusal reaches a caller that acts on it, even through a caller that
@@ -360,11 +376,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert_eq!(outcome.stop, Some(StopReason::EngineFault));
     }
 
-    /// A refused pin edge is still owed, so the machine offers it again.
+    /// A refused pin level is still owed, so the machine offers it again.
     ///
-    /// The level is remembered only once the engine has taken the edge.
-    /// Remembering it first would record an edge that was never published, and
-    /// no later boundary would find a transition to report.
+    /// The level is remembered only once the engine has taken it. Remembering
+    /// it first would record a publication that never happened, and no later
+    /// boundary would find a fall to report.
     #[test]
     fn a_refused_pic_edge_is_offered_again_at_the_next_boundary() {
         let mut machine = furnished_machine_on::<RefusingEngine>();
@@ -407,14 +423,17 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert_eq!(
             machine.engine().pic_offers,
             vec![true, true],
-            "the refused edge came back at the next boundary"
+            "the refused level came back at the next boundary"
         );
         assert_eq!(outcome.stop, None, "and nothing is stopping the machine");
 
-        // Taken means remembered: the pin has not moved since, so nothing more
-        // is owed and the engine hears nothing further.
+        // The INTA takes the vector and the pin falls. The fall is published
+        // once, and a machine at rest says nothing further — which is what
+        // stops the level publication from being a permanent stream.
+        assert_eq!(machine.device_manager.irq.acknowledge(), 0x08);
+        machine.service_device_time(0).expect("the falling pin");
         machine.service_device_time(0).expect("a quiet boundary");
-        assert_eq!(machine.engine().pic_offers, vec![true, true]);
+        assert_eq!(machine.engine().pic_offers, vec![true, true, false]);
     }
 
     /// Reset publishes the fall of the interrupt pin rather than forgetting it.
@@ -1379,6 +1398,30 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     /// Deliberately not asserted through a boundary that changed nothing: the
     /// forward has to be tied to the map moving, or an engine on a busy
     /// machine would reinstall the map thousands of times a second.
+    /// The seam verb an engine whose hardware TRAPPED an SMI reaches for
+    /// signals the event and does not itself enter the handler.
+    ///
+    /// That split is the contract, not an implementation detail: whether a
+    /// processor may take an SMI is decided when the event is processed, so an
+    /// engine that signalled and then handed the processor straight back to
+    /// hardware would have changed nothing. The caller has to run it.
+    #[test]
+    fn delivering_an_smi_signals_the_event_rather_than_entering_the_handler() {
+        let mut machine = furnished_machine();
+        let Processor { cpu, mut io, .. } = machine.processor(0);
+        assert!(!cpu.has_an_event_to_deliver(), "a fresh processor owes nothing");
+        assert!(!cpu.is_in_smm(), "and is not in system-management mode");
+
+        io.deliver_smi(cpu);
+
+        assert!(cpu.has_an_event_to_deliver(), "the SMI is now owed");
+        assert!(
+            !cpu.is_in_smm(),
+            "and is still owed rather than taken: signalling is not entering, which is why the \
+             engine runs the processor afterwards"
+        );
+    }
+
     #[test]
     fn a_chipset_change_to_the_map_is_forwarded_to_the_engine() {
         std::thread::Builder::new()

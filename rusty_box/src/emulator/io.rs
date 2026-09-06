@@ -337,6 +337,23 @@ impl<'a> PcIo<'a> {
         }
     }
 
+    /// Signal a system-management interrupt on this processor.
+    ///
+    /// For an engine whose hardware TRAPPED an SMI rather than delivering it:
+    /// the guest asked for one, the platform declined to take it, and the
+    /// shadow is where it must happen — because this machine models SMRAM's
+    /// access control (the chipset's open and close-and-lock bits) and a
+    /// handler entered anywhere else would read the wrong memory.
+    ///
+    /// Signals only, exactly as Bochs `deliver_SMI` does: whether the
+    /// processor may take it is decided when the event is processed, so the
+    /// caller runs the processor afterwards — one
+    /// [`emulate_one`](Self::emulate_one) to enter the handler, then as many
+    /// as the handler needs to leave it.
+    pub fn deliver_smi<T: Instrumentation>(&mut self, cpu: &mut BxCpuC<T>) {
+        cpu.deliver_smi();
+    }
+
     /// How many items of one repeated instruction are executed before the
     /// machine gets a look in.
     ///

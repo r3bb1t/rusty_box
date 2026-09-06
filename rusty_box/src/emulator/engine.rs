@@ -224,20 +224,28 @@ pub trait SliceEngine<T: Instrumentation> {
         DeliveryRoute::Model
     }
 
-    /// The 8259's INT pin to the boot processor CHANGED level.
+    /// The 8259's INT pin to the boot processor, as this boundary found it.
     ///
-    /// An edge, not a level: the machine calls this only on a transition. A
-    /// pin that stays asserted while the guest has not yet acknowledged it is
-    /// the ordinary case, and an engine told about it on every boundary would
-    /// cancel a running processor thousands of times a second for one
-    /// interrupt.
+    /// Called at every boundary while the pin is ASSERTED, and once when it
+    /// falls. Not once per transition: the pin is a level, this boundary is
+    /// where the machine samples it, and two interrupts can arrive with no
+    /// sample in between — the guest acknowledges the first on whatever thread
+    /// is running it, a device raises the second, and the level never reads
+    /// low. An engine told only about transitions would never hear of the
+    /// second, and an engine that has to fetch a running processor out of its
+    /// hardware to take a vector would owe that vector forever.
+    ///
+    /// **An engine that acts on this must dedup for itself.** The obligation
+    /// is one act per vector, not one per boundary; a backend that cancelled a
+    /// running processor on every call would cancel it thousands of times a
+    /// second for one interrupt.
     ///
     /// Defaulted to nothing, which is what this port's interpreter needs: it
     /// reads the processor's event word, which the same boundary publishes.
     ///
     /// # Errors
     /// Whatever the engine's backend refused. The machine surfaces it from the
-    /// boundary rather than continuing with an engine that missed the edge.
+    /// boundary rather than continuing with an engine that missed the pin.
     fn pic_pin_changed(&mut self, asserted: bool) -> core::result::Result<(), EngineFault> {
         let _ = asserted;
         Ok(())

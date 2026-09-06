@@ -760,6 +760,20 @@ impl BxIoApic {
         // Bochs doesn't do this either — it just logs.
     }
 
+    /// Whether some redirection entry carrying `vector` is level-triggered with
+    /// its request still standing.
+    ///
+    /// The question an EOI asks of this controller when the Local APIC that
+    /// took the interrupt is a backend's: a level entry keeps its IRR bit until
+    /// its pin drops (`set_pin_level`), so a set bit here means the line is
+    /// still asserted and the interrupt is owed again.
+    pub(crate) fn has_asserted_level_entry(&self, vector: u8) -> bool {
+        (0..IOAPIC_NUM_PINS).any(|pin| {
+            let entry = &self.ioredtbl[pin];
+            entry.vector() == vector && entry.trigger_mode() != 0 && self.irr & (1 << pin) != 0
+        })
+    }
+
     /// Scan the IRR for unmasked interrupts and attempt delivery via the APIC bus.
     ///
     /// For each unmasked pin with a pending interrupt (IRR bit set):

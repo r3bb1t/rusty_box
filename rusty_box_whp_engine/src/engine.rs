@@ -22,9 +22,9 @@
 use core::time::Duration;
 
 use rusty_box_whp::{
-    Exit, ExitReason, ExtendedVmExits, InterceptCounters, InterruptionType, LocalApicMode,
-    MsrExits, Partition, PartitionConfig, PendingInterruption, Reg, RuntimeCounters, Vcpu,
-    VpContext, WhpError,
+    DestinationMode, Exit, ExitReason, ExtendedVmExits, InterceptCounters, InterruptKind,
+    InterruptRequest, InterruptionType, LocalApicMode, MsrExits, Partition, PartitionConfig,
+    PendingInterruption, Reg, RuntimeCounters, TriggerMode, Vcpu, VpContext, WhpError,
 };
 
 use super::alarm::Alarm;
@@ -37,8 +37,11 @@ use rusty_box::cpu::{
     CpuError, Result,
 };
 use rusty_box::emulator::{
-    Emulator, EventDelivery, PcIo, Processor, Progress, ProgressUnit, SliceEngine, SliceRequest,
+    DeliveryRoute, DeviceClock, Emulator, EventDelivery, PcIo, Processor, Progress, ProgressUnit,
+    SliceEngine, SliceRequest,
 };
+use rusty_box::iodev::ioapic::IoApicDeliveryMode;
+use rusty_box::iodev::irq::{IoApicDelivery, IoApicDestinationMode, IoApicTrigger};
 use rusty_box_core::{EngineFault, EngineFaultKind};
 
 use super::vcpu_thread::VcpuControl;
@@ -119,6 +122,13 @@ const TRAPPED_MSRS: MsrExits = MsrExits {
     tsc_write: false,
     ..MsrExits::ALL
 };
+
+/// `IA32_APIC_BASE` is among them, which is what an emulated APIC needs: a
+/// guest relocating or software-disabling its local APIC writes that register,
+/// and under an offloaded APIC the write is the only announcement this engine
+/// gets. Stated as an assertion rather than a comment so widening `ALL` cannot
+/// quietly take it away.
+const _: () = assert!(TRAPPED_MSRS.apic_base_write);
 
 /// The last few exits, kept so a fault can say what led to it.
 ///
@@ -476,6 +486,42 @@ impl InjectState {
         self.if_flag = shadow_if;
         self.shadowed = shadow_inhibit;
     }
+
+    /// Whether the processor the next VM entry runs can take an external
+    /// interrupt right now.
+    ///
+    /// The rule, in one place (R5): `IF` set, no interrupt shadow, and no
+    /// delivery the platform has already begun. Every path that hands the
+    /// partition a vector — the slice loop's injection and the vCPU thread's
+    /// ExtINT staging alike — asks it here, so the two cannot come to differ
+    /// about what "deliverable" means. The three fields it reads are the three
+    /// [`Self::refresh_from`] takes from an exit header.
+    pub(crate) const fn permits_ext_int(&self) -> bool {
+        self.if_flag && !self.shadowed && !self.in_flight
+    }
+
+    /// Record that this engine has just put an event in the partition's
+    /// pending slot.
+    ///
+    /// The platform holds a delivery from here until it lands, and staging a
+    /// second one over it would replace an event the guest was owed. The next
+    /// exit header says so itself; until one arrives this is the only record.
+    pub(crate) const fn note_placed_event(&mut self) {
+        self.in_flight = true;
+    }
+}
+
+/// Whether an exit header describes a processor that can take an external
+/// interrupt at its next entry.
+///
+/// The header-shaped spelling of [`InjectState::permits_ext_int`], for the
+/// staging that runs before an entry rather than after an exit. It builds the
+/// cache the same way an exit would and asks the same question, so a header and
+/// a cache can never answer differently.
+pub(crate) fn ext_int_permitted(vp: &VpContext) -> bool {
+    let mut header = InjectState::at_reset();
+    header.refresh_from(vp);
+    header.permits_ext_int()
 }
 
 /// `WHvRegisterInterruptState` as this engine exchanges it: bit 0 the
@@ -532,6 +578,21 @@ struct Started {
     /// `bring_up`.
     vcpu: Option<Vcpu>,
     partition: Partition,
+    /// Which local APIC this partition has, if any.
+    ///
+    /// The one fact that decides who owns the guest's interrupts. Under
+    /// [`LocalApicMode::None`] this machine's own `cpu/apic.rs` is the guest's
+    /// local APIC, the 8259 pair lives in host memory, and every delivery is
+    /// this engine's from the acknowledge to the injection. Under either
+    /// emulated mode the partition arbitrates instead, an I/O APIC message
+    /// becomes a `WHvRequestInterrupt`, and the 8259's INTR becomes an ExtINT
+    /// this engine places in the pending-event slot.
+    ///
+    /// Recorded rather than re-derived because it is what the platform
+    /// ACCEPTED, not what was asked for: the ladder in [`start`] falls back,
+    /// and a delivery path that guessed would guess wrong on a host that
+    /// refused the first rung.
+    apic_mode: LocalApicMode,
     /// Reused across slices so a state exchange allocates nothing per exit.
     state: VcpuArchState,
     /// The map the partition is currently holding.
@@ -961,6 +1022,16 @@ impl WhpEngine {
         &self.inject_census
     }
 
+    /// The same tally, for the vCPU thread to record its own stagings in.
+    ///
+    /// One census per machine, whichever of the two paths handed the partition
+    /// the vector — so [`InjectCensus::injected`] stays comparable with the
+    /// interrupt fabric's own acknowledge count, which is the comparison that
+    /// catches a vector taken from the controllers and never delivered.
+    pub(crate) fn inject_census_mut(&mut self) -> &mut InjectCensus {
+        &mut self.inject_census
+    }
+
     /// What the hypervisor itself charged this guest, beside what this engine
     /// believes it did.
     ///
@@ -1011,6 +1082,95 @@ pub struct PlatformCounters {
     pub runtime: RuntimeCounters,
 }
 
+/// The `WHvRequestInterrupt` kind an I/O APIC delivery mode asks for, or
+/// `None` when the platform has no kind for it.
+///
+/// Exhaustive on the I/O APIC's own closed set (R5). Two modes have no
+/// counterpart and they are different absences: ExtINT is the 8259's wire,
+/// which reaches the guest through the pending-event slot rather than the APIC
+/// bus, and the two reserved encodings are a guest programming error.
+const fn requested_kind(mode: IoApicDeliveryMode) -> Option<InterruptKind> {
+    match mode {
+        IoApicDeliveryMode::Fixed => Some(InterruptKind::Fixed),
+        IoApicDeliveryMode::LowPriority => Some(InterruptKind::LowestPriority),
+        IoApicDeliveryMode::Nmi => Some(InterruptKind::Nmi),
+        IoApicDeliveryMode::Init => Some(InterruptKind::Init),
+        // `WHV_INTERRUPT_TYPE` has an SMI kind under none of its names; an SMI
+        // is trapped out by `apic_smi_trap` and run on the shadow instead,
+        // which is where system-management mode lives for this engine.
+        IoApicDeliveryMode::Smi
+        | IoApicDeliveryMode::ExtInt
+        | IoApicDeliveryMode::Reserved3
+        | IoApicDeliveryMode::Reserved6 => None,
+    }
+}
+
+/// Ask the platform for the local APIC this machine's device clock implies,
+/// and report the mode it accepted.
+///
+/// The clock is the selector because it is what says who turns the machine's
+/// wheel. Under [`DeviceClock::Ticks`] the wheel advances only when the
+/// scheduler has the processor back, so the guest's local APIC has to be this
+/// machine's own: a halted processor under an emulated APIC never leaves
+/// `WHvRunVirtualProcessor` (measured), and a timer that only turns between
+/// slices would never fire to wake it. Under [`DeviceClock::HostTime`] a thread
+/// of its own turns the wheel, the processor may stay inside the partition
+/// indefinitely, and the partition's own APIC is what makes that possible.
+///
+/// `X2Apic` first because it is the mode this port measured on its own host,
+/// and because the x2APIC register file is the one a modern guest programs
+/// through MSRs — a guest that enables x2APIC under `XApic` would find its
+/// `WRMSR`s unanswered. `XApic` is the fallback for a host that offers only it;
+/// what a guest sees differs there only if it asks for x2APIC, which is a mode
+/// the machine's own CPUID leaf controls.
+///
+/// # Errors
+/// [`CpuError::EngineFault`] with [`EngineFaultKind::Unsupported`] when a
+/// machine asked for the hypervisor's APIC and the platform offers neither
+/// mode: running it with `None` instead would strand every interrupt this
+/// engine then had no way to deliver.
+fn choose_the_local_apic(
+    config: &mut PartitionConfig,
+    clock: DeviceClock,
+) -> Result<LocalApicMode> {
+    let wanted: &[LocalApicMode] = match clock {
+        DeviceClock::Ticks => &[LocalApicMode::None],
+        DeviceClock::HostTime => &[LocalApicMode::X2Apic, LocalApicMode::XApic],
+    };
+    let mut refused = None;
+    for mode in wanted {
+        match config.local_apic(*mode) {
+            Ok(_) => {
+                tracing::debug!("this partition's local APIC is the hypervisor's {mode:?}");
+                return Ok(*mode);
+            }
+            Err(error) => {
+                tracing::debug!("the platform refused {mode:?} as this partition's APIC: {error}");
+                refused = Some(error);
+            }
+        }
+    }
+    match refused {
+        Some(error) => {
+            tracing::error!(
+                "this machine's devices run on host time, which needs the hypervisor's own \
+                 local APIC, and the platform offers neither x2APIC nor xAPIC: {error}"
+            );
+            Err(CpuError::EngineFault(EngineFault::with_code(
+                EngineFaultKind::Unsupported,
+                "no hypervisor local APIC on this host",
+                error.hresult(),
+            )))
+        }
+        // `wanted` is never empty, so a loop that fell through recorded a
+        // refusal; this arm exists because the compiler cannot know that.
+        None => Err(CpuError::EngineFault(EngineFault::new(
+            EngineFaultKind::Unsupported,
+            "no hypervisor local APIC on this host",
+        ))),
+    }
+}
+
 /// Build the partition, map the machine's memory into it and create the
 /// processor — once, on the first slice.
 ///
@@ -1035,15 +1195,10 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                 .processor_count(1)
                 .map_err(platform_failed)?
                 .processor_features(banked)
-                .map_err(platform_failed)?
-                // No APIC in the partition: this port's own `cpu/apic.rs` is
-                // the guest's local APIC, its 8259 pair stays in host memory,
-                // and injection is therefore ours end to end. Measured
-                // (probe finding 10): under `XApic` a halted processor never
-                // leaves `WHvRunVirtualProcessor`, which would strand the
-                // timer wheel on a thread that never returns.
-                .local_apic(LocalApicMode::None)
-                .map_err(platform_failed)?
+                .map_err(platform_failed)?;
+            let apic_mode = choose_the_local_apic(&mut config, io.pc_system().device_clock())?;
+            let hypervisor_apic = apic_mode != LocalApicMode::None;
+            config
                 // What a guest asks ABOUT the processor is this port's to
                 // answer, not the host's. Both are serviced on the shadow, so
                 // a guest reading CPUID or an MSR under a hypervisor gets the
@@ -1060,6 +1215,17 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                     // instant, instead of whatever the guest managed to print
                     // afterwards from a state the fault had already disturbed.
                     exception: trapped_exceptions() != 0,
+                    // A guest whose local APIC is the partition's programs
+                    // LINT0 where this engine cannot see it, and a host-placed
+                    // ExtINT is delivered whether or not that entry is masked
+                    // (measured). The trap is what keeps the fabric's own copy
+                    // current, and the fabric's copy is the only gate there is.
+                    apic_write_lint0_trap: hypervisor_apic,
+                    // An SMI the partition's APIC would deliver is one no
+                    // hypervisor can run: system-management mode belongs to the
+                    // shadow, so the SMI comes back here instead of entering a
+                    // handler on hardware.
+                    apic_smi_trap: hypervisor_apic,
                     ..ExtendedVmExits::default()
                 })
                 .map_err(platform_failed)?
@@ -1089,6 +1255,7 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                 alarm,
                 vcpu: Some(vcpu),
                 partition,
+                apic_mode,
                 state: VcpuArchState::default(),
                 installed,
                 // A processor that has never run cannot be mid-instruction.
@@ -1328,6 +1495,99 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         started.installed =
             install_the_machines_map(&mut started.partition, memory, Some(&started.installed))?;
         Ok(())
+    }
+
+    /// An I/O APIC message goes to whichever local APIC the guest is actually
+    /// reading.
+    ///
+    /// While the partition has none, that is this machine's own model and the
+    /// machine writes it. Once the hypervisor owns the APIC, the message must
+    /// reach the partition instead — and it goes as a `WHvRequestInterrupt`,
+    /// which addresses the partition rather than a stopped processor's
+    /// registers and is therefore the one delivery route safe to take from a
+    /// thread that is not the one running the guest.
+    fn route_ioapic_delivery(&mut self, delivery: IoApicDelivery) -> DeliveryRoute {
+        let Some(started) = self.started.as_ref() else {
+            // Reset and restore reach here before any partition exists, and
+            // the model is the truth until one does.
+            return DeliveryRoute::Model;
+        };
+        if started.apic_mode == LocalApicMode::None {
+            return DeliveryRoute::Model;
+        }
+        let Some(kind) = requested_kind(delivery.delivery_mode) else {
+            // ExtINT is the 8259's path, not the APIC bus's: the platform's
+            // `WHV_INTERRUPT_TYPE` has no ExtINT at all, and an entry
+            // programmed for it is served by `pic_pin_changed` and the vCPU
+            // thread's staging instead. A reserved mode is a guest programming
+            // error the I/O APIC's stuck path already describes.
+            return DeliveryRoute::Refused(EngineFault::new(
+                EngineFaultKind::Unsupported,
+                "an I/O APIC delivery mode WHvRequestInterrupt cannot carry",
+            ));
+        };
+        let request = InterruptRequest {
+            kind,
+            destination_mode: match delivery.dest_mode {
+                IoApicDestinationMode::Physical => DestinationMode::Physical,
+                IoApicDestinationMode::Logical => DestinationMode::Logical,
+            },
+            trigger_mode: match delivery.trigger_mode {
+                IoApicTrigger::Edge => TriggerMode::Edge,
+                IoApicTrigger::Level => TriggerMode::Level,
+            },
+            destination: delivery.dest,
+            vector: u32::from(delivery.vector),
+        };
+        match started.partition.interrupt_requester().request(request) {
+            Ok(()) => DeliveryRoute::Backend,
+            Err(error) => {
+                tracing::error!(
+                    "the partition's APIC refused vector {:#04x}: {error}",
+                    delivery.vector
+                );
+                DeliveryRoute::Refused(EngineFault::with_code(
+                    EngineFaultKind::Vcpu,
+                    "WHvRequestInterrupt",
+                    error.hresult(),
+                ))
+            }
+        }
+    }
+
+    /// The 8259's INT pin to the boot processor changed level.
+    ///
+    /// Nothing crosses here but the EDGE. The vector is not acknowledged —
+    /// the acknowledge is irreversible, and the thread that owns the processor
+    /// is the only party that can know whether the guest could take one — so
+    /// what this does is fetch that thread out of its run, where its pre-run
+    /// staging asks the question with a fresh header. A falling edge tells it
+    /// nothing: a pin that dropped before the guest acknowledged is reconciled
+    /// by the acknowledge attempt itself.
+    ///
+    /// A no-op while no thread runs this machine's processors, which is the
+    /// state the slice loop runs in and the state a machine is reset and
+    /// restored in — and a no-op while the partition has no APIC, where this
+    /// machine's own model holds the pin and the slice head delivers from it.
+    fn pic_pin_changed(&mut self, asserted: bool) -> core::result::Result<(), EngineFault> {
+        let hypervisor_apic = self
+            .started
+            .as_ref()
+            .is_some_and(|started| started.apic_mode != LocalApicMode::None);
+        if !hypervisor_apic {
+            return Ok(());
+        }
+        match (asserted, self.controls.first()) {
+            (true, Some(control)) => control.raise_ext_int().map_err(|error| {
+                tracing::error!("a processor could not be fetched out of its run: {error}");
+                EngineFault::with_code(
+                    EngineFaultKind::Vcpu,
+                    "WHvCancelRunVirtualProcessor",
+                    error.hresult(),
+                )
+            }),
+            _ => Ok(()),
+        }
     }
 
     fn run_slice(
@@ -1762,6 +2022,8 @@ fn install_the_shadow<T: Instrumentation>(
         alarm: _,
         vcpu,
         partition: _,
+        // Who owns the guest's local APIC; nothing here delivers an interrupt.
+        apic_mode: _,
         state,
         installed: _,
         shadowed,
@@ -1916,6 +2178,8 @@ fn read_back_into_the_shadow<T: Instrumentation>(
         alarm: _,
         vcpu,
         partition: _,
+        // Who owns the guest's local APIC; nothing here delivers an interrupt.
+        apic_mode: _,
         state,
         installed: _,
         shadowed,
@@ -2435,6 +2699,28 @@ enum Staged {
 /// layout into one opaque bitfield, so the word is built by hand.
 const INTERRUPT_NOTIFICATION: u64 = 1 << 1;
 
+/// Priority 0: notify on ANY deliverable interrupt.
+///
+/// QEMU derives `irr >> 4` by reading its own APIC's request register without
+/// acknowledging; this machine's local APIC and 8259 export no acknowledge-free
+/// read of the pending vector across this seam — the pop IS the INTA — so the
+/// widest ask is armed instead. A priority lower than the pending vector's only
+/// makes the notification arrive sooner than a filtered one would; it can never
+/// miss a deliverable vector.
+const ANY_PRIORITY: u8 = 0;
+
+/// The deliverability notification belongs to a partition with NO APIC of its
+/// own, and only to one.
+///
+/// Measured on this host, under both `XApic` and `X2Apic`: the register is
+/// accepted, reads back exactly as written, and never produces an
+/// interrupt-window exit — across sixteen thousand `STI`s in one run. Under
+/// `LocalApicMode::None` the same word on the same processor produces one
+/// window exit per ask, which is what the injection tests assert. So the vCPU
+/// thread's ExtINT staging does not arm one, and this constant is named here so
+/// the two facts sit beside each other.
+const _: () = assert!(INTERRUPT_NOTIFICATION == 2);
+
 /// Hand a deliverable external interrupt to the partition as a register
 /// write, or arm a window to be told the moment the guest could take one.
 ///
@@ -2482,18 +2768,6 @@ fn stage_injection<T: Instrumentation>(
     // possible, and leave the vector with the machine's controllers: nothing
     // is acknowledged for a delivery that cannot happen yet.
     if started.inject.shadowed || !started.inject.if_flag {
-        // Priority 0: notify on ANY deliverable interrupt. QEMU derives
-        // `irr >> 4` by reading its own APIC's request register without
-        // acknowledging; this machine's local APIC and 8259 export no
-        // acknowledge-free read of the pending vector across this seam —
-        // the popper below IS the INTA — so the widest ask is armed
-        // instead. A priority lower than the pending vector's only makes
-        // the notification arrive sooner than a filtered one would; it can
-        // never miss a deliverable vector.
-        const ANY_PRIORITY: u8 = 0;
-        // QEMU's dedup, same function: a window already armed at (or above)
-        // this priority is not re-armed. Only priority 0 is ever armed
-        // here, so any recorded window already covers this ask.
         if started.inject.window.is_none() {
             tracing::debug!(
                 target: "irq",
@@ -2501,6 +2775,11 @@ fn stage_injection<T: Instrumentation>(
                 started.inject.shadowed,
                 started.inject.if_flag
             );
+        }
+        // QEMU's dedup, from the same function: a window already armed at (or
+        // above) this priority is not re-armed. Only priority 0 is ever armed
+        // here, so any recorded window already covers this ask.
+        if started.inject.window.is_none() {
             let word = INTERRUPT_NOTIFICATION | (u64::from(ANY_PRIORITY & 0xF) << 2);
             started
                 .vcpu()?
@@ -2561,7 +2840,7 @@ const SMM_HANDLER_CEILING: u64 = 1_000_000;
 ///
 /// # Errors
 /// A fault the shadow could not take, or a handler that never returns.
-fn run_the_shadow_out_of_smm<T: Instrumentation>(
+pub(crate) fn run_the_shadow_out_of_smm<T: Instrumentation>(
     cpu: &mut BxCpuC<T>,
     io: &mut PcIo<'_>,
 ) -> Result<()> {
@@ -2957,6 +3236,8 @@ fn impose_after_errand<T: Instrumentation>(
         alarm: _,
         vcpu,
         partition: _,
+        // Who owns the guest's local APIC; nothing here delivers an interrupt.
+        apic_mode: _,
         state,
         installed: _,
         shadowed,

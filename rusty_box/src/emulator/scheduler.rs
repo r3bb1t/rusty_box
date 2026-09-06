@@ -1320,18 +1320,28 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         } else {
             self.cpu_mut().clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         }
-        // The engine hears the same pin as an EDGE. A level republished every
-        // commit is what the processor's event word wants — it is overwritten
-        // in place, so a repeat costs nothing. An engine's is not: telling one
-        // "asserted" cancels the processor it is running, and an interrupt the
-        // guest has not acknowledged yet keeps this pin high across every
-        // boundary until it does.
+        // The engine hears the same pin, as this boundary found it: every
+        // boundary at which it is ASSERTED, and once when it falls.
         //
-        // The remembered level moves only once the engine has taken the edge.
-        // Recording it first would record an edge that was never published:
-        // every later boundary would find no transition to report, and the
-        // interrupt would be owed forever by a machine that believes it paid.
-        if asserted != self.pic_pin_published {
+        // Not once per transition, because this is a level sampled at a
+        // boundary and a boundary can miss the gap between two interrupts
+        // entirely: the guest acknowledges one on its own thread and a device
+        // raises the next before this line runs again, so the level never reads
+        // low and a pure edge would report the second interrupt to nobody. An
+        // engine that must fetch a running processor out of the hardware to
+        // take a vector would then owe that vector forever.
+        //
+        // What keeps the repetition from costing anything is the ENGINE's own
+        // dedup: `WhpEngine` cancels only on the false→true transition of the
+        // vector it has yet to stage (`ext_int_request`), so a pin held high
+        // across a thousand boundaries costs one cancel. The interpreter's
+        // default does nothing at all.
+        //
+        // The remembered level moves only once the engine has taken it.
+        // Recording it first would record a publication that never happened:
+        // a later boundary would find no fall to report, and the machine would
+        // believe it had paid.
+        if asserted || self.pic_pin_published {
             match <E as SliceEngine<T>>::pic_pin_changed(&mut self.engine, asserted) {
                 Ok(()) => self.pic_pin_published = asserted,
                 Err(fault) => self.engine_fault = Some(fault),
