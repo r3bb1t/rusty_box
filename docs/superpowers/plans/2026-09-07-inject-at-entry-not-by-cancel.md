@@ -116,7 +116,9 @@ The whole defect. `WHvCancelRunVirtualProcessor` is latched when the processor i
 
 - [ ] **Step 1: Write the failing tests**
 
-In `rusty_box_whp_engine/src/vcpu_thread.rs`'s test module, beside the existing `ext_int_request` tests. `RecordingCancel` already exists there and counts cancels.
+In `rusty_box_whp_engine/src/vcpu_thread.rs`'s test module, beside the existing `ext_int_request` tests.
+
+Use the counting canceller that is already there — `struct CountingCancel(Cell<u32>)`, built as `CountingCancel(Cell::new(0))` and read as `cancel.0.get()`. Do **not** use `RecordingCancel`: it is `RecordingCancel<'a> { flag: &'a AtomicBool, saw: Cell<Option<bool>> }`, has no `Default`, and records a flag rather than a count.
 
 ```rust
     /// A request raised while the processor is between runs cancels nothing.
@@ -129,15 +131,15 @@ In `rusty_box_whp_engine/src/vcpu_thread.rs`'s test module, beside the existing 
     /// the thread's own next entry stages it.
     #[test]
     fn a_request_raised_between_runs_cancels_nothing() {
-        let pending = AtomicBool::new(false);
+        let owed = AtomicBool::new(false);
         let blocked = AtomicBool::new(false);
         let in_run = AtomicBool::new(false);
-        let cancel = RecordingCancel::default();
+        let cancel = CountingCancel(Cell::new(0));
 
-        ext_int_request(&pending, &blocked, &in_run, &cancel).expect("a request is recordable");
+        ext_int_request(&owed, &blocked, &in_run, &cancel).expect("a request is recordable");
 
-        assert_eq!(cancel.count(), 0, "a processor that is not running is not cancelled");
-        assert!(pending.load(Ordering::Acquire), "and the vector is still owed");
+        assert_eq!(cancel.0.get(), 0, "a processor that is not running is not cancelled");
+        assert!(owed.load(Ordering::SeqCst), "and the vector is still owed");
     }
 
     /// A request raised while the processor is inside its run cancels once.
@@ -146,45 +148,29 @@ In `rusty_box_whp_engine/src/vcpu_thread.rs`'s test module, beside the existing 
     /// no exits has no other moment at which the thread could stage a vector.
     #[test]
     fn a_request_raised_inside_a_run_cancels_once() {
-        let pending = AtomicBool::new(false);
+        let owed = AtomicBool::new(false);
         let blocked = AtomicBool::new(false);
         let in_run = AtomicBool::new(true);
-        let cancel = RecordingCancel::default();
+        let cancel = CountingCancel(Cell::new(0));
 
-        ext_int_request(&pending, &blocked, &in_run, &cancel).expect("a request is recordable");
+        ext_int_request(&owed, &blocked, &in_run, &cancel).expect("a request is recordable");
 
-        assert_eq!(cancel.count(), 1, "a running processor is fetched out exactly once");
-        assert!(pending.load(Ordering::Acquire), "and the vector is owed until it is staged");
-    }
-
-    /// A pin held high across many boundaries costs one cancel per run, not one
-    /// per boundary.
-    ///
-    /// The machine samples the pin as a LEVEL at every boundary, so a held line
-    /// is re-reported indefinitely. The measured cost of getting this wrong was
-    /// 104,563,825 cancels against 17,909 port exits.
-    #[test]
-    fn a_pin_held_across_boundaries_costs_one_cancel_per_run() {
-        let pending = AtomicBool::new(false);
-        let blocked = AtomicBool::new(false);
-        let in_run = AtomicBool::new(true);
-        let cancel = RecordingCancel::default();
-
-        for _ in 0..1_000 {
-            ext_int_request(&pending, &blocked, &in_run, &cancel).expect("recordable");
-        }
-
-        assert_eq!(
-            cancel.count(),
-            1,
-            "the first raise cancels; the rest find the request already owed"
-        );
+        assert_eq!(cancel.0.get(), 1, "a running processor is fetched out exactly once");
+        assert!(owed.load(Ordering::SeqCst), "and the vector is owed until it is staged");
     }
 ```
 
+Do **not** add a third test for "a held pin costs one cancel". That property is already covered by the existing `a_pin_reported_at_every_boundary_costs_one_cancel_per_vector`, which you update in Step 1b rather than duplicate.
+
+- [ ] **Step 1b: Carry the existing `ext_int_request` tests onto the new signature**
+
+The two tests already in that module — `a_pin_reported_at_every_boundary_costs_one_cancel_per_vector` and its neighbour that drives `blocked` — call `ext_int_request` with three arguments and will not compile after Step 4.
+
+Give each a `let in_run = AtomicBool::new(true);` beside its existing `owed`/`blocked` bindings and pass `&in_run` as the third argument. `true` is the value that preserves what each test currently asserts: both were written when every raise cancelled, which is now the inside-a-run case. Change nothing else about them — their subjects are unaffected by this task.
+
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test --release -p rusty_box_whp_engine --lib ext_int_request a_request_raised a_pin_held`
+Run: `cargo test --release -p rusty_box_whp_engine --lib a_request_raised`
 Expected: FAIL to compile — `ext_int_request` takes 3 arguments, not 4.
 
 - [ ] **Step 3: Add the flag to `VcpuControl`**
@@ -268,7 +254,7 @@ Keep the existing `runs.fetch_add` exactly where it was relative to `run()`.
 cargo test --release -p rusty_box_whp_engine --lib
 cargo check --release -p rusty_box --no-default-features
 ```
-Expected: the three new tests pass; the suite is 52 and green.
+Expected: the two new tests pass, the two carried-over ones still pass, and the suite is **51** and green (49 + 2).
 
 - [ ] **Step 7: Gate and commit**
 
