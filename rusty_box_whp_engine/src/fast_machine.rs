@@ -221,8 +221,9 @@ impl<T: Instrumentation + Send + 'static> FastMachine<T> {
                 VcpuThread::spawn(vcpu, 0, Arc::clone(&shared), Arc::clone(&clock))
                     .map_err(engine_refused)?;
             let mut machine = shared.lock().unwrap_or_else(PoisonError::into_inner);
-            // The engine holds one control per processor a thread runs, in
-            // processor order; this is where this processor's lands.
+            // The engine is how the machine's own boundary reaches the thread:
+            // an 8259 edge becomes a cancel through `pic_pin_changed`, which
+            // does nothing at all without a control installed here.
             machine.engine_mut().install_control(control.clone());
             vcpus.push((join, control));
         }
