@@ -1041,13 +1041,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // win over software requests from the same boundary.
         let reset_applied = match self.check_and_handle_resets() {
             Ok(applied) => applied,
-            // A refusal reset drained on its way out already carries its kind,
-            // its backend code and the operation it failed at. Flattening it
-            // into a nameless boundary failure would cost the caller exactly
-            // what `EngineFault` exists to carry, so it crosses whole. Every
-            // other way reset can fail is a chipset effect that would not
-            // settle, which has no name of its own to lose.
-            Err(crate::Error::Cpu(fault @ CpuError::EngineFault(_))) => return Err(fault),
             Err(error) => {
                 tracing::error!("machine boundary reset handling failed: {error:?}");
                 return Err(CpuError::MachineBoundaryFailed);
@@ -1060,21 +1053,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             // (or ticking elapsed_ticks) would let pre-reset state leak into
             // the fresh machine — e.g. a rearmed timer firing before the
             // first instruction at the reset vector.
-            //
-            // Stopping on a refusal is not "anything further": reset itself
-            // tells the engine the interrupt pin fell, so this exit is one a
-            // refusal can be raised on, and it is the only one that would carry
-            // the fault past its own boundary.
-            //
-            // Leaving by the error channel costs the caller the `true` below:
-            // a boundary that both resets and refuses reports the refusal, not
-            // the reset. That is the inverse of the trade `StopCause::displaces`
-            // makes, and deliberate for the same reason read the other way —
-            // the fault is the fact this call cannot re-offer, while the machine
-            // it hands back is unambiguously reset whether or not the flag says
-            // so, and a caller that stops on the error inspects it before it
-            // could act on a reset.
-            self.stop_on_engine_refusal()?;
             #[cfg(test)]
             self.assert_cpu_masks_match_scan();
             return Ok(true);
@@ -1184,7 +1162,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 self.engine_fault = Some(fault);
             }
             // A map the engine could not install leaves by the same choke point
-            // as the other two fallible engine calls (R5), so it raises a stop
+            // as a refused delivery (R5), so it raises a stop
             // rather than only propagating: the three callers with no error
             // channel log the fault and continue, and continuing here would run
             // a guest against a map only the model believes in.
@@ -1240,8 +1218,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Stop the machine on whatever the engine refused, and clear it.
     ///
     /// The single place a refusal becomes a consequence (R5), for both kinds —
-    /// a delivery the backend would not take, and an interrupt edge it could
-    /// not be told about. It does two things because one is not enough:
+    /// a delivery the backend would not take, and a map it could not install.
+    /// It does two things because one is not enough:
     ///
     /// - the fault is returned whole, so a caller with an error channel acts on
     ///   it at once;
@@ -1257,8 +1235,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// heard.
     ///
     /// Clearing here rather than latching is what lets a host that clears the
-    /// stop flag resume: the pin edge is still owed, so the next boundary
-    /// offers it again.
+    /// stop flag resume: a refused delivery stays pending on the I/O APIC, so
+    /// the next boundary offers it again.
     ///
     /// # Errors
     /// [`CpuError::EngineFault`] carrying the refusal, when there was one.
@@ -1316,33 +1294,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.device_manager.irq.pic_mut().irq_pending = false;
         self.device_manager.irq.pic_mut().irq_cleared = false;
         self.cpu_mut().set_legacy_intr_level(asserted);
-        // The engine hears the same pin, as this boundary found it: every
-        // boundary at which it is ASSERTED, and once when it falls.
-        //
-        // Not once per transition, because this is a level sampled at a
-        // boundary and a boundary can miss the gap between two interrupts
-        // entirely: the guest acknowledges one on its own thread and a device
-        // raises the next before this line runs again, so the level never reads
-        // low and a pure edge would report the second interrupt to nobody. An
-        // engine that must fetch a running processor out of the hardware to
-        // take a vector would then owe that vector forever.
-        //
-        // What keeps the repetition from costing anything is the ENGINE's own
-        // dedup: `WhpEngine` cancels only on the false→true transition of the
-        // vector it has yet to stage (`ext_int_request`), so a pin held high
-        // across a thousand boundaries costs one cancel. The interpreter's
-        // default does nothing at all.
-        //
-        // The remembered level moves only once the engine has taken it.
-        // Recording it first would record a publication that never happened:
-        // a later boundary would find no fall to report, and the machine would
-        // believe it had paid.
-        if asserted || self.pic_pin_published {
-            match <E as SliceEngine<T>>::pic_pin_changed(&mut self.engine, asserted) {
-                Ok(()) => self.pic_pin_published = asserted,
-                Err(fault) => self.engine_fault = Some(fault),
-            }
-        }
 
         // The I/O APIC's levels are already current — the fabric moved them
         // when the lines did. What is left is routing its queued messages, in

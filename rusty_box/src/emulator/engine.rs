@@ -241,31 +241,22 @@ pub trait SliceEngine<T: Instrumentation> {
         DeliveryRoute::Model
     }
 
-    /// The 8259's INT pin to the boot processor, as this boundary found it.
+    /// Whether this ENGINE, rather than this machine's own `cpu/apic.rs`, is
+    /// the local APIC the guest reads.
     ///
-    /// Called at every boundary while the pin is ASSERTED, and once when it
-    /// falls. Not once per transition: the pin is a level, this boundary is
-    /// where the machine samples it, and two interrupts can arrive with no
-    /// sample in between — the guest acknowledges the first on whatever thread
-    /// is running it, a device raises the second, and the level never reads
-    /// low. An engine told only about transitions would never hear of the
-    /// second, and an engine that has to fetch a running processor out of its
-    /// hardware to take a vector would owe that vector forever.
+    /// The one question the legacy 8259 path turns on. An engine that answers
+    /// `true` is handed that line as an already-resolved vector through
+    /// [`Self::route_ioapic_delivery`], because a local APIC is given numbers
+    /// and not wires — there is no verb anywhere on this seam for asserting
+    /// LINT0. An engine that answers `false` leaves the line to the machine's
+    /// own model APIC, which is asked for its vector only when the processor
+    /// can take it.
     ///
-    /// **An engine that acts on this must dedup for itself.** The obligation
-    /// is one act per vector, not one per boundary; a backend that cancelled a
-    /// running processor on every call would cancel it thousands of times a
-    /// second for one interrupt.
-    ///
-    /// Defaulted to nothing, which is what this port's interpreter needs: it
-    /// reads the processor's event word, which the same boundary publishes.
-    ///
-    /// # Errors
-    /// Whatever the engine's backend refused. The machine surfaces it from the
-    /// boundary rather than continuing with an engine that missed the pin.
-    fn pic_pin_changed(&mut self, asserted: bool) -> core::result::Result<(), EngineFault> {
-        let _ = asserted;
-        Ok(())
+    /// Defaults to `false`, which is the answer for every engine that runs the
+    /// guest on this machine's own processor.
+    #[must_use]
+    fn owns_the_guests_local_apic(&self) -> bool {
+        false
     }
 }
 

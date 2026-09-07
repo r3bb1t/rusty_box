@@ -815,10 +815,10 @@ impl WhpEngine {
 
     /// The threads running this machine's processors, in processor order.
     ///
-    /// Test-facing: the production paths reach `self.controls` directly. What
-    /// a test asks it is whether a spawned thread's control actually landed
-    /// here — an engine holding none is an engine whose `pic_pin_changed` is a
-    /// silent no-op, which is the failure this accessor exists to catch.
+    /// Test-facing: what a test asks it is whether a spawned thread's control
+    /// actually landed here, so a spawn path that skipped
+    /// [`Self::install_control`] fails a test instead of leaving the engine
+    /// holding fewer controls than it has running processors.
     #[cfg(test)]
     pub(crate) fn controls(&self) -> &[VcpuControl] {
         &self.controls
@@ -1327,39 +1327,10 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
         }
     }
 
-    /// The 8259's INT pin to the boot processor changed level.
-    ///
-    /// Nothing crosses here but the EDGE. The vector is not acknowledged —
-    /// the acknowledge is irreversible, and the thread that owns the processor
-    /// is the only party that can know whether the guest could take one — so
-    /// what this does is fetch that thread out of its run, where its pre-run
-    /// staging asks the question with a fresh header. A falling edge tells it
-    /// nothing: a pin that dropped before the guest acknowledged is reconciled
-    /// by the acknowledge attempt itself.
-    ///
-    /// A no-op while no thread runs this machine's processors, which is the
-    /// state the slice loop runs in and the state a machine is reset and
-    /// restored in — and a no-op while the partition has no APIC, where this
-    /// machine's own model holds the pin and the slice head delivers from it.
-    fn pic_pin_changed(&mut self, asserted: bool) -> core::result::Result<(), EngineFault> {
-        let hypervisor_apic = self
-            .started
+    fn owns_the_guests_local_apic(&self) -> bool {
+        self.started
             .as_ref()
-            .is_some_and(|started| started.apic_mode != LocalApicMode::None);
-        if !hypervisor_apic {
-            return Ok(());
-        }
-        match (asserted, self.controls.first()) {
-            (true, Some(control)) => control.raise_ext_int().map_err(|error| {
-                tracing::error!("a processor could not be fetched out of its run: {error}");
-                EngineFault::with_code(
-                    EngineFaultKind::Vcpu,
-                    "WHvCancelRunVirtualProcessor",
-                    error.hresult(),
-                )
-            }),
-            _ => Ok(()),
-        }
+            .is_some_and(|started| started.apic_mode != LocalApicMode::None)
     }
 
     /// Refused: a machine on the hypervisor is driven by `FastMachine`.
@@ -1686,6 +1657,23 @@ pub(crate) fn describe_the_fault<T: Instrumentation>(
 mod tests {
     use super::*;
     use rusty_box_whp::SegmentRegister;
+
+    /// A machine whose partition has no local APIC of its own keeps this
+    /// machine's model APIC, and says so.
+    ///
+    /// The answer decides who acknowledges the 8259: an engine that owns the
+    /// guest's APIC takes the legacy line as a resolved vector, and one that
+    /// does not leaves it to `set_legacy_intr_level` and the deferred
+    /// acknowledge. An engine that has not started a partition at all owns
+    /// nothing.
+    #[test]
+    fn an_engine_with_no_partition_owns_no_local_apic() {
+        let engine = WhpEngine::default();
+        assert!(
+            !<WhpEngine as SliceEngine<()>>::owns_the_guests_local_apic(&engine),
+            "an engine that has started nothing cannot be the guest's APIC"
+        );
+    }
 
     /// The cache decodes an exit header and nothing else: `InterruptionPending`
     /// is `ExecutionState` bit 6, `InterruptShadow` is bit 12, `IF` is `RFLAGS`

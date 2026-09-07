@@ -565,21 +565,11 @@ pub struct Emulator<T: Instrumentation = (), E = SoftwareEngine> {
     /// `scheduler.rs` — so what holds the invariant is that these two methods
     /// are the only code anywhere that touches the field (R5).
     stop_cause: StopCause,
-    /// The 8259 INT pin level this machine last told its engine about, and the
-    /// engine acknowledged.
-    ///
-    /// The pin itself is republished to the boot processor on every commit;
-    /// the engine hears only transitions, and this is what a transition is
-    /// measured against. It moves only when the engine accepted the edge, so
-    /// an edge the engine refused stays owed and is offered again at the next
-    /// boundary. Reset publishes the fall through the same rule rather than
-    /// clearing the flag, so an engine that latched the assertion is told.
-    pic_pin_published: bool,
     /// What the engine refused, until a boundary turns it into the machine's
     /// answer.
     ///
     /// One field for both refusals — a delivery the backend would not take and
-    /// an edge it could not be told about — because there is one place that
+    /// a map it could not install — because there is one place that
     /// acts on either (R5): `service_scheduler_boundary` returns it as
     /// `CpuError::EngineFault` *and* stops the machine beneath it, so a caller
     /// with nowhere to put the error still cannot keep running a guest that is
@@ -630,7 +620,6 @@ fn every_machine_field_is_accounted_for<T: Instrumentation>(machine: Emulator<T>
         vga_vertical_period_usec: _,
         stop_flag: _,
         stop_cause: _,
-        pic_pin_published: _,
         engine_fault: _,
     } = machine;
 }
@@ -1068,7 +1057,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(Arc::new(AtomicBool::new(false)));
             core::ptr::addr_of_mut!((*ptr).stop_cause).write(StopCause::default());
-            core::ptr::addr_of_mut!((*ptr).pic_pin_published).write(false);
             core::ptr::addr_of_mut!((*ptr).engine_fault).write(None);
             Ok(alloc::boxed::Box::from_raw(ptr))
         }
@@ -1143,7 +1131,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
             core::ptr::addr_of_mut!((*ptr).stop_cause).write(StopCause::default());
-            core::ptr::addr_of_mut!((*ptr).pic_pin_published).write(false);
             core::ptr::addr_of_mut!((*ptr).engine_fault).write(None);
             Ok(&mut *ptr)
         }
@@ -1494,20 +1481,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         let recovering_failed_snapshot = self.snapshot_restore_failed;
         tracing::debug!("Emulator reset ({:?})", reset_type);
         self.devices.discard_scheduler_boundary_work();
-        // The 8259 comes up with its INT pin low, and the engine is not reset
-        // with the machine — so the fall is PUBLISHED rather than forgotten. An
-        // engine that latches ExtINT and is only told the pin went low by the
-        // next transition would hold it asserted into a guest that has just
-        // come up, and a machine that merely cleared this flag would owe it an
-        // edge it can no longer name. The remembered level moves only once the
-        // engine has the edge (see `sync_final_event_levels`), so a refusal
-        // leaves the fall to be re-offered at the next boundary.
-        if self.pic_pin_published {
-            match <E as SliceEngine<T>>::pic_pin_changed(&mut self.engine, false) {
-                Ok(()) => self.pic_pin_published = false,
-                Err(fault) => self.engine_fault = Some(fault),
-            }
-        }
 
         // Reset PC system (enables A20)
         self.pc_system.reset(reset_type);
@@ -1592,12 +1565,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             self.initialized = true;
         }
         self.snapshot_restore_failed = false;
-        // A refusal recorded above is reported by the call that provoked it,
-        // not left for whichever boundary runs next to attribute to itself.
-        // Drained last so the reset completes first: a machine half-reset
-        // because its engine would not take the pin's fall is worse than one
-        // fully reset whose caller is told the engine refused.
-        self.stop_on_engine_refusal()?;
         Ok(())
     }
 

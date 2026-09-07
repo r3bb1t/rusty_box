@@ -48,10 +48,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         /// When set, no map can be installed — the way a hypervisor that
         /// refuses a guest-physical range installs none.
         refuse_map: bool,
-        /// Every 8259 INT pin transition this engine was told about, in order.
-        /// A recorder rather than a counter, so a test can say both how many
-        /// times it heard and which way the pin went each time.
-        pic_edges: Vec<bool>,
     }
 
     impl MapWatchingEngine {
@@ -81,14 +77,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             if self.refuse_map {
                 return Err(MAP_REFUSAL);
             }
-            Ok(())
-        }
-
-        fn pic_pin_changed(
-            &mut self,
-            asserted: bool,
-        ) -> core::result::Result<(), rusty_box_core::EngineFault> {
-            self.pic_edges.push(asserted);
             Ok(())
         }
     }
@@ -123,9 +111,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     #[derive(Default)]
     struct RefusingEngine {
         backend: Backend,
-        /// Every 8259 INT pin transition OFFERED, in order — refused offers
-        /// included, so a test can say whether a refused edge came back.
-        pic_offers: Vec<bool>,
         /// Every I/O APIC message offered, in order.
         deliveries: Vec<crate::iodev::irq::IoApicDelivery>,
     }
@@ -150,17 +135,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             match self.backend {
                 Backend::Refusing => DeliveryRoute::Refused(REFUSAL),
                 Backend::Accepting => DeliveryRoute::Backend,
-            }
-        }
-
-        fn pic_pin_changed(
-            &mut self,
-            asserted: bool,
-        ) -> core::result::Result<(), rusty_box_core::EngineFault> {
-            self.pic_offers.push(asserted);
-            match self.backend {
-                Backend::Refusing => Err(REFUSAL),
-                Backend::Accepting => Ok(()),
             }
         }
     }
@@ -285,50 +259,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         );
     }
 
-    /// The engine hears the PIC pin at every boundary that finds it asserted,
-    /// and once when it falls.
-    ///
-    /// A level and not an edge, because the machine samples the pin here and
-    /// only here: a guest that acknowledges one interrupt on its own thread
-    /// while a device raises the next leaves the level never reading low, and a
-    /// backend told only about transitions would never hear of the second
-    /// interrupt. Deduping is the engine's, which is where it can be done per
-    /// VECTOR rather than per boundary — see `ext_int_request` in
-    /// `rusty_box_whp_engine`.
-    ///
-    /// The fall is reported exactly once, which is what stops a machine at rest
-    /// from calling its engine forever.
-    #[test]
-    fn the_pic_pin_reaches_the_engine_at_every_boundary_that_finds_it_high() {
-        let mut machine = furnished_machine_on::<MapWatchingEngine>();
-        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
-        machine
-            .device_manager
-            .irq
-            .raise(rusty_box_devices::api::IrqLine(0));
-        machine.service_device_time(0).unwrap();
-        machine.service_device_time(0).unwrap();
-        machine.service_device_time(0).unwrap();
-        assert_eq!(
-            machine.engine().pic_edges,
-            vec![true, true, true],
-            "an interrupt the guest has not taken is still owed at every boundary"
-        );
-        // The INTA takes the vector and lowers the pin.
-        assert_eq!(
-            machine.device_manager.irq.acknowledge(),
-            0x08,
-            "IRQ0 acknowledges to the master 8259's reset offset"
-        );
-        machine.service_device_time(0).unwrap();
-        machine.service_device_time(0).unwrap();
-        assert_eq!(
-            machine.engine().pic_edges,
-            vec![true, true, true, false],
-            "the fall is published once, and a machine at rest says nothing further"
-        );
-    }
-
     /// A refusal reaches a caller that acts on it, even through a caller that
     /// can do nothing but log.
     ///
@@ -377,113 +307,24 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert_eq!(outcome.stop, Some(StopReason::EngineFault));
     }
 
-    /// A refused pin level is still owed, so the machine offers it again.
-    ///
-    /// The level is remembered only once the engine has taken it. Remembering
-    /// it first would record a publication that never happened, and no later
-    /// boundary would find a fall to report.
-    #[test]
-    fn a_refused_pic_edge_is_offered_again_at_the_next_boundary() {
-        let mut machine = furnished_machine_on::<RefusingEngine>();
-        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
-        machine
-            .device_manager
-            .irq
-            .raise(rusty_box_devices::api::IrqLine(0));
-
-        let refusal = machine
-            .service_device_time(0)
-            .expect_err("the boundary returns what the engine refused");
-        match refusal {
-            crate::cpu::CpuError::EngineFault(fault) => {
-                assert_eq!(
-                    fault.kind(),
-                    rusty_box_core::EngineFaultKind::Vcpu,
-                    "the fault crossed the boundary whole, kind included"
-                );
-                assert_eq!(fault.code(), REFUSAL.code(), "and carrying its backend code");
-                assert_eq!(fault.at(), REFUSAL.at());
-            }
-            other => panic!("the refusal reached the caller as {other}"),
-        }
-        assert_eq!(
-            machine.engine().pic_offers,
-            vec![true],
-            "the rising edge was offered once, and refused"
-        );
-
-        // The backend recovers, and the host clears the stop the refusal
-        // raised. The edge was never taken, so the machine still owes it.
-        machine.engine_mut().backend = Backend::Accepting;
-        machine
-            .stop_flag
-            .store(false, core::sync::atomic::Ordering::Relaxed);
-        let outcome = machine
-            .service_device_time(0)
-            .expect("the edge is taken this time");
-        assert_eq!(
-            machine.engine().pic_offers,
-            vec![true, true],
-            "the refused level came back at the next boundary"
-        );
-        assert_eq!(outcome.stop, None, "and nothing is stopping the machine");
-
-        // The INTA takes the vector and the pin falls. The fall is published
-        // once, and a machine at rest says nothing further — which is what
-        // stops the level publication from being a permanent stream.
-        assert_eq!(machine.device_manager.irq.acknowledge(), 0x08);
-        machine.service_device_time(0).expect("the falling pin");
-        machine.service_device_time(0).expect("a quiet boundary");
-        assert_eq!(machine.engine().pic_offers, vec![true, true, false]);
-    }
-
-    /// Reset publishes the fall of the interrupt pin rather than forgetting it.
-    ///
-    /// The engine is not reset with the machine. One that latched the assertion
-    /// and was only told by the next transition would hold it into a guest that
-    /// has just come up — and a stale assertion self-corrects at the next
-    /// boundary only while the pin stays low, which is not a promise the 8259
-    /// makes.
-    #[test]
-    fn reset_tells_the_engine_the_interrupt_pin_fell() {
-        let mut machine = furnished_machine_on::<RefusingEngine>();
-        machine.engine_mut().backend = Backend::Accepting;
-        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
-        machine
-            .device_manager
-            .irq
-            .raise(rusty_box_devices::api::IrqLine(0));
-        machine.service_device_time(0).expect("the rising edge");
-        assert_eq!(machine.engine().pic_offers, vec![true]);
-
-        machine
-            .power()
-            .reset(crate::cpu::ResetReason::Hardware)
-            .expect("a hardware reset");
-
-        assert_eq!(
-            machine.engine().pic_offers,
-            vec![true, false],
-            "reset published the fall, so an engine holding the assertion is told"
-        );
-    }
-
     /// A guest that switched itself off is reported as switched off, even when
     /// the engine refuses something in the same boundary.
     ///
     /// Both facts want the one field that says why the machine stopped. The
     /// power-off is drained at the head of the boundary and consumed there, so
     /// no later call can rediscover it; the refusal is handed back on this very
-    /// call and the edge it refused is still owed. So the power-off keeps the
-    /// field, and the refusal loses nothing by yielding it.
+    /// call and the message it refused is still pending. So the power-off keeps
+    /// the field, and the refusal loses nothing by yielding it.
     #[test]
     fn a_guest_power_off_outranks_a_refusal_from_the_same_boundary() {
         let mut machine = furnished_machine_on::<RefusingEngine>();
-        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
+        let now = machine.pc_system.time_ticks();
+        machine.cpu_mut().lapic.write_aligned(0xF0, 0x1FF, now); // software-enable the LAPIC
+        program_ioapic_entry(&mut machine, 1, 0x31);
         machine
             .device_manager
             .irq
-            .raise(rusty_box_devices::api::IrqLine(0));
+            .raise(rusty_box_devices::api::IrqLine(1));
         // What a guest's PM1_CNT write with SLP_TYP = S5 leaves behind; that
         // half is pinned by `acpi_s5_requests_soft_power_off` in acpi.rs.
         machine.device_manager.acpi.soft_off_pending = true;
@@ -500,104 +341,14 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             other => panic!("the refusal reached the caller as {other}"),
         }
         assert_eq!(
-            machine.engine().pic_offers,
-            vec![true],
-            "and it was a real refusal: the rising edge was offered and declined"
+            machine.engine().deliveries.len(),
+            1,
+            "and it was a real refusal: the message was offered and declined"
         );
         assert_eq!(
             machine.power().state(),
             PowerState::PoweredOff,
             "a machine the guest switched off does not report itself running"
-        );
-    }
-
-    /// A refusal raised while the machine resets leaves by the boundary that
-    /// reset, not by the one after it.
-    ///
-    /// Reset takes the boundary's early exit, which discards everything queued
-    /// before it. The refusal is the exception, because reset itself is what
-    /// offered the engine the falling edge — an exit that walked past it would
-    /// carry the fault into a boundary that knows nothing about it.
-    #[test]
-    fn a_refusal_raised_during_a_reset_leaves_by_the_resetting_boundary() {
-        let mut machine = furnished_machine_on::<RefusingEngine>();
-        machine.engine_mut().backend = Backend::Accepting;
-        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
-        machine
-            .device_manager
-            .irq
-            .raise(rusty_box_devices::api::IrqLine(0));
-        machine
-            .service_device_time(0)
-            .expect("the rising edge is taken");
-        assert_eq!(machine.engine().pic_offers, vec![true]);
-
-        // The backend fails, and the guest's port-92h reset lands in the same
-        // boundary that has to tell the engine the pin fell.
-        machine.engine_mut().backend = Backend::Refusing;
-        machine.device_manager.port92.reset_request = Some(crate::cpu::ResetReason::Software);
-
-        let refusal = machine
-            .service_device_time(0)
-            .expect_err("the reset's falling edge was refused, and this boundary says so");
-        match refusal {
-            crate::cpu::CpuError::EngineFault(fault) => {
-                assert_eq!(fault.code(), REFUSAL.code(), "the fault crossed whole");
-            }
-            other => panic!("the refusal reached the caller as {other}"),
-        }
-        assert_eq!(
-            machine.engine().pic_offers,
-            vec![true, false],
-            "reset offered the fall, which is what there was to refuse"
-        );
-        assert!(
-            machine.stop_flag.load(core::sync::atomic::Ordering::Relaxed),
-            "and the machine is stopped, not merely told"
-        );
-    }
-
-    /// A reset the engine refuses is reported by the reset, not by whichever
-    /// boundary happens to run next.
-    ///
-    /// Reset tells the engine the 8259's INT pin fell, so it is one of the
-    /// places a refusal can be raised — and a host that calls it directly never
-    /// reaches the boundary that would otherwise drain the fault. Returning
-    /// `Ok` there would hand back a machine that owes a refusal, and attribute
-    /// it later to a boundary that did nothing wrong.
-    #[test]
-    fn a_reset_the_engine_refuses_is_reported_by_the_reset() {
-        let mut machine = furnished_machine_on::<RefusingEngine>();
-        machine.engine_mut().backend = Backend::Accepting;
-        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
-        machine
-            .device_manager
-            .irq
-            .raise(rusty_box_devices::api::IrqLine(0));
-        machine
-            .service_device_time(0)
-            .expect("the rising edge is taken, so the fall is owed at reset");
-
-        machine.engine_mut().backend = Backend::Refusing;
-        let refusal = machine
-            .power()
-            .reset(crate::cpu::ResetReason::Hardware)
-            .expect_err("the engine would not take the pin's fall");
-        match refusal {
-            crate::Error::Cpu(crate::cpu::CpuError::EngineFault(fault)) => {
-                assert_eq!(fault.code(), REFUSAL.code(), "the fault crossed whole");
-                assert_eq!(fault.at(), REFUSAL.at());
-            }
-            other => panic!("the refusal reached the caller as {other}"),
-        }
-        assert!(
-            machine.stop_flag.load(core::sync::atomic::Ordering::Relaxed),
-            "and the machine is stopped, not merely told"
-        );
-        assert_eq!(
-            machine.engine().pic_offers,
-            vec![true, false],
-            "the reset still ran and still offered the fall"
         );
     }
 
@@ -712,11 +463,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     #[test]
     fn the_per_slice_tick_commit_propagates_a_boundary_failure() {
         let mut machine = furnished_machine_on::<RefusingEngine>();
-        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
+        let now = machine.pc_system.time_ticks();
+        machine.cpu_mut().lapic.write_aligned(0xF0, 0x1FF, now); // software-enable the LAPIC
+        program_ioapic_entry(&mut machine, 1, 0x31);
         machine
             .device_manager
             .irq
-            .raise(rusty_box_devices::api::IrqLine(0));
+            .raise(rusty_box_devices::api::IrqLine(1));
 
         let error = machine
             .advance_pc_system_after_cpu_ticks(0)
