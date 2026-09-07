@@ -5,8 +5,9 @@
 //! slices produce no exit at all, and under 1% of this engine's wall time is
 //! the guest executing. So an exit here pays for what it uses. A plain port
 //! write moves nothing — `RIP` and `RAX` go back directly. `CPUID` moves the
-//! general registers and the instruction pointer. Only a transfer of the whole
-//! processor moves the whole processor.
+//! general registers, the instruction pointer, and the two groups its own
+//! retirement width is derived from. Only a transfer of the whole processor
+//! moves the whole processor.
 //!
 //! The mask is two flag sets and nothing else. `externalised` says which groups
 //! the partition holds the live value of; `imported_this_exit` says which ones
@@ -56,10 +57,15 @@ pub(crate) enum ExitClass {
 /// The register groups `class` needs.
 ///
 /// Each entry is the state the interpreter reads to finish that access, and
-/// nothing beyond it. `Mmio` carries the model-specific registers for `EFER`
-/// alone — the paging mode decides how the operand's address is formed — and
-/// the segments because the operand is `seg:offset`. `Cpuid` carries neither:
-/// it reads and writes four general registers and advances `RIP`.
+/// nothing beyond it. `Mmio` carries the segments because the operand is
+/// `seg:offset`, and the tables because a fault it raises walks them.
+///
+/// Every class that retires an instruction on the shadow carries
+/// `CONTROL_REGS` and `MSRS` whatever else it needs, because those hold the
+/// mode the retirement is measured in — `CR0.PE` and `EFER.LMA` decide how far
+/// `RIP` advances. `PlainPort` is the one class that carries nothing, and it
+/// can because it retires nothing: the platform decoded the access and `RIP`
+/// and `RAX` go back as two words.
 pub(crate) const fn needs(class: ExitClass) -> ArchGroups {
     match class {
         // Nothing: `service_port_access` writes `RIP` and `RAX` as two words,
@@ -93,12 +99,23 @@ pub(crate) const fn needs(class: ExitClass) -> ArchGroups {
             .union(ArchGroups::TABLES)
             .union(ArchGroups::CONTROL_REGS)
             .union(ArchGroups::MSRS),
-        // The exception to the rule above, and the reason the rule is stated
-        // per class rather than applied to all of them: `CPUID` takes no
-        // memory operand, is not privileged, and is supported by every
-        // processor this port models, so no delivery can follow it. Keeping it
-        // at two groups is what makes it the cheap class it is meant to be.
-        ExitClass::Cpuid => ArchGroups::GPRS.union(ArchGroups::RIP_RFLAGS),
+        // The cheapest class that still retires an instruction, and the two
+        // groups below are the floor beneath which no such class can go.
+        //
+        // `CPUID` needs no `SEGMENTS` and no `TABLES`: it takes no memory
+        // operand, is not privileged, and is supported by every processor this
+        // port models, so no delivery can follow it and nothing walks a
+        // descriptor. What it cannot do without is the state its own
+        // RETIREMENT is measured in — `CR0.PE` says real or protected and
+        // `EFER.LMA` says long, and between them they decide whether `RIP`
+        // advances by sixteen bits, thirty-two or sixty-four. A guest changes
+        // both on hardware without ever taking an exit, so a shadow that
+        // skipped them would retire this instruction at whatever mode it was
+        // last left in.
+        ExitClass::Cpuid => ArchGroups::GPRS
+            .union(ArchGroups::RIP_RFLAGS)
+            .union(ArchGroups::CONTROL_REGS)
+            .union(ArchGroups::MSRS),
         // `RDMSR`/`WRMSR` of an MSR this port does not model raises `#GP`,
         // which is routine rather than exotic — so this class delivers, and
         // needs the segments the handler's `CS` load reads.
@@ -441,8 +458,12 @@ mod tests {
 
         assert_eq!(
             needs(ExitClass::Cpuid),
-            ArchGroups::GPRS | ArchGroups::RIP_RFLAGS,
-            "CPUID reads and writes four general registers and advances RIP"
+            ArchGroups::GPRS
+                | ArchGroups::RIP_RFLAGS
+                | ArchGroups::CONTROL_REGS
+                | ArchGroups::MSRS,
+            "CPUID reads and writes four general registers and advances RIP — by a \
+             width `CR0.PE` and `EFER.LMA` decide, so it carries those too"
         );
         assert_eq!(
             needs(ExitClass::StringPort),
@@ -525,7 +546,12 @@ mod tests {
 
         ex.import_for(&vp, cpu, ExitClass::Cpuid, &[0x0F, 0xA2], &mut xs).unwrap();
         assert!(
-            vp.reads_of(Reg::Rax) == 1 && vp.reads_of(Reg::Es) == 0 && vp.reads_of(Reg::Efer) == 0
+            vp.reads_of(Reg::Rax) == 1 && vp.reads_of(Reg::Es) == 0,
+            "the general registers CPUID answers in, and no segment it cannot name"
+        );
+        assert!(
+            vp.reads_of(Reg::Efer) == 1 && vp.reads_of(Reg::Cr0) == 1,
+            "and the two the width of its own retirement is derived from"
         );
 
         let calls = ex.export_imported(&vp, cpu, &mut xs).unwrap();
@@ -577,13 +603,26 @@ mod tests {
         .unwrap();
 
         ex.export_imported(&vp, cpu, &mut xs).unwrap();
+        // Both directions of the mask, over one exit. `CPUID` imports the
+        // control registers — its retirement width is derived from them — so
+        // the shadow's copy is the live one and goes back.
         assert_eq!(
             vp.value_of(Reg::Cr3),
-            0x0000_1000,
-            "CONTROL_REGS were not imported, so they are not exported"
+            0xDEAD_0000,
+            "CONTROL_REGS were imported, so the shadow's copy is written back"
         );
-        assert_eq!(vp.value_of(Reg::Dr7), 0x0000_0400);
-        assert_eq!(vp.writes_of(Reg::Es), 0);
+        // It imports neither the debug registers nor the segments, so the
+        // partition keeps its own — which is the property this test exists for.
+        assert_eq!(
+            vp.value_of(Reg::Dr7),
+            0x0000_0400,
+            "DEBUG_REGS were not imported, so they are not exported"
+        );
+        assert_eq!(
+            vp.writes_of(Reg::Es),
+            0,
+            "SEGMENTS were not imported, so none is written"
+        );
     }
 
     #[test]
@@ -776,5 +815,54 @@ mod tests {
             "RIP, RFLAGS and CR8→TPR landed"
         );
         assert_eq!(vp.total_reads(), 0);
+    }
+
+    /// Every class that RETIRES an instruction on the shadow must import the
+    /// state the processor's mode is derived from.
+    ///
+    /// The mode decides how wide the retirement is. `CR0.PE` says real or
+    /// protected (`CONTROL_REGS`) and `EFER.LMA` says long (`MSRS`); a shadow
+    /// missing either derives some other processor's mode and advances `RIP` by
+    /// the wrong width. Measured, before this test existed: a `CPUID` exit
+    /// imported neither, so the shadow still held `CR0 = 0x60000010` from reset
+    /// — `PE` clear — believed itself in real mode, and retired `CPUID` at
+    /// `0xe2adc` to `0x2ade` instead of `0xe2ade`. The guest resumed in the
+    /// middle of nothing and triple-faulted; the whole BIOS boot died on one
+    /// instruction, and the census said `cpuid 1`.
+    ///
+    /// Stated over the closed set rather than against a list of known-good
+    /// classes, so a class added later has to answer it too. `PlainPort` is the
+    /// one exemption and it is exempt for a reason the type system cannot
+    /// state: it retires nothing on the shadow at all — the platform decoded
+    /// the access and `service_port_access` writes `RIP` and `RAX` back as two
+    /// words — so no mode of any kind is consulted.
+    #[test]
+    fn every_class_that_retires_on_the_shadow_imports_what_its_mode_derives_from() {
+        // `CR0` for real-versus-protected, `EFER` for long: the two groups the
+        // fetch-mode derivation reads that a guest can change on hardware
+        // without ever taking an exit.
+        let mode_inputs = ArchGroups::CONTROL_REGS.union(ArchGroups::MSRS);
+        for class in [
+            ExitClass::StringPort,
+            ExitClass::Mmio,
+            ExitClass::Cpuid,
+            ExitClass::Msr,
+            ExitClass::Exception,
+            ExitClass::Full,
+        ] {
+            assert!(
+                needs(class).contains(mode_inputs),
+                "{class:?} retires an instruction on the shadow but imports \
+                 {:?}, which is missing {:?} — the shadow would derive its mode \
+                 from stale state and advance RIP by the wrong width",
+                needs(class),
+                mode_inputs.difference(needs(class))
+            );
+        }
+        assert_eq!(
+            needs(ExitClass::PlainPort),
+            ArchGroups::empty(),
+            "the one class that retires nothing on the shadow imports nothing"
+        );
     }
 }
