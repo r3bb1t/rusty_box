@@ -372,6 +372,40 @@ A guest that halts is the case a placed event alone does not wake — the platfo
     }
 ```
 
+- [ ] **Step 1b: Repair a control assertion Task 2 made timing-dependent**
+
+`a_masked_lvt0_keeps_the_legacy_path_closed` (same file) asserts
+`census.exits.canceled >= 1`, and its own message says why: "the 8259's pin must
+have risen … without that this test never reached the gate and proves nothing."
+That was unconditional when every raise cancelled. After Task 2 a raise that
+lands while the processor is between runs is staged at the next entry with **no**
+cancel, and later raises for the same vector are deduplicated — so `canceled`
+can be 0 and the test fails. The window is small (the guest programs the PIT then
+spins exit-free, so the first tick usually finds `in_run` true) but host
+preemption across a ~3.4 ms PIT period trips it.
+
+The cancel was only ever a proxy for "the pin rose". Assert that directly, which
+is both robust and closer to the property the test is about. Replace the
+`canceled >= 1` assertion with:
+
+```rust
+        assert!(
+            machine
+                .lock()
+                .expect("the machine's lock")
+                .processor(0)
+                .io
+                .device_manager()
+                .has_interrupt(),
+            "the 8259's pin must have risen and still be owed — without that this test \
+             never reached the gate and proves nothing: {census:?}"
+        );
+```
+
+Leave the file's other three assertions alone: `seen.is_empty()`,
+`exits.window == 0` and `inject_census().injected == 0` are unaffected by Task 2
+and still say what they said.
+
 - [ ] **Step 2: Run it, and prove the HLT kick is what carries it**
 
 ```bash
