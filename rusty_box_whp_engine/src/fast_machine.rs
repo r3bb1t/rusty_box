@@ -40,7 +40,7 @@ use rusty_box_core::EngineFault;
 use rusty_box_whp::WhpError;
 
 use crate::device_thread::{self, DeviceThreadControl};
-use crate::engine::{bring_up, ExitCounts, InjectCensus, WhpEngine};
+use crate::engine::{bring_up, ExitCounts, WhpEngine};
 use crate::vcpu_thread::{Parked, VcpuCensus, VcpuControl, VcpuThread};
 use crate::vm_clock::{StdClock, VmClockSource};
 
@@ -157,8 +157,6 @@ pub struct EngineCensus {
     pub exits: ExitCounts,
     /// One entry per processor, in processor order.
     pub vcpus: Vec<VcpuCensus>,
-    /// What was placed in the partition's pending-event slot.
-    pub injections: InjectCensus,
 }
 
 /// Whether the guest's threads are running (R2).
@@ -220,10 +218,6 @@ impl<T: Instrumentation + Send + 'static> FastMachine<T> {
             let (join, control) =
                 VcpuThread::spawn(vcpu, 0, Arc::clone(&shared), Arc::clone(&clock))
                     .map_err(engine_refused)?;
-            let mut machine = shared.lock().unwrap_or_else(PoisonError::into_inner);
-            // The engine holds one control per processor a thread runs, in
-            // processor order; this is where this processor's lands.
-            machine.engine_mut().install_control(control.clone());
             vcpus.push((join, control));
         }
 
@@ -426,8 +420,9 @@ impl<T: Instrumentation + Send + 'static> FastMachine<T> {
     /// What the threads and the partition have done. Touches no processor.
     ///
     /// Safe to call while the guest runs: every number comes from a shared
-    /// counter or from the machine's own engine under a brief lock, and none
-    /// of it is a platform call against a processor another thread is inside.
+    /// counter the thread that owns it writes, so none of it is a platform
+    /// call against a processor another thread is inside, and none of it
+    /// waits on the machine's lock.
     #[must_use]
     pub fn engine_census(&self) -> EngineCensus {
         let vcpus: Vec<VcpuCensus> = self
@@ -439,12 +434,7 @@ impl<T: Instrumentation + Send + 'static> FastMachine<T> {
         for vcpu in &vcpus {
             exits.absorb(vcpu.exits);
         }
-        let machine = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
-        EngineCensus {
-            exits,
-            vcpus,
-            injections: machine.engine().inject_census().clone(),
-        }
+        EngineCensus { exits, vcpus }
     }
 
     /// The guest's time, now.

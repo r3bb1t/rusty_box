@@ -416,10 +416,6 @@ pub(crate) mod fixtures {
 
     impl RunningVcpu {
         /// Move `vcpu` onto a thread and hold the means to end it.
-        ///
-        /// The control is installed on the engine here as well as held by this
-        /// handle: the engine keeps one control per processor a thread runs,
-        /// and this is the thread that runs processor `index`.
         pub(crate) fn spawn(
             vcpu: rusty_box_whp::Vcpu,
             index: usize,
@@ -446,11 +442,6 @@ pub(crate) mod fixtures {
             let (join, control) =
                 crate::vcpu_thread::VcpuThread::spawn(vcpu, index, machine.clone(), clock)
                     .expect("the vCPU thread starts");
-            machine
-                .lock()
-                .expect("the machine's lock")
-                .engine_mut()
-                .install_control(control.clone());
             Self { control, join: Some(join) }
         }
 
@@ -545,7 +536,7 @@ pub(crate) mod fixtures {
 }
 
 pub use device_thread::DeviceThreadControl;
-pub use engine::{ExitCounts, InjectCensus, PlatformCounters, WhpEngine};
+pub use engine::{ExitCounts, PlatformCounters, WhpEngine};
 pub use fast_machine::{EngineCensus, FastMachine, FastMachineFault, StepOutcome, StepStop};
 pub use vcpu_thread::VcpuCensus;
 pub use vm_clock::{StdClock, VmClockSource};
@@ -1164,8 +1155,7 @@ mod tests {
         );
         // Read while the thread still runs: the park's own cancel is an exit,
         // and "no cancel" is half the claim — a delivery through the
-        // partition's APIC never fetches the processor out of its run, where a
-        // legacy ExtINT costs one cancel per edge.
+        // partition's APIC never fetches the processor out of its run.
         let running_census = control.census();
         assert_eq!(
             (
@@ -1204,11 +1194,11 @@ mod tests {
 
     /// A masked LINT0 keeps the legacy path shut.
     ///
-    /// Measured on this platform: an ExtINT written into a processor's
-    /// pending-event slot is delivered whether or not the guest masked its own
-    /// LINT0. Nothing in the hypervisor honours that mask, so this machine's
-    /// interrupt fabric is the only thing that can — and this test is what
-    /// stands between a masked line and a delivered interrupt.
+    /// The 8259's vector reaches the partition's APIC as a `WHvRequestInterrupt`,
+    /// which no LVT entry masks: nothing in the hypervisor honours the guest's
+    /// LINT0 mask, so this machine's interrupt fabric is the only thing that
+    /// can — and this test is what stands between a masked line and a
+    /// delivered interrupt.
     ///
     /// The guest is the positive control for itself: IRQ0 is unmasked at the
     /// 8259 and the PIT ticks, so the INT pin genuinely rises and stays owed.
@@ -1243,11 +1233,6 @@ mod tests {
             seen.is_empty(),
             "a vector the guest masked at LINT0 reached its handler: {seen:#04x?}"
         );
-        assert_eq!(
-            census.exits.window, 0,
-            "no deliverability window may be armed for a vector the fabric must never stage: \
-             {census:?}"
-        );
         let mut guard = machine.lock().expect("the machine's lock");
         assert!(
             guard.processor(0).io.device_manager().has_interrupt(),
@@ -1258,11 +1243,6 @@ mod tests {
             guard.processor(0).io.device_manager().irq().acknowledge_count(),
             0,
             "nothing may be acknowledged at the controllers for a masked line"
-        );
-        assert_eq!(
-            guard.engine().inject_census().injected,
-            0,
-            "and nothing may be placed for the partition"
         );
         drop(guard);
         running.stop_and_join();
@@ -1289,12 +1269,6 @@ mod tests {
             shared(machine_running(&[0xB0, MARK, 0xE6, DEBUG_PORT, 0xEB, 0xFE]));
         let running = RunningVcpu::spawn(vcpu, 0, machine.clone());
         let control = running.control().clone();
-        // The engine holds the control for the processor this thread runs.
-        assert_eq!(
-            machine.lock().expect("the machine's lock").engine().controls().len(),
-            1,
-            "the engine holds the control for the processor a thread is running"
-        );
 
         let mut seen: std::vec::Vec<u8> = std::vec::Vec::new();
         wait_until(

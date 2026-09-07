@@ -253,10 +253,9 @@ fn boot() -> i32 {
             let exits = census.exits;
             let in_run_ms = census.vcpus.first().map_or(0, |vcpu| vcpu.in_run_nanos) / 1_000_000;
             println!(
-                "       rip={:#x} in_run={in_run_ms}ms runs={} injected={} exits: port {} mem {} cpuid {} msr {} halt {} canceled {} boundary {}",
+                "       rip={:#x} in_run={in_run_ms}ms runs={} exits: port {} mem {} cpuid {} msr {} halt {} canceled {} boundary {}",
                 machine.with_machine(|m| m.rip()),
                 census.vcpus.first().map_or(0, |vcpu| vcpu.runs),
-                census.injections.injected,
                 exits.port,
                 exits.memory,
                 exits.cpuid,
@@ -382,10 +381,6 @@ fn report(reached: usize, began: Instant, ticks: u64, machine: &mut FastMachine<
             None => println!("  platform counters unavailable: this processor has not parked"),
         }
     }
-    println!(
-        "  injected {} windows_armed {}",
-        census.injections.injected, census.injections.windows_armed
-    );
 }
 
 /// Show what the guest was doing when it stopped.
