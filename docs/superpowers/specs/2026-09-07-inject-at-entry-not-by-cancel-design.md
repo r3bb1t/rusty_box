@@ -77,10 +77,28 @@ reg_values[reg_count].ExtIntEvent = (WHV_X64_PENDING_EXT_INT_EVENT) {
 
 So the event type was already right. Only the trigger was wrong.
 
-QEMU also carries a fact this port does not know: **`WHvRegisterPendingEvent`
-does not reset the HLT state.** QEMU added `whpx_vcpu_kick_out_of_hlt()` for
-exactly this, commenting that it "does not reset the HLT state". A BIOS that
-halts waiting for its timer tick would otherwise take the event and stay halted.
+QEMU also carries a fact about HLT: **`WHvRegisterPendingEvent` does not reset
+the HLT state**, so QEMU added `whpx_vcpu_kick_out_of_hlt()`.
+
+**This port already had that, and had measured it independently.** The deleted
+staging wrote the whole internal-activity register before entering:
+
+```rust
+// Load-bearing, not redundant: measured, a processor parked in `HLT`
+// under an emulated APIC sets `halt_suspend`, produces no halt exit, and
+// does NOT run the handler for a placed event until the suspend is cleared.
+const RUNNING: InternalActivity =
+    InternalActivity { startup_suspend: false, halt_suspend: false, idle_suspend: false };
+vcpu.set_internal_activity(RUNNING)?;
+```
+
+The same is true of the readiness gate: `inject.permits_ext_int()` already tested
+IF, the interrupt shadow and an in-flight delivery from the exit header — QEMU's
+gate, arrived at independently.
+
+**So the research corroborates the deleted code rather than correcting it.** The
+staging was right in every part except one, and that is what makes this change
+small: restore it, and replace the trigger.
 
 ## The design
 
@@ -99,23 +117,27 @@ if in_run.load(Ordering::SeqCst) {
 }
 ```
 
-The thread injects before every entry, then re-checks under `in_run` so no
-request is lost against a guest that takes no exits:
+The thread already calls `stage_the_legacy_interrupt()` before each entry, and
+that body is kept **unchanged** — its LINT0 gate, its `permits_ext_int` readiness
+test, its counted INTA, its `PendingExtIntEvent` write, its `set_internal_activity`
+HLT kick and its `sync_io_events` all stay exactly as they were. What is added
+around it is the `in_run` window and the re-check that closes the lost-wakeup
+race:
 
 ```rust
-if pending.load(Ordering::SeqCst) && can_take_it(&last_exit) {
-    let vector = /* the machine's counted INTA */;
-    vcpu.write_words128(Reg::PendingEvent, PendingExtIntEvent { vector }.as_words())?;
-    if halted { kick_out_of_hlt()?; }
-    pending.store(false, Ordering::SeqCst);
+if let Continue::Park(why) = self.stage_the_legacy_interrupt() {
+    return self.park(why);
 }
-in_run.store(true, Ordering::SeqCst);
-if pending.load(Ordering::SeqCst) {
-    in_run.store(false, Ordering::SeqCst);
+self.control.in_run.store(true, Ordering::SeqCst);
+// The raiser may have set the flag in the window between the staging above
+// and this store, and read `in_run` as false, so it issued no cancel. Enter
+// only when nothing is owed; otherwise go round and stage it.
+if self.control.ext_int_pending.load(Ordering::SeqCst) {
+    self.control.in_run.store(false, Ordering::SeqCst);
     continue;
 }
-let exit = vcpu.run();
-in_run.store(false, Ordering::SeqCst);
+let exit = self.vcpu.run();
+self.control.in_run.store(false, Ordering::SeqCst);
 ```
 
 The store/load pairs are `SeqCst` on both sides deliberately: this is Dekker's
@@ -170,8 +192,10 @@ guest **under 1% of wall time**; the VMM shape exists to fix that. So:
    mutation-checked** — flip its threshold, see it fail, restore — because it
    passes vacuously without a hypervisor.
 3. **The halted guest.** A guest that executes `sti; hlt` and nothing else must
-   still take its tick. This is the case QEMU needed `kick_out_of_hlt` for, and
-   the old code would have failed it.
+   still take its tick. The restored `set_internal_activity(RUNNING)` is what
+   makes this pass; the test exists to keep it, because it is the one line whose
+   necessity is invisible from the code and would be an easy "redundant write"
+   for a later reader to delete. QEMU needed the same thing.
 4. **End to end.** `dlx_whp` reaches 3/3 milestones, three runs, with the cancel
    count at or below the step's own pauses.
 5. **Alpine.** `alpine_bench` throughput within noise of `c9d2fbd`.
