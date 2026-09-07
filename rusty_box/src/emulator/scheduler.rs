@@ -1284,6 +1284,64 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         }
     }
 
+    /// Hand the 8259's asserted line to an engine that owns the guest's local
+    /// APIC, as a resolved vector.
+    ///
+    /// A local APIC takes numbers, not wires — nothing on this seam asserts
+    /// LINT0 — so the acknowledge that resolves the vector happens HERE, on the
+    /// side that owns the controller, and the number travels. Bochs takes the
+    /// same branch wherever the line reaches an APIC rather than a processor:
+    /// `iodev/ioapic.cc service_ioapic` reads `DEV_pic_iac()` for a mode-7
+    /// entry before delivering it, while `pc_system.cc raise_INTR` — the line
+    /// wired straight at a processor — carries no vector at all.
+    ///
+    /// Nothing here runs for a machine whose own model APIC is the guest's;
+    /// that line reaches the processor through `set_legacy_intr_level` and is
+    /// acknowledged only when the processor can take it.
+    ///
+    /// Runaway is the 8259's own business, not a gate here. Its in-service and
+    /// priority logic will not present another interrupt of equal or lower
+    /// priority until the guest writes EOI, and that EOI is a port write this
+    /// machine already services — so a boundary that finds the pin high
+    /// acknowledges exactly one vector, and the next finds it low.
+    fn route_the_legacy_line(&mut self) {
+        if !self.device_manager.irq.int_pin_asserted()
+            || !self.device_manager.irq.lint0_admits_ext_int()
+        {
+            return;
+        }
+        let vector = self.device_manager.irq.acknowledge();
+        let delivery = crate::iodev::irq::IoApicDelivery {
+            vector,
+            // Said out loud rather than folded to `Fixed` here: the engine's own
+            // `requested_kind` is the one place that decides what an ExtINT
+            // becomes on a given backend, and a message that lied about where
+            // its vector came from would take that decision away from it.
+            delivery_mode: crate::iodev::ioapic::IoApicDeliveryMode::ExtInt,
+            // The virtual wire is edge-triggered and reaches one processor: the
+            // boot processor, which is the only one that holds it
+            // (`BxLocalApic::preset_lint0`, divergence D6).
+            trigger_mode: crate::iodev::irq::IoApicTrigger::Edge,
+            dest: 0,
+            dest_mode: crate::iodev::irq::IoApicDestinationMode::Physical,
+        };
+        match <E as SliceEngine<T>>::route_ioapic_delivery(&mut self.engine, delivery) {
+            // The backend has it; its APIC holds the vector until the guest can
+            // take it, which is the whole reason the line travels this way.
+            DeliveryRoute::Backend => {}
+            // An engine that owns the guest's APIC and then declines its own
+            // message has already been asked the wrong question — and the
+            // vector is spent, so there is nowhere to put it back.
+            DeliveryRoute::Model | DeliveryRoute::Undelivered => {
+                tracing::error!(
+                    "the backend APIC would not take legacy vector {vector:#04x}, which is \
+                     already acknowledged and cannot be returned to the 8259"
+                );
+            }
+            DeliveryRoute::Refused(fault) => self.engine_fault = Some(fault),
+        }
+    }
+
     /// Synchronize final physical interrupt levels after all queue owners have
     /// committed. This is deliberately not a scheduler entry point.
     fn sync_final_event_levels(&mut self) {
@@ -1293,7 +1351,15 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         let asserted = self.device_manager.irq.int_pin_asserted();
         self.device_manager.irq.pic_mut().irq_pending = false;
         self.device_manager.irq.pic_mut().irq_cleared = false;
-        self.cpu_mut().set_legacy_intr_level(asserted);
+        // Exactly one APIC is the guest's, so exactly one of these runs. The
+        // model's takes a level and defers the acknowledge until its processor
+        // can be asked; a backend's takes a resolved vector, because there is
+        // no verb for asserting LINT0 on it and no processor here to ask.
+        if <E as SliceEngine<T>>::owns_the_guests_local_apic(&self.engine) {
+            self.route_the_legacy_line();
+        } else {
+            self.cpu_mut().set_legacy_intr_level(asserted);
+        }
 
         // The I/O APIC's levels are already current — the fabric moved them
         // when the lines did. What is left is routing its queued messages, in

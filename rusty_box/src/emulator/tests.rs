@@ -36,8 +36,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         0x0BAD_0A11u32 as i32,
     );
 
-    /// An engine that runs the guest exactly as the interpreter does, and
-    /// counts the times the machine told it the guest-physical map moved.
+    /// An engine that runs the guest exactly as the interpreter does, counts
+    /// the times the machine told it the guest-physical map moved, and records
+    /// every interrupt message the machine routed to it.
     ///
     /// Stands in for an engine that installed the map in hardware, which is
     /// the only kind that needs telling — and does it without a hypervisor, so
@@ -48,6 +49,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         /// When set, no map can be installed — the way a hypervisor that
         /// refuses a guest-physical range installs none.
         refuse_map: bool,
+        /// When set, this engine's backend is the local APIC the guest reads,
+        /// so the machine hands it the 8259's line as a resolved vector rather
+        /// than publishing the pin to its own model.
+        owns_apic: bool,
+        /// Every interrupt message routed to this engine, in order — I/O APIC
+        /// messages and the legacy line alike, since both travel the one path.
+        routed: Vec<crate::iodev::irq::IoApicDelivery>,
     }
 
     impl MapWatchingEngine {
@@ -78,6 +86,18 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 return Err(MAP_REFUSAL);
             }
             Ok(())
+        }
+
+        fn route_ioapic_delivery(
+            &mut self,
+            delivery: crate::iodev::irq::IoApicDelivery,
+        ) -> DeliveryRoute {
+            self.routed.push(delivery);
+            DeliveryRoute::Backend
+        }
+
+        fn owns_the_guests_local_apic(&self) -> bool {
+            self.owns_apic
         }
     }
 
@@ -4872,6 +4892,75 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// An engine that owns the guest's local APIC is handed the 8259's line as
+    /// a resolved vector, once per boundary that finds the pin high.
+    ///
+    /// A local APIC is given numbers, not wires: there is no verb for asserting
+    /// LINT0 on a hypervisor's APIC, so the acknowledge happens here and the
+    /// number travels. Bochs takes the same branch wherever the line reaches an
+    /// APIC rather than a processor — `iodev/ioapic.cc service_ioapic` reads
+    /// `DEV_pic_iac()` for a mode-7 entry before delivering it.
+    #[test]
+    fn a_backend_apic_is_handed_the_8259s_vector_not_its_pin() {
+        let mut machine = furnished_machine_on::<MapWatchingEngine>();
+        machine.engine_mut().owns_apic = true;
+        machine.device_manager.irq.pic_mut().master.imr = 0xFE; // unmask IRQ0
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(0));
+
+        let before = machine.device_manager.irq.acknowledge_count();
+        machine.sync_event_flags();
+
+        assert_eq!(
+            machine.device_manager.irq.acknowledge_count(),
+            before + 1,
+            "one boundary with the pin high is one INTA"
+        );
+        let routed = &machine.engine().routed;
+        assert_eq!(routed.len(), 1, "and one delivery: {routed:?}");
+        assert_eq!(
+            routed[0].delivery_mode,
+            crate::iodev::ioapic::IoApicDeliveryMode::ExtInt,
+            "the message says where the vector came from"
+        );
+        assert_eq!(routed[0].dest, 0, "the legacy wire goes to the boot processor");
+        assert_eq!(
+            machine.cpu().pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
+            0,
+            "and the model APIC is NOT also told — that would deliver twice"
+        );
+    }
+
+    /// A masked LINT0 refuses the line without spending it, on the backend path
+    /// exactly as on the model one (divergence D6).
+    #[test]
+    fn a_backend_apic_is_handed_nothing_when_lint0_refuses() {
+        let mut machine = furnished_machine_on::<MapWatchingEngine>();
+        machine.engine_mut().owns_apic = true;
+        machine.device_manager.irq.set_bsp_lint0(0x0001_0700); // masked, ExtINT
+        machine.device_manager.irq.pic_mut().master.imr = 0xFE;
+        machine
+            .device_manager
+            .irq
+            .raise(rusty_box_devices::api::IrqLine(0));
+
+        let before = machine.device_manager.irq.acknowledge_count();
+        machine.sync_event_flags();
+
+        assert_eq!(
+            machine.device_manager.irq.acknowledge_count(),
+            before,
+            "a masked LINT0 takes no INTA"
+        );
+        assert!(machine.engine().routed.is_empty(), "and routes nothing");
+        assert!(
+            machine.device_manager.irq.int_pin_asserted(),
+            "and does not spend the line — it is owed once the guest unmasks"
+        );
     }
 
     /// A real-mode guest whose every interrupt vector has its OWN handler,
