@@ -980,6 +980,16 @@ impl WhpEngine {
         self.exits
     }
 
+    /// The partition this engine started, once it has one.
+    ///
+    /// For the machine's driver, which suspends and resumes the partition's own
+    /// clock around a pause: the guest's TSC and its platform timers are the
+    /// hypervisor's, and a pause that left them running would hand the guest a
+    /// jump in time it did not live through.
+    pub(crate) fn partition(&self) -> Option<&Partition> {
+        self.started.as_ref().map(|started| &started.partition)
+    }
+
     /// Record how to reach the thread running the next processor.
     ///
     /// Called by whoever spawned the threads, once per processor, in processor

@@ -1243,7 +1243,13 @@ impl BxPcSystemC {
         self.timers[timer_index].time_to_fire
     }
 
-    #[cfg(test)]
+    /// Whether this timer is armed and counting down.
+    ///
+    /// What a caller arming a ONE-SHOT has to ask first: arming an already
+    /// armed one-shot pushes its deadline out, so a machine that re-armed on
+    /// every service would keep moving the fire further away and never reach
+    /// it. Bochs has no counterpart because Bochs arms the 8042's timer
+    /// continuously and never asks (divergence H6).
     pub(crate) fn timer_is_active(&self, timer_index: usize) -> bool {
         self.timers[timer_index].flags.contains(TimerFlags::ACTIVE)
     }

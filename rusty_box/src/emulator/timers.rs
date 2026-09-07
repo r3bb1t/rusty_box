@@ -6,7 +6,7 @@ use crate::{
     pc_system::TimerOwner, Result,
 };
 
-use super::{Emulator, SliceEngine, StopReason};
+use super::{DeviceClock, Emulator, SliceEngine, StopReason};
 #[cfg(feature = "std")]
 use super::SLOWDOWN_QUANTUM_USEC;
 use crate::cpu::Result as CpuResult;
@@ -42,11 +42,63 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// not settle, or a delivery this machine's engine refused.
     pub fn service_device_time(&mut self, elapsed_ticks: u64) -> CpuResult<DeviceTime> {
         let reset_applied = self.service_scheduler_boundary(elapsed_ticks)?;
+        self.arm_the_serial_delay_if_owed();
         Ok(DeviceTime {
             next_deadline: self.pc_system.next_timer_deadline_at(),
             reset_applied,
             stop: self.stop_in_force().map(StopReason::from),
         })
+    }
+
+    /// How many serial-delay ticks the 8042 has taken.
+    ///
+    /// The guest-visible consequence of the arming below: a latched byte
+    /// reaches the guest only when a tick carries it, so this counter rising
+    /// is the evidence that one did. For a driver outside this crate that
+    /// needs to assert the host's input actually got in.
+    #[must_use]
+    pub fn keyboard_serial_ticks(&self) -> u64 {
+        self.device_manager.keyboard.serial_fires_seen
+    }
+
+    /// Give the 8042 a one-shot when it has something latched, on a machine
+    /// that keeps device time on the host's clock (divergence H6).
+    ///
+    /// **Evaluated here, and not where the guest touches a port (R5).**
+    /// `activate_timer` has six callers in `keyboard.rs`, and two of them —
+    /// `kbd_enQ` and `mouse_enQ` — are reached when the HOST queues a
+    /// keystroke or a mouse packet, which no guest port write passes through.
+    /// Arming only on a port write would therefore drop host input entirely
+    /// whenever the guest is idle: the byte sits latched, the one-shot is
+    /// never armed, and IRQ1 never fires until some unrelated port access
+    /// happens to arm it. At an idle shell prompt that is a dead keyboard.
+    ///
+    /// One site covers all six latch paths and any added later, which a
+    /// port-dispatch tail structurally cannot. `fire_keyboard_timer` needs no
+    /// special case either: the next service re-arms while
+    /// `needs_serial_tick` still holds.
+    fn arm_the_serial_delay_if_owed(&mut self) {
+        if self.config.device_clock != DeviceClock::HostTime
+            || !self.device_manager.keyboard.needs_serial_tick()
+        {
+            return;
+        }
+        let Some(handle) = self.device_manager.keyboard.timer_handle() else {
+            return;
+        };
+        // Already counting down: re-arming would push the latched byte further
+        // away every time a service ran, which on a busy machine is never
+        // delivering it at all.
+        if self.pc_system.timer_is_active(handle) {
+            return;
+        }
+        if let Err(error) = self.pc_system.activate_timer_usec(
+            handle,
+            crate::iodev::keyboard::KBD_SERIAL_DELAY_USEC,
+            false,
+        ) {
+            tracing::error!("failed to arm the 8042 serial-delay one-shot: {error:?}");
+        }
     }
 }
 
@@ -251,13 +303,23 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Bochs keyboard.cc init(): the 8042 timer is CONTINUOUS at the
         // serial_delay period and never stops; (re)start it here where the
         // IPS-based tick conversion is valid.
-        if let Some(handle) = self.device_manager.keyboard.timer_handle() {
-            if let Err(error) = self.pc_system.activate_timer_usec(
-                handle,
-                crate::iodev::keyboard::KBD_SERIAL_DELAY_USEC,
-                true,
-            ) {
-                tracing::error!("failed to start the 8042 serial-delay timer: {error:?}");
+        //
+        // Not on a machine that keeps device time on the HOST's clock
+        // (divergence H6). A continuous 150 µs timer is a device deadline
+        // every 150 µs, which is a thread that wakes fifty thousand times a
+        // second and never sleeps — and it is not what the 8042 needs, since
+        // a tick with nothing latched carries nothing. Such a machine arms a
+        // ONE-SHOT from `service_device_time` instead, whenever
+        // `BxKeyboardC::needs_serial_tick` says there is something to carry.
+        if self.config.device_clock == DeviceClock::Ticks {
+            if let Some(handle) = self.device_manager.keyboard.timer_handle() {
+                if let Err(error) = self.pc_system.activate_timer_usec(
+                    handle,
+                    crate::iodev::keyboard::KBD_SERIAL_DELAY_USEC,
+                    true,
+                ) {
+                    tracing::error!("failed to start the 8042 serial-delay timer: {error:?}");
+                }
             }
         }
         // Apply the timer-owner delta the CMOS produced during its own reset

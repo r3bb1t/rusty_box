@@ -47,7 +47,9 @@
 )]
 
 mod alarm;
+mod device_thread;
 mod engine;
+mod fast_machine;
 mod exchange;
 mod state;
 mod vcpu_thread;
@@ -416,8 +418,26 @@ pub(crate) mod fixtures {
             index: usize,
             machine: Arc<std::sync::Mutex<std::boxed::Box<Emulator<(), WhpEngine>>>>,
         ) -> Self {
+            // A clock started at the machine's own wheel position: the thread
+            // catches the wheel up to it at every exit, so one that ran
+            // against a clock behind the wheel would earn nothing and one
+            // ahead of it would jump the guest forward on its first exit.
+            let clock = {
+                let machine = machine.lock().expect("the machine's lock");
+                let rate = rusty_box_core::time::ClockHz::new(
+                    machine.config().ips.per_second_u64(),
+                )
+                .expect("a positive instruction rate");
+                let mut clock = crate::VmClockSource::stopped_at(
+                    rusty_box_core::time::VmInstant::from_ticks(machine.ticks()),
+                    rate,
+                    crate::StdClock::new(),
+                );
+                clock.start();
+                Arc::new(std::sync::Mutex::new(clock))
+            };
             let (join, control) =
-                crate::vcpu_thread::VcpuThread::spawn(vcpu, index, machine.clone())
+                crate::vcpu_thread::VcpuThread::spawn(vcpu, index, machine.clone(), clock)
                     .expect("the vCPU thread starts");
             machine
                 .lock()
@@ -584,7 +604,10 @@ pub(crate) mod fixtures {
     }
 }
 
+pub use device_thread::DeviceThreadControl;
 pub use engine::{ExitCounts, InjectCensus, PlatformCounters, SliceCensus, WhpEngine};
+pub use fast_machine::{EngineCensus, FastMachine, FastMachineFault, StepOutcome, StepStop};
+pub use vcpu_thread::VcpuCensus;
 pub use vm_clock::{StdClock, VmClockSource};
 
 /// What has to be true for a machine to be run by a thread of its own, pinned
@@ -597,12 +620,19 @@ pub use vm_clock::{StdClock, VmClockSource};
 /// reaches the machine through; the control is what they reach the vCPU thread
 /// through, from several threads at once; and the thread itself is what moves
 /// onto a thread in the first place.
+///
+/// The device thread's control is held by the machine's driver and by the
+/// thread at once, and the driver itself is the object a caller keeps — so a
+/// `FastMachine` that could not cross a thread boundary would be unusable from
+/// any front end that owns its machine on a worker.
 const _: () = {
     const fn s<M: Send>() {}
     const fn ss<M: Send + Sync>() {}
     s::<rusty_box::emulator::Emulator<(), WhpEngine>>();
     ss::<vcpu_thread::VcpuControl>();
     s::<vcpu_thread::VcpuThread<()>>();
+    ss::<DeviceThreadControl>();
+    s::<FastMachine<()>>();
 };
 
 /// Re-exported so a caller reading [`WhpEngine::platform_counters`] need not

@@ -38,7 +38,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use rusty_box::cpu::{cpu::BxCpuC, instrumentation::Instrumentation, CpuError, Result};
-use rusty_box::emulator::{Emulator, PcIo, Processor};
+use rusty_box::emulator::{Emulator, PcIo, Processor, StopReason};
 use rusty_box_core::{EngineFault, EngineFaultKind};
 use rusty_box_whp::{
     ApicWriteType, Canceller, Exit, ExitReason, InternalActivity, IoPortAccess,
@@ -52,6 +52,7 @@ use crate::engine::{
 };
 use crate::exchange::{Exchange, ExitClass};
 use crate::state::VpRegisters;
+use crate::vm_clock::{StdClock, VmClockSource};
 use crate::xsave::{self, XsaveArea};
 
 /// The processor the machine boots on, and the only one the 8259's INTR is
@@ -84,6 +85,39 @@ pub(crate) enum Parked {
     Stopped,
 }
 
+impl Parked {
+    /// Why a processor should come back, given what stopped the machine.
+    ///
+    /// The one place a machine's stop becomes a processor's park (R5), and
+    /// exhaustive over the whole vocabulary rather than over the three
+    /// [`StopCause`](rusty_box::emulator::StopReason) values a device boundary
+    /// can produce today — a reason the machine grows breaks this instead of
+    /// falling into a default, and the default that would be inherited is
+    /// "keep running", which is the wrong answer for every one of them.
+    pub(crate) fn from_stop(reason: StopReason) -> Self {
+        match reason {
+            // Terminal, and the only stop a caller acts on differently: the
+            // machine is off and will not come back.
+            StopReason::GuestPowerOff => Self::GuestPowerOff,
+            // The host asked and means to give the machine back.
+            StopReason::StopRequested => Self::Paused,
+            // A guest that triple-faulted, an engine that refused work the
+            // machine cannot do without, or a machine reporting a batch
+            // vocabulary no fast machine runs — `Halted` and `BudgetExhausted`
+            // describe a stepping loop this machine does not have, so a
+            // boundary that reports one is describing a machine in a state its
+            // driver cannot explain.
+            StopReason::CpuShutdown
+            | StopReason::EngineFault
+            | StopReason::Halted
+            | StopReason::BudgetExhausted => Self::Fault(EngineFault::new(
+                EngineFaultKind::Host,
+                "the machine stopped its own devices",
+            )),
+        }
+    }
+}
+
 /// One thread's account of itself, readable from any thread.
 ///
 /// Plain copies of the shared counters, plus the platform's own numbers as of
@@ -91,30 +125,30 @@ pub(crate) enum Parked {
 /// of the [`Vcpu`] — so reading this census never makes a platform call against
 /// a processor another thread is running.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) struct VcpuCensus {
+pub struct VcpuCensus {
     /// Entries into the partition, counted as they are made — so a thread
     /// currently inside a run has already counted it.
-    pub(crate) runs: u64,
+    pub runs: u64,
     /// Host time spent inside `WHvRunVirtualProcessor`, and nowhere else.
     ///
     /// The number this whole design is judged by: against the wall clock of a
     /// stretch, it is the fraction of the host's time the guest actually had.
-    pub(crate) in_run_nanos: u64,
+    pub in_run_nanos: u64,
     /// What the guest has been leaving the hardware for, by class.
-    pub(crate) exits: ExitCounts,
+    pub exits: ExitCounts,
     /// Platform register writes the exchange made putting serviced exits back.
     ///
     /// What the state exchange cost, which is the half of an exit's price this
     /// engine controls: an exit that imported nothing exports nothing, and a
     /// class whose count here climbs faster than its exit count is a class
     /// asking for more state than it reads.
-    pub(crate) export_calls: u64,
+    pub export_calls: u64,
     /// The hypervisor's own accounting as of the last park, or `None` if the
     /// thread has not parked yet.
     ///
     /// The independent check on the fields above: they are this port's account
     /// of its own behaviour, and an account cannot audit itself.
-    pub(crate) platform_at_last_park: Option<PlatformCounters>,
+    pub platform_at_last_park: Option<PlatformCounters>,
 }
 
 /// The counters the thread writes and everyone else reads.
@@ -484,6 +518,15 @@ pub(crate) struct VcpuThread<T: Instrumentation + Send> {
     vcpu: Vcpu,
     index: usize,
     machine: Arc<Mutex<std::boxed::Box<Emulator<T, WhpEngine>>>>,
+    /// The guest's clock, for catching the machine's wheel up at an exit.
+    ///
+    /// A guest reading a timer device must be answered from the wheel as it
+    /// stands AT THAT INSTANT, not as the device thread last left it: two
+    /// reads with no device deadline between them would otherwise return the
+    /// same count, and a guest calibrating against the PIT would measure its
+    /// own loop as infinitely fast. Locked INSIDE the machine's lock, which is
+    /// the order every path in this crate takes.
+    clock: Arc<Mutex<VmClockSource<StdClock>>>,
     exchange: Exchange,
     xsave: XsaveArea,
     inject: InjectState,
@@ -510,6 +553,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         vcpu: Vcpu,
         index: usize,
         machine: Arc<Mutex<std::boxed::Box<Emulator<T, WhpEngine>>>>,
+        clock: Arc<Mutex<VmClockSource<StdClock>>>,
     ) -> Result<(JoinHandle<()>, VcpuControl)> {
         let xsave = XsaveArea::read_from(&vcpu, xsave::HostComponents::of_this_host())
             .map_err(platform_failed)?;
@@ -525,6 +569,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             vcpu,
             index,
             machine,
+            clock,
             exchange: Exchange::at_reset(),
             xsave,
             inject: InjectState::at_reset(),
@@ -713,7 +758,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         // Destructured so the machine's lock borrows one field rather than the
         // whole thread: everything else the servicer needs is a sibling field,
         // and the guard lives across the call that uses them.
-        let Self { vcpu, index, machine, exchange, xsave, inject, control } = self;
+        let Self { vcpu, index, machine, clock, exchange, xsave, inject, control } = self;
         let mut guard = match machine.lock() {
             Ok(guard) => guard,
             // A peer thread panicked while holding the machine. Under the
@@ -752,6 +797,29 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
                         return Continue::Park(Parked::Fault(refused_service(&error)))
                     }
                 }
+            }
+        }
+        // The wheel is caught up to the clock BEFORE any arm answers, so a
+        // device the guest is about to read answers from where time actually
+        // stands (spec §3.2). Without it a guest that latches the PIT twice
+        // with no device deadline between the reads gets the same count twice
+        // and measures its own loop as infinitely fast — the device thread
+        // moves the wheel on ITS schedule, which is deadlines, not exits.
+        //
+        // The clock is locked inside the machine's lock, which is the order
+        // every path in this crate takes. Cheap when nothing is due: the
+        // boundary's own no-work fast path answers an advance of zero without
+        // touching a timer.
+        {
+            let clock = clock.lock().unwrap_or_else(PoisonError::into_inner);
+            match crate::device_thread::service_once(&mut guard, &clock) {
+                // A power-off found here is the machine's, not this exit's,
+                // and the processor has no business running on after it.
+                Ok(time) if time.stop.is_some() => {
+                    return Continue::Park(Parked::GuestPowerOff)
+                }
+                Ok(_) => {}
+                Err(error) => return Continue::Park(Parked::Fault(refused_service(&error))),
             }
         }
         let Processor { cpu, mut io, engine } = guard.processor(*index);

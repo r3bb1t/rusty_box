@@ -741,8 +741,24 @@ expensive the floor is.
 Those wakes. Restoring the continuous timer on host time costs a device-thread
 wake every 150 µs for the life of the machine and buys nothing a guest can see.
 
-**Status:** open and deliberate; fast mode only. Registered ahead of the driver
-that introduces it — `docs/superpowers/plans/2026-09-03-whp-vmm-shape.md`.
+**Status:** open and deliberate; fast mode only. **Implemented.** The reset
+arming is conditional in `Emulator::rearm_device_timers_after_hardware_reset`
+(`emulator/timers.rs`), the one-shot is armed from
+`Emulator::service_device_time` through `arm_the_serial_delay_if_owed`, and the
+question it asks is `BxKeyboardC::needs_serial_tick` (`iodev/keyboard.rs`).
+
+**The arming site is the whole of it, and it is not where a guest touches a
+port.** `activate_timer` has six callers in `keyboard.rs`, and two — `kbd_enQ`
+and `mouse_enQ` — are reached when the HOST queues a keystroke or a mouse
+packet, which no guest port write passes through. Arming from the port-dispatch
+tail would therefore drop host input entirely whenever the guest is idle: the
+byte sits latched, the one-shot is never armed, and IRQ1 never fires until some
+unrelated port access happens along. At an idle shell prompt that is a dead
+keyboard. Evaluating on every service covers all six latch paths and any added
+later, which a port-dispatch tail structurally cannot (R5). Pinned by
+`a_keystroke_the_host_queues_arms_the_8042_although_the_guest_touched_no_port`
+(`rusty_box_whp_engine/src/fast_machine.rs`), whose guest is `jmp $` — it
+touches nothing, so no port write could have armed anything.
 
 ## H7 — The time-stamp counter's rate changes across an engine transfer
 

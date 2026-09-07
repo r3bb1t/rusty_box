@@ -576,11 +576,17 @@ pub struct BxKeyboardC {
     pub(crate) reset_requested: Option<crate::cpu::ResetReason>,
     /// Serial-delay periods this controller has been run for.
     ///
-    /// The 8042's timer is continuous, so this counts periods of guest time
-    /// that actually elapsed — which is what a test asserting that a large
-    /// advance of device time replayed every missed period reads, rather than
-    /// asserting only that the clock moved.
-    #[cfg(test)]
+    /// Under `DeviceClock::Ticks` the 8042's timer is continuous, so this
+    /// counts periods of guest time that actually elapsed — which is what a
+    /// test asserting that a large advance of device time replayed every
+    /// missed period reads, rather than asserting only that the clock moved.
+    /// Under `DeviceClock::HostTime` the timer is a one-shot armed only when
+    /// something is latched (divergence H6), and this counts the ticks that
+    /// carried it — the guest-visible evidence that host input got in.
+    ///
+    /// Not `#[cfg(test)]`: a machine's driver lives in another crate, and a
+    /// field compiled only into this crate's own test build is invisible to
+    /// it. Surfaced through `Emulator::keyboard_serial_ticks`.
     pub(crate) serial_fires_seen: u64,
 }
 
@@ -664,7 +670,6 @@ impl BxKeyboardC {
             kbd_initialized: false,
             scancode_escaped: false,
             reset_requested: None,
-            #[cfg(test)]
             serial_fires_seen: 0,
         }
     }
@@ -1462,6 +1467,24 @@ impl BxKeyboardC {
     /// Return the scheduler's keyboard owner timer handle, if registered.
     pub(crate) fn timer_handle(&self) -> Option<usize> {
         self.timer_handle
+    }
+
+    /// Whether the 8042 has anything for a serial-delay tick to carry.
+    ///
+    /// Under `DeviceClock::Ticks` this is never asked: the timer is CONTINUOUS
+    /// there, exactly as Bochs `keyboard.cc init()` arms it, and fires whether
+    /// or not there is anything to do. A machine on host time cannot afford
+    /// that — a continuous 150 µs timer is a device deadline every 150 µs, and
+    /// a device thread that wakes for it never sleeps — so it arms a ONE-SHOT
+    /// instead, and this is the question that decides when (divergence H6).
+    ///
+    /// All three sources, because all three are what a tick would carry:
+    /// `timer_pending` is a delay some path asked for, and the two IRQ flags
+    /// are a byte latched for the guest that only a tick delivers.
+    pub(crate) fn needs_serial_tick(&self) -> bool {
+        self.kbd_controller.timer_pending != 0
+            || self.kbd_controller.irq1_requested
+            || self.kbd_controller.irq12_requested
     }
 
     /// One continuous serial-delay tick — Bochs keyboard.cc timer_handler:
@@ -2737,10 +2760,7 @@ impl rusty_box_devices::api::TimedDevice for BxKeyboardC {
         fires: u32,
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
-        #[cfg(test)]
-        {
-            self.serial_fires_seen += u64::from(fires);
-        }
+        self.serial_fires_seen = self.serial_fires_seen.saturating_add(u64::from(fires));
         for _ in 0..fires {
             let irq_mask = self.timer_callback();
             self.raise_latched(irq_mask, ctx);
