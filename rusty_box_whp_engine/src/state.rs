@@ -289,6 +289,7 @@ const _: () = {
 /// Not the vector file, which crosses as an XSAVE area ([`crate::xsave`]), and
 /// not the interrupt state, which is no part of a [`VcpuArchState`] — a
 /// backend exchanges that one register itself.
+#[cfg(test)]
 pub(crate) const NAMED_GROUPS: ArchGroups = ArchGroups::GPRS
     .union(ArchGroups::RIP_RFLAGS)
     .union(ArchGroups::CONTROL_REGS)
@@ -576,8 +577,14 @@ pub(crate) const fn from_platform_segment(seg: SegmentRegister) -> SegmentState 
 
 /// Write `state` into the processor.
 ///
+/// Test-facing since the slice loop went: the group machinery underneath —
+/// `write_groups` and `read_groups` — is what `Exchange` uses per exit, and
+/// these two are the whole-processor spelling the round-trip tests drive it
+/// through.
+///
 /// # Errors
 /// Whatever the platform said about a register it would not take.
+#[cfg(test)]
 pub(crate) fn import(vp: &impl VpRegisters, state: &VcpuArchState) -> WhpResult<()> {
     // The whole processor in one call — minus the time-stamp counter, which
     // [`Transfer::Write`] leaves out because the hardware owns it. The count
@@ -587,6 +594,7 @@ pub(crate) fn import(vp: &impl VpRegisters, state: &VcpuArchState) -> WhpResult<
     Ok(())
 }
 
+#[cfg(test)]
 /// Read the processor into `state`, leaving the parts this seam does not carry
 /// as they were.
 ///
@@ -649,6 +657,7 @@ pub(crate) fn export(vp: &impl VpRegisters, state: &mut VcpuArchState) -> WhpRes
     }
     Ok(())
 }
+
 
 #[cfg(test)]
 mod tests {

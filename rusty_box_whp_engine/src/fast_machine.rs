@@ -147,7 +147,13 @@ pub enum StepStop {
 /// The census of a fast machine — one struct, named fields (R0).
 #[derive(Clone, Debug)]
 pub struct EngineCensus {
-    /// What left the partition, and why.
+    /// What left the partition, and why, summed over every processor.
+    ///
+    /// Built from the per-processor tallies below rather than read off the
+    /// engine: each processor's thread counts its own exits, and there is no
+    /// longer a single loop through which they all pass. Reading the engine's
+    /// own field here would report zero forever — which it did, until a
+    /// migrated test asserted a memory exit it could not see.
     pub exits: ExitCounts,
     /// One entry per processor, in processor order.
     pub vcpus: Vec<VcpuCensus>,
@@ -425,17 +431,20 @@ impl<T: Instrumentation + Send + 'static> FastMachine<T> {
     /// of it is a platform call against a processor another thread is inside.
     #[must_use]
     pub fn engine_census(&self) -> EngineCensus {
-        let vcpus = self
+        let vcpus: Vec<VcpuCensus> = self
             .vcpus
             .iter()
             .map(|(_, control)| control.census())
             .collect();
+        let mut exits = ExitCounts::default();
+        for vcpu in &vcpus {
+            exits.absorb(vcpu.exits);
+        }
         let machine = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
-        let engine = machine.engine();
         EngineCensus {
-            exits: engine.exits(),
+            exits,
             vcpus,
-            injections: engine.inject_census().clone(),
+            injections: machine.engine().inject_census().clone(),
         }
     }
 

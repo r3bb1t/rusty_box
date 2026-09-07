@@ -226,12 +226,6 @@ const fn full_tag(abridged: u8) -> u16 {
     full
 }
 
-/// Whether two states disagree anywhere in the file the area carries — the
-/// question that decides if a write-back can be skipped.
-pub(crate) fn vector_file_differs(a: &VcpuArchState, b: &VcpuArchState) -> bool {
-    a.fpu != b.fpu || a.vector != b.vector || a.opmask != b.opmask || a.mxcsr != b.mxcsr
-}
-
 /// The partition processor's extended-state area, as the platform last handed
 /// it out.
 pub(crate) struct XsaveArea {

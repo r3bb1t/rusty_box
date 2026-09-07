@@ -639,9 +639,15 @@ const MATRIX: &[Step] = &[
     // hypervisor; the ones that start a machine on hardware skip with a reason
     // when there is none, so this runs everywhere and proves the wiring still
     // compiles even where it cannot be exercised.
+    //
+    // `--all-targets` because this crate's EXAMPLES are its measurement
+    // harnesses, and without it nothing in the suite compiles them: the
+    // neighbouring `rusty_box_whp` step checks its own examples, this one did
+    // not check these, and deleting the slice census broke five of them where
+    // no gate could see it.
     Step {
         name: "WHP engine tests",
-        args: &["test", "--release", "-p", "rusty_box_whp_engine"],
+        args: &["test", "--release", "-p", "rusty_box_whp_engine", "--all-targets"],
         envs: &[],
         stdout_marker: None,
     },

@@ -23,7 +23,7 @@ use rusty_box::emulator::{
     AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MachineBuilder,
     MemorySize, RunBudget, StopReason,
 };
-use rusty_box_whp_engine::{SliceCensus, WhpEngine};
+use rusty_box_whp_engine::WhpEngine;
 
 /// DLX Linux disk geometry, from `bochsrc.bxrc`.
 const DLX_CYLINDERS: u16 = 306;
@@ -221,7 +221,6 @@ fn boot() -> i32 {
         if began.elapsed().as_secs() != last_said {
             last_said = began.elapsed().as_secs();
             let exits = machine.engine().exits();
-            let census = machine.engine().census();
             println!(
                 "       rip={:#x} exits: port {} mem {} cpuid {} msr {} halt {} boundary {}",
                 machine.rip(),
@@ -232,7 +231,6 @@ fn boot() -> i32 {
                 exits.halt,
                 exits.boundary,
             );
-            println!("       {}", one_line_census(&census));
         }
 
         if let Some(screen) = machine.display().text().map(|text| text.to_text()) {
@@ -307,7 +305,6 @@ fn report(
     machine: &rusty_box::emulator::Emulator<(), WhpEngine>,
 ) {
     let exits = machine.engine().exits();
-    let census = machine.engine().census();
     println!();
     println!(
         "got {} of {} milestones in {:.1}s of host time and {} Mticks of guest time",
@@ -330,7 +327,6 @@ fn report(
         exits.canceled,
         exits.boundary,
     );
-    println!("  {}", one_line_census(&census));
     // The hypervisor's own account, beside this engine's. Printed even when it
     // is unavailable: "the platform would not say" is itself a result, and
     // silently omitting the independent check would leave a reader believing
@@ -355,33 +351,6 @@ fn report(
         }
         Err(error) => println!("  platform counters unavailable: {error}"),
     }
-}
-
-/// The census as one line: how many slices, how many exits each held, and what
-/// ended them.
-///
-/// The histogram's buckets are named from [`SliceCensus::BUCKET_LABELS`] rather
-/// than written out here, so a reader and the engine cannot describe different
-/// ranges with the same numbers.
-fn one_line_census(census: &SliceCensus) -> String {
-    let histogram: Vec<String> = SliceCensus::BUCKET_LABELS
-        .iter()
-        .zip(census.exits_per_slice.iter())
-        .map(|(label, slices)| format!("{label}={slices}"))
-        .collect();
-    format!(
-        "slices: {} [exits/slice {}] ended: halted {} canceled {} budget {} \
-         boundary(processor {} device {} event {}) read-backs skipped {}",
-        census.slices,
-        histogram.join(" "),
-        census.ended_halted,
-        census.ended_canceled,
-        census.ended_budget,
-        census.ended_wants_machine_boundary,
-        census.ended_needs_boundary,
-        census.ended_event_to_deliver,
-        census.read_backs_skipped,
-    )
 }
 
 /// Show what the guest was doing when it stopped.

@@ -271,11 +271,9 @@ fn probe() -> i32 {
             &mut machine,
             &iso,
             |engine| {
-                let census = engine.census();
                 let inject = engine.inject_census();
                 format!(
-                    "slices={} injected={} windows_armed={} exits={:?}",
-                    census.slices,
+                    "injected={} windows_armed={} exits={:?}",
                     inject.injected,
                     inject.windows_armed,
                     engine.exits()
@@ -284,7 +282,6 @@ fn probe() -> i32 {
             |engine| {
                 let inject = engine.inject_census();
                 println!("RESULT exits={:?}", engine.exits());
-                println!("RESULT census={:?}", engine.census());
                 println!(
                     "RESULT inject injected={} windows_armed={}",
                     inject.injected, inject.windows_armed
