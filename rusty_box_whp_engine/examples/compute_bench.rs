@@ -12,6 +12,12 @@
 //! a halt. Identical instruction counts, so wall time is directly comparable
 //! and the ratio is the answer.
 //!
+//! The two arms are driven by the verbs their machines have. The interpreter is
+//! stepped, because a step is what advances it. The hardware guest is let go
+//! and watched, because its processor stays inside the partition and a step
+//! would end by cancelling the run — timing it by stepping would mean
+//! interrupting the uninterrupted execution this exists to time.
+//!
 //! ```text
 //! cargo run --release -p rusty_box_whp_engine --example compute_bench
 //! ```
@@ -20,9 +26,9 @@ use std::time::{Duration, Instant};
 
 use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{
-    Emulator, EmulatorConfig, MemorySize, RunBudget, SliceEngine, StopReason,
+    DeviceClock, Emulator, EmulatorConfig, MemorySize, RunBudget, SliceEngine, StopReason,
 };
-use rusty_box_whp_engine::WhpEngine;
+use rusty_box_whp_engine::{FastMachine, FastMachineFault, WhpEngine};
 
 /// Where the guest's code goes.
 const CODE: u64 = 0x1000;
@@ -46,6 +52,14 @@ const SLICE_TICKS: u64 = 50_000_000;
 /// How long a run may take before it is called a failure rather than a
 /// measurement.
 const PATIENCE: Duration = Duration::from_secs(300);
+
+/// How long the hardware arm may wait for its guest before the run is called a
+/// failure.
+///
+/// A hundred million instructions on a real processor is tens of milliseconds.
+/// A run still going after thirty seconds is not slow — it is stopped, and its
+/// processor is parked on a fault nobody is waiting for.
+const HARDWARE_PATIENCE: Duration = Duration::from_secs(30);
 
 /// The guest: count down and halt, touching nothing.
 ///
@@ -78,6 +92,15 @@ fn config() -> EmulatorConfig {
         memory: MemorySize::bytes(8 * 1024 * 1024),
         ..EmulatorConfig::default()
     }
+}
+
+/// The same machine, with its devices on the host's clock.
+///
+/// The one setting a fast machine requires: its guest's processor runs
+/// unbounded and nothing counts its instructions, so a device wheel measured
+/// in retired instructions would never turn.
+fn config_on_host_time() -> EmulatorConfig {
+    EmulatorConfig { device_clock: DeviceClock::HostTime, ..config() }
 }
 
 /// Run until the guest halts, and report how long that took.
@@ -121,6 +144,54 @@ where
     E: SliceEngine<()>,
 {
     machine.debug_port().take_output().count() > 0
+}
+
+/// Run the hardware guest until its port write leaves the partition, and
+/// report how long that took.
+///
+/// **Watched rather than stepped, and that is the measurement.** A step ends
+/// in a pause, and a pause cancels the run and re-enters it — so timing this
+/// guest by stepping would mean cancelling the very stretch of uninterrupted
+/// execution the benchmark exists to time, once per step. The guest is let go
+/// instead, and its progress is read from the exit census, which is answered
+/// from shared counters and disturbs no processor.
+///
+/// The port exit is the signal because this guest takes exactly one: it runs
+/// in a bare machine with no BIOS and no device initialisation, so the `out`
+/// that ends it is the only instruction in the whole guest that leaves the
+/// hardware. The halt after it produces no exit at all — under the
+/// hypervisor's own local APIC the processor parks inside the run — so the
+/// port write is also the last thing that will ever be heard from it.
+fn time_until_the_port_write(machine: &mut FastMachine<()>) -> Option<Duration> {
+    match machine.resume() {
+        Ok(()) => {}
+        Err(error) => {
+            eprintln!("the guest would not start: {error}");
+            return None;
+        }
+    }
+    let began = Instant::now();
+    let took = loop {
+        if machine.engine_census().exits.port > 0 {
+            break Some(began.elapsed());
+        }
+        if began.elapsed() > HARDWARE_PATIENCE {
+            eprintln!("gave up after {HARDWARE_PATIENCE:?}");
+            break None;
+        }
+        std::thread::yield_now();
+    };
+    match machine.pause() {
+        Ok(()) => took,
+        Err(FastMachineFault::Wedged { waited }) => {
+            println!("RESULT wedged waited={:.1}", waited.as_secs_f64());
+            None
+        }
+        Err(error) => {
+            eprintln!("the guest would not stop: {error}");
+            None
+        }
+    }
 }
 
 fn rate(instructions: u64, took: Duration) -> f64 {
@@ -184,21 +255,35 @@ fn bench() -> std::process::ExitCode {
     }
 
     let hardware = {
-        let mut machine =
-            match Emulator::<(), WhpEngine>::with_engine(config(), CpuSetupMode::RealMode) {
-                Ok(machine) => machine,
-                Err(error) => {
-                    eprintln!("could not build the hypervisor machine: {error}");
-                    return std::process::ExitCode::FAILURE;
-                }
-            };
-        if machine.mem_write(CODE, &code).is_err() {
+        let mut assembled = match Emulator::<(), WhpEngine>::with_engine(
+            config_on_host_time(),
+            CpuSetupMode::RealMode,
+        ) {
+            Ok(machine) => machine,
+            Err(error) => {
+                eprintln!("could not build the hypervisor machine: {error}");
+                return std::process::ExitCode::FAILURE;
+            }
+        };
+        if assembled.mem_write(CODE, &code).is_err() {
             eprintln!("could not load the guest");
             return std::process::ExitCode::FAILURE;
         }
-        machine.reg_write(X86Reg::Rip, CODE);
-        let took = time_until_halt(&mut machine);
-        match (took, reached_the_end(&mut machine)) {
+        assembled.reg_write(X86Reg::Rip, CODE);
+        // Loaded and pointed at the code BEFORE adoption: adoption hands the
+        // processor to a thread and exports the machine's state into the
+        // partition, and a register written after that would be written to a
+        // shadow the guest is no longer reading.
+        let mut machine = match FastMachine::adopt(assembled) {
+            Ok(machine) => machine,
+            Err(error) => {
+                eprintln!("could not adopt the machine onto hardware: {error}");
+                return std::process::ExitCode::FAILURE;
+            }
+        };
+        let took = time_until_the_port_write(&mut machine);
+        let arrived = machine.with_machine(|m| m.debug_port().take_output().count() > 0);
+        match (took, arrived) {
             (Some(took), true) => took,
             (_, false) => {
                 eprintln!("the hypervisor's guest never reached its port write");

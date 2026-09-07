@@ -21,10 +21,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rusty_box::emulator::{
-    AtaSlot, BootDevice, BootOrder, Emulator, EmulatorConfig, Ips, MachineBuilder, MemorySize,
-    RunBudget, SliceEngine, StopReason,
+    AtaSlot, BootDevice, BootOrder, DeviceClock, Emulator, EmulatorConfig, Ips, MachineBuilder,
+    MemorySize, RunBudget, SliceEngine, StopReason,
 };
-use rusty_box_whp_engine::WhpEngine;
+use rusty_box_whp_engine::{FastMachine, FastMachineFault, StepStop, WhpEngine};
 
 /// The exit code a harness reads as "this host cannot run this".
 const SKIPPED: i32 = 77;
@@ -67,6 +67,10 @@ struct Reached {
     milestones: usize,
     took: Duration,
     at: Vec<Duration>,
+    /// How long a processor was waited for before it was given up on. A run
+    /// that ends this way produced no measurement at all, so the whole bench
+    /// fails on it; an interpreter has no processor to lose and never sets it.
+    wedged: Option<Duration>,
 }
 
 /// Run one machine to its last milestone, or until patience runs out.
@@ -129,7 +133,79 @@ where
         // looking at is exactly the one that failed.
         dump(machine, label);
     }
-    Reached { milestones: reached, took: began.elapsed(), at }
+    Reached { milestones: reached, took: began.elapsed(), at, wedged: None }
+}
+
+/// Run one machine on hardware to its last milestone, or until patience runs
+/// out.
+///
+/// The same loop as [`boot`], in the verbs a fast machine has: a step is a
+/// span of the guest's own time rather than a count of instructions, and the
+/// screen is read between steps, while the machine is paused.
+fn boot_fast(machine: &mut FastMachine<()>, label: &str) -> Reached {
+    let began = Instant::now();
+    let mut reached = 0;
+    let mut panicked = false;
+    let mut at = Vec::new();
+    let mut wedged = None;
+    let limit = patience();
+    loop {
+        let outcome = match machine.step(RunBudget::Ticks(SLICE_TICKS)) {
+            Ok(outcome) => outcome,
+            Err(FastMachineFault::Wedged { waited }) => {
+                println!("RESULT wedged waited={:.1}", waited.as_secs_f64());
+                wedged = Some(waited);
+                break;
+            }
+            Err(error) => {
+                eprintln!("  {label}: the run ended with an error: {error}");
+                break;
+            }
+        };
+        if let Some(screen) = fast_screen(machine) {
+            if !panicked && screen.contains("Kernel panic") {
+                panicked = true;
+                tracing::info!(target: "vec", "GUEST PANICKED");
+            }
+            while reached < MILESTONES.len() {
+                let (name, needle) = MILESTONES[reached];
+                if !screen.contains(needle) {
+                    break;
+                }
+                let elapsed = began.elapsed();
+                println!("  {label}: {name} ({:.1}s)", elapsed.as_secs_f64());
+                at.push(elapsed);
+                reached += 1;
+            }
+        }
+        if reached == MILESTONES.len() {
+            break;
+        }
+        match outcome.stop {
+            StepStop::BudgetSpent => {}
+            StepStop::GuestPowerOff => {
+                eprintln!("  {label}: the guest turned the machine off");
+                break;
+            }
+            StepStop::Faulted(fault) => {
+                eprintln!("  {label}: a processor could not carry on: {fault}");
+                break;
+            }
+        }
+        if began.elapsed() > limit {
+            eprintln!("  {label}: gave up after {limit:?}");
+            break;
+        }
+    }
+    if reached < MILESTONES.len() {
+        fast_dump(machine, label);
+    }
+    Reached { milestones: reached, took: began.elapsed(), at, wedged }
+}
+
+/// The guest's text screen as it stands between two steps.
+fn fast_screen(machine: &mut FastMachine<()>) -> Option<String> {
+    machine.with_machine(|m| m.display().text().map(|text| text.to_text()))
 }
 
 /// What the guest had reached when it stopped.
@@ -138,9 +214,20 @@ where
     E: SliceEngine<()>,
 {
     println!("\n  {label}: RIP = {:#x}", machine.rip());
-    match machine.display().text() {
-        Some(text) => {
-            let screen = text.to_text();
+    show(machine.display().text().map(|text| text.to_text()), label);
+}
+
+/// The same, for a machine on hardware.
+fn fast_dump(machine: &mut FastMachine<()>, label: &str) {
+    println!("\n  {label}: RIP = {:#x}", machine.with_machine(|m| m.rip()));
+    let screen = fast_screen(machine);
+    show(screen, label);
+}
+
+/// Print a scraped screen, or say why there is none.
+fn show(screen: Option<String>, label: &str) {
+    match screen {
+        Some(screen) => {
             if screen.trim().is_empty() {
                 println!("  {label}: the screen is blank");
             }
@@ -155,18 +242,31 @@ where
     }
 }
 
-fn config() -> EmulatorConfig {
+/// The machine both arms build, with the device clock said out loud.
+///
+/// The clock is the only field that differs between them: a machine adopted
+/// onto hardware runs its devices on host time, because nothing counts a
+/// hardware processor's instructions and a wheel measured in them would never
+/// turn. The interpreter keeps its wheel in ticks, which is the unit it
+/// retires.
+fn config(clock: DeviceClock) -> EmulatorConfig {
     EmulatorConfig {
         memory: MemorySize::bytes(512 * 1024 * 1024),
         memory_block_size: 128 * 1024,
         ips: Ips::new(300_000_000),
         pci_enabled: true,
+        device_clock: clock,
         ..EmulatorConfig::default()
     }
 }
 
-fn builder<'a>(bios: &'a [u8], vga: Option<&'a [u8]>, iso: &str) -> MachineBuilder<'a, ()> {
-    let mut builder = MachineBuilder::new(config())
+fn builder<'a>(
+    clock: DeviceClock,
+    bios: &'a [u8],
+    vga: Option<&'a [u8]>,
+    iso: &str,
+) -> MachineBuilder<'a, ()> {
+    let mut builder = MachineBuilder::new(config(clock))
         .bios(bios)
         .boot_order(BootOrder::just(BootDevice::Cdrom))
         .cdrom_file(AtaSlot::SECONDARY_MASTER, iso);
@@ -228,15 +328,16 @@ fn bench() -> std::process::ExitCode {
 
     println!("interpreter:");
     let software = if !want_software {
-        Reached { milestones: 0, took: Duration::ZERO, at: Vec::new() }
+        Reached { milestones: 0, took: Duration::ZERO, at: Vec::new(), wedged: None }
     } else {
-        let mut machine = match builder(&bios, vga.as_deref(), &iso).build() {
-            Ok(machine) => machine,
-            Err(error) => {
-                eprintln!("could not assemble the interpreter machine: {error}");
-                return std::process::ExitCode::FAILURE;
-            }
-        };
+        let mut machine =
+            match builder(DeviceClock::Ticks, &bios, vga.as_deref(), &iso).build() {
+                Ok(machine) => machine,
+                Err(error) => {
+                    eprintln!("could not assemble the interpreter machine: {error}");
+                    return std::process::ExitCode::FAILURE;
+                }
+            };
         boot(&mut machine, "interpreter")
     };
 
@@ -247,17 +348,25 @@ fn bench() -> std::process::ExitCode {
 
     println!("\nhypervisor:");
     let hardware = if !want_hardware {
-        Reached { milestones: 0, took: Duration::ZERO, at: Vec::new() }
+        Reached { milestones: 0, took: Duration::ZERO, at: Vec::new(), wedged: None }
     } else {
-        let mut machine =
-            match builder(&bios, vga.as_deref(), &iso).build_on::<WhpEngine>() {
-                Ok(machine) => machine,
-                Err(error) => {
-                    eprintln!("could not assemble the hypervisor machine: {error}");
-                    return std::process::ExitCode::FAILURE;
-                }
-            };
-        boot(&mut machine, "hypervisor")
+        let assembled = match builder(DeviceClock::HostTime, &bios, vga.as_deref(), &iso)
+            .build_on::<WhpEngine>()
+        {
+            Ok(machine) => machine,
+            Err(error) => {
+                eprintln!("could not assemble the hypervisor machine: {error}");
+                return std::process::ExitCode::FAILURE;
+            }
+        };
+        let mut machine = match FastMachine::adopt(assembled) {
+            Ok(machine) => machine,
+            Err(error) => {
+                eprintln!("could not adopt the machine onto hardware: {error}");
+                return std::process::ExitCode::FAILURE;
+            }
+        };
+        boot_fast(&mut machine, "hypervisor")
     };
 
     println!("\n{:<14} {:>10} {:>12}", "milestone", "interpreter", "hypervisor");
@@ -285,5 +394,11 @@ fn bench() -> std::process::ExitCode {
             software.took.as_secs_f64() / hardware.took.as_secs_f64()
         );
     }
-    std::process::ExitCode::SUCCESS
+    // A boot that ended because its processor never came back is not a slow
+    // measurement, it is no measurement — so the bench fails rather than
+    // printing a comparison against a number nothing produced.
+    match hardware.wedged {
+        Some(_) => std::process::ExitCode::FAILURE,
+        None => std::process::ExitCode::SUCCESS,
+    }
 }

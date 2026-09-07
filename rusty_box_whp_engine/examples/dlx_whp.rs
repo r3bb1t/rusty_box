@@ -20,10 +20,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rusty_box::emulator::{
-    AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MachineBuilder,
-    MemorySize, RunBudget, StopReason,
+    AtaSlot, BootDevice, BootOrder, DeviceClock, DiskGeometry, EmulatorConfig, Ips,
+    MachineBuilder, MemorySize, RunBudget,
 };
-use rusty_box_whp_engine::WhpEngine;
+use rusty_box_whp_engine::{EngineCensus, FastMachine, FastMachineFault, StepStop, WhpEngine};
 
 /// DLX Linux disk geometry, from `bochsrc.bxrc`.
 const DLX_CYLINDERS: u16 = 306;
@@ -121,6 +121,12 @@ fn boot() -> i32 {
         memory_block_size: 128 * 1024,
         ips: Ips::new(300_000_000),
         pci_enabled: true,
+        // A machine driven on hardware keeps its device time on the host's
+        // clock: the guest's processor runs unbounded and nothing counts its
+        // instructions, so a wheel measured in retired instructions would
+        // never turn. `FastMachine::adopt` refuses a machine that keeps
+        // device time in ticks rather than freezing its devices silently.
+        device_clock: DeviceClock::HostTime,
         ..EmulatorConfig::default()
     };
 
@@ -138,13 +144,29 @@ fn boot() -> i32 {
     }
 
     // The one line that differs from the software example.
-    let mut machine = match builder.build_on::<WhpEngine>() {
+    let assembled = match builder.build_on::<WhpEngine>() {
         Ok(machine) => machine,
         Err(error) => {
             eprintln!("could not assemble the machine: {error}");
             return 1;
         }
     };
+    // Adoption is the step after assembly: the machine's processor is handed
+    // to a thread of its own and stays inside the partition, and the devices
+    // get a thread that wakes at their deadlines. Nothing runs until a step
+    // says so.
+    let mut machine = match FastMachine::adopt(assembled) {
+        Ok(machine) => machine,
+        Err(error) => {
+            eprintln!("could not adopt the machine onto hardware: {error}");
+            return 1;
+        }
+    };
+    // The last step of the machine's own bring-up, and it belongs to whoever
+    // is about to run it: it anchors the PIT, the ACPI timer and the VGA
+    // retrace to the machine's instruction rate, which the BIOS's calibration
+    // loops read.
+    machine.with_machine(|m| m.prepare_run());
     println!("machine assembled on the hypervisor engine; running");
 
     // A watchdog on its own thread, because the failure worth catching is the
@@ -180,25 +202,33 @@ fn boot() -> i32 {
     loop {
         let outcome = match machine.step(RunBudget::Ticks(SLICE_TICKS)) {
             Ok(outcome) => outcome,
+            // A processor that did not come back is the one failure a step
+            // cannot describe in the guest's terms, so it is named on its own
+            // line and the run fails.
+            Err(FastMachineFault::Wedged { waited }) => {
+                println!("RESULT wedged waited={:.1}", waited.as_secs_f64());
+                report(reached, began, ticks, &mut machine);
+                return 1;
+            }
             Err(error) => {
-                report(
-                    reached,
-                    began,
-                    ticks,
-                    &machine,
-                );
+                report(reached, began, ticks, &mut machine);
                 eprintln!("the run ended with an error: {error}");
                 return 1;
             }
         };
-        ticks = ticks.saturating_add(outcome.progress.count());
+        ticks = ticks.saturating_add(outcome.ticks);
         steps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Show the guest's own screen as it fills. Every character here got
         // there through an MMIO exit serviced on the shadow processor, so this
         // is not a convenience — it is the only account of what the guest
         // believes it is doing, and counters cannot substitute for it.
-        if let Some(screen) = machine.display().text().map(|text| text.to_text()) {
+        //
+        // Read between steps, while the machine is paused: a scrape taken with
+        // a processor inside the partition answers from a shadow that
+        // processor is not using.
+        let seen = screen(&mut machine);
+        if let Some(screen) = seen.clone() {
             if screen != shown {
                 for (line, was) in screen.lines().zip(shown.lines().chain(std::iter::repeat("")))
                 {
@@ -213,27 +243,31 @@ fn boot() -> i32 {
         // A boot that is merely slow and one that is stuck look the same from
         // outside, so say what the guest has been exiting for as it goes.
         //
-        // And how those exits were divided into slices, which the counts alone
-        // cannot say: the same ten thousand exits are one cost spread over a
-        // hundred slices and quite another spread over ten thousand, because a
-        // slice buys a VM entry, a VM exit and two architectural state
-        // exchanges whatever it then does with them.
+        // And how long the processor spent INSIDE the partition against the
+        // wall clock, which the exit counts alone cannot say: the same ten
+        // thousand exits are one cost when the guest ran between them and
+        // quite another when it did not.
         if began.elapsed().as_secs() != last_said {
             last_said = began.elapsed().as_secs();
-            let exits = machine.engine().exits();
+            let census = machine.engine_census();
+            let exits = census.exits;
+            let in_run_ms = census.vcpus.first().map_or(0, |vcpu| vcpu.in_run_nanos) / 1_000_000;
             println!(
-                "       rip={:#x} exits: port {} mem {} cpuid {} msr {} halt {} boundary {}",
-                machine.rip(),
+                "       rip={:#x} in_run={in_run_ms}ms runs={} injected={} exits: port {} mem {} cpuid {} msr {} halt {} canceled {} boundary {}",
+                machine.with_machine(|m| m.rip()),
+                census.vcpus.first().map_or(0, |vcpu| vcpu.runs),
+                census.injections.injected,
                 exits.port,
                 exits.memory,
                 exits.cpuid,
                 exits.msr,
                 exits.halt,
+                exits.canceled,
                 exits.boundary,
             );
         }
 
-        if let Some(screen) = machine.display().text().map(|text| text.to_text()) {
+        if let Some(screen) = seen {
             while reached < MILESTONES.len() {
                 let (name, needle) = MILESTONES[reached];
                 if !screen.contains(needle) {
@@ -253,27 +287,27 @@ fn boot() -> i32 {
             // a boot that succeeded is the measurement this example exists to
             // produce; printing it only on the failure paths would mean the
             // one run worth measuring is the one that says nothing.
-            report(reached, began, ticks, &machine);
+            report(reached, began, ticks, &mut machine);
             return 0;
         }
 
-        if outcome.is_terminal() {
-            report(
-                reached,
-                began,
-                ticks,
-                &machine,
-            );
-            eprintln!("the guest stopped: {:?}", outcome.stop);
-            return 1;
+        match outcome.stop {
+            StepStop::BudgetSpent => {}
+            StepStop::GuestPowerOff => {
+                report(reached, began, ticks, &mut machine);
+                eprintln!("the guest turned the machine off");
+                dump(&mut machine);
+                return 1;
+            }
+            StepStop::Faulted(fault) => {
+                report(reached, began, ticks, &mut machine);
+                eprintln!("a processor could not carry on: {fault}");
+                dump(&mut machine);
+                return 1;
+            }
         }
         if began.elapsed() > patience {
-            report(
-                reached,
-                began,
-                ticks,
-                &machine,
-            );
+            report(reached, began, ticks, &mut machine);
             eprintln!("gave up after {patience:?} of host time");
             // What the guest had reached matters most on the path that gives up
             // on it: a run that ends by exhausting patience is the one whose
@@ -281,30 +315,18 @@ fn boot() -> i32 {
             dump(&mut machine);
             return 1;
         }
-        // A machine whose processor is halted with nothing able to wake it is
-        // not going to become unstuck by being asked again.
-        if matches!(outcome.stop, StopReason::Halted) && outcome.progress.stalled() {
-            report(
-                reached,
-                began,
-                ticks,
-                &machine,
-            );
-            eprintln!("the guest halted with nothing left to wake it");
-            dump(&mut machine);
-            return 1;
-        }
     }
 }
 
+/// The guest's text screen as it stands between two steps.
+fn screen(machine: &mut FastMachine<()>) -> Option<String> {
+    machine.with_machine(|m| m.display().text().map(|text| text.to_text()))
+}
+
 /// Say how far the guest got and, more usefully, what it was doing.
-fn report(
-    reached: usize,
-    began: Instant,
-    ticks: u64,
-    machine: &rusty_box::emulator::Emulator<(), WhpEngine>,
-) {
-    let exits = machine.engine().exits();
+fn report(reached: usize, began: Instant, ticks: u64, machine: &mut FastMachine<()>) {
+    let census: EngineCensus = machine.engine_census();
+    let exits = census.exits;
     println!();
     println!(
         "got {} of {} milestones in {:.1}s of host time and {} Mticks of guest time",
@@ -327,30 +349,43 @@ fn report(
         exits.canceled,
         exits.boundary,
     );
-    // The hypervisor's own account, beside this engine's. Printed even when it
-    // is unavailable: "the platform would not say" is itself a result, and
-    // silently omitting the independent check would leave a reader believing
-    // the two agreed.
-    match machine.engine().platform_counters() {
-        Ok(counters) => {
-            let intercepts = &counters.intercepts;
-            println!(
-                "  platform: io {} npf {} other {} cpuid {} msr {} halt_time_100ns {}",
-                intercepts.io_instructions.count,
-                intercepts.nested_page_fault_intercepts.count,
-                intercepts.other_intercepts.count,
-                intercepts.cpuid_instructions.count,
-                intercepts.msr_accesses.count,
-                intercepts.halt_instructions.time_100ns,
-            );
-            println!(
-                "  runtime: total {}ms hypervisor {}ms",
-                counters.runtime.total_100ns / 10_000,
-                counters.runtime.hypervisor_100ns / 10_000,
-            );
+    for (index, vcpu) in census.vcpus.iter().enumerate() {
+        println!(
+            "  vcpu {index}: runs {} in_run {}ms exports {}",
+            vcpu.runs,
+            vcpu.in_run_nanos / 1_000_000,
+            vcpu.export_calls,
+        );
+        // The hypervisor's own account, beside this engine's, as of the last
+        // time this processor came back. Printed even when there is none:
+        // "the platform has not said yet" is itself a result, and silently
+        // omitting the independent check would leave a reader believing the
+        // two agreed.
+        match vcpu.platform_at_last_park {
+            Some(counters) => {
+                let intercepts = &counters.intercepts;
+                println!(
+                    "  platform: io {} npf {} other {} cpuid {} msr {} halt_time_100ns {}",
+                    intercepts.io_instructions.count,
+                    intercepts.nested_page_fault_intercepts.count,
+                    intercepts.other_intercepts.count,
+                    intercepts.cpuid_instructions.count,
+                    intercepts.msr_accesses.count,
+                    intercepts.halt_instructions.time_100ns,
+                );
+                println!(
+                    "  runtime: total {}ms hypervisor {}ms",
+                    counters.runtime.total_100ns / 10_000,
+                    counters.runtime.hypervisor_100ns / 10_000,
+                );
+            }
+            None => println!("  platform counters unavailable: this processor has not parked"),
         }
-        Err(error) => println!("  platform counters unavailable: {error}"),
     }
+    println!(
+        "  injected {} windows_armed {}",
+        census.injections.injected, census.injections.windows_armed
+    );
 }
 
 /// Show what the guest was doing when it stopped.
@@ -359,12 +394,11 @@ fn report(
 /// and it says which part of the firmware got as far as printing. Then where
 /// the processor is, which distinguishes "stopped in the BIOS" from "stopped
 /// somewhere this port put it".
-fn dump(machine: &mut rusty_box::emulator::Emulator<(), WhpEngine>) {
+fn dump(machine: &mut FastMachine<()>) {
     println!();
-    println!("RIP = {:#x}", machine.rip());
-    match machine.display().text() {
-        Some(text) => {
-            let screen = text.to_text();
+    println!("RIP = {:#x}", machine.with_machine(|m| m.rip()));
+    match screen(machine) {
+        Some(screen) => {
             println!("the guest's text screen:");
             for line in screen.lines() {
                 let line = line.trim_end();
@@ -378,7 +412,8 @@ fn dump(machine: &mut rusty_box::emulator::Emulator<(), WhpEngine>) {
         }
         None => println!("the display is not in a text mode"),
     }
-    let debugcon: Vec<u8> = machine.debug_port().take_output().collect();
+    let debugcon: Vec<u8> =
+        machine.with_machine(|m| m.debug_port().take_output().collect());
     if !debugcon.is_empty() {
         println!("port 0xE9 said: {}", String::from_utf8_lossy(&debugcon));
     }
