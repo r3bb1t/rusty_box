@@ -483,33 +483,61 @@ Kept for the reasoning and the measurements; do not implement it.
 
 - [ ] **Step 2: Register the divergence**
 
-Append to `docs/bochs-parity-divergences.md`, following the file's existing entry format:
+Append to `docs/bochs-parity-divergences.md`. **Match the file's house format exactly** — the last entry is `## H8`, headings are `## H<n> — <sentence>`, and each entry carries `### What the guest observes`, `### Why the divergence is the correct side`, `### Price of closing it`, then a bold `**Status:**` line. Read `## H8` before writing, and follow it:
 
 ```markdown
-### D-WHP-EXTINT — the legacy line is placed as a pending event, not taken by an INTA at the processor
+## H9 — The legacy 8259 line is placed as a pending event, not taken by an INTA at the processor
 
-**Applies to:** the WHP engine in fast mode only. The interpreter is unaffected.
+Fast mode only (`DeviceClock::HostTime`). The interpreter is unaffected and keeps
+Bochs's behaviour exactly.
 
-Bochs raises a flag and reads the vector only when the processor is ready
-(`pc_system.cc raise_INTR`, then `cpu/event.cc`'s `DEV_pic_iac()`). This engine
-cannot: the processor is inside the hypervisor and there is no INTA cycle to
-join. It performs the acknowledge itself, on the machine's side, once the guest's
-own readiness is known from the last exit header — `IF` set, no interrupt shadow,
-no delivery already in flight — and places the resolved vector as a
-`WHvX64PendingEventExtInt`.
+### What the guest observes
 
-**Evidence it must be this way:** `WHvRequestInterrupt`, the alternative, refuses
-vector `0x08` with `0xC0350005` because a local APIC takes no vector below 16
-(this port's own `BX_LAPIC_FIRST_VECTOR`, and Bochs `cpu/apic.cc trigger_irq`).
-`WHV_INTERRUPT_TYPE` offers no ExtINT and no LocalInt0, so the wire cannot be
-asserted at all. QEMU places the same event for the same reason
-(`target/i386/whpx/whpx-all.c whpx_vcpu_pre_run`).
+Bochs raises a flag and reads the vector only once the processor is ready to take
+it: `pc_system.cc raise_INTR` carries no vector, and `cpu/event.cc` calls
+`DEV_pic_iac()` at the moment of delivery. This engine acknowledges earlier. The
+vCPU thread tests the guest's readiness from its last exit header — `IF` set, no
+interrupt shadow, no delivery already in flight — and, if the guest can take one,
+performs the acknowledge and places the resolved vector as a
+`WHvX64PendingEventExtInt` before re-entering the partition.
 
-**Guest-visible difference:** the vector leaves the 8259 a few instructions
-earlier than Bochs would take it. A guest that masks the IRQ in that window still
-receives it. No guest is known to depend on the difference, and the same is
-already true of an I/O APIC entry in ExtINT mode, which is the other way a PC
-wires this controller.
+So the vector leaves the 8259 a few instructions earlier than Bochs would take
+it. A guest that masks that IRQ in the window between the acknowledge and the
+delivery still receives it.
+
+### Why the divergence is the correct side
+
+There is no INTA cycle to join: the processor is inside the hypervisor, and the
+platform offers no verb for the wire. `WHV_INTERRUPT_TYPE` has no ExtINT(7) and
+no LocalInt0(8), so LINT0 cannot be asserted at all.
+
+The obvious alternative is measured impossible rather than merely worse.
+`WHvRequestInterrupt` refuses vector `0x08` with `0xC0350005`
+(`ERROR_HV_INVALID_PARAMETER`), because a local APIC takes no vector below 16 —
+this port's own `BX_LAPIC_FIRST_VECTOR`, and Bochs `cpu/apic.cc trigger_irq`,
+reject the same. Remapped above the floor it is accepted and the vector vanishes,
+because the partition's APIC is software-disabled at reset and a legacy guest
+never enables it.
+
+QEMU places the identical event for the identical reason
+(`target/i386/whpx/whpx-all.c whpx_vcpu_pre_run`), so this is the platform's
+intended path rather than this port's invention.
+
+### Price of closing it
+
+Not closable while the guest runs on the hypervisor: closing it means reading the
+vector at delivery, and the delivery happens inside hardware this process does
+not observe instruction by instruction. Single-stepping to recover the INTA
+moment is measured 416× slower and would defeat the reason for using the
+hypervisor at all.
+
+The same acknowledge-early behaviour is already this port's answer for an I/O
+APIC entry in ExtINT mode, which is the other way a PC wires this controller, so
+closing it here alone would make the two paths disagree.
+
+**Status:** open and deliberate; fast mode only. Introduced by
+`docs/superpowers/plans/2026-09-07-inject-at-entry-not-by-cancel.md`, whose
+Task 3 proves the delivery on hardware for both a spinning and a halting guest.
 ```
 
 - [ ] **Step 3: Gate and commit**
