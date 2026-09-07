@@ -1371,6 +1371,77 @@ mod tests {
         running.stop_and_join();
     }
 
+    /// A guest that halts still takes its tick.
+    ///
+    /// A placed pending event does not clear `halt_suspend`: measured, a
+    /// processor parked in `HLT` produces no halt exit and does not run the
+    /// handler until the suspend is cleared, which is why the staging writes
+    /// the whole internal-activity register before it enters. QEMU needs the
+    /// same thing and calls it `whpx_vcpu_kick_out_of_hlt`
+    /// (`target/i386/whpx/whpx-all.c`): "we also manually do inject some
+    /// interrupts via WHvRegisterPendingEvent instead of WHVRequestInterrupt,
+    /// which does not reset the HLT state".
+    ///
+    /// Without that write this test hangs until its deadline with an empty
+    /// debug port, which is the whole point of having it.
+    #[test]
+    fn a_halted_guest_still_takes_its_legacy_tick() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        // isr at CODE+0x29, exactly as the delivery test's guest.
+        let machine = machine_with_devices_on(
+            DeviceClock::HostTime,
+            &[
+                0x31, 0xC0, //             xor ax, ax
+                0x8E, 0xD8, //             mov ds, ax
+                0x8E, 0xD0, //             mov ss, ax
+                0xBC, 0x00, 0x70, //       mov sp, 0x7000
+                0xC7, 0x06, 0x20, 0x00, 0x29, 0x10, // mov word [0x20], isr (IVT[8])
+                0xC7, 0x06, 0x22, 0x00, 0x00, 0x00, //  mov word [0x22], 0
+                0xB0, 0xFE, //             mov al, 0xFE — unmask IRQ0 alone
+                0xE6, 0x21, //             out 0x21, al
+                0xB0, 0x34, //             mov al, 0x34 — ch0, lo/hi, mode 2
+                0xE6, 0x43, //             out 0x43, al
+                0xB0, 0x00, //             mov al, 0x00 — count 0x0400 low
+                0xE6, 0x40, //             out 0x40, al
+                0xB0, 0x04, //             mov al, 0x04 — count 0x0400 high
+                0xE6, 0x40, //             out 0x40, al
+                0xFB, //                   sti (CODE+0x25)
+                // halt (CODE+0x26): the guest asks for nothing and takes no
+                // exits; only a placed event that also clears the suspend can
+                // reach the handler.
+                0xF4, //                   hlt
+                0xEB, 0xFD, //             jmp halt
+                // isr (CODE+0x29)
+                0xFB, //                   sti
+                0x90, //                   nop
+                0xB0, MARK, //             mov al, MARK
+                0xE6, DEBUG_PORT, //       out 0xE9, al
+                0xB0, 0x20, //             mov al, 0x20
+                0xE6, 0x20, //             out 0x20, al — non-specific EOI
+                0xCF, //                   iret
+            ],
+        );
+        let ThreadedRun { machine, written, .. } = drive_on_a_thread(
+            machine,
+            std::time::Duration::from_secs(10),
+            "a halted guest's own ISR ran",
+            |_, seen| seen.len() >= 3,
+        );
+        assert!(
+            !written.is_empty() && written.iter().all(|byte| *byte == MARK),
+            "the PIT's ticks must reach the ISR of a guest that halts: {written:#04x?}"
+        );
+        let guard = machine.lock().expect("the machine's lock");
+        assert!(
+            guard.engine().inject_census().injected >= 3,
+            "and each must be a placed event: {}",
+            guard.engine().inject_census().injected
+        );
+    }
+
     /// A masked LINT0 keeps the legacy path shut.
     ///
     /// Measured on this platform: an ExtINT written into a processor's
@@ -1380,10 +1451,10 @@ mod tests {
     /// stands between a masked line and a delivered interrupt.
     ///
     /// The guest is the positive control for itself: IRQ0 is unmasked at the
-    /// 8259 and the PIT ticks, so the INT pin genuinely rises and the thread is
-    /// genuinely fetched out of its run to consider it. What must not happen is
-    /// the acknowledge — and the vector's gate is filled, so one that arrived
-    /// anyway would announce itself.
+    /// 8259 and the PIT ticks, so the INT pin genuinely rises and, with nothing
+    /// permitted to acknowledge it, is still owed at the controllers when the
+    /// test looks. What must not happen is the acknowledge — and the vector's
+    /// gate is filled, so one that arrived anyway would announce itself.
     #[test]
     fn a_masked_lvt0_keeps_the_legacy_path_closed() {
         if !hypervisor_here() {
@@ -1419,9 +1490,15 @@ mod tests {
              {census:?}"
         );
         assert!(
-            census.exits.canceled >= 1,
-            "the 8259's pin must have risen and fetched the processor out of its run — without \
-             that this test never reached the gate and proves nothing: {census:?}"
+            machine
+                .lock()
+                .expect("the machine's lock")
+                .processor(0)
+                .io
+                .device_manager()
+                .has_interrupt(),
+            "the 8259's pin must have risen and still be owed — without that this test \
+             never reached the gate and proves nothing: {census:?}"
         );
         assert_eq!(
             machine.lock().expect("the machine's lock").engine().inject_census().injected,
