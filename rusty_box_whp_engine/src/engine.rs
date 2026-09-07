@@ -22,7 +22,7 @@
 use rusty_box_whp::{
     DestinationMode, Exit, ExitReason, ExtendedVmExits, InterceptCounters, InterruptKind,
     InterruptRequest, LocalApicMode, MsrExits, Partition, PartitionConfig, RuntimeCounters,
-    TriggerMode, Vcpu, WhpError,
+    TriggerMode, Vcpu, VpContext, WhpError,
 };
 
 use super::xsave;
@@ -35,6 +35,8 @@ use rusty_box::emulator::{
 use rusty_box::iodev::ioapic::IoApicDeliveryMode;
 use rusty_box::iodev::irq::{IoApicDelivery, IoApicDestinationMode, IoApicTrigger};
 use rusty_box_core::{EngineFault, EngineFaultKind};
+
+use super::vcpu_thread::VcpuControl;
 
 use rusty_box::memory::plan::MemoryPlan;
 use rusty_box::memory::BxMemC;
@@ -289,6 +291,196 @@ pub(crate) fn refused_import(error: rusty_box::cpu::arch_state::ArchStateError) 
     CpuError::UnsupportedCpuOperation { operation: "hypervisor state refused on import" }
 }
 
+/// What the injection decision must know about deliverability, kept current
+/// without a single register read (QEMU `target/i386/whpx/whpx-all.c`
+/// `whpx_vcpu_post_run` keeps the same cache for the same reason).
+///
+/// The invariant this type exists for: everything [`stage_injection`]
+/// consults is already in hand the moment it decides, so consulting it costs
+/// zero platform calls — where a register read would cost the very exchange
+/// injection is meant to avoid.
+///
+/// ## The freshness contract
+///
+/// The decision runs at the tail of a loop iteration and at the head of a
+/// slice; between an exit and its tail the engine may SERVICE the exit on the
+/// shadow interpreter, and a serviced instruction can change `IF` (a `CLI`,
+/// or a fault entering a gate) and leave the guest at a fresh boundary. So
+/// the cache has two authorities, and which one is current depends on whether
+/// the shadow is what the next entry runs:
+///
+/// - **No errand** (a raw port write, an interrupt-window exit): the exit
+///   header describes the processor the tail will re-enter, so
+///   [`Self::refresh_from`] — called once per iteration on the fresh header —
+///   is authoritative. It decodes `in_flight`, `if_flag`, `cr8` AND the
+///   interrupt-shadow bit.
+/// - **An errand ran** (`finish_on_the_shadow`, `burst_on_the_shadow`): the
+///   errand's `impose_the_shadow` has just made the partition identical to
+///   the shadow, so the SHADOW is what the next VM entry sees and the header
+///   is stale. Every errand path therefore ends with
+///   [`Self::refresh_from_shadow`], which republishes `if_flag` AND the
+///   interrupt shadow from the interpreter's own bookkeeping
+///   (`BxCpuC::in_interrupt_shadow`) — the inhibit the errand's last
+///   retired instruction armed, or none.
+/// - **A slice head** (`install_the_shadow`) is the errand case writ large:
+///   whatever the cache holds predates everything the machine did between
+///   slices — shadow-converted slices, deliveries, state the machine wrote —
+///   or there was never a header at all. The install is an imposition, so it
+///   carries the same republish, from the shadow's own `IF` and from BOTH
+///   parties that can hold a shadow at a head: the interpreter's inhibit,
+///   and the partition's own bit as the last read-back left it.
+///
+/// The property both together guarantee: at the instant `stage_injection`
+/// pops a vector — an irreversible acknowledge — the gate holds POSITIVE
+/// evidence that delivery is permitted, never merely the absence of evidence
+/// that it is blocked. The interpreter's inhibit is that evidence for the
+/// shadow exactly as its `IF` is: the value its own delivery gate consults at
+/// this boundary (Bochs event.cc handleAsyncEvent, Priority 5), read rather
+/// than guessed. Getting this wrong injects a maskable interrupt into an
+/// `IF=0` or interrupt-shadowed context, which the VM-entry guest-state
+/// checks reject with `WHV_E_INVALID_VP_STATE` and which loses the
+/// acknowledged vector. Guessing "blocked" instead is safe and is not free:
+/// every guess defers the vector to a deliverability window and pays a
+/// window exit to learn what the interpreter already knew.
+pub(crate) struct InjectState {
+    /// `ExecutionState` bit 6, `InterruptionPending` — a delivery the platform
+    /// has begun and not landed. From the exit header alone.
+    in_flight: bool,
+    /// Whether interrupts are enabled for the processor the next VM entry will
+    /// run: `RFLAGS` bit 9 from the exit header on an errand-free iteration,
+    /// or `cpu.interrupts_enabled()` republished by [`Self::refresh_from_shadow`]
+    /// after an errand.
+    if_flag: bool,
+    /// The exit header's `Cr8` field, and the only fresh source there is: a
+    /// guest `MOV CR8` retires on hardware without an exit, so no copy this
+    /// engine keeps between exits can be trusted over the header's.
+    cr8: u8,
+    /// Whether the processor the next VM entry will run is inside an
+    /// interrupt shadow — an `STI` / `MOV SS` / `POP SS` window that blocks
+    /// delivery for one instruction. `ExecutionState` bit 12 from the exit
+    /// header on an errand-free iteration; the interpreter's own inhibit
+    /// (`BxCpuC::in_interrupt_shadow`), republished by
+    /// [`Self::refresh_from_shadow`] after an errand and at a slice head.
+    shadowed: bool,
+    /// A `DeliverabilityNotifications` request armed at this priority and not
+    /// yet answered by a window exit. NOT touched by either refresh — no
+    /// header or shadow reports it back. It is owned by the injection logic —
+    /// [`stage_injection`] arms it, the `InterruptWindow` arm clears it.
+    pub(crate) window: Option<u8>,
+}
+
+impl InjectState {
+    /// A processor that has never run has no exit header to have said
+    /// anything: nothing in flight, `IF` clear — the architectural reset
+    /// value — not shadowed, `CR8` zero, and no window armed.
+    pub(crate) const fn at_reset() -> Self {
+        Self { in_flight: false, if_flag: false, cr8: 0, shadowed: false, window: None }
+    }
+
+    /// Cache what an exit header says — the authority for an iteration in
+    /// which no shadow errand ran.
+    ///
+    /// Sets `in_flight`, `if_flag`, `cr8` and `shadowed`; `window` is
+    /// deliberately untouched, because it records a notification this engine
+    /// armed and no header reports one back.
+    pub(crate) fn refresh_from(&mut self, vp: &VpContext) {
+        // `WHV_X64_VP_EXECUTION_STATE`: `InterruptionPending` is bit 6,
+        // `InterruptShadow` is bit 12 (the `unserviced` diagnostic reads the
+        // same two bits).
+        self.in_flight = (vp.execution_state >> 6) & 1 == 1;
+        self.shadowed = (vp.execution_state >> 12) & 1 == 1;
+        // `RFLAGS.IF` is bit 9.
+        self.if_flag = (vp.rflags >> 9) & 1 == 1;
+        self.cr8 = vp.cr8;
+    }
+
+    /// Republish deliverability from the shadow — the authority whenever the
+    /// shadow is what the next VM entry runs.
+    ///
+    /// Called at the end of every path that emulates before the injection
+    /// tail, once `impose_the_shadow` has made the partition identical to the
+    /// interpreter, and by `install_the_shadow` at every slice head — always
+    /// with the shadow's live `IF` (`cpu.interrupts_enabled()`) and its live
+    /// inhibit.
+    ///
+    /// `shadowed` is the interpreter's own answer, and that is what makes it
+    /// admissible where a guess would not be. The gate acknowledges on this
+    /// value — an irreversible INTA — so it must be positive evidence that
+    /// delivery is permitted: `BxCpuC::in_interrupt_shadow` is the very test
+    /// the interpreter's delivery gate runs at this boundary
+    /// (`interrupts_inhibited(BX_INHIBIT_INTERRUPTS)`, Bochs event.cc
+    /// handleAsyncEvent Priority 5), current for the instruction the shadow
+    /// retired last. An errand CAN stop with an inhibit live — the batch
+    /// loop breaks on its instruction budget at the loop head, before the
+    /// async-event handling that would consume one (rusty_box `cpu.rs`
+    /// `cpu_loop_n_impl`), so a burst whose last instruction is `STI`
+    /// returns mid-window, and a trapped `MOV SS`/`POP SS` with a
+    /// device-memory operand does the same in one step — and then the answer
+    /// is "blocked", the vector defers to a window, and the NEXT exit's
+    /// header bit 12 answers again. Every other errand answers "open", and
+    /// the vector is injected at the tail with no window and no window exit.
+    /// VirtualBox's NEM backend exports the same interpreter-side answer into
+    /// the same register (`NEMAllNativeTemplate-win.cpp.h`
+    /// `nemHCWinCopyStateToHyperV`, `CPUMIsInInterruptShadow`).
+    ///
+    /// At a slice head the caller ORs in the partition's own bit from the
+    /// last read-back: the interpreter cannot know of a shadow the hardware
+    /// entered, and a head is the one place both can be live.
+    ///
+    /// `in_flight` and `cr8` are not republished: nothing an errand does
+    /// begins a platform delivery, and the header's `CR8` still stands.
+    ///
+    /// Takes the flags rather than the processor so the freshness rule is
+    /// unit-testable without a constructed `BxCpuC`; the call sites read them
+    /// from the shadow.
+    pub(crate) fn refresh_from_shadow(&mut self, shadow_if: bool, shadow_inhibit: bool) {
+        self.if_flag = shadow_if;
+        self.shadowed = shadow_inhibit;
+    }
+
+    /// Whether the processor the next VM entry runs can take an external
+    /// interrupt right now.
+    ///
+    /// The rule, in one place (R5): `IF` set, no interrupt shadow, and no
+    /// delivery the platform has already begun. Every path that hands the
+    /// partition a vector — the slice loop's injection and the vCPU thread's
+    /// ExtINT staging alike — asks it here, so the two cannot come to differ
+    /// about what "deliverable" means. The three fields it reads are the three
+    /// [`Self::refresh_from`] takes from an exit header.
+    pub(crate) const fn permits_ext_int(&self) -> bool {
+        self.if_flag && !self.shadowed && !self.in_flight
+    }
+
+    /// Record that this engine has just put an event in the partition's
+    /// pending slot.
+    ///
+    /// The platform holds a delivery from here until it lands, and staging a
+    /// second one over it would replace an event the guest was owed. The next
+    /// exit header says so itself; until one arrives this is the only record.
+    pub(crate) const fn note_placed_event(&mut self) {
+        self.in_flight = true;
+    }
+}
+
+/// Whether an exit header describes a processor that can take an external
+/// interrupt at its next entry.
+///
+/// The header-shaped spelling of [`InjectState::permits_ext_int`]. It builds
+/// the cache the same way an exit would and asks the same question, so a header
+/// and a cache can never answer differently.
+///
+/// Test-only now: the production caller was the slice head's staging, which
+/// went with the slice loop. The PREDICATE it spells is still the live one —
+/// `VcpuThread::stage_the_legacy_interrupt` asks it of a cache refreshed from
+/// the exit header — and the test that reads all three bits is what keeps that
+/// predicate from quietly dropping one.
+#[cfg(test)]
+pub(crate) fn ext_int_permitted(vp: &VpContext) -> bool {
+    let mut header = InjectState::at_reset();
+    header.refresh_from(vp);
+    header.permits_ext_int()
+}
+
 /// `WHvRegisterInterruptState` as this engine exchanges it: bit 0 the
 /// interrupt shadow, bit 1 the NMI mask (`WHV_X64_INTERRUPT_STATE_REGISTER`).
 /// The one place the word is decoded and encoded (R5), so the read-back and
@@ -343,17 +535,13 @@ struct Started {
     partition: Partition,
     /// Which local APIC this partition has, if any.
     ///
-    /// The one fact that decides who owns the guest's interrupts, and what
-    /// `owns_the_guests_local_apic` answers from. Under
+    /// The one fact that decides who owns the guest's interrupts. Under
     /// [`LocalApicMode::None`] this machine's own `cpu/apic.rs` is the guest's
-    /// local APIC: the 8259's line reaches the processor as a level, and the
-    /// controller is acknowledged only when the processor can take the vector.
-    /// Under either emulated mode the partition arbitrates instead, and every
-    /// delivery reaches it as a `WHvRequestInterrupt` through
-    /// `route_ioapic_delivery` — an I/O APIC message as itself, and the 8259's
-    /// line as the vector the machine resolved at its own boundary, because a
-    /// local APIC takes numbers and the platform has no verb for asserting
-    /// LINT0.
+    /// local APIC, the 8259 pair lives in host memory, and every delivery is
+    /// this engine's from the acknowledge to the injection. Under either
+    /// emulated mode the partition arbitrates instead, an I/O APIC message
+    /// becomes a `WHvRequestInterrupt`, and the 8259's INTR becomes an ExtINT
+    /// this engine places in the pending-event slot.
     ///
     /// Recorded rather than re-derived because it is what the platform
     /// ACCEPTED, not what was asked for: the ladder in [`start`] falls back,
@@ -423,11 +611,12 @@ pub struct ExitCounts {
     pub canceled: u64,
     /// A device dispatch asked for the machine's boundary to be serviced.
     pub boundary: u64,
-    /// An interrupt-window exit. The platform raises it only for a
-    /// deliverability notification someone armed, and nothing in this crate
-    /// arms one — the partition's own APIC holds every vector the guest is
-    /// owed until it can take it — so a count here is a request this engine
-    /// never made.
+    /// An interrupt window the engine armed opened. The platform raises this
+    /// exit only when asked, and the engine asks only when delivery was
+    /// blocked — an interrupt shadow, or IF clear — at the moment it wanted
+    /// to inject; a guest whose delivery is open at that moment never pays
+    /// one. Read beside [`InjectCensus::windows_armed`], which counts the
+    /// asks this counts the answers to.
     pub window: u64,
     /// The guest ended an interrupt at a local APIC the hypervisor owns.
     pub apic_eoi: u64,
@@ -508,6 +697,52 @@ impl ExitCounts {
     }
 }
 
+/// What this engine has put into the partition's pending-event slot, and how
+/// often it had to arm a window and wait for the guest to become able to
+/// take it.
+///
+/// [`ExitCounts`] and [`SliceCensus`] measure what the guest asked the
+/// hardware for; this measures what the machine pushed in. Every field here
+/// is one half of a comparison whose other half is kept by an independent
+/// party — the interrupt fabric, or the platform's own exit stream — because
+/// the defect class these counters exist to catch is a vector acknowledged
+/// on one side and lost or doubled on the other, and a counter shows that
+/// only by disagreeing with an account that does not share its bugs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InjectCensus {
+    /// Interrupts injected into the partition.
+    ///
+    /// Must equal the interrupt fabric's `acknowledge_count` delta
+    /// attributable to injection: every injection acknowledges exactly one
+    /// vector at the fabric, so a shortfall here is a vector acknowledged
+    /// and lost, and an excess is one delivered twice.
+    pub injected: u64,
+    /// Interrupt windows armed because delivery was blocked — an interrupt
+    /// shadow, or IF clear — at the moment the engine wanted to inject.
+    ///
+    /// Paired with [`ExitCounts::window`]: every armed window must
+    /// eventually be answered by a window exit, so armed-with-no-exits is
+    /// not a quiet guest but a wedged one, holding a vector it will never
+    /// take.
+    pub windows_armed: u64,
+    /// [`Self::injected`], split by vector.
+    ///
+    /// The aggregate can balance while two vectors trade places; matching
+    /// this against the fabric's `vectors_acknowledged` histogram is the
+    /// comparison that catches a swap.
+    pub injected_per_vector: [u32; 256],
+}
+
+/// Everything zero: nothing injected, no window armed. Written by hand
+/// because this toolchain derives `Default` for arrays only up to 32
+/// elements, and the per-vector histogram holds 256.
+impl Default for InjectCensus {
+    fn default() -> Self {
+        Self { injected: 0, windows_armed: 0, injected_per_vector: [0; 256] }
+    }
+}
+
 /// Runs guest code on the Windows Hypervisor Platform.
 ///
 /// Starts unconfigured because a machine constructs its engine before it has
@@ -516,8 +751,25 @@ impl ExitCounts {
 /// guest-physical map.
 #[derive(Default)]
 pub struct WhpEngine {
+    /// How to reach each processor's thread, installed by whoever spawned
+    /// them.
+    ///
+    /// Empty until then, which is the state the slice loop runs in and the
+    /// state a machine is reset and restored in — so anything that speaks to a
+    /// thread must be a no-op over an empty list rather than an assertion that
+    /// one exists.
+    ///
+    /// **Declared before `started`, and the order is the point.** Each control
+    /// holds a `Canceller`, which names this partition's handle, and a struct
+    /// drops its fields in declaration order — so the controls go first and no
+    /// canceller outlives the partition it names. Nothing today would notice
+    /// (a `Canceller` is `Copy` and has no `Drop`), which is exactly why the
+    /// order is stated rather than left to be rediscovered. `Started` carries
+    /// the same banner for the same relationship.
+    controls: std::vec::Vec<VcpuControl>,
     started: Option<Started>,
     exits: ExitCounts,
+    inject_census: InjectCensus,
     /// Diagnostic; see [`ExitHistory`]. Lives here rather than in a slice
     /// because a guest's path to a fault crosses slice boundaries — a handler
     /// that traps for its own port I/O is several slices old by the time it
@@ -545,6 +797,51 @@ impl WhpEngine {
     /// jump in time it did not live through.
     pub(crate) fn partition(&self) -> Option<&Partition> {
         self.started.as_ref().map(|started| &started.partition)
+    }
+
+    /// Record how to reach the thread running the next processor.
+    ///
+    /// Called by whoever spawned the threads, once per processor, in processor
+    /// order — which is the order they are spawned in. The position is the
+    /// list's own length rather than an argument, because an index that could
+    /// disagree with it would admit a gap: a processor whose thread nobody
+    /// started, which is not a state this engine has (R2). The list grows to
+    /// fit rather than being sized at construction, since an engine is built
+    /// before its machine has memory and long before anyone knows whether a
+    /// thread will run it at all.
+    pub(crate) fn install_control(&mut self, control: VcpuControl) {
+        self.controls.push(control);
+    }
+
+    /// The threads running this machine's processors, in processor order.
+    ///
+    /// Test-facing: what a test asks it is whether a spawned thread's control
+    /// actually landed here, so a spawn path that skipped
+    /// [`Self::install_control`] fails a test instead of leaving the engine
+    /// holding fewer controls than it has running processors.
+    #[cfg(test)]
+    pub(crate) fn controls(&self) -> &[VcpuControl] {
+        &self.controls
+    }
+
+    /// What this engine has put into the partition's pending-event slot, and
+    /// how often it had to arm a window and wait.
+    ///
+    /// Returned by reference rather than by value: the per-vector histogram
+    /// makes a copy a kilobyte, not a pair of words.
+    #[must_use]
+    pub const fn inject_census(&self) -> &InjectCensus {
+        &self.inject_census
+    }
+
+    /// The same tally, for the vCPU thread to record its own stagings in.
+    ///
+    /// One census per machine, whichever of the two paths handed the partition
+    /// the vector — so [`InjectCensus::injected`] stays comparable with the
+    /// interrupt fabric's own acknowledge count, which is the comparison that
+    /// catches a vector taken from the controllers and never delivered.
+    pub(crate) fn inject_census_mut(&mut self) -> &mut InjectCensus {
+        &mut self.inject_census
     }
 
     /// What the hypervisor itself charged this guest, beside what this engine
@@ -601,9 +898,9 @@ pub struct PlatformCounters {
 /// `None` when the platform has no kind for it.
 ///
 /// Exhaustive on the I/O APIC's own closed set (R5). Two modes have no
-/// counterpart and they are different absences: SMI is a gap in this port, and
-/// the two reserved encodings are a guest programming error. ExtINT has one,
-/// and its arm says why.
+/// counterpart and they are different absences: ExtINT is the 8259's wire,
+/// which reaches the guest through the pending-event slot rather than the APIC
+/// bus, and the two reserved encodings are a guest programming error.
 const fn requested_kind(mode: IoApicDeliveryMode) -> Option<InterruptKind> {
     match mode {
         IoApicDeliveryMode::Fixed => Some(InterruptKind::Fixed),
@@ -751,11 +1048,10 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
                     // afterwards from a state the fault had already disturbed.
                     exception: trapped_exceptions() != 0,
                     // A guest whose local APIC is the partition's programs
-                    // LINT0 where this engine cannot see it, and the 8259's
-                    // vector reaches that APIC as a `WHvRequestInterrupt`, which
-                    // no LVT entry masks. The trap is what keeps the fabric's
-                    // own copy current, and the fabric's copy is the only gate
-                    // there is (`IrqFabric::lint0_admits_ext_int`).
+                    // LINT0 where this engine cannot see it, and a host-placed
+                    // ExtINT is delivered whether or not that entry is masked
+                    // (measured). The trap is what keeps the fabric's own copy
+                    // current, and the fabric's copy is the only gate there is.
                     apic_write_lint0_trap: hypervisor_apic,
                     // An SMI the partition's APIC would deliver is one no
                     // hypervisor can run: system-management mode belongs to the
@@ -940,12 +1236,14 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
     // them, so what a slice can report is the time it took. See `ticks_elapsed`.
     const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Ticks;
 
-    // The machine's between-batch delivery is for a processor the machine runs
-    // itself, and none of this engine's are: the hardware runs them. So the
-    // machine's loop takes nothing off the 8259 for this engine, and the line
-    // is resolved at the machine's boundary instead — `route_the_legacy_line`
-    // acknowledges the controller and hands the vector to
-    // `route_ioapic_delivery`, which requests it of the partition's APIC.
+    // Delivery is this machine's, not the partition's: the partition has no
+    // local APIC of its own and the hardware knows nothing of this machine's
+    // 8259 pair, so the vector, the acknowledge, the priority and the EOI all
+    // belong to this machine's own controllers wherever the guest happens to
+    // be executing. Only the final push crosses the seam — a maskable vector
+    // as `stage_injection`'s register write, at a slice head or an exit tail
+    // alike; an NMI, SMI or INIT as the shadow's own interpreted delivery at
+    // a head.
     const EVENT_DELIVERY: EventDelivery = EventDelivery::Engine;
 
     fn memory_map_changed(
@@ -1096,9 +1394,9 @@ const INTERRUPT_NOTIFICATION: u64 = 1 << 1;
 /// accepted, reads back exactly as written, and never produces an
 /// interrupt-window exit — across sixteen thousand `STI`s in one run. Under
 /// `LocalApicMode::None` the same word on the same processor produces one
-/// window exit per ask (`docs/whp-interrupt-window-2026-09-06.md`, probe P10).
-/// Nothing in this crate arms one, and this constant is named here so the
-/// measurement and the register it was made against sit beside each other.
+/// window exit per ask, which is what the injection tests assert. So the vCPU
+/// thread's ExtINT staging does not arm one, and this constant is named here so
+/// the two facts sit beside each other.
 const _: () = assert!(INTERRUPT_NOTIFICATION == 2);
 
 /// How many instructions a system-management handler may take before this
@@ -1358,6 +1656,7 @@ pub(crate) fn describe_the_fault<T: Instrumentation>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_box_whp::SegmentRegister;
 
     /// A machine whose partition has no local APIC of its own keeps this
     /// machine's model APIC, and says so.
@@ -1374,6 +1673,112 @@ mod tests {
             !<WhpEngine as SliceEngine<()>>::owns_the_guests_local_apic(&engine),
             "an engine that has started nothing cannot be the guest's APIC"
         );
+    }
+
+    /// The cache decodes an exit header and nothing else: `InterruptionPending`
+    /// is `ExecutionState` bit 6, `InterruptShadow` is bit 12, `IF` is `RFLAGS`
+    /// bit 9, `CR8` arrives as the header's own field, and the armed-window
+    /// record survives every refresh because no header reports it. Pure struct
+    /// decoding — no hypervisor, so it runs on any host.
+    #[test]
+    fn the_inject_cache_decodes_exit_headers_alone() {
+        let header = |execution_state: u16, rflags: u64, cr8: u8| VpContext {
+            rip: 0xFFF0,
+            rflags,
+            cs: SegmentRegister::default(),
+            instruction_length: 0,
+            cr8,
+            execution_state,
+        };
+        let mut inject = InjectState::at_reset();
+        assert!(!inject.in_flight);
+        assert!(!inject.if_flag);
+        assert!(!inject.shadowed);
+        assert_eq!(inject.cr8, 0);
+        assert_eq!(inject.window, None);
+        inject.window = Some(3);
+
+        // Bits 6 and 12 together, IF set.
+        inject.refresh_from(&header(0x1040, 0x202, 0x5));
+        assert!(inject.in_flight, "ExecutionState bit 6 is InterruptionPending");
+        assert!(inject.shadowed, "ExecutionState bit 12 is InterruptShadow");
+        assert!(inject.if_flag, "RFLAGS bit 9 is IF");
+        assert_eq!(inject.cr8, 0x5, "the header's CR8 nibble round-trips");
+        assert_eq!(inject.window, Some(3), "no header reports an armed window");
+
+        inject.refresh_from(&header(0x0000, 0x2, 0x0));
+        assert!(!inject.in_flight, "ExecutionState 0 means nothing in flight");
+        assert!(!inject.shadowed, "ExecutionState 0 means no interrupt shadow");
+        assert!(!inject.if_flag, "RFLAGS 0x2 has IF clear");
+        assert_eq!(inject.cr8, 0);
+        assert_eq!(inject.window, Some(3), "a refresh never touches the window");
+    }
+
+    /// The freshness contract: after an errand, the shadow's `IF` and the
+    /// shadow's own inhibit override whatever the exit header said — both
+    /// read from the interpreter, neither presumed. This is the property the
+    /// injection gate turns on: a `CLI` retired on the shadow between the
+    /// exit and the staging decision must be seen; a `MOV SS` retired there
+    /// must block; and an errand that armed nothing must NOT be told
+    /// "blocked", because that is one window exit per errand for evidence
+    /// the interpreter already holds.
+    #[test]
+    fn a_shadow_errand_republishes_if_and_the_inhibit_it_read() {
+        let mut inject = InjectState::at_reset();
+        inject.window = Some(0);
+        // Header carries IF=1 and NO interrupt shadow — the processor as it
+        // was at the exit, BEFORE the errand ran.
+        inject.refresh_from(&VpContext {
+            rip: 0,
+            rflags: 0x202,
+            cs: SegmentRegister::default(),
+            instruction_length: 0,
+            cr8: 0,
+            execution_state: 0x0000,
+        });
+        assert!(inject.if_flag, "the header's IF is set");
+        assert!(!inject.shadowed, "the header reports no interrupt shadow");
+
+        // The errand retired a `CLI` (or entered a fault gate): the shadow's
+        // live IF is now clear, and its last instruction armed no inhibit.
+        inject.refresh_from_shadow(false, false);
+        assert!(
+            !inject.if_flag,
+            "the shadow's IF must override the header's — the gate injects on this"
+        );
+        assert!(
+            !inject.shadowed,
+            "an errand that armed no inhibit leaves delivery open — the gate \
+             must be told so, or every errand pays a window exit"
+        );
+        // The window record and in-flight state are the errand's to leave
+        // alone: no header or shadow reports the armed notification, and
+        // nothing an errand does begins a platform delivery.
+        assert_eq!(inject.window, Some(0), "an errand never touches the window");
+        assert!(!inject.in_flight, "an errand begins no platform delivery");
+
+        // The errand retired a `MOV SS` from device memory: IF as the header
+        // had it, the interpreter's inhibit live for the next instruction.
+        inject.refresh_from_shadow(true, true);
+        assert!(inject.if_flag);
+        assert!(
+            inject.shadowed,
+            "a shadower retired last on the shadow blocks the gate — an \
+             injection here lands the new-SS old-ESP frame"
+        );
+
+        // The next exit's header is authoritative again: bit 12 clear is how
+        // a deferred injection resolves after exactly one more exit.
+        inject.refresh_from(&VpContext {
+            rip: 0,
+            rflags: 0x202,
+            cs: SegmentRegister::default(),
+            instruction_length: 0,
+            cr8: 0,
+            execution_state: 0x0000,
+        });
+        assert!(!inject.shadowed, "the next header's truth lifts the shadow");
+        assert!(inject.if_flag);
     }
 
     /// `WHvRegisterInterruptState` round-trips through the one decoder and

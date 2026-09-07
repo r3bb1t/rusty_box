@@ -24,7 +24,7 @@ use rusty_box::cpu::{cpu::BxCpuC, instrumentation::Instrumentation, Result};
 use rusty_box_whp::{Reg, VpContext};
 
 use crate::engine::{
-    platform_failed, refused_import, refused_state, uncarried, InterruptStateWord,
+    platform_failed, refused_import, refused_state, uncarried, InjectState, InterruptStateWord,
 };
 use crate::state::{self, VpRegisters};
 use crate::xsave::XsaveArea;
@@ -194,7 +194,9 @@ impl Exchange {
         &mut self,
         cpu: &mut BxCpuC<T>,
         vp: &VpContext,
+        inject: &mut InjectState,
     ) -> Result<()> {
+        inject.refresh_from(vp);
         cpu.take_exit_header(&ExitHeader {
             rip: vp.rip,
             rflags: vp.rflags,
@@ -784,6 +786,7 @@ mod tests {
         let vp = recorder_with_an_area();
         let mut machine = machine_running(&[]);
         let cpu = machine.processor(0).cpu;
+        let mut inject = InjectState::at_reset();
         let mut ex = Exchange::at_reset();
 
         let header = VpContext {
@@ -799,7 +802,7 @@ mod tests {
             cr8: 3,
             execution_state: 0,
         };
-        ex.take_header(cpu, &header).unwrap();
+        ex.take_header(cpu, &header, &mut inject).unwrap();
 
         let mut shadow = VcpuArchState::default();
         cpu.export_arch_groups(

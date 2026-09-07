@@ -19,9 +19,10 @@
 //!   nowhere else, because the idle a HLT fast-forwards over falls outside the
 //!   counter on both engines. Compare the arms by `wall_s`, never by these;
 //! - on the hypervisor engine, the fast machine's `engine_census()` — the
-//!   exits by class, and the hypervisor's own intercept and runtime counters
-//!   as of the last park, the independent account that audits this port's. An
-//!   arm that keeps no exit census prints `RESULT exits=none` in their place;
+//!   exits by class, what was put in the pending-event slot, and the
+//!   hypervisor's own intercept and runtime counters as of the last park, the
+//!   independent account that audits this port's. An arm that keeps no exit
+//!   census prints `RESULT exits=none` in their place;
 //! - `RESULT in_run_share`, one line per adjacent pair of milestones: the
 //!   fraction of that phase's wall clock the processor spent INSIDE
 //!   `WHvRunVirtualProcessor`, the hypervisor's own guest-versus-overhead
@@ -350,8 +351,10 @@ impl Arm for Adopted {
     fn progress_line(&self) -> String {
         let census = self.0.engine_census();
         format!(
-            "runs={} exits={:?}",
+            "runs={} injected={} windows_armed={} exits={:?}",
             census.vcpus.first().map_or(0, |vcpu| vcpu.runs),
+            census.injections.injected,
+            census.injections.windows_armed,
             census.exits
         )
     }
@@ -359,6 +362,10 @@ impl Arm for Adopted {
     fn results(&self) {
         let census = self.0.engine_census();
         println!("RESULT exits={:?}", census.exits);
+        println!(
+            "RESULT inject injected={} windows_armed={}",
+            census.injections.injected, census.injections.windows_armed
+        );
         // The hypervisor's own counters come from the processor's own thread,
         // recorded as it parked — the engine cannot ask for them, because the
         // processor it would ask about belongs to a thread now. The first
