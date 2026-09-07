@@ -1,5 +1,18 @@
 # The 8259 Through the Hypervisor's APIC — Implementation Plan
 
+> **SUPERSEDED — DO NOT IMPLEMENT.** Its design was refuted by measurement: a
+> hypervisor local APIC cannot carry the 8259's vectors. `WHvRequestInterrupt`
+> refuses vector `0x08` with `0xC0350005` because an APIC takes no vector below
+> 16, and with the controller remapped above that floor the call is accepted
+> while the vector vanishes into an APIC a legacy guest never enables. Tasks 1–3
+> of this plan were implemented, then reverted by
+> `docs/superpowers/plans/2026-09-07-inject-at-entry-not-by-cancel.md`, which
+> restores the mechanism this one deleted. See
+> `docs/superpowers/specs/2026-09-07-the-8259-through-the-hypervisors-apic-design.md`
+> for the full refutation, and divergence `H9` for what shipped instead.
+>
+> Kept for its reasoning and its measurements, which the replacement builds on.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A legacy 8259 interrupt reaches a guest running on the hypervisor, by acknowledging it on the machine's side and handing the resolved vector to the hypervisor's own local APIC — deleting the hand-written readiness gate that livelocks.
@@ -145,12 +158,16 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 The behavioural change. The machine's boundary, when the engine owns the APIC and LINT0 admits the line, performs the counted acknowledge and routes the vector as a Fixed physical edge delivery to the boot processor.
 
 **Files:**
-- Modify: `rusty_box/src/emulator/scheduler.rs` (`sync_final_event_levels`: add the acknowledge-and-route, guarded)
+- Modify: `rusty_box/src/emulator/scheduler.rs` (`sync_final_event_levels`: branch the legacy line, add `route_the_legacy_line`)
 - Test: `rusty_box/src/emulator/tests.rs`
 
 **Interfaces:**
-- Consumes: `SliceEngine::owns_the_guests_local_apic` (Task 1); `IrqFabric::{lint0_admits_ext_int, int_pin_asserted, acknowledge, acknowledge_count}` (`iodev/irq.rs`); `IoApicDelivery { vector: u8, delivery_mode: IoApicDeliveryMode, trigger_mode: IoApicTrigger, dest: u32, dest_mode: IoApicDestinationMode }` (`iodev/irq.rs`); `SliceEngine::route_ioapic_delivery(&mut E, IoApicDelivery) -> DeliveryRoute`.
+- Consumes: `SliceEngine::owns_the_guests_local_apic` (Task 1); `IrqFabric::{lint0_admits_ext_int, int_pin_asserted, acknowledge, acknowledge_count}` (`iodev/irq.rs` — the first three are `pub(crate)`, which is enough for `scheduler.rs` and `tests.rs`); `IoApicDelivery { vector: u8, delivery_mode: IoApicDeliveryMode, trigger_mode: IoApicTrigger, dest: u32, dest_mode: IoApicDestinationMode }` (`iodev/irq.rs`, `Copy + Debug`, exactly five fields — `needs_pic_iac` belongs to `PendingIoApicDelivery`, not this); `SliceEngine::route_ioapic_delivery(&mut E, IoApicDelivery) -> DeliveryRoute`.
 - Produces: `Emulator::route_the_legacy_line(&mut self)`, private to `scheduler.rs`, called from `sync_final_event_levels`.
+
+`Emulator::engine(&self) -> &E` already exists at `rusty_box/src/emulator/run.rs:977`
+(not in `mod.rs`, which holds only `engine_mut()`) and `tests.rs` uses it throughout.
+Do not add one — that is a duplicate definition.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -268,8 +285,7 @@ In `rusty_box/src/emulator/scheduler.rs`, add the method and call it from `sync_
     /// machine already services — so a boundary that finds the pin high
     /// acknowledges exactly one vector, and the next finds it low.
     fn route_the_legacy_line(&mut self) {
-        if !<E as SliceEngine<T>>::owns_the_guests_local_apic(&self.engine)
-            || !self.device_manager.irq.int_pin_asserted()
+        if !self.device_manager.irq.int_pin_asserted()
             || !self.device_manager.irq.lint0_admits_ext_int()
         {
             return;
@@ -285,9 +301,9 @@ In `rusty_box/src/emulator/scheduler.rs`, add the method and call it from `sync_
             // The virtual wire is edge-triggered and reaches one processor: the
             // boot processor, which is the only one that holds it
             // (`BxLocalApic::preset_lint0`, divergence D6).
-            trigger_mode: crate::iodev::ioapic::IoApicTrigger::Edge,
+            trigger_mode: crate::iodev::irq::IoApicTrigger::Edge,
             dest: 0,
-            dest_mode: crate::iodev::ioapic::IoApicDestinationMode::Physical,
+            dest_mode: crate::iodev::irq::IoApicDestinationMode::Physical,
         };
         match <E as SliceEngine<T>>::route_ioapic_delivery(&mut self.engine, delivery) {
             // The backend has it; its APIC holds the vector until the guest can
@@ -307,15 +323,27 @@ In `rusty_box/src/emulator/scheduler.rs`, add the method and call it from `sync_
     }
 ```
 
-Call it from `sync_final_event_levels`, immediately after the `self.cpu_mut().set_legacy_intr_level(asserted);` line:
+Call it from `sync_final_event_levels`. It REPLACES the level publication rather
+than joining it — the two are alternatives, not a sequence, because a line
+published to both APICs is delivered twice. Replace the existing
+`self.cpu_mut().set_legacy_intr_level(asserted);` line (Task 1 already deleted
+the `pic_pin_changed` block that followed it) with:
 
 ```rust
-        // An engine that owns the guest's APIC takes the same line as a number.
-        // The two are exclusive by construction — `choose_the_local_apic` ties
-        // APIC ownership to the device clock — so the level published above
-        // reaches a processor nobody is reading when this fires.
-        self.route_the_legacy_line();
+        // Exactly one APIC is the guest's, so exactly one of these runs. The
+        // model's takes a level and defers the acknowledge until its processor
+        // can be asked; a backend's takes a resolved vector, because there is
+        // no verb for asserting LINT0 on it and nobody to ask.
+        if <E as SliceEngine<T>>::owns_the_guests_local_apic(&self.engine) {
+            self.route_the_legacy_line();
+        } else {
+            self.cpu_mut().set_legacy_intr_level(asserted);
+        }
 ```
+
+Note `asserted` is read into a local ABOVE this block and stays there — the
+`irq_pending`/`irq_cleared` clearing that follows it is unconditional on both
+paths, and `route_the_legacy_line` re-reads the pin itself.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -425,12 +453,22 @@ The acceptance criterion. Task 1.8 of the parent plan could not meet it.
 - Modify: `rusty_box_whp_engine/src/lib.rs` (rewrite `a_legacy_8259_vector_reaches_a_hardware_guest_as_a_placed_ext_int`)
 
 **Interfaces:**
-- Consumes: `FastMachine::{adopt, step, with_machine, engine_census}`, `fast_machine_with_devices` if present or `machine_with_devices_on(DeviceClock::HostTime, ..)` + `FastMachine::adopt`.
+- Consumes: `FastMachine::{adopt, step, with_machine, engine_census}` (`fast_machine.rs`). There is no `fast_machine_with_devices` helper — build the machine with `machine_with_devices_on(DeviceClock::HostTime, ..)` (`lib.rs`, `pub(crate)`) and hand it to `FastMachine::adopt`, which takes `Box<Emulator<T, WhpEngine>>` and returns `Result<Self, FastMachineFault>`. The census field is spelled `canceled`, one `l`.
 - Produces: nothing.
 
-- [ ] **Step 1: Rewrite the hardware test**
+- [ ] **Step 1: Write the hardware test**
 
-Rename it to `a_legacy_8259_vector_reaches_a_hardware_guest` — "as a placed ext int" named the mechanism, and the mechanism has changed while the subject has not. Drive it on a `FastMachine` with the same guest, keep the assertion that the guest's own handler ran (the `MARK` at the debug port), and add the assertion the old path could not make:
+Task 1 retired `a_legacy_8259_vector_reaches_a_hardware_guest_as_a_placed_ext_int`
+rather than leaving it red across three commits: it asserts a delivery that
+Task 1 disconnects and Task 2 restores, so it could not pass in between. Its
+subject is what survives, and you recreate it here. The old body — including
+the toy guest that raises IRQ0 and writes `MARK` to the debug port — is at
+`git show 0329d76:rusty_box_whp_engine/src/lib.rs`; read it for the guest and
+the assertions, not for the harness. Its `ThreadedRun`/`drive_on_a_thread`
+helpers were retired with it and are NOT to be restored: `FastMachine` already
+owns its vCPU thread.
+
+Name it `a_legacy_8259_vector_reaches_a_hardware_guest` — "as a placed ext int" named the mechanism, and the mechanism has changed while the subject has not. Drive it on a `FastMachine` with the same guest, keep the assertion that the guest's own handler ran (the `MARK` at the debug port), and add the assertion the old path could not make:
 
 ```rust
         let census = machine.engine_census();
