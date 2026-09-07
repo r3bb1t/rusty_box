@@ -717,6 +717,17 @@ const MATRIX: &[Step] = &[
         stdout_marker: None,
     },
     Step {
+        // The step above compiles the GUI's LIB for wasm, and `--full`'s
+        // release build compiles its BINARY for the host. Neither compiles its
+        // test targets, so the fixtures in `app.rs` and `runner.rs` that build
+        // a `ResolvedConfig` field by field were free to rot — and did, for two
+        // fields, across four sites. `--all-targets` is what sees them.
+        name: "GUI host check, tests included",
+        args: &["check", "--release", "-p", "rusty_box_gui", "--all-targets"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
         name: "all-features check",
         args: &["check", "--release", "-p", "rusty_box", "--all-features"],
         envs: &[],

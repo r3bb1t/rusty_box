@@ -4027,6 +4027,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn test_resolved_config() -> crate::config::ResolvedConfig {
         crate::config::ResolvedConfig {
+            engine: crate::config::Engine::Interpreter,
+            cpu_capabilities: crate::config::CpuCapabilities::Preset,
             memory_mib: 256,
             host_memory_mib: 256,
             memory_block_kib: 128,

@@ -559,7 +559,9 @@ fn path_to_str(path: &PathBuf) -> Result<&str, RunError> {
 mod tests {
     use super::*;
     use crate::args::DiskGeometry;
-    use crate::config::{ResolvedCdrom, ResolvedDisk, ResolvedDiskCreation};
+    use crate::config::{
+        CpuCapabilities, Engine, ResolvedCdrom, ResolvedDisk, ResolvedDiskCreation,
+    };
     use rusty_box::params::BxParams;
     use rusty_box_bximage::ImageSize;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -577,6 +579,8 @@ mod tests {
         fs::write(&vga, []).unwrap();
 
         let error = run_resolved(ResolvedConfig {
+            engine: Engine::Interpreter,
+            cpu_capabilities: CpuCapabilities::Preset,
             memory_mib: 32,
             host_memory_mib: 32,
             memory_block_kib: 128,
@@ -628,6 +632,8 @@ mod tests {
 
     fn disk_creation_config(path: PathBuf, overwrite: bool) -> ResolvedConfig {
         ResolvedConfig {
+            engine: Engine::Interpreter,
+            cpu_capabilities: CpuCapabilities::Preset,
             memory_mib: 32,
             host_memory_mib: 32,
             memory_block_kib: 128,
@@ -785,6 +791,8 @@ mod tests {
 
         command_tx
             .send(crate::app::NativeEmulatorCommand::Start(ResolvedConfig {
+                engine: Engine::Interpreter,
+                cpu_capabilities: CpuCapabilities::Preset,
                 memory_mib: 32,
                 host_memory_mib: 32,
                 memory_block_kib: 128,
