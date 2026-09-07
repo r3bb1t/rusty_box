@@ -158,13 +158,20 @@ genuinely inside a long run, which is the case the old code got right.
 
 ### What is kept from the refuted design
 
-`SliceEngine::owns_the_guests_local_apic` stays. It is a better seam than the
-`pic_pin_changed` it replaced — a question rather than an action — and the
-machine still needs to know who owns the APIC. Only the APIC *routing* of the
-legacy line goes.
+Nothing, and that is deliberate. All three of its commits are reverted, so the
+tree lands exactly on `0329d76` — the state in which the delivery test is proven
+to pass.
+
+`owns_the_guests_local_apic` was a nicer seam than the `pic_pin_changed` it
+replaced, and it is tempting to keep. It cannot be kept cheaply:
+`pic_pin_changed` was the ONLY caller of `raise_ext_int`, so keeping the new seam
+means inventing a new trigger path inside the very step whose purpose is to
+reach a *known-good* baseline. That would put unproven code underneath the test
+that is supposed to be proving the baseline. Re-introducing it afterwards is a
+separate change that can be verified on its own merits.
 
 The I/O APIC path (`route_ioapic_delivery` → `deliver_ioapic_to_lapics`) is
-untouched. That is the path Alpine uses once booted, and it works.
+untouched by any of this. That is the path Alpine uses once booted, and it works.
 
 ## Performance is a first-class requirement, not a side effect
 

@@ -26,22 +26,31 @@
 
 ### Task 1: Restore the working mechanism
 
-Two commits removed a delivery path that measurement shows works. Revert them. Nothing is designed in this task; it exists so the next task starts from a known-good baseline that the hardware test can verify.
+Three commits removed a delivery path that measurement shows works. Revert all three. Nothing is designed in this task; it exists so the next task starts from a known-good baseline that the hardware test can verify.
+
+**Revert all three, not two.** `bbccbce` removed `SliceEngine::pic_pin_changed`, which was the ONLY caller of `VcpuControl::raise_ext_int` — verified: at `720192b` the name survives solely in a doc comment. Reverting only `c9d2fbd` and `720192b` would restore the whole staging mechanism with nothing to trigger it, and the hardware delivery test would fail. The tree must land exactly on `0329d76`'s code, which is the state where that test provably passes.
+
+This drops `owns_the_guests_local_apic`. It was a nicer seam than the `pic_pin_changed` it replaced, but keeping it would mean inventing a new caller for `raise_ext_int` inside the one task whose entire purpose is to reach a *known-good* baseline. Re-introducing it later is a separate, verifiable change; doing it here would put unproven code under the test that is supposed to be proving the baseline.
 
 **Files:**
-- Revert: commits `c9d2fbd` and `720192b`
+- Revert: commits `c9d2fbd`, `720192b` and `bbccbce`
 
 **Interfaces:**
-- Produces (all restored): `VcpuThread::stage_the_legacy_interrupt(&mut self) -> Continue`; `ext_int_request(&AtomicBool, &AtomicBool, &impl CancelRun) -> WhpResult<()>`; `VcpuControl::{ext_int_pending, ext_int_blocked, raise_ext_int}`; `InjectState` with `permits_ext_int`/`note_placed_event`; `InjectCensus` with `injected`/`injected_per_vector`; `WhpEngine::{controls, install_control}`; `SliceEngine::pic_pin_changed`. Task 2 changes `ext_int_request` and the run loop; Task 3 uses `InjectCensus`.
+- Produces (all restored): `VcpuThread::stage_the_legacy_interrupt(&mut self) -> Continue`; `ext_int_request(&AtomicBool, &AtomicBool, &impl CancelRun) -> WhpResult<()>`; `VcpuControl::{ext_int_pending, ext_int_blocked, raise_ext_int}`; `InjectState` with `permits_ext_int`/`note_placed_event`; `InjectCensus` with `injected`/`injected_per_vector`; `WhpEngine::{controls, install_control}`; `SliceEngine::pic_pin_changed` (the trait method that calls `raise_ext_int`). Task 2 changes `ext_int_request` and the run loop; Task 3 uses `InjectCensus`.
 
 - [ ] **Step 1: Revert, newest first**
 
 ```bash
 git revert --no-edit c9d2fbd
 git revert --no-edit 720192b
+git revert --no-edit bbccbce
 ```
 
-Expected: both apply cleanly — nothing has touched these files since.
+Expected: all three apply cleanly — nothing has touched these files since.
+
+If any revert conflicts, STOP and report rather than resolving by hand: a
+hand-merged baseline is no longer the state the delivery test was proven against,
+which is this task's whole purpose.
 
 - [ ] **Step 2: Confirm the tree builds and the suite is whole again**
 
@@ -51,7 +60,14 @@ cargo check --release -p rusty_box --no-default-features
 cargo test --release -p rusty_box_whp_engine --lib
 ```
 
-Expected: both checks exit 0. The suite returns to **49 tests** (44 + the 5 the deletion took).
+Expected: both checks exit 0. The suite returns to **49 tests** (44 + the 5 the deletion took), and the `emulator::` module returns to its pre-`720192b` count — the two `a_backend_apic_*` tests go with the revert, since the routing they cover is gone.
+
+Confirm the tree really is `0329d76`'s code:
+
+```bash
+git diff --stat 0329d76 -- rusty_box/src rusty_box_whp_engine/src
+```
+Expected: **empty**. Any output means the reverts did not land cleanly and the baseline is not the proven one.
 
 - [ ] **Step 3: Prove the restored delivery actually delivers — and is not a vacuous pass**
 
