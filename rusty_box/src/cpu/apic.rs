@@ -131,6 +131,24 @@ impl LvtBits {
     pub fn timer_mode_field(self) -> u32 {
         (self.bits() >> 17) & 0x3
     }
+
+    /// Get the delivery mode field (bits 8-10).
+    ///
+    /// The field is three bits wide and every encoding names a mode, so the
+    /// answer is the mode itself rather than a number a caller has to decode.
+    #[inline(always)]
+    pub fn delivery_mode(self) -> ApicDeliveryMode {
+        match (self.bits() >> 8) & 0x7 {
+            0 => ApicDeliveryMode::Fixed,
+            1 => ApicDeliveryMode::LowPriority,
+            2 => ApicDeliveryMode::Smi,
+            3 => ApicDeliveryMode::Reserved,
+            4 => ApicDeliveryMode::Nmi,
+            5 => ApicDeliveryMode::Init,
+            6 => ApicDeliveryMode::Sipi,
+            _ => ApicDeliveryMode::ExtInt,
+        }
+    }
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -684,6 +702,80 @@ impl BxLocalApic {
         self.apic_id = id;
         if self.mode == ApicMode::X2apicMode {
             self.ldr = ((self.apic_id & 0xFFFF_FFF0) << 16) | (1 << (self.apic_id & 0xF));
+        }
+        // The identity decides who holds the virtual wire, so it is re-derived
+        // whenever the identity changes: a processor built before its id was
+        // assigned would otherwise keep the bootstrap processor's entry.
+        self.preset_lint0();
+    }
+
+    /// Give the bootstrap processor the legacy virtual wire, and no one else.
+    ///
+    /// **A deliberate deviation from the architecture, and the same one KVM and
+    /// QEMU make.** The SDM resets every LVT entry masked ("The LVT register is
+    /// reset to 0s except for the mask bits; these are set to 1s"), leaving
+    /// firmware to program LINT0 into ExtINT for virtual wire mode. Production
+    /// firmware does — EDK2/OVMF, coreboot and SeaBIOS all write it during POST
+    /// — but the BIOS this port ships with does not: the only local-APIC writes
+    /// in Bochs's `bios/` are `APIC_SVR` and `APIC_ICR_LOW`, and `bios/rombios.h`
+    /// does not even name offset 0x350. A processor that honoured a masked
+    /// LINT0 under that firmware would take no legacy interrupt for the whole
+    /// life of the guest.
+    ///
+    /// So the entry is preset here instead, exactly as KVM's
+    /// `KVM_X86_QUIRK_LINT0_REENABLED` does (enabled by default, and
+    /// self-described as a spec deviation for this reason) and as QEMU's
+    /// `apic_reset_common` did with the same literal `0x700` until 2015 —
+    /// removing it there broke coreboot within days.
+    ///
+    /// Only the bootstrap processor gets it: the SDM says one processor at most
+    /// should carry an ExtINT LVT entry, and Linux's `setup_local_APIC` masks
+    /// LINT0 on every application processor for that reason.
+    ///
+    /// The preset only survives because `reset` clears `software_enabled`
+    /// directly instead of writing SVR: a software disable masks every LVT
+    /// entry (`write_spurious_interrupt_register`), so routing reset's disable
+    /// through that writer would close the wire again. KVM's `kvm_lapic_reset`
+    /// takes the same care: the masking lives in its `kvm_lapic_reg_write`
+    /// `APIC_SPIV` arm, and reset calls `apic_set_spiv` directly, bypassing it.
+    fn preset_lint0(&mut self) {
+        /// Unmasked, delivery mode 0b111 (ExtINT). QEMU spelled the same
+        /// constant `0x700` in `apic_reset_common`.
+        const VIRTUAL_WIRE: u32 = 0x0000_0700;
+        self.lvt[LocalVectorTableEntry::Lint0 as usize] = if self.apic_id == 0 {
+            LvtBits::from_raw(VIRTUAL_WIRE)
+        } else {
+            LvtBits::MASKED
+        };
+    }
+
+    /// Whether an 8259 INTR assertion on LINT0 reaches this processor.
+    ///
+    /// The architectural gate on the legacy wire, and the same predicate KVM
+    /// applies in `kvm_apic_accept_pic_intr`: a local APIC that is hardware
+    /// disabled has no LVT to consult at all — the SDM says LINT0 and LINT1
+    /// then behave as the INTR and NMI pins of a processor with no APIC — and
+    /// an enabled one admits the line only through an unmasked LVT0 in ExtINT
+    /// delivery mode.
+    ///
+    /// A software disable needs no term of its own: it masks every LVT entry
+    /// where it happens (`write_spurious_interrupt_register`), so the mask bit
+    /// already carries it.
+    ///
+    /// The engine backends ask the same question of whoever owns LVT0 in their
+    /// topology; when the local APIC is the hypervisor's, that is the shadow
+    /// the fabric keeps (`IrqFabric::lint0_admits_ext_int`).
+    pub(crate) fn lint0_admits_ext_int(&self) -> bool {
+        match self.mode {
+            // Both have IA32_APIC_BASE.EN clear — `StateInvalid` is the
+            // illegal EXTD-without-EN encoding — so the pins bypass the APIC
+            // entirely and there is no LVT to consult.
+            ApicMode::GloballyDisabled | ApicMode::StateInvalid => true,
+            ApicMode::XapicMode | ApicMode::X2apicMode => {
+                let lvt0 = self.lvt[LocalVectorTableEntry::Lint0 as usize];
+                !lvt0.contains(LvtBits::MASKED)
+                    && lvt0.delivery_mode() == ApicDeliveryMode::ExtInt
+            }
         }
     }
 
@@ -2136,6 +2228,8 @@ impl BxLocalApic {
         for i in 0..LVT_ENTRY_COUNT {
             self.lvt[i] = LvtBits::MASKED; // all masked
         }
+        // …except LINT0 on the bootstrap processor. See `preset_lint0`.
+        self.preset_lint0();
 
         self.spurious_vector = 0xFF;
         self.software_enabled = false;
@@ -2875,8 +2969,81 @@ mod tests {
             assert_eq!(lapic.ier[i], 0xFFFFFFFF);
         }
         for i in 0..LVT_ENTRY_COUNT {
+            if i == LocalVectorTableEntry::Lint0 as usize {
+                continue; // the virtual wire — see `preset_lint0`
+            }
             assert_eq!(lapic.lvt[i], LvtBits::MASKED); // all masked
         }
+    }
+
+    /// The bootstrap processor comes out of reset holding the legacy virtual
+    /// wire, and no application processor does. Without this the BIOS shipped
+    /// with this port — which never writes offset 0x350 — would leave every
+    /// guest deaf to the 8259 for its whole life.
+    #[test]
+    fn reset_leaves_the_virtual_wire_on_the_bootstrap_processor_alone() {
+        let bsp = make_lapic();
+        assert_eq!(
+            bsp.lvt[LocalVectorTableEntry::Lint0 as usize],
+            LvtBits::from_raw(0x0000_0700),
+            "the bootstrap processor's LINT0 is unmasked ExtINT"
+        );
+        assert!(bsp.lint0_admits_ext_int());
+
+        let mut ap = BxLocalApic::default();
+        ap.set_id(1);
+        ap.reset(0);
+        assert_eq!(
+            ap.lvt[LocalVectorTableEntry::Lint0 as usize],
+            LvtBits::MASKED,
+            "an application processor's LINT0 stays masked"
+        );
+        assert!(!ap.lint0_admits_ext_int());
+    }
+
+    /// The predicate the legacy wire is gated on, over the states a guest can
+    /// actually put LVT0 in. Matches KVM's `kvm_apic_accept_pic_intr`.
+    #[test]
+    fn lint0_admits_ext_int_only_through_an_unmasked_ext_int_entry() {
+        let mut lapic = make_lapic();
+        let lint0 = LocalVectorTableEntry::Lint0 as usize;
+
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0000_0700);
+        assert!(lapic.lint0_admits_ext_int(), "unmasked ExtINT admits");
+
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0001_0700);
+        assert!(!lapic.lint0_admits_ext_int(), "the mask bit refuses");
+
+        // What Linux's `check_timer()` writes when it wants the tick to stop.
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0001_0000);
+        assert!(!lapic.lint0_admits_ext_int(), "masked fixed refuses");
+
+        // A fixed vector on LINT0 is a different interrupt, not the 8259's.
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0000_0031);
+        assert!(!lapic.lint0_admits_ext_int(), "unmasked fixed refuses");
+
+        // Hardware disabled: the pins bypass the APIC, mask bit and all.
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0001_0000);
+        lapic.mode = ApicMode::GloballyDisabled;
+        assert!(lapic.lint0_admits_ext_int(), "a disabled APIC gates nothing");
+    }
+
+    /// A software disable masks every LVT entry, so it closes the legacy wire
+    /// without the predicate needing a term of its own — and reset must not
+    /// reach that masking, or the preset above would never survive.
+    #[test]
+    fn a_software_disable_closes_the_wire_but_reset_does_not() {
+        let mut lapic = make_lapic();
+        assert!(!lapic.software_enabled, "reset leaves the APIC disabled");
+        assert!(
+            lapic.lint0_admits_ext_int(),
+            "reset's disable does not run through the register writer"
+        );
+
+        lapic.write_spurious_interrupt_register(0x1FF); // enable
+        assert!(lapic.software_enabled);
+        lapic.write_spurious_interrupt_register(0x0FF); // disable
+        assert!(!lapic.lint0_admits_ext_int());
     }
 
     #[test]

@@ -54,6 +54,10 @@ use crate::exchange::{Exchange, ExitClass};
 use crate::state::VpRegisters;
 use crate::xsave::{self, XsaveArea};
 
+/// The processor the machine boots on, and the only one the 8259's INTR is
+/// wired to (`BxLocalApic::preset_lint0`, divergence D6).
+const BOOT_PROCESSOR: usize = 0;
+
 /// Why a vCPU thread left its run loop.
 ///
 /// Named rather than a flag and a reason beside it (R0/R2): a parked thread is
@@ -752,7 +756,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         }
         let Processor { cpu, mut io, engine } = guard.processor(*index);
         engine.history.record(exit.vp.rip, history_mark(exit.reason));
-        let mut servicer = Servicer { vcpu, exchange, xsave, inject, control };
+        let mut servicer = Servicer { vcpu, index: *index, exchange, xsave, inject, control };
         match servicer.answer(exit, cpu, &mut io, engine) {
             Ok(carry_on) => carry_on,
             Err(error) => Continue::Park(Parked::Fault(refused_service(&error))),
@@ -842,6 +846,10 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
 /// and nowhere else.
 struct Servicer<'a> {
     vcpu: &'a Vcpu,
+    /// Which processor this exit came from. Most arms answer the same way for
+    /// every processor; the ones that do not are the ones that touch machine
+    /// state only the boot processor owns.
+    index: usize,
     exchange: &'a mut Exchange,
     xsave: &'a mut XsaveArea,
     inject: &'a mut InjectState,
@@ -1017,8 +1025,16 @@ impl Servicer<'_> {
             // zero — the inverse of a memory exit — so a handler that
             // recomputed the end of the instruction would step over the one
             // after it.
+            //
+            // Only the boot processor's write is recorded. The legacy wire
+            // exists on that processor alone (divergence D6), so an
+            // application processor's LVT0 says nothing about the 8259 — and
+            // the platform has already applied its value to the register that
+            // processor reads.
             ExitReason::ApicWriteTrap { register: ApicWriteType::Lint0, value } => {
-                io.device_manager().irq_mut().set_lint0(value);
+                if self.index == BOOT_PROCESSOR {
+                    io.device_manager().irq_mut().set_bsp_lint0(value);
+                }
                 Ok(Continue::Run)
             }
             // The partition traps no other APIC register for this engine, so a

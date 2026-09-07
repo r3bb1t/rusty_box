@@ -680,8 +680,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             return AcknowledgedInterrupt::Lapic(vector);
         }
 
-        // Then check PIC (legacy 8259 path) — only if the LAPIC didn't answer
-        if self.device_manager.irq.int_pin_asserted() {
+        // Then the 8259, through LINT0 — only if the LAPIC didn't answer.
+        //
+        // LVT0 gates the INTA as well as the raise (`set_legacy_intr_level`),
+        // because the two are separate hazards and this one is reachable
+        // without the other: the body is entered for a pending *LAPIC* event
+        // too, and a local APIC with nothing left to answer falls through to
+        // the 8259 with the legacy event never having been raised at all.
+        if self.lapic.lint0_admits_ext_int() && self.device_manager.irq.int_pin_asserted() {
             let vector = self.device_manager.irq.acknowledge();
             tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
             vector, self.rip(), self.sregs[0].selector.value,
@@ -698,7 +704,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             // current deasserted INT pin. A later device assertion
             // will set irq_pending again, so it cannot be erased by
             // this acknowledge's stale irq_cleared flag.
-            self.device_manager.irq.pic_mut().reconcile_deasserted_intr();
+            //
+            // Only when the pin really is low: LINT0 can refuse a line that is
+            // still asserted, and telling the 8259 its pin fell would retire
+            // the edge the guest owes itself once it unmasks.
+            if !self.device_manager.irq.int_pin_asserted() {
+                self.device_manager.irq.pic_mut().reconcile_deasserted_intr();
+            }
             self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
             if self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR == 0 {
                 // An assignment, so the request the stale pin raised is

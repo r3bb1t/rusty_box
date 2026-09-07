@@ -368,8 +368,16 @@ impl IrqFabric {
     ///
     /// Called from the trap a backend raises on the write, so this copy stays
     /// current with the register the guest actually programmed.
+    ///
+    /// The name is the contract: this record is the BOOT processor's, because
+    /// the legacy wire exists on that processor alone
+    /// (`BxLocalApic::preset_lint0`, and divergence D6). An application
+    /// processor's write to its own LVT0 has already been applied by the
+    /// backend to the register that processor reads, and says nothing about
+    /// the 8259 — passing one here would let an AP close or open the legacy
+    /// wire for the machine.
     #[inline]
-    pub fn set_lint0(&mut self, value: u64) {
+    pub fn set_bsp_lint0(&mut self, value: u64) {
         self.lint0 = value;
     }
 
@@ -524,6 +532,46 @@ mod tests {
         assert_eq!(fabric.ioapic_mut().take_pending_deliveries().1, 0);
     }
 
+    /// A mode-7 entry's own vector field is not used: the 8259 answers the
+    /// INTA and the queued message carries THAT vector.
+    ///
+    /// This is the whole reason an ExtINT entry can be routed as a Fixed
+    /// interrupt by the time an engine sees it — the ExtINT-ness is spent at
+    /// service time. Bochs `ioapic.cc service_ioapic` does the same
+    /// (`if (entry->delivery_mode() == 7) vector = DEV_pic_iac()`), and it is
+    /// what makes Linux's `unlock_ExtINT_logic` work: that entry carries vector
+    /// 0 and exists only to force INTA cycles at the 8259.
+    #[test]
+    fn an_ext_int_entry_carries_the_vector_the_8259_answered_not_its_own() {
+        const MODE_EXT_INT: u32 = 7 << 8;
+        // A vector field the 8259 can never produce, so a message carrying it
+        // would prove the entry's own field had been used.
+        const NEVER_FROM_THE_PIC: u8 = 0x99;
+
+        let mut fabric = IrqFabric::new();
+        route_pin(&mut fabric, 5, u32::from(NEVER_FROM_THE_PIC) | MODE_EXT_INT);
+        // Every line masked, which is the state Linux leaves the 8259 in for
+        // this entry: the acknowledge answers the spurious vector instead.
+        fabric.pic_mut().master.imr = 0xFF;
+        let spurious = fabric.pic().master.interrupt_offset + 7;
+
+        fabric.set_ioapic_pin(5, true);
+
+        let (queued, n) = fabric.ioapic_mut().take_pending_deliveries();
+        assert_eq!(n, 1, "the entry's own pin is the trigger, masked 8259 or not");
+        assert_eq!(
+            queued[0].vector, spurious,
+            "the 8259 supplied the vector, and with every line masked that is its spurious one"
+        );
+        assert_ne!(queued[0].vector, NEVER_FROM_THE_PIC, "the entry's vector field is ignored");
+        assert_eq!(
+            fabric.acknowledge_count(),
+            1,
+            "and the acknowledge happened here, at service time — an engine that acknowledged \
+             again later would take a second vector off the controller"
+        );
+    }
+
     /// The gate that stands between a masked legacy line and a delivered
     /// interrupt.
     ///
@@ -541,13 +589,13 @@ mod tests {
             "a machine whose guest has not touched the APIC is a virtual wire: \
              the 8259's INTR reaches the processor"
         );
-        fabric.set_lint0(0x0001_0700); // masked, ExtINT
+        fabric.set_bsp_lint0(0x0001_0700); // masked, ExtINT
         assert!(!fabric.lint0_admits_ext_int());
-        fabric.set_lint0(0x0000_0700); // unmasked, ExtINT
+        fabric.set_bsp_lint0(0x0000_0700); // unmasked, ExtINT
         assert!(fabric.lint0_admits_ext_int());
         // Unmasked, fixed vector 0x30 — not ExtINT: the guest wants a fixed
         // vector on LINT0, not the 8259's.
-        fabric.set_lint0(0x0000_0030);
+        fabric.set_bsp_lint0(0x0000_0030);
         assert!(!fabric.lint0_admits_ext_int());
     }
 

@@ -302,6 +302,140 @@ every `async_event` site in `cpu/`.
 port (`signal_event`, `unmask_event`, and the FRED, SVM and task-switch paths)
 are Bochs-faithful, carry the same hazard, and are outside this entry.
 
+---
+
+## D6 — The 8259's INTR reaches a processor through LVT0, and the bootstrap processor comes out of reset holding the virtual wire
+
+**Bochs:** `pc_system.cc bx_pc_system_c::raise_INTR` and `lower_INTR`, reached
+from `iodev/pic.cc bx_pic_c::service_master_pic` through the `BX_RAISE_INTR`
+macro in `bochs.h`. They call `BX_CPU(0)->signal_event(BX_EVENT_PENDING_INTR)`
+and the matching clear — straight at the processor's event word. Nothing on
+that path reads `cpu/apic.cc`'s `lvt[APIC_LVT0]`. The local APIC's LINT0 entry
+is written by the guest, saved, restored and returned on a read, and consulted
+by nothing: grepping `apic.cc` for `APIC_LVT0` finds the register table and the
+reset loop, and no reader. `cpu/event.cc handleAsyncEvent` then takes the vector
+with `DEV_pic_iac()` on the strength of the event bit alone.
+
+Symmetrically, `bx_local_apic_c::reset` masks every LVT entry including LINT0,
+and the BIOS in `bios/` never writes offset `0x350` — `rombios.h` does not even
+name it. So under Bochs a guest boots with LINT0 masked and takes legacy
+interrupts anyway, and the mask it writes later changes nothing.
+
+**rusty_box:** `cpu/cpu.rs BxCpuC::set_legacy_intr_level` is the one place the
+8259's level becomes a processor event, and it asks
+`cpu/apic.rs BxLocalApic::lint0_admits_ext_int` first. The INTA in
+`cpu/event.rs acknowledge_external_interrupt` asks the same question, because
+that body is reachable with only a *LAPIC* event pending and would otherwise
+walk around the raise-side gate. `BxLocalApic::preset_lint0` gives APIC id 0 —
+and only id 0 — `LVT0 = 0x700` at reset and whenever its identity is assigned.
+
+The predicate is KVM's `kvm_apic_accept_pic_intr` (`arch/x86/kvm/lapic.c`): a
+hardware-disabled local APIC admits the line unconditionally, because the SDM
+(Vol. 3, "Local APIC Status and Location") says LINT0 and LINT1 then behave as
+the INTR and NMI pins of a processor with no APIC at all; an enabled one admits
+it only through an unmasked LVT0 in ExtINT delivery mode. A software disable
+needs no term of its own — it masks every LVT entry where it happens
+(`write_spurious_interrupt_register`), so the mask bit already carries it.
+
+**Provenance (R7):** two upstreams, for the two halves.
+
+- The routing is the SDM's ("Local Vector Table", LVT0 gates the LINT0 pin) and
+  KVM's `kvm_apic_accept_pic_intr`. Xen's `vlapic.c` and QEMU's TCG local APIC
+  both apply the same gate.
+- The preset is `KVM_X86_QUIRK_LINT0_REENABLED`, enabled by default and
+  self-described upstream as a deliberate spec deviation, applied in
+  `kvm_lapic_reset` to the reset BSP only. QEMU's `apic_reset_common` carried
+  the same literal `0x700` until it was removed in 2015, which broke coreboot
+  within days and is why KVM's quirk still exists.
+
+The Bochs side of it is filed in `docs/bochs-upstream-bugs.md` ("The legacy
+8259's INTR bypasses the local APIC, so LVT0 (LINT0) gates nothing").
+
+### What the guest observes
+
+Firmware that programs virtual wire mode itself — EDK2/OVMF, coreboot, SeaBIOS
+— observes nothing: it writes `0x700` into LVT0 during POST, which is the value
+already there.
+
+What changes is the answer to a question Linux asks on every boot.
+`arch/x86/kernel/apic/io_apic.c check_timer()` decides whether the I/O APIC's
+timer route works by masking LINT0 (`disable_8259A_irq` / the `unlock_ExtINT`
+sequence) and watching whether the tick survives. Under the Bochs rule the tick
+survives no matter what, because the 8259 is still wired straight at the
+processor — so a machine whose I/O APIC timer route is broken reports itself
+healthy, and the real failure surfaces later and somewhere else. Under this
+rule the mask is honoured, the probe gets its true answer, and Linux falls
+through to the next attempt as it does on hardware.
+
+The second half is what makes the mask survivable: a refused line is **not**
+consumed. The 8259 keeps its level and its edge bookkeeping — `acknowledge_
+external_interrupt` reconciles a deasserted pin only when the pin really is
+low — so the interrupt the guest is owed arrives at the next boundary after it
+restores the wire, rather than being lost to the mask.
+
+Without the preset the same change would be catastrophic rather than merely
+visible: the BIOS this port ships with never writes `0x350`, so an honoured
+mask with a masked reset value means every guest is deaf to the 8259 for its
+whole life.
+
+One image is affected: a v3 snapshot written before this rule restores LVT0
+verbatim (`BxLocalApic::restore_snapshot_v3_body`), and a guest saved before it
+had programmed the register carries the old masked reset value. Restored now,
+such a guest is deaf to the 8259 until it programs LINT0 itself. There is no
+migration to write, because nothing in the image distinguishes "masked because
+reset never preset it" from "masked because the guest masked it" — and the
+second must be honoured. In practice the window is early boot only: a guest
+that has finished `check_timer()` and moved to I/O APIC delivery has LINT0
+masked and wants nothing from the 8259.
+
+Application processors are unaffected in the direction that matters: their
+LINT0 stays masked, which is what the SDM asks for (at most one processor
+carries an ExtINT entry) and what Linux's `setup_local_APIC` programs anyway.
+An AP that drains the bus latch mid-slice now declines the line instead of
+taking it; the level is not spent, and the next scheduler boundary republishes
+it onto the bootstrap processor, where the wire is.
+
+### Why the divergence is the correct side
+
+Bochs is wrong here in the plain sense: it models the register and ignores it.
+Every other x86 emulator and hypervisor that models a local APIC at all applies
+the gate, and the guest software that matters was written against machines that
+do. Keeping Bochs's behaviour means keeping a hole that makes a broken I/O APIC
+look healthy — which is a fault this port cannot afford, because the fast engine
+is where I/O APIC routing is most likely to be wrong.
+
+The preset is a deviation from the SDM's reset state and is registered as one.
+It buys the same thing it buys KVM: firmware that predates virtual wire mode,
+or omits it as this port's BIOS does, still gets its legacy interrupts. The
+alternative — teaching `bios/rombios.c` to write `0x350` — is a change to
+vendored upstream firmware that every future BIOS refresh would have to carry.
+
+The two halves are one entry because neither is safe alone. The routing without
+the preset makes every guest deaf; the preset without the routing is a value
+nothing reads.
+
+### Price of closing it
+
+Reverting the routing restores the upstream hole and costs Linux its
+`check_timer()` answer. Reverting the preset requires the firmware change above.
+
+The one cost of keeping it: reset leaves `LVT0 = 0x700` while the local APIC is
+still software-disabled, a state real hardware cannot be in — a software disable
+forces every LVT mask bit set. KVM has exactly the same inconsistency, and for
+the same reason: the masking lives in its `kvm_lapic_reg_write` `APIC_SPIV`
+arm, and `kvm_lapic_reset` presets LVT0 and then calls `apic_set_spiv`
+directly, bypassing it. This port's `BxLocalApic::reset` clears
+`software_enabled` by assignment for the same reason, and
+`a_software_disable_closes_the_wire_but_reset_does_not`
+(`cpu/apic.rs`) is the test that pins the distinction. Once the guest performs
+a real software disable, the wire closes as hardware would.
+
+**Status:** open and deliberate; both engines. The fast engine asks the same
+question of whoever owns LVT0 in its topology — the local APIC is the
+hypervisor's there, so the answer comes from the shadow the fabric keeps
+(`IrqFabric::lint0_admits_ext_int`, `iodev/irq.rs`), consulted in
+`rusty_box_whp_engine/src/vcpu_thread.rs stage_the_legacy_interrupt`.
+
 # Hypervisor-engine divergences (`H<n>`)
 
 A machine running its guest on `rusty_box_whp_engine` executes on the host's

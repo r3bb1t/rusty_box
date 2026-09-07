@@ -353,3 +353,130 @@ existing `async_event` check can observe a deadline landing inside the burst.
 
 **Not reproduced in rusty** — see divergence D3 in
 `docs/bochs-parity-divergences.md`. Cost there is one extra `min` per chunk.
+
+---
+
+## The legacy 8259's INTR bypasses the local APIC, so LVT0 (LINT0) gates nothing
+
+**Severity**: Fidelity bug, guest-observable, and able to make a BROKEN guest
+configuration look healthy — see "Why it matters" below. Not a crash: Bochs is
+internally consistent and boots guests correctly.
+
+**Location**:
+- `iodev/pic.cc` — `bx_pic_c::service_master_pic()` reaches `BX_RAISE_INTR()`.
+- `pc_system.cc` — `bx_pc_system_c::raise_INTR()`:
+  `BX_CPU(BX_BOOTSTRAP_PROCESSOR)->raise_INTR()`.
+- `cpu/event.cc` — `BX_CPU_C::raise_INTR()`:
+  `signal_event(BX_EVENT_PENDING_INTR)`.
+- `cpu/event.cc` — `BX_CPU_C::interrupt_acknowledge()`.
+- `cpu/apic.cc` — `bx_local_apic_c::reset()`: `lvt[i] = 0x10000; // all LVT are masked`.
+
+### What Bochs does
+
+The 8259's INTR output is wired **directly to the CPU's event word**. The local
+APIC is not in the path at all:
+
+```
+iodev/pic.cc     BX_RAISE_INTR()
+pc_system.cc     BX_CPU(BX_BOOTSTRAP_PROCESSOR)->raise_INTR()
+cpu/event.cc     signal_event(BX_EVENT_PENDING_INTR)
+```
+
+and the acknowledge treats the local APIC and the PIC as two *parallel* sources
+of one event, the APIC winning ties:
+
+```cpp
+// cpu/event.cc  BX_CPU_C::interrupt_acknowledge()
+#if BX_SUPPORT_APIC
+  if (is_pending(BX_EVENT_PENDING_LAPIC_INTR))
+    vector = BX_CPU_THIS_PTR lapic->acknowledge_int();
+  else
+#endif
+    // if no local APIC, always acknowledge the PIC.
+    vector = DEV_pic_iac();
+```
+
+The comment says "if no local APIC", but the branch is taken whenever the APIC
+has nothing pending — including when there *is* an APIC. `lvt[APIC_LVT_LINT0]`
+is read and written by guests (`cpu/apic.h`: `BX_LAPIC_LVT_LINT0 = 0x350`) and
+is consulted by nothing.
+
+### What the architecture says
+
+Intel SDM Vol. 3A, Local APIC chapter:
+
+- The LVT's LINT0 entry selects how an interrupt arriving on the **LINT0 pin**
+  is delivered, and the mask bit inhibits that source. "Virtual wire mode" for a
+  legacy 8259 *is* LVT0 programmed to ExtINT, unmasked — see also Intel MP
+  Specification 1.4, Virtual Wire Mode.
+- ExtINT delivery mode makes the processor respond "as if the interrupt
+  originated in an externally connected (8259A-compatible) interrupt
+  controller", with "The external controller is expected to supply the vector
+  information". LVT0 is therefore a **gate**; the vector still comes from the
+  INTA cycle, not from LVT0's own vector field.
+- "Local APIC State After Power-Up or Reset": "The LVT register is reset to 0s
+  except for the mask bits; these are set to 1s." Bochs matches this exactly
+  (`apic.cc reset()`), which is the other half of the problem below.
+
+### Every other implementation routes through LVT0
+
+- **KVM** — `arch/x86/kvm/lapic.c` `kvm_apic_accept_pic_intr()` gates on mask
+  clear **and** delivery mode `== APIC_DM_EXTINT`.
+- **QEMU** — `hw/intc/apic.c` gates on the mask bit.
+- **Xen** — an exact-equality test over mask + mode, OR'd with two other
+  acceptance conditions.
+
+Bochs is the only one of the four that never consults LVT0.
+
+### Why it matters — it can hide a broken I/O APIC
+
+Linux's `check_timer()` (`arch/x86/kernel/apic/io_apic.c`) masks LVT0
+deliberately — writing `APIC_LVT_MASKED | APIC_DM_EXTINT` — and **holds that
+state across the whole I/O-APIC-routed portion of the timer probe, while IRQ0 is
+still enabled in the 8259**, precisely so the virtual wire cannot deliver and
+the probe measures the I/O APIC alone.
+
+On Bochs those PIC interrupts arrive anyway. So `timer_irq_works()` can succeed
+on the strength of the direct wire while the I/O APIC path is in fact broken,
+and Bochs reports a working I/O APIC timer where hardware reports a broken one.
+For an emulator used to bring up and debug operating systems, a divergence that
+makes a failing configuration look healthy is worse than one that fails loudly.
+
+### Why it is nonetheless self-consistent, and what a fix must include
+
+Bochs resets every LVT entry masked (correct per the SDM) **and its own BIOS
+never programs LVT0** — the only local-APIC MMIO writes in the entire `bios/`
+tree are `APIC_SVR` (software-enable) and `APIC_ICR_LOW` (INIT/SIPI); `bios/
+rombios.h` does not even define a constant for offset 0x350. So simply routing
+the PIC through LVT0 would suppress every legacy interrupt from reset onward,
+because nothing would ever unmask it.
+
+That is not speculation — it is exactly the trap the other projects hit:
+
+- **KVM** ships `KVM_X86_QUIRK_LINT0_REENABLED`, **enabled by default**, a
+  self-described deviation from the architecture that presets
+  `LVT0 = unmasked ExtINT` on the bootstrap processor at reset, because firmware
+  could not be relied upon to do it.
+- **QEMU** carried the identical preset — `apic_reset_common():
+  s->lvt[APIC_LVT_LINT0] = 0x700;` — until Nadav Amit's 2015 series
+  "target-i386: disable LINT0 after reset" removed it. **coreboot broke, and was
+  fixed days later.**
+
+Production firmware does program it: EDK2/OVMF, coreboot and SeaBIOS all set
+LVT0 to unmasked ExtINT on the BSP during POST. The Bochs BIOS does not, which
+is why Bochs could get away with the direct wire.
+
+**A complete fix is therefore two changes, not one**: route the 8259's INTR
+through LVT0 *and* preset `lvt[APIC_LVT_LINT0] = 0x700` on the bootstrap
+processor in `bx_local_apic_c::reset()`, as KVM does and as QEMU did.
+
+**Not reproduced in rusty** — this is one of the few upstream bugs this port
+does *not* inherit. Both halves are implemented: the routing at
+`BxCpuC::set_legacy_intr_level` (`cpu/cpu.rs`) and the INTA in
+`acknowledge_external_interrupt` (`cpu/event.rs`), the preset at
+`BxLocalApic::preset_lint0` (`cpu/apic.rs`). See divergence D6 in
+`docs/bochs-parity-divergences.md` for the argument, pinned by
+`a_masked_lint0_refuses_the_legacy_line_without_spending_it` and
+`a_fixed_mode_lint0_does_not_acknowledge_the_8259` (`emulator/tests.rs`),
+`reset_leaves_the_virtual_wire_on_the_bootstrap_processor_alone` and
+`a_software_disable_closes_the_wire_but_reset_does_not` (`cpu/apic.rs`).

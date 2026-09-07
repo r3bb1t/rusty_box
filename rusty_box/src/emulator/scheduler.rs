@@ -731,6 +731,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             // The engine took it; this machine's Local APIC models are not the
             // ones the guest is reading, so writing them would deliver twice.
             DeliveryRoute::Backend => true,
+            // Nobody matched. The same answer the model path gives when its own
+            // destination scan finds no target, and it means the same thing:
+            // the message stays on the stuck path and the machine runs on.
+            DeliveryRoute::Undelivered => false,
             DeliveryRoute::Refused(fault) => {
                 // Undelivered, and said so: the caller leaves the message on
                 // the I/O APIC's stuck path and the boundary returns the fault.
@@ -1290,11 +1294,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         let pic_asserted = self.device_manager.irq.int_pin_asserted()
             || self.device_manager.irq.pic().irq_pending
             || self.pc_system.intr_raised;
-        if pic_asserted {
-            self.cpu_mut().signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
-        } else {
-            self.cpu_mut().clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
-        }
+        self.cpu_mut().set_legacy_intr_level(pic_asserted);
 
         for cpu_index in 0..self.cpu_count() {
             let cpu = self.cpu_mut_at(cpu_index);
@@ -1315,11 +1315,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         let asserted = self.device_manager.irq.int_pin_asserted();
         self.device_manager.irq.pic_mut().irq_pending = false;
         self.device_manager.irq.pic_mut().irq_cleared = false;
-        if asserted {
-            self.cpu_mut().signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
-        } else {
-            self.cpu_mut().clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
-        }
+        self.cpu_mut().set_legacy_intr_level(asserted);
         // The engine hears the same pin, as this boundary found it: every
         // boundary at which it is ASSERTED, and once when it falls.
         //
@@ -1390,11 +1386,11 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         }
 
         if self.pc_system.intr_raised {
-            self.cpu_mut().signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+            self.cpu_mut().set_legacy_intr_level(true);
             self.pc_system.intr_raised = false;
         }
         if self.pc_system.intr_cleared {
-            self.cpu_mut().clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+            self.cpu_mut().set_legacy_intr_level(false);
             self.pc_system.intr_cleared = false;
         }
         if self.pc_system.async_event_pending {

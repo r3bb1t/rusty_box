@@ -1660,6 +1660,36 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.pending_event &= !event;
     }
 
+    /// Publish the legacy 8259's INTR line onto this processor, through LINT0.
+    ///
+    /// The machine's one place (R5) where the 8259's level becomes a processor
+    /// event. Four callers reach the same wire — a port write serviced mid
+    /// slice, the level republished at every scheduler boundary, `raise_intr` /
+    /// `clear_intr` from `BxPcSystemC`, and a snapshot restore — and a gate
+    /// applied at three of them is a gate the fourth walks around.
+    ///
+    /// **The gate is the divergence from Bochs** (`docs/bochs-parity-divergences.md`
+    /// D6, and `docs/bochs-upstream-bugs.md`). Bochs wires the 8259 straight to
+    /// this event from `bx_pc_system_c::raise_INTR`, so LVT0 gates nothing there
+    /// and a guest that masks LINT0 keeps taking legacy interrupts. Linux's
+    /// `check_timer()` decides whether its I/O APIC works by masking LINT0 and
+    /// watching the tick stop, so honouring the mask is what lets that probe
+    /// reach its true answer.
+    ///
+    /// Only the bootstrap processor holds that wire (`BxLocalApic::preset_lint0`),
+    /// which is why an application processor draining the bus latch mid slice
+    /// now declines the line instead of taking it: the level itself is not
+    /// consumed, and the next scheduler boundary republishes it onto the
+    /// bootstrap processor, where it belongs.
+    #[inline]
+    pub(crate) fn set_legacy_intr_level(&mut self, asserted: bool) {
+        if asserted && self.lapic.lint0_admits_ext_int() {
+            self.signal_event(Self::BX_EVENT_PENDING_INTR);
+        } else {
+            self.clear_event(Self::BX_EVENT_PENDING_INTR);
+        }
+    }
+
     /// Bochs `mask_event()`: add event bits to event_mask so they won't fire.
     /// Used by handleInterruptMaskChange when IF is cleared — external
     /// interrupts stay pending but are blocked until IF is re-enabled.

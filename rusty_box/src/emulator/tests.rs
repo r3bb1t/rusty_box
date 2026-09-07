@@ -11,7 +11,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         instrumentation::{CpuSetupMode, X86Reg},
     };
     use crate::cpu::api_bridge::SegmentSize;
-    use crate::cpu::apic::LocalApicCpuEvent;
+    use crate::cpu::apic::{LocalApicCpuEvent, BX_LAPIC_BASE_ADDR};
+    use crate::cpu::event::AcknowledgedInterrupt;
     use rusty_box_devices::pci::PciDevice;
     use crate::iodev::{DeviceTimerOwner, TimerRequest};
     use crate::pc_system::TimerOwner;
@@ -4997,6 +4998,122 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert_ne!(
                     emu.cpu().pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
                     0
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Spurious interrupt vector register, and the bit that software-enables
+    /// the local APIC.
+    const SVR: u64 = 0x0F0;
+    const SVR_ENABLED: u32 = 0x0000_01FF;
+    /// LVT LINT0, and the two encodings a guest puts in it that matter to the
+    /// legacy wire: unmasked ExtINT, and the mask bit that closes it.
+    const LVT_LINT0: u64 = 0x350;
+    const VIRTUAL_WIRE: u32 = 0x0000_0700;
+    const LVT_MASK_BIT: u32 = 0x0001_0000;
+
+    /// Program one local APIC register the way the guest does, through the
+    /// register writer, so the write is subject to every rule a guest write is
+    /// — the per-entry writable mask included.
+    fn write_apic(emu: &mut Emulator, register: u64, value: u32) {
+        let ticks = emu.pc_system.time_ticks();
+        emu.cpu_mut()
+            .lapic
+            .write_aligned(BX_LAPIC_BASE_ADDR + register, value, ticks);
+    }
+
+    /// LINT0 gates the legacy wire, and masking it does not spend the line.
+    ///
+    /// This is the mechanism Linux's `check_timer()` runs on: it masks LINT0
+    /// and watches for the tick to stop, concluding the I/O APIC works only if
+    /// it does. A machine that delivered the 8259 regardless — which is what
+    /// Bochs does, wiring `raise_INTR` straight at the CPU event — tells that
+    /// probe the timer is fine no matter how the I/O APIC is programmed.
+    ///
+    /// The second half is what makes the mask survivable: the level is refused,
+    /// not consumed, so the interrupt the guest is owed arrives the moment it
+    /// puts the wire back.
+    #[test]
+    fn a_masked_lint0_refuses_the_legacy_line_without_spending_it() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut emu = Emulator::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.device_manager.irq.pic_mut().master.int_pin = true;
+                write_apic(&mut emu, SVR, SVR_ENABLED);
+
+                write_apic(&mut emu, LVT_LINT0, VIRTUAL_WIRE);
+                emu.sync_event_flags();
+                assert_ne!(
+                    emu.cpu().pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
+                    0,
+                    "the virtual wire carries the 8259 to the processor"
+                );
+
+                write_apic(&mut emu, LVT_LINT0, VIRTUAL_WIRE | LVT_MASK_BIT);
+                emu.sync_event_flags();
+                assert_eq!(
+                    emu.cpu().pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
+                    0,
+                    "a masked LINT0 must not put the 8259 on the processor"
+                );
+                assert!(
+                    emu.device_manager.irq.int_pin_asserted(),
+                    "and must not spend the line doing it"
+                );
+
+                write_apic(&mut emu, LVT_LINT0, VIRTUAL_WIRE);
+                emu.sync_event_flags();
+                assert_ne!(
+                    emu.cpu().pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
+                    0,
+                    "restoring the virtual wire delivers what was owed"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A fixed vector on LINT0 is a different interrupt from the 8259's, so it
+    /// must not turn into an INTA cycle. Bochs cannot tell the two apart at
+    /// all: its legacy path never reads LVT0.
+    #[test]
+    fn a_fixed_mode_lint0_does_not_acknowledge_the_8259() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut emu = Emulator::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.device_manager.irq.pic_mut().master.int_pin = true;
+                write_apic(&mut emu, SVR, SVR_ENABLED);
+                write_apic(&mut emu, LVT_LINT0, 0x0000_0031);
+
+                let before = emu.device_manager.irq.acknowledge_count();
+                let taken = emu.exec_ctx(BSP_INDEX).acknowledge_external_interrupt();
+
+                assert!(
+                    matches!(taken, AcknowledgedInterrupt::None),
+                    "LINT0 in fixed mode answers nothing for the 8259, got {taken:?}"
+                );
+                assert_eq!(
+                    emu.device_manager.irq.acknowledge_count(),
+                    before,
+                    "and runs no INTA cycle"
+                );
+                assert!(
+                    emu.device_manager.irq.int_pin_asserted(),
+                    "the line is still owed"
                 );
             })
             .unwrap()

@@ -109,11 +109,7 @@ impl<'a> PcIo<'a> {
             // the INTA that takes it is what turns "an interrupt arrived that
             // nobody expected" into a sequence with an order.
             tracing::debug!(target: "irq", "BUS: PIC line -> {level}, onto the processor");
-            if level {
-                cpu.signal_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
-            } else {
-                cpu.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
-            }
+            cpu.set_legacy_intr_level(level);
         }
         if let Some(level) = hrq_level {
             // Bochs pc_system.cc set_HRQ: `HRQ = val; if (val)

@@ -1095,11 +1095,31 @@ const fn requested_kind(mode: IoApicDeliveryMode) -> Option<InterruptKind> {
         IoApicDeliveryMode::LowPriority => Some(InterruptKind::LowestPriority),
         IoApicDeliveryMode::Nmi => Some(InterruptKind::Nmi),
         IoApicDeliveryMode::Init => Some(InterruptKind::Init),
-        // `WHV_INTERRUPT_TYPE` has an SMI kind under none of its names; an SMI
-        // is trapped out by `apic_smi_trap` and run on the shadow instead,
-        // which is where system-management mode lives for this engine.
+        // ExtINT is `Fixed` by the time it reaches here, and the reason is that
+        // the acknowledge has ALREADY happened. `BxIoApic::service` runs the
+        // INTA against the 8259 for a mode-7 entry and puts the answered vector
+        // in the message — Bochs `ioapic.cc service_ioapic` does exactly this
+        // (`if (entry->delivery_mode() == 7) vector = DEV_pic_iac()`), and then
+        // hands that vector to the destination APIC through the same path as a
+        // Fixed one: `apic.cc bx_local_apic_c::deliver` case `APIC_DM_EXTINT`
+        // calls `trigger_irq`, whose `bypass_irr_isr` argument skips only the
+        // already-pending check. So there is nothing ExtINT-shaped left to
+        // carry, and `WHvRequestInterrupt` with a resolved vector is precisely
+        // what the model path would do. The entry's own vector field is not
+        // used at all; a masked or idle 8259 answers with its spurious vector,
+        // which is the delivery hardware makes too.
+        IoApicDeliveryMode::ExtInt => Some(InterruptKind::Fixed),
+        // `WHV_INTERRUPT_TYPE` has an SMI kind under none of its names, and an
+        // SMI raised through an I/O APIC entry has no path to the shadow: the
+        // `apic_smi_trap` arm answers a guest's APIC WRITE, not a device's
+        // message. Refused rather than dropped, deliberately — a machine that
+        // stops loudly is better than one that silently loses a
+        // system-management interrupt some firmware is waiting on.
+        //
+        // A reserved encoding answers `None` too, and the call site tells the
+        // two apart: one is a gap in this port, the other a guest programming
+        // its own I/O APIC wrongly.
         IoApicDeliveryMode::Smi
-        | IoApicDeliveryMode::ExtInt
         | IoApicDeliveryMode::Reserved3
         | IoApicDeliveryMode::Reserved6 => None,
     }
@@ -1516,15 +1536,23 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             return DeliveryRoute::Model;
         }
         let Some(kind) = requested_kind(delivery.delivery_mode) else {
-            // ExtINT is the 8259's path, not the APIC bus's: the platform's
-            // `WHV_INTERRUPT_TYPE` has no ExtINT at all, and an entry
-            // programmed for it is served by `pic_pin_changed` and the vCPU
-            // thread's staging instead. A reserved mode is a guest programming
-            // error the I/O APIC's stuck path already describes.
-            return DeliveryRoute::Refused(EngineFault::new(
-                EngineFaultKind::Unsupported,
-                "an I/O APIC delivery mode WHvRequestInterrupt cannot carry",
-            ));
+            return match delivery.delivery_mode {
+                // A guest programmed its own I/O APIC with an encoding the
+                // architecture does not define. Bochs leaves the entry stuck
+                // and runs on, and so does this: a machine that stopped would
+                // punish the guest's mistake by ending the guest.
+                IoApicDeliveryMode::Reserved3 | IoApicDeliveryMode::Reserved6 => {
+                    DeliveryRoute::Undelivered
+                }
+                // A gap in this port rather than the guest's error, so it is
+                // loud. Dropping it silently would leave firmware waiting on a
+                // system-management interrupt that never comes, which is the
+                // harder failure to find of the two.
+                _ => DeliveryRoute::Refused(EngineFault::new(
+                    EngineFaultKind::Unsupported,
+                    "an I/O APIC SMI has no path to the shadow",
+                )),
+            };
         };
         let request = InterruptRequest {
             kind,

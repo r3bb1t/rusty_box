@@ -131,8 +131,25 @@ pub enum DeliveryRoute {
     Model,
     /// The engine delivered it elsewhere; the machine does nothing.
     Backend,
+    /// Nobody received it, and that is not an error.
+    ///
+    /// The message is left on the I/O APIC's stuck path exactly as
+    /// [`Self::Refused`] leaves it, and no fault is raised — because a message
+    /// no local APIC matches is a thing hardware does every day. Bochs
+    /// `ioapic.cc service_ioapic` reads the same answer from
+    /// `apic_bus_deliver_interrupt` returning false and simply leaves the entry
+    /// pending; a machine that stopped instead would halt on a guest doing
+    /// something legal. Linux's `unlock_ExtINT_logic` writes precisely such an
+    /// entry — a logical destination holding the boot processor's *physical*
+    /// APIC id, which is 0 on a uniprocessor and matches no logical id
+    /// anywhere — and expects the acknowledge without the delivery.
+    Undelivered,
     /// The engine's backend refused it. The machine leaves the message pending
     /// (the I/O APIC's stuck path) and returns the fault from the boundary.
+    ///
+    /// For a message the backend cannot carry AT ALL, which is a gap in this
+    /// port rather than an ordinary outcome. A message simply not matched is
+    /// [`Self::Undelivered`].
     Refused(EngineFault),
 }
 
