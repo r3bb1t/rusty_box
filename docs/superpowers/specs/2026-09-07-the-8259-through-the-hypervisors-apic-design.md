@@ -106,9 +106,27 @@ line (divergence D6), the machine performs the counted acknowledge and routes
 the resulting vector to the boot processor as a Fixed, physical, edge delivery —
 through the same `DeliveryRoute` the I/O APIC's messages take.
 
-This runs only for a machine whose engine owns no local APIC of its own. On the
-interpreter the pin reaches the processor through `set_legacy_intr_level` and
-nothing here applies.
+This runs only for a machine whose ENGINE owns the guest's local APIC. Where
+this machine's own model APIC is the guest's — the interpreter, and any WHP
+machine on `DeviceClock::Ticks` — the pin reaches the processor through
+`set_legacy_intr_level` exactly as it does today, and none of this applies.
+
+**The machine must know which of the two it is BEFORE it acknowledges**, or a
+route that came back `Model` would leave the vector already taken and the model
+path would acknowledge a second time. So `pic_pin_changed` is replaced by a
+question rather than an action:
+
+```rust
+/// Whether this engine, not this machine's own `cpu/apic.rs`, is the local
+/// APIC the guest reads. Answering `true` moves the legacy 8259 line onto
+/// `route_ioapic_delivery`, and with it the acknowledge that resolves its
+/// vector.
+fn owns_the_guests_local_apic(&self) -> bool { false }
+```
+
+The default is `false`, so an engine that says nothing keeps the model path and
+the deferred acknowledge — which is what `SoftwareEngine` and the test engines
+want, and means they need no change beyond dropping the removed method.
 
 The hypervisor's APIC then holds the vector in its IRR and delivers it when the
 guest becomes ready. That is the component designed to answer the readiness
@@ -127,10 +145,12 @@ whenever its IRR bit is set and it is not masked.
 - `ext_int_request` and its two tests
 - `VcpuThread::stage_the_legacy_interrupt` and its call from the run loop
 - the `PendingExtIntEvent` write and the `Reg::PendingEvent` path for ExtINT
-- `SliceEngine::pic_pin_changed` **entirely**, from the trait and from both
-  implementors. With the acknowledge and the routing on the machine's side there
-  is nothing left an engine needs to be told about a pin level, and it is the
-  last caller that fetches a processor out of its run for an interrupt. The
+- `SliceEngine::pic_pin_changed` **entirely**, from the trait and from all four
+  implementations (`engine.rs`'s default, `WhpEngine`, and the two test engines
+  in `emulator/tests.rs`). With the acknowledge and the routing on the machine's
+  side there is nothing left an engine needs to be TOLD about a pin level — only
+  something it must be ASKED, which is `owns_the_guests_local_apic`. It is also
+  the last caller that fetches a processor out of its run for an interrupt. The
   `pic_pin_published` bookkeeping that fed it goes with it.
 
 ### What is kept
