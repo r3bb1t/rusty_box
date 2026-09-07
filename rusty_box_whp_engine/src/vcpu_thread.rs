@@ -23,7 +23,7 @@
 //! shape — `whpx_vcpu_run` is a loop around the run call, and `bql_unlock()`
 //! before it is what lets QEMU's main loop advance device time meanwhile.
 //!
-//! ## The two rules the design rests on
+//! ## The three rules the design rests on
 //!
 //! **The lock is released across the run.** `Vcpu::run` blocks for as long as
 //! the guest keeps running, which is the whole point; holding the machine's
@@ -38,6 +38,14 @@
 //! [`CancelRun`] so it can be tested without a partition — which is the only
 //! way to test an ordering whose failure mode is a race. QEMU's
 //! `cpus-common.c` keeps the same `exit_request` before its own kick.
+//!
+//! **A cancel goes only to a processor inside its run.** The platform latches
+//! a cancel issued between runs and spends it on the next entry, which then
+//! retires nothing; a guest that exits often would never execute its way to
+//! the `STI` it needs. So the thread publishes whether it is inside
+//! `WHvRunVirtualProcessor`, the legacy-interrupt raiser asks before it
+//! cancels, and the entry re-reads the request under that flag —
+//! [`VcpuControl::in_run`] is the ordering, [`ext_int_request`] the asking.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -282,6 +290,21 @@ pub(crate) struct VcpuControl {
     /// outlives a masked LINT0 and a guest that cannot yet take a delivery, so
     /// neither loses the interrupt it is owed.
     ext_int_pending: Arc<AtomicBool>,
+    /// Whether this processor's thread is inside `WHvRunVirtualProcessor`
+    /// right now.
+    ///
+    /// The one question a canceller must ask. `WHvCancelRunVirtualProcessor`
+    /// issued to a processor that is NOT inside a run is latched by the
+    /// platform and spent on the next entry, which returns having retired no
+    /// instruction — undocumented behaviour, measured here. A guest that exits
+    /// often is then never able to execute its way to the `STI` that would let
+    /// it accept the vector.
+    ///
+    /// `SeqCst` on every access, on both sides: this and `ext_int_pending` are
+    /// a Dekker pair, and a weaker ordering admits the interleaving in which
+    /// the raiser reads this as false while the thread reads the request as
+    /// unset, so neither acts and the vector is owed forever.
+    pub(crate) in_run: Arc<AtomicBool>,
     /// Whether the last staging attempt found the guest unable to take the
     /// vector it is owed.
     ///
@@ -374,6 +397,13 @@ pub(crate) fn park_request(
 /// it, and `blocked` is never set. Only a guest that was busy pays a second,
 /// and it pays at its own interrupt rate rather than on a timer.
 ///
+/// And a cancel goes only to a processor that is inside its run. One issued to
+/// a processor between runs is latched by the platform and spent on the next
+/// entry, which then retires nothing — [`VcpuControl::in_run`] is the account
+/// of that, and of the ordering that keeps a request raised in the gap from
+/// being lost. The flag is set here regardless, so the thread's own entry
+/// stages the request whether or not it was cancelled for.
+///
 /// # Errors
 /// Whatever the platform said about the cancel. The flag is left SET either
 /// way: the interrupt is owed whether or not the processor could be fetched out
@@ -381,12 +411,20 @@ pub(crate) fn park_request(
 pub(crate) fn ext_int_request(
     pending: &AtomicBool,
     blocked: &AtomicBool,
+    in_run: &AtomicBool,
     cancel: &impl CancelRun,
 ) -> WhpResult<()> {
     let first = pending
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok();
-    if first || blocked.load(Ordering::Acquire) {
+    if !(first || blocked.load(Ordering::SeqCst)) {
+        return Ok(());
+    }
+    // Only a processor inside its run can be fetched out of one. A cancel to
+    // one that is between runs is latched and spent on the next entry; the
+    // thread stages this request before that entry anyway, so there is nothing
+    // a cancel here could win.
+    if in_run.load(Ordering::SeqCst) {
         return cancel.cancel();
     }
     Ok(())
@@ -418,15 +456,22 @@ impl VcpuControl {
     /// The 8259's INT pin is asserted.
     ///
     /// Cancels the processor only for a vector the thread has not yet staged,
-    /// so a pin reported at every boundary costs one exit rather than one per
-    /// boundary — [`ext_int_request`] is that rule. The vector itself is not
-    /// acknowledged here: nothing is taken from the machine's controllers until
-    /// the thread has positive evidence that the guest can take it.
+    /// and only while the processor is inside a run — [`ext_int_request`] is
+    /// both rules. A pin reported at every boundary therefore costs one exit
+    /// rather than one per boundary, and a processor between runs stages the
+    /// vector at its own next entry. The vector itself is not acknowledged
+    /// here: nothing is taken from the machine's controllers until the thread
+    /// has positive evidence that the guest can take it.
     ///
     /// # Errors
     /// Whatever the platform said about the cancel.
     pub(crate) fn raise_ext_int(&self) -> WhpResult<()> {
-        ext_int_request(&self.ext_int_pending, &self.ext_int_blocked, &self.canceller)
+        ext_int_request(
+            &self.ext_int_pending,
+            &self.ext_int_blocked,
+            &self.in_run,
+            &self.canceller,
+        )
     }
 
     /// Wait for the thread to park, answering what it parked for.
@@ -515,6 +560,28 @@ enum Continue {
     Park(Parked),
 }
 
+/// What the pre-run staging leaves for the entry that follows it.
+///
+/// Three states rather than [`Continue`] with a flag beside it (R2), because
+/// the entry acts differently on each and the difference is the second half of
+/// the Dekker argument in [`VcpuControl::in_run`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Staged {
+    /// Nothing is owed as of the staging's last look at the flag: it was
+    /// clear, or the vector it carried was placed or spent here. A request
+    /// that lands after that look may have found `in_run` false and cancelled
+    /// nothing, so the entry re-reads the flag under `in_run` before it goes
+    /// in.
+    Clear,
+    /// A vector is owed and deliberately left standing — LINT0 is masked, or
+    /// the guest cannot take a delivery yet. The entry proceeds: the guest has
+    /// to execute to change either, and what asks again is the unmask trap or
+    /// a republication of the pin that finds the processor inside its run.
+    Owed,
+    /// Out, for this reason.
+    Park(Parked),
+}
+
 /// One processor, the machine it runs against, and everything servicing an exit
 /// needs.
 ///
@@ -568,6 +635,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             exit_requested: Arc::new(AtomicBool::new(false)),
             ext_int_pending: Arc::new(AtomicBool::new(false)),
             ext_int_blocked: Arc::new(AtomicBool::new(false)),
+            in_run: Arc::new(AtomicBool::new(false)),
             canceller: vcpu.canceller(),
             park: Arc::new((Mutex::new(ParkSlot::default()), Condvar::new())),
             census: Arc::new(SharedCensus::default()),
@@ -616,15 +684,31 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             // rather than after an exit because this is the only moment the
             // answer is about the processor the NEXT entry runs — which is the
             // processor that would take the vector.
-            if let Continue::Park(why) = self.stage_the_legacy_interrupt() {
+            let staged = self.stage_the_legacy_interrupt();
+            if let Staged::Park(why) = staged {
                 if self.park(why) == Woke::ToStop {
                     return;
                 }
                 continue;
             }
+            self.control.in_run.store(true, Ordering::SeqCst);
+            // The raiser may have set the request in the window between the
+            // staging above and this store, and read `in_run` as false, so it
+            // issued no cancel and nothing else will report it. Only a request
+            // the staging's last look found CLEAR can have gone unannounced
+            // that way: one it left standing on purpose is asked for again by
+            // the unmask trap or by a republication of the pin while the
+            // processor is inside a run, and entering is what lets the guest
+            // execute its way to either. Enter only with nothing newly owed;
+            // otherwise go round and stage it.
+            if staged == Staged::Clear && self.control.ext_int_pending.load(Ordering::SeqCst) {
+                self.control.in_run.store(false, Ordering::SeqCst);
+                continue;
+            }
             self.control.census.runs.fetch_add(1, Ordering::Release);
             let entered = Instant::now();
             let exit = self.vcpu.run();
+            self.control.in_run.store(false, Ordering::SeqCst);
             self.record_the_run(entered.elapsed());
             let outcome = match exit {
                 Ok(exit) => self.service(&exit),
@@ -661,15 +745,20 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
     /// Costs nothing at all until the pin raises the flag: the atomic is read
     /// before the machine's lock is taken, so an entry with no interrupt owed
     /// touches neither the lock nor the platform.
-    fn stage_the_legacy_interrupt(&mut self) -> Continue {
-        if !self.control.ext_int_pending.load(Ordering::Acquire) {
-            return Continue::Run;
+    ///
+    /// Answers how it left the flag as well as whether to run, because the
+    /// entry's re-check under `in_run` has to tell a request this staging left
+    /// standing on purpose from one that arrived after its last look — see
+    /// [`Staged`].
+    fn stage_the_legacy_interrupt(&mut self) -> Staged {
+        if !self.control.ext_int_pending.load(Ordering::SeqCst) {
+            return Staged::Clear;
         }
         let Self { vcpu, index, machine, inject, control, .. } = self;
         let mut guard = match machine.lock() {
             Ok(guard) => guard,
             Err(_) => {
-                return Continue::Park(Parked::Fault(EngineFault::new(
+                return Staged::Park(Parked::Fault(EngineFault::new(
                     EngineFaultKind::Host,
                     "machine lock poisoned by a panicking peer thread",
                 )))
@@ -681,7 +770,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             // vector instead. Nothing is acknowledged, and the flag stays up so
             // the vector is still owed the moment the guest unmasks — the
             // ordinary case for firmware that opens its line late.
-            return Continue::Run;
+            return Staged::Owed;
         }
         if !inject.permits_ext_int() {
             // Blocked right now — `IF` clear, an interrupt shadow, or a
@@ -699,7 +788,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             // inside its handler with `IF` clear, and returns with `IRET` —
             // not an exit, and so not otherwise a moment anyone asks again.
             control.ext_int_blocked.store(true, Ordering::Release);
-            return Continue::Run;
+            return Staged::Owed;
         }
         // Whatever happens below, this attempt was not blocked: the guest could
         // take a delivery. Cleared before the acknowledge rather than after, so
@@ -713,13 +802,13 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         let Some(vector) = io.pop_deliverable_vector(cpu) else {
             // Nothing was deliverable after all, and the acknowledge attempt
             // reconciled the stale pin. The edge is spent.
-            control.ext_int_pending.store(false, Ordering::Release);
-            return Continue::Run;
+            control.ext_int_pending.store(false, Ordering::SeqCst);
+            return Staged::Clear;
         };
         if let Err(error) =
             vcpu.write_words128(Reg::PendingEvent, PendingExtIntEvent { vector }.as_words())
         {
-            return Continue::Park(Parked::Fault(refused_register(&error)));
+            return Staged::Park(Parked::Fault(refused_register(&error)));
         }
         // Load-bearing, not redundant: measured, a processor parked in `HLT`
         // under an emulated APIC sets `halt_suspend`, produces no halt exit,
@@ -733,7 +822,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             idle_suspend: false,
         };
         if let Err(error) = vcpu.set_internal_activity(RUNNING) {
-            return Continue::Park(Parked::Fault(refused_register(&error)));
+            return Staged::Park(Parked::Fault(refused_register(&error)));
         }
         // The platform holds a delivery now; the next exit's header will say so
         // itself, and until one arrives this is the record.
@@ -742,12 +831,12 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         census.injected += 1;
         census.injected_per_vector[usize::from(vector)] =
             census.injected_per_vector[usize::from(vector)].saturating_add(1);
-        control.ext_int_pending.store(false, Ordering::Release);
+        control.ext_int_pending.store(false, Ordering::SeqCst);
         // The acknowledge changed the controllers' lines; the processor's
         // latched copy follows before anything asks.
         io.sync_io_events(cpu);
         tracing::debug!(target: "irq", "CPU: ExtINT vector {vector:#04x} placed for the partition");
-        Continue::Run
+        Staged::Clear
     }
 
     /// Answer one exit, with the machine's lock held for exactly as long as the
@@ -1450,16 +1539,17 @@ mod tests {
     fn a_pin_reported_at_every_boundary_costs_one_cancel_per_vector() {
         let owed = AtomicBool::new(false);
         let blocked = AtomicBool::new(false);
+        let in_run = AtomicBool::new(true);
         let cancel = CountingCancel(Cell::new(0));
         for _ in 0..8 {
-            ext_int_request(&owed, &blocked, &cancel).unwrap();
+            ext_int_request(&owed, &blocked, &in_run, &cancel).unwrap();
         }
         assert_eq!(cancel.0.get(), 1, "eight boundaries, one interrupt, one cancel");
         assert!(owed.load(Ordering::Acquire), "and the vector is still owed");
 
         // The thread staged it and cleared the flag.
         owed.store(false, Ordering::Release);
-        ext_int_request(&owed, &blocked, &cancel).unwrap();
+        ext_int_request(&owed, &blocked, &in_run, &cancel).unwrap();
         assert_eq!(cancel.0.get(), 2, "the next interrupt fetches the processor out again");
     }
 
@@ -1478,9 +1568,10 @@ mod tests {
     fn a_blocked_guest_is_fetched_out_again_at_every_boundary() {
         let owed = AtomicBool::new(true);
         let blocked = AtomicBool::new(true);
+        let in_run = AtomicBool::new(true);
         let cancel = CountingCancel(Cell::new(0));
         for _ in 0..8 {
-            ext_int_request(&owed, &blocked, &cancel).unwrap();
+            ext_int_request(&owed, &blocked, &in_run, &cancel).unwrap();
         }
         assert_eq!(
             cancel.0.get(),
@@ -1492,9 +1583,47 @@ mod tests {
         // dedup applies once more.
         blocked.store(false, Ordering::Release);
         for _ in 0..8 {
-            ext_int_request(&owed, &blocked, &cancel).unwrap();
+            ext_int_request(&owed, &blocked, &in_run, &cancel).unwrap();
         }
         assert_eq!(cancel.0.get(), 8, "a guest that can take it costs nothing further");
+    }
+
+    /// A request raised while the processor is between runs cancels nothing.
+    ///
+    /// `WHvCancelRunVirtualProcessor` is latched when the processor is not
+    /// inside `WHvRunVirtualProcessor`: the next entry returns having retired
+    /// no instruction. A guest that exits often is therefore never able to
+    /// execute its way to the `STI` that would let it accept the vector, which
+    /// is the livelock this flag exists to prevent. The request stays owed, and
+    /// the thread's own next entry stages it.
+    #[test]
+    fn a_request_raised_between_runs_cancels_nothing() {
+        let owed = AtomicBool::new(false);
+        let blocked = AtomicBool::new(false);
+        let in_run = AtomicBool::new(false);
+        let cancel = CountingCancel(Cell::new(0));
+
+        ext_int_request(&owed, &blocked, &in_run, &cancel).expect("a request is recordable");
+
+        assert_eq!(cancel.0.get(), 0, "a processor that is not running is not cancelled");
+        assert!(owed.load(Ordering::SeqCst), "and the vector is still owed");
+    }
+
+    /// A request raised while the processor is inside its run cancels once.
+    ///
+    /// This is the case the cancel exists for: a guest in a long run that takes
+    /// no exits has no other moment at which the thread could stage a vector.
+    #[test]
+    fn a_request_raised_inside_a_run_cancels_once() {
+        let owed = AtomicBool::new(false);
+        let blocked = AtomicBool::new(false);
+        let in_run = AtomicBool::new(true);
+        let cancel = CountingCancel(Cell::new(0));
+
+        ext_int_request(&owed, &blocked, &in_run, &cancel).expect("a request is recordable");
+
+        assert_eq!(cancel.0.get(), 1, "a running processor is fetched out exactly once");
+        assert!(owed.load(Ordering::SeqCst), "and the vector is owed until it is staged");
     }
 
     #[test]
