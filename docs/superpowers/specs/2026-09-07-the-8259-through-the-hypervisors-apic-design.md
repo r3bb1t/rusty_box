@@ -1,6 +1,10 @@
 # The 8259 reaches a hardware guest through the hypervisor's APIC
 
-**Status:** design, awaiting review
+**Status:** REFUTED BY MEASUREMENT — superseded by
+`2026-09-07-inject-at-entry-not-by-cancel-design.md`. `WHvRequestInterrupt`
+refuses vector 0x08 (an APIC takes no vector below 16) and, with the 8259
+remapped above the floor, drops it into an APIC a legacy guest never enables.
+Kept for the reasoning and the measurements; do not implement it.
 **Date:** 2026-09-07
 **Applies to:** `rusty_box_whp_engine`, fast mode only (`DeviceClock::HostTime`)
 
