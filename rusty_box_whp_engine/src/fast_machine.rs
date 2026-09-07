@@ -614,9 +614,17 @@ mod tests {
 
         let census = machine.engine_census();
         let vcpu = census.vcpus[0];
+        // Half the step, which is not the number this design achieves — it
+        // measures 9.48 to 10.10 ms of a 10 ms step, 95% and over — but the
+        // number that DISTINGUISHES it. The slice model this replaced left
+        // under 1% of the wall clock inside the run, so half is two orders of
+        // magnitude above the behaviour under test and falsifies it outright,
+        // while a 90% threshold only measured how busy the host was: it flaked
+        // when the step ran on a machine still finishing a compile.
         assert!(
-            vcpu.in_run_nanos >= 9_000_000,
-            "the processor was inside WHvRunVirtualProcessor for at least 9 of the 10 ms: {vcpu:?}"
+            vcpu.in_run_nanos >= 5_000_000,
+            "the processor stayed inside WHvRunVirtualProcessor for most of the 10 ms \
+             rather than bouncing in and out of it: {vcpu:?}"
         );
         let platform = vcpu
             .platform_at_last_park

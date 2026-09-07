@@ -284,6 +284,32 @@ pub const fn shape_of(reg: Reg) -> RegisterValue {
     }
 }
 
+/// The pair of host wait objects a device deadline is waited on.
+///
+/// Two handles rather than one, because a waiter must wake for two different
+/// reasons and one object cannot carry both: the timer says "the deadline you
+/// asked for has arrived", the event says "someone changed your mind".
+///
+/// Held as `isize` rather than as the platform's handle type so `Send` and
+/// `Sync` DERIVE (R6) — this crosses to the thread that does the waiting, and a
+/// raw pointer would make that a promise instead of a fact.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RawDeadline {
+    /// The high-resolution timer.
+    pub timer: isize,
+    /// The doorbell.
+    pub event: isize,
+}
+
+/// Which of a deadline's two objects ended the wait (R0/R2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeadlineWake {
+    /// The timer fired: what was waited for is due.
+    Deadline,
+    /// The doorbell rang: someone moved the deadline, or wants the thread back.
+    Rung,
+}
+
 /// How far a `WHvTranslateGva` got.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct GvaTranslation {
@@ -295,12 +321,13 @@ pub struct GvaTranslation {
 }
 
 pub use imp::{
-    cancel_vp, capability, capability_banks, create_partition, create_vp, delete_partition,
-    delete_vp, dirty_bitmap, get_counters, get_property_word, get_registers, get_segments,
-    get_tables, get_vp_state, get_words, get_xsave, hypervisor_present, map_gpa,
-    request_interrupt, resume_time, run_vp, set_cpuid_exit_list, set_property,
-    set_property_bytes, set_registers, set_segments, set_tables, set_vp_state, set_words,
-    set_xsave, setup, suspend_time, translate_gva, unmap_gpa,
+    arm_deadline, cancel_vp, capability, capability_banks, close_deadline, create_deadline,
+    create_partition, create_vp, delete_partition, delete_vp, dirty_bitmap, get_counters,
+    get_property_word, ring_deadline, wait_deadline,
+    get_registers, get_segments, get_tables, get_vp_state, get_words, get_xsave,
+    hypervisor_present, map_gpa, request_interrupt, resume_time, run_vp, set_cpuid_exit_list,
+    set_property, set_property_bytes, set_registers, set_segments, set_tables, set_vp_state,
+    set_words, set_xsave, setup, suspend_time, translate_gva, unmap_gpa,
 };
 
 /// Every function `imp` must provide, stated once so the two implementations
@@ -343,6 +370,11 @@ const _IMP_IS_COMPLETE: ImpSignatures = ImpSignatures {
     get_tables: imp::get_tables,
     set_tables: imp::set_tables,
     translate_gva: imp::translate_gva,
+    create_deadline: imp::create_deadline,
+    arm_deadline: imp::arm_deadline,
+    ring_deadline: imp::ring_deadline,
+    wait_deadline: imp::wait_deadline,
+    close_deadline: imp::close_deadline,
 };
 
 /// The shape `_IMP_IS_COMPLETE` pins. Its fields exist to be type-checked
@@ -388,6 +420,17 @@ struct ImpSignatures {
     get_tables: fn(RawPartition, u32, &[Reg], &mut [TableRegister]) -> WhpResult<()>,
     set_tables: fn(RawPartition, u32, &[Reg], &[TableRegister]) -> WhpResult<()>,
     translate_gva: fn(RawPartition, u32, u64) -> WhpResult<GvaTranslation>,
+    /// System-wide and paired: not a partition call at all, but a host clock
+    /// setting a machine's device deadlines depend on. It belongs to the same
+    /// seam because it is the same operating system.
+    create_deadline: fn() -> WhpResult<RawDeadline>,
+    arm_deadline: fn(RawDeadline, u64) -> WhpResult<()>,
+    ring_deadline: fn(RawDeadline) -> WhpResult<()>,
+    wait_deadline: fn(RawDeadline) -> WhpResult<DeadlineWake>,
+    /// `unsafe fn` because the handles are owned and `RawDeadline` is `Copy`:
+    /// closing one twice releases a handle the platform has reclaimed, and no
+    /// type here can stop a caller doing it.
+    close_deadline: unsafe fn(RawDeadline),
 }
 
 #[cfg(test)]

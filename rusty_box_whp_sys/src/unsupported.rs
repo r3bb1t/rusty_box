@@ -267,3 +267,29 @@ pub fn translate_gva(
 ) -> WhpResult<GvaTranslation> {
     Err(WhpError::unsupported(CALL))
 }
+
+pub fn create_deadline() -> WhpResult<RawDeadline> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub fn arm_deadline(_deadline: RawDeadline, _after_nanos: u64) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub fn ring_deadline(_deadline: RawDeadline) -> WhpResult<()> {
+    Err(WhpError::unsupported(CALL))
+}
+
+pub fn wait_deadline(_deadline: RawDeadline) -> WhpResult<DeadlineWake> {
+    Err(WhpError::unsupported(CALL))
+}
+
+/// # Safety
+/// Nothing to release: no handle was ever created. The signature matches the
+/// Windows one because the seam's two implementations must be one shape, and
+/// the obligation it states is the Windows one's.
+#[expect(
+    unsafe_code,
+    reason = "UNSAFETY: none performed — the marker matches the Windows signature"
+)]
+pub unsafe fn close_deadline(_deadline: RawDeadline) {}

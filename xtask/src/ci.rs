@@ -142,7 +142,35 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // `RegVal`, and reading the APIC-write context off an exit. `unsupported.rs`
     // and `lib.rs` do not move: the new verbs carry no obligation a caller must
     // discharge, so their signatures are safe `fn`s on both targets.
-    ("rusty_box_whp_sys/src", 52),
+    //
+    // 52 -> 62: the high-resolution waitable timer a device deadline is waited
+    // on. Not partition calls — host WAIT objects, and the ones a machine's
+    // device deadlines cannot do without: measured on this host, the condition
+    // variable behind `Condvar::wait_timeout` returns after the system's
+    // ~15.6 ms tick whatever it asks for, and every device deadline on a PC is
+    // nearer than that (a PIT at 1 kHz is 1 ms away, the 8042's serial delay
+    // 150 µs). A timer created with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`
+    // answers a 500 µs request in 0.752 ms.
+    //
+    // Deliberately NOT `timeBeginPeriod`, which was tried here and measured to
+    // work: it raises a setting for the whole process, which QEMU may do
+    // (`os-win32.c os_setup_early_signal_handling`) because QEMU is the
+    // application and this is a library; it floors at 1 ms so the 8042's
+    // deadline is inexpressible through it; and Windows 11 revokes the grant
+    // for an occluded process. QEMU has no high-resolution waitable timer path
+    // at all, so this is ahead of it rather than level with it.
+    //
+    // Ten tokens: five blocks in `windows.rs` (create the timer, create the
+    // event, arm, ring, wait) plus the close, which is TWO handles in one
+    // block and an `unsafe fn` marker — `RawDeadline` is `Copy`, so the type
+    // cannot stop a caller closing twice and the obligation is stated in the
+    // signature. The remaining three are that signature written again in
+    // `unsupported.rs` (which performs no unsafe operation and carries a
+    // targeted `#[expect]`), the `unsafe fn` field type in `_IMP_IS_COMPLETE`
+    // that pins it for both targets, and its `#[expect]`. The obligation is
+    // discharged once, by `rusty_box_whp::DeadlineTimer`, which owns the
+    // handles and closes them in `Drop` (R1).
+    ("rusty_box_whp_sys/src", 62),
     // The safe wrapper over that leaf. FOUR: one signature and three blocks,
     // and the split is the point.
     //
@@ -165,7 +193,18 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // `fn`, so a fourth caller of it needs no marker and moves this number not
     // at all — R5's single door, not this baseline, is what holds that
     // obligation in one place.
-    ("rusty_box_whp/src", 4),
+    //
+    // 4 -> 5: a THIRD destructor, and it is the same shape as the other two.
+    // `DeadlineTimer` owns the pair of host wait objects a device deadline is
+    // waited on, and the seam's `close_deadline` is an `unsafe fn` because
+    // `RawDeadline` is `Copy` and nothing in the type system stops a caller
+    // closing one twice. `Drop::drop` cannot be an `unsafe fn`, so the
+    // guarantee — the pair is taken out of the value before it is closed, and
+    // a `&mut self` drop means no waiter can be inside a call on it — is
+    // stated in a block. That is exactly the split this baseline exists to
+    // describe: the seam states the obligation, this crate discharges it once,
+    // and every caller of `DeadlineTimer` needs no marker at all.
+    ("rusty_box_whp/src", 5),
     // The adapter between the machine and the leaf. ONE: installing the
     // machine's memory into a partition hands the hypervisor host addresses
     // that outlive the borrow they came from, and no lifetime can say

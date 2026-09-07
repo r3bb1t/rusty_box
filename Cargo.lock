@@ -3818,6 +3818,7 @@ dependencies = [
  "bitflags 2.13.1",
  "rusty_box_core",
  "rusty_box_whp_sys",
+ "tracing",
 ]
 
 [[package]]

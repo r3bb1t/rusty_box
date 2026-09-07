@@ -21,7 +21,20 @@ homepage.workspace = true
 # to build.
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"
-features = ["Win32_System_Hypervisor"]
+# `Win32_System_Threading` and `Win32_Foundation` are the high-resolution
+# waitable timer a machine's device deadlines are waited on. MEASURED here: an
+# ordinary timed wait returns after the system's ~15.6 ms tick whatever it asks
+# for, and every device deadline on a PC is nearer than that. A timer created
+# with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` answers a 500 µs request in
+# 0.752 ms without raising any system-wide setting.
+features = [
+    "Win32_System_Hypervisor",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+    # The two constructors take `*const SECURITY_ATTRIBUTES`, which is what
+    # gates them behind this feature even though we pass null for it.
+    "Win32_Security",
+]
 
 [dependencies]
 # The engine seam's vocabulary. A permission on a guest-physical window means

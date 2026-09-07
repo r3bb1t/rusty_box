@@ -24,8 +24,8 @@ use windows_sys::Win32::System::Hypervisor::*;
 
 use crate::error::{WhpError, WhpResult};
 use crate::{
-    shape_of, CapabilityCode, CounterSet, FeatureBanks, GpaPerms, GvaTranslation, PropertyCode,
-    RawPartition, RegisterValue, VpStateType,
+    shape_of, CapabilityCode, CounterSet, DeadlineWake, FeatureBanks, GpaPerms, GvaTranslation,
+    PropertyCode, RawDeadline, RawPartition, RegisterValue, VpStateType,
 };
 use crate::vcpu::{
     AccessType, ApicWriteType, CpuidAccess, Exit, ExitReason, InterruptRequest, IoPortAccess,
@@ -1252,6 +1252,163 @@ fn decode_exit(context: &WHV_RUN_VP_EXIT_CONTEXT) -> Exit {
         other => ExitReason::Unrecognized(other),
     };
     Exit { vp, reason }
+}
+
+/// Create the pair of host objects a thread waits a device deadline on.
+///
+/// **Why a platform object and not a condition variable.** Measured on this
+/// host: `SleepConditionVariableSRW` — what backs Rust's `Condvar` — returns
+/// after the system's ~15.6 ms timer tick whatever it asks for (asked 1 ms it
+/// returned in 12.172 ms on average, asked 10 ms in 17.177, worst case 29.563).
+/// The request does not appear in the answer; the tick does. Every device
+/// deadline on a PC is nearer than that — a PIT at 1 kHz is 1 ms away, the
+/// 8042's serial delay 150 µs — so a thread that waited that way would deliver
+/// their pulses in bursts one tick apart.
+///
+/// A timer created with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` (Windows 10
+/// 1803 and later) answers instead from the system's high-resolution timer
+/// queue. Measured on the same host, with no system-wide setting touched:
+/// 500 µs asked returned in 0.752 ms, 1 ms in 1.327, 5 ms in 5.313, 10 ms in
+/// 10.355.
+///
+/// **This is deliberately NOT `timeBeginPeriod`.** That raises a setting for
+/// the whole process — which QEMU may do, being an application
+/// (`os-win32.c os_setup_early_signal_handling`), and a library may not — it
+/// floors at 1 ms so it cannot express the 8042's 150 µs at all, and since
+/// Windows 10 2004 the grant is per-process and Windows 11 revokes it for a
+/// process whose window is occluded unless it opts out through
+/// `PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION`.
+///
+/// The event beside the timer is the doorbell: a waiter must also wake when
+/// someone moves its deadline, pauses it or stops it, and one wait cannot be
+/// two waits. Both are auto-reset, so each wake consumes exactly one signal.
+///
+/// # Errors
+/// [`WhpErrorKind::Unsupported`](crate::WhpErrorKind::Unsupported) if the
+/// system will not create either object — which is what a Windows older than
+/// 1803 answers for the high-resolution flag.
+pub fn create_deadline() -> WhpResult<RawDeadline> {
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, CreateWaitableTimerExW, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+    };
+    const CALL: &str = "CreateWaitableTimerExW";
+    const TIMER_ALL_ACCESS: u32 = 0x001F_0003;
+    // SAFETY: both constructors take null attributes and a null name, which is
+    // the documented "unnamed, default security" form, and each returns an
+    // owned handle this crate hands to its caller to close. Nothing borrowed
+    // crosses.
+    let timer = unsafe {
+        CreateWaitableTimerExW(
+            core::ptr::null(),
+            core::ptr::null(),
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            TIMER_ALL_ACCESS,
+        )
+    };
+    if timer.is_null() {
+        return Err(WhpError::unsupported(CALL));
+    }
+    // SAFETY: as above. Manual-reset false, initial state false: an auto-reset
+    // doorbell that starts silent.
+    let event = unsafe { CreateEventW(core::ptr::null(), 0, 0, core::ptr::null()) };
+    if event.is_null() {
+        // SAFETY: `timer` is the handle this function just created and has not
+        // handed out; nobody else can be holding it.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(timer) };
+        return Err(WhpError::unsupported("CreateEventW"));
+    }
+    Ok(RawDeadline { timer: timer as isize, event: event as isize })
+}
+
+/// Arm `deadline`'s timer to fire `after` nanoseconds from now.
+///
+/// Re-arming replaces whatever was pending: the platform keeps one due time per
+/// timer, which is what makes "someone moved the deadline earlier" a single
+/// call rather than a cancel and a set.
+///
+/// # Errors
+/// Whatever the platform said.
+pub fn arm_deadline(deadline: RawDeadline, after_nanos: u64) -> WhpResult<()> {
+    const CALL: &str = "SetWaitableTimer";
+    // A negative due time is RELATIVE, in 100-nanosecond units — the platform's
+    // own encoding. Saturating: a span longer than this is a span nobody waits.
+    let due: i64 = -i64::try_from(after_nanos / 100).unwrap_or(i64::MAX);
+    // SAFETY: `due` is a borrowed scalar the call reads and does not retain,
+    // and the three null arguments are the documented "no completion routine"
+    // form. The handle is one `create_deadline` produced.
+    let ok = unsafe {
+        windows_sys::Win32::System::Threading::SetWaitableTimer(
+            deadline.timer as *mut core::ffi::c_void,
+            &due,
+            0,
+            None,
+            core::ptr::null(),
+            0,
+        )
+    };
+    if ok == 0 {
+        return Err(WhpError::unsupported(CALL));
+    }
+    Ok(())
+}
+
+/// Ring `deadline`'s doorbell, waking a thread waiting on it.
+///
+/// # Errors
+/// Whatever the platform said.
+pub fn ring_deadline(deadline: RawDeadline) -> WhpResult<()> {
+    const CALL: &str = "SetEvent";
+    // SAFETY: the handle is one `create_deadline` produced, and `SetEvent`
+    // borrows it for the call.
+    let ok = unsafe {
+        windows_sys::Win32::System::Threading::SetEvent(
+            deadline.event as *mut core::ffi::c_void,
+        )
+    };
+    if ok == 0 {
+        return Err(WhpError::unsupported(CALL));
+    }
+    Ok(())
+}
+
+/// Block until `deadline`'s timer fires or its doorbell rings.
+///
+/// # Errors
+/// Whatever the platform said. A refusal here is a thread that would otherwise
+/// spin, so it is reported rather than retried.
+pub fn wait_deadline(deadline: RawDeadline) -> WhpResult<DeadlineWake> {
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
+    const CALL: &str = "WaitForMultipleObjects";
+    let handles = [
+        deadline.timer as *mut core::ffi::c_void,
+        deadline.event as *mut core::ffi::c_void,
+    ];
+    // SAFETY: `handles` is a borrowed array of two handles this crate produced,
+    // and `2` is its length. `FALSE` for `bWaitAll` is "whichever fires first",
+    // which is the whole point.
+    let waited = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
+    match waited {
+        w if w == WAIT_OBJECT_0 => Ok(DeadlineWake::Deadline),
+        w if w == WAIT_OBJECT_0 + 1 => Ok(DeadlineWake::Rung),
+        _ => Err(WhpError::unsupported(CALL)),
+    }
+}
+
+/// Release both handles of a deadline.
+///
+/// # Safety
+/// The caller must not use `deadline` afterwards, and must call this at most
+/// once for it: these are owned handles and the platform reclaims a handle
+/// closed twice. `RawDeadline` is `Copy`, so the type cannot enforce it.
+pub unsafe fn close_deadline(deadline: RawDeadline) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    // SAFETY: the caller's obligation above is exactly that these two handles
+    // are live and unshared.
+    unsafe {
+        CloseHandle(deadline.timer as *mut core::ffi::c_void);
+        CloseHandle(deadline.event as *mut core::ffi::c_void);
+    }
 }
 
 #[cfg(test)]

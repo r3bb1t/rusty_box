@@ -9,12 +9,19 @@
 //! executing guest instructions. The entry is the cost, and the only way to
 //! stop paying it is to stop leaving.
 //!
-//! So a thread here enters the partition and STAYS there. It comes back when
+//! So a thread here is BOUND to one processor for its life. It comes back when
 //! the hardware has something to say, takes the machine's lock long enough to
-//! answer, and goes straight back in. Everything else about the machine — its
-//! device timers, its interrupt fabric, the front end reading its display —
-//! runs on other threads against the same lock, which is what makes the guest's
-//! time the guest's rather than a share of one thread's.
+//! answer, and re-enters immediately — with no state exchange and no budget in
+//! between, which is the whole difference from a slice. What it does not do is
+//! return to a scheduler that owns the machine; the machine is owned by nobody,
+//! and its device timers, its interrupt fabric and the front end reading its
+//! display all run on other threads against the same lock. That is what makes
+//! the guest's time the guest's rather than a share of one thread's.
+//!
+//! Not one entry that never returns: `WHvRunVirtualProcessor` returns on every
+//! exit and the loop below re-enters. QEMU's WHPX accelerator has the same
+//! shape — `whpx_vcpu_run` is a loop around the run call, and `bql_unlock()`
+//! before it is what lets QEMU's main loop advance device time meanwhile.
 //!
 //! ## The two rules the design rests on
 //!

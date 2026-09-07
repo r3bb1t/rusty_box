@@ -12,9 +12,15 @@
 //! So the wheel gets a thread of its own. It sleeps until the machine's next
 //! device deadline, takes the machine's lock long enough to catch the wheel up
 //! to the clock and run the boundary, and goes back to sleep. The guest is not
-//! interrupted for any of it — the vCPU thread stays inside
-//! `WHvRunVirtualProcessor`, and a device that raises a line reaches the guest
-//! through the interrupt path rather than by ending its run.
+//! interrupted for any of it: a processor thread holds the machine's lock only
+//! while it services its own exit, so this thread and that one interleave on
+//! the lock instead of waiting on each other. A device that raises a line
+//! reaches the guest through the interrupt path rather than by ending its run.
+//!
+//! The same division QEMU makes: its vCPU thread calls `bql_unlock()` before
+//! entering the platform's run call, which is exactly what lets
+//! `main_loop_wait` run `qemu_clock_run_all_timers` under that same lock while
+//! the guest executes.
 //!
 //! ## The two-phase wait
 //!
@@ -48,35 +54,24 @@ use rusty_box::cpu::Result as CpuResult;
 use rusty_box::emulator::{DeviceTime, Emulator, SliceEngine};
 use rusty_box_core::time::{HostClock, VmInstant};
 use rusty_box_core::{EngineFault, EngineFaultKind};
+use rusty_box_whp::{DeadlineTimer, DeadlineWake};
 
 use crate::vm_clock::VmClockSource;
 
 /// How much of a wait is spun rather than slept.
 ///
-/// **Measured on this platform, not chosen.** `Condvar::wait_timeout` returns
-/// after the host's timer tick whatever it is asked for — asked for 1 ms it
-/// returned in 15.313 ms on average, for 5 ms in 15.819, for 10 ms in 15.640,
-/// with a worst case of 26.842. The request does not appear in the answer at
-/// all; the tick does.
+/// The wait is served by a high-resolution platform timer
+/// (`rusty_box_whp::DeadlineTimer`, which carries the measurements), so what
+/// remains to spin is only its residual error: measured, a 500 µs request
+/// returns in 0.752 ms and a 10 ms one in 10.355. One millisecond covers that
+/// with room, and anything nearer than it — the 8042's 150 µs one-shot, say —
+/// is spun whole and fires when it was due.
 ///
-/// So a slept wait cannot end within 15 ms of when it was asked to, and every
-/// device deadline on a PC is nearer than that: the PIT at 1 kHz is 1 ms away,
-/// the 8042's serial delay 150 µs. A device thread that slept for them would
-/// deliver their pulses in bursts one host tick apart — which is precisely the
-/// disease the slice model had and this design exists to cure.
-///
-/// Hence the margin covers the measured worst case with room over it: anything
-/// due sooner than this is spun, and only a genuinely distant deadline is
-/// slept, where one tick of error is a small fraction of the wait.
-///
-/// **The cost is a core, and it is real.** A guest with a 1 ms timer keeps
-/// this thread spinning for as long as it runs. That is what every
-/// hypervisor-backed VMM on Windows pays for timing fidelity, and the way out
-/// is a high-resolution waitable timer
-/// (`CreateWaitableTimerExW` with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`)
-/// rather than a shorter margin — a shorter margin does not buy back the tick,
-/// it just misses the deadline.
-const SPIN_MARGIN: Duration = Duration::from_millis(30);
+/// Was thirty milliseconds when the wait was a condition variable, because a
+/// condition variable cannot end within a system tick of when it was asked to.
+/// The platform timer is what bought that back; a shorter margin over a
+/// condition variable would not have, it would just have missed the deadline.
+const SPIN_MARGIN: Duration = Duration::from_millis(1);
 
 /// Catch the machine's wheel up to the clock and run one device boundary.
 ///
@@ -123,10 +118,20 @@ struct DeviceWake {
 /// The handle a machine drives its device thread by.
 ///
 /// Cloneable and `Send`: the thread holds one and the machine holds another,
-/// and both only ever touch the two condition variables inside.
+/// and both only ever touch the shared state inside.
 #[derive(Clone, Debug)]
 pub struct DeviceThreadControl {
     wake: Arc<(Mutex<DeviceWake>, Condvar)>,
+    /// What a deadline is actually waited on, and the doorbell that ends the
+    /// wait early.
+    ///
+    /// Not the condition variable beside it: measured, a condition variable
+    /// cannot end within the system's ~15.6 ms tick of when it was asked to,
+    /// and every device deadline on a PC is nearer than that. The condition
+    /// variable still guards the STATE — it is what `run`, `stop` and
+    /// `earlier_deadline` are read and written under — but the sleeping is the
+    /// timer's.
+    deadline: Arc<DeadlineTimer>,
     /// How many times the thread has serviced, and a way to wait for the next.
     ///
     /// A generation rather than a flag, because a waiter must be able to tell
@@ -151,6 +156,7 @@ impl DeviceThreadControl {
     pub fn new() -> Self {
         Self {
             wake: Arc::new((Mutex::new(DeviceWake::default()), Condvar::new())),
+            deadline: Arc::new(DeadlineTimer::new()),
             served: Arc::new((Mutex::new(0), Condvar::new())),
             generation: Arc::new(AtomicU64::new(0)),
         }
@@ -240,7 +246,11 @@ impl DeviceThreadControl {
         // Published after the state it describes, and read by a spinning
         // waiter before it acts, so a wait that has been superseded ends.
         self.generation.fetch_add(1, Ordering::Release);
+        // Both wakes, because a waiter may be on either: blocked on the state
+        // (paused, or nothing armed) waits on the condition variable, and one
+        // waiting out a deadline is inside the platform timer.
         self.wake.1.notify_all();
+        self.deadline.ring();
     }
 
     /// Record a service and wake everyone waiting for one.
@@ -442,14 +452,30 @@ fn wait_for_deadline<H: HostClock>(
             continue;
         };
 
+        // How much of the wait is spun. The whole of it when the deadline is
+        // already inside the margin; only the margin when a sleep came first.
+        let mut spin_for = remaining;
         if let Some(sleepable) = remaining.checked_sub(SPIN_MARGIN) {
-            let (guard, _timed_out) = changed
-                .wait_timeout(wake, sleepable)
-                .unwrap_or_else(PoisonError::into_inner);
-            wake = guard;
-            // Re-read rather than assume the wait timed out: an earlier
-            // deadline may have arrived while this thread slept.
-            continue;
+            // The lock is RELEASED across the sleep. It has to be: `change`
+            // takes it to move a deadline, and a thread asleep holding it
+            // would make every such request wait out the sleep it was trying
+            // to cut short. The doorbell is what ends the sleep instead, and
+            // `change` rings it under the same lock it writes the state under,
+            // so a ring can never be lost between the write and the wait.
+            drop(wake);
+            let ended = control.deadline.wait(sleepable);
+            wake = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            match ended {
+                // The sleep ran its course. What is left of the wait is the
+                // margin, so spin THAT — not `remaining`, which was the whole
+                // wait and has now mostly elapsed.
+                DeadlineWake::Deadline => spin_for = SPIN_MARGIN,
+                // Someone changed the state. Which change it was decides
+                // everything — a pause, a stop and a nearer deadline all end
+                // the same wait — so the loop's head reads it rather than this
+                // arm guessing.
+                DeadlineWake::Rung => continue,
+            }
         }
 
         // Inside the margin, so the rest is spun with the lock released — a
@@ -459,7 +485,7 @@ fn wait_for_deadline<H: HostClock>(
         wake.earlier_deadline = None;
         let generation = control.generation.load(Ordering::Acquire);
         drop(wake);
-        let until = Instant::now() + remaining;
+        let until = Instant::now() + spin_for;
         while Instant::now() < until
             && control.generation.load(Ordering::Acquire) == generation
         {

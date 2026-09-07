@@ -43,6 +43,7 @@
 //! SDK installed.
 
 mod caps;
+mod deadline;
 mod partition;
 
 // The platform seam, under the one name this crate reaches it by. Every host
@@ -57,6 +58,7 @@ pub use partition::{
     Canceller, HostPages, InterceptCounter, InterceptCounters, InterruptRequester, LateProperty,
     LocalApicMode, Partition, PartitionConfig, RuntimeCounters, Vcpu, VpCounters, PAGE_SIZE,
 };
+pub use deadline::{DeadlineTimer, DeadlineWake};
 // The seam's three vocabularies — register shapes, errors, and the exits a
 // processor produces — under the names a caller of this crate uses them by.
 pub use rusty_box_whp_sys::{shape_of, FeatureBanks, GvaTranslation, RegisterValue};
