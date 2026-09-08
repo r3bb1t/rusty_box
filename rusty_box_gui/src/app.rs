@@ -900,16 +900,15 @@ impl NativeShellApp {
     }
 
     fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("vm_menu_bar")
-            .exact_size(32.0)
+        let bar = egui::Panel::top("vm_menu_bar")
+            .exact_size(28.0)
             .frame(
                 egui::Frame::new()
-                    .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::symmetric(12, 4)),
+                    .fill(BG_BASE)
+                    .inner_margin(egui::Margin::symmetric(8, 2)),
             )
             .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
+                egui::MenuBar::new().style(shell_menu_style).ui(ui, |ui| {
                     let status = self.runtime_status();
                     let running = status.running;
                     let start_blocked = running || status.start_pending;
@@ -985,46 +984,40 @@ impl NativeShellApp {
                             ui.close();
                         }
                     });
-                    ui.separator();
-                    self.nav_button(ui, ShellPage::Home, "Home");
-                    self.nav_button(ui, ShellPage::Console, "Console");
-                    self.nav_button(ui, ShellPage::Hardware, "Hardware");
-                    self.nav_button(ui, ShellPage::Images, "Images");
-                    if ui
-                        .add_enabled(!start_blocked, egui::Button::new("Power On"))
-                        .clicked()
-                    {
-                        self.start_vm();
-                    }
                 });
             });
+        hairline_below(ui, bar.response.rect);
     }
 
     fn draw_toolbar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("vm_toolbar")
-            .exact_size(46.0)
+        let toolbar = egui::Panel::top("vm_toolbar")
+            .exact_size(44.0)
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(0x0D, 0x13, 0x1A))
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::symmetric(14, 6)),
+                    .fill(BG_PANEL)
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let status = self.runtime_status();
                     let running = status.running;
                     let start_blocked = running || status.start_pending;
+                    // The one verb in the shell: filled in the accent while the
+                    // VM can be powered on, a plain destination once it runs.
                     let primary = if running {
-                        "▶ Console"
+                        egui::Button::new(
+                            RichText::new("▶ Console").strong().color(TEXT_PRIMARY),
+                        )
                     } else if status.start_pending {
-                        "▶ Starting…"
+                        egui::Button::new(
+                            RichText::new("▶ Starting…").strong().color(ACCENT_AMBER),
+                        )
                     } else {
-                        "▶ Power On"
+                        egui::Button::new(RichText::new("▶ Power On").strong().color(BG_BASE))
+                            .fill(ACCENT_CYAN)
+                            .stroke(Stroke::NONE)
                     };
-                    if ui
-                        .add_enabled(running || !start_blocked, egui::Button::new(primary))
-                        .clicked()
-                    {
+                    if ui.add_enabled(running || !start_blocked, primary).clicked() {
                         if running {
                             self.chrome.selected_page = ShellPage::Console;
                         } else {
@@ -1057,9 +1050,11 @@ impl NativeShellApp {
                                 .strong()
                                 .color(TEXT_PRIMARY),
                         );
+                        ui.label(RichText::new("VM").size(11.0).color(TEXT_MUTED));
                     });
                 });
             });
+        hairline_below(ui, toolbar.response.rect);
     }
 
     fn draw_library(&mut self, ui: &mut egui::Ui) {
@@ -1138,117 +1133,173 @@ impl NativeShellApp {
             });
     }
 
+    /// Whether the shell is currently showing the user an error notice; the
+    /// state badge reads it as a fault until the notice is dismissed.
+    fn has_error_notice(&self) -> bool {
+        self.shell_notice
+            .as_ref()
+            .is_some_and(|notice| notice.kind == ShellNoticeKind::Error)
+    }
+
     fn draw_status_strip(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("vm_status_strip")
-            .exact_size(30.0)
+        let strip = egui::Panel::bottom("vm_status_strip")
+            .exact_size(28.0)
             .frame(
                 egui::Frame::new()
                     .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::symmetric(14, 4)),
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     if self.shared.is_poisoned() {
                         status_dot(ui, ACCENT_RED);
-                        ui.label(
-                            RichText::new("State unavailable")
-                                .monospace()
-                                .size(11.0)
-                                .color(ACCENT_RED),
-                        );
+                        ui.label(status_text("State unavailable").color(ACCENT_RED));
                         return;
                     }
 
                     let snapshot = self.runtime_status();
-                    let state = if snapshot.running {
-                        "Running"
-                    } else if snapshot.start_pending {
-                        "Starting"
-                    } else {
-                        "Stopped"
-                    };
-                    let state_color = if snapshot.running {
-                        ACCENT_CYAN
-                    } else if snapshot.start_pending {
-                        ACCENT_AMBER
+                    let badge = shell_state_badge(&snapshot, self.has_error_notice());
+                    status_dot(ui, badge.color);
+                    ui.label(status_text(badge.label).color(badge.color));
+                    ui.separator();
+                    ui.label(
+                        status_text(engine_label(self.settings.engine)).color(TEXT_PRIMARY),
+                    );
+                    ui.separator();
+                    ui.label(
+                        status_text(format!(
+                            "{} MB · {}",
+                            self.vm_info.memory_mib,
+                            cpu_count_label(self.vm_info.cpus)
+                        ))
+                        .color(TEXT_MUTED),
+                    );
+                    ui.separator();
+                    // A published rate is a fact and reads in the data accent;
+                    // an absent one is drawn muted so it cannot pass for zero.
+                    let ips_color = if snapshot.ips > 0 {
+                        ACCENT_BLUE
                     } else {
                         TEXT_MUTED
                     };
-                    status_dot(ui, state_color);
-                    ui.label(
-                        RichText::new(state)
-                            .monospace()
-                            .size(11.0)
-                            .color(state_color),
-                    );
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format_ips_u32(snapshot.ips))
-                            .monospace()
-                            .size(11.0)
-                            .color(ACCENT_BLUE),
-                    );
-                    ui.separator();
-                    let reset = if snapshot.reset_requested {
-                        "Restart queued"
-                    } else {
-                        "Ready"
-                    };
-                    ui.label(
-                        RichText::new(reset)
-                            .monospace()
-                            .size(11.0)
-                            .color(TEXT_MUTED),
-                    );
+                    ui.label(status_text(format_ips_u32(snapshot.ips)).color(ips_color));
+                    if snapshot.reset_requested {
+                        ui.separator();
+                        ui.label(status_text("Restart queued").color(ACCENT_AMBER));
+                    }
                 });
             });
+        hairline_above(ui, strip.response.rect);
+    }
+
+    /// The destinations, drawn as tabs directly above the page they select:
+    /// the current one carries the text weight and an accent rule, the rest
+    /// sit muted.
+    fn draw_tab_strip(&mut self, ui: &mut egui::Ui) {
+        let strip = egui::Panel::top("vm_tab_strip")
+            .exact_size(36.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(BG_PANEL)
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    self.nav_button(ui, ShellPage::Home, "Home");
+                    self.nav_button(ui, ShellPage::Console, "Console");
+                    self.nav_button(ui, ShellPage::Hardware, "Hardware");
+                    self.nav_button(ui, ShellPage::Images, "Images");
+                });
+            });
+        hairline_below(ui, strip.response.rect);
     }
 
     fn draw_central(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.take_runtime_error_notice();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG_BASE))
-            .show(ui, |ui| match self.chrome.selected_page {
-                ShellPage::Home => self.draw_home_page(ui),
-                ShellPage::Console => self.draw_console_page(ui, frame),
-                ShellPage::Hardware => self.draw_hardware_page(ui),
-                ShellPage::Images => self.draw_images_page(ui),
+            .show(ui, |ui| {
+                self.draw_tab_strip(ui);
+                match self.chrome.selected_page {
+                    ShellPage::Home => self.draw_home_page(ui),
+                    ShellPage::Console => self.draw_console_page(ui, frame),
+                    ShellPage::Hardware => self.draw_hardware_page(ui),
+                    ShellPage::Images => self.draw_images_page(ui),
+                }
             });
     }
 
     fn draw_home_page(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            self.draw_shell_notice(ui);
-            ui.add_space(24.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new("RUSTY BOX WORKSTATION")
-                        .size(26.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                ui.label(
-                    RichText::new("Graphite VM library for x86 experiments").color(TEXT_MUTED),
-                );
-            });
-            ui.add_space(24.0);
-            shell_card_frame().show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Selected VM").strong().color(TEXT_PRIMARY));
-                    let mut name_changed = false;
-                    if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm) {
-                        name_changed |= ui
-                            .add(
-                                egui::TextEdit::singleline(&mut profile.name)
-                                    .desired_width(220.0),
-                            )
-                            .changed();
-                    }
-                    if ui.button("Duplicate VM Profile").clicked() {
-                        self.duplicate_selected_profile();
-                    }
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(20, 16))
+                .show(ui, |ui| {
+                    self.draw_shell_notice(ui);
+                    self.draw_home_header(ui);
+                    ui.add_space(12.0);
                     let status = self.runtime_status();
+                    let start_enabled = !status.running && !status.start_pending;
+                    ui.columns(3, |columns| {
+                        action_tile_enabled(
+                            &mut columns[0],
+                            "Power On VM",
+                            "Start this VM with the settings selected below.",
+                            ACCENT_CYAN,
+                            ActionTileWeight::Primary,
+                            start_enabled,
+                            || self.start_vm(),
+                        );
+                        action_tile(
+                            &mut columns[1],
+                            "Create Disk Image",
+                            "Build bximage-compatible hard disks and floppies.",
+                            ACCENT_BLUE,
+                            ActionTileWeight::Secondary,
+                            || self.chrome.selected_page = ShellPage::Images,
+                        );
+                        action_tile(
+                            &mut columns[2],
+                            "Hardware Settings",
+                            "Inspect boot media and VM hardware limits.",
+                            ACCENT_AMBER,
+                            ActionTileWeight::Secondary,
+                            || self.chrome.selected_page = ShellPage::Hardware,
+                        );
+                    });
+                });
+        });
+    }
+
+    /// The selected VM as the Home page's headline: its state badge and
+    /// engine, its editable name beside the profile actions, and the facts
+    /// the Library already summarises about it.
+    fn draw_home_header(&mut self, ui: &mut egui::Ui) {
+        let status = self.runtime_status();
+        let badge = shell_state_badge(&status, self.has_error_notice());
+        shell_card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                status_dot(ui, badge.color);
+                ui.label(status_text(badge.label).color(badge.color));
+                ui.label(status_text("·").color(TEXT_MUTED));
+                ui.label(status_text(engine_label(self.settings.engine)).color(TEXT_MUTED));
+            });
+            let mut name_changed = false;
+            ui.horizontal(|ui| {
+                if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm) {
+                    name_changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(&mut profile.name)
+                                .font(egui::TextStyle::Heading)
+                                .desired_width(320.0),
+                        )
+                        .changed();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Hardware Settings").clicked() {
+                        self.chrome.selected_page = ShellPage::Hardware;
+                    }
                     let delete_enabled =
                         !status.running && !status.start_pending && self.profiles.len() > 1;
                     if ui
@@ -1257,49 +1308,36 @@ impl NativeShellApp {
                     {
                         self.delete_selected_profile();
                     }
-                    if ui.button("Hardware Settings").clicked() {
-                        self.chrome.selected_page = ShellPage::Hardware;
-                    }
-                    if name_changed {
-                        if let Err(message) = self.apply_pending_settings() {
-                            self.shell_notice = Some(ShellNotice::error(message));
-                        }
+                    if ui.button("Duplicate VM Profile").clicked() {
+                        self.duplicate_selected_profile();
                     }
                 });
-                ui.label(
-                    RichText::new(
-                        "Profiles are independent launch configurations. Power on starts only the selected VM.",
-                    )
-                    .color(TEXT_MUTED),
-                );
             });
-            ui.add_space(16.0);
-            let status = self.runtime_status();
-            let start_enabled = !status.running && !status.start_pending;
-            ui.columns(3, |columns| {
-                action_tile_enabled(
-                    &mut columns[0],
-                    "Power On VM",
-                    "Start this VM with the settings selected below.",
-                    ACCENT_CYAN,
-                    start_enabled,
-                    || self.start_vm(),
-                );
-                action_tile(
-                    &mut columns[1],
-                    "Create Disk Image",
-                    "Build bximage-compatible hard disks and floppies.",
-                    ACCENT_BLUE,
-                    || self.chrome.selected_page = ShellPage::Images,
-                );
-                action_tile(
-                    &mut columns[2],
-                    "Hardware Settings",
-                    "Inspect boot media and VM hardware limits.",
-                    ACCENT_AMBER,
-                    || self.chrome.selected_page = ShellPage::Hardware,
-                );
-            });
+            if name_changed {
+                if let Err(message) = self.apply_pending_settings() {
+                    self.shell_notice = Some(ShellNotice::error(message));
+                }
+            }
+            ui.add_space(6.0);
+            if let Some(entry) = self.chrome.vm_library.get(self.chrome.selected_vm) {
+                let cpus = cpu_count_label(self.vm_info.cpus);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 28.0;
+                    home_fact(ui, "Memory", &entry.memory);
+                    home_fact(ui, "Processors", &cpus);
+                    home_fact(ui, "Boot", &entry.boot);
+                    home_fact(ui, "CD/DVD", &entry.cdrom);
+                    home_fact(ui, "Disk", &entry.disk);
+                });
+            }
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "Profiles are independent launch configurations. Power on starts only the selected VM.",
+                )
+                .size(11.0)
+                .color(TEXT_MUTED),
+            );
         });
     }
 
@@ -1974,10 +2012,25 @@ impl NativeShellApp {
     }
 
     fn nav_button(&mut self, ui: &mut egui::Ui, page: ShellPage, label: &str) {
-        if ui
-            .selectable_label(self.chrome.selected_page == page, label)
-            .clicked()
-        {
+        let selected = self.chrome.selected_page == page;
+        let text = RichText::new(label)
+            .size(14.0)
+            .color(if selected { TEXT_PRIMARY } else { TEXT_MUTED });
+        let text = if selected { text.strong() } else { text };
+        let response = ui.add(
+            egui::Button::new(text)
+                .frame_when_inactive(false)
+                .min_size(egui::vec2(0.0, ui.available_height())),
+        );
+        if selected {
+            let rect = response.rect;
+            ui.painter().hline(
+                rect.x_range(),
+                rect.bottom() - 1.0,
+                Stroke::new(2.0_f32, ACCENT_CYAN),
+            );
+        }
+        if response.clicked() {
             self.chrome.selected_page = page;
         }
     }
@@ -3285,6 +3338,7 @@ impl WebShellApp {
                     WEB_BOOT_MEDIA_ACTION_LABEL,
                     WEB_BOOT_MEDIA_ACTION_DESCRIPTION,
                     ACCENT_BLUE,
+                    ActionTileWeight::Primary,
                     || self.open_file_picker(),
                 );
                 disabled_tile(
@@ -3297,6 +3351,7 @@ impl WebShellApp {
                     "Create Disk Image",
                     "Download bximage-compatible zero-filled images.",
                     ACCENT_CYAN,
+                    ActionTileWeight::Secondary,
                     || self.chrome.selected_page = ShellPage::Images,
                 );
             });
@@ -3802,6 +3857,94 @@ fn status_dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 3.5, color);
 }
 
+/// The small monospace face the status strip and state badges share.
+#[cfg(not(target_arch = "wasm32"))]
+fn status_text(text: impl Into<String>) -> RichText {
+    RichText::new(text).monospace().size(11.0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cpu_count_label(cpus: u32) -> String {
+    if cpus == 1 {
+        "1 CPU".to_owned()
+    } else {
+        format!("{cpus} CPUs")
+    }
+}
+
+/// The one-word state the status strip and the Home header both show, with
+/// the accent that state owns: cyan runs, amber waits, red has faulted, and
+/// idle is muted.
+#[cfg(not(target_arch = "wasm32"))]
+struct ShellStateBadge {
+    label: &'static str,
+    color: Color32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn shell_state_badge(status: &ShellStatus, faulted: bool) -> ShellStateBadge {
+    if status.running {
+        ShellStateBadge {
+            label: "Running",
+            color: ACCENT_CYAN,
+        }
+    } else if status.start_pending {
+        ShellStateBadge {
+            label: "Starting",
+            color: ACCENT_AMBER,
+        }
+    } else if faulted {
+        ShellStateBadge {
+            label: "Faulted",
+            color: ACCENT_RED,
+        }
+    } else {
+        ShellStateBadge {
+            label: "Stopped",
+            color: TEXT_MUTED,
+        }
+    }
+}
+
+/// A one-point rule along the bottom edge of a panel's `rect`, so two stacked
+/// panels meet on a single line instead of two framed strokes.
+#[cfg(not(target_arch = "wasm32"))]
+fn hairline_below(ui: &egui::Ui, rect: egui::Rect) {
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        Stroke::new(1.0_f32, STROKE_HAIRLINE),
+    );
+}
+
+/// The same rule along the top edge, for a panel that sits below its neighbour.
+#[cfg(not(target_arch = "wasm32"))]
+fn hairline_above(ui: &egui::Ui, rect: egui::Rect) {
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top() + 0.5,
+        Stroke::new(1.0_f32, STROKE_HAIRLINE),
+    );
+}
+
+/// A labelled fact in the Home header: a muted caption over its value.
+#[cfg(not(target_arch = "wasm32"))]
+fn home_fact(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(RichText::new(label).size(10.5).color(TEXT_MUTED));
+        ui.label(RichText::new(value).size(13.0).color(TEXT_PRIMARY));
+    });
+}
+
+/// egui's flat menu-bar styling with enough padding that the menu titles read
+/// as separate words rather than one run of text.
+#[cfg(not(target_arch = "wasm32"))]
+fn shell_menu_style(style: &mut egui::Style) {
+    egui::containers::menu::menu_style(style);
+    style.spacing.button_padding = egui::vec2(8.0, 3.0);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn format_ips_u32(ips: u32) -> String {
     if ips >= 1_000_000 {
@@ -3828,46 +3971,128 @@ fn format_ips_f64(ips: f64) -> String {
     }
 }
 
+/// Which card in a row of actions carries the eye. The primary card keeps its
+/// accent outline at rest and a filled accent button; a secondary card rests
+/// on the hairline and only takes its accent when hovered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionTileWeight {
+    Primary,
+    Secondary,
+}
+
+/// The card's resting height; every tile in a row shares it so the row reads
+/// as one band.
+const ACTION_TILE_MIN_HEIGHT: f32 = 112.0;
+
 fn action_tile(
     ui: &mut egui::Ui,
     title: &str,
     body: &str,
     accent: Color32,
+    weight: ActionTileWeight,
     on_click: impl FnMut(),
 ) {
-    action_tile_enabled(ui, title, body, accent, true, on_click);
+    action_tile_enabled(ui, title, body, accent, weight, true, on_click);
 }
 
+/// An action card that is the target as a whole: the frame senses the click,
+/// hover tints the fill toward the accent, and the button inside is the same
+/// action spelled out.
 fn action_tile_enabled(
     ui: &mut egui::Ui,
     title: &str,
     body: &str,
     accent: Color32,
+    weight: ActionTileWeight,
     enabled: bool,
     mut on_click: impl FnMut(),
 ) {
-    shell_card_frame().show(ui, |ui| {
-        ui.set_min_height(150.0);
-        let title_color = if enabled { TEXT_PRIMARY } else { TEXT_MUTED };
-        ui.label(RichText::new(title).size(18.0).strong().color(title_color));
-        ui.label(RichText::new(body).color(TEXT_MUTED));
-        ui.add_space(16.0);
-        let button = egui::Button::new(RichText::new(title).strong())
-            .fill(Color32::from_rgb(0x1E, 0x35, 0x43))
-            .stroke(Stroke::new(1.0_f32, accent));
-        if ui.add_enabled(enabled, button).clicked() {
-            on_click();
-        }
-    });
+    let egui::InnerResponse {
+        inner: button_clicked,
+        response: card,
+    } = ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt(title)
+            .sense(egui::Sense::click()),
+        |ui| {
+            let hovered = enabled && ui.response().hovered();
+            let stroke_color = match (weight, enabled, hovered) {
+                (_, false, _) => STROKE_HAIRLINE,
+                (ActionTileWeight::Primary, true, _) => accent,
+                (ActionTileWeight::Secondary, true, true) => accent,
+                (ActionTileWeight::Secondary, true, false) => STROKE_HAIRLINE,
+            };
+            let fill = if hovered {
+                BG_CARD.lerp_to_gamma(accent, 0.06)
+            } else {
+                BG_CARD
+            };
+            shell_card_frame()
+                .fill(fill)
+                .stroke(Stroke::new(1.0_f32, stroke_color))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.set_min_height(ACTION_TILE_MIN_HEIGHT);
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    let title_color = if enabled { TEXT_PRIMARY } else { TEXT_MUTED };
+                    ui.label(RichText::new(title).size(16.0).strong().color(title_color));
+                    ui.label(RichText::new(body).size(12.5).color(TEXT_MUTED));
+                    let button = match weight {
+                        ActionTileWeight::Primary => {
+                            egui::Button::new(RichText::new(title).strong().color(BG_BASE))
+                                .fill(accent)
+                                .stroke(Stroke::NONE)
+                        }
+                        ActionTileWeight::Secondary => {
+                            egui::Button::new(RichText::new(title).color(TEXT_PRIMARY))
+                                .fill(BG_PANEL)
+                                .stroke(Stroke::new(1.0_f32, accent))
+                        }
+                    };
+                    action_tile_footer(ui, button, enabled).clicked()
+                })
+                .inner
+        },
+    );
+    let card = if enabled {
+        card.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        card
+    };
+    if button_clicked || (enabled && card.clicked()) {
+        on_click();
+    }
+}
+
+/// Places a tile's button on the card's bottom edge, so a row of tiles whose
+/// bodies wrap to different line counts still shares one button baseline.
+fn action_tile_footer(
+    ui: &mut egui::Ui,
+    button: egui::Button<'_>,
+    enabled: bool,
+) -> egui::Response {
+    const FOOTER_MIN_HEIGHT: f32 = 36.0;
+    // The cursor already sits one item-spacing below the last label; measuring
+    // from the content's top edge is what stays true after `set_min_height`.
+    let used = ui.cursor().top() - ui.max_rect().top();
+    let footer = (ACTION_TILE_MIN_HEIGHT - used).max(FOOTER_MIN_HEIGHT);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), footer),
+        egui::Layout::bottom_up(egui::Align::Min).with_cross_justify(true),
+        |ui| ui.add_enabled(enabled, button),
+    )
+    .inner
 }
 
 #[cfg(target_arch = "wasm32")]
 fn disabled_tile(ui: &mut egui::Ui, title: &str, body: &str) {
     shell_card_frame().show(ui, |ui| {
-        ui.set_min_height(150.0);
-        ui.label(RichText::new(title).size(18.0).strong().color(TEXT_MUTED));
-        ui.label(RichText::new(body).color(TEXT_MUTED));
-        ui.add_enabled(false, egui::Button::new("Unavailable"));
+        ui.set_width(ui.available_width());
+        ui.set_min_height(ACTION_TILE_MIN_HEIGHT);
+        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.label(RichText::new(title).size(16.0).strong().color(TEXT_MUTED));
+        ui.label(RichText::new(body).size(12.5).color(TEXT_MUTED));
+        action_tile_footer(ui, egui::Button::new("Unavailable"), false);
     });
 }
 
