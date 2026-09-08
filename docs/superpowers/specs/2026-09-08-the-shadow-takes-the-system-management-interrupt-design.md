@@ -101,24 +101,62 @@ fn take_the_system_management_interrupt(&mut self, cpu: &mut BxCpuC<T>, io: &mut
     -> Result<()>
 ```
 
-and the entry path runs it **before** the legacy-interrupt staging that already
-lives there:
+### Where the question is asked, and why not at the entry
+
+**At the tail of `service`, not on the entry path.** The shadow lives behind the
+machine's mutex, so asking on the entry path would mean taking that lock on every
+entry purely to read one bit — and DLX makes **70,074,467** of them in 360 s.
+`service` already holds the lock and already has `cpu` and `io` destructured, so
+the question costs nothing there:
 
 ```rust
-// An SMI outranks the 8259's line, exactly as Bochs orders them
-// (`cpu/event.cc handleAsyncEvent`: SMI is tested before INTR). Taking the
-// legacy vector first would push an interrupt frame onto a processor that is
-// about to enter system-management mode, and SMM would then resume into the
-// handler rather than into the instruction the guest was executing.
+// At the tail of `service`, after the exit that raised it has been answered.
 if cpu.owes_a_system_management_interrupt() {
-    self.take_the_system_management_interrupt(cpu, io)?;
+    take_the_signalled_smi(vcpu, exchange, xsave, cpu, &mut io)?;
 }
-if let Continue::Park(why) = self.stage_the_legacy_interrupt() { … }
 ```
 
-The ordering is not a preference. Bochs tests SMI before INTR in
-`cpu/event.cc handleAsyncEvent`, and this port must match that or a guest can
-observe an interrupt frame built on the wrong side of an SMM entry.
+Every entry is preceded by an exit, so no entry escapes the check. The one
+latency this accepts is a single poll iteration: `out 0xb2` is itself an exit,
+but the flag reaches the shadow only when the DEVICE thread next drains it, so
+the SMI is taken at the following `inb 0xb3` exit instead of the same one.
+`rombios32` polls that port in a tight loop, so that is microseconds, and the
+alternative — draining on the vCPU thread — is the second choke point R5 forbids.
+
+This also gets the Bochs ordering for free. Taking the SMI in `service` places it
+before the entry's `stage_the_legacy_interrupt`, which is the order
+`cpu/event.cc handleAsyncEvent` uses: SMI sits under its "Priority 3: External
+Hardware Interventions" block and INTR is tested well after it. The order is
+parity, not preference — taking the legacy vector first would build an interrupt
+frame on a processor about to enter system-management mode, and the `RSM` would
+resume into the handler rather than into the instruction the guest was running.
+
+### The sequence, factored once so the two callers cannot drift
+
+```rust
+/// Take an SMI the shadow has ALREADY been signalled, and hand the result back.
+fn take_the_signalled_smi<T: Instrumentation>(
+    vcpu: &Vcpu,
+    exchange: &mut Exchange,
+    xsave: &mut XsaveArea,
+    cpu: &mut BxCpuC<T>,
+    io: &mut PcIo<'_>,
+) -> Result<usize> {
+    exchange.import_everything(vcpu, cpu, xsave)?;
+    io.emulate_one(cpu)?;                  // the shadow takes it and enters SMM
+    io.sync_io_events(cpu);
+    run_the_shadow_out_of_smm(cpu, io)?;
+    exchange.export_imported(vcpu, cpu, xsave)
+}
+```
+
+`import_everything` is inside it and is load-bearing on both paths: the shadow
+must hold the guest's current architectural state before it enters SMM, or the
+SMM state save captures the wrong registers and `RSM` restores them.
+
+`ExitReason::ApicSmiTrap` keeps its `io.deliver_smi(cpu)` — that path signals the
+SMI itself — and then calls the same helper. The new path does not signal
+anything: the bit it detected IS the signal.
 
 ### Why ask rather than be told
 
