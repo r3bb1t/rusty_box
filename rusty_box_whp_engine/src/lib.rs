@@ -1442,6 +1442,87 @@ mod tests {
         );
     }
 
+    /// A guest that raises a chipset SMI has its handler run.
+    ///
+    /// `rombios32.c smm_init` writes the APM command port and then spins on the
+    /// status port until its own relocation handler clears it:
+    /// `outb(0xb3, 0x01); outb(0xb2, 0x00); while (inb(0xb3) != 0x00);`
+    /// The write reaches `acpi.generate_smi`, the machine's boundary signals the
+    /// shadow, and nothing on this path would ever act on that signal without
+    /// the ask at the tail of `service`. Every BIOS-booted guest stops here
+    /// without it.
+    ///
+    /// The guest below is that loop with a handler that clears the port, so it
+    /// terminates only if the SMI is genuinely taken.
+    #[test]
+    fn a_chipset_smi_reaches_a_hardware_guests_handler() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let machine = machine_with_devices_on(
+            DeviceClock::HostTime,
+            &[
+                0x31, 0xC0, //             xor ax, ax
+                0x8E, 0xD8, //             mov ds, ax
+                0x8E, 0xD0, //             mov ss, ax
+                0xBC, 0x00, 0x70, //       mov sp, 0x7000
+                // Install an SMM handler at SMBASE+0x8000 = 0x38000
+                // (`cpu/init.rs`: SMBASE is 0x30000 at reset). The handler is
+                // `mov al,0; out 0xb3,al; rsm` — it clears the status port the
+                // poll below waits on, which is the whole property under test.
+                0xFC, //                   cld
+                0xB8, 0x00, 0x38, //       mov ax, 0x3800
+                0x8E, 0xC0, //             mov es, ax
+                0x31, 0xFF, //             xor di, di
+                0xB0, 0xB0, 0xAA, //       mov al,0xB0; stosb   ┐ mov al, 0
+                0xB0, 0x00, 0xAA, //       mov al,0x00; stosb   ┘
+                0xB0, 0xE6, 0xAA, //       mov al,0xE6; stosb   ┐ out 0xb3, al
+                0xB0, 0xB3, 0xAA, //       mov al,0xB3; stosb   ┘
+                0xB0, 0x0F, 0xAA, //       mov al,0x0F; stosb   ┐ rsm
+                0xB0, 0xAA, 0xAA, //       mov al,0xAA; stosb   ┘
+                // Enable APMC. `acpi.rs generate_smi` raises nothing unless
+                // `pci_conf[0x5b]` bit 1 is set, and the BIOS sets it through
+                // PCI config space — the ACPI function is `devfunc: 0x0B`,
+                // i.e. BX_PCI_DEVICE(1, 3), so the config address for register
+                // 0x58 is 0x80000B58 and byte 3 of that dword is 0x5b.
+                // WITHOUT THIS the `out 0xb2` below raises no SMI at all and
+                // this test would fail for the wrong reason.
+                0xBA, 0xF8, 0x0C, //       mov dx, 0x0CF8
+                0x66, 0xB8, 0x58, 0x0B, 0x00, 0x80, // mov eax, 0x80000B58
+                0x66, 0xEF, //             out dx, eax
+                0xBA, 0xFF, 0x0C, //       mov dx, 0x0CFF   (= 0xCFC + 3 → reg 0x5b)
+                0xB0, 0x02, //             mov al, 0x02     (APMC_EN)
+                0xEE, //                   out dx, al
+                // Arm the status port, then raise the chipset SMI.
+                0xB0, 0x01, //             mov al, 1
+                0xE6, 0xB3, //             out 0xb3, al
+                0xB0, 0x00, //             mov al, 0
+                0xE6, 0xB2, //             out 0xb2, al
+                // wait: poll until the handler clears it
+                0xE4, 0xB3, //             in al, 0xb3
+                0x84, 0xC0, //             test al, al
+                0x75, 0xFA, //             jnz wait
+                // cleared: say so and stop
+                0xB0, MARK, //             mov al, MARK
+                0xE6, DEBUG_PORT, //       out 0xE9, al
+                0xF4, //                   hlt
+            ],
+        );
+        let ThreadedRun { written, .. } = drive_on_a_thread(
+            machine,
+            std::time::Duration::from_secs(10),
+            "the guest's SMM handler cleared the status port",
+            |_, seen| !seen.is_empty(),
+        );
+        assert_eq!(
+            written,
+            std::vec![MARK],
+            "the guest must leave its poll loop, which only its SMM handler can \
+             end: {written:#04x?}"
+        );
+    }
+
     /// A masked LINT0 keeps the legacy path shut.
     ///
     /// Measured on this platform: an ExtINT written into a processor's

@@ -1052,6 +1052,29 @@ impl Servicer<'_> {
         // same bus and a line nobody moved onto the processor is a line the
         // guest never sees.
         io.sync_io_events(cpu);
+        // A chipset SMI is signalled onto this shadow by the machine's boundary
+        // (`emulator/scheduler.rs` drains `acpi.smi_request_pending`), and a
+        // guest running inside the partition never consults that word — so this
+        // is the one place anything acts on it (R5). Asked here, where the
+        // machine's lock is already held and the shadow is already in hand,
+        // because a guest can take tens of millions of exits and a lock taken
+        // per entry to read one bit would be paid on every one of them.
+        //
+        // Only on the way back to the guest: a processor that is parking has a
+        // fault or a power-off to report, and system-management mode is not
+        // somewhere to send it on the way out.
+        //
+        // Bochs orders an SMI ahead of the 8259's line (`cpu/event.cc
+        // handleAsyncEvent`, "Priority 3: External Hardware Interventions"),
+        // and taking it here — before the entry stages a legacy vector — is
+        // that order.
+        if matches!(carry_on, Continue::Run) && cpu.owes_a_system_management_interrupt() {
+            let calls = take_the_signalled_smi(self.vcpu, self.exchange, self.xsave, cpu, io)?;
+            self.control
+                .census
+                .export_calls
+                .fetch_add(u64::try_from(calls).unwrap_or(u64::MAX), Ordering::Release);
+        }
         Ok(carry_on)
     }
 
@@ -1246,14 +1269,8 @@ impl Servicer<'_> {
             // half-way into system-management mode, which has no equivalent
             // there.
             ExitReason::ApicSmiTrap => {
-                self.exchange.import_everything(self.vcpu, cpu, self.xsave)?;
                 io.deliver_smi(cpu);
-                // Signalled, not yet taken: the event is processed when the
-                // processor next runs, exactly as Bochs decides it.
-                io.emulate_one(cpu)?;
-                io.sync_io_events(cpu);
-                run_the_shadow_out_of_smm(cpu, io)?;
-                let calls = self.exchange.export_imported(self.vcpu, cpu, self.xsave)?;
+                let calls = take_the_signalled_smi(self.vcpu, self.exchange, self.xsave, cpu, io)?;
                 self.control
                     .census
                     .export_calls
@@ -1411,6 +1428,34 @@ pub(crate) fn service_port_access<V: VpRegisters>(
     // decode (probe finding 2).
     let resume = exit.vp.rip + u64::from(exit.vp.instruction_length);
     vp.write_words(&[Reg::Rip, Reg::Rax], &[resume, rax]).map_err(platform_failed)
+}
+
+/// Take a system-management interrupt the shadow has ALREADY been signalled,
+/// and hand the result back to the partition.
+///
+/// The processor is imported first because system-management mode saves the
+/// state it finds: a shadow holding anything but the guest's current registers
+/// would save the wrong ones, and `RSM` would restore them. The handler runs to
+/// completion here — a processor cannot be returned to the hardware half-way
+/// into a mode the hardware has no equivalent for.
+///
+/// # Errors
+/// A register the platform would not give up or take back, or a handler the
+/// shadow could not run to its `RSM`.
+fn take_the_signalled_smi<T: Instrumentation>(
+    vcpu: &Vcpu,
+    exchange: &mut Exchange,
+    xsave: &mut XsaveArea,
+    cpu: &mut BxCpuC<T>,
+    io: &mut PcIo<'_>,
+) -> Result<usize> {
+    exchange.import_everything(vcpu, cpu, xsave)?;
+    // Signalled, not yet taken: the event is processed when the processor next
+    // runs, exactly as Bochs decides it.
+    io.emulate_one(cpu)?;
+    io.sync_io_events(cpu);
+    run_the_shadow_out_of_smm(cpu, io)?;
+    exchange.export_imported(vcpu, cpu, xsave)
 }
 
 /// The fault a register write the staging made parks with.
