@@ -15,6 +15,8 @@
 #[cfg(feature = "gui-egui")]
 pub mod app;
 pub mod args;
+#[cfg(feature = "gui-egui")]
+pub(crate) mod shell;
 pub mod config;
 mod disk_images;
 pub mod error;

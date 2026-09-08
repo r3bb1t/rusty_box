@@ -10,6 +10,10 @@ use std::sync::{
     {Arc, Mutex},
 };
 
+use crate::shell::theme::{
+    configure_shell_style, shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED,
+    BG_BASE, BG_CARD, BG_PANEL, STROKE_HAIRLINE, TEXT_MUTED, TEXT_PRIMARY,
+};
 use egui::{Color32, RichText, Stroke};
 // The wasm build drives the machine directly from the frame loop below; the
 // native build hands it to a runner thread instead.
@@ -26,13 +30,6 @@ use rusty_box_bximage::{
 #[cfg(not(target_arch = "wasm32"))]
 use rusty_box_bximage::{create_flat_hard_disk, create_floppy, ExistingFilePolicy};
 
-const BG_BASE: Color32 = Color32::from_rgb(0x0B, 0x0F, 0x14);
-const BG_PANEL: Color32 = Color32::from_rgb(0x11, 0x18, 0x21);
-const BG_CARD: Color32 = Color32::from_rgb(0x17, 0x21, 0x2B);
-const STROKE_HAIRLINE: Color32 = Color32::from_rgb(0x26, 0x34, 0x43);
-const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xE8, 0xEE, 0xF5);
-const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x98, 0xA8);
-
 /// Common pre-boot VBE resolutions offered by the Display panel picker.
 const VGA_MODE_PRESETS: &[(u16, u16)] = &[
     (1024, 768),
@@ -48,10 +45,7 @@ fn vga_mode_label(mode: Option<crate::config::VgaMode>) -> String {
         Some(mode) => format!("{}×{} @ {}bpp", mode.width, mode.height, mode.bpp),
     }
 }
-const ACCENT_CYAN: Color32 = Color32::from_rgb(0x46, 0xD9, 0xC7);
-const ACCENT_BLUE: Color32 = Color32::from_rgb(0x6A, 0xA8, 0xFF);
-const ACCENT_AMBER: Color32 = Color32::from_rgb(0xF2, 0xB8, 0x4B);
-const ACCENT_RED: Color32 = Color32::from_rgb(0xFF, 0x5C, 0x6C);
+
 #[cfg(target_arch = "wasm32")]
 const BROWSER_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -753,39 +747,6 @@ pub(crate) fn status_snapshot(
             start_pending: false,
         },
     }
-}
-
-fn configure_shell_style(ctx: &egui::Context) {
-    use egui::{style::Selection, Theme, ThemePreference, Vec2};
-
-    ctx.set_theme(ThemePreference::Dark);
-    ctx.style_mut_of(Theme::Dark, |style| {
-        style.visuals.panel_fill = BG_BASE;
-        style.visuals.window_fill = BG_PANEL;
-        style.visuals.extreme_bg_color = Color32::from_rgb(0x07, 0x0A, 0x0E);
-        style.visuals.hyperlink_color = ACCENT_BLUE;
-        style.visuals.text_cursor.stroke.color = ACCENT_CYAN;
-        style.visuals.selection = Selection {
-            bg_fill: Color32::from_rgb(0x1E, 0x5F, 0x62),
-            stroke: Stroke::new(1.0_f32, ACCENT_CYAN),
-        };
-        style.visuals.widgets.noninteractive.bg_fill = BG_PANEL;
-        style.visuals.widgets.inactive.bg_fill = BG_CARD;
-        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(0x1D, 0x2A, 0x36);
-        style.visuals.widgets.active.bg_fill = Color32::from_rgb(0x21, 0x35, 0x43);
-        style.visuals.widgets.inactive.fg_stroke.color = TEXT_PRIMARY;
-        style.visuals.widgets.hovered.fg_stroke.color = Color32::WHITE;
-        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-        style.spacing.button_padding = Vec2::new(12.0, 6.0);
-    });
-}
-
-fn shell_card_frame() -> egui::Frame {
-    egui::Frame::new()
-        .fill(BG_CARD)
-        .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-        .corner_radius(12)
-        .inner_margin(egui::Margin::same(16))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
