@@ -101,13 +101,24 @@ fn take_the_system_management_interrupt(&mut self, cpu: &mut BxCpuC<T>, io: &mut
     -> Result<()>
 ```
 
-and the entry path, beside the legacy-interrupt staging that already lives there:
+and the entry path runs it **before** the legacy-interrupt staging that already
+lives there:
 
 ```rust
+// An SMI outranks the 8259's line, exactly as Bochs orders them
+// (`cpu/event.cc handleAsyncEvent`: SMI is tested before INTR). Taking the
+// legacy vector first would push an interrupt frame onto a processor that is
+// about to enter system-management mode, and SMM would then resume into the
+// handler rather than into the instruction the guest was executing.
 if cpu.owes_a_system_management_interrupt() {
     self.take_the_system_management_interrupt(cpu, io)?;
 }
+if let Continue::Park(why) = self.stage_the_legacy_interrupt() { … }
 ```
+
+The ordering is not a preference. Bochs tests SMI before INTR in
+`cpu/event.cc handleAsyncEvent`, and this port must match that or a guest can
+observe an interrupt frame built on the wrong side of an SMM entry.
 
 ### Why ask rather than be told
 
