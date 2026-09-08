@@ -293,9 +293,45 @@ Then rewrite the `ExitReason::ApicSmiTrap` arm to use it. That arm signals the S
 
 **Careful with the borrow:** `service` destructures `self` (`let Self { vcpu, index, machine, clock, exchange, xsave, inject, control } = self;`), so inside it use the destructured `control`, not `self.control`. Match whatever the surrounding arm already does.
 
-- [ ] **Step 4: Ask the question at the tail of `service`**
+- [ ] **Step 4: Ask the question at the tail of `Servicer::answer`**
 
-At the end of `service`, after the exit's own arm has produced its outcome and while the machine's guard is still held, take an SMI if one is owed. Place it so it runs for **every** exit reason, not only some:
+**Not in `service` — in `Servicer::answer`.** `Servicer` already holds `vcpu`, `exchange` and `xsave`, and `answer` already receives `cpu` and `io`, so every piece the sequence needs is in scope there with no restructuring. `service`'s own tail would have none of them: it consumes `servicer` in the `match` that produces its return value.
+
+`answer` currently ends with one `match exit.reason { … }` whose arms each yield `Ok(...)`. Bind that to a local, ask, then return it:
+
+```rust
+        let carry_on = match exit.reason {
+            // … every existing arm, unchanged …
+        }?;
+        // A chipset SMI is signalled onto this shadow by the machine's boundary
+        // (`emulator/scheduler.rs` drains `acpi.smi_request_pending`), and a
+        // guest running inside the partition never consults that word — so this
+        // is the one place anything acts on it. Asked here, where the machine's
+        // lock is already held and the shadow is already in hand, because a
+        // guest can take tens of millions of exits and a lock taken per entry
+        // to read one bit would be paid on every one of them.
+        //
+        // Only on the way back to the guest: a processor that is parking has a
+        // fault or a power-off to report, and system-management mode is not
+        // somewhere to send it on the way out.
+        //
+        // Bochs orders an SMI ahead of the 8259's line (`cpu/event.cc
+        // handleAsyncEvent`, "Priority 3: External Hardware Interventions"),
+        // and taking it here — before the entry stages a legacy vector — is
+        // that order.
+        if matches!(carry_on, Continue::Run) && cpu.owes_a_system_management_interrupt() {
+            let calls = take_the_signalled_smi(self.vcpu, self.exchange, self.xsave, cpu, io)?;
+            self.control
+                .census
+                .export_calls
+                .fetch_add(u64::try_from(calls).unwrap_or(u64::MAX), Ordering::Release);
+        }
+        Ok(carry_on)
+```
+
+The `matches!(carry_on, Continue::Run)` guard is load-bearing, not defensive: without it a fault or a guest power-off would be followed by an SMM entry on a processor that is on its way to parking.
+
+Note the arms hold `self.exchange` etc. as `&mut` fields of `Servicer`, so inside `answer` write `self.vcpu` / `self.exchange` / `self.xsave` — not the bare destructured names used in `service`.
 
 ```rust
         // A chipset SMI is signalled onto this shadow by the machine's boundary
@@ -332,8 +368,11 @@ Expected: the new test PASSES; the full suite is green; the no-default build is 
 
 - [ ] **Step 6: Prove the ask is what carries it**
 
-Comment out the `if cpu.owes_a_system_management_interrupt() { … }` block and re-run the new test.
-Expected: **FAIL** at the deadline with an empty debug port. Restore it and re-run to confirm PASS. Report both outcomes verbatim — this is the only evidence the new code is what makes the test pass.
+Comment out the `if matches!(carry_on, Continue::Run) && cpu.owes_a_system_management_interrupt() { … }` block you added at the tail of `Servicer::answer` and re-run the new test.
+
+Expected: **FAIL** at the deadline with an empty debug port — the guest is back in the poll loop that no handler ends. Restore it and re-run to confirm PASS.
+
+Report both outcomes verbatim. This is the only evidence the new code is what makes the test pass: the test is gated on `hypervisor_here()` with a bare `return`, so a host without a hypervisor gives an identical-looking green in the same ~0.03 s, and every hardware claim in this plan is worthless without a mutation behind it.
 
 - [ ] **Step 7: Gate and commit**
 
@@ -425,6 +464,6 @@ No source changes, so there is nothing to gate beyond what Task 2 already gated.
 
 **4. Risks this plan does not remove.**
 
-- **`service`'s shape may not admit a single tail check.** Step 4 says to restructure rather than duplicate, but if arms return early the restructure is larger than one line and the implementer will be editing control flow around every exit reason. That is the one place this plan could turn out bigger than it looks.
+- ~~`service`'s shape may not admit a single tail check.~~ **Resolved before dispatch.** `service` ends in one `match servicer.answer(…)` and consumes `servicer` doing it, so its tail has none of the pieces; `Servicer::answer` ends in one `match exit.reason` and already holds `vcpu`/`exchange`/`xsave` with `cpu`/`io` in hand. Step 4 now names `answer` and needs no control-flow restructuring — only binding that match to a local. The `matches!(carry_on, Continue::Run)` guard is the one piece of judgement it adds.
 - **The chipset-SMI latency is one poll iteration**, because the flag reaches the shadow only when the device thread drains it. `rombios32` polls tightly so this is microseconds, but a guest that raises an SMI and then runs exit-free would not be served at all. No such guest is known and none is in scope; recorded rather than hidden.
 - **Task 3 may find another wall.** That is expected, not a plan defect — Alpine has never booted on `FastMachine`.
