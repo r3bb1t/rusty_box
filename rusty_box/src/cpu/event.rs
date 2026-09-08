@@ -741,6 +741,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.signal_event(Self::BX_EVENT_SMI);
     }
 
+    /// Whether this processor has been signalled a system-management interrupt
+    /// it has not yet taken.
+    ///
+    /// The question an engine that runs the guest somewhere else must ask.
+    /// [`Self::deliver_smi`] sets a bit in this processor's event word, which
+    /// the interpreter consults in `handle_async_event` — Bochs
+    /// `cpu/event.cc handleAsyncEvent`, where an SMI is a "Priority 3: External
+    /// Hardware Interventions" tested ahead of `INTR`. A guest executing inside
+    /// a hypervisor partition consults nothing here, so its engine has to.
+    #[must_use]
+    pub fn owes_a_system_management_interrupt(&self) -> bool {
+        (self.pending_event & Self::BX_EVENT_SMI) != 0
+    }
+
     /// Bochs `deliver_NMI`: signal NMI.
     #[inline]
     pub(crate) fn deliver_nmi(&mut self) {

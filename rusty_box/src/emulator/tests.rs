@@ -1423,6 +1423,35 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         );
     }
 
+    /// A processor reports an SMI it has been signalled and has not yet taken.
+    ///
+    /// The one question an engine that runs the guest on a hypervisor must ask.
+    /// `deliver_smi` sets a bit in this processor's own event word, and a guest
+    /// executing inside a partition never consults it — so without this the
+    /// signal is raised and nothing ever acts on it.
+    #[test]
+    fn a_processor_reports_a_system_management_interrupt_it_has_not_taken() {
+        let mut machine = furnished_machine();
+        let cpu = machine.cpu_mut_at(0);
+
+        assert!(
+            !cpu.owes_a_system_management_interrupt(),
+            "a processor that has been signalled nothing owes nothing"
+        );
+
+        cpu.deliver_smi();
+        assert!(
+            cpu.owes_a_system_management_interrupt(),
+            "a signalled SMI is owed until it is taken"
+        );
+
+        cpu.clear_event(BxCpuC::<()>::BX_EVENT_SMI);
+        assert!(
+            !cpu.owes_a_system_management_interrupt(),
+            "and taking it settles the debt"
+        );
+    }
+
     #[test]
     fn a_chipset_change_to_the_map_is_forwarded_to_the_engine() {
         std::thread::Builder::new()
