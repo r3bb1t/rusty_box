@@ -2487,6 +2487,9 @@ pub struct WebShellApp {
     frame_count: u64,
     /// Previous PS/2 button bitmask for relative mouse forwarding.
     web_prev_mouse_buttons: u8,
+    /// The modifiers held at the end of the previous frame, so each Shift,
+    /// Ctrl and Alt edge is forwarded once.
+    web_held_modifiers: rusty_box::gui::host_input::HeldModifiers,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2734,6 +2737,7 @@ impl WebShellApp {
             cached_ips: 0.0,
             frame_count: 0,
             web_prev_mouse_buttons: 0,
+            web_held_modifiers: rusty_box::gui::host_input::HeldModifiers::default(),
         }
     }
 
@@ -2983,30 +2987,21 @@ impl WebShellApp {
         }
     }
 
+    /// Forward this frame's keyboard to the guest, with the `Emulator` as the
+    /// sink (single-threaded wasm applies events immediately) — the same
+    /// translator the native shell feeds through its shared display. A widget
+    /// that has asked for the keyboard (the Library search box) keeps it, as
+    /// on native; the translator consumes what it forwards.
     fn process_keyboard(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
         let Some(emu) = &mut self.emulator else {
             return;
         };
-        ctx.input(|input| {
-            for event in &input.events {
-                match event {
-                    egui::Event::Text(text) => {
-                        for ch in text.chars() {
-                            for (key, pressed) in rusty_box::gui::char_to_bx_key_sequence(ch) {
-                                // A full ring drops the keystroke; the next
-                                // frame's input is unaffected.
-                                let _delivered = emu.keyboard().key(key, pressed);
-                            }
-                        }
-                    }
-                    egui::Event::Key { key, pressed, .. } => {
-                        if let Some(bx_key) = egui_key_to_bx_key(*key) {
-                            let _delivered = emu.keyboard().key(bx_key, *pressed);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        let held = self.web_held_modifiers;
+        self.web_held_modifiers = ctx.input_mut(|input| {
+            rusty_box::gui::host_input::translate_egui_keyboard(input, held, &mut **emu)
         });
     }
 
@@ -3954,47 +3949,6 @@ fn engine_label(engine: crate::config::Engine) -> &'static str {
         crate::config::Engine::Interpreter => "Interpreter",
         crate::config::Engine::Whp => "Windows Hypervisor",
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-/// Map an egui key to the guest key it represents.
-///
-/// The guest key (not a raw scancode) is what gets delivered, so the keyboard
-/// controller can render it through the guest's active scancode set — Bochs
-/// keyboard.cc `gen_scancode`. Returns `None` for keys the guest has no
-/// equivalent for; printable characters arrive separately as `egui::Event::Text`.
-fn egui_key_to_bx_key(key: egui::Key) -> Option<rusty_box::iodev::scancodes::BxKey> {
-    use rusty_box::iodev::scancodes::BxKey;
-    Some(match key {
-        egui::Key::Escape => BxKey::Esc,
-        egui::Key::F1 => BxKey::F1,
-        egui::Key::F2 => BxKey::F2,
-        egui::Key::F3 => BxKey::F3,
-        egui::Key::F4 => BxKey::F4,
-        egui::Key::F5 => BxKey::F5,
-        egui::Key::F6 => BxKey::F6,
-        egui::Key::F7 => BxKey::F7,
-        egui::Key::F8 => BxKey::F8,
-        egui::Key::F9 => BxKey::F9,
-        egui::Key::F10 => BxKey::F10,
-        egui::Key::F11 => BxKey::F11,
-        egui::Key::F12 => BxKey::F12,
-        egui::Key::Enter => BxKey::Enter,
-        egui::Key::Tab => BxKey::Tab,
-        egui::Key::Backspace => BxKey::Backspace,
-        egui::Key::ArrowUp => BxKey::Up,
-        egui::Key::ArrowDown => BxKey::Down,
-        egui::Key::ArrowLeft => BxKey::Left,
-        egui::Key::ArrowRight => BxKey::Right,
-        egui::Key::Home => BxKey::Home,
-        egui::Key::End => BxKey::End,
-        egui::Key::PageUp => BxKey::PageUp,
-        egui::Key::PageDown => BxKey::PageDown,
-        egui::Key::Delete => BxKey::Delete,
-        egui::Key::Insert => BxKey::Insert,
-        egui::Key::Space => BxKey::Space,
-        _ => return None,
-    })
 }
 
 #[cfg(test)]

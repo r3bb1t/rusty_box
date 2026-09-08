@@ -1,10 +1,11 @@
 //! eframe/egui application for the Rusty Box emulator.
 //!
 //! `RustyBoxApp` implements `eframe::App` and renders the VGA framebuffer
-//! from `SharedDisplay` as an egui texture. Keyboard events are converted
-//! to PS/2 scancodes and pushed into the shared scancode queue.
+//! from `SharedDisplay` as an egui texture. Keyboard and mouse events are
+//! translated by `host_input` into guest key and mouse events, queued on the
+//! `SharedDisplay` for the emulator thread to drain.
 
-use super::keymap::char_to_bx_key_sequence;
+use super::host_input::HeldModifiers;
 use crate::iodev::scancodes::BxKey;
 use super::shared_display::SharedDisplay;
 
@@ -41,11 +42,9 @@ pub struct RustyBoxApp {
     pixel_aspect_correct: bool,
     /// Previous PS/2 button bitmask, so a release with no motion is still reported.
     prev_mouse_buttons: u8,
-    /// Previous modifier-key state, to synthesize make/break scancodes for
-    /// Shift/Ctrl/Alt (egui reports these via `Modifiers`, not `Key` events).
-    prev_ctrl: bool,
-    prev_alt: bool,
-    prev_shift: bool,
+    /// The modifiers held at the end of the previous frame, so each Shift,
+    /// Ctrl and Alt edge is forwarded once.
+    held_modifiers: HeldModifiers,
 }
 
 impl RustyBoxApp {
@@ -70,9 +69,7 @@ impl RustyBoxApp {
             fit_to_available: false,
             pixel_aspect_correct: false,
             prev_mouse_buttons: 0,
-            prev_ctrl: false,
-            prev_alt: false,
-            prev_shift: false,
+            held_modifiers: HeldModifiers::default(),
         }
     }
 
@@ -110,79 +107,21 @@ impl RustyBoxApp {
         }
     }
 
-    /// Process keyboard input from egui and convert to PS/2 scancodes.
+    /// Forward this frame's keyboard to the guest through the shared queue.
     ///
-    /// Handles three event types:
-    /// - `Event::Text` — printable characters from the platform text input system
-    /// - `Event::Ime(ImeEvent::Commit)` — characters from IME (Windows may use this path)
-    /// - `Event::Key` — special keys (arrows, F-keys, Enter, etc.)
-    ///
-    /// Letter/number keys are handled via Text/Ime events (which include proper
-    /// OS-level shift/layout handling). The Key handler covers non-printable keys
-    /// and also serves as a fallback for letters when Text events aren't produced.
+    /// The translation is `host_input::translate_egui_keyboard`'s — the one
+    /// the browser shell also uses, with the machine itself as its sink; here
+    /// the sink is the shared display, which the emulator thread drains. The
+    /// events are consumed there, so egui does not also spend them on widget
+    /// navigation (Tab then Enter would otherwise press "Restart VM").
     fn process_input(&mut self, ctx: &egui::Context) {
-        let mut keys: Vec<(BxKey, bool)> = Vec::new();
-
-        ctx.input_mut(|i| {
-            // Pass 1: check if any Text or Ime::Commit events exist in this frame.
-            // If so, we rely on them for printable characters and skip the Key fallback
-            // (avoids double-sending since Key events fire BEFORE Text events).
-            let has_text_events = i.events.iter().any(|e| {
-                matches!(
-                    e,
-                    egui::Event::Text(_) | egui::Event::Ime(egui::ImeEvent::Commit(_))
-                )
-            });
-
-            // Pass 2: process events and CONSUME them so egui doesn't use them
-            // for widget navigation (Tab = focus change, Enter = button click).
-            // Without this, Tab+Enter accidentally triggers the Reset button.
-            i.events.retain(|event| {
-                match event {
-                    egui::Event::Text(text) => {
-                        for ch in text.chars() {
-                            keys.extend(char_to_bx_key_sequence(ch));
-                        }
-                        false
-                    }
-                    egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
-                        for ch in text.chars() {
-                            keys.extend(char_to_bx_key_sequence(ch));
-                        }
-                        false
-                    }
-                    egui::Event::Key { key, pressed, .. } => {
-                        if let Some(bx_key) = egui_key_to_bx_key(*key) {
-                            keys.push((bx_key, *pressed));
-                        } else if *pressed && !has_text_events {
-                            if let Some(ch) = egui_key_to_char(*key) {
-                                keys.extend(char_to_bx_key_sequence(ch));
-                            }
-                        }
-                        false
-                    }
-                    _ => true, // keep non-keyboard events for egui
-                }
-            });
+        let Ok(mut display) = self.shared.lock() else {
+            return;
+        };
+        let held = self.held_modifiers;
+        self.held_modifiers = ctx.input_mut(|input| {
+            super::host_input::translate_egui_keyboard(input, held, &mut *display)
         });
-
-        // Synthesize make/break scancodes for Ctrl and Alt from egui's modifier
-        // state (egui reports these via `Modifiers`, not `Key` events), so guest
-        // chords like Ctrl+C and Alt+F reach the VM. Shift is intentionally NOT
-        // forwarded here: printable characters already carry their own shift in
-        // `char_to_scancode_sequence`, and adding it again would double-shift.
-        let mods = ctx.input(|i| i.modifiers);
-        push_modifier_key(&mut keys, self.prev_ctrl, mods.ctrl, BxKey::CtrlL);
-        push_modifier_key(&mut keys, self.prev_alt, mods.alt, BxKey::AltL);
-        self.prev_ctrl = mods.ctrl;
-        self.prev_alt = mods.alt;
-        self.prev_shift = mods.shift;
-
-        if !keys.is_empty() {
-            if let Ok(mut display) = self.shared.lock() {
-                display.pending_keys.extend_from_slice(&keys);
-            }
-        }
     }
 
     /// Queue the PS/2 Set-2 sequence for Ctrl+Alt+Del. Needed because the host OS
@@ -638,118 +577,6 @@ impl RustyBoxApp {
 impl eframe::App for RustyBoxApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.ui_inner(ui, frame, true, true, true);
-    }
-}
-
-/// Convert an egui Key to PS/2 scancode set 2 sequence.
-///
-/// Returns make codes for pressed=true, break codes (0xF0 + make) for pressed=false.
-/// Extended keys use 0xE0 prefix.
-/// Map an egui key to the guest key it represents, so the keyboard controller
-/// can render it through the guest's active scancode set.
-fn egui_key_to_bx_key(key: egui::Key) -> Option<BxKey> {
-    Some(match key {
-        egui::Key::Escape => BxKey::Esc,
-        egui::Key::F1 => BxKey::F1,
-        egui::Key::F2 => BxKey::F2,
-        egui::Key::F3 => BxKey::F3,
-        egui::Key::F4 => BxKey::F4,
-        egui::Key::F5 => BxKey::F5,
-        egui::Key::F6 => BxKey::F6,
-        egui::Key::F7 => BxKey::F7,
-        egui::Key::F8 => BxKey::F8,
-        egui::Key::F9 => BxKey::F9,
-        egui::Key::F10 => BxKey::F10,
-        egui::Key::F11 => BxKey::F11,
-        egui::Key::F12 => BxKey::F12,
-        egui::Key::Enter => BxKey::Enter,
-        egui::Key::Tab => BxKey::Tab,
-        egui::Key::Backspace => BxKey::Backspace,
-        egui::Key::ArrowUp => BxKey::Up,
-        egui::Key::ArrowDown => BxKey::Down,
-        egui::Key::ArrowLeft => BxKey::Left,
-        egui::Key::ArrowRight => BxKey::Right,
-        egui::Key::Home => BxKey::Home,
-        egui::Key::End => BxKey::End,
-        egui::Key::PageUp => BxKey::PageUp,
-        egui::Key::PageDown => BxKey::PageDown,
-        egui::Key::Delete => BxKey::Delete,
-        egui::Key::Insert => BxKey::Insert,
-        egui::Key::Space => BxKey::Space,
-        _ => return None,
-    })
-}
-
-
-/// Append a PS/2 Set-2 make (key down) or break (key up) code for a modifier key
-/// when its state changed this frame. `make` is the Set-2 make byte
-/// (e.g. `0x14` = left Ctrl, `0x11` = left Alt, `0x12` = left Shift).
-/// Emit a press or release for a modifier whose state changed. egui reports
-/// Ctrl/Alt through `Modifiers` rather than `Key` events, so their edges are
-/// synthesized here.
-fn push_modifier_key(keys: &mut Vec<(BxKey, bool)>, was_down: bool, now_down: bool, key: BxKey) {
-    if now_down && !was_down {
-        keys.push((key, true));
-    } else if !now_down && was_down {
-        keys.push((key, false));
-    }
-}
-
-/// Fallback: convert an egui Key to a lowercase ASCII character.
-///
-/// Used when `Event::Text` / `Event::Ime` don't fire (e.g., certain IME states,
-/// accessibility tools, or platform edge cases). Returns lowercase because
-/// `char_to_scancode_sequence` handles shift detection from the character itself.
-fn egui_key_to_char(key: egui::Key) -> Option<char> {
-    match key {
-        egui::Key::A => Some('a'),
-        egui::Key::B => Some('b'),
-        egui::Key::C => Some('c'),
-        egui::Key::D => Some('d'),
-        egui::Key::E => Some('e'),
-        egui::Key::F => Some('f'),
-        egui::Key::G => Some('g'),
-        egui::Key::H => Some('h'),
-        egui::Key::I => Some('i'),
-        egui::Key::J => Some('j'),
-        egui::Key::K => Some('k'),
-        egui::Key::L => Some('l'),
-        egui::Key::M => Some('m'),
-        egui::Key::N => Some('n'),
-        egui::Key::O => Some('o'),
-        egui::Key::P => Some('p'),
-        egui::Key::Q => Some('q'),
-        egui::Key::R => Some('r'),
-        egui::Key::S => Some('s'),
-        egui::Key::T => Some('t'),
-        egui::Key::U => Some('u'),
-        egui::Key::V => Some('v'),
-        egui::Key::W => Some('w'),
-        egui::Key::X => Some('x'),
-        egui::Key::Y => Some('y'),
-        egui::Key::Z => Some('z'),
-        egui::Key::Num0 => Some('0'),
-        egui::Key::Num1 => Some('1'),
-        egui::Key::Num2 => Some('2'),
-        egui::Key::Num3 => Some('3'),
-        egui::Key::Num4 => Some('4'),
-        egui::Key::Num5 => Some('5'),
-        egui::Key::Num6 => Some('6'),
-        egui::Key::Num7 => Some('7'),
-        egui::Key::Num8 => Some('8'),
-        egui::Key::Num9 => Some('9'),
-        egui::Key::Minus => Some('-'),
-        egui::Key::Equals => Some('='),
-        egui::Key::OpenBracket => Some('['),
-        egui::Key::CloseBracket => Some(']'),
-        egui::Key::Backslash => Some('\\'),
-        egui::Key::Semicolon => Some(';'),
-        egui::Key::Quote => Some('\''),
-        egui::Key::Backtick => Some('`'),
-        egui::Key::Comma => Some(','),
-        egui::Key::Period => Some('.'),
-        egui::Key::Slash => Some('/'),
-        _ => None,
     }
 }
 
