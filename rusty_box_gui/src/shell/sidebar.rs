@@ -64,35 +64,58 @@ const ROW_HEIGHT: f32 = 24.0;
 #[cfg(not(target_arch = "wasm32"))]
 const CHILD_INDENT: f32 = 22.0;
 
-/// One row of the tree. Selection is the shell's single idiom — a two-point
-/// accent bar on the left edge over a card fill — and the row is the whole
-/// click target, so a name and its indent never disagree about what was hit.
+/// How a tree row is marked. Exactly one row in the tree is `Destination`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(not(target_arch = "wasm32"))]
+enum RowMark {
+    /// The row the shell is showing: the accent bar over a card fill.
+    Destination,
+    /// The VM whose pages are listed: brighter than its siblings, unmarked.
+    Expanded,
+    /// Everything else.
+    Plain,
+}
+
+/// One row of the tree. The shell's single selection idiom — a two-point
+/// accent bar on the left edge over a card fill — marks the one `Destination`
+/// row; an `Expanded` row is told apart by its text alone, and any row without
+/// the fill tints on hover. The row is the whole click target, so a name and
+/// its indent never disagree about what was hit.
 #[cfg(not(target_arch = "wasm32"))]
 fn tree_row(
     ui: &mut egui::Ui,
     label: &str,
     indent: f32,
-    selected: bool,
+    mark: RowMark,
     trailing_dot: Option<Color32>,
 ) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), egui::Sense::click());
-    if selected {
-        ui.painter().rect_filled(rect, 6.0, BG_CARD);
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
-            0.0,
-            ACCENT_CYAN,
-        );
-    } else if response.hovered() {
-        ui.painter().rect_filled(rect, 6.0, BG_CARD.gamma_multiply(0.5));
+    match mark {
+        RowMark::Destination => {
+            ui.painter().rect_filled(rect, 6.0, BG_CARD);
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
+                0.0,
+                ACCENT_CYAN,
+            );
+        }
+        RowMark::Expanded | RowMark::Plain => {
+            if response.hovered() {
+                ui.painter().rect_filled(rect, 6.0, BG_CARD.gamma_multiply(0.5));
+            }
+        }
     }
+    let text_color = match mark {
+        RowMark::Destination | RowMark::Expanded => TEXT_PRIMARY,
+        RowMark::Plain => TEXT_MUTED,
+    };
     ui.painter().text(
         rect.left_center() + egui::vec2(indent, 0.0),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(TEXT_BODY),
-        if selected { TEXT_PRIMARY } else { TEXT_MUTED },
+        text_color,
     );
     if let Some(color) = trailing_dot {
         ui.painter()
@@ -161,15 +184,24 @@ pub(crate) fn draw_sidebar(
             for &index in visible {
                 let is_selected_vm = destination.vm() == index;
                 let dot = is_selected_vm.then_some(badge.color);
-                if tree_row(ui, &entries[index].name, 8.0, is_selected_vm, dot).clicked() {
+                let vm_mark = if is_selected_vm {
+                    RowMark::Expanded
+                } else {
+                    RowMark::Plain
+                };
+                if tree_row(ui, &entries[index].name, 8.0, vm_mark, dot).clicked() {
                     action = Some(SidebarAction::Select(destination.select_vm(index)));
                 }
                 if !is_selected_vm {
                     continue;
                 }
                 for page in ShellPage::ALL {
-                    let on_page = destination.page() == page;
-                    if tree_row(ui, page.label(), CHILD_INDENT, on_page, None).clicked() {
+                    let page_mark = if destination.page() == page {
+                        RowMark::Destination
+                    } else {
+                        RowMark::Plain
+                    };
+                    if tree_row(ui, page.label(), CHILD_INDENT, page_mark, None).clicked() {
                         action = Some(SidebarAction::Select(destination.select_page(page)));
                     }
                 }

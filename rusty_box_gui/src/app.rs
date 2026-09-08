@@ -1643,8 +1643,8 @@ impl NativeShellApp {
                             });
                     });
 
-                    field_row(ui, "VGA mode", |ui| {
-                        egui::ComboBox::from_id_salt("VGA mode")
+                    field_row(ui, "Display resolution", |ui| {
+                        egui::ComboBox::from_id_salt("Display resolution")
                             .selected_text(vga_mode_label(self.settings.vga_mode))
                             .show_ui(ui, |ui| {
                                 changed |= ui
@@ -1723,7 +1723,7 @@ impl NativeShellApp {
             )
             .fill(ACCENT_CYAN)
             .stroke(Stroke::NONE);
-            if ui.add_enabled(editable, save).clicked() {
+            if ui.add(save).clicked() {
                 self.save_settings_to_config_file();
             }
             if let Some(path) = &self.config.config_path {

@@ -19,23 +19,31 @@ pub(crate) fn page_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
 }
 
 /// The width every label column in the shell reserves, so that two inputs in
-/// the same pane start on the same x whatever their labels say.
-pub(crate) const FIELD_LABEL_WIDTH: f32 = 104.0;
+/// the same pane start on the same x whatever their labels say. It holds the
+/// longest label the panes carry, `Display resolution`, at `TEXT_BODY`.
+pub(crate) const FIELD_LABEL_WIDTH: f32 = 112.0;
 
-/// One labelled control on a pane's grid. The label is allocated a fixed
-/// column; the caller's widgets take the rest of the row.
+/// One labelled control on a pane's grid. The label column is reserved with
+/// `allocate_exact_size`, which advances the row by exactly the width asked
+/// for, and the label is painted into that rect; an empty label therefore
+/// holds its column as fully as a long one, and the caller's widgets begin on
+/// the same x in every row.
 pub(crate) fn field_row<R>(
     ui: &mut egui::Ui,
     label: &str,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
     ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
+        let (rect, _) = ui.allocate_exact_size(
             egui::vec2(FIELD_LABEL_WIDTH, ui.spacing().interact_size.y),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.label(RichText::new(label).size(TEXT_BODY).color(TEXT_MUTED));
-            },
+            egui::Sense::hover(),
+        );
+        ui.painter().text(
+            rect.left_center(),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(TEXT_BODY),
+            TEXT_MUTED,
         );
         add_contents(ui)
     })
