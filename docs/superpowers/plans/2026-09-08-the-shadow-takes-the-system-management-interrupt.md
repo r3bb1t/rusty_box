@@ -145,6 +145,72 @@ The behavioural change. The SMM sequence is factored once and asked for at the t
 - Consumes: `BxCpuC::owes_a_system_management_interrupt` (Task 1); `Exchange::{import_everything, export_imported}`, `PcIo::{deliver_smi, emulate_one, sync_io_events}`, `run_the_shadow_out_of_smm` (`engine.rs`) — all already used by the `ApicSmiTrap` arm.
 - Produces: `take_the_signalled_smi`, a private free function in `vcpu_thread.rs`.
 
+- [ ] **Step 0: Correct the predicate Task 1 landed — it ignores the event mask**
+
+Task 1 shipped `owes_a_system_management_interrupt` as
+`(self.pending_event & Self::BX_EVENT_SMI) != 0`. That is a Bochs inaccuracy and
+this task would build on it.
+
+Bochs masks `BX_EVENT_SMI` on SMM **entry** and unmasks it on `RSM`
+(`cpu/smm.cc`, and this port mirrors it in `cpu/smm.rs`), and
+`cpu/event.cc handleAsyncEvent` therefore tests the event with
+`is_unmasked_event_pending`, not a bare `pending_event` read. A predicate that
+ignores the mask claims an SMI is owed by a processor already inside
+system-management mode — a nested entry Bochs forbids.
+
+In `rusty_box/src/cpu/event.rs`, change the body to the masked form and say why:
+
+```rust
+    #[must_use]
+    pub fn owes_a_system_management_interrupt(&self) -> bool {
+        // Masked, not a bare pending read: SMM entry masks this event and `RSM`
+        // unmasks it (`cpu/smm.cc`), so a processor already inside
+        // system-management mode owes nothing — Bochs
+        // `cpu/event.cc handleAsyncEvent` tests it the same way.
+        self.is_unmasked_event_pending(Self::BX_EVENT_SMI)
+    }
+```
+
+Extend Task 1's test in `rusty_box/src/emulator/tests.rs` with the case that
+pins it, keeping the existing assertions:
+
+```rust
+        cpu.deliver_smi();
+        cpu.mask_event(BxCpuC::<()>::BX_EVENT_SMI);
+        assert!(
+            !cpu.owes_a_system_management_interrupt(),
+            "a processor inside system-management mode owes no further SMI: Bochs \
+             masks the event on entry and unmasks it at RSM"
+        );
+        cpu.unmask_event(BxCpuC::<()>::BX_EVENT_SMI);
+        assert!(
+            cpu.owes_a_system_management_interrupt(),
+            "and it is owed again once the mode is left"
+        );
+```
+
+Confirm `mask_event`/`unmask_event` exist with those names in `cpu/cpu.rs`
+before using them; if they differ, use whatever `cpu/smm.rs` calls at its entry
+and `RSM` sites, which are the two places that actually move this bit.
+
+Run `cargo test --release -p rusty_box --lib --features std a_processor_reports_a_system_management`
+and confirm the new assertions fail before the body change and pass after.
+
+Commit this separately from the rest of the task — it is a correction to
+committed code and belongs in its own commit:
+
+```bash
+git add rusty_box/src/cpu/event.rs rusty_box/src/emulator/tests.rs
+git commit -m "fix(cpu): an owed SMI respects the event mask, as Bochs tests it
+
+SMM entry masks BX_EVENT_SMI and RSM unmasks it (cpu/smm.cc, mirrored in
+cpu/smm.rs), so cpu/event.cc handleAsyncEvent tests the event through
+is_unmasked_event_pending. The predicate read pending_event bare, and so claimed
+an SMI was owed by a processor already inside system-management mode.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+```
+
 - [ ] **Step 1: Write the failing test**
 
 In `rusty_box_whp_engine/src/lib.rs`'s test module, beside the other hardware tests. This is the property `rombios32` waits on, expressed directly: a guest that raises a chipset SMI has its handler run.
