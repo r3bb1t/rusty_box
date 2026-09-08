@@ -27,6 +27,70 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
 impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     #[cfg(feature = "alloc")]
+    /// Hand the guest's console bytes to their hosts.
+    ///
+    /// Port 0xE9 goes to the BIOS output file when one is installed and to
+    /// stdout otherwise; serial port 0 goes to the attached front end's log
+    /// and is mirrored to stdout. The interpreter's loop calls this once per
+    /// batch, and a driver that advances the guest by other means calls it
+    /// between steps — a machine on the hypervisor is stepped from its front
+    /// end's thread, and this is how that thread shows what the guest said.
+    ///
+    /// A closed or redirected sink must not stop the guest, but it does mean
+    /// the mirror is now lying — so a failed write is logged, once per failed
+    /// write, rather than propagated or discarded.
+    pub fn present_console_output(&mut self) {
+        #[cfg(feature = "std")]
+        {
+            use std::io::Write;
+            let e9 = self.devices.take_port_e9_output();
+            if !e9.is_empty() {
+                let written = match self.bios_output_file {
+                    Some(ref mut bios_file) => {
+                        bios_file.write_all(&e9).and_then(|()| bios_file.flush())
+                    }
+                    None => {
+                        let mut out = std::io::stdout();
+                        out.write_all(&e9).and_then(|()| out.flush())
+                    }
+                };
+                if let Err(error) = written {
+                    tracing::warn!("debug-console (port 0xE9) sink failed: {error}");
+                }
+            }
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            // No host sink exists without `std`, so the debug console has
+            // nowhere to go — drain it anyway, or its ring backs up and starts
+            // dropping the oldest bytes silently.
+            let dropped = self.devices.drain_port_e9_output().count();
+            if dropped > 0 {
+                tracing::trace!("{dropped} debug-console bytes had no host sink");
+            }
+        }
+
+        let serial_bytes: Vec<u8> = self.device_manager.drain_serial_tx(0).collect();
+        if serial_bytes.is_empty() {
+            return;
+        }
+        if let Some(ref gui) = self.gui {
+            let text = String::from_utf8_lossy(&serial_bytes);
+            gui.append_serial_log(&text);
+        }
+        #[cfg(feature = "std")]
+        {
+            use std::io::Write;
+            let mirrored = std::io::stdout()
+                .write_all(serial_bytes.as_slice())
+                .and_then(|()| std::io::stdout().flush());
+            if let Err(error) = mirrored {
+                tracing::warn!("serial stdout mirror failed: {error}");
+            }
+        }
+    }
+
+    #[cfg(feature = "alloc")]
     /// Run emulator interactively with GUI event handling
     ///
     /// This method integrates CPU execution with GUI event processing:
@@ -313,36 +377,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                             stuck_count = 0;
                             stuck_reported = false;
                             last_rip = current_rip;
-                        }
-                    }
-
-                    // Drain Bochs-style port 0xE9 output (if any) and print it.
-                    // This is useful for very early debug output before VGA is initialized.
-                    #[cfg(feature = "std")]
-                    {
-                        let e9 = self.devices.take_port_e9_output();
-                        if !e9.is_empty() {
-                            use std::io::Write;
-                            // Write to BIOS output file if configured, otherwise to stdout
-                            if let Some(ref mut bios_file) = self.bios_output_file {
-                                bios_file.write_all(&e9).ok();
-                                bios_file.flush().ok();
-                            } else {
-                                let mut out = std::io::stdout();
-                                out.write_all(&e9).ok();
-                                out.flush().ok();
-                            }
-                        }
-                    }
-                    #[cfg(not(feature = "std"))]
-                    {
-                        // No host sink exists without `std`, so the debug
-                        // console has nowhere to go — drain it anyway, or its
-                        // ring backs up and starts dropping the oldest bytes
-                        // silently.
-                        let dropped = self.devices.drain_port_e9_output().count();
-                        if dropped > 0 {
-                            tracing::trace!("{dropped} debug-console bytes had no host sink");
                         }
                     }
 
@@ -642,31 +676,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 }
             };
 
-            // Drain serial port output every batch for responsive serial console.
-            // Previously gated by should_update_gui (100ms) — now immediate.
-            {
-                let serial_bytes: Vec<u8> = self.device_manager.drain_serial_tx(0).collect();
-                if !serial_bytes.is_empty() {
-                    if let Some(ref gui) = self.gui {
-                        let text = String::from_utf8_lossy(&serial_bytes);
-                        gui.append_serial_log(&text);
-                    }
-                    // Always write serial output to stdout for headless/terminal visibility
-                    #[cfg(feature = "std")]
-                    {
-                        use std::io::Write;
-                        // A closed or redirected stdout must not stop the
-                        // guest, but it does mean the mirror is now lying —
-                        // say so once per failed write rather than never.
-                        let mirrored = std::io::stdout()
-                            .write_all(serial_bytes.as_slice())
-                            .and_then(|()| std::io::stdout().flush());
-                        if let Err(error) = mirrored {
-                            tracing::warn!("serial stdout mirror failed: {error}");
-                        }
-                    }
-                }
-            }
+            // Every batch, so the serial console and the debug port are
+            // current while the guest runs rather than at the next redraw.
+            self.present_console_output();
 
             // BENCHMARK-ONLY (temporary): see the bench_sink setup above.
             #[cfg(feature = "std")]

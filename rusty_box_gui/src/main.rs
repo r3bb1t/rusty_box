@@ -48,10 +48,13 @@ fn main() -> ExitCode {
 fn print_result(result: Result<rusty_box_gui::RunSummary, rusty_box_gui::RunError>) -> ExitCode {
     match result {
         Ok(summary) => {
-            println!(
-                "rusty_box_gui: executed {} instructions",
-                summary.instructions_executed
-            );
+            match summary.instructions_executed {
+                Some(count) => println!("rusty_box_gui: executed {count} instructions"),
+                None => println!(
+                    "rusty_box_gui: the guest ran on the hypervisor, which does not count \
+                     instructions"
+                ),
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {

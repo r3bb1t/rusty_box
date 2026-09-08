@@ -118,6 +118,20 @@ pub enum RunError {
     )]
     NoHypervisor,
 
+    #[error(
+        "max_instructions = {max_instructions} cannot be honoured by `--engine whp`: a processor \
+         on the hypervisor retires instructions the host does not count, so the limit would end \
+         the run at a guess. Remove the limit or use `--engine interpreter`"
+    )]
+    InstructionBudgetOnHypervisor { max_instructions: u64 },
+
+    #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+    #[error("the machine on the hypervisor could not carry on: {source}")]
+    Hypervisor {
+        #[source]
+        source: rusty_box_whp_engine::FastMachineFault,
+    },
+
     #[error(transparent)]
     Emulator(#[from] rusty_box::Error),
 }

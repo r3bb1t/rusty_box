@@ -1,15 +1,25 @@
 use crate::{
     args::{Args, BootDevice, DisplayBackend, LogLevel},
-    config::ResolvedConfig,
+    config::{Engine, ResolvedConfig},
     error::RunError,
 };
+// Named only where the hypervisor engine forces it; the interpreter path
+// reaches the same narrowing through a method call and needs no name.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+use crate::config::CpuCapabilities;
+use rusty_box::params::BxParams;
 #[cfg(feature = "gui-egui")]
 use rusty_box::gui::{shared_display::SharedDisplay, BridgeGui};
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+use rusty_box::emulator::RunBudget;
 use rusty_box::emulator::{
-    AtaSlot, BootDevice as GuestBootDevice, BootOrder, DiskGeometry as GuestDiskGeometry,
-    EmulatorConfig, Ips, MachineBuilder, MemorySize,
+    AtaSlot, BootDevice as GuestBootDevice, BootOrder, DeviceClock,
+    DiskGeometry as GuestDiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder, MemorySize,
+    SliceEngine,
 };
 use rusty_box::gui::{BxGui, NoGui, TermGui};
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+use rusty_box_whp_engine::{FastMachine, FastMachineFault, StepStop, WhpEngine};
 #[cfg(feature = "gui-egui")]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "gui-egui")]
@@ -20,9 +30,16 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
+/// What a run amounted to, once it ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunSummary {
-    pub instructions_executed: u64,
+    /// Guest instructions the boot processor retired, when the engine that ran
+    /// the guest counts them.
+    ///
+    /// `None` for a machine on the hypervisor: a processor there retires
+    /// instructions the host never tallies, and an approximate count would be
+    /// indistinguishable from a real one.
+    pub instructions_executed: Option<u64>,
 }
 
 pub fn run(args: Args) -> Result<RunSummary, RunError> {
@@ -138,7 +155,10 @@ where
         sync_realtime: config.sync_realtime,
         smp_quantum: config.smp_quantum,
         cpuid_freq: config.cpuid_freq,
-        cpu_params: config.cpu_capabilities.narrow(config.cpu_params.clone()),
+        cpu_params: cpu_params_for_engine(&config),
+        // The engine decides who turns the device wheel, so it decides which
+        // clock the wheel runs on.
+        device_clock: device_clock_for(config.engine),
         ..EmulatorConfig::default()
     };
 
@@ -163,12 +183,13 @@ where
 
     // The hypervisor engine, when this build has it and the caller asked.
     //
-    // Returns from here rather than falling through, because the two machines
-    // are different TYPES — the engine is a type parameter, not a field — so
-    // one binding cannot hold either. What they share is `drive`, which is
-    // generic over exactly that parameter.
+    // Returns from here rather than falling through, because the two paths
+    // differ in how the guest is advanced, not only in the machine's type: a
+    // machine on the hypervisor is stepped by `FastMachine` from this thread,
+    // while an interpreter machine runs `run_interactive`'s own loop. What
+    // they share is the arranging done before either, in `arrange_for_boot`.
     #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
-    if config.engine == crate::config::Engine::Whp {
+    if config.engine == Engine::Whp {
         // Asked for and absent is a refusal, not a silent fall back to the
         // interpreter: a caller who chose an engine wants to know it did not
         // get it, and a boot that quietly ran somewhere else is a measurement
@@ -176,8 +197,8 @@ where
         if !rusty_box_whp_engine::hypervisor_present().unwrap_or(false) {
             return Err(RunError::NoHypervisor);
         }
-        let emu = builder.build_on::<rusty_box_whp_engine::WhpEngine>()?;
-        return drive(emu, &config, stop_flag);
+        let emu = builder.build_on::<WhpEngine>()?;
+        return drive_on_the_hypervisor(emu, &config, stop_flag);
     }
 
     #[cfg(not(feature = "guest-trace"))]
@@ -201,20 +222,18 @@ where
     drive(emu, &config, stop_flag)
 }
 
-/// Bring a built machine up and run it, whichever engine retires its guest's
-/// instructions.
+/// Everything a built machine needs arranged before it runs, whichever engine
+/// runs it.
 ///
-/// Generic over the engine rather than written twice, because none of this
-/// depends on which one it is: a machine on the hypervisor takes the same
-/// stop flag, the same pre-boot video mode and the same queued keystroke as a
-/// machine on the interpreter, and answers `run_interactive` the same way.
-fn drive<E>(
-    mut emu: Box<rusty_box::emulator::Emulator<(), E>>,
+/// One function for both drive paths (R5): the front end's stop control, its
+/// pre-boot video mode and its boot keystroke are wired here or nowhere, so
+/// none of them can work on one engine and quietly not on the other.
+fn arrange_for_boot<E>(
+    emu: &mut Emulator<(), E>,
     config: &ResolvedConfig,
     stop_flag: Option<Arc<AtomicBool>>,
-) -> Result<RunSummary, RunError>
-where
-    E: rusty_box::emulator::SliceEngine<()>,
+) where
+    E: SliceEngine<()>,
 {
     if let Some(stop_flag) = stop_flag {
         emu.set_stop_flag(stop_flag);
@@ -226,15 +245,200 @@ where
         emu.display()
             .set_preferred_mode(mode.width, mode.height, mode.bpp);
     }
+    // The last step of the machine's own bring-up: anchors the PIT, the ACPI
+    // timer and the VGA retrace to the instruction rate the BIOS's calibration
+    // loops read. Idempotent, so `run_interactive` repeating it changes
+    // nothing.
+    emu.prepare_run();
     if should_prequeue_boot_enter(&config.boot_order) {
-        emu.prepare_run();
-        let _typed = emu.keyboard().type_text("\n");
+        // The keystroke a CD-ROM boot loader's prompt waits for. A refused
+        // keystroke is a boot that sits at that prompt, so it is said rather
+        // than assumed.
+        if emu.keyboard().type_text("\n") == 0 {
+            tracing::warn!(
+                "the boot keystroke was not accepted; the boot prompt may wait for a key"
+            );
+        }
     }
+}
+
+/// Bring a built machine up and run it on the interpreter's own loop.
+///
+/// Generic over the engine because `run_interactive` is: any engine that runs
+/// the machine in slices is driven this way. A machine on the hypervisor is
+/// not — see [`drive_on_the_hypervisor`].
+fn drive<E>(
+    mut emu: Box<Emulator<(), E>>,
+    config: &ResolvedConfig,
+    stop_flag: Option<Arc<AtomicBool>>,
+) -> Result<RunSummary, RunError>
+where
+    E: SliceEngine<()>,
+{
+    arrange_for_boot(emu.as_mut(), config, stop_flag);
     let instructions_executed = emu.run_interactive(config.max_instructions)?;
 
     Ok(RunSummary {
-        instructions_executed,
+        instructions_executed: Some(instructions_executed),
     })
+}
+
+/// How much guest time one hypervisor step covers, in milliseconds at the
+/// machine's own instruction rate.
+///
+/// The step is the latency ceiling for every host action: "Power Off",
+/// "Reset" and a keystroke are all seen between steps, because nothing inside
+/// one looks at the stop flag or the input queue. Ten milliseconds is under
+/// what a person notices on a key and a quarter of the 40 ms VGA refresh
+/// period, so a frame is drawn from a machine that paused at most one step
+/// ago. Shorter would buy nothing visible and cost a park and a resume per
+/// step — measured at 0.06 to 0.24 ms each in `FastMachine::step` — which at
+/// a hundred steps a second is one or two percent of the guest's time and at
+/// a thousand would be a fifth of it.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+const HYPERVISOR_STEP_MILLIS: u64 = 10;
+
+/// How often the front end is redrawn: the 25 frames a second of Bochs's VGA
+/// update timer (vga.cc `vga_update_interval`), which `run_interactive` also
+/// keeps.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
+
+/// Drive a machine that runs its guest on the hypervisor.
+///
+/// Separate from [`drive`] rather than a branch inside it: a hypervisor
+/// machine is advanced by `FastMachine::step`, which owns the vCPU thread and
+/// the device wheel, while an interpreter machine is advanced by
+/// `run_interactive`'s own loop. The two share their setup — the stop flag,
+/// the pre-boot video mode, the queued boot key, in [`arrange_for_boot`] — and
+/// nothing else.
+///
+/// What `run_interactive` does inside its loop is done here between steps,
+/// while the machine is paused: host input is pumped into the devices, the
+/// guest's console output is handed on, and the front end is redrawn. The
+/// stop flag is read between steps too, which is what makes the step length
+/// the front end's latency — see [`HYPERVISOR_STEP_MILLIS`].
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+fn drive_on_the_hypervisor(
+    mut emu: Box<Emulator<(), WhpEngine>>,
+    config: &ResolvedConfig,
+    stop_flag: Option<Arc<AtomicBool>>,
+) -> Result<RunSummary, RunError> {
+    // Refused, not approximated: nothing on the hypervisor counts the guest's
+    // instructions, so a limit in them would end the run at a guess, and a
+    // caller who asked for a limit wants to know it did not get one.
+    if config.max_instructions != u64::MAX {
+        return Err(RunError::InstructionBudgetOnHypervisor {
+            max_instructions: config.max_instructions,
+        });
+    }
+    // This loop is what reads the flag, so a run given none gets one nobody
+    // will raise rather than a branch on every step.
+    let stop_flag = stop_flag.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    arrange_for_boot(emu.as_mut(), config, Some(Arc::clone(&stop_flag)));
+    let step = RunBudget::Ticks(
+        (emu.config().ips.per_second_u64() * HYPERVISOR_STEP_MILLIS / 1_000).max(1),
+    );
+
+    // Adoption hands the processor to a thread of its own and the devices to a
+    // thread that wakes at their deadlines; nothing runs until a step says so.
+    let mut machine =
+        FastMachine::adopt(emu).map_err(|source| RunError::Hypervisor { source })?;
+    machine.with_machine(|m| {
+        // The status bar shows an instruction rate, and this machine has none
+        // to show: told zero it reads `---`, rather than the last rate of a run
+        // on the other engine.
+        if let Some(gui) = m.gui_mut() {
+            gui.show_ips(0);
+        }
+        m.display().force_update();
+        m.update_gui();
+    });
+
+    let mut last_frame = std::time::Instant::now();
+    loop {
+        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        let outcome = machine
+            .step(step)
+            .map_err(|source| RunError::Hypervisor { source })?;
+        // Between steps the machine is paused, which is the only time its
+        // shadow processor and its devices can be read coherently.
+        machine.with_machine(|m| {
+            m.pump_gui_input();
+            m.present_console_output();
+            if last_frame.elapsed() >= FRAME_INTERVAL {
+                m.update_gui();
+                last_frame = std::time::Instant::now();
+            }
+        });
+        match outcome.stop {
+            StepStop::BudgetSpent => {}
+            // The guest asked to be off. Its last frame was drawn above.
+            StepStop::GuestPowerOff => break,
+            StepStop::Faulted(fault) => {
+                return Err(RunError::Hypervisor {
+                    source: FastMachineFault::Engine(fault),
+                });
+            }
+        }
+    }
+
+    Ok(RunSummary {
+        // Nothing here counted, so nothing is claimed — see `RunSummary`.
+        instructions_executed: None,
+    })
+}
+
+/// Which clock the machine's devices run on, decided by the engine (R2).
+///
+/// An interpreter machine turns its own wheel as it retires instructions. A
+/// machine on the hypervisor cannot: its processor runs on the host's silicon
+/// and nothing counts what it retires, so a wheel measured in instructions
+/// would never turn. `FastMachine` drives that wheel from a host clock on a
+/// thread of its own, and refuses a machine configured to keep it in ticks.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+fn device_clock_for(engine: Engine) -> DeviceClock {
+    match engine {
+        Engine::Interpreter => DeviceClock::Ticks,
+        Engine::Whp => DeviceClock::HostTime,
+    }
+}
+
+/// Without the hypervisor engine in this build, every machine is an
+/// interpreter machine whatever engine was asked for, and an interpreter
+/// machine turns its own wheel in ticks.
+#[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
+fn device_clock_for(_engine: Engine) -> DeviceClock {
+    DeviceClock::Ticks
+}
+
+/// The processor the machine offers its guest, narrowed for the engine that
+/// will run it.
+///
+/// A machine on the hypervisor must be narrowed to what the host's silicon can
+/// hold, whatever profile it was given: `XSETBV` is not a trapped instruction
+/// on the partition, so a guest that believes the preset enables a register
+/// file the host lacks makes the platform refuse its first 64-bit context
+/// write-back — measured as ISOLINUX handing off to the Alpine kernel, then a
+/// `Host`-kind engine fault. `HostShared` is therefore forced for that engine
+/// rather than left to the `--cpu-capabilities` flag, which defaults to the
+/// full `Preset`. The interpreter offers whatever the profile asked for.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+fn cpu_params_for_engine(config: &ResolvedConfig) -> BxParams {
+    let capabilities = match config.engine {
+        Engine::Whp => CpuCapabilities::HostShared,
+        Engine::Interpreter => config.cpu_capabilities,
+    };
+    capabilities.narrow(config.cpu_params.clone())
+}
+
+/// Without the hypervisor engine in this build, every machine runs on the
+/// interpreter, which offers exactly the profile's processor.
+#[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
+fn cpu_params_for_engine(config: &ResolvedConfig) -> BxParams {
+    config.cpu_capabilities.narrow(config.cpu_params.clone())
 }
 
 #[cfg(feature = "gui-egui")]
@@ -285,7 +489,7 @@ fn run_egui_emulator_loop(
     command_rx: mpsc::Receiver<crate::app::NativeEmulatorCommand>,
     shared: Arc<Mutex<SharedDisplay>>,
 ) -> Result<RunSummary, RunError> {
-    let mut instructions_executed = 0u64;
+    let mut instructions_executed = Some(0u64);
     let mut create_startup_disks = true;
 
     while let Ok(command) = command_rx.recv() {
@@ -316,8 +520,14 @@ fn run_egui_emulator_loop(
                     }
                 };
                 create_startup_disks = false;
+                // A total is a total only while every run counted. One run on
+                // the hypervisor makes the sum a guess, and a guess is not
+                // reported as a count.
                 instructions_executed =
-                    instructions_executed.saturating_add(summary.instructions_executed);
+                    match (instructions_executed, summary.instructions_executed) {
+                        (Some(total), Some(counted)) => Some(total.saturating_add(counted)),
+                        (None, _) | (_, None) => None,
+                    };
 
                 let restart_requested = finish_egui_run(&shared);
                 if !restart_requested {

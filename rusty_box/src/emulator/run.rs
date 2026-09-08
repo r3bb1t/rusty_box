@@ -526,16 +526,22 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// feel laggy and drop characters. Pumping inside the wait lets a keypress
     /// enqueue a scancode, which the very next device tick delivers as IRQ1,
     /// waking the guest within a device quantum.
+    ///
+    /// Public because a driver outside this crate that advances the guest by
+    /// other means has the same obligation: a machine on the hypervisor is
+    /// stepped from its front end's thread, and this is how that thread's
+    /// input reaches the devices between steps.
+    ///
     /// Without alloc there is no GUI (`Emulator::gui` requires `Box<dyn
     /// BxGui>`), so host-input pumping is a no-op; `step_batch` and the
     /// HLT/MWAIT waits stay callable from no-alloc hosts like the UEFI
     /// example.
     #[cfg(not(feature = "alloc"))]
     #[inline]
-    pub(super) fn pump_gui_input(&mut self) {}
+    pub fn pump_gui_input(&mut self) {}
 
     #[cfg(feature = "alloc")]
-    pub(super) fn pump_gui_input(&mut self) {
+    pub fn pump_gui_input(&mut self) {
         let mut scancodes_to_send = Vec::new();
         let mut mouse_to_send = Vec::new();
         let mut serial_input = Vec::new();
