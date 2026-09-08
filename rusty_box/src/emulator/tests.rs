@@ -1450,6 +1450,19 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             !cpu.owes_a_system_management_interrupt(),
             "and taking it settles the debt"
         );
+
+        cpu.deliver_smi();
+        cpu.mask_event(BxCpuC::<()>::BX_EVENT_SMI);
+        assert!(
+            !cpu.owes_a_system_management_interrupt(),
+            "a processor inside system-management mode owes no further SMI: Bochs \
+             masks the event on entry and unmasks it at RSM"
+        );
+        cpu.unmask_event(BxCpuC::<()>::BX_EVENT_SMI);
+        assert!(
+            cpu.owes_a_system_management_interrupt(),
+            "and it is owed again once the mode is left"
+        );
     }
 
     #[test]

@@ -752,7 +752,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// a hypervisor partition consults nothing here, so its engine has to.
     #[must_use]
     pub fn owes_a_system_management_interrupt(&self) -> bool {
-        (self.pending_event & Self::BX_EVENT_SMI) != 0
+        // Masked, not a bare pending read: SMM entry masks this event and `RSM`
+        // unmasks it (`cpu/smm.cc`), so a processor already inside
+        // system-management mode owes nothing — Bochs
+        // `cpu/event.cc handleAsyncEvent` tests it the same way.
+        self.is_unmasked_event_pending(Self::BX_EVENT_SMI)
     }
 
     /// Bochs `deliver_NMI`: signal NMI.
