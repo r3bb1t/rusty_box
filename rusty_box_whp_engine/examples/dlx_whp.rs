@@ -386,6 +386,60 @@ fn report(reached: usize, began: Instant, ticks: u64, machine: &mut FastMachine<
         "  injected {} windows_armed {}",
         census.injections.injected, census.injections.windows_armed
     );
+    // Every vector this engine placed, beside every INTA cycle the machine's
+    // own controllers took. They must match, in total and per vector: an
+    // acknowledge without a placement is a vector taken from the 8259 and
+    // never delivered, and on the SLAVE that is unrecoverable — the master's
+    // cascade line stays in service until the guest EOIs it, so every later
+    // slave IRQ is blocked while IRQ 0, being higher priority, keeps arriving.
+    // Only non-zero vectors, because which vectors appear at all is the fact
+    // worth reading; vector = the 8259's base + IRQ, so IRQ 0 is 0x08 under
+    // the BIOS and 0x20 once Linux remaps, and IRQ 14 is 0x76 then 0x2e.
+    let acknowledged = machine.with_machine(|m| {
+        let mut processor = m.processor(0);
+        let fabric = processor.io.device_manager().irq();
+        Acknowledged {
+            total: fabric.acknowledge_count(),
+            per_vector: (0..=u8::MAX)
+                .map(|vector| (vector, fabric.vectors_acknowledged(vector)))
+                .filter(|(_, count)| *count != 0)
+                .collect(),
+        }
+    });
+    let placed: Vec<(u8, u32)> = census
+        .injections
+        .injected_per_vector
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count != 0)
+        .map(|(vector, count)| (u8::try_from(vector).unwrap_or(u8::MAX), *count))
+        .collect();
+    println!("  placed per vector:       {}", per_vector(&placed));
+    println!("  acknowledged per vector: {}", per_vector(&acknowledged.per_vector));
+    println!(
+        "  acknowledges {}  injected {}",
+        acknowledged.total, census.injections.injected
+    );
+}
+
+/// The fabric's side of the placement ledger, read under the machine's lock.
+struct Acknowledged {
+    /// INTA cycles taken at this machine's own 8259 pair.
+    total: u64,
+    /// Those cycles split by the vector they produced; zero entries omitted.
+    per_vector: Vec<(u8, u32)>,
+}
+
+/// `0x20:1234 0x2e:56`, so a vector reads against the 8259's bases at sight.
+fn per_vector(counts: &[(u8, u32)]) -> String {
+    if counts.is_empty() {
+        return "(none)".to_string();
+    }
+    counts
+        .iter()
+        .map(|(vector, count)| format!("{vector:#04x}:{count}"))
+        .collect::<Vec<String>>()
+        .join(" ")
 }
 
 /// Show what the guest was doing when it stopped.
