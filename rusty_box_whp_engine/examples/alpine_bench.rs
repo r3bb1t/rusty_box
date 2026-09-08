@@ -20,10 +20,12 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use rusty_box::cpu::decoder::features::X86Feature;
 use rusty_box::emulator::{
     AtaSlot, BootDevice, BootOrder, DeviceClock, Emulator, EmulatorConfig, Ips, MachineBuilder,
     MemorySize, RunBudget, SliceEngine, StopReason,
 };
+use rusty_box::params::BxParams;
 use rusty_box_whp_engine::{FastMachine, FastMachineFault, StepStop, WhpEngine};
 
 /// The exit code a harness reads as "this host cannot run this".
@@ -242,6 +244,29 @@ fn show(screen: Option<String>, label: &str) {
     }
 }
 
+/// `CpuCapabilities::HostShared::narrow` from `rusty_box_gui/src/config.rs`,
+/// in effect: drop AVX-512 / AVX when the host cannot carry their XSAVE
+/// state, and MONITOR/MWAIT unconditionally.
+///
+/// Without this the guest enables state the partition cannot hold, and the
+/// first write-back of a 64-bit kernel context fails
+/// `WHvSetVirtualProcessorRegisters` with `0xC0350005` — measured on an
+/// i5-12450H, which has no AVX-512, at `xcr0 = 0xe7`.
+fn host_shared(params: BxParams) -> BxParams {
+    let reported = core::arch::x86_64::__cpuid_count(0xD, 0);
+    let carried = (u64::from(reported.edx) << 32) | u64::from(reported.eax);
+    const AVX512_STATE: u64 = (1 << 5) | (1 << 6) | (1 << 7);
+    const AVX_STATE: u64 = 1 << 2;
+    let mut narrowed = params;
+    if carried & AVX512_STATE != AVX512_STATE {
+        narrowed = narrowed.excluding(X86Feature::IsaAvx512);
+    }
+    if carried & AVX_STATE == 0 {
+        narrowed = narrowed.excluding(X86Feature::IsaAvx);
+    }
+    narrowed.excluding(X86Feature::IsaMonitorMwait)
+}
+
 /// The machine both arms build, with the device clock said out loud.
 ///
 /// The clock is the only field that differs between them: a machine adopted
@@ -249,12 +274,18 @@ fn show(screen: Option<String>, label: &str) {
 /// hardware processor's instructions and a wheel measured in them would never
 /// turn. The interpreter keeps its wheel in ticks, which is the unit it
 /// retires.
-fn config(clock: DeviceClock) -> EmulatorConfig {
+///
+/// The processor is the same on both, and it is the caller's to narrow: a
+/// benchmark comparing two engines runs one guest, so the interpreter offers
+/// exactly the features the hypervisor's partition can carry, or the two arms
+/// would be booting different machines.
+fn config(clock: DeviceClock, cpu_params: BxParams) -> EmulatorConfig {
     EmulatorConfig {
         memory: MemorySize::bytes(512 * 1024 * 1024),
         memory_block_size: 128 * 1024,
         ips: Ips::new(300_000_000),
         pci_enabled: true,
+        cpu_params,
         device_clock: clock,
         ..EmulatorConfig::default()
     }
@@ -262,11 +293,12 @@ fn config(clock: DeviceClock) -> EmulatorConfig {
 
 fn builder<'a>(
     clock: DeviceClock,
+    cpu_params: BxParams,
     bios: &'a [u8],
     vga: Option<&'a [u8]>,
     iso: &str,
 ) -> MachineBuilder<'a, ()> {
-    let mut builder = MachineBuilder::new(config(clock))
+    let mut builder = MachineBuilder::new(config(clock, cpu_params))
         .bios(bios)
         .boot_order(BootOrder::just(BootDevice::Cdrom))
         .cdrom_file(AtaSlot::SECONDARY_MASTER, iso);
@@ -320,6 +352,17 @@ fn bench() -> std::process::ExitCode {
 
     println!("Alpine: {iso}\n");
 
+    // One processor for both arms, narrowed once to what this host's XSAVE
+    // can carry, so the two boots are of the same machine.
+    let topology = match BxParams::default().with_topology(1, 1, 1) {
+        Ok(params) => params,
+        Err(error) => {
+            eprintln!("topology: {error:?}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let cpu_params = host_shared(topology);
+
     // Either engine alone, because a failure on one is investigated by running
     // that one repeatedly and the other's boot is a minute of waiting each time.
     let only = std::env::var("ALPINE_ENGINE").unwrap_or_default();
@@ -330,14 +373,21 @@ fn bench() -> std::process::ExitCode {
     let software = if !want_software {
         Reached { milestones: 0, took: Duration::ZERO, at: Vec::new(), wedged: None }
     } else {
-        let mut machine =
-            match builder(DeviceClock::Ticks, &bios, vga.as_deref(), &iso).build() {
-                Ok(machine) => machine,
-                Err(error) => {
-                    eprintln!("could not assemble the interpreter machine: {error}");
-                    return std::process::ExitCode::FAILURE;
-                }
-            };
+        let mut machine = match builder(
+            DeviceClock::Ticks,
+            cpu_params.clone(),
+            &bios,
+            vga.as_deref(),
+            &iso,
+        )
+        .build()
+        {
+            Ok(machine) => machine,
+            Err(error) => {
+                eprintln!("could not assemble the interpreter machine: {error}");
+                return std::process::ExitCode::FAILURE;
+            }
+        };
         boot(&mut machine, "interpreter")
     };
 
@@ -350,8 +400,14 @@ fn bench() -> std::process::ExitCode {
     let hardware = if !want_hardware {
         Reached { milestones: 0, took: Duration::ZERO, at: Vec::new(), wedged: None }
     } else {
-        let assembled = match builder(DeviceClock::HostTime, &bios, vga.as_deref(), &iso)
-            .build_on::<WhpEngine>()
+        let assembled = match builder(
+            DeviceClock::HostTime,
+            cpu_params,
+            &bios,
+            vga.as_deref(),
+            &iso,
+        )
+        .build_on::<WhpEngine>()
         {
             Ok(machine) => machine,
             Err(error) => {
