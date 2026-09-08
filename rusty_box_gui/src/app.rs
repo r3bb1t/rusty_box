@@ -10,11 +10,24 @@ use std::sync::{
     {Arc, Mutex},
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::theme::STROKE_HAIRLINE;
 use crate::shell::theme::{
     configure_shell_style, shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED,
-    BG_BASE, BG_CARD, BG_PANEL, STROKE_HAIRLINE, TEXT_MUTED, TEXT_PRIMARY,
+    BG_BASE, BG_PANEL, TEXT_MUTED, TEXT_PRIMARY,
 };
-use egui::{Color32, RichText, Stroke};
+#[cfg(target_arch = "wasm32")]
+use crate::shell::widgets::disabled_tile;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::widgets::{
+    action_tile_enabled, hairline_above, hairline_below, home_fact, status_text, ShellStateBadge,
+};
+use crate::shell::widgets::{action_tile, metadata_text, page_header, status_dot, ActionTileWeight};
+#[cfg(target_arch = "wasm32")]
+use egui::Color32;
+use egui::RichText;
+#[cfg(not(target_arch = "wasm32"))]
+use egui::Stroke;
 // The wasm build drives the machine directly from the frame loop below; the
 // native build hands it to a runner thread instead.
 #[cfg(target_arch = "wasm32")]
@@ -1358,7 +1371,7 @@ impl NativeShellApp {
             HardwareDevice::Memory => {
                 let memory_step = if cfg!(target_os = "android") { 64 } else { 1 };
                 let memory_block_step = if cfg!(target_os = "android") { 64 } else { 1 };
-                hardware_intro(
+                page_header(
                     ui,
                     "Memory",
                     "Edit guest memory, host memory, and allocation block size before power-on.",
@@ -1406,7 +1419,7 @@ impl NativeShellApp {
                 });
             }
             HardwareDevice::Processors => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Virtual CPU",
                     "Select virtual processors and pacing before power-on. Max instructions of 0 means unlimited.",
@@ -1536,7 +1549,7 @@ impl NativeShellApp {
                 });
             }
             HardwareDevice::Devices => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Devices",
                     "PCI and boot order apply at the next Power On.",
@@ -1611,7 +1624,7 @@ impl NativeShellApp {
                 detail_row(ui, "Effective boot order", &self.vm_info.boot);
             }
             HardwareDevice::HardDisk => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Hard disk",
                     "Attach or detach hard disk media for the next launch.",
@@ -1706,7 +1719,7 @@ impl NativeShellApp {
                 }
             }
             HardwareDevice::CdDvd => {
-                hardware_intro(
+                page_header(
                     ui,
                     "CD/DVD",
                     "Attach or detach ISO media and optionally boot it first.",
@@ -1772,7 +1785,7 @@ impl NativeShellApp {
                 }
             }
             HardwareDevice::Display => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Display and ROMs",
                     "BIOS, VGA BIOS, and logging are applied on the next Power On.",
@@ -3459,7 +3472,7 @@ impl WebShellApp {
     fn draw_web_hardware_detail(&mut self, ui: &mut egui::Ui) {
         match self.chrome.selected_hardware {
             HardwareDevice::Memory => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Browser memory",
                     "Choose guest RAM before boot. Wasm32 can address up to 4 GiB, but allocation still depends on browser and device memory.",
@@ -3499,7 +3512,7 @@ impl WebShellApp {
                 }
             }
             HardwareDevice::Processors => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Cooperative CPU",
                     "Select virtual processors before boot. Browser execution still uses frame-sized batches to keep the UI responsive.",
@@ -3535,7 +3548,7 @@ impl WebShellApp {
                 }
             }
             HardwareDevice::Devices => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Browser devices",
                     "The browser build exposes a fixed virtual machine profile and does not persist hardware edits.",
@@ -3544,7 +3557,7 @@ impl WebShellApp {
                 detail_row(ui, "Boot media", "Upload on Home");
             }
             HardwareDevice::HardDisk => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Browser disk images",
                     "The browser does not attach host disks. Use Images to download flat disk or floppy images.",
@@ -3557,7 +3570,7 @@ impl WebShellApp {
                     (Some(name), Some(byte_len)) => web_uploaded_media_summary(name, byte_len),
                     _ => "No uploaded media".to_owned(),
                 };
-                hardware_intro(
+                page_header(
                     ui,
                     "Uploaded boot media",
                     "Home opens a browser file picker and attaches the selected image as bootable CD/DVD media.",
@@ -3566,7 +3579,7 @@ impl WebShellApp {
                 detail_row(ui, "Boot mode", "Uploaded boot image");
             }
             HardwareDevice::Display => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Canvas display",
                     "The VGA framebuffer is uploaded as an egui texture and scaled with nearest-neighbor filtering.",
@@ -3677,18 +3690,6 @@ fn draw_about_window(ctx: &egui::Context, chrome: &mut ShellChrome) {
                 "upload ISO, download generated images",
             ));
         });
-}
-
-fn metadata_text(label: &str, value: &str) -> RichText {
-    RichText::new(format!("{label}: {value}"))
-        .size(11.0)
-        .color(TEXT_MUTED)
-}
-
-fn hardware_intro(ui: &mut egui::Ui, title: &str, body: &str) {
-    ui.label(RichText::new(title).size(16.0).strong().color(TEXT_PRIMARY));
-    ui.label(RichText::new(body).color(TEXT_MUTED));
-    ui.add_space(10.0);
 }
 
 #[cfg(target_os = "android")]
@@ -3813,17 +3814,6 @@ fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
     });
 }
 
-fn status_dot(ui: &mut egui::Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 3.5, color);
-}
-
-/// The small monospace face the status strip and state badges share.
-#[cfg(not(target_arch = "wasm32"))]
-fn status_text(text: impl Into<String>) -> RichText {
-    RichText::new(text).monospace().size(11.0)
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 fn cpu_count_label(cpus: u32) -> String {
     if cpus == 1 {
@@ -3833,15 +3823,8 @@ fn cpu_count_label(cpus: u32) -> String {
     }
 }
 
-/// The one-word state the status strip and the Home header both show, with
-/// the accent that state owns: cyan runs, amber waits, red has faulted, and
+/// The badge for a runner status: cyan runs, amber waits, red has faulted, and
 /// idle is muted.
-#[cfg(not(target_arch = "wasm32"))]
-struct ShellStateBadge {
-    label: &'static str,
-    color: Color32,
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 fn shell_state_badge(status: &ShellStatus, faulted: bool) -> ShellStateBadge {
     if status.running {
@@ -3865,37 +3848,6 @@ fn shell_state_badge(status: &ShellStatus, faulted: bool) -> ShellStateBadge {
             color: TEXT_MUTED,
         }
     }
-}
-
-/// A one-point rule along the bottom edge of a panel's `rect`, so two stacked
-/// panels meet on a single line instead of two framed strokes.
-#[cfg(not(target_arch = "wasm32"))]
-fn hairline_below(ui: &egui::Ui, rect: egui::Rect) {
-    ui.painter().hline(
-        rect.x_range(),
-        rect.bottom() - 0.5,
-        Stroke::new(1.0_f32, STROKE_HAIRLINE),
-    );
-}
-
-/// The same rule along the top edge, for a panel that sits below its neighbour.
-#[cfg(not(target_arch = "wasm32"))]
-fn hairline_above(ui: &egui::Ui, rect: egui::Rect) {
-    ui.painter().hline(
-        rect.x_range(),
-        rect.top() + 0.5,
-        Stroke::new(1.0_f32, STROKE_HAIRLINE),
-    );
-}
-
-/// A labelled fact in the Home header: a muted caption over its value.
-#[cfg(not(target_arch = "wasm32"))]
-fn home_fact(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(RichText::new(label).size(10.5).color(TEXT_MUTED));
-        ui.label(RichText::new(value).size(13.0).color(TEXT_PRIMARY));
-    });
 }
 
 /// egui's flat menu-bar styling with enough padding that the menu titles read
@@ -3930,131 +3882,6 @@ fn format_ips_f64(ips: f64) -> String {
     } else {
         "---".to_owned()
     }
-}
-
-/// Which card in a row of actions carries the eye. The primary card keeps its
-/// accent outline at rest and a filled accent button; a secondary card rests
-/// on the hairline and only takes its accent when hovered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActionTileWeight {
-    Primary,
-    Secondary,
-}
-
-/// The card's resting height; every tile in a row shares it so the row reads
-/// as one band.
-const ACTION_TILE_MIN_HEIGHT: f32 = 112.0;
-
-fn action_tile(
-    ui: &mut egui::Ui,
-    title: &str,
-    body: &str,
-    accent: Color32,
-    weight: ActionTileWeight,
-    on_click: impl FnMut(),
-) {
-    action_tile_enabled(ui, title, body, accent, weight, true, on_click);
-}
-
-/// An action card that is the target as a whole: the frame senses the click,
-/// hover tints the fill toward the accent, and the button inside is the same
-/// action spelled out.
-fn action_tile_enabled(
-    ui: &mut egui::Ui,
-    title: &str,
-    body: &str,
-    accent: Color32,
-    weight: ActionTileWeight,
-    enabled: bool,
-    mut on_click: impl FnMut(),
-) {
-    let egui::InnerResponse {
-        inner: button_clicked,
-        response: card,
-    } = ui.scope_builder(
-        egui::UiBuilder::new()
-            .id_salt(title)
-            .sense(egui::Sense::click()),
-        |ui| {
-            let hovered = enabled && ui.response().hovered();
-            let stroke_color = match (weight, enabled, hovered) {
-                (_, false, _) => STROKE_HAIRLINE,
-                (ActionTileWeight::Primary, true, _) => accent,
-                (ActionTileWeight::Secondary, true, true) => accent,
-                (ActionTileWeight::Secondary, true, false) => STROKE_HAIRLINE,
-            };
-            let fill = if hovered {
-                BG_CARD.lerp_to_gamma(accent, 0.06)
-            } else {
-                BG_CARD
-            };
-            shell_card_frame()
-                .fill(fill)
-                .stroke(Stroke::new(1.0_f32, stroke_color))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_min_height(ACTION_TILE_MIN_HEIGHT);
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    let title_color = if enabled { TEXT_PRIMARY } else { TEXT_MUTED };
-                    ui.label(RichText::new(title).size(16.0).strong().color(title_color));
-                    ui.label(RichText::new(body).size(12.5).color(TEXT_MUTED));
-                    let button = match weight {
-                        ActionTileWeight::Primary => {
-                            egui::Button::new(RichText::new(title).strong().color(BG_BASE))
-                                .fill(accent)
-                                .stroke(Stroke::NONE)
-                        }
-                        ActionTileWeight::Secondary => {
-                            egui::Button::new(RichText::new(title).color(TEXT_PRIMARY))
-                                .fill(BG_PANEL)
-                                .stroke(Stroke::new(1.0_f32, accent))
-                        }
-                    };
-                    action_tile_footer(ui, button, enabled).clicked()
-                })
-                .inner
-        },
-    );
-    let card = if enabled {
-        card.on_hover_cursor(egui::CursorIcon::PointingHand)
-    } else {
-        card
-    };
-    if button_clicked || (enabled && card.clicked()) {
-        on_click();
-    }
-}
-
-/// Places a tile's button on the card's bottom edge, so a row of tiles whose
-/// bodies wrap to different line counts still shares one button baseline.
-fn action_tile_footer(
-    ui: &mut egui::Ui,
-    button: egui::Button<'_>,
-    enabled: bool,
-) -> egui::Response {
-    const FOOTER_MIN_HEIGHT: f32 = 36.0;
-    // The cursor already sits one item-spacing below the last label; measuring
-    // from the content's top edge is what stays true after `set_min_height`.
-    let used = ui.cursor().top() - ui.max_rect().top();
-    let footer = (ACTION_TILE_MIN_HEIGHT - used).max(FOOTER_MIN_HEIGHT);
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), footer),
-        egui::Layout::bottom_up(egui::Align::Min).with_cross_justify(true),
-        |ui| ui.add_enabled(enabled, button),
-    )
-    .inner
-}
-
-#[cfg(target_arch = "wasm32")]
-fn disabled_tile(ui: &mut egui::Ui, title: &str, body: &str) {
-    shell_card_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.set_min_height(ACTION_TILE_MIN_HEIGHT);
-        ui.spacing_mut().item_spacing.y = 4.0;
-        ui.label(RichText::new(title).size(16.0).strong().color(TEXT_MUTED));
-        ui.label(RichText::new(body).size(12.5).color(TEXT_MUTED));
-        action_tile_footer(ui, egui::Button::new("Unavailable"), false);
-    });
 }
 
 #[cfg(target_arch = "wasm32")]
