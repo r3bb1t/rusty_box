@@ -14,7 +14,7 @@ cargo run -p rusty_box_gui
 
 With no flags, the runner loads `rusty_box.toml` from the current working directory if it exists. Use `--config PATH` to load a specific file, or `--no-config` to skip TOML completely.
 
-The desktop egui shell runs `eframe` on the main thread and the emulator on a large-stack worker thread. It includes a Library sidebar, toolbar, Home, Hardware, Images, and Console pages. The Images page uses native `Browse...` save dialogs and accepts drag/drop to fill the target image path.
+The desktop egui shell runs `eframe` on the main thread and the emulator on a large-stack worker thread. It includes a Library sidebar, toolbar, Home, Hardware, Images, and Console pages. The Images page uses native `Browse…` save dialogs and accepts drag/drop to fill the target image path.
 
 Power controls are state-aware: `Power On` starts the selected Library profile, `Restart VM` and `Power Off` only affect a running VM, and startup errors are surfaced in the shell. Hardware panes edit guest memory, CPU/IPS, boot device, disk/CD-ROM attachment, and ROM paths before launch. The Library can duplicate, rename, select, and delete VM profiles while the VM is stopped, and the toolbar `Library` checkbox can hide the sidebar so the Console can scale wider. The Console can show the serial log and send serial input lines while a VM is running.
 

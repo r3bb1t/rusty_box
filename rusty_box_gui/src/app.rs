@@ -18,7 +18,7 @@ use crate::shell::sidebar::VmLibraryEntry;
 use crate::shell::theme::STROKE_HAIRLINE;
 use crate::shell::theme::{
     configure_shell_style, shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED,
-    BG_BASE, BG_PANEL, TEXT_MUTED, TEXT_PRIMARY,
+    BG_BASE, BG_PANEL, SPACE_GROUP, SPACE_PAGE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::vm_bar::VmBarState;
@@ -28,14 +28,14 @@ use crate::shell::widgets::disabled_tile;
 use crate::shell::widgets::hairline_below;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::{
-    action_tile_enabled, hairline_above, home_fact, status_text, ShellStateBadge,
+    action_tile_enabled, hairline_above, hardware_row, home_fact, status_text, ShellStateBadge,
 };
-use crate::shell::widgets::{action_tile, metadata_text, page_header, status_dot, ActionTileWeight};
+use crate::shell::widgets::{
+    action_tile, field_row, metadata_text, page_header, status_dot, ActionTileWeight,
+};
 #[cfg(target_arch = "wasm32")]
 use egui::Color32;
-use egui::RichText;
-#[cfg(target_os = "android")]
-use egui::Stroke;
+use egui::{RichText, Stroke};
 // The wasm build drives the machine directly from the frame loop below; the
 // native build hands it to a runner thread instead.
 #[cfg(target_arch = "wasm32")]
@@ -66,6 +66,11 @@ fn vga_mode_label(mode: Option<crate::config::VgaMode>) -> String {
         Some(mode) => format!("{}×{} @ {}bpp", mode.width, mode.height, mode.bpp),
     }
 }
+
+/// The device list takes a fixed column; the detail card takes the rest.
+/// A card's width is the layout's decision, never the card's own.
+#[cfg(not(target_arch = "wasm32"))]
+const HARDWARE_LIST_WIDTH: f32 = 150.0;
 
 #[cfg(target_arch = "wasm32")]
 const BROWSER_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
@@ -1127,44 +1132,51 @@ impl NativeShellApp {
     }
 
     fn draw_hardware_page(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            self.draw_shell_notice(ui);
-            ui.horizontal(|ui| {
-                shell_card_frame().show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.set_min_width(190.0);
-                        ui.label(RichText::new("Devices").strong().color(TEXT_PRIMARY));
-                        ui.add_space(8.0);
-                        for device in HardwareDevice::ALL {
-                            if ui
-                                .selectable_label(
-                                    self.chrome.selected_hardware == device,
-                                    device.label(),
-                                )
-                                .clicked()
-                            {
-                                self.chrome.selected_hardware = device;
-                            }
-                        }
-                    });
-                });
-                shell_card_frame().show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.set_min_width(520.0);
-                        ui.label(
-                            RichText::new(format!(
-                                "Hardware Summary  |  {}",
-                                self.chrome.selected_hardware.label()
-                            ))
-                            .size(18.0)
-                            .strong(),
-                        );
-                        ui.separator();
-                        self.draw_hardware_detail(ui);
-                    });
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(SPACE_PAGE))
+            .show(ui, |ui| {
+                self.draw_shell_notice(ui);
+                page_header(ui, "Hardware", "Settings apply at power-on.");
+                let height = ui.available_height();
+                // A card stands exactly as tall as its column when its content
+                // is the column less the frame's total margin: the padding and
+                // the hairline on both edges.
+                let card_content_height =
+                    (height - shell_card_frame().total_margin().sum().y).max(0.0);
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(HARDWARE_LIST_WIDTH, height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            // The list is a navigator: it sits on the panel
+                            // surface `hardware_row` paints its selection over.
+                            shell_card_frame().fill(BG_PANEL).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.set_min_height(card_content_height);
+                                for device in HardwareDevice::ALL {
+                                    let selected = self.chrome.selected_hardware == device;
+                                    if hardware_row(ui, device.label(), selected).clicked() {
+                                        self.chrome.selected_hardware = device;
+                                    }
+                                }
+                            });
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            shell_card_frame().show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.set_min_height(card_content_height);
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    self.draw_hardware_detail(ui);
+                                });
+                            });
+                        },
+                    );
                 });
             });
-        });
     }
 
     fn draw_hardware_detail(&mut self, ui: &mut egui::Ui) {
@@ -1182,9 +1194,8 @@ impl NativeShellApp {
                     "Edit guest memory, host memory, and allocation block size before power-on.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Guest memory").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Guest memory", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.memory_mib,
                             1,
@@ -1193,11 +1204,10 @@ impl NativeShellApp {
                             editable,
                             memory_step,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Host memory").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Host memory", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.host_memory_mib,
                             1,
@@ -1206,11 +1216,10 @@ impl NativeShellApp {
                             editable,
                             memory_step,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Memory block").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Memory block", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.memory_block_kib,
                             1,
@@ -1219,7 +1228,7 @@ impl NativeShellApp {
                             editable,
                             memory_block_step,
                             None,
-                        );
+                        )
                     });
                 });
             }
@@ -1231,9 +1240,8 @@ impl NativeShellApp {
                 );
                 detail_row(ui, "Virtual processors", &self.vm_info.cpus.to_string());
                 ui.add_enabled_ui(editable, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Sockets").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Sockets", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.cpu_sockets,
                             1,
@@ -1242,15 +1250,10 @@ impl NativeShellApp {
                             editable,
                             1,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Cores / socket")
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Cores / socket", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.cpu_cores,
                             1,
@@ -1259,15 +1262,10 @@ impl NativeShellApp {
                             editable,
                             1,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Threads / core")
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Threads / core", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.cpu_threads,
                             1,
@@ -1276,7 +1274,7 @@ impl NativeShellApp {
                             editable,
                             1,
                             None,
-                        );
+                        )
                     });
                     let total = self
                         .settings
@@ -1291,10 +1289,11 @@ impl NativeShellApp {
                     } else {
                         RichText::new(format!("{total} logical CPUs")).color(TEXT_MUTED)
                     };
-                    ui.label(total_text);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("IPS target").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    field_row(ui, "", |ui| {
+                        ui.label(total_text);
+                    });
+                    changed |= field_row(ui, "IPS target", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.ips,
                             1,
@@ -1303,44 +1302,42 @@ impl NativeShellApp {
                             editable,
                             1_000_000,
                             Some(1_000_000.0),
-                        );
+                        )
                     });
-                    changed |= ui
-                        .checkbox(&mut self.settings.sync_slowdown, "Sync slowdown")
-                        .changed();
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(&mut self.settings.sync_slowdown, "Sync slowdown")
+                            .changed()
+                    });
                     // Which engine retires the guest's instructions. The
                     // hypervisor is offered only by a build that carries it on
                     // a host that has it, because choosing it otherwise is
                     // refused at power-on rather than quietly downgraded — see
                     // `RunError::NoHypervisor`.
-                    egui::ComboBox::from_label("Engine")
-                        .selected_text(engine_label(self.settings.engine))
-                        .show_ui(ui, |ui| {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.settings.engine,
-                                    crate::config::Engine::Interpreter,
-                                    engine_label(crate::config::Engine::Interpreter),
-                                )
-                                .changed();
-                            #[cfg(all(feature = "hv-whp", windows))]
-                            {
+                    field_row(ui, "Engine", |ui| {
+                        egui::ComboBox::from_id_salt("Engine")
+                            .selected_text(engine_label(self.settings.engine))
+                            .show_ui(ui, |ui| {
                                 changed |= ui
                                     .selectable_value(
                                         &mut self.settings.engine,
-                                        crate::config::Engine::Whp,
-                                        engine_label(crate::config::Engine::Whp),
+                                        crate::config::Engine::Interpreter,
+                                        engine_label(crate::config::Engine::Interpreter),
                                     )
                                     .changed();
-                            }
-                        });
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Max instructions")
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                        changed |= draw_u64_field(
+                                #[cfg(all(feature = "hv-whp", windows))]
+                                {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut self.settings.engine,
+                                            crate::config::Engine::Whp,
+                                            engine_label(crate::config::Engine::Whp),
+                                        )
+                                        .changed();
+                                }
+                            });
+                    });
+                    changed |= field_row(ui, "Max instructions", |ui| {
+                        draw_u64_field(
                             ui,
                             &mut self.settings.max_instructions,
                             0,
@@ -1349,7 +1346,7 @@ impl NativeShellApp {
                             editable,
                             1_000_000,
                             Some(1.0),
-                        );
+                        )
                     });
                 });
             }
@@ -1360,7 +1357,9 @@ impl NativeShellApp {
                     "PCI and boot order apply at the next Power On.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    changed |= ui.checkbox(&mut self.settings.pci, "Enable PCI").changed();
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(&mut self.settings.pci, "Enable PCI").changed()
+                    });
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new("Boot order (first match boots)")
@@ -1373,11 +1372,7 @@ impl NativeShellApp {
                     let mut remove: Option<usize> = None;
                     let len = self.settings.boot_order.len();
                     for (index, device) in self.settings.boot_order.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("{}. {device}", index + 1))
-                                    .color(TEXT_PRIMARY),
-                            );
+                        field_row(ui, &format!("{}. {device}", index + 1), |ui| {
                             if ui
                                 .add_enabled(index > 0, egui::Button::new("▲"))
                                 .on_hover_text("Move earlier")
@@ -1416,13 +1411,18 @@ impl NativeShellApp {
                     ] {
                         if !self.settings.boot_order.contains(&device) {
                             let attached = self.settings.is_boot_device_attached(device);
-                            if ui
-                                .add_enabled(attached, egui::Button::new(format!("Add {device}")))
-                                .clicked()
-                            {
-                                self.settings.boot_order.push(device);
-                                changed = true;
-                            }
+                            field_row(ui, "", |ui| {
+                                if ui
+                                    .add_enabled(
+                                        attached,
+                                        egui::Button::new(format!("Add {device}")),
+                                    )
+                                    .clicked()
+                                {
+                                    self.settings.boot_order.push(device);
+                                    changed = true;
+                                }
+                            });
                         }
                     }
                 });
@@ -1435,11 +1435,11 @@ impl NativeShellApp {
                     "Attach or detach hard disk media for the next launch.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    changed |= ui
-                        .checkbox(&mut self.settings.disk_enabled, "Enable hard disk")
-                        .changed();
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("Disk path").strong().color(TEXT_PRIMARY));
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(&mut self.settings.disk_enabled, "Enable hard disk")
+                            .changed()
+                    });
+                    field_row(ui, "Disk path", |ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.disk_path)
@@ -1454,8 +1454,7 @@ impl NativeShellApp {
                             }
                         }
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("ATA channel").strong().color(TEXT_PRIMARY));
+                    field_row(ui, "ATA channel", |ui| {
                         changed |= ui
                             .add(egui::DragValue::new(&mut self.settings.disk_channel).range(0..=1))
                             .changed();
@@ -1466,29 +1465,30 @@ impl NativeShellApp {
                     });
 
                     let mut override_enabled = self.settings.disk_chs_override.is_some();
-                    if ui
-                        .checkbox(&mut override_enabled, "Override CHS geometry")
-                        .on_hover_text(
-                            "Force a specific cylinders/heads/sectors geometry instead of \
-                             auto-detecting it from the image size.",
-                        )
-                        .changed()
-                    {
-                        self.settings.disk_chs_override = override_enabled.then(|| {
-                            self.config.disk.as_ref().map_or(
-                                crate::args::DiskGeometry {
-                                    cylinders: 16_383,
-                                    heads: 16,
-                                    sectors_per_track: 63,
-                                },
-                                |disk| disk.geometry,
+                    field_row(ui, "", |ui| {
+                        if ui
+                            .checkbox(&mut override_enabled, "Override CHS geometry")
+                            .on_hover_text(
+                                "Force a specific cylinders/heads/sectors geometry instead of \
+                                 auto-detecting it from the image size.",
                             )
-                        });
-                        changed = true;
-                    }
+                            .changed()
+                        {
+                            self.settings.disk_chs_override = override_enabled.then(|| {
+                                self.config.disk.as_ref().map_or(
+                                    crate::args::DiskGeometry {
+                                        cylinders: 16_383,
+                                        heads: 16,
+                                        sectors_per_track: 63,
+                                    },
+                                    |disk| disk.geometry,
+                                )
+                            });
+                            changed = true;
+                        }
+                    });
                     if let Some(chs) = &mut self.settings.disk_chs_override {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Cylinders").strong().color(TEXT_PRIMARY));
+                        field_row(ui, "Cylinders", |ui| {
                             changed |= ui
                                 .add(
                                     egui::DragValue::new(&mut chs.cylinders)
@@ -1530,11 +1530,11 @@ impl NativeShellApp {
                     "Attach or detach ISO media and optionally boot it first.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    changed |= ui
-                        .checkbox(&mut self.settings.cdrom_enabled, "Enable CD/DVD")
-                        .changed();
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("ISO path").strong().color(TEXT_PRIMARY));
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(&mut self.settings.cdrom_enabled, "Enable CD/DVD")
+                            .changed()
+                    });
+                    field_row(ui, "ISO path", |ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.cdrom_path)
@@ -1549,8 +1549,7 @@ impl NativeShellApp {
                             }
                         }
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("ATA channel").strong().color(TEXT_PRIMARY));
+                    field_row(ui, "ATA channel", |ui| {
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut self.settings.cdrom_channel).range(0..=1),
@@ -1563,21 +1562,23 @@ impl NativeShellApp {
                     });
                     let mut boot_cdrom = self.settings.boot_order.first()
                         == Some(&crate::args::BootDevice::Cdrom);
-                    if ui.checkbox(&mut boot_cdrom, "Boot CD/DVD first").changed() {
-                        // Reposition the CD/DVD within the boot order without
-                        // disturbing the other devices' relative order.
-                        self.settings
-                            .boot_order
-                            .retain(|device| *device != crate::args::BootDevice::Cdrom);
-                        if boot_cdrom {
+                    field_row(ui, "", |ui| {
+                        if ui.checkbox(&mut boot_cdrom, "Boot CD/DVD first").changed() {
+                            // Reposition the CD/DVD within the boot order without
+                            // disturbing the other devices' relative order.
                             self.settings
                                 .boot_order
-                                .insert(0, crate::args::BootDevice::Cdrom);
-                        } else {
-                            self.settings.boot_order.push(crate::args::BootDevice::Cdrom);
+                                .retain(|device| *device != crate::args::BootDevice::Cdrom);
+                            if boot_cdrom {
+                                self.settings
+                                    .boot_order
+                                    .insert(0, crate::args::BootDevice::Cdrom);
+                            } else {
+                                self.settings.boot_order.push(crate::args::BootDevice::Cdrom);
+                            }
+                            changed = true;
                         }
-                        changed = true;
-                    }
+                    });
                 });
                 if let Some(cdrom) = &self.config.cdrom {
                     detail_row(
@@ -1596,8 +1597,7 @@ impl NativeShellApp {
                     "BIOS, VGA BIOS, and logging are applied on the next Power On.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("BIOS path").strong().color(TEXT_PRIMARY));
+                    field_row(ui, "BIOS path", |ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.bios_path)
@@ -1611,8 +1611,7 @@ impl NativeShellApp {
                             }
                         }
                     });
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("VGA BIOS path").strong().color(TEXT_PRIMARY));
+                    field_row(ui, "VGA BIOS path", |ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.vga_bios_path)
@@ -1626,56 +1625,65 @@ impl NativeShellApp {
                             }
                         }
                     });
-                    egui::ComboBox::from_label("Log level")
-                        .selected_text(format!("{:?}", self.settings.log_level))
-                        .show_ui(ui, |ui| {
-                            for (level, label) in [
-                                (crate::args::LogLevel::Trace, "trace"),
-                                (crate::args::LogLevel::Debug, "debug"),
-                                (crate::args::LogLevel::Info, "info"),
-                                (crate::args::LogLevel::Warn, "warn"),
-                                (crate::args::LogLevel::Error, "error"),
-                            ] {
-                                changed |= ui
-                                    .selectable_value(&mut self.settings.log_level, level, label)
-                                    .changed();
-                            }
-                        });
+                    field_row(ui, "Log level", |ui| {
+                        egui::ComboBox::from_id_salt("Log level")
+                            .selected_text(format!("{:?}", self.settings.log_level))
+                            .show_ui(ui, |ui| {
+                                for (level, label) in [
+                                    (crate::args::LogLevel::Trace, "trace"),
+                                    (crate::args::LogLevel::Debug, "debug"),
+                                    (crate::args::LogLevel::Info, "info"),
+                                    (crate::args::LogLevel::Warn, "warn"),
+                                    (crate::args::LogLevel::Error, "error"),
+                                ] {
+                                    changed |= ui
+                                        .selectable_value(&mut self.settings.log_level, level, label)
+                                        .changed();
+                                }
+                            });
+                    });
 
-                    egui::ComboBox::from_label("Display resolution")
-                        .selected_text(vga_mode_label(self.settings.vga_mode))
-                        .show_ui(ui, |ui| {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.settings.vga_mode,
-                                    None,
-                                    "Default (VGA / VBE)",
-                                )
-                                .changed();
-                            for &(w, h) in VGA_MODE_PRESETS {
-                                let mode = crate::config::VgaMode {
-                                    width: w,
-                                    height: h,
-                                    bpp: 32,
-                                };
+                    field_row(ui, "VGA mode", |ui| {
+                        egui::ComboBox::from_id_salt("VGA mode")
+                            .selected_text(vga_mode_label(self.settings.vga_mode))
+                            .show_ui(ui, |ui| {
                                 changed |= ui
                                     .selectable_value(
                                         &mut self.settings.vga_mode,
-                                        Some(mode),
-                                        format!("{w}×{h} @ 32bpp"),
+                                        None,
+                                        "Default (VGA / VBE)",
                                     )
                                     .changed();
-                            }
-                        });
-                    ui.label(
-                        RichText::new(
-                            "Raises the VBE ceiling so the guest can select this mode (via GRUB \
-                             gfxpayload / vesafb).",
-                        )
-                        .color(TEXT_MUTED),
-                    );
-                    changed |= ui
-                        .checkbox(
+                                for &(w, h) in VGA_MODE_PRESETS {
+                                    let mode = crate::config::VgaMode {
+                                        width: w,
+                                        height: h,
+                                        bpp: 32,
+                                    };
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut self.settings.vga_mode,
+                                            Some(mode),
+                                            format!("{w}×{h} @ 32bpp"),
+                                        )
+                                        .changed();
+                                }
+                            });
+                    });
+                    field_row(ui, "", |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(
+                                    "Raises the VBE ceiling so the guest can select this mode (via \
+                                     GRUB gfxpayload / vesafb).",
+                                )
+                                .color(TEXT_MUTED),
+                            )
+                            .wrap(),
+                        );
+                    });
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(
                             &mut self.settings.pci_vga,
                             "Register VGA on PCI (experimental KMS / bochs-drm)",
                         )
@@ -1683,7 +1691,8 @@ impl NativeShellApp {
                             "Exposes the adapter as PCI 1234:1111 so Linux bochs-drm can bind for \
                              a full KMS framebuffer. Experimental — verify with a guest boot.",
                         )
-                        .changed();
+                        .changed()
+                    });
                 });
                 detail_row(ui, "Adapter", "VGA text/graphics framebuffer");
                 detail_row(ui, "Applied BIOS", &self.vm_info.bios.display().to_string());
@@ -1704,10 +1713,17 @@ impl NativeShellApp {
             }
         }
 
-        ui.add_space(12.0);
+        ui.add_space(SPACE_GROUP);
         ui.separator();
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Save settings to config file").clicked() {
+            let save = egui::Button::new(
+                RichText::new("Save settings to config file")
+                    .strong()
+                    .color(BG_BASE),
+            )
+            .fill(ACCENT_CYAN)
+            .stroke(Stroke::NONE);
+            if ui.add_enabled(editable, save).clicked() {
                 self.save_settings_to_config_file();
             }
             if let Some(path) = &self.config.config_path {
@@ -2108,97 +2124,103 @@ impl DiskCreatorPanel {
     fn ui_page(&mut self, ui: &mut egui::Ui) -> Option<CreatedImage> {
         let mut created_image = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(12.0);
-            shell_card_frame().show(ui, |ui| {
-                ui.label(
-                    RichText::new("Disk Images")
-                        .size(22.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                ui.label(
-                    RichText::new(
-                        "Create flat hard disks and floppy images using the bximage backend.",
-                    )
-                    .color(TEXT_MUTED),
-                );
-            });
-            ui.add_space(12.0);
-
-            shell_card_frame().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.kind, CreatorKind::HardDisk, "Hard Disk");
-                    ui.selectable_value(&mut self.kind, CreatorKind::Floppy, "Floppy");
-                });
-                ui.separator();
-
-                #[cfg(not(target_arch = "wasm32"))]
-                ui.horizontal(|ui| {
-                    ui.label("Path");
-                    ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(360.0));
-                    if ui.button("Browse...").clicked() {
-                        self.choose_native_image_path();
-                    }
-                });
-
-                #[cfg(target_arch = "wasm32")]
-                ui.horizontal(|ui| {
-                    ui.label("Filename");
-                    ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(300.0));
-                });
-
-                match self.kind {
-                    CreatorKind::HardDisk => {
+            egui::Frame::new()
+                .inner_margin(egui::Margin::same(SPACE_PAGE))
+                .show(ui, |ui| {
+                    page_header(
+                        ui,
+                        "Disk images",
+                        "Create flat hard disks and floppy images with the bximage backend.",
+                    );
+                    shell_card_frame().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.label("Size");
+                            ui.selectable_value(&mut self.kind, CreatorKind::HardDisk, "Hard Disk");
+                            ui.selectable_value(&mut self.kind, CreatorKind::Floppy, "Floppy");
+                        });
+                        ui.separator();
+
+                        #[cfg(not(target_arch = "wasm32"))]
+                        field_row(ui, "Path", |ui| {
                             ui.add(
-                                egui::TextEdit::singleline(&mut self.hard_disk_size)
-                                    .hint_text("20G")
-                                    .desired_width(120.0),
+                                egui::TextEdit::singleline(&mut self.path)
+                                    .desired_width(320.0),
                             );
-                            ui.label(
-                                RichText::new("Examples: 10M, 512M, 20G, 512").color(TEXT_MUTED),
+                            if ui.button("Browse…").clicked() {
+                                self.choose_native_image_path();
+                            }
+                        });
+
+                        #[cfg(target_arch = "wasm32")]
+                        field_row(ui, "Filename", |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.path)
+                                    .desired_width(320.0),
                             );
                         });
-                    }
-                    CreatorKind::Floppy => {
-                        egui::ComboBox::from_label("Floppy format")
-                            .selected_text(self.floppy_format.friendly_label())
-                            .show_ui(ui, |ui| {
-                                for format in FloppyFormat::ALL {
-                                    ui.selectable_value(
-                                        &mut self.floppy_format,
-                                        format,
-                                        format.friendly_label(),
+
+                        match self.kind {
+                            CreatorKind::HardDisk => {
+                                field_row(ui, "Size", |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.hard_disk_size)
+                                            .hint_text("20G")
+                                            .desired_width(120.0),
                                     );
+                                    ui.label(
+                                        RichText::new("Examples: 10M, 512M, 20G, 512")
+                                            .size(TEXT_SECONDARY)
+                                            .color(TEXT_MUTED),
+                                    );
+                                });
+                            }
+                            CreatorKind::Floppy => {
+                                field_row(ui, "Floppy format", |ui| {
+                                    egui::ComboBox::from_id_salt("Floppy format")
+                                        .selected_text(self.floppy_format.friendly_label())
+                                        .show_ui(ui, |ui| {
+                                            for format in FloppyFormat::ALL {
+                                                ui.selectable_value(
+                                                    &mut self.floppy_format,
+                                                    format,
+                                                    format.friendly_label(),
+                                                );
+                                            }
+                                        });
+                                });
+                            }
+                        }
+
+                        #[cfg(not(target_arch = "wasm32"))]
+                        field_row(ui, "", |ui| {
+                            ui.checkbox(&mut self.overwrite, "Overwrite existing file");
+                        });
+
+                        ui.add_space(SPACE_GROUP);
+                        let action = if cfg!(target_arch = "wasm32") {
+                            "Download image"
+                        } else {
+                            "Create image"
+                        };
+                        let create = egui::Button::new(RichText::new(action).strong().color(BG_BASE))
+                            .fill(ACCENT_CYAN)
+                            .stroke(Stroke::NONE);
+                        if ui.add(create).clicked() {
+                            created_image = self.create_image();
+                        }
+
+                        if let Some(status) = &self.status {
+                            match status {
+                                CreatorStatus::Success(message) => {
+                                    ui.colored_label(ACCENT_CYAN, message);
                                 }
-                            });
-                    }
-                }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                ui.checkbox(&mut self.overwrite, "Overwrite existing file");
-
-                let action = if cfg!(target_arch = "wasm32") {
-                    "Download image"
-                } else {
-                    "Create image"
-                };
-                if ui.button(action).clicked() {
-                    created_image = self.create_image();
-                }
-
-                if let Some(status) = &self.status {
-                    match status {
-                        CreatorStatus::Success(message) => {
-                            ui.colored_label(ACCENT_CYAN, message);
+                                CreatorStatus::Error(message) => {
+                                    ui.colored_label(ACCENT_RED, message);
+                                }
+                            }
                         }
-                        CreatorStatus::Error(message) => {
-                            ui.colored_label(ACCENT_RED, message);
-                        }
-                    }
-                }
-            });
+                    });
+                });
         });
         created_image
     }

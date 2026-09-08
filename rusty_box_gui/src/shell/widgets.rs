@@ -2,6 +2,8 @@
 //! labelled row its controls sit on, the status dot and badge, the hairlines
 //! that join stacked panels, and the action tiles.
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::theme::ACCENT_CYAN;
 use crate::shell::theme::{
     shell_card_frame, BG_BASE, BG_CARD, BG_PANEL, SPACE_GROUP, STROKE_HAIRLINE, TEXT_BODY,
     TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY, TEXT_TITLE,
@@ -38,6 +40,33 @@ pub(crate) fn field_row<R>(
         add_contents(ui)
     })
     .inner
+}
+
+/// A row in a flat selectable list, wearing the shell's one selection idiom.
+/// The selected fill is `BG_CARD`, one step above the `BG_PANEL` surface a
+/// list of these rows sits on.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn hardware_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+    if selected {
+        ui.painter().rect_filled(rect, 6.0, BG_CARD);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
+            0.0,
+            ACCENT_CYAN,
+        );
+    } else if response.hovered() {
+        ui.painter().rect_filled(rect, 6.0, BG_CARD.gamma_multiply(0.5));
+    }
+    ui.painter().text(
+        rect.left_center() + egui::vec2(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(TEXT_BODY),
+        if selected { TEXT_PRIMARY } else { TEXT_MUTED },
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 pub(crate) fn metadata_text(label: &str, value: &str) -> RichText {
