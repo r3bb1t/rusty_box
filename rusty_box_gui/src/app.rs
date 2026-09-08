@@ -11,7 +11,7 @@ use std::sync::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::destination::SidebarAction;
+use crate::shell::destination::{SidebarAction, VmBarAction};
 use crate::shell::destination::{Destination, ShellPage};
 use crate::shell::sidebar::VmLibraryEntry;
 #[cfg(target_os = "android")]
@@ -20,17 +20,21 @@ use crate::shell::theme::{
     configure_shell_style, shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED,
     BG_BASE, BG_PANEL, TEXT_MUTED, TEXT_PRIMARY,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::vm_bar::VmBarState;
 #[cfg(target_arch = "wasm32")]
 use crate::shell::widgets::disabled_tile;
+#[cfg(target_os = "android")]
+use crate::shell::widgets::hairline_below;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::{
-    action_tile_enabled, hairline_above, hairline_below, home_fact, status_text, ShellStateBadge,
+    action_tile_enabled, hairline_above, home_fact, status_text, ShellStateBadge,
 };
 use crate::shell::widgets::{action_tile, metadata_text, page_header, status_dot, ActionTileWeight};
 #[cfg(target_arch = "wasm32")]
 use egui::Color32;
 use egui::RichText;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_os = "android")]
 use egui::Stroke;
 // The wasm build drives the machine directly from the frame loop below; the
 // native build hands it to a runner thread instead.
@@ -534,11 +538,6 @@ fn shell_should_draw_library(chrome: &ShellChrome) -> bool {
     chrome.show_library
 }
 
-#[cfg(test)]
-fn shell_menu_labels() -> [&'static str; 4] {
-    ["File", "Edit", "VM", "Help"]
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ShellStatus {
@@ -845,162 +844,42 @@ impl NativeShellApp {
         }
     }
 
-    fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
-        let bar = egui::Panel::top("vm_menu_bar")
-            .exact_size(28.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG_BASE)
-                    .inner_margin(egui::Margin::symmetric(8, 2)),
-            )
-            .show(ui, |ui| {
-                egui::MenuBar::new().style(shell_menu_style).ui(ui, |ui| {
-                    let status = self.runtime_status();
-                    let running = status.running;
-                    let start_blocked = running || status.start_pending;
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Open Console").clicked() {
-                            self.chrome.go_to(ShellPage::Console);
-                            ui.close();
-                        }
-                        if ui.button("Duplicate VM Profile").clicked() {
-                            self.duplicate_selected_profile();
-                            ui.close();
-                        }
-                        if ui.button("Create Disk Image").clicked() {
-                            self.chrome.go_to(ShellPage::Images);
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button("Quit").clicked() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.menu_button("Edit", |ui| {
-                        if ui.button("Clear Library Search").clicked() {
-                            self.chrome.library_filter.clear();
-                            ui.close();
-                        }
-                    });
-                    ui.menu_button("VM", |ui| {
-                        if ui
-                            .add_enabled(!start_blocked, egui::Button::new("Power On"))
-                            .clicked()
-                        {
-                            self.start_vm();
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(running, egui::Button::new("Power Off"))
-                            .clicked()
-                        {
-                            self.request_power_off();
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(running, egui::Button::new("Restart VM"))
-                            .clicked()
-                        {
-                            self.request_reset();
-                            ui.close();
-                        }
-                    });
-                    ui.menu_button("Input", |ui| {
-                        if ui
-                            .add_enabled(running, egui::Button::new("Send Ctrl+Alt+Del"))
-                            .clicked()
-                        {
-                            self.emulator.send_ctrl_alt_del();
-                            ui.close();
-                        }
-                        let captured = self.emulator.mouse_captured();
-                        let label = if captured {
-                            "Release Mouse"
-                        } else {
-                            "Capture Mouse"
-                        };
-                        if ui.add_enabled(running, egui::Button::new(label)).clicked() {
-                            self.emulator.toggle_mouse_capture();
-                            ui.close();
-                        }
-                    });
-                    ui.menu_button("Help", |ui| {
-                        if ui.button("About Rusty Box Workstation").clicked() {
-                            self.chrome.show_about = true;
-                            ui.close();
-                        }
-                    });
-                });
-            });
-        hairline_below(ui, bar.response.rect);
-    }
-
-    fn draw_toolbar(&mut self, ui: &mut egui::Ui) {
-        let toolbar = egui::Panel::top("vm_toolbar")
-            .exact_size(44.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG_PANEL)
-                    .inner_margin(egui::Margin::symmetric(12, 6)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let status = self.runtime_status();
-                    let running = status.running;
-                    let start_blocked = running || status.start_pending;
-                    // The one verb in the shell: filled in the accent while the
-                    // VM can be powered on, a plain destination once it runs.
-                    let primary = if running {
-                        egui::Button::new(
-                            RichText::new("▶ Console").strong().color(TEXT_PRIMARY),
-                        )
-                    } else if status.start_pending {
-                        egui::Button::new(
-                            RichText::new("▶ Starting…").strong().color(ACCENT_AMBER),
-                        )
-                    } else {
-                        egui::Button::new(RichText::new("▶ Power On").strong().color(BG_BASE))
-                            .fill(ACCENT_CYAN)
-                            .stroke(Stroke::NONE)
-                    };
-                    if ui.add_enabled(running || !start_blocked, primary).clicked() {
-                        if running {
-                            self.chrome.go_to(ShellPage::Console);
-                        } else {
-                            self.start_vm();
-                        }
-                    }
-                    if ui
-                        .add_enabled(running, egui::Button::new("■ Power Off"))
-                        .clicked()
-                    {
-                        self.request_power_off();
-                    }
-                    if ui
-                        .add_enabled(running, egui::Button::new("↻ Restart VM"))
-                        .clicked()
-                    {
-                        self.request_reset();
-                    }
-                    if ui.button("▣ Hardware").clicked() {
-                        self.chrome.go_to(ShellPage::Hardware);
-                    }
-                    if ui.button("＋ New Image").clicked() {
-                        self.chrome.go_to(ShellPage::Images);
-                    }
-                    ui.checkbox(&mut self.chrome.show_library, "Library");
-                    ui.checkbox(&mut self.chrome.show_serial, "Serial");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(&self.vm_info.name)
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                        ui.label(RichText::new("VM").size(11.0).color(TEXT_MUTED));
-                    });
-                });
-            });
-        hairline_below(ui, toolbar.response.rect);
+    /// Draws the VM bar and acts on its click. The bar reports what was asked
+    /// for; the verbs that change the machine's state go through the same
+    /// methods every other surface uses, so the bar cannot reach a state the
+    /// rest of the shell cannot.
+    fn draw_vm_bar(&mut self, ui: &mut egui::Ui) {
+        let status = self.runtime_status();
+        let action = crate::shell::vm_bar::draw_vm_bar(
+            ui,
+            VmBarState {
+                name: &self.vm_info.name,
+                badge: shell_state_badge(&status, self.has_error_notice()),
+                running: status.running,
+                start_pending: status.start_pending,
+                on_console: self.chrome.page() == ShellPage::Console,
+                serial_shown: self.chrome.show_serial,
+                mouse_captured: self.emulator.mouse_captured(),
+            },
+        );
+        match action {
+            None => {}
+            Some(VmBarAction::ToggleSidebar) => {
+                self.chrome.show_library = !self.chrome.show_library;
+            }
+            Some(VmBarAction::PowerOn) => self.start_vm(),
+            Some(VmBarAction::PowerOff) => self.request_power_off(),
+            Some(VmBarAction::Restart) => self.request_reset(),
+            Some(VmBarAction::ToggleSerial) => {
+                self.chrome.show_serial = !self.chrome.show_serial;
+            }
+            Some(VmBarAction::ToggleMouseCapture) => self.emulator.toggle_mouse_capture(),
+            Some(VmBarAction::SendCtrlAltDel) => self.emulator.send_ctrl_alt_del(),
+            Some(VmBarAction::ShowAbout) => self.chrome.show_about = true,
+            Some(VmBarAction::Quit) => {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
     }
 
     /// Draws the tree and acts on its click. A page of the VM already shown is
@@ -2214,8 +2093,7 @@ impl eframe::App for NativeShellApp {
             return;
         }
 
-        self.draw_menu_bar(ui);
-        self.draw_toolbar(ui);
+        self.draw_vm_bar(ui);
         if shell_should_draw_library(&self.chrome) {
             self.draw_sidebar(ui);
         }
@@ -3779,14 +3657,6 @@ fn shell_state_badge(status: &ShellStatus, faulted: bool) -> ShellStateBadge {
     }
 }
 
-/// egui's flat menu-bar styling with enough padding that the menu titles read
-/// as separate words rather than one run of text.
-#[cfg(not(target_arch = "wasm32"))]
-fn shell_menu_style(style: &mut egui::Style) {
-    egui::containers::menu::menu_style(style);
-    style.spacing.button_padding = egui::vec2(8.0, 3.0);
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 fn format_ips_u32(ips: u32) -> String {
     if ips >= 1_000_000 {
@@ -4022,14 +3892,6 @@ mod tests {
         assert!(shell_should_draw_library(&chrome));
         chrome.show_library = false;
         assert!(!shell_should_draw_library(&chrome));
-    }
-
-    #[test]
-    fn shell_menu_labels_omit_redundant_view_and_tabs() {
-        let labels = shell_menu_labels();
-        assert_eq!(labels, ["File", "Edit", "VM", "Help"]);
-        assert!(!labels.contains(&"View"));
-        assert!(!labels.contains(&"Tabs"));
     }
 
     #[test]

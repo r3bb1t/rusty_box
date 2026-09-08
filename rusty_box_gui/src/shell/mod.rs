@@ -9,8 +9,12 @@
 //! the pair cannot disagree — and the actions its two chrome surfaces report.
 //! `sidebar` is the desktop's navigation: the tree of VM profiles, the
 //! selected one open to its pages, and the entry each row is drawn from.
+//! `vm_bar` is the one bar above a page: the selected VM's name, its state
+//! badge, and the verbs that change that state, with the console's own
+//! controls shown only while the console page is.
 
 pub(crate) mod destination;
 pub(crate) mod sidebar;
 pub(crate) mod theme;
+pub(crate) mod vm_bar;
 pub(crate) mod widgets;
