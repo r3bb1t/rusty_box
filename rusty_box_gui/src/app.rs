@@ -10,6 +10,7 @@ use std::sync::{
     {Arc, Mutex},
 };
 
+use crate::shell::destination::{Destination, ShellPage};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::theme::STROKE_HAIRLINE;
 use crate::shell::theme::{
@@ -439,14 +440,6 @@ impl NativeVmProfile {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ShellPage {
-    Home,
-    Console,
-    Hardware,
-    Images,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HardwareDevice {
     Memory,
     Processors,
@@ -515,9 +508,8 @@ impl VmLibraryEntry {
 
 #[derive(Debug)]
 pub(crate) struct ShellChrome {
-    selected_page: ShellPage,
+    destination: Destination,
     selected_hardware: HardwareDevice,
-    selected_vm: usize,
     vm_library: Vec<VmLibraryEntry>,
     library_filter: String,
     show_serial: bool,
@@ -528,9 +520,8 @@ pub(crate) struct ShellChrome {
 impl Default for ShellChrome {
     fn default() -> Self {
         Self {
-            selected_page: ShellPage::Home,
+            destination: Destination::default(),
             selected_hardware: HardwareDevice::Memory,
-            selected_vm: 0,
             vm_library: Vec::new(),
             library_filter: String::new(),
             show_serial: true,
@@ -541,6 +532,19 @@ impl Default for ShellChrome {
 }
 
 impl ShellChrome {
+    pub(crate) fn page(&self) -> ShellPage {
+        self.destination.page()
+    }
+
+    pub(crate) fn selected_vm(&self) -> usize {
+        self.destination.vm()
+    }
+
+    /// Moves to a page of the VM already shown.
+    pub(crate) fn go_to(&mut self, page: ShellPage) {
+        self.destination = self.destination.select_page(page);
+    }
+
     fn with_library(vm_library: Vec<VmLibraryEntry>) -> Self {
         Self {
             vm_library,
@@ -852,7 +856,7 @@ impl NativeShellApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn handle_native_dropped_files(&mut self, ctx: &egui::Context) {
-        if self.chrome.selected_page != ShellPage::Images {
+        if self.chrome.page() != ShellPage::Images {
             return;
         }
 
@@ -888,7 +892,7 @@ impl NativeShellApp {
                     let start_blocked = running || status.start_pending;
                     ui.menu_button("File", |ui| {
                         if ui.button("Open Console").clicked() {
-                            self.chrome.selected_page = ShellPage::Console;
+                            self.chrome.go_to(ShellPage::Console);
                             ui.close();
                         }
                         if ui.button("Duplicate VM Profile").clicked() {
@@ -896,7 +900,7 @@ impl NativeShellApp {
                             ui.close();
                         }
                         if ui.button("Create Disk Image").clicked() {
-                            self.chrome.selected_page = ShellPage::Images;
+                            self.chrome.go_to(ShellPage::Images);
                             ui.close();
                         }
                         ui.separator();
@@ -993,7 +997,7 @@ impl NativeShellApp {
                     };
                     if ui.add_enabled(running || !start_blocked, primary).clicked() {
                         if running {
-                            self.chrome.selected_page = ShellPage::Console;
+                            self.chrome.go_to(ShellPage::Console);
                         } else {
                             self.start_vm();
                         }
@@ -1011,10 +1015,10 @@ impl NativeShellApp {
                         self.request_reset();
                     }
                     if ui.button("▣ Hardware").clicked() {
-                        self.chrome.selected_page = ShellPage::Hardware;
+                        self.chrome.go_to(ShellPage::Hardware);
                     }
                     if ui.button("＋ New Image").clicked() {
-                        self.chrome.selected_page = ShellPage::Images;
+                        self.chrome.go_to(ShellPage::Images);
                     }
                     ui.checkbox(&mut self.chrome.show_library, "Library");
                     ui.checkbox(&mut self.chrome.show_serial, "Serial");
@@ -1067,10 +1071,10 @@ impl NativeShellApp {
                     let clicked = {
                         let entry = &self.chrome.vm_library[index];
                         let selected = ui.selectable_label(
-                            self.chrome.selected_vm == index,
+                            self.chrome.selected_vm() == index,
                             format!("  ▣ {}", entry.name),
                         );
-                        if self.chrome.selected_vm == index {
+                        if self.chrome.selected_vm() == index {
                             ui.indent(format!("vm_library_metadata_{index}"), |ui| {
                                 ui.label(metadata_text("Boot", &entry.boot));
                                 ui.label(metadata_text("Memory", &entry.memory));
@@ -1195,7 +1199,7 @@ impl NativeShellApp {
             .frame(egui::Frame::new().fill(BG_BASE))
             .show(ui, |ui| {
                 self.draw_tab_strip(ui);
-                match self.chrome.selected_page {
+                match self.chrome.page() {
                     ShellPage::Home => self.draw_home_page(ui),
                     ShellPage::Console => self.draw_console_page(ui, frame),
                     ShellPage::Hardware => self.draw_hardware_page(ui),
@@ -1230,7 +1234,7 @@ impl NativeShellApp {
                             "Build bximage-compatible hard disks and floppies.",
                             ACCENT_BLUE,
                             ActionTileWeight::Secondary,
-                            || self.chrome.selected_page = ShellPage::Images,
+                            || self.chrome.go_to(ShellPage::Images),
                         );
                         action_tile(
                             &mut columns[2],
@@ -1238,7 +1242,7 @@ impl NativeShellApp {
                             "Inspect boot media and VM hardware limits.",
                             ACCENT_AMBER,
                             ActionTileWeight::Secondary,
-                            || self.chrome.selected_page = ShellPage::Hardware,
+                            || self.chrome.go_to(ShellPage::Hardware),
                         );
                     });
                 });
@@ -1261,7 +1265,7 @@ impl NativeShellApp {
             });
             let mut name_changed = false;
             ui.horizontal(|ui| {
-                if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm) {
+                if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm()) {
                     name_changed |= ui
                         .add(
                             egui::TextEdit::singleline(&mut profile.name)
@@ -1272,7 +1276,7 @@ impl NativeShellApp {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Hardware Settings").clicked() {
-                        self.chrome.selected_page = ShellPage::Hardware;
+                        self.chrome.go_to(ShellPage::Hardware);
                     }
                     let delete_enabled =
                         !status.running && !status.start_pending && self.profiles.len() > 1;
@@ -1293,7 +1297,7 @@ impl NativeShellApp {
                 }
             }
             ui.add_space(6.0);
-            if let Some(entry) = self.chrome.vm_library.get(self.chrome.selected_vm) {
+            if let Some(entry) = self.chrome.vm_library.get(self.chrome.selected_vm()) {
                 let cpus = cpu_count_label(self.vm_info.cpus);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 28.0;
@@ -1715,7 +1719,7 @@ impl NativeShellApp {
                     detail_row(ui, "Attached disk", "None");
                 }
                 if ui.button("Create disk image").clicked() {
-                    self.chrome.selected_page = ShellPage::Images;
+                    self.chrome.go_to(ShellPage::Images);
                 }
             }
             HardwareDevice::CdDvd => {
@@ -1888,7 +1892,7 @@ impl NativeShellApp {
                     &format_path_for_summary(self.vm_info.vga_bios.as_deref()),
                 );
                 if ui.button("Open console").clicked() {
-                    self.chrome.selected_page = ShellPage::Console;
+                    self.chrome.go_to(ShellPage::Console);
                 }
             }
         }
@@ -1986,7 +1990,7 @@ impl NativeShellApp {
     }
 
     fn nav_button(&mut self, ui: &mut egui::Ui, page: ShellPage, label: &str) {
-        let selected = self.chrome.selected_page == page;
+        let selected = self.chrome.page() == page;
         let text = RichText::new(label)
             .size(14.0)
             .color(if selected { TEXT_PRIMARY } else { TEXT_MUTED });
@@ -2005,18 +2009,18 @@ impl NativeShellApp {
             );
         }
         if response.clicked() {
-            self.chrome.selected_page = page;
+            self.chrome.go_to(page);
         }
     }
 
     fn apply_pending_settings(&mut self) -> Result<(), String> {
         self.settings.apply_to_config(&mut self.config)?;
-        if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm) {
+        if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm()) {
             profile.config.clone_from(&self.config);
             profile.settings.clone_from(&self.settings);
             self.refresh_selected_profile_metadata()?;
             self.config
-                .clone_from(&self.profiles[self.chrome.selected_vm].config);
+                .clone_from(&self.profiles[self.chrome.selected_vm()].config);
         } else {
             self.vm_info = NativeVmInfo::from_config(&self.config);
         }
@@ -2024,7 +2028,7 @@ impl NativeShellApp {
     }
 
     fn refresh_selected_profile_metadata(&mut self) -> Result<(), String> {
-        let index = self.chrome.selected_vm;
+        let index = self.chrome.selected_vm();
         if index >= self.profiles.len() {
             return Ok(());
         }
@@ -2057,15 +2061,13 @@ impl NativeShellApp {
             self.shell_notice = Some(ShellNotice::error(message));
             return;
         }
-        self.chrome.selected_vm = index;
+        self.chrome.destination = self.chrome.destination.select_vm(index);
         let profile = &self.profiles[index];
         self.config = profile.config.clone();
         self.settings = profile.settings.clone();
         if let Err(message) = self.refresh_selected_profile_metadata() {
             self.shell_notice = Some(ShellNotice::error(message));
-            return;
         }
-        self.chrome.selected_page = ShellPage::Home;
     }
 
     fn duplicate_selected_profile(&mut self) {
@@ -2076,7 +2078,7 @@ impl NativeShellApp {
             self.shell_notice = Some(ShellNotice::error(message));
             return;
         }
-        let base = self.chrome.selected_vm.min(self.profiles.len() - 1);
+        let base = self.chrome.selected_vm().min(self.profiles.len() - 1);
         let name = format!("{} Copy {}", self.profiles[base].name, self.profiles.len());
         let profile = self.profiles[base].duplicate(name);
         self.profiles.push(profile);
@@ -2106,13 +2108,16 @@ impl NativeShellApp {
             return;
         }
 
-        let index = self.chrome.selected_vm.min(self.profiles.len() - 1);
-        self.profiles.remove(index);
-        if index < self.chrome.vm_library.len() {
-            self.chrome.vm_library.remove(index);
+        let removed = self.chrome.selected_vm().min(self.profiles.len() - 1);
+        self.profiles.remove(removed);
+        if removed < self.chrome.vm_library.len() {
+            self.chrome.vm_library.remove(removed);
         }
-        self.chrome.selected_vm = index.min(self.profiles.len() - 1);
-        let profile = &self.profiles[self.chrome.selected_vm];
+        self.chrome.destination = self
+            .chrome
+            .destination
+            .clamped_after_removal(removed, self.profiles.len());
+        let profile = &self.profiles[self.chrome.selected_vm()];
         self.config = profile.config.clone();
         self.settings = profile.settings.clone();
         if let Err(message) = self.refresh_selected_profile_metadata() {
@@ -2123,7 +2128,7 @@ impl NativeShellApp {
     fn start_vm(&mut self) {
         let snapshot = self.runtime_status();
         if snapshot.running {
-            self.chrome.selected_page = ShellPage::Console;
+            self.chrome.go_to(ShellPage::Console);
             return;
         }
         if snapshot.start_pending {
@@ -2142,7 +2147,7 @@ impl NativeShellApp {
             .send(NativeEmulatorCommand::Start(self.config.clone()))
         {
             Ok(()) => {
-                self.chrome.selected_page = ShellPage::Console;
+                self.chrome.go_to(ShellPage::Console);
             }
             Err(_) => {
                 if let Ok(mut display) = self.shared.lock() {
@@ -2182,11 +2187,11 @@ impl NativeShellApp {
                     let start_blocked = running || status.start_pending;
                     ui.menu_button("File", |ui| {
                         if ui.button("Home").clicked() {
-                            self.chrome.selected_page = ShellPage::Home;
+                            self.chrome.go_to(ShellPage::Home);
                             ui.close();
                         }
                         if ui.button("Create Disk Image").clicked() {
-                            self.chrome.selected_page = ShellPage::Images;
+                            self.chrome.go_to(ShellPage::Images);
                             ui.close();
                         }
                         ui.separator();
@@ -2276,7 +2281,7 @@ impl eframe::App for NativeShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.handle_native_dropped_files(ui.ctx());
         #[cfg(target_os = "android")]
-        if self.chrome.selected_page == ShellPage::Console {
+        if self.chrome.page() == ShellPage::Console {
             self.draw_android_console_header(ui);
             self.draw_status_strip(ui);
             self.draw_central(ui, frame);
@@ -2776,7 +2781,7 @@ impl WebShellApp {
             self.web_cpu_count,
         ));
         self.boot_mode = WebBootMode::UploadedMedia;
-        self.chrome.selected_page = ShellPage::Console;
+        self.chrome.go_to(ShellPage::Console);
         self.initialized = false;
         self.init_error = None;
         self.shutdown = false;
@@ -2859,9 +2864,9 @@ impl WebShellApp {
 
     fn handle_primary_toolbar_action(&mut self) {
         if self.web_has_vm() {
-            self.chrome.selected_page = ShellPage::Console;
+            self.chrome.go_to(ShellPage::Console);
         } else {
-            self.chrome.selected_page = ShellPage::Home;
+            self.chrome.go_to(ShellPage::Home);
             self.open_file_picker();
         }
     }
@@ -3116,7 +3121,7 @@ impl WebShellApp {
                             ui.close();
                         }
                         if ui.button("Create Disk Image").clicked() {
-                            self.chrome.selected_page = ShellPage::Images;
+                            self.chrome.go_to(ShellPage::Images);
                             ui.close();
                         }
                     });
@@ -3171,10 +3176,10 @@ impl WebShellApp {
                         self.reset_web_vm();
                     }
                     if ui.button("▣ Hardware").clicked() {
-                        self.chrome.selected_page = ShellPage::Hardware;
+                        self.chrome.go_to(ShellPage::Hardware);
                     }
                     if ui.button("＋ New Image").clicked() {
-                        self.chrome.selected_page = ShellPage::Images;
+                        self.chrome.go_to(ShellPage::Images);
                     }
                     ui.checkbox(&mut self.chrome.show_library, "Library");
                     ui.checkbox(&mut self.chrome.show_serial, "Serial");
@@ -3213,10 +3218,10 @@ impl WebShellApp {
                     let clicked = {
                         let entry = &self.chrome.vm_library[index];
                         let selected = ui.selectable_label(
-                            self.chrome.selected_vm == index,
+                            self.chrome.selected_vm() == index,
                             format!("  ▣ {}", entry.name),
                         );
-                        if self.chrome.selected_vm == index {
+                        if self.chrome.selected_vm() == index {
                             ui.indent(format!("web_library_metadata_{index}"), |ui| {
                                 ui.label(metadata_text("Boot", &entry.boot));
                                 ui.label(metadata_text("Memory", &entry.memory));
@@ -3227,8 +3232,7 @@ impl WebShellApp {
                         selected.clicked()
                     };
                     if clicked {
-                        self.chrome.selected_vm = index;
-                        self.chrome.selected_page = ShellPage::Home;
+                        self.chrome.destination = Destination::new(index, ShellPage::Home);
                     }
                 }
             });
@@ -3280,7 +3284,7 @@ impl WebShellApp {
     fn draw_central(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG_BASE))
-            .show(ui, |ui| match self.chrome.selected_page {
+            .show(ui, |ui| match self.chrome.page() {
                 ShellPage::Home => self.draw_web_home_page(ui),
                 ShellPage::Console => self.draw_web_console_page(ui),
                 ShellPage::Hardware => self.draw_web_hardware_page(ui),
@@ -3326,7 +3330,7 @@ impl WebShellApp {
                     "Download bximage-compatible zero-filled images.",
                     ACCENT_CYAN,
                     ActionTileWeight::Secondary,
-                    || self.chrome.selected_page = ShellPage::Images,
+                    || self.chrome.go_to(ShellPage::Images),
                 );
             });
         });
@@ -3591,10 +3595,10 @@ impl WebShellApp {
     }
     fn nav_button(&mut self, ui: &mut egui::Ui, page: ShellPage, label: &str) {
         if ui
-            .selectable_label(self.chrome.selected_page == page, label)
+            .selectable_label(self.chrome.page() == page, label)
             .clicked()
         {
-            self.chrome.selected_page = page;
+            self.chrome.go_to(page);
         }
     }
 
@@ -3612,7 +3616,7 @@ impl WebShellApp {
         self.clear_uploaded_media_metadata();
         if self.boot_mode != WebBootMode::Launcher {
             self.boot_mode = WebBootMode::Launcher;
-            self.chrome.selected_page = ShellPage::Home;
+            self.chrome.go_to(ShellPage::Home);
         }
     }
 }
@@ -3643,7 +3647,7 @@ impl eframe::App for WebShellApp {
         if web_should_pump_emulator_this_frame(advanced_startup_this_frame, has_input_this_frame) {
             self.pump_emulator();
         }
-        if self.chrome.selected_page == ShellPage::Console {
+        if self.chrome.page() == ShellPage::Console {
             self.process_keyboard(ui.ctx());
         }
         self.update_ips();
@@ -4059,7 +4063,8 @@ mod tests {
     #[test]
     fn shell_starts_on_home_page() {
         let chrome = ShellChrome::default();
-        assert_eq!(chrome.selected_page, ShellPage::Home);
+        assert_eq!(chrome.page(), ShellPage::Home);
+        assert_eq!(chrome.selected_vm(), 0);
     }
 
     #[test]
@@ -4636,7 +4641,7 @@ mod tests {
         app.duplicate_selected_profile();
 
         assert_eq!(app.profiles.len(), 2);
-        assert_eq!(app.chrome.selected_vm, 1);
+        assert_eq!(app.chrome.selected_vm(), 1);
         assert_eq!(app.chrome.vm_library[1].memory, "512 MB");
         app.profiles[1].name = "Copy VM".to_owned();
         app.apply_pending_settings().unwrap();
@@ -4646,7 +4651,7 @@ mod tests {
         app.delete_selected_profile();
 
         assert_eq!(app.profiles.len(), 1);
-        assert_eq!(app.chrome.selected_vm, 0);
+        assert_eq!(app.chrome.selected_vm(), 0);
         assert_eq!(app.vm_info.name, "Base VM");
         assert_eq!(app.chrome.vm_library[0].name, "Base VM");
     }
@@ -4682,12 +4687,12 @@ mod tests {
     fn native_profile_selection_refuses_while_running() {
         let (mut app, _command_rx) = native_test_app();
         app.duplicate_selected_profile();
-        assert_eq!(app.chrome.selected_vm, 1);
+        assert_eq!(app.chrome.selected_vm(), 1);
         app.shared.lock().unwrap().emu_running = true;
 
         app.select_profile(0);
 
-        assert_eq!(app.chrome.selected_vm, 1);
+        assert_eq!(app.chrome.selected_vm(), 1);
         assert_eq!(
             app.shell_notice,
             Some(ShellNotice::warning(
