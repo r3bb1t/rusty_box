@@ -40,10 +40,13 @@ Supersedes `docs/superpowers/plans/2026-09-08-the-shell-is-consistent-throughout
 - Stay on `wip/atom-execctx`. Do not create branches.
 - Commit messages end with:
   `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`
-- **Do not touch `WebShellApp`** (its own `nav_button` at `app.rs:3618`, its own
-  `draw_library` at `app.rs:3214`, its own toolbar). It shares `ShellPage`,
-  `ShellChrome`, `shell_should_draw_library` and `VmLibraryEntry`; all four
-  survive this change. Keep it compiling.
+- **`WebShellApp`'s logic must not change; it inherits vocabulary changes.**
+  Its own `nav_button` (`app.rs:3618`), `draw_library` (`app.rs:3214`) and
+  toolbar are not restructured, and it shares `ShellPage`, `ShellChrome`,
+  `shell_should_draw_library` and `VmLibraryEntry`, all of which survive. But
+  where it calls a helper this plan rewrites, it takes the new rendering rather
+  than getting a frozen copy — a forked vocabulary costs more than the drift.
+  Keep it compiling on `wasm32-unknown-unknown`.
 - **Do not touch the `#[cfg(target_os = "android")]` blocks' behaviour.** The
   android target cannot be compiled here, so changes there are unverifiable.
 - **The gate cannot see rendering.** `cargo xtask ci` builds this crate only as

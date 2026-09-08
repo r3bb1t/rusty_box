@@ -254,11 +254,17 @@ This is deliberately the minimum: **the android target cannot be compiled in
 this environment**, so any change to those blocks is unverifiable. Gating them
 unchanged is the only option that cannot silently break them.
 
-**The browser shell is untouched.** `WebShellApp` has its own `nav_button`
-(`app.rs:3618`), its own `draw_library` (`app.rs:3214`) and its own toolbar, in
-a separate `impl` block. It shares `ShellPage`, `ShellChrome`,
-`shell_should_draw_library` and `VmLibraryEntry`, all of which survive. It may
-adopt the vocabulary later; that is not this change.
+**The browser shell is not restructured, but it inherits the vocabulary.**
+`WebShellApp` has its own `nav_button` (`app.rs:3618`), its own `draw_library`
+(`app.rs:3214`) and its own toolbar, in a separate `impl` block; none of those
+change. It shares `ShellPage`, `ShellChrome`, `shell_should_draw_library` and
+`VmLibraryEntry`, all of which survive.
+
+Where it calls a helper this design rewrites, it takes the new rendering. Six
+of `hardware_intro`'s twelve call sites are inside it, so its hardware headers
+become `page_header`s. Freezing them would mean a `cfg`-gated copy of every
+rewritten helper — a permanently forked vocabulary, re-litigated on each
+change, to hold a surface no ci step renders. The drift is the cheaper side.
 
 ## 7. Naming ruling: `ShellPage::Home` keeps its name
 
