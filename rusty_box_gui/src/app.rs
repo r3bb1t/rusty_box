@@ -10,8 +10,11 @@ use std::sync::{
     {Arc, Mutex},
 };
 
-use crate::shell::destination::{Destination, ShellPage};
 #[cfg(not(target_arch = "wasm32"))]
+use crate::shell::destination::SidebarAction;
+use crate::shell::destination::{Destination, ShellPage};
+use crate::shell::sidebar::VmLibraryEntry;
+#[cfg(target_os = "android")]
 use crate::shell::theme::STROKE_HAIRLINE;
 use crate::shell::theme::{
     configure_shell_style, shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED,
@@ -468,41 +471,6 @@ impl HardwareDevice {
             Self::CdDvd => "CD/DVD",
             Self::Display => "Display",
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VmLibraryEntry {
-    name: String,
-    boot: String,
-    memory: String,
-    disk: String,
-    cdrom: String,
-}
-
-impl VmLibraryEntry {
-    fn new(
-        name: impl Into<String>,
-        boot: impl Into<String>,
-        memory: impl Into<String>,
-        disk: impl Into<String>,
-        cdrom: impl Into<String>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            boot: boot.into(),
-            memory: memory.into(),
-            disk: disk.into(),
-            cdrom: cdrom.into(),
-        }
-    }
-
-    fn matches_filter(&self, filter: &str) -> bool {
-        filter.is_empty()
-            || self.name.to_ascii_lowercase().contains(filter)
-            || self.boot.to_ascii_lowercase().contains(filter)
-            || self.disk.to_ascii_lowercase().contains(filter)
-            || self.cdrom.to_ascii_lowercase().contains(filter)
     }
 }
 
@@ -1035,80 +1003,31 @@ impl NativeShellApp {
         hairline_below(ui, toolbar.response.rect);
     }
 
-    fn draw_library(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("vm_library")
-            .resizable(true)
-            .default_size(250.0)
-            .min_size(210.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::same(14)),
-            )
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Library")
-                        .size(16.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                if ui.button("＋ Duplicate VM Profile").clicked() {
-                    self.duplicate_selected_profile();
+    /// Draws the tree and acts on its click. A page of the VM already shown is
+    /// a move; a different VM is a profile switch, which goes through
+    /// `select_profile` so that profile's config and settings are loaded too.
+    fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
+        let badge = shell_state_badge(&self.runtime_status(), self.has_error_notice());
+        let visible = self.chrome.visible_vm_indices();
+        let action = crate::shell::sidebar::draw_sidebar(
+            ui,
+            &self.chrome.vm_library,
+            &visible,
+            self.chrome.destination,
+            &mut self.chrome.library_filter,
+            badge,
+        );
+        match action {
+            None => {}
+            Some(SidebarAction::DuplicateSelected) => self.duplicate_selected_profile(),
+            Some(SidebarAction::Select(destination)) => {
+                if destination.vm() == self.chrome.destination.vm() {
+                    self.chrome.destination = destination;
+                } else {
+                    self.select_profile(destination.vm());
                 }
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.chrome.library_filter)
-                        .hint_text("Type here to search"),
-                );
-                ui.add_space(8.0);
-                ui.label(RichText::new("▾ My Computer").color(TEXT_MUTED));
-
-                let visible = self.chrome.visible_vm_indices();
-                let mut delete_requested = false;
-                let mut selected_index = None;
-                for index in visible {
-                    let mut delete_clicked = false;
-                    let clicked = {
-                        let entry = &self.chrome.vm_library[index];
-                        let selected = ui.selectable_label(
-                            self.chrome.selected_vm() == index,
-                            format!("  ▣ {}", entry.name),
-                        );
-                        if self.chrome.selected_vm() == index {
-                            ui.indent(format!("vm_library_metadata_{index}"), |ui| {
-                                ui.label(metadata_text("Boot", &entry.boot));
-                                ui.label(metadata_text("Memory", &entry.memory));
-                                ui.label(metadata_text("Disk", &entry.disk));
-                                ui.label(metadata_text("CD/DVD", &entry.cdrom));
-                                let status = self.runtime_status();
-                                let delete_enabled = !status.running
-                                    && !status.start_pending
-                                    && self.profiles.len() > 1;
-                                delete_clicked = ui
-                                    .add_enabled(
-                                        delete_enabled,
-                                        egui::Button::new("Delete Profile"),
-                                    )
-                                    .clicked();
-                            });
-                        }
-                        selected.clicked()
-                    };
-                    if delete_clicked {
-                        delete_requested = true;
-                    } else if clicked {
-                        selected_index = Some(index);
-                    }
-                }
-                if delete_requested {
-                    self.delete_selected_profile();
-                } else if let Some(index) = selected_index {
-                    self.select_profile(index);
-                }
-                if self.chrome.vm_library.is_empty() {
-                    ui.label(RichText::new("No VM sessions registered").color(TEXT_MUTED));
-                }
-            });
+            }
+        }
     }
 
     /// Whether the shell is currently showing the user an error notice; the
@@ -1170,10 +1089,12 @@ impl NativeShellApp {
         hairline_above(ui, strip.response.rect);
     }
 
-    /// The destinations, drawn as tabs directly above the page they select:
-    /// the current one carries the text weight and an accent rule, the rest
-    /// sit muted.
-    fn draw_tab_strip(&mut self, ui: &mut egui::Ui) {
+    /// The phone form factor's page navigation. Android hides the sidebar, so
+    /// on a phone the pages are reached from this strip drawn directly above
+    /// them: the current one carries the text weight and an accent rule, the
+    /// rest sit muted.
+    #[cfg(target_os = "android")]
+    fn draw_android_tab_strip(&mut self, ui: &mut egui::Ui) {
         let strip = egui::Panel::top("vm_tab_strip")
             .exact_size(36.0)
             .frame(
@@ -1198,7 +1119,8 @@ impl NativeShellApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG_BASE))
             .show(ui, |ui| {
-                self.draw_tab_strip(ui);
+                #[cfg(target_os = "android")]
+                self.draw_android_tab_strip(ui);
                 match self.chrome.page() {
                     ShellPage::Home => self.draw_home_page(ui),
                     ShellPage::Console => self.draw_console_page(ui, frame),
@@ -1989,6 +1911,9 @@ impl NativeShellApp {
         }
     }
 
+    /// The phone form factor's navigation. Android hides the sidebar, so on a
+    /// phone this strip is the only way off the page it is drawn on.
+    #[cfg(target_os = "android")]
     fn nav_button(&mut self, ui: &mut egui::Ui, page: ShellPage, label: &str) {
         let selected = self.chrome.page() == page;
         let text = RichText::new(label)
@@ -2292,7 +2217,7 @@ impl eframe::App for NativeShellApp {
         self.draw_menu_bar(ui);
         self.draw_toolbar(ui);
         if shell_should_draw_library(&self.chrome) {
-            self.draw_library(ui);
+            self.draw_sidebar(ui);
         }
         self.draw_status_strip(ui);
         self.draw_central(ui, frame);
