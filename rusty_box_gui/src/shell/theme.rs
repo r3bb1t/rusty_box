@@ -7,6 +7,12 @@ pub(crate) const BG_BASE: Color32 = Color32::from_rgb(0x0B, 0x0F, 0x14);
 pub(crate) const BG_PANEL: Color32 = Color32::from_rgb(0x11, 0x18, 0x21);
 pub(crate) const BG_CARD: Color32 = Color32::from_rgb(0x17, 0x21, 0x2B);
 pub(crate) const STROKE_HAIRLINE: Color32 = Color32::from_rgb(0x26, 0x34, 0x43);
+/// A control's own box — a checkbox's square, a radio's disc, a slider's
+/// handle — while the pointer is over it, and while it is pressed or focused.
+/// At rest the box is `STROKE_HAIRLINE`; these two sit above it in that order,
+/// so interaction reads as the control lifting off its surface.
+pub(crate) const CONTROL_FILL_HOVERED: Color32 = Color32::from_rgb(0x2E, 0x3F, 0x51);
+pub(crate) const CONTROL_FILL_ACTIVE: Color32 = Color32::from_rgb(0x36, 0x49, 0x5D);
 pub(crate) const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xE8, 0xEE, 0xF5);
 pub(crate) const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x98, 0xA8);
 pub(crate) const ACCENT_CYAN: Color32 = Color32::from_rgb(0x46, 0xD9, 0xC7);
@@ -45,9 +51,18 @@ pub(crate) fn configure_shell_style(ctx: &egui::Context) {
             stroke: Stroke::new(1.0_f32, ACCENT_CYAN),
         };
         style.visuals.widgets.noninteractive.bg_fill = BG_PANEL;
-        style.visuals.widgets.inactive.bg_fill = BG_CARD;
-        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(0x1D, 0x2A, 0x36);
-        style.visuals.widgets.active.bg_fill = Color32::from_rgb(0x21, 0x35, 0x43);
+        // `bg_fill` is a control's own box, not its surface: the checkbox
+        // square, the radio disc, the slider rail and handle, and a solid
+        // scroll bar's handle over its `extreme_bg_color` track. Each of the
+        // three interactive fills is lighter than every surface a control sits
+        // on — the page (`BG_BASE`), a panel (`BG_PANEL`), a card (`BG_CARD`)
+        // and the input well (`extreme_bg_color`) — so a resting box is visible
+        // wherever it lands, and the ramp rises rest → hover → press.
+        // `bg_stroke` keeps egui's default because it frames every button, and
+        // buttons fill with `weak_bg_fill`, which this ramp does not touch.
+        style.visuals.widgets.inactive.bg_fill = STROKE_HAIRLINE;
+        style.visuals.widgets.hovered.bg_fill = CONTROL_FILL_HOVERED;
+        style.visuals.widgets.active.bg_fill = CONTROL_FILL_ACTIVE;
         style.visuals.widgets.inactive.fg_stroke.color = TEXT_PRIMARY;
         style.visuals.widgets.hovered.fg_stroke.color = Color32::WHITE;
         style.spacing.item_spacing = Vec2::new(8.0, 8.0);
