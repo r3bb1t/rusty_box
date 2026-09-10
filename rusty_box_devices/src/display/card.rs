@@ -414,7 +414,9 @@ mod tests {
 
     /// Counts what a front end was told, which is all a fall-through test needs
     /// to compare: two cards agree when they say the same things in the same
-    /// order.
+    /// order. Its one reader is the GeForce comparison below, which needs an
+    /// allocator.
+    #[cfg(feature = "alloc")]
     #[derive(Default, PartialEq, Eq, Debug)]
     struct FrameLog {
         dimensions: Option<crate::display::sink::Dimensions>,
@@ -423,6 +425,7 @@ mod tests {
         cursor: Option<crate::display::sink::CursorPos>,
     }
 
+    #[cfg(feature = "alloc")]
     impl DisplaySink for FrameLog {
         fn dimension_update(&mut self, dims: crate::display::sink::Dimensions) {
             self.dimensions = Some(dims);
