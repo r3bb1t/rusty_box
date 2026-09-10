@@ -1,8 +1,18 @@
 # Rusty Box Web — x86 Emulator in the Browser
 
-Run the Rusty Box x86 emulator (a Rust port of Bochs) directly in your web browser via WebAssembly.
+A small egui app that runs the Rusty Box emulator (a Rust port of Bochs) in a
+web browser through WebAssembly. It opens a launcher with two choices:
 
-Boots DLX Linux 1.3.89 from a 10 MB hard disk image with full VGA text output, BIOS POST, LILO boot loader, and Linux kernel startup — all at ~3 MIPS in the browser.
+- **Boot DLX Linux** — the DLX Linux 10 MB hard disk image embedded in the
+  module, 32 MB of guest RAM, booting from the hard disk.
+- **Load Alpine Linux ISO** — a browser file picker (accepts `.iso` and
+  `.img`); the uploaded image is attached as a CD-ROM and booted with 256 MB of
+  guest RAM.
+
+`rusty_box_gui` has a separate browser build with the full VMware-style shell
+(`cd rusty_box_gui && trunk serve --release --port 8080`; see
+[rusty_box_gui/README.md](../../rusty_box_gui/README.md)). This crate is the
+smaller of the two: one launcher page, and the only one that embeds DLX.
 
 ## Prerequisites
 
@@ -11,65 +21,76 @@ rustup target add wasm32-unknown-unknown
 cargo install --locked trunk
 ```
 
-## Run in Browser (WASM)
+The build embeds three files with `include_bytes!` (`src/app.rs`). They are not
+in the repository (`/cpp_orig` and `/dlxlinux` are gitignored), so the build
+fails until they exist at these paths, relative to the workspace root:
+
+| File | Source |
+|------|--------|
+| `cpp_orig/bochs/bochs/bios/BIOS-bochs-latest` | a Bochs source checkout, `bios/BIOS-bochs-latest` (128 KB) |
+| `cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin` | a Bochs source checkout (32 KB; padded to whole 512-byte blocks at run time) |
+| `dlxlinux/hd10meg.img` | [Bochs DLX Linux disk image](https://bochs.sourceforge.io/diskimages.html) (10.2 MiB) |
+
+## Run in the browser
 
 ```bash
-cd rusty_box_web
+cd examples/rusty_box_web
 trunk serve --release --port 8080
 ```
 
-Open http://localhost:8080 in your browser. The emulator starts automatically:
-1. BIOS POST (VGA BIOS, ATA detection)
-2. LILO boot loader
-3. Linux 1.3.89 kernel decompression and startup
+Open http://localhost:8080 and choose **Boot DLX Linux** or **Load Alpine Linux
+ISO**. Nothing is built until you choose.
 
-## Run Natively (Desktop with egui GUI)
+Input is keyboard only; there is no mouse. Typed text is sent as scancodes, plus
+Enter, Tab, Backspace, Space, Esc, F1–F12, the arrow keys, Home/End,
+PgUp/PgDn and Ins/Del.
 
-```bash
-cargo run --release --example dlxlinux_egui --features "std,gui-egui"
-```
-
-This opens a native window with the same emulator. The native build runs on a
-dedicated thread and achieves higher IPS (~15 MIPS).
-
-## Architecture
-
-The WASM build uses cooperative single-threaded execution:
-
-```
-eframe::App::update() called each frame (~60 fps)
-  1. emu.step_batch(50_000)     — run CPU instructions
-  2. emu.update_display(&mut d) — render VGA text to pixel framebuffer
-  3. upload framebuffer texture  — display via egui
-  4. process keyboard input      — push scancodes to emulator
-```
-
-No threads, no `Arc<Mutex<>>` — the emulator and display are owned directly
-by the app struct. The `step_batch()` method handles:
-- Device ticking (PIT, PIC, keyboard, VGA)
-- PIC interrupt delivery to the CPU
-- HLT time-advancement (Bochs-style BX_TICKN acceleration)
-- A20 line synchronization
-
-## Embedded Assets
-
-Binary assets are compiled into the WASM module via `include_bytes!`:
-- **BIOS**: `cpp_orig/bochs/bios/BIOS-bochs-latest` (128 KB)
-- **VGA BIOS**: `cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin` (38 KB)
-- **Disk**: `dlxlinux/hd10meg.img` (10.2 MB)
-
-Total WASM size: ~9 MB (uncompressed), ~4 MB with gzip.
-
-## Build for Deployment
+## Run natively
 
 ```bash
-cd rusty_box_web
+cargo run --release -p rusty_box_web
+```
+
+This opens the same app in a native window, running the same single-threaded
+loop. The Alpine file picker only exists in the browser build; natively, the
+button logs a warning and does nothing, so only DLX can be booted. For a
+threaded desktop front end, use `cargo run --release -p rusty_box_gui`.
+
+## Frame loop
+
+The app owns the emulator and the display directly and runs cooperatively on
+one thread (`src/app.rs`, `WasmEmulatorApp::ui`). On each frame:
+
+1. It calls `emu.step(RunBudget::Instructions(50_000))` repeatedly until the
+   frame has made 200,000 units of progress (`FRAME_BUDGET`). It stops early
+   when `outcome.is_terminal()` (guest power-off, CPU shutdown, a stop request
+   or an engine fault), when `outcome.progress.stalled()`, or on an error.
+2. It renders the VGA state with `emu.display().render_into(&mut self.display)`.
+3. It feeds this frame's keyboard events to the guest as scancodes.
+4. It uploads the framebuffer as an egui texture, scaled to a whole multiple.
+
+`Emulator::step` runs the guest, ticks the devices and syncs the A20 line, then
+returns control, so a single-threaded host keeps its event loop. Its
+`BatchOutcome` says how far the guest got and why the step returned.
+
+## Build for deployment
+
+```bash
+cd examples/rusty_box_web
 trunk build --release
 ```
 
-Static files are generated in `dist/`:
+Trunk writes the site to `examples/rusty_box_web/dist/`:
+
 - `index.html`
 - `rusty_box_web.js`
 - `rusty_box_web_bg.wasm`
 
-Serve these with any static HTTP server.
+`Trunk.toml` sets `filehash = false`, so these names do not change between
+builds, and `index.html` asks Trunk for `wasm-opt` level 2. The `.wasm` is
+larger than the 10.2 MiB DLX disk image it embeds. Serve the `dist/` files with
+any static HTTP server.
+
+`cargo xtask ci` neither builds nor checks this crate: its wasm steps cover only
+the `rusty_box` library and `rusty_box_gui`. Build it yourself after changing
+anything it uses.
