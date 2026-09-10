@@ -10,7 +10,6 @@
 //! Implements NVIDIA GeForce 2/3/FX 5900/6800 GPU emulation.
 //! Ported from Bochs geforce.cc/geforce.h.
 
-#[cfg(not(feature = "std"))]
 use rusty_box_core::FloatExt;
 use alloc::vec;
 use alloc::{boxed::Box, vec::Vec};
@@ -1001,7 +1000,10 @@ fn dot4(x: &[f32], y: &[f32]) -> f32 {
 }
 
 fn vec3_length(v: &[f32; 3]) -> f32 {
-    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+    // Named through the trait so every build takes the same path: a test
+    // build links std, whose inherent `f32::sqrt` would otherwise win the
+    // method lookup and leave production's `no_std` square root untested.
+    FloatExt::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
 }
 
 fn vec3_normalize(v: &mut [f32; 3]) -> f32 {
