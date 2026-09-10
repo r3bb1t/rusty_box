@@ -95,8 +95,9 @@ libc = { version = "0.2", default-features = false }
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
 # Doctrine fixture registry (docs/safety-doctrine.md) — R2/R3 compile-fail pins.
-# Deliberately NOT in the xtask ci matrix: goldens track the local toolchain
-# (regenerate with TRYBUILD=overwrite after a toolchain bump).
+# Run by the `cargo xtask ci` step "doctrine compile-fail fixtures". The goldens
+# are rustc's rendered diagnostics, so they track the toolchain and the code
+# they quote: regenerate with TRYBUILD=overwrite once the rule still holds.
 trybuild = "1.0"
 
 [[bench]]

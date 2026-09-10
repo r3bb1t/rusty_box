@@ -428,7 +428,7 @@ impl<'r, T: Instrumentation> MachineBuilder<'r, T> {
     /// Build the machine, run it through hardware initialisation, and reset it.
     ///
     /// The result sits at its reset vector with timers armed: the next
-    /// `step_batch` executes the first firmware instruction.
+    /// `Emulator::step` executes the first firmware instruction.
     ///
     /// Runs the guest on this port's own interpreter. To name a different
     /// engine, see [`MachineBuilder::build_on`] — which this is, with the

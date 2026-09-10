@@ -130,8 +130,9 @@ pub enum Engine {
     /// This port's own interpreter. Everywhere, and the default.
     #[default]
     Interpreter,
-    /// The Windows Hypervisor Platform. Needs the `hv-whp` feature and a host
-    /// that has the platform enabled.
+    /// The Windows Hypervisor Platform. Needs a Windows build with `hv-whp`
+    /// and without `guest-trace`, and a host that has the platform enabled;
+    /// refused rather than downgraded when any of these is missing.
     Whp,
 }
 

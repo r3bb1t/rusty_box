@@ -498,7 +498,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Delivery reads the IVT/IDT and pushes a stack frame, so it runs on an
     /// execution context — assembling one is what gives it memory.
     ///
-    /// Used by `run_interactive` / `step_batch` for manual interrupt delivery
+    /// Used by `run_interactive` / `step` for manual interrupt delivery
     /// between CPU batches. Also available for no-alloc callers doing their
     /// own batch loops (e.g. UEFI example).
     pub fn inject_interrupt(&mut self, vector: u8) -> CpuResult<()> {

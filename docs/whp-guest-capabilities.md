@@ -48,31 +48,71 @@ design forgets.
 None of the three names its own cause in the failure. That is the point of the
 rule.
 
-## Where the answer has to live
+## Where the answer lives
 
-`CPUID` is answered in **two** places on this engine:
+On this engine, a guest's `CPUID` is answered by the shadow processor, the
+interpreter's `BxCpuC` that finishes every trapped instruction:
 
-- the `Cpuid` exit, which `withhold_virtualisation_from` filters — and which the
-  census shows **never fires** (`exits: cpuid 0`), so that filter is dead code;
-- `burst_on_the_shadow` and `emulate_one`, which execute the guest's `CPUID` on
-  the interpreter and answer from the model with no filter at all.
+1. **The partition hands the leaves over.** It is set up with
+   `ExtendedVmExits.cpuid` and a `CpuidExitList` naming every leaf in
+   `TRAPPED_CPUID_LEAVES` (`rusty_box_whp_engine/src/engine.rs`):
+   - the standard leaves `0x0`–`0x1F`;
+   - the hypervisor leaves `0x40000000`–`0x4000000F`;
+   - the extended leaves `0x80000000`–`0x8000001F`;
+   - `0xC0000000`–`0xC0000001`.
 
-So a filter at the exit cannot work, and the withholding belongs to the processor
-both paths share. It does: `cpu_include_features` / `cpu_exclude_features` on
-`BxParams` — Bochs `cpuid: <feature>=0`, present in this tree with no consumer
-until now — edit `ia_extensions_bitmask` at initialisation, and the affected
-`CPUID` leaves derive from that bitmask rather than from the model's static table:
+   A leaf outside those ranges executes on the host's processor and gets the
+   host's answer.
+2. **The shadow answers from the model.** The vCPU thread
+   (`rusty_box_whp_engine/src/vcpu_thread.rs`) routes the `Cpuid` exit to
+   `finish_the_errand`. That function runs the guest's `CPUID` on the shadow,
+   through the same handler the interpreter uses, so the answer is this port's
+   model and not the host's silicon.
+3. **Virtualisation is withheld on the shadow itself, before the export.**
+   Before exporting the result to the partition, `finish_the_errand` calls
+   `withhold_virtualisation_from` on the shadow, which clears two bits: leaf 1's
+   `ECX[5]` (VMX) and leaf `0x80000001`'s `ECX[2]` (SVM). The shadow and the
+   partition then hold the same answer.
 
-- leaf `D` subleaf 0 already did, through `xcr0_suppmask`;
-- leaf 7 subleaf 0 withdraws the AVX-512 bits;
-- leaf 1 withdraws `ECX[3]` when `IsaMonitorMwait` is absent.
+The gated test
+`a_cpuid_exit_on_the_thread_answers_on_the_shadow_and_exports_the_answer`
+(`rusty_box_whp_engine/src/lib.rs`) covers steps 1 and 2 end to end: a guest
+executes leaf 0, reads the answer back out of `EBX`, and the test counts
+exactly one `CPUID` exit. Leaf 0 is not withheld, so step 3 has no test.
 
-`--cpu-capabilities host-shared` selects the narrowing; `preset` is the default
-and leaves an interpreter run answering `CPUID` byte for byte as before.
+The shadow also runs guest code that never passes through `finish_the_errand`:
+on an `ApicSmiTrap` exit, `take_the_signalled_smi` (`vcpu_thread.rs`) runs the
+system-management handler to its `RSM` through `run_the_shadow_out_of_smm`. A
+`CPUID` inside such a handler is answered from the same narrowed model, but
+without the VMX/SVM withholding.
+
+**Narrowing happens where both engines read it.** Narrowing the processor
+belongs to the model that both engines answer from, and that is where it
+happens. `BxParams` carries `cpu_include_features` / `cpu_exclude_features`,
+the equivalent of Bochs `cpuid: <feature>=0`. These edit
+`ia_extensions_bitmask` at initialisation (`rusty_box/src/cpu/init.rs`), and
+the affected `CPUID` leaves derive from that bitmask rather than from the
+model's static table (`rusty_box/src/cpu/soft_int.rs`):
+
+- leaf `D` subleaf 0, through `xcr0_suppmask`;
+- leaf 7 subleaf 0, which withdraws the AVX-512 bits;
+- leaf 1, which withdraws `ECX[3]` when `IsaMonitorMwait` is absent.
+
+`--cpu-capabilities host-shared` selects the narrowing
+(`CpuCapabilities::narrow` in `rusty_box_gui/src/config.rs`). It withdraws
+AVX-512 or AVX when the host cannot hold their register state, and
+`MONITOR`/`MWAIT` always. `preset` is the default: an interpreter run then
+answers `CPUID` exactly as the model does.
+
+`rusty_box_gui` forces `host-shared` for `--engine whp` whatever the flag says
+(`cpu_params_for_engine` in `rusty_box_gui/src/runner.rs`). The reason is that
+`XSETBV` is not trapped on the partition, so a guest that believed the full
+preset would enable register state the host does not have.
 
 **It is a machine setting, not an engine one.** A guest keeps what it enabled
-across a switch from the hypervisor to the interpreter, so the two must offer the
-same processor or the switch changes the hardware under a running guest.
+across a switch from the hypervisor to the interpreter. The two engines must
+therefore offer the same processor, or the switch changes the hardware under
+a running guest.
 
 ## The platform API this should use instead
 
@@ -85,11 +125,11 @@ WHvPartitionPropertyCodeCpuidResultList2  = 0x0000100D   // + WHV_X64_CPUID_RESU
 WHvPartitionPropertyCodeProcessorFeatures = 0x00001001   // no MWAIT bit
 ```
 
-`CpuidResultList` registers answers **with the partition**, returned without an
-exit. That is strictly better than what is built today: one answer, authoritative
-on both execution paths, and no exits to pay for. It would also make `preset`
-enforceable on the hardware path, which today it is not — the preset governs only
-what the shadow answers.
+`CpuidResultList` registers answers **with the partition**, and those are
+returned without an exit. What is built today pays an exit and a shadow round
+trip for every trapped `CPUID`. Registered answers would give the same
+answers at no exit cost, and they could cover leaves the exit list leaves to
+the host.
 
 Not yet used. The property codes and struct names are read; the semantics
 (subleaf addressing, which functions are permitted, interaction with

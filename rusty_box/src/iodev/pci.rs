@@ -57,8 +57,8 @@ pub const PCI_CONFIG_DATA: u16 = 0x0CFC;
 /// requires. Bochs applies PAM/SMRAM to the memory object synchronously
 /// inside `pci_write_handler` (pci.cc); here the memory system lives outside
 /// the bridge (borrow-separated), so `devices.rs` defers via
-/// `pam_needs_update`/`smram_needs_update` and drains these flags at the next
-/// shared machine boundary once memory is available.
+/// `PendingPlatformWork::PAM`/`PendingPlatformWork::SMRAM` and drains these
+/// flags at the next shared machine boundary once memory is available.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PciBridgeWriteEffects {
     /// A PAM register (0x59-0x5F) changed; memory shadow-RAM types must be re-applied.
@@ -418,7 +418,7 @@ impl BxPciBridge {
             let dopen = (v & 0x40) != 0;
             let dcls = (v & 0x20) != 0;
             // Illegal DOPEN&&DCLS combo is logged once, where the state is
-            // actually decided/dropped: apply_smram_to_memory() (tracing::error!).
+            // actually decided/dropped: smram_effect() (tracing::error!).
             tracing::trace!("SMRAM enabled: DOPEN={}, DCLS={}", dopen, dcls);
         }
 
@@ -577,14 +577,13 @@ mod tests {
         assert_eq!(bridge.pci_conf[0x72] & 0x40, 0); // DOPEN stays 0
     }
 
-    // ─── Finding #20b: status register (0x06/0x07) write-1-to-clear ──────────
+    // ─── status register (0x06/0x07) write-1-to-clear ────────────────────────
     //
     // Bochs pci.cc bx_pci_bridge_c::pci_write_handler case 0x07 (i440FX path):
     //   value8 = (pci_conf[0x07] & ~value8) | 0x02;
     //   pci_conf[addr] &= ~value8;
-    // Algebraically this reduces (per-bit) to: new = (old & written) & 0xFD
-    // for every bit except bit1, which is unconditionally forced to 0 (NOT
-    // forced to 1 as the old rusty_box formula did).
+    // Algebraically this reduces to: new = (old & written) & 0xFD, so bit1
+    // reads back 0 after any write even though reset() sets it.
 
     #[test]
     fn test_status_reg_write1_to_clear_matches_bochs_formula() {
@@ -598,8 +597,7 @@ mod tests {
         assert_eq!(bridge.pci_conf[0x07], 0xA0);
 
         // Bit1 (0x02) is unconditionally cleared by the formula, even though
-        // reset() sets it — this is the opposite of the old rusty_box code,
-        // which forced it permanently SET.
+        // reset() sets it.
         bridge.pci_conf[0x07] = 0x02; // only the reset "always" bit set
         bridge.pci_write(0x07, 0xFF, 1); // guest clears everything
         assert_eq!(
@@ -624,7 +622,7 @@ mod tests {
         assert_eq!(bridge.pci_conf[0x06], before);
     }
 
-    // ─── Finding #35a: i440FX read-only registers (pci.cc case list) ─────────
+    // ─── i440FX read-only registers (pci.cc case list) ────────────────────────
     // Bochs's i440FX pci_write_handler falls through to a no-op for these
     // registers (their `case`s are guarded by `chipset == BX_PCI_CHIPSET_I440BX`,
     // which is never true for our i440FX-only bridge): 0x73, 0xB4, 0xB9, 0xBA,
@@ -645,10 +643,11 @@ mod tests {
         }
     }
 
-    // ─── Finding #8: apply_smram_to_memory actually switches memory ──────────
+    // ─── SMRAM control register (0x72) decodes to the SMRAM effect (Bochs
+    // pci.cc bx_pci_bridge_c::smram_control) ─────────────────────────────────
 
     #[test]
-    fn apply_smram_to_memory_derives_state_from_register() {
+    fn smram_effect_derives_state_from_register() {
         let mut bridge = BxPciBridge::new();
         bridge.reset();
 

@@ -18,12 +18,21 @@ experiments — see "Host conditions" below, and note that no answer here rests 
 a duration. The first two runs' logs were not kept, which is why
 this document reproduces the third's in full.
 
-These nine questions are the ones the VMM-shape design rests on. Two of them
-decide the shape of later work rather than merely informing it, and both are
-answered here without hedging: **P1 says a parked processor CAN be woken for a
-legacy interrupt**, so the campaign's legacy path stands as designed; **P3 says
-a halt produces NO exit under an emulated APIC**, so the run loop's halt arm is
-unreachable in that mode and the machine thread has to be taken back by force.
+These nine questions are the ones the VMM-shape design rests on. That design is
+the project owner's plan for this engine, and it is kept outside this
+repository. Where an answer below says what it changes, it names the code that
+carries the change (the vCPU thread's run loop, the legacy 8259 path, a
+conversion of the APIC state page) rather than a plan task, and the code is
+the authority on what was built.
+
+Two of the nine questions decide the shape of later work rather than merely
+informing it, and both are answered here without hedging:
+
+- **P1 says a parked processor CAN be woken for a legacy interrupt**, so the
+  legacy 8259 path (a host-placed ExtINT) stands as designed.
+- **P3 says a halt produces NO exit under an emulated APIC**, so the run
+  loop's halt arm is unreachable in that mode, and the machine thread has to
+  be taken back by force.
 
 Three answers contradict what was written down before. One contradicts the
 earlier probe document, which recorded a mode-specific refusal as a fact about
@@ -97,7 +106,7 @@ is offered as a *latency* of the platform.
 
 ### P1. A parked processor CAN be woken, and clearing the halt suspend is what does it
 
-**The campaign's legacy interrupt path stands.** Research said Windows 10 hosts
+**The legacy interrupt path stands.** Research said Windows 10 hosts
 fail this and Windows 11 hosts pass; this host passes.
 
 Guest: `sti; hlt; mov byte [RESUMED],0x11; hlt`, with a real-mode handler on
@@ -174,11 +183,18 @@ differs between its two runs — so the rejection is attributable to it.
 emulates an APIC; with no APIC, the route is `WHvRegisterPendingInterruption`
 (2026-08-27 finding 3), not this one.
 
-**What it changes.** Task 1.6 keeps its designed shape. The wake protocol,
-measured end to end, is: stop the processor, write the ExtINT into
-`WHvRegisterPendingEvent`, clear `halt_suspend`, re-enter — in that order, both
-writes requiring a stopped processor. QEMU's `whpx_vcpu_kick_out_of_hlt`
-workaround is not needed on this host.
+**What it changes.** The legacy ExtINT path keeps its designed shape. The wake
+protocol, measured end to end, is:
+
+1. stop the processor;
+2. write the ExtINT into `WHvRegisterPendingEvent`;
+3. clear `halt_suspend`;
+4. re-enter.
+
+The steps must run in that order, and both writes require a stopped processor.
+That is the order the vCPU thread's pre-run staging follows
+(`rusty_box_whp_engine/src/vcpu_thread.rs`). QEMU's
+`whpx_vcpu_kick_out_of_hlt` workaround is not needed on this host.
 
 ### P2. The state page round-trips exactly — and it is NOT the only write path
 
@@ -230,8 +246,10 @@ task-priority field and no APIC-base field, so the page carries neither — and
 both of the registers that do carry them are writable while the hypervisor owns
 the APIC.
 
-**What it changes.** Stage 3's conversion has an escape hatch, and it carries two
-things: the guest's `IA32_APIC_BASE` and the top four bits of its task priority.
+**What it changes.** A conversion between the hypervisor's APIC state page and
+this port's `BxLocalApic` (not built yet) has an escape hatch, and it carries
+two things: the guest's `IA32_APIC_BASE` and the top four bits of its task
+priority.
 It needs the first — the APIC base, with its APIC-enable and x2APIC-enable bits,
 has to cross the seam somehow and no word of the page can carry it. It crosses by
 name, through `WHvX64RegisterApicBase`, which the port already exchanges
@@ -317,13 +335,14 @@ does not execute differently because a
 hypervisor is emulating an APIC. It also reproduces 2026-08-27 finding 10, which
 saw the same parking under `XApic` with a different guest.
 
-**What it changes.** Task 1.5's `Halt` arm is **unreachable** whenever the
-partition has an emulated APIC. It must still exist for the `None` partitions,
-but a run loop that waits for `ExitReason::Halt` to notice an idle guest will
-wait forever. Idleness has to be noticed from outside the run — which, with P4,
-is what makes the cancel the machine thread's only door back. Where the plan
-turns this into a hard fault, the fault text should name this measurement, so
-that an occurrence is diagnosable rather than mysterious.
+**What it changes.** The run loop's `Halt` arm is **unreachable** whenever the
+partition has an emulated APIC. A run loop that waits for `ExitReason::Halt` to
+notice an idle guest will wait forever. Idleness has to be noticed from outside
+the run, and together with P4 this makes the cancel the machine thread's only
+way back. The vCPU thread (`rusty_box_whp_engine/src/vcpu_thread.rs`) turns a
+`Halt` arriving there into an engine fault, `X64Halt under the hypervisor
+APIC`, and the comment on that arm describes this measurement, so an occurrence
+can be diagnosed rather than being a mystery.
 
 ### P4. A cancel is sticky under X2Apic too
 
@@ -402,7 +421,7 @@ to. The platform also makes this the only route there is to test:
 `InterruptKind` offers Fixed, LowestPriority, Nmi, Init, Sipi and LocalInt1, and
 no ExtINT delivery kind for `WHvRequestInterrupt` — so `WHvRegisterPendingEvent`
 is not one of several ways a host can place an ExtINT, it is the way, and "not
-gated" covers the whole surface Task 1.6 can use.
+gated" covers the whole surface the legacy path can use.
 
 **A correction to this probe's own first attempt.** The first run of this
 experiment did not software-enable the APIC, and reported "not gated" off a
@@ -414,11 +433,20 @@ the two attempts leave genuinely different values standing; the answer survived,
 but it was not evidence until it did. The probe carries a `really_differed`
 check so the confounded shape cannot be reported as an answer again.
 
-**What it changes.** Task 1.6's LVT0 tracking is a **correctness requirement**,
-not a fidelity nicety: the platform will deliver a masked ExtINT, so the fabric
-must consult LINT0 itself before placing one. Task 1.6's gated-LVT0 test should
-be written. The trap is available for keeping that model current, and its
-already-advanced RIP is a hazard its handler must know about.
+**What it changes.** The fabric's LVT0 tracking is a **correctness
+requirement**, not a fidelity nicety: the platform will deliver a masked
+ExtINT, so the fabric must consult LINT0 itself before placing one. The code
+does so in three places:
+
+- `IrqFabric::set_bsp_lint0` and `lint0_admits_ext_int`
+  (`rusty_box/src/iodev/irq.rs`) keep the fabric's copy of LINT0 and consult
+  it before placing an ExtINT;
+- the vCPU thread feeds that copy from this trap without advancing RIP;
+- two tests pin the gate: `lvt0_gates_the_legacy_path_the_way_the_lapic_would`
+  (`irq.rs`) and the gated `a_masked_lvt0_keeps_the_legacy_path_closed`
+  (`rusty_box_whp_engine/src/lib.rs`).
+
+The trap's already-advanced RIP is a hazard its handler must know about.
 
 ### P6. The synthetic bank is accepted whole, and the guest sees Hv#1
 
@@ -477,9 +505,11 @@ for every use the design has.
 **The control is the part worth keeping.** The TSC advances while the processor
 is merely *stopped* — 153 million counts across a window in which no guest
 instruction executed. A host that wants a guest not to see its own downtime must
-**suspend the clock**, not merely refrain from running. This extends Task 0.2's
-observation of the reference clock (845 → 845 across 20 ms, and reading 0 until
-a processor has run) to the TSC, which is the clock a guest actually reads.
+**suspend the clock**, not merely refrain from running. This extends to the
+TSC, the clock a guest actually reads, what
+`the_partitions_reference_clock_starts_with_the_guest_and_a_suspend_holds_it`
+(`rusty_box_whp/src/partition.rs`) pins for the partition's reference clock:
+it reads zero until a processor has run, and a suspend holds it still.
 
 ### P9. In-service and trigger-mode are NOT swapped — pinned twice, asymmetrically
 
@@ -520,8 +550,9 @@ in-service; the field the layout calls trigger-mode stayed clear for an
 edge-triggered delivery and was set for a level-triggered one. **The two are the
 right way round.** `ApicVector::InService` at word 5 and
 `ApicVector::TriggerMode` at word 13 stand as transcribed, now by measurement.
-Words 5..29 hold exactly three eight-word bitmaps and `Request` was already
-pinned at word 21 by Task 0.2, so with `Request` fixed only two orderings
+Words 5..29 hold exactly three eight-word bitmaps. `Request` is already pinned
+at word 21, by `a_requested_vector_appears_in_the_pages_request_bitmap`
+(`rusty_box_whp/src/partition.rs`). With `Request` fixed, only two orderings
 remain, and both observations select the same one. There is no third field the
 bit could belong to.
 
@@ -556,7 +587,7 @@ transcribed rather than measured.
 Both may be genuine — Hyper-V's interrupt-controller structure could plausibly
 declare a latched ESR early and an error-status word after the LVT block — but
 nothing here settles it, and it must be settled against the SDK's own field
-order before Stage 3 converts those words in either direction. Neither is
+order before any conversion of the APIC state page reads or writes those words. Neither is
 exercised by anything today, which is why the duplication has survived.
 
 ### The earlier ten, re-run
@@ -600,20 +631,20 @@ guest's own disabled APIC.
 
 | Item | Status |
 |---|---|
-| **P1** — clear halt suspend and wake a parked processor for an ExtINT | **YES on this host.** Task 1.6 keeps its designed shape; QEMU's Windows-10 workaround is not needed |
-| **P3** — halt exits under an emulated APIC | **NO.** Task 1.5's `Halt` arm is unreachable with an APIC; idleness must be noticed from outside the run |
+| **P1** — clear halt suspend and wake a parked processor for an ExtINT | **YES on this host.** The legacy ExtINT path keeps its designed shape; QEMU's Windows-10 workaround is not needed |
+| **P3** — halt exits under an emulated APIC | **NO.** The run loop's `Halt` arm is unreachable with an APIC; idleness must be noticed from outside the run |
 | 2026-08-27 finding 3, "`HaltSuspend` is never set and the register cannot be written **at all** on this host" | **Corrected — mode-specific.** True under `None`; false under `X2Apic`, where the bit is set and the register is writable |
 | 2026-08-27 finding 10, "direct injection is unreachable in this mode" | **Its reasoning is refuted.** A cancel *does* stop a parked processor (P3, P4) and the register writes then go through (P1). Measured under `X2Apic`; under `XApic` itself the route is untested, so the conclusion is unestablished rather than disproved |
 | 2026-08-27 host table's seven extended exits | **Corrected — a port artefact.** The raw word is `0x7fff`: the host offers fifteen positions, this port names thirteen, and `0xc00` is the unnamed remainder |
-| **P2** — is the state page the only write path | **NO.** `WHvX64RegisterApicTpr` is refused for read AND write (`0xC0350005`), but `WHvX64RegisterApicBase` and `CR8` are both writable under `X2Apic` and both read back the value written, on a processor that had been created and never run. Stage 3 carries the APIC base through `WHvX64RegisterApicBase` and the task-priority *class* (`TPR[7:4]`, all `CR8` holds) through `CR8`; the page carries neither, and no measured path carries `TPR[3:0]` |
+| **P2** — is the state page the only write path | **NO.** `WHvX64RegisterApicTpr` is refused for read AND write (`0xC0350005`), but `WHvX64RegisterApicBase` and `CR8` are both writable under `X2Apic` and both read back the value written, on a processor that had been created and never run. A page conversion carries the APIC base through `WHvX64RegisterApicBase` and the task-priority *class* (`TPR[7:4]`, all `CR8` holds) through `CR8`; the page carries neither, and no measured path carries `TPR[3:0]` |
 | **P2b** — a software-disabled APIC's handling of a requested vector | **Dropped, silently.** A page conversion MUST carry the spurious register's enable bit |
 | **P4** — cancel stickiness under `X2Apic` | Sticky, as under `None`. A pre-run cancel cannot be lost |
 | **P5** — the LINT0 write trap | Offered and working; the trapped value is applied, and **RIP arrives already advanced** with `instruction_length = 0` |
-| **P5** — is a host-placed ExtINT gated by LINT0 | **Not gated.** Task 1.6's LVT0 tracking is a correctness requirement; write its gated-LVT0 test |
+| **P5** — is a host-placed ExtINT gated by LINT0 | **Not gated.** The fabric's LVT0 tracking is a correctness requirement; it is built and tested (`IrqFabric::lint0_admits_ext_int`) |
 | **P6** — the synthetic bank and Hv#1 | Accepted whole; the guest reads `"Microsoft Hv"`, `"Hv#1"`, hypercall bit 5 and VP-index bit 6 both set |
 | **P7** — clocks | Capability answers and the guest's enlightened MSRs agree exactly; APIC bus clock is 200 MHz |
 | **P8** — partition time and the TSC | Freezes; and the TSC advances while the processor is merely stopped, so a suspend is the only way to hide host time |
-| **P9** — in-service versus trigger-mode | **Not swapped**, pinned by two independent asymmetric observations. Words 29–31 and 38–43 remain transcribed, and `ApicRegister`'s two error-status fields must be resolved before Stage 3 |
+| **P9** — in-service versus trigger-mode | **Not swapped**, pinned by two independent asymmetric observations. Words 29–31 and 38–43 remain transcribed, and `ApicRegister`'s two error-status fields must be resolved before any page conversion uses them |
 
 ## Appendix: the probe's output, unedited
 

@@ -14,7 +14,7 @@ review discipline, and saying so is part of the rule.
 | id | rule | enforcement |
 |---|---|---|
 | R0 | Public returns are named types; bounds are named generics | public-api diff (optional job) + review |
-| R1 | No undefined behavior; `unsafe` only ratchets down | **mechanical** (xtask ratchet; P8 `forbid`) |
+| R1 | No undefined behavior; `unsafe` only ratchets down | **mechanical** (xtask ratchet; `forbid` end state) |
 | R2 | States are types, not flags | **mechanical** (fixtures) + review |
 | R3 | Machine parts have no loose currency | **mechanical** (visibility + fixture) |
 | R4 | Units are types | review citation |
@@ -50,11 +50,13 @@ enum whose completeness depends on the build.
 
 Every `unsafe` block carries a `// SAFETY:` comment naming **who owns the invariant** it
 relies on. The per-crate count of `unsafe` tokens may never increase; when work removes some,
-the baseline in `xtask/src/ci.rs` is tightened in the same commit. End state (campaign P8):
-`#![forbid(unsafe_code)]` on every library crate but the host-FFI leaf, with no_alloc
-placement delegated to the vetted `static_cell` crate so the one unavoidable `unsafe` lives
-outside this tree. The leaf, `rusty_box_whp_sys`, is a permanent exception and is registered
-below.
+the baseline in `xtask/src/ci.rs` is tightened in the same commit.
+
+The end state is `#![forbid(unsafe_code)]` on every library crate except the host-FFI leaf,
+with no_alloc placement delegated to the vetted `static_cell` crate, so that the one
+unavoidable `unsafe` lives outside this tree. Today three crates carry the `forbid`:
+`rusty_box_core`, `rusty_box_decoder` and `rusty_box_devices`. `static_cell` is not yet a
+dependency. The leaf, `rusty_box_whp_sys`, is a permanent exception and is registered below.
 
 *Enforcement (mechanical):* the `doctrine ratchets` ci step counts comment-stripped `unsafe`
 tokens per crate against the baseline and fails on any increase. A rise is not impossible,
@@ -72,8 +74,9 @@ shutdown, halt) are typed *values* (`ShutdownState`), because a typestate the gu
 invalidate mid-instruction is a lie — the same line llvmkit D8 draws between author-controlled
 transitions and witnessed runtime facts.
 
-*Enforcement:* the campaign deletes the violating fields and predicates; trybuild fixtures pin
-the shape (executing an instruction on a bare CPU without a machine does not compile).
+*Enforcement:* a violating field or predicate is a defect to delete, not a pattern to extend;
+trybuild fixtures pin the shape (executing an instruction on a bare CPU without a machine
+does not compile).
 
 ## R3 — Machine parts have no loose currency
 
@@ -182,43 +185,58 @@ is the mechanical half for type-level claims.
 ## The named erasure/exemption registry
 
 Kept complete on purpose — an exemption not listed here is a violation. Counted, not
-recalled: `dyn` in `rusty_box/src` is 43 occurrences, and every one of them is below.
+recalled: the word `dyn` occurs 22 times in `rusty_box/src`. Nineteen are code, and every
+one of them is below. The other three are comments that name the pattern: in
+`emulator/engine.rs`, `emulator/run.rs` and `cpu/instrumentation/bochs.rs`.
 
 **Sanctioned — a user's closure has no type to name, so erasure is the only form:**
 
-- Hook storage `Box<dyn FnMut…>` — `cpu/instrumentation/{hooks,registry}.rs`, alloc-gated.
 - The user MMIO registry `Box<dyn FnMut…>` — `memory/mmio.rs`, reached from
-  `cpu/access.rs` behind an `is_empty()` guard and exposed as `Emulator::mmio_map`.
-  Alloc-gated.
+  `cpu/access.rs` behind an `is_empty()` guard and exposed as `Emulator::mmio_map`
+  (`emulator_api.rs`). Alloc-gated.
 - `AnyDisk::Custom(Box<dyn BlockDevice + Send>)` — the reserved shape for a user disk
-  backend (P7). Not built yet; listed so it is not re-litigated when it is.
+  backend. Not built yet; listed so it is not re-litigated when it is.
 
-**Tolerated, each with the unit that removes it — a `dyn` here is debt, not design:**
+Instrumentation needs no entry: an observer is a type parameter
+(`InstrumentationRegistry<T: Instrumentation = ()>`, `cpu/instrumentation/registry.rs`),
+not stored closures.
+
+**Tolerated, each with what removes it — a `dyn` here is debt, not design:**
 
 - `Box<dyn BxGui>` / `&mut dyn BxGui` — `emulator/mod.rs`, `emulator/builder.rs`,
-  `gui/gui_trait.rs`. The display leaves the machine as a `DisplaySink` (REPLAN unit B/H2).
+  `gui/gui_trait.rs`. The display adapters already draw into the `DisplaySink` trait
+  (`rusty_box_devices/src/display/sink.rs`), and `GuiSink` in `gui/gui_trait.rs` is what
+  still presents a `BxGui` as one. These go when the machine hands its frames only to a
+  `DisplaySink`.
 - `Box<dyn Fn()>` in `BxGui::headerbar_bitmap` and its three implementations — dies with
   the same seam.
 - `&mut dyn CpuAccess` — `cpu/instrumentation/ctx.rs`. Load-bearing today: because
   `HookCtx` erases the whole context, dispatch has to move the tracer out of the registry
   rather than hold it beside `ExecCtx`. Making `HookCtx` generic is its own unit.
 - `&mut dyn IrqSink` / `&mut dyn TimerService` in `rusty_box_devices`'s `DeviceCtx` — the
-  fabric and the timer wheel live in `rusty_box`, so the devices crate has no concrete type
-  to name until they move (unit L).
+  fabric (`IrqFabric`, `rusty_box/src/iodev/irq.rs`) and the timer wheel live in
+  `rusty_box`, so the devices crate has no concrete type to name until they move into a
+  crate it can depend on.
 
-**Sealed by signature rather than by a private supertrait:**
+**Unsealed on purpose:**
 
-- `SliceEngine` — public, because it bounds `Emulator`'s engine parameter, and
-  implementable only inside this crate, because its arguments (`BxCpuC`'s
-  siblings via `PcIo`, and `SliceRequest`, whose fields are crate-private) are.
-  The seal is deliberate: an engine needs the machine's insides, and a backend
-  crate stays a host-FFI leaf that this crate adapts. Per the per-trait sealing
-  policy, that keeps the trait free to gain methods.
+- `SliceEngine` (`rusty_box/src/emulator/engine.rs`) — public, because it bounds
+  `Emulator`'s engine parameter, and implemented outside this crate:
+  `rusty_box_whp_engine`'s `WhpEngine` is an implementation. A hypervisor
+  backend must never be a dependency of the machine crate, so the adapter that
+  knows both sides is a third crate (see the trait's own doc). That is why
+  `PcIo`'s fields and `PcIo::emulate_one` (`emulator/io.rs`) are public: an
+  engine services, on the machine's parts, what its hardware could not finish,
+  while only the machine assembles a `PcIo`. The trait is not dyn-compatible,
+  and not meant to be (R8): a machine names its engine at compile time.
+  Because implementations live outside this crate, the trait gains only
+  defaulted methods — a new required method would break every one of them.
 
 **Not erasure, but exempted from R0 by name:**
 
 - `ExecCtx::slice_parts` — internal 6-tuple destructure (R0 scope note).
-- `static_cell` — the one `unsafe` dependency for no_alloc placement (R1), outside this tree.
+- `static_cell` — reserved as the one `unsafe` dependency for no_alloc placement (R1),
+  outside this tree; not yet a dependency.
 - no-alloc `Emulator` is `!Send` — documented caller-outlives contract (R6).
 - `rusty_box_whp_sys` — the host-FFI leaf, permanently outside R1's `forbid` end state; the
   section below is its registration.
@@ -233,16 +251,27 @@ What the ratchet buys here is **confinement**, not zero: the workspace lint tabl
 `unsafe_code`, `rusty_box_whp_sys/src/windows.rs` is the one file that lifts the deny
 wholesale, and everywhere else it is lifted a single item at a time under a named `#[expect]`.
 
-**What the counts count.** The baselines are `rusty_box_whp_sys/src` 43 and `rusty_box_whp/src`
-4 — 47 against the 38 of the single crate they replace. The number of unsafe *operations* is
-unchanged: the same 37 host calls and union reads, all still in `windows.rs`. What rose is
-markers. A public seam cannot lean on module privacy, so the three verbs carrying an
-obligation no type can express state it in their signatures — `map_gpa`, which leaves the
-hypervisor holding a host address past the borrow, and `delete_partition` / `delete_vp`, which
-release a resource a `Copy` handle cannot stop anyone releasing twice. In `rusty_box_whp` the
-three tokens that *discharge* those obligations sit where a signature cannot go: two `Drop`
-bodies, because a destructor cannot be an `unsafe fn`, and `map_range`, the crate's single
-door onto the retaining verb — R5's shape, reached by R5's argument.
+**What the counts count.** When the leaf was split out of `rusty_box_whp` (commit
+`68673fe`), the baselines became `rusty_box_whp_sys/src` 43 and `rusty_box_whp/src` 4 — 47
+against the 38 of the single crate they replaced. The number of unsafe *operations* did not
+change: the same 37 host calls and union reads, all in `windows.rs`. What rose was markers.
+
+A public seam cannot lean on module privacy, so the three verbs that carry an obligation no
+type can express state it in their signatures, as `unsafe fn`:
+
+- `map_gpa` leaves the hypervisor holding a host address past the borrow;
+- `delete_partition` and `delete_vp` release a resource that a `Copy` handle cannot stop
+  anyone releasing twice.
+
+At the split, the three tokens in `rusty_box_whp` that *discharge* those obligations sat
+where a signature cannot go:
+
+- two `Drop` bodies, because a destructor cannot be an `unsafe fn`;
+- `map_range`, the crate's single door onto the retaining verb — R5's shape, reached by R5's
+  argument.
+
+Bindings added since then raised both baselines on the same terms. The current values, and
+what each added token is, are recorded beside the numbers in `xtask/src/ci.rs`.
 
 R1 counts markers and operations with one number, so it reads this rise as a regression where
 an implicit obligation in fact became explicit and compiler-enforced. The rule stands as

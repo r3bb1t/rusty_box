@@ -157,6 +157,7 @@ fn run_alpine() -> Result<()> {
 
     let vga_bios_paths = [
         workspace_root.join("binaries/bios/VGABIOS-lgpl-latest.bin"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"),
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin"),
         workspace_root.join("VGABIOS-lgpl-latest.bin"),
         std::path::PathBuf::from("VGABIOS-lgpl-latest.bin"),

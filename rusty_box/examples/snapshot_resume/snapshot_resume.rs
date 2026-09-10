@@ -5,11 +5,11 @@
 //! then restore it in a FRESH PROCESS with the same media attached and
 //! continue executing.
 //!
-//! Run (defaults target the Windows 7 install ISO):
-//!   cargo run --release --example snapshot_resume --features std
+//! Run:
+//!   RB_ISO=path/to/guest.iso cargo run --release --example snapshot_resume --features std
 //!
 //! Environment:
-//!   RB_ISO          ISO path (default: C:\Users\olegg\Downloads\Windows.7.SP1.7601.28064.OneSmiLe.iso)
+//!   RB_ISO          ISO path (required; the harness refuses to start without it)
 //!   RB_MEM_MIB      Guest/host RAM in MiB (default 2048)
 //!   RB_BOOT_INSNS   Instructions before the snapshot (default 1_000_000_000)
 //!   RB_RESUME_INSNS Instructions after the restore (default 200_000_000)
@@ -22,8 +22,6 @@ use rusty_box::{
     },
     gui::NoGui,
 };
-
-const DEFAULT_ISO: &str = r"C:\Users\olegg\Downloads\Windows.7.SP1.7601.28064.OneSmiLe.iso";
 
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
@@ -45,14 +43,16 @@ struct HarnessConfig {
 }
 
 impl HarnessConfig {
-    fn from_env() -> Self {
-        Self {
-            iso: env_string("RB_ISO", DEFAULT_ISO),
+    /// Fails when `RB_ISO` is unset or not Unicode: the harness has no guest
+    /// to boot without one, and no ISO path is portable enough to default to.
+    fn from_env() -> Result<Self, std::env::VarError> {
+        Ok(Self {
+            iso: std::env::var("RB_ISO")?,
             mem_mib: env_u64("RB_MEM_MIB", 2048),
             boot_insns: env_u64("RB_BOOT_INSNS", 1_000_000_000),
             resume_insns: env_u64("RB_RESUME_INSNS", 200_000_000),
             snapshot_path: env_string("RB_SNAPSHOT", "target/snapshot_resume.rbx"),
-        }
+        })
     }
 }
 
@@ -68,7 +68,16 @@ fn main() {
 }
 
 fn run(mode: &str) {
-    let config = HarnessConfig::from_env();
+    let config = match HarnessConfig::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!(
+                "snapshot_resume needs RB_ISO, the path of a bootable CD image \
+                 (RB_ISO=path/to/guest.iso): {error}"
+            );
+            std::process::exit(2);
+        }
+    };
     match mode {
         // Full mode drives both phases as separate OS processes so the
         // restore proves a genuinely fresh machine, not warm in-process state.

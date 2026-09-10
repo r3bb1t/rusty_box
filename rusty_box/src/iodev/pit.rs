@@ -129,9 +129,10 @@ pub struct PitCounter {
     pub(crate) next_change_time: u32,
     /// Whether an OUT handler is attached (Bochs: out_handler != NULL).
     /// Bochs pit.cc attaches irq_handler to counter 0 and speaker_handler
-    /// to counter 2; rusty_box has no host audio backend, so only counter 0
-    /// carries a handler (counter 2's Bochs handler only drives
-    /// DEV_speaker_set_line, which has no register-visible state).
+    /// to counter 2. This machine has no PC speaker device (Bochs
+    /// iodev/speaker.cc bx_speaker_c), so only counter 0 carries a handler;
+    /// speaker_handler only calls DEV_speaker_set_line, which has no
+    /// register-visible state.
     pub(crate) out_handler_attached: bool,
     /// Number of OUT pin transitions since the last drain. Bochs
     /// pit82c54.cc set_OUT invokes out_handler synchronously on every
@@ -379,7 +380,7 @@ impl PitCounter {
             // and count half read" — Bochs BX_ERRORs and falls through to
             // the trailing `return 0` WITHOUT clearing any latch state, so
             // this configuration keeps returning 0 until the counter is
-            // reprogrammed. Reproduced Bochs quirk (iodev parity audit #32).
+            // reprogrammed. Reproduced Bochs quirk.
             if self.count_msb_latched && self.read_state == RWState::MsByteMultiple {
                 return 0;
             }
@@ -597,9 +598,7 @@ impl PitCounter {
                             // and masks to 0xFFFF, scheduling the next OUT
                             // toggle 65535 ticks out instead of 32767, so a
                             // count of 0 yields ~9.1 Hz instead of the real
-                            // hardware's 18.2 Hz. Reproduced Bochs quirk
-                            // (iodev parity audit #32, parity ruling: match
-                            // Bochs exactly).
+                            // hardware's 18.2 Hz. Reproduced Bochs quirk.
                             let half_minus_1 = (self.count_binary as u32 / 2).wrapping_sub(1);
                             if half_minus_1 == 0 {
                                 self.next_change_time = 1;
@@ -856,9 +855,9 @@ pub struct BxPitC {
     total_usec: u64,
     /// Sub-microsecond remainder of the ABSOLUTE icount→usec conversion at
     /// the last port-path sync: `(icount * USEC_PER_SECOND) % ips`. Serialized
-    /// and phase-validated (`< ips`), but it no longer drives advancement —
-    /// since the single-cursor fix `total_usec` is the sole authoritative
-    /// position and the port path recomputes this remainder wholesale.
+    /// and phase-validated (`< ips`); it does not drive advancement:
+    /// `total_usec` is the sole authoritative position, and the port path
+    /// recomputes this remainder wholesale.
     usec_remainder: u128,
     /// Sub-tick remainder of the usec→tick conversion — the integer-exact
     /// equivalent of Bochs pit.cc periodic()'s
@@ -926,9 +925,10 @@ impl BxPitC {
         // Bochs pit.cc init → s.timer.init() (pit82c54.cc init)
         self.counters = [PitCounter::new(0), PitCounter::new(1), PitCounter::new(2)];
         // Bochs pit.cc init: s.timer.set_OUT_handler(0, irq_handler).
-        // Counter 2's Bochs handler (speaker_handler) only drives the host
-        // audio line (DEV_speaker_set_line) with no register-visible state;
-        // rusty_box has no audio backend, so no handler is attached there.
+        // Counter 2's Bochs handler (speaker_handler) only calls
+        // DEV_speaker_set_line, which has no register-visible state. This
+        // machine has no PC speaker device (Bochs iodev/speaker.cc
+        // bx_speaker_c), so no handler is attached there.
         self.counters[0].out_handler_attached = true;
         self.total_ticks = 0;
         self.total_usec = 0;
@@ -1149,7 +1149,7 @@ impl BxPitC {
         }
 
         // `VmClock::micros` IS this conversion — cumulative floor against the
-        // clock's own rate — so the PIT no longer divides for itself.
+        // clock's own rate — so the PIT does not divide for itself.
         let target_usec = clock.micros();
         if target_usec > self.total_usec {
             self.advance_by_usec(target_usec - self.total_usec);
@@ -1305,9 +1305,9 @@ impl BxPitC {
                 // Bochs pit.cc write case 0x42: if speaker_active and
                 // counter 2 is in mode 3 with a complete new count,
                 // DEV_speaker_beep_on(1193180.0/count) retunes the beep.
-                // rusty_box has no host audio backend (iodev parity audit
-                // #32), and the retune changes no register-visible state,
-                // so nothing further happens here.
+                // This machine has no PC speaker device (Bochs
+                // iodev/speaker.cc bx_speaker_c), so no tone is produced; the
+                // retune changes no register-visible state.
             }
             PIT_CONTROL => self.write_control(value),
             PIT_SYSTEM_CONTROL_B => self.write_port61(value),
@@ -1325,17 +1325,19 @@ impl BxPitC {
         if self.counters[2].mode == 3 {
             if self.speaker_active != new_speaker_active {
                 // Bochs pit.cc: DEV_speaker_beep_on(1193180.0/count) /
-                // DEV_speaker_beep_off() — the host audio backend is absent
-                // in rusty_box, so only the speaker_active state tracking
-                // remains (it is what Bochs saves/restores and gates the
-                // beep retune on the 0x42 write path).
+                // DEV_speaker_beep_off(). This machine has no PC speaker
+                // device (Bochs iodev/speaker.cc bx_speaker_c), so only
+                // speaker_active is tracked: it is what Bochs saves/restores,
+                // and it gates the beep retune on the 0x42 write path.
                 self.speaker_active = new_speaker_active;
             }
         } else {
             let new_speaker_level = self.speaker_data_on && self.counters[2].output;
             if self.speaker_level != new_speaker_level {
-                // Bochs pit.cc: DEV_speaker_set_line(new_speaker_level) —
-                // audio backend absent; state tracking only.
+                // Bochs pit.cc: DEV_speaker_set_line(new_speaker_level).
+                // This machine has no PC speaker device (Bochs
+                // iodev/speaker.cc bx_speaker_c), so only the level is
+                // tracked.
                 self.speaker_level = new_speaker_level;
             }
         }
@@ -1946,7 +1948,7 @@ mod tests {
 
     #[test]
     fn write_syncs_counter_to_now_before_applying() {
-        // Finding #16: Bochs pit.cc bx_pit_c::write runs periodic() BEFORE
+        // Bochs pit.cc bx_pit_c::write runs periodic() BEFORE
         // s.timer.write(...), so elapsed ticks replay under the OLD program.
         let mut pit = usec_locked_pit();
 
@@ -1980,7 +1982,7 @@ mod tests {
 
     #[test]
     fn mode3_bulk_decrement_is_two_per_tick() {
-        // Finding #17: Bochs pit82c54.cc clock_multiple decrements mode 3
+        // Bochs pit82c54.cc clock_multiple decrements mode 3
         // by 2*cycles in the bulk path.
         let mut pit = BxPitC::new();
 
@@ -2005,8 +2007,9 @@ mod tests {
 
     #[test]
     fn bcd_bulk_decrement_consumes_ticks() {
-        // Finding #17: the old bulk path returned without decrementing BCD
-        // counters while the caller still consumed the ticks.
+        // Bochs pit82c54.cc decrement_multiple works on count_binary for
+        // both binary and BCD counters, so a BCD counter's bulk path
+        // decrements by every tick it consumes.
         let mut pit = BxPitC::new();
 
         pit.write(PIT_CONTROL, 0x35, 1, clock_at(0)); // Counter 0, low-high, mode 2, BCD
@@ -2029,7 +2032,7 @@ mod tests {
 
     #[test]
     fn port61_read_composition_is_fresh_every_read() {
-        // Finding #18: Bochs pit.cc read case 0x61 composes the value fresh:
+        // Bochs pit.cc read case 0x61 composes the value fresh:
         // bit5=OUT2, bit4=(usec/15)&1, bit1=speaker_data_on, bit0=GATE2;
         // bits 2/3/6/7 read 0.
         let mut pit = usec_locked_pit();
@@ -2057,14 +2060,14 @@ mod tests {
 
     #[test]
     fn port43_read_returns_zero() {
-        // Finding #32b: Bochs pit82c54.cc read(CONTROL_ADDRESS) returns 0.
+        // Bochs pit82c54.cc read(CONTROL_ADDRESS) returns 0.
         let mut pit = BxPitC::new();
         assert_eq!(pit.read(PIT_CONTROL, 1, clock_at(0)), 0);
     }
 
     #[test]
     fn guest_reset_preserves_counter_state() {
-        // Finding #32a: Bochs pit82c54.cc reset is empty — counters keep
+        // Bochs pit82c54.cc reset is empty — counters keep
         // their programming across a guest reset.
         let mut pit = BxPitC::new();
         pit.write(PIT_CONTROL, 0x34, 1, clock_at(0));
@@ -2086,7 +2089,7 @@ mod tests {
 
     #[test]
     fn control_word_out_transition_is_recorded() {
-        // Finding #32d: Bochs pit82c54.cc write (control word) calls
+        // Bochs pit82c54.cc write (control word) calls
         // set_OUT, which invokes the counter-0 out_handler on a transition
         // → IRQ0 edge from a control-word write alone.
         let mut pit = BxPitC::new();
@@ -2126,7 +2129,7 @@ mod tests {
 
     #[test]
     fn mode3_count0_reproduces_bochs_91hz_quirk() {
-        // Finding #32f (parity ruling): Bochs pit82c54.cc clock (mode 3
+        // Bochs pit82c54.cc clock (mode 3
         // reload) computes ((count_binary/2)-1) in Bit32u; count 0
         // underflows and masks to 0xFFFF, so each half-period is 65536
         // ticks (~9.1 Hz square wave) instead of real hardware's 32768
@@ -2157,7 +2160,7 @@ mod tests {
 
     #[test]
     fn latched_status_with_half_read_count_returns_zero_forever() {
-        // Finding #32e: Bochs pit82c54.cc read — status latched while a
+        // Bochs pit82c54.cc read — status latched while a
         // latched count is half-read (MSB pending in MSByte_multiple) hits
         // the "Undefined output" error path and returns 0 WITHOUT clearing
         // any latch, so every subsequent read also returns 0.

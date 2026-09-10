@@ -93,8 +93,10 @@ fn main() {
         &workspace_root,
         &[
             "binaries/bios/VGABIOS-lgpl-latest.bin",
+            "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin",
             "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin",
             "VGABIOS-lgpl-latest.bin",
+            "../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin",
             "../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin",
         ],
         |data| data.len() % 512 == 0,
@@ -382,8 +384,9 @@ fn detect_boot_profile(workspace_root: &std::path::Path) -> BootProfile {
     }
 }
 
-/// Non-panicking check for Alpine ISO existence (for auto-detection).
-/// Searches workspace root, parent, and current directory.
+/// Non-panicking check for Alpine ISO existence (for auto-detection):
+/// `ALPINE_ISO` or `ALPINE_DISK` when it names an existing file, otherwise
+/// [`search_for_alpine_iso`].
 fn try_find_alpine_iso(workspace_root: &std::path::Path) -> Option<std::path::PathBuf> {
     if let Ok(path) = std::env::var("ALPINE_ISO") {
         let p = std::path::PathBuf::from(&path);
@@ -397,7 +400,14 @@ fn try_find_alpine_iso(workspace_root: &std::path::Path) -> Option<std::path::Pa
             return Some(p);
         }
     }
-    // Search workspace root, its parent, and current dir for alpine*.iso
+    search_for_alpine_iso(workspace_root)
+}
+
+/// The first `alpine*.iso` in the workspace root, its parent, or the current
+/// directory. Auto-detection and the Alpine boot arms both search through
+/// this one function, so an ISO that selects the Alpine profile is an ISO the
+/// profile then finds.
+fn search_for_alpine_iso(workspace_root: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut search_dirs = vec![workspace_root.to_path_buf()];
     if let Some(parent) = workspace_root.parent() {
         search_dirs.push(parent.to_path_buf());
@@ -407,12 +417,7 @@ fn try_find_alpine_iso(workspace_root: &std::path::Path) -> Option<std::path::Pa
             search_dirs.push(cwd);
         }
     }
-    for dir in &search_dirs {
-        if let Some(iso) = find_iso_in_dir(dir) {
-            return Some(iso);
-        }
-    }
-    None
+    search_dirs.iter().find_map(|dir| find_iso_in_dir(dir))
 }
 
 fn find_iso_in_dir(dir: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -444,20 +449,14 @@ fn find_alpine_iso(workspace_root: &std::path::Path) -> std::path::PathBuf {
         }
         return p;
     }
-    // Auto-detect alpine*.iso in workspace root
-    let iso = std::fs::read_dir(workspace_root).ok().and_then(|entries| {
-        entries.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
-            p.extension().map(|ext| ext == "iso").unwrap_or(false)
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_lowercase().contains("alpine"))
-                    .unwrap_or(false)
-        })
-    });
-    match iso {
+    match search_for_alpine_iso(workspace_root) {
         Some(p) => p,
         None => {
-            eprintln!("ERROR: No Alpine ISO found. Set ALPINE_ISO=/path/to/alpine.iso");
+            eprintln!(
+                "ERROR: No alpine*.iso found in {}, its parent, or the current directory. \
+                 Set ALPINE_ISO=/path/to/alpine.iso",
+                workspace_root.display()
+            );
             std::process::exit(1);
         }
     }

@@ -56,12 +56,12 @@ pub struct InstrumentationRegistry<T: Instrumentation = ()> {
     /// that a hook — not a budget — ended the slice.
     ///
     /// Two fields rather than one because they travel in opposite directions.
-    /// A single self-clearing flag told the CPU to stop and told the machine
-    /// nothing, so `step_batch` re-entered the loop and the stop was lost; a
-    /// single sticky flag would stop the machine but re-break every slice of
-    /// any processor whose flag no one had cleared. The machine drains this one
-    /// at the end of each batch and raises its own stop flag, which is what
-    /// every run loop already honours.
+    /// A single self-clearing flag would tell the CPU to stop and tell the
+    /// machine nothing, so `Emulator::step` would re-enter the loop and lose
+    /// the stop; a single sticky flag would stop the machine but re-break
+    /// every slice of any processor whose flag no one had cleared. The
+    /// machine drains this one at the end of each batch and raises its own
+    /// stop flag, which is what every run loop already honours.
     pub(crate) stop_honored: bool,
 
     /// Monomorphized tracer — zero-cost when `T = ()`.

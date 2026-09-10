@@ -1095,9 +1095,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert_eq!(read(&mut mem, moved.0, &mut data), PhysAccess::Done);
     }
 
-    /// Register/unregister cycles must not leak region slots. The old chain
-    /// leaked its fixed overflow pool without a free-list; a table that fills
-    /// up silently would start refusing a relocating BAR.
+    /// Register/unregister cycles must not leak region slots. `MmioMap` holds
+    /// a fixed number of regions (`MAX_DEVICE_MMIO_REGIONS`, fewer than the
+    /// 200 cycles below), so a slot that unregistering failed to free would
+    /// fill the table and make it refuse a relocating BAR.
     #[test]
     fn repeated_register_unregister_does_not_leak_region_slots() {
         let mut mem = test_mem();
@@ -1115,8 +1116,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
         assert_eq!(mem.mmio.len(), 1, "only the kept region may remain");
     }
-
-    // ─── Finding #8: enable_smram/disable_smram actually switch routing ──────
 
     #[test]
     fn direct_mapping_uses_by_value_monitor_policy() {
@@ -1142,6 +1141,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .is_some()
         );
     }
+
+    // ─── enable_smram/disable_smram switch routing (Bochs misc_mem.cc
+    // BX_MEM_C::enable_smram / BX_MEM_C::disable_smram) ───────────────────────
 
     #[test]
     fn enable_smram_bypasses_vga_handler_disable_restores_it() {
@@ -1207,7 +1209,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
-    // ─── Finding #35b: bios_write_enabled gates BIOS-ROM-region writes ───────
+    // ─── bios_write_enabled gates BIOS-ROM-region writes ─────────────────────
     //
     // Bochs misc_mem.cc BX_MEM_C::init_memory() defaults bios_write_enabled
     // to false; PIIX3 XBCS bit 2 (pci2isa.cc case 0x4e) is the only thing

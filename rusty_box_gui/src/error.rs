@@ -118,6 +118,17 @@ pub enum RunError {
     )]
     NoHypervisor,
 
+    /// `--engine whp` asked of a build that carries no hypervisor path. The
+    /// path exists only on Windows, with `hv-whp` and without `guest-trace`;
+    /// the gate is the one `runner.rs` compiles the engine under.
+    #[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
+    #[error(
+        "this build has no hypervisor engine, so `--engine whp` cannot run. The engine is built \
+         only for Windows, with the `hv-whp` feature and without `guest-trace`. Use \
+         `--engine interpreter`, or run a build that carries the engine"
+    )]
+    NoHypervisorEngine,
+
     #[error(
         "max_instructions = {max_instructions} cannot be honoured by `--engine whp`: a processor \
          on the hypervisor retires instructions the host does not count, so the limit would end \

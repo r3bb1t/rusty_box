@@ -36,7 +36,8 @@ variable. This supersedes nothing: an earlier measurement of 0 window exits acro
 evidence rather than an absence.
 
 **New, and it suggests the mechanism.** Under `X2Apic` a NON-ZERO `InterruptPriority` is refused
-outright with `0xC0350005` — the same code that refuses `WHvX64RegisterApicTpr` (probe P8). Once
+outright with `0xC0350005` — the same code that refuses `WHvX64RegisterApicTpr`
+([probe P2](whp-platform-probe-2026-09-03.md)). Once
 the hypervisor owns the APIC it owns interrupt priority, and this register is priority-qualified.
 The notification looks like a mechanism built for a VMM that owns its own APIC, being asked of one
 that has given the APIC away.
@@ -136,7 +137,17 @@ That makes the fix the cheap one: **drop the `ext_int_request` dedup while a vec
 every boundary that finds the 8259's INT pin still high re-cancels the run rather than returning
 early. It is bounded by the guest's own interrupt rate, needs no timer, and the machine already
 republishes the level at every boundary. The alternative — a periodic forced exit — is what no
-shipped VMM does and what this campaign exists to eliminate.
+shipped VMM does, and this engine does not do it either.
+
+**As built** (`ext_int_request` in `rusty_box_whp_engine/src/vcpu_thread.rs`), the dedup is
+dropped at a narrower point than "owed":
+
+- While a vector is owed and no staging has yet found the guest unable to take it, the dedup
+  stands, and one cancel serves every republication of the pin.
+- Once the pre-run staging finds the guest unable to take it (`IF` clear, an interrupt shadow, or a
+  delivery in flight), `ext_int_blocked` is set, and each later republication cancels the run
+  again until a staging finds the guest ready.
+- A run is cancelled only while the processor is inside one.
 
 Both other VMMs' behaviour is consistent with that reading: QEMU depends on a mechanism that does
 not work here, and VirtualBox disabled the whole configuration citing unfixed backend issues.

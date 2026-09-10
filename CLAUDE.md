@@ -83,7 +83,7 @@ directly over stdio (newline-delimited JSON-RPC: `initialize` → `notifications
 ## Architecture
 
 ```
-Emulator<T: Instrumentation = ()>        (no lifetime params; CPU model is runtime data: CpuModel enum)
+Emulator<T: Instrumentation = (), E = SoftwareEngine>   (no lifetime params; E is the execution engine: SoftwareEngine interprets, rusty_box_whp_engine::WhpEngine runs on WHP; CPU model is runtime data: CpuModel enum)
 +-- BxCpuC<T>         CPU core state (registers, TLBs as OFFSETS into the allocation, icache)
 +-- BxMemC            Memory subsystem (block-based, supports >4GB; owns its RAM as Box<[GuestPage]>)
 +-- BxDevicesC        I/O port handler manager (65536 ports, fixed arrays)
@@ -142,5 +142,5 @@ Emulator::init_at(emu_ptr, cpu, mem_stub, config)   // Emulator at raw pointer
 - `std` -- Standard library support (terminal, file I/O, tempfile). Implies `alloc`.
 - `alloc` -- Heap allocation. Enables `Emulator::new()`, GUI, diagnostic methods, StopHandle.
 - `gui-egui` -- Graphical UI using egui.
-- `instrumentation` -- Closure-based CPU hooks. Implies `alloc`.
+- Instrumentation is not a feature: an observer is the `T: Instrumentation` type parameter of `Emulator`/`BxCpuC` (`()` observes nothing; its empty hook mask makes the CPU skip every dispatch).
 - `profiling` -- Profiling support. Implies `std`.

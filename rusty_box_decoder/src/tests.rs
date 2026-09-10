@@ -2199,6 +2199,67 @@ fn vex_opmask_group_form_constraints() {
     assert!(fetch_decode64(&[0xC4, 0xE1, 0x78, 0x99, 0x08]).is_err());
 }
 
+/// VEX.L0.66.0F3A 30..33 are the opmask shifts. Bochs
+/// `BxOpcodeGroup_VEX_0F3A30`..`_0F3A33` (fetchdecode_opmap_avx.cc) lets the
+/// opcode byte choose direction and width pair and VEX.W choose the member:
+/// 30 = KSHIFTRB/KSHIFTRW, 31 = KSHIFTRD/KSHIFTRQ, 32 = KSHIFTLB/KSHIFTLW,
+/// 33 = KSHIFTLD/KSHIFTLQ. None of the eight carries ATTR_IS64, so all of them
+/// decode identically in 32-bit mode.
+#[test]
+fn vex_kshift_encodings_select_the_bochs_opcode() {
+    // C4 E3 = 3-byte VEX, R/X/B clear, map 0F3A. Byte 2 = W vvvv=1111 L=0
+    // pp=01 (66): 0x79 for W0, 0xF9 for W1. ModRM CA = mod 11, reg k1, rm k2.
+    const W0: u8 = 0x79;
+    const W1: u8 = 0xF9;
+    let cases: [(u8, u8, Opcode); 8] = [
+        (0x30, W0, Opcode::KshiftrbKgbKebIb),
+        (0x30, W1, Opcode::KshiftrwKgwKewIb),
+        (0x31, W0, Opcode::KshiftrdKgdKedIb),
+        (0x31, W1, Opcode::KshiftrqKgqKeqIb),
+        (0x32, W0, Opcode::KshiftlbKgbKebIb),
+        (0x32, W1, Opcode::KshiftlwKgwKewIb),
+        (0x33, W0, Opcode::KshiftldKgdKedIb),
+        (0x33, W1, Opcode::KshiftlqKgqKeqIb),
+    ];
+    for (byte, vex2, expected) in cases {
+        let enc = [0xC4u8, 0xE3, vex2, byte, 0xCA, 0x03];
+        let w = vex2 >> 7;
+        for (mode, decoded) in [
+            ("64-bit", fetch_decode64(&enc)),
+            ("32-bit", fetch_decode32(&enc, true)),
+        ] {
+            let i = decoded.unwrap_or_else(|e| {
+                panic!("{mode}: VEX.66.0F3A.W{w} {byte:02X} must decode, got {e:?}")
+            });
+            assert_eq!(
+                i.get_ia_opcode(),
+                expected,
+                "{mode}: VEX.66.0F3A.W{w} {byte:02X}"
+            );
+            assert_eq!(i.ilen(), 6, "{mode}: {expected:?} length");
+            assert_eq!(i.dst(), 1, "{mode}: {expected:?} writes ModRM.reg (k1)");
+            assert_eq!(i.src(), 2, "{mode}: {expected:?} reads ModRM.rm (k2)");
+            assert_eq!(i.ib(), 3, "{mode}: {expected:?} shift count");
+        }
+    }
+
+    // Every group is ATTR_VL128: VEX.L1 (byte 2 = 0x7D / 0xFD) is reserved.
+    for byte in 0x30u8..=0x33 {
+        for vex2 in [0x7Du8, 0xFD] {
+            let enc = [0xC4u8, 0xE3, vex2, byte, 0xCA, 0x03];
+            assert!(
+                fetch_decode64(&enc).is_err(),
+                "VEX.256.66.0F3A {byte:02X} must #UD"
+            );
+        }
+        // No legacy (non-VEX) encoding exists at 66 0F 3A 30..33.
+        assert!(
+            fetch_decode64(&[0x66, 0x0F, 0x3A, byte, 0xCA, 0x03]).is_err(),
+            "legacy 66 0F 3A {byte:02X} must #UD"
+        );
+    }
+}
+
 /// SETcc has no VEX encoding, so a VEX-prefixed 0F 90..9F that no opmask entry
 /// claims must be #UD rather than falling through to the shared SETcc entry,
 /// whose attribute mask constrains nothing.

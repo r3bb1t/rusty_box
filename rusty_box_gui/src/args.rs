@@ -31,8 +31,9 @@ pub struct Args {
 
     /// Which engine retires the guest's instructions.
     ///
-    /// `whp` needs the `hv-whp` feature built in and a host with the platform
-    /// enabled; it is refused rather than silently downgraded when absent.
+    /// `whp` needs a Windows build with `hv-whp` and without `guest-trace`, and
+    /// a host with the platform enabled; it is refused rather than silently
+    /// downgraded when any of these is missing.
     #[arg(long = "engine", value_enum, default_value_t = crate::config::Engine::Interpreter)]
     pub engine: crate::config::Engine,
 

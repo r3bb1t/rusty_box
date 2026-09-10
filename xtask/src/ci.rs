@@ -1,8 +1,25 @@
-//! Local CI gate suite for the clean-architecture refactor.
+//! Local CI gate suite.
 //!
-//! `cargo xtask ci` runs the same load-bearing matrix as `.github/workflows/ci.yml`
-//! plus the DLX Linux headless boot gate, so every refactor phase can be verified
-//! with one command before review.
+//! `cargo xtask ci` runs the doctrine ratchets, then a fixed matrix of `cargo`
+//! steps, every one but the last a release build: tests for rusty_box_core and
+//! rusty_box_devices (their no_std + no_alloc builds included) and bare-metal
+//! (`x86_64-unknown-none`) checks of both, devices with alloc; tests for the
+//! three WHP crates, the engine's with every target, and a check of
+//! rusty_box_whp's examples; tests for the decoder and the rusty_box library;
+//! checks of rusty_box as no_std with and without alloc, for
+//! `x86_64-unknown-none`, and for `wasm32-unknown-unknown` with alloc; the UEFI
+//! application build; the public-API, doc-example and doctrine compile-fail
+//! tests; checks of the GUI for wasm and for the host (its tests compiled, not
+//! run); an all-features check; and a debug-assertions check. `--full` then
+//! adds the whole rusty_box test suite and the GUI release build, and the DLX
+//! Linux headless boot gate runs last unless `--skip-boot` is given.
+//!
+//! It is not a copy of `.github/workflows/ci.yml`. That workflow runs debug
+//! builds, and among its steps are several no step here runs: the tests of
+//! rusty_box_bximage and rusty_box_gui, the egui serial-path tests, and checks
+//! of rusty_box_no_alloc_smoke, of the decoder for `x86_64-unknown-none`, of
+//! rusty_box for `x86_64-unknown-uefi`, and of the GUI without its default
+//! features.
 //!
 //! `cargo xtask perf-baseline` builds the release perfbench binary and archives it
 //! (with the git revision) under `target/perf-baselines/<rev>/` for interleaved
@@ -227,11 +244,10 @@ const UNSAFE_IMPL_SEND_BASELINE: usize = 0;
 /// hides are wrong, but because while it is on, nothing tells you a NEW one
 /// appeared. A scanned crate with no entry is held at zero.
 ///
-/// Measured with `RUSTFLAGS="--force-warn dead_code"`, these hide ~2470 items.
+/// Measured with `RUSTFLAGS="--force-warn dead_code"`, these hide ~2450 items.
 /// Most are Bochs-parity constants and helpers ported ahead of their callers —
-/// `tables.rs` alone accounts for ~141, and `geforce.rs` ~23 in a file that is
-/// deliberately kept — so the backlog needs per-item judgement and cannot be
-/// swept. The count going down is what makes that judgement happen file by
+/// `tables.rs` alone accounts for ~141 — so the backlog needs per-item
+/// judgement and cannot be swept. The count going down is what makes that judgement happen file by
 /// file; replace a blanket allow with targeted ones that name their provenance.
 // 73 -> 70: `memory/mod.rs` (whose inner attribute covered the whole memory
 // subtree, `residency.rs` included), `memory/memory_stub.rs`, and `cpu/tlb.rs`.
@@ -243,12 +259,11 @@ const BLANKET_DEAD_CODE_BASELINES: &[(&str, usize)] = &[
     // `decoder/tables.rs` names `dead_code`; the three opcode maps (`opmap.rs`,
     // `opmap_0f38.rs`, `opmap_0f3a.rs`) switch it off through `unused`.
     ("rusty_box_decoder/src", 4),
-    // `display/geforce.rs`, the NV card ported ahead of the machine that will
-    // host it and kept deliberately.
-    ("rusty_box_devices/src", 1),
 ];
 
-/// `.unwrap()` / `.expect(…)` outside test code, across every library crate.
+/// `.unwrap()` / `.expect(…)` outside test code, in each crate
+/// `UNSAFE_TOKEN_BASELINES` names: rusty_box, the decoder, core, devices and
+/// the three WHP crates.
 /// Zero, and it is to stay zero: a library that panics on a condition it could
 /// have returned is a library its caller cannot contain.
 ///

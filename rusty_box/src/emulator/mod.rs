@@ -544,8 +544,8 @@ pub struct Emulator<T: Instrumentation = (), E = SoftwareEngine> {
     /// re-armed when the guest actually changes the display timing.
     pub(crate) vga_vertical_period_usec: u32,
     /// Shared stop flag: when set to true by another thread (typically a GUI
-    /// thread), `run_interactive`/`step_batch` loops exit. Crate-private
-    /// (doctrine R3): external consumers share it through
+    /// thread), the `run_interactive`, `step` and `emu_start` loops exit.
+    /// Crate-private (doctrine R3): external consumers share it through
     /// [`Emulator::set_stop_flag`] and read it through [`Emulator::stop_flag`],
     /// which present the same shape under both `alloc` settings (R0).
     #[cfg(feature = "alloc")]
@@ -1538,21 +1538,21 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             }
         }
 
-        // Reset devices (only on hardware reset)
-        // Matches original: DEV_reset_devices(type) at pc_system.cc
-        // which calls bx_devices_c::reset() at devices.cc
+        // Reset devices (only on hardware reset). Bochs pc_system.cc
+        // `bx_pc_system_c::Reset` calls `DEV_reset_devices(type)`, which is
+        // devices.cc `bx_devices_c::reset`. That, in order, clears the PCI
+        // configuration address, disables SMRAM (`mem->disable_smram`),
+        // resets every device plugin (`bx_reset_plugins`), sends a break code
+        // for every key the host holds (`release_keys`), and stops the paste
+        // buffer (`paste.stop`). The first three are ported below.
+        // `release_keys` and the paste buffer are not: this machine keeps no
+        // table of host-held keys and has no paste buffer, so a key held
+        // across a hardware reset stays down in the guest.
         if matches!(reset_type, ResetReason::Hardware) {
-            // Original bx_devices_c::reset() does (in order):
-            // 1. Clear PCI confAddr if PCI enabled (line 402) - done in devices.reset()
-            // 2. mem->disable_smram() (line 405) - disable SMRAM
-            // 3. bx_reset_plugins(type) (line 406) - reset all device plugins
-            // 4. release_keys() (line 407) - release keyboard keys
-            // 5. paste.stop = 1 (line 409) - stop paste buffer
-
-            // Step 1: Clear PCI confAddr (done in devices.reset())
+            // Step 1: clear the PCI configuration address (`BxDevicesC::reset`).
             self.devices.reset(reset_type)?;
 
-            // Step 2: Disable SMRAM (matches original line 405: mem->disable_smram())
+            // Step 2: Bochs `mem->disable_smram()`.
             self.memory.disable_smram();
 
             // Reset the machine-wide SMC write-stamp table (Bochs
@@ -1561,12 +1561,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             // trace can outlive its stamps).
             self.memory.smc_reset_stamps();
 
-            // Step 3: Reset all device plugins (matches original line 406: bx_reset_plugins())
-            // This resets all devices: PIC, PIT, CMOS, DMA, Keyboard, HardDrive, VGA
+            // Step 3: Bochs `bx_reset_plugins(type)` — every device the
+            // device manager owns.
             self.device_manager.reset(reset_type)?;
             self.rearm_device_timers_after_hardware_reset();
-
-            // Note: release_keys() at line 407 and paste.stop at line 409 not yet implemented
         }
 
         // Reset always enables A20. Discard requests made before this reset

@@ -8,6 +8,12 @@ These answers exist to unblock the WHP engine's signatures. Four of them
 contradict what the plan assumed, and one closes a question the documentation
 answers ambiguously.
 
+"The plan" and "REPLAN" below mean the project owner's hypervisor plan, which
+is kept outside this repository. Where this document cites one of its open
+questions (§7 Q1–Q8), a decision or a risk, it also states what that item
+asked or decided, so the plan itself is never needed to follow the argument.
+For what was actually built, the code is the authority.
+
 **Three entries below have since been superseded**, by
 [the 2026-09-03 probe](whp-platform-probe-2026-09-03.md) on this same host: the
 host table's extended-exit list, finding 3's claim that
@@ -47,7 +53,7 @@ A page mapped `Read|Execute` and written by the guest produces
 property set**. Shadowed ROM and write-ignored PAM regions therefore work with
 a plain `R|X` mapping.
 
-**Correction to the plan.** REPLAN §7 Q1 asked whether
+**Correction to the plan.** The plan's §7 Q1 asked whether
 `ExtendedVmExits.GpaAccessFaultExit` was *needed*, on the strength of OpenVMM
 setting it. It is not needed, and it is actively harmful: with the bit set, the
 first exit is `MemoryAccess gpa=0x1000 access=Execute gpa_unmapped=false` — an
@@ -69,8 +75,9 @@ gpa=0x10000`, so the call works in real mode.
 
 **This is the load-bearing finding.** For both memory exits, RIP still points
 at the faulting instruction and the exit reports no length, so a host **must**
-decode the instruction to make progress — which is exactly REPLAN decision 5's
-shadow `BxCpuC`, now established as mandatory rather than preferred. Worse for
+decode the instruction to make progress. That is exactly the plan's decision 5
+— a shadow `BxCpuC` that decodes and finishes each trapped instruction — now
+established as mandatory rather than preferred. Worse for
 the read-only case: the exit carries no instruction bytes either, so the
 decoder must fetch them from guest memory first. Port I/O is the exception the
 plan expected — `instruction_length=1` means non-string PIO needs no decoder.
@@ -110,7 +117,7 @@ nothing to do where it does not.
 | halt | 3.99–4.14 µs |
 
 20 000 exits each, round trip out of and back into the guest with no host
-register writes in between. REPLAN risk 5 budgeted 2–20 µs against an estimated
+register writes in between. The plan's risk 5 budgeted 2–20 µs against an estimated
 2·10⁴–10⁵ exits per text-mode boot; at 4 µs that is 0.08–0.4 s of pure exit
 cost, which the budget absorbs.
 
@@ -127,7 +134,8 @@ cost, which the budget absorbs.
 MMIO exits cost 4.38 µs with a separate domain and 4.36 µs without — inside the
 noise of interleaved best-of-two runs. The documented speedup is not
 measurable here, so the mitigation costs nothing and the property stays on by
-default. REPLAN §7 Q6 is closed.
+default. The plan's §7 Q6, which asked what `SeparateSecurityDomain` costs, is
+closed.
 
 ### 7. CPUID is fully the host's to author, and properties are not uniformly pre-setup
 
@@ -143,7 +151,7 @@ host's own answer already has ECX bit 31 clear: answering with the bit set
 makes the guest read `0xf6da3203`, and answering with it clear makes the guest
 read `0x76da3203`. The stealth lever works.
 
-**Ambiguity resolved.** REPLAN §7 Q7 asked whether processor properties are
+**Ambiguity resolved.** The plan's §7 Q7 asked whether processor properties are
 truly pre-setup-only, noting that the docs conflict. They are **per-property**:
 after `WHvSetupPartition`, `ProcessorCount` is refused with `0x80070057`
 (`E_INVALIDARG`) while `ExtendedVmExits` is **accepted**. A design may therefore
@@ -225,11 +233,23 @@ thread** — either one that owns the devices and delivers through
 machine thread back.
 
 `LocalApicEmulationMode::None` has no such problem, because a halt exits. It is
-also the stealth target, our `cpu/apic.rs` already exists, and Unit E's
-`IrqFabric` already owns EOI. **That argues for taking Alpine straight to
-stage 2 — `None` plus our own LAPIC behind the shadow CPU — rather than
-through the `XApic` stage the plan sequences first.** Stage 1 is viable, but it
-buys a threading model that REPLAN decision 9 spent effort avoiding.
+also the stealth target, our `cpu/apic.rs` already exists, and the `IrqFabric`
+(`rusty_box/src/iodev/irq.rs`) already owns EOI. **That argues for taking
+Alpine straight to the plan's stage 2 — `None` plus our own LAPIC behind the
+shadow CPU — rather than through the `XApic` stage it sequences first.** That
+first stage is viable, but it buys a threading model that the plan's
+decision 9 (one machine thread with two cross-thread pokes) spent effort
+avoiding.
+
+**As built,** the engine took the second thread after all, and with it both
+modes. `choose_the_local_apic` in `rusty_box_whp_engine/src/engine.rs`
+chooses by device clock:
+
+- When the machine's devices run in ticks, it asks for `None`.
+- When a device thread drives them on host time, it asks for the hypervisor's
+  `X2Apic`, falling back to `XApic`. The vCPU thread
+  (`rusty_box_whp_engine/src/vcpu_thread.rs`) is then the thread that stays
+  inside the run.
 
 ## What this changes
 
@@ -244,5 +264,5 @@ buys a threading model that REPLAN decision 9 spent effort avoiding.
 | §7 Q7 CPUID authorship and property timing | Answered; properties are per-property, not uniformly pre-setup |
 | §7 Q8 cancel stickiness | Answered — sticky |
 | Decision 5, the shadow CPU | **Promoted from preferred to mandatory** by finding 2 |
-| Decision 6, P9b's `XApic`-first staging for Alpine | **Questioned** by finding 10 — viable, but it forces a second thread that `None` does not |
+| Decision 6, `XApic`-first staging for Alpine | **Questioned** by finding 10 — viable, but it forces a second thread that `None` does not |
 | Decision 9, one thread and two cross-thread pokes | **Three under `XApic`**: stop flag, waker, and interrupt delivery. Unchanged under `None` |

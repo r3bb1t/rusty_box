@@ -5453,16 +5453,16 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     /// A guest that asks to be powered off must be able to say so to a caller
-    /// that drives the machine with `step_batch`.
+    /// that drives the machine with `step`.
     ///
     /// The guest-visible property, not the transport: a guest completing the
     /// port-0x8900 shutdown protocol leaves the CPU perfectly healthy — no
-    /// shutdown activity state, no fault — so the old `(count, is_shutdown)`
-    /// return reported `false` forever and a `step_batch` driver span until it
-    /// hit its own instruction cap. The UEFI and WASM front ends are exactly
-    /// such drivers.
+    /// shutdown activity state, no fault — so only the stop reason `step`
+    /// returns can report it, and a driver that read the CPU's state instead
+    /// would run until its own instruction cap. The UEFI and WASM front ends
+    /// are exactly such drivers.
     #[test]
-    fn a_guest_power_off_request_reaches_a_step_batch_caller() {
+    fn a_guest_power_off_request_reaches_a_step_caller() {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
@@ -5576,9 +5576,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     ///
     /// `InstrHookCtx::stop` sets exactly the flag this test sets, so this is
     /// the hook path without a bespoke tracer. The flag ends the CPU slice on
-    /// its own; what needed fixing is that the slice ending was all it did —
-    /// `step_batch` re-entered the loop for the rest of its wall-clock budget
-    /// and returned as though nothing had been asked.
+    /// its own; the machine must end the call as well, returning
+    /// `StopRequested` rather than re-entering the loop for the rest of the
+    /// budget and returning as though nothing had been asked.
     #[test]
     fn a_stop_requested_inside_the_cpu_loop_stops_the_machine() {
         std::thread::Builder::new()
