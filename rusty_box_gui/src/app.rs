@@ -3147,7 +3147,7 @@ impl WebShellApp {
                     &mut columns[0],
                     WEB_BOOT_MEDIA_ACTION_LABEL,
                     WEB_BOOT_MEDIA_ACTION_DESCRIPTION,
-                    ACCENT_BLUE,
+                    ACCENT_CYAN,
                     ActionTileWeight::Primary,
                     || self.open_file_picker(),
                 );
