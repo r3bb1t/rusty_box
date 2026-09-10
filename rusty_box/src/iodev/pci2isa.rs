@@ -722,7 +722,7 @@ mod tests {
         assert_eq!(bridge.reset_request, Some(ResetReason::Hardware));
     }
 
-    // ─── Finding #35b: XBCS (0x4E) BIOS write-enable wiring ──────────────────
+    // ─── XBCS (0x4E) BIOS write-enable wiring ────────────────────────────────
     //
     // Bochs pci2isa.cc bx_piix3_c::pci_write_handler case 0x4e:
     //   if ((value8 & 0x04) != (oldval & 0x04)) DEV_mem_set_bios_write(...)

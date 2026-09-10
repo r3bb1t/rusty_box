@@ -93,10 +93,9 @@ fn bin_to_bcd(value: u8, is_binary: bool) -> u8 {
 //
 // Ported verbatim from `utctime_ext`/`timeutc`: pure integer math, no
 // per-year/per-day iteration, so it is O(1) regardless of how far `timeval`
-// or the broken-down fields are from a sane range. The previous hand-rolled
-// loops in `update_clock`/`update_timeval` were O(days) and O(months) and
-// could be driven by the guest into a multi-hour host stall (finding #1) or
-// an out-of-bounds panic (month >= 14) / underflow panic (day == 0).
+// or the broken-down fields are from a sane range. A guest-written date can
+// therefore neither stall the host in `update_clock`/`update_timeval` nor
+// reach a panic through an out-of-range month or a zero day of month.
 // =============================================================================
 
 /// Days elapsed between the start of a month and the start of the year,
@@ -681,7 +680,7 @@ impl BxCmosC {
         // Bochs cmos.cc uip_timer: the Update-Ended flag (UF, bit 4 of
         // Status C) is only set together with IRQF when Update-Ended
         // Interrupt Enable (UIE, bit 4 of Status B) is set — NOT
-        // unconditionally on every update cycle (finding #33).
+        // unconditionally on every update cycle.
         if self.ram[REG_STAT_B as usize] & 0x10 != 0 {
             self.ram[REG_STAT_C as usize] |= 0x90; // IRQF + UF
             if self.irq_enabled {
@@ -708,7 +707,7 @@ impl BxCmosC {
         if sec_match && min_match && hour_match {
             // Bochs cmos.cc uip_timer: the Alarm Flag (AF, bit 5 of Status
             // C) is only set together with IRQF when Alarm Interrupt
-            // Enable (AIE, bit 5 of Status B) is set (finding #33).
+            // Enable (AIE, bit 5 of Status B) is set.
             if self.ram[REG_STAT_B as usize] & 0x20 != 0 {
                 self.ram[REG_STAT_C as usize] |= 0xA0; // IRQF + AF
                 if self.irq_enabled {
@@ -725,11 +724,13 @@ impl BxCmosC {
         let is_24hour = (self.ram[REG_STAT_B as usize] & 0x02) != 0;
 
         // Bochs cmos.cc update_clock: clamp timeval into the representable
-        // range before decoding it. This is the host-DoS fix (finding #1):
-        // previously an unbounded `timeval` fed an O(days) year-search loop
-        // that a guest could drive into a multi-hour host stall by writing
-        // an extreme date and exiting SET mode. The clamp wraps like a
-        // simple overflow, exactly mirroring Bochs.
+        // range before decoding it, wrapping like a simple overflow — years
+        // 0000..=9999 in BCD mode, 0000..=25599 in binary mode. Each wrap
+        // subtracts or adds one range width. A timeval that `update_timeval`
+        // derives from guest-written registers lies within two widths of the
+        // range (the register bytes cap the year near 25,800), so each loop
+        // runs at most twice, and the decode that follows is O(1)
+        // (`utctime_ext`).
         const MINTVALSET: i64 = -62_167_219_200; // year 0000-01-01
         const MAXTVALSET_BCD: i64 = 253_402_300_799; // year 9999-12-31 23:59:59
         const MAXTVALSET_BIN: i64 = 745_690_751_999; // year 25599-12-31 23:59:59
@@ -830,7 +831,7 @@ impl BxCmosC {
         // update month (register is 1..12 -> BrokenTime is 0..11; may be
         // out of range for a malformed guest write, e.g. 0 or >=14 — that
         // is fine, timeutc()/utctime_ext() normalize it without indexing
-        // anything by the raw value, unlike the old DAYS_IN_MONTH loop)
+        // anything by the raw value)
         bt.mon = bcd_to_bin(self.ram[REG_MONTH as usize], is_binary) as i64 - 1;
 
         // update year
@@ -1027,9 +1028,7 @@ impl BxCmosC {
                     // (mark timeval_change) until SET mode is exited;
                     // otherwise apply it immediately (Bochs cmos.cc write:
                     // `if (reg[STAT_B] & 0x80) timeval_change=1; else
-                    // update_timeval();` — finding #9. Previously only the
-                    // SET-mode branch existed, so a guest writing time
-                    // registers outside SET mode had no effect at all.
+                    // update_timeval();`).
                     REG_SEC
                     | REG_MIN
                     | REG_HOUR
@@ -1062,8 +1061,7 @@ impl BxCmosC {
                             // Bochs cmos.cc write: the checksum is never
                             // recomputed from an I/O write — only by
                             // explicit calls like set_memory_size() /
-                            // configure_disk_geometry() at setup time
-                            // (finding #33).
+                            // configure_disk_geometry() at setup time.
                         }
                     }
                 }
@@ -1734,16 +1732,16 @@ mod tests {
     }
 
     // =========================================================================
-    // Finding #1 — host-DoS in date conversion (Bochs utctime.h port)
+    // Bounded, panic-free date conversion (Bochs utctime.h utctime_ext /
+    // timeutc)
     // =========================================================================
 
-    /// Isolates the month-OOB path: only `REG_MONTH` is malformed, day of
-    /// month is left at whatever valid value `init_defaults`/`update_clock`
-    /// already put there. The old code did
-    /// `for m in 1..month { DAYS_IN_MONTH[(m-1)] }`, which only panics once
-    /// `month >= 14` — `1..13` (month=13) tops out at index `m-1 == 11`,
-    /// still in bounds for a 12-entry table. BCD 0x14 decodes to decimal
-    /// 14, so `1..14` reaches index 12 and would have panicked pre-fix.
+    /// Isolates the month path: only `REG_MONTH` is malformed; day of month
+    /// is left at whatever valid value `init_defaults`/`update_clock`
+    /// already put there. BCD 0x14 decodes to decimal 14 (`bt.mon` = 13);
+    /// `timeutc` folds it into 0..=11 with `tmon / 12` and `tmon %= 12`
+    /// before indexing `MONTHLYDAYS` (Bochs utctime.h timeutc), so the date
+    /// normalizes into February of the following year.
     #[test]
     fn cmos_malformed_month_does_not_panic() {
         let mut cmos = BxCmosC::new();
@@ -1772,10 +1770,10 @@ mod tests {
         assert!((1..=31).contains(&mday), "mday {mday} out of range");
     }
 
-    /// Isolates the mday-underflow path: only `REG_MONTH_DAY` is malformed
-    /// (0), month is left at whatever valid value was already there. The
-    /// old code did `days += mday - 1` on a `u64`, which underflows and
-    /// panics (debug builds) when `mday == 0`.
+    /// Isolates the day-of-month path: only `REG_MONTH_DAY` is malformed
+    /// (0), month is left at whatever valid value was already there.
+    /// `timeutc` adds `mday - 1` in i64, so day 0 normalizes to the last day
+    /// of the previous month (Bochs utctime.h timeutc).
     #[test]
     fn cmos_malformed_mday_does_not_panic() {
         let mut cmos = BxCmosC::new();
@@ -1810,10 +1808,9 @@ mod tests {
         const MINTVALSET: i64 = -62_167_219_200;
         const MAXTVALSET_BCD: i64 = 253_402_300_799;
 
-        // A value the old `loop { days -= days_in_year; year += 1; }`
-        // would have iterated through year-by-year (finding #1's host-DoS
-        // surface) — the new clamp+utctime_ext path is O(1) date math, so
-        // this returns promptly regardless of magnitude.
+        // A value ~317,000 years out: the clamp wraps it back into range in
+        // a few dozen iterations and utctime_ext decodes it in O(1), so this
+        // returns promptly.
         cmos.timeval = 10_000_000_000_000; // ~317,000 years past epoch
         cmos.update_clock();
         assert!((MINTVALSET..=MAXTVALSET_BCD).contains(&cmos.timeval));
@@ -1824,7 +1821,8 @@ mod tests {
     }
 
     // =========================================================================
-    // Finding #9 — century register 0x37 mirror + non-SET write branch
+    // Century register 0x37 mirror + non-SET write branch (Bochs cmos.cc
+    // write, update_clock)
     // =========================================================================
 
     #[test]
@@ -1871,8 +1869,8 @@ mod tests {
         cmos.write(CMOS_ADDR, REG_SEC as u32, 1);
         cmos.write(CMOS_DATA, target_bcd as u32, 1);
 
-        // Finding #9: previously only the SET-mode branch existed, so a
-        // write outside SET mode had no effect on timeval at all.
+        // Bochs cmos.cc write: outside SET mode a time-register write runs
+        // update_timeval() at once.
         assert_ne!(cmos.timeval, before, "update_timeval() did not run");
         let mut bt = BrokenTime::default();
         assert!(utctime_ext(cmos.timeval, &mut bt));
@@ -1880,7 +1878,8 @@ mod tests {
     }
 
     // =========================================================================
-    // Finding #1 / #9 combined — BCD + binary, 12h + 24h round trip
+    // BCD + binary, 12h + 24h round trip (Bochs cmos.cc update_timeval,
+    // update_clock)
     // =========================================================================
 
     #[test]
@@ -1981,8 +1980,8 @@ mod tests {
     }
 
     // =========================================================================
-    // Finding #19 — reset() masks CRB + restarts periodic; STAT_A rewrite
-    // restarts timer
+    // reset() masks CRB + restarts periodic; STAT_A rewrite restarts timer
+    // (Bochs cmos.cc reset, write REG_STAT_A -> CRA_change)
     // =========================================================================
 
     #[test]
@@ -2095,8 +2094,9 @@ mod tests {
     }
 
     // =========================================================================
-    // Finding #33 (cmos.rs-local parts) — UF/AF gated on enables, no
-    // auto-checksum on I/O writes, saturating one-second reload
+    // UF gated on UIE, no checksum recompute on I/O writes, one timeval
+    // second per one-second callback (Bochs cmos.cc uip_timer, write,
+    // one_second_timer)
     // =========================================================================
 
     #[test]

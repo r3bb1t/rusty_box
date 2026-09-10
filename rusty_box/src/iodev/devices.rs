@@ -496,16 +496,6 @@ impl DeviceManager {
         }
     }
 
-    /// Initialize all devices and register I/O handlers
-    ///
-    /// Matches device loading order from cpp_orig/bochs/iodev/devices.cc:
-    /// 1. CMOS (line 250)
-    /// 2. DMA (line 251)
-    /// 3. PIC (line 252)
-    /// 4. PIT (line 253)
-    /// 5. VGA (line 254-256)
-    /// 6. Keyboard (line 262)
-    /// 7. Hard drive (line 275-277)
     /// Put the display's declared ports and windows onto the two buses.
     ///
     /// The device says what it answers on; this is the only code that maps it.
@@ -532,10 +522,12 @@ impl DeviceManager {
         Ok(())
     }
 
+    /// Bring every device to its power-on state and register its I/O
+    /// handlers — the devices Bochs devices.cc bx_devices_c::init loads as
+    /// plugins.
     pub fn init(&mut self, io: &mut BxDevicesC, mem: &mut BxMemC) -> Result<()> {
         tracing::debug!("Initializing device manager");
 
-        // Initialize each device in original Bochs order
         // 1. CMOS
         self.cmos.init();
         // 2. DMA
@@ -1733,9 +1725,18 @@ impl BxDevicesC {
         self.init(_mem)
     }
 
-    /// Reset all devices
+    /// Reset the I/O bus's own state (Bochs devices.cc bx_devices_c::reset).
     ///
-    /// Matches bx_devices_c::reset() from cpp_orig/bochs/iodev/devices.cc
+    /// A hardware reset clears the PCI configuration address. The rest of
+    /// `bx_devices_c::reset` is the machine's: `Emulator::reset` disables
+    /// SMRAM (`mem->disable_smram`) and resets every device
+    /// (`bx_reset_plugins`) through `DeviceManager::reset`, which also queues
+    /// `PendingPlatformWork::SMRAM` so the reset value of the SMRAM control
+    /// register is applied before the guest resumes. Bochs's `release_keys`
+    /// (a break code for every key the host holds) and its paste buffer
+    /// (`paste.stop`) are not ported: this machine keeps no table of host-held
+    /// keys and has no paste buffer, so a key held across a hardware reset
+    /// stays down in the guest.
     ///
     /// # Arguments
     /// * `reset_type` - Type of reset (Hardware or Software)
@@ -1743,14 +1744,8 @@ impl BxDevicesC {
         match reset_type {
             ResetReason::Hardware => {
                 tracing::debug!("Device hardware reset");
-                {
-                    // Clear PCI configuration address (line 402)
-                    self.pci_conf_addr = 0;
-                }
-                // Note: mem->disable_smram() at line 405 - SMRAM disable not yet implemented
-                // Note: bx_reset_plugins(type) at line 406 - done via device_manager.reset()
-                // Note: release_keys() at line 407 - keyboard key release not yet implemented
-                // Note: paste.stop = 1 at line 409 - paste buffer stop not yet implemented
+                // Bochs devices.cc bx_devices_c::reset: pci.confAddr = 0.
+                self.pci_conf_addr = 0;
             }
             ResetReason::Software => {
                 tracing::debug!("Device software reset");
@@ -2343,7 +2338,7 @@ mod tests {
 
     #[test]
     fn pit_irq0_mirrors_counter0_out_level() {
-        // Finding #32d: IRQ0 must mirror counter 0's OUT LEVEL (Bochs
+        // IRQ0 must mirror counter 0's OUT LEVEL (Bochs
         // pit.cc irq_handler: raise on 0→1, lower on 1→0) — not a
         // synthesized lower+raise pulse.
         let mut pit = BxPitC::new();
@@ -2376,9 +2371,10 @@ mod tests {
 
     #[test]
     fn pit_control_word_write_drives_irq0_edge() {
-        // Finding #32d: OUT transitions caused by CONTROL-WORD writes must
-        // reach the PIC (Bochs pit82c54.cc write_ctrl's set_OUT invokes the
-        // out_handler on any transition).
+        // OUT transitions caused by CONTROL-WORD writes must
+        // reach the PIC (Bochs pit82c54.cc pit_82C54::write at
+        // CONTROL_ADDRESS calls set_OUT, which invokes the out_handler on
+        // any transition).
         let mut pit = BxPitC::new();
         let mut irq = IrqFabric::new();
 
@@ -2862,7 +2858,9 @@ mod tests {
         });
     }
 
-    // ─── Finding #2: port 0xCF9 (PIIX3 reset control) registration/dispatch ───
+    // ─── Port 0xCF9 (PIIX3 reset control) registration/dispatch ───
+    // Bochs pci2isa.cc bx_piix3_c::init registers 0x0cf9; bx_piix3_c::write
+    // case 0x0cf9 latches the reset type and triggers on bit 2.
 
     #[test]
     fn pci_reset_port_cf9_registers_and_dispatches_through_io_bus() {
@@ -2903,7 +2901,8 @@ mod tests {
         });
     }
 
-    // ─── Finding #3: ELCR writes must reach BxPicC::set_mode ───
+    // ─── ELCR writes must reach BxPicC::set_mode (Bochs pci2isa.cc
+    // bx_piix3_c::write cases 0x04d0/0x04d1 -> DEV_pic_set_mode) ───
 
     #[test]
     fn elcr_write_drains_into_pic_set_mode() {
@@ -2980,7 +2979,8 @@ mod tests {
         });
     }
 
-    // ─── Finding #21: common PCI config-space read-only filter ───
+    // ─── Common PCI config-space read-only filter (Bochs devices.cc
+    // bx_pci_device_c::pci_write_handler_common) ───
 
     #[test]
     fn pci_config_write_blocks_common_readonly_bytes_but_allows_bar_and_command() {
@@ -3097,7 +3097,9 @@ mod tests {
         });
     }
 
-    // ─── Finding #8: SMRAM control register (0x72) drives memory shadowing ───
+    // ─── SMRAM control register (0x72) drives memory shadowing (Bochs pci.cc
+    // bx_pci_bridge_c::smram_control -> misc_mem.cc BX_MEM_C::enable_smram /
+    // BX_MEM_C::disable_smram) ───
 
     #[test]
     fn smram_register_write_defers_then_applies_to_memory() {
@@ -3169,13 +3171,13 @@ mod tests {
         });
     }
 
-    // ─── Finding #20a: PAM config re-applied to memory after guest reset ─────
+    // ─── PAM config re-applied to memory after guest reset ───────────────────
     //
     // Bochs pci.cc bx_pci_bridge_c::reset() zeroes the PAM config bytes AND
     // re-applies memory type for every PAM area directly
     // (DEV_mem_set_memory_type loop), so the shadow-RAM routing tracks the
-    // reset PAM config immediately. rusty_box queues `pam_needs_update` for
-    // the shared machine-boundary drain.
+    // reset PAM config immediately. rusty_box queues `PendingPlatformWork::PAM`
+    // for the shared machine-boundary drain.
 
     #[test]
     fn pam_config_reapplied_to_memory_after_reset() {

@@ -237,8 +237,8 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Read this machine's screen.
     ///
     /// The handle borrows the machine, so it is taken, used and dropped; a
-    /// scrape between two `step_batch` calls sees the frame as it stood when
-    /// the batch ended.
+    /// scrape between two `step` calls sees the frame as it stood when the
+    /// last batch ended.
     pub fn display(
         &mut self,
     ) -> Display<'_, VgaCard<StdVga>> {

@@ -219,8 +219,8 @@ impl<'m> Mouse<'m> {
 
 /// Why a batch of execution ended.
 ///
-/// Exhaustive over what `step_batch` can actually determine at the moment it
-/// returns. Every variant here is a condition the loop genuinely distinguishes;
+/// Exhaustive over what [`Emulator::step`] can actually determine at the moment
+/// it returns. Every variant here is a condition the loop genuinely distinguishes;
 /// a cause the machine cannot tell apart from another does not get a name,
 /// because a caller matching on it would be matching on a guess.
 ///
@@ -252,9 +252,9 @@ pub enum StopReason {
     /// wake event arrived within the idle fast-forward budget. Time still
     /// advanced; the caller may step again to keep advancing it.
     Halted,
-    /// The batch ran out of budget with the CPU still executing. Under `std`
-    /// that is the 15 ms wall-clock budget, not `batch_instructions` — see
-    /// `Emulator::step_batch`.
+    /// The call returned with the machine still able to make progress —
+    /// normally because its [`RunBudget`] was spent. Stepping again continues
+    /// the run.
     BudgetExhausted,
     /// The machine's engine refused something the machine cannot do itself —
     /// an I/O APIC message its backend would not take, an interrupt edge it
@@ -274,8 +274,8 @@ pub enum StopReason {
 /// a `HostClock`: `std::time::Instant` is not available on every target this
 /// runs on, and a front end that wants to bound a frame already has one.
 ///
-/// Both bounds are honoured exactly. Neither is a hint about an inner batch —
-/// that shape is what let `step_batch(1)` retire 475,135 instructions.
+/// Neither bound is a hint about an inner batch; [`Emulator::step`] states how
+/// closely each one is held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunBudget {
     /// Guest instructions the boot processor may retire.
@@ -294,18 +294,19 @@ pub enum RunBudget {
 
 /// How far a run got, in the unit the machine can actually answer in.
 ///
-/// A uniprocessor answers in instructions: one processor retires them, and its
-/// count is the machine's own. A multiprocessor cannot. Bochs `main.cc` gives
-/// every processor a quantum and credits the whole round with one `BX_TICKN`,
-/// so machine time advances by the round's average — a figure no single
-/// processor's instruction count describes, and one that keeps moving while a
-/// halted processor retires nothing at all.
+/// A uniprocessor on an engine that counts instructions answers in
+/// instructions: one processor retires them, and its count is the machine's
+/// own. A multiprocessor cannot. Bochs `main.cc` gives every processor a
+/// quantum and credits the whole round with one `BX_TICKN`, so machine time
+/// advances by the round's average — a figure no single processor's
+/// instruction count describes, and one that keeps moving while a halted
+/// processor retires nothing at all. Nor can an engine that runs the guest on
+/// the host's processor: it never sees an instruction retire, so it reports
+/// the time its stretch took.
 ///
-/// The two used to travel as one `u64` called `executed`, documented as
-/// instructions and holding ticks whenever the machine had more than one
-/// processor. Naming them apart is doctrine R4: a count of instructions and a
-/// span of time are different things, and a caller that adds them is wrong in
-/// a way no type was previously able to say.
+/// Naming the two apart is doctrine R4: a count of instructions and a span of
+/// time are different things, and adding one to the other is a type error
+/// rather than a silent mistake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Progress {
     /// Guest instructions retired.
@@ -379,8 +380,8 @@ impl Progress {
     /// bounding how much it does per frame wants to know how much happened,
     /// not what kind. Anything that will compare against an instruction count
     /// or a deadline must ask [`Self::instructions`] or [`Self::ticks`] and
-    /// handle the `None` — discarding the unit there is how the two got
-    /// confused in the first place.
+    /// handle the `None`: discarding the unit there compares a span of time
+    /// with a count.
     #[inline]
     #[must_use]
     pub const fn count(self) -> u64 {
@@ -392,15 +393,19 @@ impl Progress {
 
 /// What one run did.
 ///
-/// A named struct rather than a pair (doctrine R0): the two fields are how far
-/// it got and why it stopped, and nothing about `(u64, bool)` said which was
-/// which — nor could a `bool` carry more than one of the five causes above.
+/// A named struct rather than a tuple (doctrine R0): one field says how far the
+/// run got, the other why it stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BatchOutcome {
-    /// How far the guest got. Under `std` this may exceed what was asked for,
-    /// because the call keeps running whole batches until its wall-clock
-    /// budget is spent.
+    /// How far the guest got: the sum of what each batch reported, in the
+    /// unit the machine measures (see [`Progress`]). Guest time the halt
+    /// fast-forward passes is not in it. A uniprocessor on an engine that
+    /// counts instructions (the interpreter) reports the instructions it
+    /// retired, which stay within an instruction budget as [`Emulator::step`]
+    /// describes. A multiprocessor, or an engine that runs the guest on the
+    /// host's processor, reports machine ticks, which an instruction budget
+    /// does not bound.
     pub progress: Progress,
     /// Why the call returned.
     pub stop: StopReason,
@@ -494,10 +499,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Draw one VGA frame to the attached front end.
     ///
     /// Bochs `bx_vgacore_c::update()` calls the GUI directly; so does this, by
-    /// handing the card a sink over the `BxGui` this machine holds. What used
-    /// to live here — the clear-screen and palette drains, the charmap push,
-    /// the cursor arithmetic and the two shapes of frame — is inside the card
-    /// now, where upstream keeps it, and is shared with every other front end.
+    /// handing the card a sink over the `BxGui` this machine holds. The
+    /// clear-screen and palette drains, the charmap push, the cursor
+    /// arithmetic and both frame shapes live inside the card, where upstream
+    /// keeps them, and every front end shares them.
     pub fn update_gui(&mut self) {
         let Some(ref mut gui) = self.gui else {
             return;
@@ -533,9 +538,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// input reaches the devices between steps.
     ///
     /// Without alloc there is no GUI (`Emulator::gui` requires `Box<dyn
-    /// BxGui>`), so host-input pumping is a no-op; `step_batch` and the
-    /// HLT/MWAIT waits stay callable from no-alloc hosts like the UEFI
-    /// example.
+    /// BxGui>`), so host-input pumping is a no-op; `step` and the HLT/MWAIT
+    /// waits stay callable from no-alloc hosts like the UEFI example.
     #[cfg(not(feature = "alloc"))]
     #[inline]
     pub fn pump_gui_input(&mut self) {}
@@ -706,12 +710,28 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// GUI frame loop — keeps its event loop. Runs the guest, ticks devices,
     /// syncs A20, then says why it returned.
     ///
-    /// The budget is a ceiling and is honoured exactly. Its predecessor's
-    /// argument bounded an *inner* batch while the call ran on for a fixed
-    /// 15 ms of host time, so asking for one instruction could retire hundreds
-    /// of thousands of them, and asking twice on a loaded machine gave two
-    /// different answers. A caller that wants to bound host time owns a clock
-    /// and can bound its own loop; the machine no longer guesses on its behalf.
+    /// The budget is a ceiling measured from where the call began: the boot
+    /// processor's instruction counter for [`RunBudget::Instructions`], the
+    /// machine's clock for [`RunBudget::Ticks`]. Each batch asks for no more
+    /// than what remains, and the call returns once none does, or earlier on a
+    /// stop, a halt or a stall. How closely each unit is held:
+    ///
+    /// - On a uniprocessor an instruction budget is never passed: a strict
+    ///   batch stops at its count. On a multiprocessor a batch is bounded in
+    ///   machine ticks, and a round credits the average of its processors'
+    ///   ticks, so the boot processor can retire more than the budget when the
+    ///   others retire less than it does. On either, a hardware reset inside
+    ///   the call zeroes the counter (Bochs init.cc `BX_CPU_C::reset`), and
+    ///   the call counts nothing as spent until the counter climbs back past
+    ///   its starting value.
+    /// - A tick budget is compared only between batches, so guest time can
+    ///   run past it. A batch commits the ticks its processors consumed,
+    ///   including the surplus of a fast REP string instruction, and the halt
+    ///   fast-forward advances the clock one device deadline at a time, for
+    ///   about 100,000,000 ticks, without consulting the budget.
+    ///
+    /// No host clock is consulted. A caller that wants to bound host time owns
+    /// a clock and bounds its own loop.
     ///
     /// A caller driving a machine to completion should stop on
     /// [`BatchOutcome::is_terminal`]: comparing progress against the budget
@@ -938,14 +958,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         }
     }
 
-    /// Execute at most `instructions` guest instructions, and no more.
+    /// Run one strict batch of at most `instructions` — guest instructions on
+    /// a uniprocessor, machine ticks on a multiprocessor (see [`Self::step`]).
     ///
-    /// The strict counterpart to [`Self::step_batch`]. That one treats its
-    /// argument as one inner batch and keeps going for a 15 ms wall-clock
-    /// budget, which is right for throughput and wrong for anything that has
-    /// to look at the machine between instructions: an address to stop at, a
-    /// single step, a debugger. This one runs the count and returns, with no
-    /// wall clock and no HLT fast-forward past it.
+    /// For anything that has to look at the machine between instructions: an
+    /// address to stop at, a single step, a debugger. Unlike [`Self::step`] it
+    /// runs no further batch and does no HLT fast-forward, and it may stop
+    /// short of the count at the next device deadline.
     ///
     /// Devices still advance by the ticks the CPU consumed, so guest time does
     /// not fall behind — only the batching is different.
@@ -999,24 +1018,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         Mouse::new(&mut self.device_manager.keyboard)
     }
 
-    /// How many ticks of guest time may pass before the next device timer
-    /// fires, or `None` when no timer is armed.
-    ///
-    /// The question a caller asks to avoid grinding through idle instructions:
-    /// a machine waiting on a PIT or RTC deadline retires nothing interesting
-    /// until it arrives, so a driver can size its next `step_batch` from this
-    /// instead of stepping blindly and checking afterwards. QEMU's qtest
-    /// exposes the same thing as its most-used verb, `clock_step` with no
-    /// argument; this is the query form, leaving the caller to decide how far
-    /// to actually run.
-    ///
-    /// Zero means a deadline is due now. It shares its computation with the
-    /// scheduler's own deadline cap, so the two cannot disagree about when the
-    /// next event is.
     /// The machine's guest-physical map, as an execution engine would install
     /// it.
     ///
-    /// The complement of stepping: `step_batch` asks the machine to run, this
+    /// The complement of stepping: `step` asks the machine to run, this
     /// asks it where its memory *is*. An engine that executes the guest on real
     /// hardware needs the whole map up front rather than one address at a time,
     /// and re-derives it whenever the chipset moves something — a shadow-RAM
@@ -1036,6 +1041,22 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         MemoryPlan::derive(&self.memory)
     }
 
+    /// How many ticks of guest time may pass before the next device timer
+    /// fires, or `None` when no timer is armed.
+    ///
+    /// The question a caller asks to avoid grinding through idle instructions:
+    /// a machine waiting on a PIT or RTC deadline retires nothing interesting
+    /// until it arrives, so a driver can size its next [`Self::step`] with a
+    /// [`RunBudget::Ticks`] from this instead of stepping blindly and checking
+    /// afterwards. QEMU's qtest has the same thing as `clock_step` with no
+    /// argument; this is the query form, leaving the caller to decide how far
+    /// to actually run.
+    ///
+    /// Zero means a deadline is due now. The answer is a scan of the armed
+    /// timers (`BxPcSystemC::next_timer_deadline_at`). The scheduler's own
+    /// batch cap reads the tick countdown
+    /// (`BxPcSystemC::get_num_cpu_ticks_left_next_event`) instead, and the two
+    /// can differ after a timer is deactivated.
     pub fn ticks_to_next_timer_deadline(&self) -> Option<u64> {
         self.pc_system.ticks_to_next_timer_deadline()
     }
@@ -1123,11 +1144,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
 /// Render one VGA frame into a `SharedDisplay` framebuffer.
 ///
-/// The same refresh `update_gui` performs, with the shared framebuffer as the
-/// sink instead of a `BxGui`. It used to be a second hand-maintained copy of
-/// that forwarding code, which is why it never forwarded the character
-/// generators: a guest that reprogrammed the font rendered with stale glyphs
-/// here and nowhere else. One pump, one sink, so the two cannot drift again.
+/// The same refresh `update_gui` performs, through the same pump, with the
+/// shared framebuffer as the sink instead of a `BxGui`: both paths forward the
+/// same state, the character generators a guest reprograms included.
 /// Reached through [`crate::emulator::Display::render_into`].
 #[cfg(feature = "alloc")]
 pub(crate) fn render_vga_into(

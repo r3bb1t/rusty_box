@@ -1,6 +1,6 @@
-//! Bochs-parity regression tests for AVX-512 defects found by the adversarial
-//! parity audit. Each test pins one upstream behaviour that rusty_box diverged
-//! from; all were red before the accompanying fix.
+//! Bochs-parity tests for AVX-512 instructions. Each test pins one Bochs
+//! behaviour, cited in its doc comment, as the register, flag, memory or
+//! exception result a guest observes.
 
 #![cfg(feature = "std")]
 
@@ -39,9 +39,8 @@ fn evex_emulator() -> Box<Emulator> {
 /// if (opmask) { eaddr = ...; val_8 = read_virtual_byte(i->seg(), eaddr); }
 /// ```
 ///
-/// An all-zero writemask must suppress the memory access entirely. Ours read
-/// the operand unconditionally, so a masked-off broadcast took a #PF on an
-/// address the instruction never uses.
+/// An all-zero writemask suppresses the memory access entirely, so a
+/// masked-off broadcast from an unmapped address takes no #PF.
 #[test]
 fn evex_vpbroadcastb_suppresses_the_load_under_an_empty_opmask() {
     std::thread::Builder::new()
@@ -91,11 +90,9 @@ fn evex_vpbroadcastb_suppresses_the_load_under_an_empty_opmask() {
 }
 
 /// Bochs avx/avx512_move.cc `VMOVAPD_MASK_VpdWpdR` writes a masked register
-/// move through `avx512_write_regq_masked` — one mask bit per QWORD. Our W1
-/// register store-form used to delegate straight to the W0 (dword) handler
-/// under the comment "register form is identical", so each mask bit gated
-/// only 32 bits: with `k1 = 0b0101` a 256-bit `VMOVDQU64` wrote qwords 0 and
-/// 2 as half-updated values and left qwords 1 and 3 wrong as well.
+/// move through `avx512_write_regq_masked` — one mask bit per QWORD. The W1
+/// register store form masks at that granularity too; masking it per dword
+/// would gate only 32 bits with each mask bit and split every qword in half.
 ///
 /// `vmovdqu64 zmm2 {k1}{z}, zmm1` with k1 = 0b0011 must copy qwords 0 and 1
 /// whole and zero the rest.
@@ -158,10 +155,10 @@ fn evex_vmovdqu64_register_store_masks_at_qword_granularity() {
 ///
 /// where Bochs `src1` is Hps (EVEX.vvvv) and `src2` is Wps (ModRM.rm).
 /// rusty_box's EVEX decoder uses the opposite accessor convention —
-/// `src2()` is vvvv and `src1()` is rm — so the compare handlers must read
-/// vvvv from `src2()`, exactly as the neighbouring VPTESTMD does. They read
-/// them the other way round, which both transposed the comparison and, in
-/// the memory form, made op1 an unrelated register instead of vvvv.
+/// `src2()` is vvvv and `src1()` is rm — so the compare handlers read vvvv
+/// from `src2()`, exactly as the neighbouring VPTESTMD does. Read the other
+/// way round, the comparison would be transposed and, in the memory form,
+/// op1 would be an unrelated register instead of vvvv.
 ///
 /// `VCMPPS k1, zmm1, zmm2, LT_OS` with zmm1 = 1.0 and zmm2 = 2.0 must set
 /// every lane (1.0 < 2.0); transposed it clears every lane.
@@ -217,11 +214,11 @@ fn evex_vcmpps_compares_vvvv_against_rm() {
 /// ```
 ///
 /// ia_opcodes.def declares KTEST as `OP_NONE, OP_KGb, OP_KEb` — it has NO
-/// destination; the ModRM.reg field is src1 and rm is src2. Our decoder used
-/// to route VEX `0F 99` through the SETcc arm (`0F 90..9F`, whose operand IS
-/// rm), which transposed the two. `KORTEST` shares that arm but is immune —
-/// OR is commutative and both its flag tests are symmetric — so only KTEST's
-/// asymmetric CF term exposes the swap.
+/// destination; the ModRM.reg field is src1 and rm is src2. A decode that
+/// took VEX `0F 99` through the SETcc arm (`0F 90..9F`, whose operand IS rm)
+/// would transpose the two. `KORTEST` cannot show that transposition — OR is
+/// commutative and both its flag tests are symmetric — so only KTEST's
+/// asymmetric CF term exposes it.
 #[test]
 fn ktest_reads_the_reg_field_as_its_first_operand() {
     std::thread::Builder::new()

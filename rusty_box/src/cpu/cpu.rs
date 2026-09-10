@@ -2894,10 +2894,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.oszapc.set_oszapc_logic_32(result);
     }
 
-    // ── Bochs lazy-flag bridge (cpu.h, lazy_flags.h) ────────────────
-    // These methods are the interface for lazy flag evaluation.
-    // Wire individual call sites to these as you migrate from eflags.
-    // See docs/future-plans/lazy-flags-read-side.md for the plan.
+    // ── Bochs lazy-flag bridge (cpu.h getB_*/set_*, lazy_flags.h) ───
+    // The six arithmetic flags (CF, PF, AF, ZF, SF, OF) live in `oszapc`;
+    // the matching bits of `eflags` may be stale until `force_flags` copies
+    // them in. Reads go through the getters below or `read_eflags` (Bochs
+    // cpu.h read_eflags -> flag_ctrl_pro.cc force_flags); a raw write of
+    // those bits into `eflags` is followed by `set_eflags_oszapc` (Bochs
+    // cpu.h setEFlagsOSZAPC), or, when the bits are cleared, by
+    // `oszapc.set_oszapc_logic_32(1)` (Bochs cpu.h clearEFlagsOSZAPC).
 
     /// Read a single arithmetic flag from the lazy `oszapc` store.
     #[inline]
@@ -3024,8 +3028,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// address the whole allocation rather than the identity guest-RAM base,
     /// because instruction fetch also runs out of ROM and out of relocated
     /// blocks. That is exactly what makes them survivable across a swap and
-    /// therefore stale-able by one — the case the per-CPU pin sidecar used to
-    /// prevent by vetoing eviction.
+    /// therefore stale-able by one.
     ///
     /// Called from `get_icache_entry`, once per instruction fetch — the point
     /// where the fetch window is CONSUMED. Checking at refill instead would
@@ -3192,13 +3195,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         let fetch_ptr_option = if tlb_hit {
             self.p_addr_fetch_page = tlb_ppf;
-            // Bochs cpu/cpu.cc prefetch path does NOT speculatively
-            // populate the DTLB on an ITLB hit. The earlier rusty_box
-            // workaround that called `translate_data_read(laddr)` here
-            // could synchronously raise #PF (mutating CR2 + pushing the
-            // exception frame) for an unrelated data access, then
-            // swallow the `CpuLoopRestart` and continue prefetching
-            // from a stale RIP. Removed to match Bochs.
+            // Bochs cpu/cpu.cc prefetch path does not populate the DTLB on
+            // an ITLB hit: a data-side translation here could raise #PF
+            // (CR2 written, frame pushed) for an access the guest never
+            // made.
             Some(tlb_host_addr)
         } else {
             // The direct-mapped slot may still pin an unrelated resident
@@ -3218,24 +3218,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         p_addr,
                         self.p_addr_fetch_page
                     );
-                    // Bochs `BX_CPU_C::prefetch` (cpu.cc) does NOT
-                    // populate the DTLB after an ITLB miss — only the
-                    // ITLB entry it just walked. The earlier rusty_box
-                    // workaround that called `translate_data_read(laddr)`
-                    // here could synchronously raise #PF (mutating CR2 +
-                    // pushing the exception frame) for an unrelated data
-                    // access, then swallow the `CpuLoopRestart` and
-                    // continue prefetching from a stale RIP. Removed to
-                    // match Bochs.
+                    // Bochs `BX_CPU_C::prefetch` (cpu.cc) fills only the
+                    // ITLB entry it just walked after an ITLB miss, never
+                    // the DTLB: a data-side translation here could raise
+                    // #PF (CR2 written, frame pushed) for an access the
+                    // guest never made.
                     None
                 }
                 Err(e) => {
-                    // Page fault or other exception occurred during page walk.
-                    // The exception handler has already pushed the exception frame
-                    // and changed RIP. Propagate the error (CpuLoopRestart) so the
-                    // CPU loop restarts execution at the exception handler.
-                    // Previously this was silently swallowed, causing boundary_fetch
-                    // to continue with stale eip_page_window_size=0 and panic.
+                    // Page fault or other exception during the page walk. The
+                    // exception has already been delivered (frame pushed, RIP
+                    // at the handler), so the error (CpuLoopRestart) propagates
+                    // and the CPU loop restarts at the handler. Returning here
+                    // is what keeps boundary_fetch from running on with a zero
+                    // eip_page_window_size.
                     return Err(e);
                 }
             }
@@ -3245,11 +3241,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         if let Some(fetch_ptr) = fetch_ptr_option {
             // Two levels: the outer says the ITLB hit, the inner whether that
             // entry carries a direct mapping. The fill below only ever installs
-            // an entry together with its page, so a hit always carries one —
-            // but the previous code unwrapped only the outer level and would
-            // have built a 4096-byte slice from a null pointer had that ever
-            // stopped holding. Treating the absent page as "no direct mapping"
-            // is what it means.
+            // an entry together with its page, so a hit always carries one. An
+            // absent page is read as "no direct mapping", which is what it
+            // means, so no window is ever formed without a page behind it.
             //
             // The entry already names the page by allocation offset, so the
             // window is that offset verbatim and no pointer is formed at all.

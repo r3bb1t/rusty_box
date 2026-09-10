@@ -855,14 +855,15 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
         let watching_addresses = until.is_some() || !self.exit_set.is_empty();
         let stride = if watching_addresses { 1 } else { BATCH };
 
-        // A limit the caller can count has to be honoured exactly, whatever its
-        // size. `step_batch` treats its argument as one INNER batch and then
-        // keeps running whole batches until a 15 ms wall-clock budget is spent,
-        // so a caller asking for thirteen instructions gets however many
-        // thirteen-instruction batches fit in 15 ms — a different number on a
-        // loaded machine than on an idle one. `step_exactly` runs the count and
-        // returns. `step_one` was moved off `step_batch` for this reason; the
-        // count here is the same promise at a larger size.
+        // A limit the caller can count, or an address it watches, is honoured
+        // one strict batch at a time. `step` holds its budget across as many
+        // batches as it takes, and after each one it fast-forwards a halted
+        // processor and delivers a pending 8259 vector, which moves RIP into a
+        // handler before this loop can compare it with an address.
+        // `step_exactly` runs one strict batch, with no fast-forward and no
+        // 8259 delivery of its own, and returns; the loop re-measures the boot
+        // processor's counter before asking for the next. `step_one` takes the
+        // same path for a count of one.
         let bounded = watching_addresses || count.is_some();
 
         loop {
@@ -904,10 +905,11 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
                 }
             }
 
-            // Everything else the batch already determined. This used to be
-            // inferred as `executed == 0 && is_waiting_for_event()`, which
-            // could not see a guest power-off at all and could not tell a
-            // halted machine from a batch that simply retired nothing.
+            // Everything else the batch already determined. Its stop reason
+            // tells a guest power-off, a host stop, a shutdown and a halt
+            // apart, which neither a retired-instruction count nor the CPU's
+            // activity state can: a guest that powers off leaves the CPU
+            // healthy, and a batch can retire nothing without being halted.
             match outcome.stop {
                 // An engine refusal reaches a batch's verdict only when the
                 // boundary's own error had nowhere to go; the flag it raised is
@@ -936,8 +938,9 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
         // retired count through the CPU's instruction counter, the stop cause
         // through the activity state and the stop flag — so nothing is lost by
         // not returning it from a one-instruction step. It goes through the
-        // strict path: `step_batch(1)` would treat the 1 as an inner batch and
-        // keep running for its wall-clock budget, which is not a step.
+        // strict path: `step` follows the instruction with its between-batch
+        // work — a halt fast-forward and a pending 8259 vector's delivery —
+        // which is more than one step.
         self.step_exactly(1)?;
         Ok(())
     }

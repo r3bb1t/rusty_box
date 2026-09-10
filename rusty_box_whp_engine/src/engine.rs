@@ -42,9 +42,12 @@ use rusty_box::memory::plan::MemoryPlan;
 use rusty_box::memory::BxMemC;
 use rusty_box::GpaWindow;
 
-/// The processor this engine runs. SMP under a hypervisor is its own unit; a
-/// machine with more processors than this refuses to start rather than running
-/// one and pretending.
+/// The processor this engine runs.
+///
+/// The partition is created with one virtual processor, and [`bring_up`]
+/// lends it the machine's processor 0. Nothing consults the machine's own
+/// processor count: on a machine built with more than one processor, only
+/// processor 0 executes on this engine.
 const BOOT_VP: u32 = 0;
 
 /// RFLAGS.TF, the trap flag. A guest with it set owes a single-step `#DB`
@@ -860,7 +863,7 @@ impl WhpEngine {
     /// The mapping between these counters and this engine's own tallies is not
     /// field-for-field obvious — notably a halt serviced by the machine leaves
     /// `halt_instructions.count` at zero and is booked under
-    /// `other_intercepts`. See `docs/superpowers/plans/2026-08-29-whp-fast-path.md`.
+    /// `other_intercepts`.
     ///
     /// # Errors
     /// [`CpuError::UnsupportedCpuOperation`] if no partition has started, since
@@ -1236,14 +1239,16 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
     // them, so what a slice can report is the time it took. See `ticks_elapsed`.
     const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Ticks;
 
-    // Delivery is this machine's, not the partition's: the partition has no
-    // local APIC of its own and the hardware knows nothing of this machine's
-    // 8259 pair, so the vector, the acknowledge, the priority and the EOI all
-    // belong to this machine's own controllers wherever the guest happens to
-    // be executing. Only the final push crosses the seam — a maskable vector
-    // as `stage_injection`'s register write, at a slice head or an exit tail
-    // alike; an NMI, SMI or INIT as the shadow's own interpreted delivery at
-    // a head.
+    // The machine's step loop must not deliver an 8259 vector between batches
+    // (`Emulator::run_until_budget_spent` skips its `iac` for this engine):
+    // the processor thread owns that delivery. The hardware knows nothing of
+    // this machine's 8259 pair, so the vector, the acknowledge, the priority
+    // and the EOI all belong to this machine's own controllers; only the
+    // final push crosses the seam. `VcpuThread::stage_the_legacy_interrupt`
+    // acknowledges a vector once the guest can take it and places it in the
+    // partition's pending-event slot, and the exit path takes a signalled
+    // chipset SMI through `take_the_signalled_smi` before the next entry.
+    // An I/O APIC message takes `route_ioapic_delivery` below.
     const EVENT_DELIVERY: EventDelivery = EventDelivery::Engine;
 
     fn memory_map_changed(
@@ -1364,13 +1369,12 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
 
     /// Refused: a machine on the hypervisor is driven by `FastMachine`.
     ///
-    /// The slice model this used to implement is gone, and with it every
-    /// reason to hand a hardware processor a bounded stretch of guest time.
-    /// Measured over 300 seconds, it bought 2.19 million partition entries of
-    /// which 85.4% produced no exit at all, and left under 1% of the wall
-    /// clock actually executing guest instructions; its mean slice overran its
-    /// budget 271-fold, which a guest sees as a timer that fires in bursts at
-    /// slice boundaries instead of at its deadline.
+    /// Handing a hardware processor a bounded stretch of guest time buys
+    /// nothing. Measured over 300 seconds, a machine driven that way made 2.19
+    /// million partition entries, of which 85.4% produced no exit at all, and
+    /// spent under 1% of the wall clock executing guest instructions; its
+    /// mean stretch overran its budget 271-fold, which a guest sees as a timer
+    /// that fires in bursts at stretch boundaries instead of at its deadline.
     ///
     /// A machine on this engine is adopted by `FastMachine` instead, which
     /// gives each processor a thread that stays bound to it and gives the
