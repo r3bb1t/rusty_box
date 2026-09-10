@@ -18,6 +18,18 @@ const SERIAL_PANEL_MIN_HEIGHT: f32 = 48.0;
 const SERIAL_PANEL_DEFAULT_HEIGHT: f32 = 88.0;
 const SERIAL_PANEL_MAX_HEIGHT: f32 = 200.0;
 
+/// The startup notice: a spinner over one row of text.
+const STARTUP_SPINNER_SIZE: f32 = 28.0;
+const STARTUP_GAP: f32 = 12.0;
+const STARTUP_TEXT_SIZE: f32 = 15.0;
+
+/// What the display region shows instead of the framebuffer while the machine
+/// is off. The caller that owns the words lays them out — fonts, colours, line
+/// breaks — as one `LayoutJob`, and the view places that job as a single label
+/// centred in the region. While it is shown, `RustyBoxApp::texture` is not
+/// drawn: that texture holds the previous run's last frame.
+pub struct ConsolePlaceholder(pub egui::text::LayoutJob);
+
 /// The eframe application that displays the emulator's VGA output.
 pub struct RustyBoxApp {
     shared: Arc<Mutex<SharedDisplay>>,
@@ -294,17 +306,20 @@ impl RustyBoxApp {
 impl RustyBoxApp {
     /// Render the emulator UI inside a parent egui shell without overriding the shell theme.
     pub fn ui_embedded(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.ui_embedded_with_serial(ui, frame, true);
+        self.ui_embedded_with_serial(ui, frame, true, None);
     }
 
-    /// Render the emulator UI inside a parent egui shell with serial visibility control.
+    /// Render the emulator UI inside a parent egui shell with serial visibility
+    /// control. `placeholder` is what the display region shows while the machine
+    /// is off; `None` leaves the last framebuffer on screen.
     pub fn ui_embedded_with_serial(
         &mut self,
         ui: &mut egui::Ui,
         frame: &mut eframe::Frame,
         show_serial: bool,
+        placeholder: Option<ConsolePlaceholder>,
     ) {
-        self.ui_inner(ui, frame, false, show_serial, false);
+        self.ui_inner(ui, frame, false, show_serial, false, placeholder);
     }
 
     fn ui_inner(
@@ -314,6 +329,7 @@ impl RustyBoxApp {
         apply_theme: bool,
         show_serial: bool,
         show_status_bar: bool,
+        placeholder: Option<ConsolePlaceholder>,
     ) {
         let ctx = ui.ctx().clone();
         if apply_theme {
@@ -483,6 +499,10 @@ impl RustyBoxApp {
                 });
         }
 
+        // The placeholder stands in for the framebuffer only while the machine
+        // is off: a running machine's video wins over whatever the caller passed.
+        let powered_off = placeholder.filter(|_| !self.cached_emu_running);
+
         // Main display area — deep dark background
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(0x0D, 0x0D, 0x1A)))
@@ -492,16 +512,33 @@ impl RustyBoxApp {
                     // A startup step (e.g. allocating the disk image) is running.
                     // Show it with a spinner instead of a blank panel, so the
                     // window doesn't look frozen while the guest has no video yet.
+                    // A top-down layout stacks from the region's top edge, so the
+                    // stack is centred by the pad above it: half of what the
+                    // region has left after the spinner, the item spacing the
+                    // layout inserts below it, the gap, and one row of the text.
+                    let text_height = ui.fonts_mut(|fonts| {
+                        fonts.row_height(&egui::FontId::proportional(STARTUP_TEXT_SIZE))
+                    });
+                    let stack_height = STARTUP_SPINNER_SIZE
+                        + ui.spacing().item_spacing.y
+                        + STARTUP_GAP
+                        + text_height;
+                    let pad = ((ui.available_height() - stack_height) / 2.0).max(0.0);
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(pad);
+                        ui.add(egui::Spinner::new().size(STARTUP_SPINNER_SIZE));
+                        ui.add_space(STARTUP_GAP);
+                        ui.label(
+                            egui::RichText::new(status)
+                                .color(egui::Color32::from_rgb(0xE8, 0xEE, 0xF5))
+                                .size(STARTUP_TEXT_SIZE),
+                        );
+                    });
+                } else if let Some(ConsolePlaceholder(job)) = powered_off {
+                    // `centered_and_justified` centres exactly one widget, so the
+                    // whole block is one label over the caller's layout job.
                     ui.centered_and_justified(|ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.add(egui::Spinner::new().size(28.0));
-                            ui.add_space(12.0);
-                            ui.label(
-                                egui::RichText::new(status)
-                                    .color(egui::Color32::from_rgb(0xE8, 0xEE, 0xF5))
-                                    .size(15.0),
-                            );
-                        });
+                        ui.label(job);
                     });
                 } else if let Some(tex) = &self.texture {
                     let available = ui.available_size();
@@ -576,7 +613,7 @@ impl RustyBoxApp {
 
 impl eframe::App for RustyBoxApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.ui_inner(ui, frame, true, true, true);
+        self.ui_inner(ui, frame, true, true, true, None);
     }
 }
 

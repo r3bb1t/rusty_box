@@ -1124,25 +1124,17 @@ impl NativeShellApp {
     fn draw_console_page(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.draw_shell_notice(ui);
         let status = self.runtime_status();
-        if !status.running && !status.start_pending {
-            ui.centered_and_justified(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        RichText::new("This VM is powered off")
-                            .size(TEXT_TITLE)
-                            .color(TEXT_MUTED),
-                    );
-                    ui.label(
-                        RichText::new("Power on in the bar above to start it.")
-                            .size(TEXT_CAPTION)
-                            .color(TEXT_MUTED),
-                    );
-                });
-            });
-            return;
-        }
+        // The embedded view owns the whole console region in every state — the
+        // serial panel stays readable while the VM is off. The shell supplies
+        // only the words for the powered-off display, and none while the
+        // machine runs or is about to.
+        let placeholder = if status.running || status.start_pending {
+            None
+        } else {
+            Some(powered_off_placeholder())
+        };
         self.emulator
-            .ui_embedded_with_serial(ui, frame, self.chrome.show_serial);
+            .ui_embedded_with_serial(ui, frame, self.chrome.show_serial, placeholder);
     }
 
     fn draw_hardware_page(&mut self, ui: &mut egui::Ui) {
@@ -3704,6 +3696,38 @@ fn format_ips_u32(ips: u32) -> String {
     } else {
         "--- IPS".to_owned()
     }
+}
+
+/// The Console's powered-off display: the shell's copy on the shell's type
+/// scale, laid out as one centred block so the embedded view can place it as a
+/// single label. The `rusty_box` crate learns neither the palette nor that the
+/// power verbs live in a bar above the console.
+#[cfg(not(target_arch = "wasm32"))]
+fn powered_off_placeholder() -> rusty_box::gui::ConsolePlaceholder {
+    use egui::text::{LayoutJob, TextFormat};
+    use egui::{Align, FontId};
+
+    let mut job = LayoutJob::default();
+    job.halign = Align::Center;
+    job.append(
+        "This VM is powered off\n",
+        0.0,
+        TextFormat {
+            font_id: FontId::proportional(TEXT_TITLE),
+            color: TEXT_MUTED,
+            ..Default::default()
+        },
+    );
+    job.append(
+        "Power on in the bar above to start it.",
+        0.0,
+        TextFormat {
+            font_id: FontId::proportional(TEXT_CAPTION),
+            color: TEXT_MUTED,
+            ..Default::default()
+        },
+    );
+    rusty_box::gui::ConsolePlaceholder(job)
 }
 
 #[cfg(target_arch = "wasm32")]
