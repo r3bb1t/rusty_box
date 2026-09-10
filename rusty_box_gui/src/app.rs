@@ -14,11 +14,12 @@ use std::sync::{
 use crate::shell::destination::{SidebarAction, VmBarAction};
 use crate::shell::destination::{Destination, ShellPage};
 use crate::shell::sidebar::VmLibraryEntry;
-#[cfg(target_os = "android")]
-use crate::shell::theme::STROKE_HAIRLINE;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::theme::{SPACE_ITEM, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_DISPLAY};
 use crate::shell::theme::{
     configure_shell_style, shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED,
     BG_BASE, BG_PANEL, SPACE_GROUP, SPACE_PAGE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    TEXT_TITLE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::vm_bar::VmBarState;
@@ -1034,11 +1035,13 @@ impl NativeShellApp {
                             start_enabled,
                             || self.start_vm(),
                         );
+                        // Cyan is the primary verb's colour and no other tile
+                        // is a verb, so the two shortcuts rest on the hairline.
                         action_tile(
                             &mut columns[1],
                             "Create Disk Image",
                             "Build bximage-compatible hard disks and floppies.",
-                            ACCENT_BLUE,
+                            STROKE_HAIRLINE,
                             ActionTileWeight::Secondary,
                             || self.chrome.go_to(ShellPage::Images),
                         );
@@ -1046,7 +1049,7 @@ impl NativeShellApp {
                             &mut columns[2],
                             "Hardware Settings",
                             "Inspect boot media and VM hardware limits.",
-                            ACCENT_AMBER,
+                            STROKE_HAIRLINE,
                             ActionTileWeight::Secondary,
                             || self.chrome.go_to(ShellPage::Hardware),
                         );
@@ -1055,9 +1058,11 @@ impl NativeShellApp {
         });
     }
 
-    /// The selected VM as the Home page's headline: its state badge and
-    /// engine, its editable name beside the profile actions, and the facts
-    /// the Library already summarises about it.
+    /// The selected VM as the Summary page's headline: its state badge and
+    /// engine, its editable name, the facts the tree already summarises about
+    /// it, and the one profile verb that has no other home — delete. Power
+    /// belongs to the VM bar and duplication to the sidebar's `+`, so neither
+    /// is repeated here.
     fn draw_home_header(&mut self, ui: &mut egui::Ui) {
         let status = self.runtime_status();
         let badge = shell_state_badge(&status, self.has_error_notice());
@@ -1070,33 +1075,15 @@ impl NativeShellApp {
                 ui.label(status_text(engine_label(self.settings.engine)).color(TEXT_MUTED));
             });
             let mut name_changed = false;
-            ui.horizontal(|ui| {
-                if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm()) {
-                    name_changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut profile.name)
-                                .font(egui::TextStyle::Heading)
-                                .desired_width(320.0),
-                        )
-                        .changed();
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Hardware Settings").clicked() {
-                        self.chrome.go_to(ShellPage::Hardware);
-                    }
-                    let delete_enabled =
-                        !status.running && !status.start_pending && self.profiles.len() > 1;
-                    if ui
-                        .add_enabled(delete_enabled, egui::Button::new("Delete Profile"))
-                        .clicked()
-                    {
-                        self.delete_selected_profile();
-                    }
-                    if ui.button("Duplicate VM Profile").clicked() {
-                        self.duplicate_selected_profile();
-                    }
-                });
-            });
+            if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm()) {
+                name_changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut profile.name)
+                            .font(egui::FontId::proportional(TEXT_DISPLAY))
+                            .desired_width(320.0),
+                    )
+                    .changed();
+            }
             if name_changed {
                 if let Err(message) = self.apply_pending_settings() {
                     self.shell_notice = Some(ShellNotice::error(message));
@@ -1114,12 +1101,21 @@ impl NativeShellApp {
                     home_fact(ui, "Disk", &entry.disk);
                 });
             }
+            ui.add_space(SPACE_ITEM);
+            let delete_enabled =
+                !status.running && !status.start_pending && self.profiles.len() > 1;
+            if ui
+                .add_enabled(delete_enabled, egui::Button::new("Delete Profile"))
+                .clicked()
+            {
+                self.delete_selected_profile();
+            }
             ui.add_space(4.0);
             ui.label(
                 RichText::new(
                     "Profiles are independent launch configurations. Power on starts only the selected VM.",
                 )
-                .size(11.0)
+                .size(TEXT_CAPTION)
                 .color(TEXT_MUTED),
             );
         });
@@ -1127,6 +1123,24 @@ impl NativeShellApp {
 
     fn draw_console_page(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.draw_shell_notice(ui);
+        let status = self.runtime_status();
+        if !status.running && !status.start_pending {
+            ui.centered_and_justified(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new("This VM is powered off")
+                            .size(TEXT_TITLE)
+                            .color(TEXT_MUTED),
+                    );
+                    ui.label(
+                        RichText::new("Power on in the bar above to start it.")
+                            .size(TEXT_CAPTION)
+                            .color(TEXT_MUTED),
+                    );
+                });
+            });
+            return;
+        }
         self.emulator
             .ui_embedded_with_serial(ui, frame, self.chrome.show_serial);
     }
@@ -3503,7 +3517,7 @@ fn draw_about_window(ctx: &egui::Context, chrome: &mut ShellChrome) {
         .resizable(false)
         .open(&mut chrome.show_about)
         .show(ctx, |ui| {
-            ui.label(RichText::new("Rusty Box Workstation").size(18.0).strong());
+            ui.label(RichText::new("Rusty Box Workstation").size(TEXT_TITLE).strong());
             ui.label("VMware-style shell for Rusty Box emulator sessions.");
             ui.separator();
             ui.label(metadata_text(

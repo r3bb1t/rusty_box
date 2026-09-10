@@ -198,7 +198,9 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                             action = Some(VmBarAction::Quit);
                             ui.close();
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_text("More");
                     if state.on_console && !folded {
                         if let Some(chosen) = console_controls(ui, &state) {
                             action = Some(chosen);

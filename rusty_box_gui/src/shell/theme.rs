@@ -15,7 +15,8 @@ pub(crate) const ACCENT_AMBER: Color32 = Color32::from_rgb(0xF2, 0xB8, 0x4B);
 pub(crate) const ACCENT_RED: Color32 = Color32::from_rgb(0xFF, 0x5C, 0x6C);
 
 /// The shell's five type sizes. Nothing outside this list is a legal font size
-/// in a pane, and two weights carry every distinction: regular, and `.strong()`.
+/// in a native pane — the browser shell sets its own — and two weights carry
+/// every distinction: regular, and `.strong()`.
 pub(crate) const TEXT_DISPLAY: f32 = 22.0;
 pub(crate) const TEXT_TITLE: f32 = 16.0;
 pub(crate) const TEXT_BODY: f32 = 14.0;

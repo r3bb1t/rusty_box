@@ -63,6 +63,9 @@ pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 170.0;
 const ROW_HEIGHT: f32 = 24.0;
 #[cfg(not(target_arch = "wasm32"))]
 const CHILD_INDENT: f32 = 22.0;
+/// How far in from the row's right edge a trailing state dot is centred.
+#[cfg(not(target_arch = "wasm32"))]
+const DOT_INSET: f32 = 10.0;
 
 /// How a tree row is marked. Exactly one row in the tree is `Destination`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +113,14 @@ fn tree_row(
         RowMark::Destination | RowMark::Expanded => TEXT_PRIMARY,
         RowMark::Plain => TEXT_MUTED,
     };
-    ui.painter().text(
+    // The label is cut at the row's edge — short of the dot when there is
+    // one — so a long name never runs under the dot or past the panel.
+    let label_right = match trailing_dot {
+        Some(_) => rect.right() - 2.0 * DOT_INSET,
+        None => rect.right() - SPACE_ITEM,
+    };
+    let label_clip = egui::Rect::from_min_max(rect.min, egui::pos2(label_right, rect.max.y));
+    ui.painter().with_clip_rect(label_clip).text(
         rect.left_center() + egui::vec2(indent, 0.0),
         egui::Align2::LEFT_CENTER,
         label,
@@ -119,7 +129,7 @@ fn tree_row(
     );
     if let Some(color) = trailing_dot {
         ui.painter()
-            .circle_filled(rect.right_center() - egui::vec2(10.0, 0.0), 3.5, color);
+            .circle_filled(rect.right_center() - egui::vec2(DOT_INSET, 0.0), 3.5, color);
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

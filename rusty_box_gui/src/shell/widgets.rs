@@ -6,7 +6,7 @@
 use crate::shell::theme::ACCENT_CYAN;
 use crate::shell::theme::{
     shell_card_frame, BG_BASE, BG_CARD, BG_PANEL, SPACE_GROUP, STROKE_HAIRLINE, TEXT_BODY,
-    TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY, TEXT_TITLE,
+    TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TITLE,
 };
 use egui::{Color32, RichText, Stroke};
 
@@ -79,7 +79,7 @@ pub(crate) fn hardware_row(ui: &mut egui::Ui, label: &str, selected: bool) -> eg
 
 pub(crate) fn metadata_text(label: &str, value: &str) -> RichText {
     RichText::new(format!("{label}: {value}"))
-        .size(11.0)
+        .size(TEXT_CAPTION)
         .color(TEXT_MUTED)
 }
 
@@ -91,7 +91,7 @@ pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
 /// The small monospace face the status strip and state badges share.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn status_text(text: impl Into<String>) -> RichText {
-    RichText::new(text).monospace().size(11.0)
+    RichText::new(text).monospace().size(TEXT_CAPTION)
 }
 
 /// The one-word state the status strip, the sidebar and the VM bar all show,
@@ -198,8 +198,13 @@ pub(crate) fn action_tile_enabled(
                     ui.set_min_height(ACTION_TILE_MIN_HEIGHT);
                     ui.spacing_mut().item_spacing.y = 4.0;
                     let title_color = if enabled { TEXT_PRIMARY } else { TEXT_MUTED };
-                    ui.label(RichText::new(title).size(16.0).strong().color(title_color));
-                    ui.label(RichText::new(body).size(12.5).color(TEXT_MUTED));
+                    ui.label(
+                        RichText::new(title)
+                            .size(TEXT_TITLE)
+                            .strong()
+                            .color(title_color),
+                    );
+                    ui.label(RichText::new(body).size(TEXT_SECONDARY).color(TEXT_MUTED));
                     let button = match weight {
                         ActionTileWeight::Primary => {
                             egui::Button::new(RichText::new(title).strong().color(BG_BASE))
@@ -253,8 +258,8 @@ pub(crate) fn disabled_tile(ui: &mut egui::Ui, title: &str, body: &str) {
         ui.set_width(ui.available_width());
         ui.set_min_height(ACTION_TILE_MIN_HEIGHT);
         ui.spacing_mut().item_spacing.y = 4.0;
-        ui.label(RichText::new(title).size(16.0).strong().color(TEXT_MUTED));
-        ui.label(RichText::new(body).size(12.5).color(TEXT_MUTED));
+        ui.label(RichText::new(title).size(TEXT_TITLE).strong().color(TEXT_MUTED));
+        ui.label(RichText::new(body).size(TEXT_SECONDARY).color(TEXT_MUTED));
         action_tile_footer(ui, egui::Button::new("Unavailable"), false);
     });
 }

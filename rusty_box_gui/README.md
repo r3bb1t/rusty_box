@@ -1,6 +1,6 @@
 # rusty_box_gui
 
-`rusty_box_gui` is the normal-user Rusty Box launcher. Native builds parse typed CLI flags, merge optional TOML config, validate media, and start the existing `rusty_box` emulator APIs. The default egui frontend is a modern VMware-style Rusty Box Workstation shell; browser builds use the same shell structure with a WebRunner runtime.
+`rusty_box_gui` is the normal-user Rusty Box launcher. Native builds parse typed CLI flags, merge optional TOML config, validate media, and start the existing `rusty_box` emulator APIs. The default egui frontend is a modern VMware-style Rusty Box Workstation shell; browser builds share its pages and vocabulary over a WebRunner runtime, behind their own menu bar and toolbar.
 
 RustyBox GUI is not VMware; it uses VMware-like organization for familiarity while retaining Rusty Box emulator constraints.
 
@@ -14,9 +14,9 @@ cargo run -p rusty_box_gui
 
 With no flags, the runner loads `rusty_box.toml` from the current working directory if it exists. Use `--config PATH` to load a specific file, or `--no-config` to skip TOML completely.
 
-The desktop egui shell runs `eframe` on the main thread and the emulator on a large-stack worker thread. It includes a Library sidebar, toolbar, Home, Hardware, Images, and Console pages. The Images page uses native `Browse…` save dialogs and accepts drag/drop to fill the target image path.
+The desktop egui shell runs `eframe` on the main thread and the emulator on a large-stack worker thread. Its navigation is one sidebar tree: every VM profile is a node, and the selected one expands into its Summary, Console, Hardware, and Images pages. Above the page, one VM bar carries the selected VM's name, its state, and the verbs that change it; a status strip along the bottom shows the state, engine, memory, CPU count, and instruction rate. The Images page uses native `Browse…` save dialogs and accepts drag/drop to fill the target image path.
 
-Power controls are state-aware: `Power On` starts the selected Library profile, `Restart VM` and `Power Off` only affect a running VM, and startup errors are surfaced in the shell. Hardware panes edit guest memory, CPU/IPS, boot device, disk/CD-ROM attachment, and ROM paths before launch. The Library can duplicate, rename, select, and delete VM profiles while the VM is stopped, and the toolbar `Library` checkbox can hide the sidebar so the Console can scale wider. The Console can show the serial log and send serial input lines while a VM is running.
+The VM bar's power verbs are state-aware: `Power on` starts the selected profile, `Restart` and `Power off` only affect a running VM, and startup errors are surfaced in the shell. While the Console is shown, the bar also carries `Ctrl+Alt+Del`, mouse capture, and the serial pane toggle, folding them into its `⋯` menu when the window is too narrow; `⋯` always holds `About` and `Quit`. Hardware panes edit guest memory, CPU/IPS, boot device, disk/CD-ROM attachment, and ROM paths before launch. The sidebar's `+` duplicates the selected profile, the Summary page renames it and — while the VM is stopped — deletes it, and the `☰` in the VM bar hides the sidebar so the Console can scale wider. A powered-off Console says so; while a VM is running it can show the serial log and send serial input lines.
 
 Direct flags still work:
 
