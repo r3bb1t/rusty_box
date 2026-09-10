@@ -14,7 +14,9 @@ use crate::shell::destination::VmBarAction;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::theme::{BG_PANEL, TEXT_BODY, TEXT_CAPTION, TEXT_PRIMARY};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::widgets::{hairline_below, primary_button, ShellStateBadge};
+use crate::shell::widgets::{
+    button_width, hairline_below, primary_button, text_width, ShellStateBadge,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use egui::RichText;
 
@@ -55,23 +57,6 @@ const HIDE_SERIAL: &str = "Hide serial";
 /// The room the rule between the console's controls and the power verbs takes.
 #[cfg(not(target_arch = "wasm32"))]
 const SEPARATOR_SPACING: f32 = 6.0;
-
-/// The width `text` takes laid out on one line in `font`, which is how a
-/// label sizes itself.
-#[cfg(not(target_arch = "wasm32"))]
-fn text_width(ui: &egui::Ui, text: impl Into<egui::WidgetText>, font: egui::TextStyle) -> f32 {
-    text.into()
-        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, font)
-        .size()
-        .x
-}
-
-/// The width a button captioned `text` takes: the laid-out caption plus the
-/// button padding on both sides, which is how `egui::Button` sizes itself.
-#[cfg(not(target_arch = "wasm32"))]
-fn button_width(ui: &egui::Ui, text: impl Into<egui::WidgetText>) -> f32 {
-    text_width(ui, text, egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.x
-}
 
 /// The width the verbs that are always in the bar take together: the `⋯`
 /// overflow and the three power verbs, with the gaps between them.

@@ -58,6 +58,48 @@ pub(crate) fn field_row<R>(
     .inner
 }
 
+/// The width `text` takes laid out on one line in `font`, which is how a
+/// label sizes itself.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn text_width(
+    ui: &egui::Ui,
+    text: impl Into<egui::WidgetText>,
+    font: egui::TextStyle,
+) -> f32 {
+    text.into()
+        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, font)
+        .size()
+        .x
+}
+
+/// The width a button captioned `text` takes: the laid-out caption plus the
+/// button padding on both sides, which is how `egui::Button` sizes itself.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn button_width(ui: &egui::Ui, text: impl Into<egui::WidgetText>) -> f32 {
+    text_width(ui, text, egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.x
+}
+
+/// The caption of every button that opens the host's file picker, named once
+/// because a path row measures it before drawing the field beside it.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const BROWSE: &str = "Browse…";
+
+/// The widest a path's text field is drawn, so a wide window does not stretch
+/// it across the pane.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const PATH_FIELD_MAX_WIDTH: f32 = 360.0;
+
+/// The width a path's text field takes beside its `BROWSE` button: what is
+/// left of the row once the button and the gap before it have their room,
+/// capped at `PATH_FIELD_MAX_WIDTH`. The field is the row's one elastic
+/// element, so the button stays inside the row however narrow the pane.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn path_field_width(ui: &egui::Ui) -> f32 {
+    (ui.available_width() - button_width(ui, BROWSE) - ui.spacing().item_spacing.x)
+        .min(PATH_FIELD_MAX_WIDTH)
+        .max(0.0)
+}
+
 /// The height of every row in a selectable list.
 #[cfg(not(target_arch = "wasm32"))]
 const ROW_HEIGHT: f32 = 24.0;

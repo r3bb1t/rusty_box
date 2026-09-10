@@ -29,8 +29,8 @@ use crate::shell::widgets::disabled_tile;
 use crate::shell::widgets::hairline_below;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::{
-    action_tile_enabled, hairline_above, home_fact, selection_row, status_text, RowMark,
-    ShellStateBadge, ROOT_INDENT,
+    action_tile_enabled, hairline_above, home_fact, path_field_width, selection_row, status_text,
+    RowMark, ShellStateBadge, BROWSE, ROOT_INDENT,
 };
 use crate::shell::widgets::{
     action_tile, field_row, metadata_text, page_header, primary_button, status_dot,
@@ -1459,10 +1459,10 @@ impl NativeShellApp {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.disk_path)
-                                    .desired_width(360.0),
+                                    .desired_width(path_field_width(ui)),
                             )
                             .changed();
-                        if ui.button("Browse").clicked() {
+                        if ui.button(BROWSE).clicked() {
                             if let Some(path) = pick_native_file() {
                                 self.settings.disk_path = path.display().to_string();
                                 self.settings.disk_enabled = true;
@@ -1554,10 +1554,10 @@ impl NativeShellApp {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.cdrom_path)
-                                    .desired_width(360.0),
+                                    .desired_width(path_field_width(ui)),
                             )
                             .changed();
-                        if ui.button("Browse").clicked() {
+                        if ui.button(BROWSE).clicked() {
                             if let Some(path) = pick_native_file() {
                                 self.settings.cdrom_path = path.display().to_string();
                                 self.settings.cdrom_enabled = true;
@@ -1617,10 +1617,10 @@ impl NativeShellApp {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.bios_path)
-                                    .desired_width(360.0),
+                                    .desired_width(path_field_width(ui)),
                             )
                             .changed();
-                        if ui.button("Browse").clicked() {
+                        if ui.button(BROWSE).clicked() {
                             if let Some(path) = pick_native_file() {
                                 self.settings.bios_path = path.display().to_string();
                                 changed = true;
@@ -1631,10 +1631,10 @@ impl NativeShellApp {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.vga_bios_path)
-                                    .desired_width(360.0),
+                                    .desired_width(path_field_width(ui)),
                             )
                             .changed();
-                        if ui.button("Browse").clicked() {
+                        if ui.button(BROWSE).clicked() {
                             if let Some(path) = pick_native_file() {
                                 self.settings.vga_bios_path = path.display().to_string();
                                 changed = true;
@@ -2146,19 +2146,18 @@ impl DiskCreatorPanel {
                     );
                     shell_card_frame().show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(&mut self.kind, CreatorKind::HardDisk, "Hard Disk");
-                            ui.selectable_value(&mut self.kind, CreatorKind::Floppy, "Floppy");
+                        field_row(ui, "Kind", |ui| {
+                            ui.radio_value(&mut self.kind, CreatorKind::HardDisk, "Hard disk");
+                            ui.radio_value(&mut self.kind, CreatorKind::Floppy, "Floppy");
                         });
-                        ui.separator();
 
                         #[cfg(not(target_arch = "wasm32"))]
                         field_row(ui, "Path", |ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.path)
-                                    .desired_width(320.0),
+                                    .desired_width(path_field_width(ui)),
                             );
-                            if ui.button("Browse…").clicked() {
+                            if ui.button(BROWSE).clicked() {
                                 self.choose_native_image_path();
                             }
                         });
