@@ -76,9 +76,18 @@ const VGA_MEM_SIZE: usize = 0x40000;
 /// Number of DAC (PEL) colour registers.
 const PEL_COLOR_COUNT: usize = 256;
 
-/// Shift applied to 6-bit DAC components to reach 8-bit host colour.
+/// Shift applied to 6-bit DAC components to reach 8-bit host colour — the
+/// standard VGA's, and every card's until it widens its DAC.
 /// Bochs: `s.dac_shift = 2` (vgacore.cc init_standard_vga).
 const DAC_SHIFT: u8 = 2;
+
+/// The shift for a DAC of the width the DISPI enable register selects: an
+/// 8-bit DAC already holds host-width components.
+/// Bochs vga.cc, the VBE_DISPI_INDEX_ENABLE write:
+/// `s.dac_shift = new_vbe_8bit_dac ? 0 : 2`.
+const fn dac_shift_for(dac_8bit: bool) -> u8 {
+    if dac_8bit { 0 } else { DAC_SHIFT }
+}
 
 /// Size of one character generator: 256 glyphs x 32 bytes.
 /// Bochs: the `Bit8u charmap[0x2000]` in `update_charmap` (vgacore.cc).
@@ -936,7 +945,8 @@ pub struct VgaCore {
     /// GUI. Bochs calls `bx_gui->palette_change_common(index, r << dac_shift,
     /// ...)` synchronously from the PEL data write (vgacore.cc); the GUI is not
     /// reachable from here, so the indices are queued and drained at the frame
-    /// boundary. A full-table republish is requested with `dac_all_dirty`.
+    /// boundary. A snapshot restore marks every entry, which republishes the
+    /// whole table (Bochs vgacore.cc `after_restore_state`).
     dac_dirty: [bool; PEL_COLOR_COUNT],
     dac_any_dirty: bool,
 
@@ -1206,7 +1216,7 @@ impl VgaCore {
             charmap: [[0u8; CHARMAP_SIZE]; 2],
             y_doublescan: false,
             pel_mask: 0xFF,
-            dac_shift: 2, // All palette entries visible
+            dac_shift: DAC_SHIFT,
             dac_state: 0x01,   // Initial state
             pel_write_addr: 0,
             pel_read_addr: 0,
@@ -2741,8 +2751,8 @@ impl VgaCore {
     }
 
     /// Drain the DAC entries whose colour changed, as `(index, r, g, b)` with
-    /// the values already shifted from the 6-bit DAC to 8-bit like Bochs's
-    /// `dac_shift` of 2.
+    /// each component shifted to host width by `dac_shift`, as Bochs's
+    /// `palette_change_common` calls are.
     pub(crate) fn take_dac_palette_changes(&mut self) -> impl Iterator<Item = (u8, u8, u8, u8)> + '_ {
         let any = core::mem::take(&mut self.dac_any_dirty);
         (0..PEL_COLOR_COUNT).filter_map(move |i| {
@@ -2752,9 +2762,9 @@ impl VgaCore {
             let entry = self.pel_data[i];
             Some((
                 i as u8,
-                entry[0] << DAC_SHIFT,
-                entry[1] << DAC_SHIFT,
-                entry[2] << DAC_SHIFT,
+                entry[0] << self.dac_shift,
+                entry[1] << self.dac_shift,
+                entry[2] << self.dac_shift,
             ))
         })
     }
@@ -2831,9 +2841,9 @@ impl VgaCore {
                 let _redraw = sink.palette_change(
                     index as u8,
                     Rgb {
-                        red: entry[0] << DAC_SHIFT,
-                        green: entry[1] << DAC_SHIFT,
-                        blue: entry[2] << DAC_SHIFT,
+                        red: entry[0] << self.dac_shift,
+                        green: entry[1] << self.dac_shift,
+                        blue: entry[2] << self.dac_shift,
                     },
                 );
             }
@@ -4825,6 +4835,38 @@ mod tests {
     }
 
     #[test]
+    fn an_eight_bit_dac_reaches_the_screen_and_the_front_end_unshifted() {
+        let mut vga = card();
+
+        write_vbe(&mut vga, VBE_DISPI_INDEX_XRES, 1);
+        write_vbe(&mut vga, VBE_DISPI_INDEX_YRES, 1);
+        write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_8);
+        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_8BIT_DAC);
+        vga.core.write_port(VGA_PEL_ADDR_WRITE, 5, 1);
+        vga.core.write_port(VGA_PEL_DATA, 0xf0, 1);
+        vga.core.write_port(VGA_PEL_DATA, 0x00, 1);
+        vga.core.write_port(VGA_PEL_DATA, 0x0c, 1);
+        write_vram(&mut vga, VgaWindow::Lfb, 0, &[5]);
+
+        let wide = draw(&mut vga);
+        assert_eq!(&wide.tile_at(0, 0)[0..4], &[0xf0, 0x00, 0x0c, 0xff]);
+        assert_eq!(
+            wide.palette,
+            [(5, Rgb { red: 0xf0, green: 0x00, blue: 0x0c })],
+            "an 8-bit DAC entry is already host width"
+        );
+
+        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
+
+        let narrow = draw(&mut vga);
+        assert_eq!(
+            &narrow.tile_at(0, 0)[0..4],
+            &[0xf0, 0x00, 0x0c, 0xff],
+            "narrowing the DAC halves the entries and restores the shift, so the colour holds"
+        );
+    }
+
+    #[test]
     fn legacy_chain_four_graphics_update_returns_palette_rgba_tile() {
         let mut vga = card();
         vga.core.vga_enabled = true;
@@ -5441,6 +5483,52 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
+    fn a_restored_eight_bit_dac_keeps_its_width_and_republishes_every_entry() {
+        let mut source = pci_vga();
+        source.pci_write(0x10, 0xE800_0000, 4);
+        source.pci_write(0x18, 0xF010_0000, 4);
+        write_vbe(&mut source, VBE_DISPI_INDEX_XRES, 320);
+        write_vbe(&mut source, VBE_DISPI_INDEX_YRES, 200);
+        write_vbe(&mut source, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_8);
+        write_vbe(
+            &mut source,
+            VBE_DISPI_INDEX_ENABLE,
+            VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED | VBE_DISPI_8BIT_DAC,
+        );
+        source.core.write_port(VGA_PEL_ADDR_WRITE, 5, 1);
+        source.core.write_port(VGA_PEL_DATA, 0xf0, 1);
+        source.core.write_port(VGA_PEL_DATA, 0x00, 1);
+        source.core.write_port(VGA_PEL_DATA, 0x0c, 1);
+        write_vram(&mut source, VgaWindow::Lfb, 0, &[5]);
+
+        let mut saved = Vec::new();
+        source.save(&mut saved).unwrap();
+
+        let mut restored = pci_vga();
+        let mut reader: &[u8] = saved.as_slice();
+        let target = restored.restore(&mut reader).unwrap();
+        restored.commit_snapshot_v3_mapping_target(target);
+        restored.rebuild_snapshot_v3_derived_state().unwrap();
+
+        let sink = draw(&mut restored);
+        assert_eq!(
+            &sink.tile_at(0, 0)[0..4],
+            &[0xf0, 0x00, 0x0c, 0xff],
+            "the restored DAC keeps the width the guest chose"
+        );
+        assert_eq!(
+            sink.palette.len(),
+            PEL_COLOR_COUNT,
+            "a restore republishes the whole DAC table, as Bochs after_restore_state does"
+        );
+        assert!(
+            sink.palette.contains(&(5, Rgb { red: 0xf0, green: 0x00, blue: 0x0c })),
+            "republished entries carry the restored width"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
     fn vga_snapshot_rejects_oversized_pci_config_length() {
         let source = card();
         let mut saved = Vec::new();
@@ -5588,6 +5676,14 @@ impl VgaCard<StdVga> {
         )?;
         self.ext.recompute_vbe_virtual_start(&mut self.core);
         self.core.calculate_retrace_timing();
+
+        // Bochs vgacore.cc after_restore_state republishes every DAC entry
+        // `<< dac_shift`. The snapshot carries the DAC width the shift derives
+        // from, and a marked entry reaches the front end in the next frame's
+        // preamble.
+        self.core.dac_shift = dac_shift_for(self.ext.vbe.dac_8bit);
+        self.core.dac_dirty.fill(true);
+        self.core.dac_any_dirty = true;
 
         let cursor_addr = (usize::from(self.core.crtc_regs[CRTC_CURSOR_LOC_HIGH]) << 8)
             | usize::from(self.core.crtc_regs[CRTC_CURSOR_LOC_LOW]);
@@ -6384,6 +6480,7 @@ impl StdVga {
                         }
                     }
                     self.vbe.dac_8bit = new_dac_8bit;
+                    core.dac_shift = dac_shift_for(new_dac_8bit);
                     needs_update = true;
                 }
             }
