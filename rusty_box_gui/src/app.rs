@@ -30,7 +30,7 @@ use crate::shell::widgets::hairline_below;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::{
     action_tile_enabled, hairline_above, home_fact, path_field_width, selection_row, status_text,
-    RowMark, ShellStateBadge, BROWSE, ROOT_INDENT,
+    RowMark, ShellStateBadge, BROWSE, HOME_FACT_GAP, ROOT_INDENT,
 };
 use crate::shell::widgets::{
     action_tile, field_row, metadata_text, page_header, primary_button, status_dot,
@@ -816,7 +816,7 @@ impl NativeShellApp {
                 }
             });
         });
-        ui.add_space(12.0);
+        ui.add_space(SPACE_GROUP);
     }
 
     fn take_runtime_error_notice(&mut self) {
@@ -911,7 +911,7 @@ impl NativeShellApp {
             Some(SidebarAction::DuplicateSelected) => self.duplicate_selected_profile(),
             Some(SidebarAction::Select(destination)) => {
                 if destination.vm() == self.chrome.destination.vm() {
-                    self.chrome.destination = destination;
+                    self.chrome.go_to(destination.page());
                 } else {
                     self.select_profile(destination.vm());
                 }
@@ -1022,11 +1022,11 @@ impl NativeShellApp {
     fn draw_home_page(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Frame::new()
-                .inner_margin(egui::Margin::symmetric(20, 16))
+                .inner_margin(egui::Margin::same(SPACE_PAGE))
                 .show(ui, |ui| {
                     self.draw_shell_notice(ui);
                     self.draw_home_header(ui);
-                    ui.add_space(12.0);
+                    ui.add_space(SPACE_GROUP);
                     let status = self.runtime_status();
                     let start_enabled = !status.running && !status.start_pending;
                     ui.columns(3, |columns| {
@@ -1093,11 +1093,11 @@ impl NativeShellApp {
                     self.shell_notice = Some(ShellNotice::error(message));
                 }
             }
-            ui.add_space(6.0);
+            ui.add_space(SPACE_ITEM);
             if let Some(entry) = self.chrome.vm_library.get(self.chrome.selected_vm()) {
                 let cpus = cpu_count_label(self.vm_info.cpus);
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 28.0;
+                    ui.spacing_mut().item_spacing.x = HOME_FACT_GAP;
                     home_fact(ui, "Memory", &entry.memory);
                     home_fact(ui, "Processors", &cpus);
                     home_fact(ui, "Boot", &entry.boot);
@@ -1114,7 +1114,6 @@ impl NativeShellApp {
             {
                 self.delete_selected_profile();
             }
-            ui.add_space(4.0);
             ui.label(
                 RichText::new(
                     "Profiles are independent launch configurations. Power on starts only the selected VM.",
@@ -1376,7 +1375,7 @@ impl NativeShellApp {
                     changed |= field_row(ui, "", |ui| {
                         ui.checkbox(&mut self.settings.pci, "Enable PCI").changed()
                     });
-                    ui.add_space(6.0);
+                    ui.add_space(SPACE_ITEM);
                     ui.label(
                         RichText::new("Boot order (first match boots)")
                             .strong()
@@ -1474,7 +1473,7 @@ impl NativeShellApp {
                         changed |= ui
                             .add(egui::DragValue::new(&mut self.settings.disk_channel).range(0..=1))
                             .changed();
-                        ui.label(RichText::new("drive").strong().color(TEXT_PRIMARY));
+                        ui.label(RichText::new("drive").color(TEXT_MUTED));
                         changed |= ui
                             .add(egui::DragValue::new(&mut self.settings.disk_drive).range(0..=1))
                             .changed();
@@ -1511,11 +1510,11 @@ impl NativeShellApp {
                                         .range(1..=(rusty_box_bximage::BOCHS_MAX_CYLINDERS - 1) as u32),
                                 )
                                 .changed();
-                            ui.label(RichText::new("heads").strong().color(TEXT_PRIMARY));
+                            ui.label(RichText::new("heads").color(TEXT_MUTED));
                             changed |= ui
                                 .add(egui::DragValue::new(&mut chs.heads).range(1..=u8::MAX))
                                 .changed();
-                            ui.label(RichText::new("sectors").strong().color(TEXT_PRIMARY));
+                            ui.label(RichText::new("sectors").color(TEXT_MUTED));
                             changed |= ui
                                 .add(
                                     egui::DragValue::new(&mut chs.sectors_per_track)
@@ -1571,7 +1570,7 @@ impl NativeShellApp {
                                 egui::DragValue::new(&mut self.settings.cdrom_channel).range(0..=1),
                             )
                             .changed();
-                        ui.label(RichText::new("drive").strong().color(TEXT_PRIMARY));
+                        ui.label(RichText::new("drive").color(TEXT_MUTED));
                         changed |= ui
                             .add(egui::DragValue::new(&mut self.settings.cdrom_drive).range(0..=1))
                             .changed();
@@ -1744,7 +1743,7 @@ impl NativeShellApp {
         });
 
         if !editable {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_ITEM);
             ui.label(RichText::new("Power off before changing VM hardware.").color(ACCENT_AMBER));
         }
     }
@@ -3643,11 +3642,11 @@ fn draw_u64_field(
     ui.add_enabled(editable, widget).changed()
 }
 
+/// A read-only fact on the pane's grid: the caption in the label column, the
+/// value beside it, wrapping so a long path stays inside the card.
 fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.horizontal_wrapped(|ui| {
-        ui.set_min_width(150.0);
-        ui.label(RichText::new(label).strong().color(TEXT_PRIMARY));
-        ui.label(RichText::new(value).color(TEXT_MUTED));
+    field_row(ui, label, |ui| {
+        ui.add(egui::Label::new(RichText::new(value).color(TEXT_PRIMARY)).wrap());
     });
 }
 

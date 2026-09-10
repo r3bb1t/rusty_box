@@ -244,6 +244,11 @@ pub(crate) fn hairline_above(ui: &egui::Ui, rect: egui::Rect) {
     );
 }
 
+/// The gap between two facts in a header's facts row, wide enough that each
+/// caption-over-value pair reads as its own column.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const HOME_FACT_GAP: f32 = 28.0;
+
 /// A labelled fact in a page header: a muted caption over its value.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn home_fact(ui: &mut egui::Ui, label: &str, value: &str) {
