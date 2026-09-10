@@ -112,7 +112,7 @@ Right: the verbs.
 - **On the Console page only**, the bar also carries `Serial`, `Capture mouse`
   and `Send Ctrl+Alt+Del`. Page-local controls belong to their page; they are
   not global chrome, which is why the `Serial` checkbox leaves the toolbar.
-- A `⋯` overflow at the far right holds `About Rusty Box Workstation` and
+- A `…` overflow at the far right holds `About Rusty Box Workstation` and
   `Quit`.
 
 Like the sidebar, the bar returns intent rather than acting:
@@ -139,11 +139,11 @@ Every item in it except two already exists elsewhere in the shell:
 | File ▸ Open Console | the tree's `Console` child |
 | File ▸ Duplicate VM Profile | the sidebar's `+` |
 | File ▸ Create Disk Image | the tree's `Images` child |
-| File ▸ Quit | the VM bar's `⋯` |
+| File ▸ Quit | the VM bar's `…` |
 | Edit ▸ Clear Library Search | the search field clears itself |
 | VM ▸ Power On / Power Off / Restart VM | the VM bar's verbs |
 | Input ▸ Send Ctrl+Alt+Del / Capture Mouse | the VM bar, on Console |
-| Help ▸ About Rusty Box Workstation | the VM bar's `⋯` |
+| Help ▸ About Rusty Box Workstation | the VM bar's `…` |
 
 `draw_menu_bar`, `shell_menu_style` and `shell_menu_labels` go with it.
 
@@ -216,9 +216,13 @@ Under this rule the three Summary action tiles stop being cyan/blue/amber; only
 nowhere else. `selectable_label`'s default frame is not used for selection
 anywhere in the desktop shell.
 
-**Glyphs** — the audit found five styles from three families. The shell keeps
-glyphs only on the three power verbs (`▶ ■ ↻`), which are a recognised set.
-Navigation and object-creation buttons carry text alone.
+**Glyphs** — every glyph a caption carries is one egui's default fonts can
+draw. A test in `shell/mod.rs` holds this: it checks each non-ASCII character in
+the shell's string literals against the font family's character map
+(`Font::characters()` — not `has_glyph`, which misreports every symbol the emoji
+face supplies). The power verbs carry `▶ ■ ↻`; the VM bar's chrome carries `☰`
+and `…`; the sidebar's duplicate button `+`; the boot-order rows `⏶ ⏷ ×`.
+Navigation carries text alone.
 
 ## 5. The pages
 
