@@ -246,36 +246,79 @@ have cleared survive.
 
 ### What the guest observes
 
-Under upstream's form, in this port: a lost machine boundary — on the
-hypervisor engine, through the API site. This port's word carries a bit Bochs
-has no counterpart for, `BX_ASYNC_EVENT_SCHEDULER_BOUNDARY` (`cpu/cpu.rs`),
-raised by `sync_lapic_events` (`cpu/cpu.rs`) and `PcIo::sync_io_events`
-(`emulator/io.rs`) when a device has work only the scheduler can do — a
-completion timer armed while answering a port write, a PAM flip, a relocated
-BAR. The engine's exit tail (`rusty_box_whp_engine/src/engine.rs`,
-`run_the_exit_loop`) asks `wants_a_machine_boundary` and only THEN stages an
-injection: `stage_injection` → `PcIo::pop_deliverable_vector` →
-`acknowledge_external_interrupt` → `sync_lapic_events`, which can raise the
-bit after the check, and the `sync_io_events` right after it raises it for
-any device's latch (`take_scheduler_boundary_requested`). The guest then runs
-on the hardware with the request on the shadow's word. When the next exit is
-an errand — a memory access, `CPUID`, an MSR, a string or repeated port
-access — `read_back_into_the_shadow` → `import_arch_state` →
-`set_rflags_for_api`, and a stepping guest has TF set. A literal `= 1` there
-zeroes the request; the tail after that exit finds nothing to hand back, and
-the machine services the device a whole slice late — a disk interrupt landing
-after the driver has polled the data and finished, the `hda: unexpected_intr`
-failure class this port has already met from a dropped boundary. A plain port
-exit finished by `service_port_access` reads nothing back, so it cannot
-clobber; the reach is exactly the errand exits.
+Under upstream's form, in this port: nothing a guest can observe at the
+interpreter's site. At the API site there is one difference, on the hypervisor
+engine, and it comes from a stall the bit causes there rather than from the
+flags write (below). The reason differs by site, and one site also has a
+host-side reach.
 
-The interpreter's site, `set_eflags_internal`, has no reachable clobber today
-and its `|=` is defensive: the trace loop leaves the trace the moment the word
-is non-zero (`cpu_loop_n_impl`, the post-instruction `async_event != 0`
-break), and the loop head hands the processor to the scheduler on the boundary
-bit before another instruction runs — so no `POPF` or `IRET` can retire with
-the bit already latched. No single instruction both raises the bit and writes
+This port's word carries a bit Bochs has no counterpart for,
+`BX_ASYNC_EVENT_SCHEDULER_BOUNDARY` (`cpu/cpu.rs`). `sync_lapic_events`
+(`cpu/cpu.rs`) and `PcIo::sync_io_events` (`emulator/io.rs`) raise it when a
+device has work only the machine's boundary can do: a completion timer armed
+while answering a port write, a PAM flip, a relocated BAR. A literal `= 1`
+under TF would zero it. Whether that matters depends on who reads the bit.
+
+The interpreter's site, `set_eflags_internal`, has no reachable clobber, and its
+`|=` is defensive. The trace loop leaves the trace the moment the word is
+non-zero (`cpu_loop_n_impl`, the post-instruction `async_event != 0` break).
+The loop head then hands the processor to the scheduler on the boundary bit
+before another instruction runs. So no `POPF` or `IRET` can retire with the
+bit already latched, and no single instruction both raises the bit and writes
 TF.
+
+The API site, `set_rflags_for_api`, is reached on the interpreter only from the
+host, between slices. The callers that can carry TF are the public register
+write (`api_bridge.rs`, `X86Reg::Rflags` and its narrower forms) and
+`import_arch_state`. The slice loop takes the bit after every slice
+(`take_scheduler_boundary_request`, `emulator/scheduler.rs`). But two setters
+of the same API raise it again between slices, both through
+`sync_lapic_events`: `set_cr8_for_api` and the `IA32_TSC_DEADLINE` arm of its
+MSR write. So a host that writes one of them and then writes RFLAGS with TF
+set would, under the literal store, clear the request. The next slice would
+then run instead of returning at its loop head for the boundary. That is a
+sequence of host calls, not guest behaviour.
+
+On the hypervisor engine the site is reached from guest code, on every exit.
+`Servicer::answer` (`rusty_box_whp_engine/src/vcpu_thread.rs`) first takes the
+exit header: `Exchange::take_header` (`exchange.rs`) →
+`BxCpuC::take_exit_header` → `take_rip_and_flags` → `set_rflags_for_api`
+(`cpu/arch_state.rs`). An errand whose exit class imports
+`ArchGroups::RIP_RFLAGS` goes through it again (`Exchange::import_for` →
+`import_arch_groups` → `take_rip_and_flags`). A stepping guest's header has TF
+set. The bit can be on the shadow's word at that moment, because `answer` ends
+every exit with `PcIo::sync_io_events`.
+
+Nothing on that engine reads the bit as a request, though. The machine's
+boundary runs whatever the word holds: at the head of every exit's service
+(`device_thread::service_once` → `Emulator::service_device_time`), and at every
+device deadline on the device thread. It drains the device-side queues
+(`scheduler_boundary_work_pending`, `emulator/scheduler.rs`), never the
+processor's word. `wants_a_machine_boundary` has no caller in
+`rusty_box_whp_engine`. `WhpEngine::run_slice` refuses, so the only function
+that takes the bit, the scheduler's `take_scheduler_boundary_request`, is
+never reached there. On this engine the latched bit therefore delays no
+device.
+
+It does stop the shadow. The bit has one reader on that engine: the
+interpreter loop head inside `PcIo::emulate_one` (`cpu_loop_n_impl`,
+`cpu/cpu.rs`), which returns without executing anything while the bit is set.
+`PcIo::finish_the_instruction` parks the bit around an errand's instruction
+(`park_trace_bookkeeping`). `take_the_signalled_smi` (`vcpu_thread.rs`) and
+`run_the_shadow_out_of_smm` (`engine.rs`) call `emulate_one` without parking
+it. So while the bit is latched, `take_the_signalled_smi` returns before the
+signalled SMI is processed and hands the processor back with the SMI still
+pending on the shadow. Once a handler has been entered, a latched bit leaves
+`run_the_shadow_out_of_smm` retiring nothing until `SMM_HANDLER_CEILING` ends
+it with an error. `take_the_signalled_smi` runs `PcIo::sync_io_events` between
+its two calls, which can latch the bit at exactly that point.
+
+The two forms differ there only by accident. `Servicer::answer` writes the
+exit header, and the flags with it, before that exit's `sync_io_events`. With
+TF set, the literal store would clear a bit latched at an earlier exit, and
+the system-management path would then run unless something latched the bit
+again in between; `|=` keeps it. The stall belongs to the latch, not to the
+flags write. It happens whatever TF holds, and neither form removes it.
 
 Under this port's form: nothing that differs from Bochs. The word is non-zero
 after the write, which is all Bochs's loop asks; `STOP_TRACE` surviving means
@@ -287,16 +330,25 @@ chain it either, because its word is non-zero too.
 The assignment is a Bochs idiom for "make the word non-zero", written when the
 word held nothing else worth keeping. Read as that intent, `|= 1` is the
 faithful port. Read as the literal store, it ports an upstream defect (the
-bit-31 clobber is real there, merely harmless) onto a word where it is no
-longer harmless.
+bit-31 clobber is real there, merely harmless) onto a word that carries a bit
+Bochs's word does not.
 
 ### Price of closing it
 
-None to pay: adopting the literal store re-introduces the dropped boundary. The
-other closure — moving trace bookkeeping and the scheduler boundary out of
-`async_event` into a word of their own, so that `= 1` could be written
-literally and mean what Bochs means — is the OPEN QUESTION below, and touches
-every `async_event` site in `cpu/`.
+At the interpreter's site nothing a guest can see is bought either way: guest
+code cannot reach a latched bit there. On the hypervisor engine the latched
+bit delays no device but does stall the shadow's system-management paths
+(above), and the literal store would lift that stall for a stepping guest
+alone. That is chance, not a closure: the stall is the latch's, and neither
+form removes it. What `|=` keeps is that a
+TF write never lowers the boundary bit, which the interpreter's loop head and
+its slice loop both rely on. Without it, every flags write would have to be
+audited against them.
+
+The other closure is to move trace bookkeeping and the scheduler boundary out
+of `async_event` into a word of their own, so that `= 1` could be written
+literally and mean what Bochs means. That is the OPEN QUESTION below, and it
+touches every `async_event` site in `cpu/`.
 
 **Status:** open and deliberate. The literal `= 1` stores that remain in this
 port (`signal_event`, `unmask_event`, and the FRED, SVM and task-switch paths)
@@ -436,6 +488,410 @@ hypervisor's there, so the answer comes from the shadow the fabric keeps
 (`IrqFabric::lint0_admits_ext_int`, `iodev/irq.rs`), consulted in
 `rusty_box_whp_engine/src/vcpu_thread.rs stage_the_legacy_interrupt`.
 
+---
+
+## D7 — The CPUID frequency leaves default to "not enumerated"
+
+**Bochs:** `config.cc` declares `cpu: cpuid_freq=hardware|none|ips` with
+`hardware` as its default, and `cpu/cpuid.cc bx_cpuid_t::get_freq_leaf_15` /
+`get_freq_leaf_16` answer the model's hardware dump in that mode. For
+`corei7_skylake_x` (`cpu/cpudb/intel/corei7_skylake-x.cc`) the dump is leaf
+0x15 EAX/EBX/ECX = 2 / 292 / 0 and leaf 0x16 = 3500 / 4000 / 100 MHz. The
+option reached upstream through PR #792, the fix for bochs-emu/Bochs#791.
+
+**rusty_box:** `CpuidFreq` (`cpu/cpuid.rs`) defaults to `None`, and so do
+`EmulatorConfig::default` (`emulator/mod.rs`) and the `rusty_box_gui` launcher
+(`--cpuid-freq`, `[emulator] cpuid_freq`; `rusty_box_gui/src/config.rs`). Only
+the default differs. Each mode gives Bochs's answer —
+`Hardware` the dump, `None` all-zero leaves, `Ips` a 1/1 crystal ratio at `ips`
+Hz and the rate rounded to MHz — in `Corei7SkylakeX::get_freq_leaf_15` /
+`get_freq_leaf_16` (`cpu/cpudb/intel/core_i7_skylake.rs`).
+
+### What the guest observes
+
+On the default model, leaves 0x15 and 0x16 read all zero. The SDM gives leaf
+0x15 EBX = 0 the meaning "TSC/crystal ratio not enumerated", so Linux
+calibrates the TSC against the PIT and measures the rate the counter really
+runs at. `skylake_x_cpuid_freq_default_reports_leaves_not_enumerated`
+(`core_i7_skylake.rs`) and
+`cpuid_freq_config_reaches_every_cpu_through_cpuid_instruction`
+(`emulator/tests.rs`) pin the zero leaves.
+
+Under Bochs's default the same guest reads a 3.5 GHz declaration while the
+emulated TSC advances one tick per retired instruction, `ips` ticks per
+emulated second. Linux 4.8 and later take the frequency from these leaves
+instead of the PIT (`cpu_khz_from_cpuid`, Linux commit `aa297292d708`), and
+from 5.3 derive 3,499,912 kHz. Everything the kernel scales by the TSC —
+`sched_clock` and printk timestamps, `udelay` / `mdelay`, `loops_per_jiffy`,
+TSC-deadline arithmetic — then runs slow by the declared rate over `ips`, while
+the PIT, HPET, RTC and PM timer keep correct emulated time. The factor is 875×
+at `ips = 4,000,000`, the upstream default when #791 was filed, and 70× at the
+50,000,000 that both Bochs `config.cc` and this port (`Ips::BOCHS_DEFAULT`)
+default to now.
+
+### Why the divergence is the correct side
+
+Measured by the #791 reproduction on stock Bochs master `70da922c` (Ubuntu
+26.04 live-server, kernel 7.0.0-14-generic, `cpu: model=corei7_skylake_x,
+count=1, ips=4000000`; the issue carries the full kernel log): the kernel logs
+`tsc: Detected 3499.912 MHz TSC` and `lpj=3499912`, never logs
+`Fast TSC calibration using PIT`, and keeps the TSC as its clocksource. The
+same guest on the Bochs build that became PR #792, with the leaves reported as
+not enumerated, logs `Fast TSC calibration using PIT` and
+`Detected 3.999 MHz processor`: the true rate.
+
+`hardware` declares a rate the emulated TSC never runs at. `none` declares
+nothing and lets the guest measure, which is the SDM's own opt-out and, as
+#791 records, what QEMU does. A guest-visible clock that disagrees with every
+other clock in the machine by a factor of 70 is a worse fingerprint than an
+unenumerated leaf.
+
+### Price of closing it
+
+Three behavioural edits, in two files.
+
+- `#[default]` moves to `CpuidFreq::Hardware` in `rusty_box/src/cpu/cpuid.rs`.
+  That changes `EmulatorConfig::default` and nothing else.
+- The `rusty_box_gui` launcher does not read that default.
+  `rusty_box_gui/src/config.rs` resolves an absent value through its own arm,
+  `None | Some("none") => CpuidFreq::None`, and that arm has to send an absent
+  value to `Hardware`.
+- The save arm in the same file leaves out whichever value it treats as the
+  default (`CpuidFreq::None => None`). It has to leave out `Hardware` and write
+  `none` out instead. Otherwise a saved `none` reloads as `hardware`.
+
+Plus the consequential edits, which change no behaviour. Three pieces of text
+state today's default and would become false: the `cpuid_freq` doc string in
+`rusty_box_gui/src/args.rs` (`Default: none`), the doc string on the file
+configuration's `cpuid_freq` field in `rusty_box_gui/src/config.rs`
+(`Default: "none"`), and the comment on that file's resolve arm. Two tests pin
+today's default and would fail: `cpuid_freq_defaults_to_none_and_parses_all_modes`
+(`config.rs`), which asserts `CpuidFreq::None` for an absent value, and the
+`EmulatorConfig::default` half of
+`cpuid_freq_config_reaches_every_cpu_through_cpuid_instruction`
+(`emulator/tests.rs`). `skylake_x_cpuid_freq_default_reports_leaves_not_enumerated`
+keeps passing. It reads the model's `INIT` placeholder (`CpuidFreq::None`,
+which every `Emulator` construction path replaces), not the default, so its
+name and comment would have to follow.
+
+After that, every Linux 4.8+ guest on the default model runs its TSC-derived
+time 70× slow at the default `ips`. A caller who wants Bochs's answer asks for
+it: `cpuid_freq: CpuidFreq::Hardware`, or `--cpuid-freq hardware`.
+
+**Status:** open and deliberate; the default only. Filed upstream as
+bochs-emu/Bochs#791.
+
+---
+
+## D8 — KSHIFTLW and KSHIFTRW shift by 15
+
+**Bochs:** `cpu/avx/avx512_mask16.cc BX_CPU_C::KSHIFTLW_KGwKEwIbR` and
+`KSHIFTRW_KGwKEwIbR` shift only `if (count < 15)`, so a count of 15 writes
+zero. The other widths bound at their own width: `count < 8` in
+`avx512_mask8.cc`, `< 32` in `avx512_mask32.cc`, `< 64` in `avx512_mask64.cc`.
+
+**rusty_box:** `cpu/avx512_mask.rs kshiftlw_kgw_kew_ib_r` and
+`kshiftrw_kgw_kew_ib_r` write zero only for `count >= 16`.
+
+### What the guest observes
+
+A count of exactly 15. `KSHIFTLW k1, k2, 15` with bit 0 of `k2` set leaves
+`k1 = 0x8000` here and `0` under Bochs; `KSHIFTRW k1, k2, 15` with bit 15 set
+leaves `1` here and `0` under Bochs. Every other count gives the same result on
+both. The instructions are AVX-512F, so any guest on the default Skylake-X model
+that has enabled the opmask state can reach them.
+
+### Why the divergence is the correct side
+
+The SDM's operation for both instructions shifts whenever the count is at most
+15 and zeroes only above that — the bound Bochs itself applies at the byte,
+dword and qword widths. The word width's `< 15` is the lone exception, so
+matching it would reproduce an off-by-one rather than a modelling choice.
+
+### Price of closing it
+
+One literal, and it buys a wrong answer at one count. No test pins the count-15
+case in either direction.
+
+**Status:** open and deliberate. Written up for upstream in
+`docs/bochs-upstream-bugs.md`.
+
+---
+
+## D9 — A quadword shift by exactly 64 in the XMM-register forms
+
+**Bochs:** `cpu/simd_int.h xmm_psrlq` clears the register only when
+`shift_64 > 64`, and `xmm_psravq` sign-fills an element only when `shift > 64`.
+A count of exactly 64 falls through to a shift by the operand's full width —
+`op->xmm64u(n) >>= shift` and `op1->xmm64s(n) >> shift` — which C++ leaves
+undefined, so the answer is whatever the compiler that built Bochs made of it.
+`xmm_psrlq` serves every XMM-register PSRLQ form: SSE2, VEX and EVEX, with
+the count in a register or an immediate (`cpu/decoder/ia_opcodes.def`,
+`cpu/decoder/ia_opcodes_evex.def`). `xmm_psravq` serves EVEX VPSRAVQ. Every
+sibling helper — `xmm_psrlvq`, `xmm_psraq`, `xmm_psllq`, `xmm_psllvq` — bounds
+at `> 63`.
+
+**rusty_box:** `cpu/sse.rs psrlq_vdq_wdq` / `psrlq_udq_ib` (SSE2) and
+`cpu/avx.rs vpsrlq_reg` / `vpsrlq_imm` (VEX) shift only below 64 and otherwise
+write zero; `cpu/avx512.rs evex_vpsrlq_imm` / `evex_vpsrlq_reg` write zero, and
+`evex_vpsravq` writes each element's sign, for a count of 64 or more.
+
+### What the guest observes
+
+At a count of exactly 64, a logical shift yields zero and VPSRAVQ yields each
+element's sign bit replicated — the SDM's results for any count above 63.
+Bochs yields an undefined result. Every other count agrees.
+
+### Why the divergence is the correct side
+
+There is no defined Bochs behaviour to match. Reproducing it would mean picking
+one compiler's lowering of undefined code and calling it the machine.
+
+### Price of closing it
+
+None to pay. `rusty_box/tests/sse_qword_shift_count.rs` pins the SSE2 forms:
+PSRLQ by register and by immediate zeroes both quadwords at a count of 64 and
+still shifts at 63. The same file pins PSLLQ at both counts, which is plain
+parity with `xmm_psllq`. No test pins the VEX or EVEX forms, or VPSRAVQ, at a
+count of 64.
+
+**Status:** open and deliberate. Written up for upstream in
+`docs/bochs-upstream-bugs.md`.
+
+---
+
+## D10 — CMOS Status Register A accepts the divider-chain TEST values
+
+**Bochs:** `iodev/cmos.cc bx_cmos_c::write`, `case REG_STAT_A`: a divider-chain
+control of 3, 4 or 5 (the MC146818's TEST settings) raises
+`BX_PANIC(("CRA: divider chain control 0x%02x", dcc))` before the register is
+stored. A panic's built-in action is to ask the user on a GUI build and to quit
+otherwise (`logio.cc logfunctions::default_onoff`), and the sample `.bochsrc`
+sets `panic: action=ask`. A run that continues past the panic stores
+`value & 0x7f` beneath the read-only UIP bit and calls `CRA_change`.
+
+**rusty_box:** the `REG_STAT_A` arm of `BxCmosC::write` (`iodev/cmos.rs`)
+stores the same bits and calls `cra_change` (Bochs `CRA_change`), with no
+panic.
+
+### What the guest observes
+
+A guest that writes a TEST value keeps running, in the state Bochs reaches when
+it continues past its own panic. `CRA_change` and `cra_change` both treat a
+divider with bit 1 or bit 2 set as running, so the periodic interrupt keeps the
+rate its low nibble selects. `bx_cmos_c::one_second_timer` and
+`BxCmosC::one_second_timer` both stop the clock only for the divider-reset
+values 6 and 7, so the update cycle keeps running too.
+
+### Why the divergence is the correct side
+
+The panic is a guest-triggerable halt of the host process, or a modal prompt on
+a GUI build, reachable with two `OUT` instructions from any guest with port
+access. No guest can depend on it. The only continuation Bochs defines is the
+one this port takes, and the two are bit-identical from there on.
+
+### Price of closing it
+
+Reproducing it means giving the guest a register write that stops the
+emulator. No test writes a TEST value.
+
+**Status:** open and deliberate.
+
+---
+
+## D11 — A host byte reaches the UART's receiver at once, not one character time later
+
+**Bochs:** `iodev/serial.cc bx_serial_c::rx_timer` polls the port's backend — a
+terminal, socket, pipe, raw serial device or the serial mouse — from a
+one-shot that re-arms every `databyte_usec`, the character time at the
+programmed baud rate and word length. Without a FIFO it takes a byte only while
+`rxdata_ready` is clear, polls again at four times the character time while it
+is set, and polls an empty backend again after 100 ms. Each fire hands
+`rx_fifo_enq` at most one byte.
+
+**rusty_box:** `Emulator::pump_gui_input` (`emulator/run.rs`) passes every byte
+the front end has queued (`BxGui::get_pending_serial_input`) to
+`BxSerialC::receive_byte` (`iodev/serial.rs`) in one pass, and each goes
+straight to `rx_fifo_enq`. From there the receive path — FIFO trigger levels,
+the character timeout, overrun, LSR — is Bochs's.
+
+### What the guest observes
+
+Bytes arrive back to back, and a burst larger than the receiver holds loses
+bytes. With the FIFO enabled, bytes queue until it holds 16 (`FIFO_SIZE`), and
+each byte after that sets the overrun error and is dropped. Without a FIFO,
+every byte after the first overwrites RBR and sets the overrun error. Under
+Bochs the backend keeps what the receiver has no room for: without a FIFO
+nothing is taken while `rxdata_ready` is set, and with one a byte arrives only
+once per character time, so a guest that reads its UART promptly loses nothing.
+A guest timing the gap between characters sees none here.
+
+### What justifies it
+
+The owner's ruling, recorded when the transmit side was paced to the baud rate:
+commit `db43214` states that RX byte arrival "intentionally stays immediate".
+No measurement stands behind the ruling. The structural difference it rests on
+is real: this port has no backend for a timer to poll. Its only serial source is
+the front end's queue, which host input fills, so pacing it means holding bytes
+in the device rather than in the host.
+
+### Price of closing it
+
+A per-port queue of host bytes, drained by a receive one-shot at
+`databyte_usec` as Bochs's `rx_timer` is, built the way the transmit one-shot
+already is (`TimerOwner::SerialTx`, `pc_system.rs`), and carried in the serial
+snapshot section.
+
+**Status:** open and deliberate.
+
+---
+
+## D12 — HPET routes 16–23 reach only the IOAPIC
+
+**Bochs:** `iodev/hpet.cc bx_hpet_c::update_irq` raises and lowers a timer's
+interrupt through `DEV_pic_raise_irq` / `DEV_pic_lower_irq` unless the timer is
+FSB-routed. Except for timers 0 and 1 in legacy-replacement mode (routed to 0
+and `RTC_ISA_IRQ`), the line is `timer_int_route`, the five-bit route field of
+the timer's configuration register, so routes 16–23 are reachable in either
+mode. The macros reach
+`iodev/pic.cc bx_pic_c::raise_irq` / `bx_pic_c::lower_irq` with
+`BX_IRQ_TYPE_ISA`. Both functions assume a legacy line: they pick
+`(irq_no < 8) ? master_pic : slave_pic` and index `IRQ_in[irq_no & 7]`. So a
+route of 16–23 lands on slave line `route & 7`, ISA IRQ 8–15. The forward to
+IOAPIC pin `route` sits inside the same function, after the slave line's
+bookkeeping.
+
+The routes are advertised and writable. `hpet.cc` puts `HPET_ROUTING_CAP`
+(`0xffffff`, all 24 IOAPIC inputs) in every timer's capability field, and
+`HPET_TN_CFG_WRITE_MASK` (`0x7f4e`, `iodev/hpet.h`) keeps every bit of
+`HPET_TN_INT_ROUTE_MASK` writable. This port's `iodev/hpet.rs` carries both
+constants unchanged.
+
+**rusty_box:** `Emulator::drain_hpet_pending` (`emulator/timers.rs`) sends a
+route below 16 through `set_isa_level`. That is the legacy path, and like
+Bochs's it also forwards to the IOAPIC. A route of 16–23 goes to
+`IrqFabric::set_ioapic_pin` (`iodev/irq.rs`) and nowhere else. A route of 24
+or above is logged and dropped. The capability field does not advertise those
+routes, but the route field can hold them. Bochs folds them onto the slave PIC
+in the same way, and its `iodev/ioapic.cc bx_ioapic_c::set_irq_level` ignores
+a pin at or above `BX_IOAPIC_NUM_PINS` (24).
+
+### What the guest observes
+
+A timer routed to GSI 16–23 raises that IOAPIC pin and nothing else. An
+APIC-mode OS may pick such a GSI from the routing-capability field. Under
+Bochs the same timer also drives an unrelated ISA line on the slave 8259:
+
+| HPET route | slave line (`route & 7`) | ISA IRQ |
+|---|---|---|
+| 16 | 0 | 8 (RTC) |
+| 20 | 4 | 12 (PS/2 mouse) |
+| 22 | 6 | 14 (primary IDE) |
+
+`pic.cc` then produces four faults:
+
+- **A phantom edge.** An edge-triggered fire is `lower_irq` then `raise_irq`,
+  so the 8259 records an edge on IRQ 8, 12 or 14 that no device raised.
+- **A device's own assertion cleared.** The ISA bit of that `IRQ_in` slot is
+  shared with the device that owns the line. An HPET deassert
+  (`update_irq(timer, 0)`: the guest clearing a level timer's status bit, a
+  configuration write to an enabled timer whose status bit is clear, or
+  `hpet_del_timer` when the HPET is disabled or reset) runs `lower_irq`. That
+  clears the shared bit and, once `IRQ_in` is empty, the device's pending IRR
+  request with it. To the 8259 the device's line then reads low until the
+  device raises it again. The lower half of an edge does the same for an
+  instant, but the raise half sets the bit and a request again at once, so
+  the device's request merges with the HPET's rather than being lost.
+- **A lost HPET interrupt.** `raise_irq` forwards to IOAPIC pin `route` only
+  on the branch that finds the slave line's IRR bit clear. A level-triggered
+  timer is raised with no lower first. So while that ISA line already has a
+  request in the slave's IRR, the pin the guest programmed is never raised.
+- **A host panic.** When the slave line already carries a non-ISA assertion,
+  `raise_irq` hits `BX_PANIC("ISA IRQ %d lost")`. D10 describes what a panic
+  does to the run.
+
+### Why the divergence is the correct side
+
+A route of 16 or above names an input that exists only on the IOAPIC. The 8259
+pair has lines 0–15. The `& 7` fold is an out-of-range index into a
+two-controller model, not a modelling choice. What it produces is the four
+faults above, and no guest can depend on any of them. Matching Bochs would
+give the guest a phantom IRQ, a cleared device line, a lost timer interrupt,
+and a register write that stops the emulator. The owner ratified the port's
+behaviour on 2026-07-25 as a closed decision, as the comment at the
+`drain_hpet_pending` site records.
+
+### Price of closing it
+
+Folding routes 16–23 onto the legacy path the way Bochs does. That buys the
+four faults and nothing else. No test pins a route of 16 or above in either
+direction.
+
+**Status:** deliberate. The owner ratified it on 2026-07-25 as a closed
+decision. Written up for upstream as entry 1 of `docs/bochs-upstream-bugs.md`.
+
+---
+
+## D13 — A GeForce access past the end of VRAM or PCI config space reads 0 and drops its write
+
+**Bochs:** `iodev/display/geforce.cc bx_geforce_c::vram_read8` through
+`vram_read64` and `vram_write8` through `vram_write64` index
+`s.memory[address + n]` with no bound, and `bx_geforce_c::svga_init_members`
+allocates `s.memory` at exactly `s.memsize` bytes. A caller that bounds an
+access by its first byte leaves the rest of it free to run past the end.
+`bx_geforce_c::svga_read`'s RMA data read (CRTC `0x38` index 2) checks
+`offset < s.memsize` and then calls `vram_read32(offset)`, so an offset in the
+last three bytes of VRAM reads up to three bytes past the allocation.
+
+`bx_geforce_c::register_read32`'s `0x1800`–`0x18FF` arm mirrors PCI config
+space into BAR0. It assembles a dword from `pci_conf[offset + 0]` through
+`pci_conf[offset + 3]`, and `pci_conf` is the 256-byte array of
+`bx_pci_device_c` (`iodev/iodev.h`). So a dword at `0x18FD`–`0x18FF` reads up
+to three bytes past the array. `bx_geforce_c::register_write32` hands the same
+offset to `bx_geforce_c::pci_write_handler`, which stores
+`pci_conf[address + i]` past it too. C++ leaves each of those accesses
+undefined.
+
+**rusty_box:** `rusty_box_devices/src/display/geforce.rs`
+`BxGeForceC::vram_load` / `vram_store`, which every `vram_read*` /
+`vram_write*` goes through, read a byte past the end of VRAM as 0 and drop a
+write to one. `register_read32`'s `0x1800` arm reads a byte past `pci_conf` as
+0, and `register_write32`'s drops it. Bytes inside VRAM are read and written as
+in Bochs, and bytes inside config space read as in Bochs.
+
+### What the guest observes
+
+Only an access that runs past the end. An RMA dword read two bytes before the
+end of VRAM returns the two bytes that exist in its low half and zero above
+them. A BAR0 dword read at `0x18FE` returns config bytes `0xFE` and `0xFF` and
+zero above them. Under Bochs the same reads return whatever the build placed
+after the allocation or after `pci_conf` (on a typical build, heap memory or
+the start of the next member, `pci_bar`), and the config-space write
+overwrites it.
+
+No guest reaches either path today, because no machine instantiates the card.
+`rusty_box/src/iodev/mod.rs` re-exports `BxGeForceC` as a model ported ahead
+of its wiring. The entry settles the ported-ahead model's rule before the card
+is wired.
+
+### Why the divergence is the correct side
+
+There is no defined Bochs behaviour to match. Reproducing it would mean picking
+one compiler's lowering of undefined code and calling it the card, as in D9.
+Rust cannot index past the end without a panic, and a guest-triggerable host
+abort is not an answer either (D10 makes the same argument). Reading 0 and
+dropping the write leaves the in-range bytes of a straddling access exactly as
+Bochs has them.
+
+### Price of closing it
+
+Nothing to buy.
+`an_rma_read_straddling_the_end_of_vram_returns_the_bytes_that_exist` and
+`a_dword_read_at_the_end_of_pci_config_space_completes` (`geforce.rs`) pin the
+rule. They pin the read side only; no test writes past either end.
+
+**Status:** open and deliberate; the ported-ahead GeForce model only.
+
 # Hypervisor-engine divergences (`H<n>`)
 
 A machine running its guest on `rusty_box_whp_engine` executes on the host's
@@ -522,6 +978,93 @@ is worth having. Both bits are one named constant away in
 
 **Status:** open and deliberate. The lever exists and is named; what is missing
 is the bridge and the measurement.
+
+## H3 — `CPUID` withholds VMX and SVM
+
+**Bochs:** `cpu/cpuid.cc bx_cpuid_t::get_std_cpuid_leaf_1_ecx` sets leaf 1
+`ECX[5]` (`BX_CPUID_STD1_ECX_VMX`) when the model enables `BX_ISA_VMX`.
+`bx_cpuid_t::get_ext_cpuid_leaf_1_ecx` sets leaf `0x80000001` `ECX[2]`
+(`BX_CPUID_EXT1_ECX_SVM`) when the model enables `BX_ISA_SVM`.
+`cpu/cpudb/intel/corei7_skylake-x.cc` enables VMX in a build with
+`BX_SUPPORT_VMX >= 2`, and `cpu/cpudb/amd/ryzen.cc` enables SVM in a build
+with `BX_SUPPORT_SVM`. This port's models give the same answers:
+`LEAF1_ECX_BASE` (`cpu/cpudb/intel/core_i7_skylake.rs`) includes `VMX`, and
+`LEAF8_0000_0001_ECX_BASE` (`cpu/cpudb/amd/amd_ryzen.rs`) includes `SVM`.
+
+**rusty_box on the hypervisor:** `withhold_virtualisation_from`
+(`rusty_box_whp_engine/src/engine.rs`) clears those two bits. Leaves 1 and
+`0x80000001` are both in `TRAPPED_CPUID_LEAVES`, so a guest's `CPUID` of
+either one exits. `Servicer::finish_the_errand`
+(`rusty_box_whp_engine/src/vcpu_thread.rs`) runs the instruction on the shadow
+through the interpreter's own handler. It then clears the bit in the shadow's
+`RCX`, before `Exchange::export_imported` writes the registers back, so the
+shadow and the partition hold the same answer. The interpreter answers from
+the model unchanged.
+
+### What the guest observes
+
+On the default Skylake-X model, leaf 1 `ECX[5]` reads clear. On the Ryzen
+model, leaf `0x80000001` `ECX[2]` reads clear. The guest is told it has no
+hardware virtualisation. So the Bochs BIOS's `smp_probe` (`bios/rombios32.c`)
+skips its `IA32_FEATURE_CONTROL` write, which it gates on
+`cpuid_ext_features & CPUID_EXT_VMX`, and a guest hypervisor finds nothing to
+enable.
+
+The withholding has two limits:
+
+- **Only the `CPUID` bits change.** The model still enables its
+  virtualisation extension on the shadow (`IsaVmx` on Skylake-X, `IsaSvm` on
+  Ryzen). `CpuCapabilities::narrow` (`rusty_box_gui/src/config.rs`), which the
+  GUI applies for `--engine whp`, excludes neither.
+- **Only `finish_the_errand` withholds.** A `CPUID` that never passes through
+  it gets the unwithheld answer. The case that exists is a `CPUID` inside a
+  system-management handler, which `take_the_signalled_smi`
+  (`vcpu_thread.rs`) runs through `run_the_shadow_out_of_smm` (`engine.rs`).
+
+Outside a system-management handler, no single guest sees both answers today,
+because no engine transfer is built (H7). The difference otherwise shows only
+between two machines, one on each engine.
+
+### Why the divergence is the correct side
+
+It follows H4's rule: advertise nothing the guest cannot execute. A guest told
+it has VMX or SVM will use it, and this engine can honour neither:
+
+- The seam cannot carry it. `VcpuArchState` has no place for the VMCS or VMCB
+  caches (`cpu/arch_state.rs`, module documentation), so a guest running a
+  hypervisor of its own could not be serviced across an exit.
+- `rusty_box_whp_engine` asks the platform for no nested-virtualisation
+  property on its partition.
+
+The measurement recorded when the withholding was added
+(`docs/whp-guest-capabilities.md`, 2026-08-31): with `ECX[5]` advertised, the
+Bochs BIOS believed it and wrote `IA32_FEATURE_CONTROL` to lock VMX on. The
+platform refused the write, in firmware that had no interrupt descriptor table
+yet, and the guest triple-faulted at `0xE1E80` in `rombios32` before the boot
+loader ran.
+
+### Price of closing it
+
+Offering VMX or SVM on this engine takes both halves above: a partition
+configured for nested virtualisation, and an architectural-state seam that
+carries the VMCS and VMCB caches. Neither exists.
+
+A narrower change would keep the bits withheld and make both engines agree,
+in line with H4's rule that the processor is a machine setting, not an engine
+one. `CpuCapabilities::narrow` would exclude `IsaVmx` and `IsaSvm`, and the
+`CPUID` handler (`cpu/soft_int.rs`, `cpuid`) would clear `ECX[5]` / `ECX[2]`
+when the extension is absent, as it already clears leaf 1 `ECX[3]` for
+`IsaMonitorMwait`. Not done.
+
+**Status:** open and deliberate; hypervisor engine only. No test exercises the
+withholding yet.
+`a_guest_on_hardware_is_told_the_same_processor_the_interpreter_tells_it`
+(`rusty_box_whp_engine/src/lib.rs`) runs leaf 1 but compares only `EAX` and
+`ECX[31]`.
+`a_cpuid_exit_on_the_thread_answers_on_the_shadow_and_exports_the_answer`
+runs leaf 0, which the function leaves alone. A gated test would pin it by
+running leaf 1 on the thread and asserting that `ECX[5]` reaches the guest
+clear.
 
 ## OPEN QUESTION — what may cut short a trapped instruction
 
@@ -610,9 +1153,9 @@ answer paths, and what other hypervisors do: `docs/whp-guest-capabilities.md`.
 
 ## H5 — Device time is host time, and a tick is a unit rather than an instruction
 
-**Fast mode and precise mode.** H5 through H8 name the two engines as the
-resident-driver design names them: *fast mode* is a machine on
-`rusty_box_whp_engine`, *precise mode* is the same machine on the interpreter.
+**Fast mode and precise mode.** In this registry, *fast mode* is a machine on
+`rusty_box_whp_engine`, and *precise mode* is the same machine on the
+interpreter. H5 onward use the two terms.
 
 **Bochs:** `pc_system.h bx_pc_system_c::tick1` is called once per retired
 instruction and `pc_system.cc bx_pc_system_c::countdownEvent` advances
@@ -666,8 +1209,12 @@ instruction-count clock runs on the interpreter, where it is exact. Asking the
 hypervisor for the same thing means counting the guest's retired instructions,
 which is precisely what handing the guest to hardware gives up.
 
-**Status:** open and deliberate; fast mode only. Registered ahead of the driver
-that introduces it — `docs/superpowers/plans/2026-09-03-whp-vmm-shape.md`.
+**Status:** open and deliberate; fast mode only. The driver is the device
+thread, `rusty_box_whp_engine/src/device_thread.rs`, introduced by commit
+`a80b61d`: it sleeps until the machine's next device deadline and catches the
+wheel up to the host clock. The catch-up is pinned by
+`service_once_catches_the_wheel_up_to_the_clock_and_names_the_next_deadline`
+(same file), which drives an interpreter machine and so runs on any host.
 
 ## H6 — The 8042's serial delay is a one-shot
 
@@ -768,22 +1315,25 @@ one per retired instruction. There is a single rate and it never changes.
 
 **rusty_box:** in fast mode the counter is the host's (H2).
 
-The direction into precise mode exists today. The engine reads
-`WHvX64RegisterTsc` and hands the value to `set_tsc`
-(`rusty_box_whp_engine/src/engine.rs`) at every read-back, not only at a
-transfer, so the interpreter's counter continues from exactly where the
-hardware's stood and from there advances at one tick per retired instruction.
+No engine transfer exists. Neither `FastMachine::into_precise` nor
+`FastMachine::from_precise` is built, so a running guest cannot move between the
+engines, and this entry registers the rate change that such a transfer
+produces. The seam carries the counter in neither direction today:
 
-The direction back does not exist yet, and today's seam refuses it on purpose:
-`rusty_box_whp_engine/src/state.rs` puts `Reg::Tsc` last in `MSR_REGS`, at
-`TSC_SLOT`, and the whole-state write skips that one register by index rather
-than by truncating a list, so no write reaches it at all — the test
-`the_time_stamp_counter_is_never_written_to_the_processor` asserts exactly
-that, on the recorder rather than on a read-back. What this entry registers is
-the transfer back: it writes the interpreter's value into the partition, so the
-hardware's counter resumes from where the interpreter left it and returns to the
-host's rate. Until the driver the Status line names lands, that exclusion and its
-test are what the code does, and this paragraph is what it is to do.
+- The whole-state read (`rusty_box_whp_engine/src/state.rs`) stores
+  `WHvX64RegisterTsc` in the architectural state's `msrs.tsc`, but
+  `BxCpuC::import_arch_state` (`cpu/arch_state.rs`) does not consume that
+  field, so the shadow's counter is not continued from the hardware's.
+- The whole-state write never reaches the register. `Reg::Tsc` sits last in
+  `MSR_REGS`, at `TSC_SLOT`, and the write skips that one index rather than
+  truncating a list; `the_time_stamp_counter_is_never_written_to_the_processor`
+  (`state.rs`) asserts it on the recorder rather than on a read-back.
+
+A transfer has to carry the value both ways. Into precise mode, the
+interpreter's counter continues from where the hardware's stood and then
+advances at one tick per retired instruction. Back into fast mode, the
+interpreter's value is written into the partition, so the hardware's counter
+resumes from where the interpreter left it and returns to the host's rate.
 
 ### What the guest observes
 
@@ -828,13 +1378,12 @@ machine's instruction count; the bridge closes the discontinuity by giving the
 first of those up.
 
 **Status:** open and deliberate; both engines, since the divergence is the
-boundary between them. Registered ahead of the driver that introduces it —
-`docs/superpowers/plans/2026-09-03-whp-vmm-shape.md`, whose Stage 3 builds the
-transfer (`FastMachine::into_precise` / `from_precise`) and the write back that
-carries the value across it. No transfer exists yet, so nothing asserts the
-continuity of the value today; Stage 3's G4 live-transfer gate — Alpine at
-`login:`, fast → precise → fast, with `date` still advancing at wall rate and no
-clocksource demotion in `dmesg` — is where that invariant has to be held.
+boundary between them. The engine transfer (`FastMachine::into_precise` /
+`from_precise`) is not built, and neither is the TSC hand-off in either
+direction, so nothing asserts the continuity of the value today. The transfer
+has to hold it against a live-transfer criterion: Alpine at `login:`,
+fast → precise → fast, with `date` still advancing at wall rate and no
+clocksource demotion in `dmesg`.
 
 ## H8 — A level-triggered IOAPIC entry is re-serviced on the guest's EOI
 
@@ -905,10 +1454,13 @@ would have spaced the re-deliveries out by whatever unrelated event ran the next
 scan. Whoever finds such a loop should add the back-off as part of the borrowed
 behaviour under R7, not treat the resample itself as the defect.
 
-**Status:** open and deliberate; fast mode only. Registered ahead of the driver
-that introduces it — `docs/superpowers/plans/2026-09-03-whp-vmm-shape.md`, whose
-Task 1.6 proves the resample hypervisor-free and whose Stage 2 proves it on
-hardware.
+**Status:** open and deliberate; fast mode only. Introduced by commit
+`a614588`: `IrqFabric::resample_on_eoi` (`rusty_box/src/iodev/irq.rs`), called
+from the vCPU thread's `ExitReason::ApicEoi` arm
+(`rusty_box_whp_engine/src/vcpu_thread.rs`).
+`an_eoi_re_services_a_level_entry_whose_line_is_still_asserted`
+(`iodev/irq.rs`) pins the resample without a hypervisor. No test yet drives a
+level-triggered EOI exit on hardware.
 
 ## H9 — The legacy 8259 line is placed as a pending event, not taken by an INTA at the processor
 
@@ -959,6 +1511,13 @@ The same acknowledge-early behaviour is already this port's answer for an I/O
 APIC entry in ExtINT mode, which is the other way a PC wires this controller, so
 closing it here alone would make the two paths disagree.
 
-**Status:** open and deliberate; fast mode only. Introduced by
-`docs/superpowers/plans/2026-09-07-inject-at-entry-not-by-cancel.md`, whose
-Task 3 proves the delivery on hardware for both a spinning and a halting guest.
+**Status:** open and deliberate; fast mode only. The placement is
+`stage_the_legacy_interrupt` (`rusty_box_whp_engine/src/vcpu_thread.rs`). A
+cancel fetches a processor out of its run only when `VcpuControl::in_run` says
+it is inside one (commit `a5a5336`): the platform latches a cancel sent to a
+processor outside a run and spends it on the next entry, which then retires
+nothing. Two hardware tests in `rusty_box_whp_engine/src/lib.rs` prove the
+delivery: `a_legacy_8259_vector_reaches_a_hardware_guest_as_a_placed_ext_int`
+for a guest spinning with IF set, and `a_halted_guest_still_takes_its_legacy_tick`
+(commit `8d334de`) for one parked in `HLT`. Both return without asserting on a
+host where the hypervisor platform is unavailable.
