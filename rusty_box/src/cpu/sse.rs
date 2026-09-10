@@ -830,12 +830,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let op2 = self.sse_read_op2_xmm(instr)?;
 
         let count = op2.xmm64u(0);
-        // Bochs simd_int.h uses `> 64` (note: count=64 is technically UB in C,
-        // but we match Bochs behavior exactly here)
-        if count > 64 {
+        // Any count above 63 clears the destination (SDM), the bound the VEX
+        // and EVEX forms use. Bochs simd_int.h xmm_psrlq clears only for
+        // `> 64`, which leaves a count of 64 to a C++ shift by the operand's
+        // full width — undefined behaviour; the port follows the SDM there,
+        // registered as D9 in docs/bochs-parity-divergences.md.
+        if count > 63 {
             op1 = BxPackedXmmRegister::default();
-        } else if count > 0 {
-            let shift = count.min(63) as u32; // clamp to avoid Rust panic on >> 64
+        } else {
+            let shift = count as u32;
             op1.set_xmm64u(0, op1.xmm64u(0) >> shift);
             op1.set_xmm64u(1, op1.xmm64u(1) >> shift);
         }
@@ -930,11 +933,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let op2 = self.sse_read_op2_xmm(instr)?;
 
         let count = op2.xmm64u(0);
-        // Bochs simd_int.h xmm_psllq uses `> 64` — match exactly
-        if count > 64 {
+        // Bochs simd_int.h xmm_psllq: any count above 63 clears the
+        // destination.
+        if count > 63 {
             op1 = BxPackedXmmRegister::default();
-        } else if count > 0 {
-            let shift = count.min(63) as u32;
+        } else {
+            let shift = count as u32;
             op1.set_xmm64u(0, op1.xmm64u(0) << shift);
             op1.set_xmm64u(1, op1.xmm64u(1) << shift);
         }
@@ -1020,13 +1024,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
-        // Bochs simd_int.h uses `shift > 64` for qword immediate shifts
-        if shift > 64 {
+        // Any count above 63 clears the destination (SDM), the bound the VEX
+        // and EVEX forms use. Bochs simd_int.h xmm_psrlq clears only for
+        // `> 64`, which leaves a count of 64 to a C++ shift by the operand's
+        // full width — undefined behaviour; the port follows the SDM there,
+        // registered as D9 in docs/bochs-parity-divergences.md.
+        if shift > 63 {
             op = BxPackedXmmRegister::default();
-        } else if shift > 0 {
-            let s = (shift as u32).min(63);
-            op.set_xmm64u(0, op.xmm64u(0) >> s as u64);
-            op.set_xmm64u(1, op.xmm64u(1) >> s as u64);
+        } else {
+            let s = u32::from(shift);
+            op.set_xmm64u(0, op.xmm64u(0) >> s);
+            op.set_xmm64u(1, op.xmm64u(1) >> s);
         }
         self.write_xmm_reg_lo128(instr.dst(), op);
         Ok(())
@@ -1114,13 +1122,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
-        // Bochs simd_int.h uses `shift > 64` for qword immediate shifts
-        if shift > 64 {
+        // Bochs simd_int.h xmm_psllq: any count above 63 clears the
+        // destination.
+        if shift > 63 {
             op = BxPackedXmmRegister::default();
-        } else if shift > 0 {
-            let s = (shift as u32).min(63);
-            op.set_xmm64u(0, op.xmm64u(0) << s as u64);
-            op.set_xmm64u(1, op.xmm64u(1) << s as u64);
+        } else {
+            let s = u32::from(shift);
+            op.set_xmm64u(0, op.xmm64u(0) << s);
+            op.set_xmm64u(1, op.xmm64u(1) << s);
         }
         self.write_xmm_reg_lo128(instr.dst(), op);
         Ok(())

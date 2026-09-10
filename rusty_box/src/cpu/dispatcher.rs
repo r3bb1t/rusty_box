@@ -5200,6 +5200,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::KtestbKgbKeb => self.ktestb_kgb_keb_r(instr),
             Opcode::KtestdKgdKed => self.ktestd_kgd_ked_r(instr),
 
+            // KSHIFT memory form. Bochs ia_opcodes.def gives every
+            // BX_IA_KSHIFT* opcode execute1 = BxError, and
+            // fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A30..33 carry no
+            // ATTR_MODC0, so mod != 11 decodes and raises #UD when it executes,
+            // before any operand is read.
+            Opcode::KshiftlbKgbKebIb
+            | Opcode::KshiftlwKgwKewIb
+            | Opcode::KshiftldKgdKedIb
+            | Opcode::KshiftlqKgqKeqIb
+            | Opcode::KshiftrbKgbKebIb
+            | Opcode::KshiftrwKgwKewIb
+            | Opcode::KshiftrdKgdKedIb
+            | Opcode::KshiftrqKgqKeqIb
+                if !instr.mod_c0() =>
+            {
+                self.bx_error(instr)
+            }
+
             // KSHIFT left
             Opcode::KshiftlbKgbKebIb => self.kshiftlb_kgb_keb_ib_r(instr),
             Opcode::KshiftlwKgwKewIb => self.kshiftlw_kgw_kew_ib_r(instr),
