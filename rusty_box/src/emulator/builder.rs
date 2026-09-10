@@ -273,9 +273,8 @@ struct Settings<'r> {
 /// A powered-off PC, and the only way to reach a running one.
 ///
 /// ```no_run
-/// use rusty_box::config::EmulatorConfig;
 /// use rusty_box::emulator::{
-///     AtaSlot, BootDevice, BootOrder, DiskGeometry, MachineBuilder, RunBudget,
+///     AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, MachineBuilder, RunBudget,
 /// };
 ///
 /// # fn main() -> rusty_box::Result<()> {

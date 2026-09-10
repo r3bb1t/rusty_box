@@ -1233,6 +1233,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     #[cfg(debug_assertions)]
     #[test]
     fn boundary_reserved_vvvv_executes_ia_error_not_decoder_failure() {
+        use crate::{cpu::cpu::Exception, error::Error};
+
         const CODE: u64 = 0x20_0ffe;
         const IDT: u64 = 0x28_0000;
         const HANDLER: u64 = 0x29_0000;
@@ -1276,7 +1278,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     result.unwrap();
 
                     assert_eq!(emu.cpu().get_exception_diag()[Exception::Ud as usize], 1);
-                    assert_eq!(emu.cpu().rip(), HANDLER + 1);
+                    // The delivered #UD is the one instruction the run was
+                    // allowed: Bochs cpu.cc `cpu_loop` counts it (`icount++`
+                    // in the setjmp handler), so execution stops on the
+                    // handler's first byte.
+                    assert_eq!(emu.cpu().rip(), HANDLER);
                     assert_eq!(emu.reg_read(X86Reg::Rsp), STACK_TOP - 40);
                     let mut pushed_rip = [0u8; 8];
                     emu.mem_read(STACK_TOP - 40, &mut pushed_rip).unwrap();
@@ -1457,26 +1463,37 @@ mod const_initialiser_tests {
     /// carry the invalid sentinel would serve stale traces on the first lookup.
     #[test]
     fn const_elements_match_the_flushed_state_they_replace() {
-        assert_eq!(BxICacheEntry::INVALID.p_addr, BX_ICACHE_INVALID_PHY_ADDRESS);
-        assert_eq!(BxICacheEntry::INVALID.trace_mask, 0);
-        assert_eq!(BxICacheEntry::INVALID.tlen, 0);
-        assert_eq!(BxICacheEntry::INVALID.mpool_start_idx, 0);
+        // `BxICache::new()` returns the whole cache by value, and a debug
+        // build materialises it on the stack — more than a default test
+        // thread holds.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                assert_eq!(BxICacheEntry::INVALID.p_addr, BX_ICACHE_INVALID_PHY_ADDRESS);
+                assert_eq!(BxICacheEntry::INVALID.trace_mask, 0);
+                assert_eq!(BxICacheEntry::INVALID.tlen, 0);
+                assert_eq!(BxICacheEntry::INVALID.mpool_start_idx, 0);
 
-        assert_eq!(PageSplitEntry::EMPTY.ppf, PageSplitEntry::default().ppf);
-        assert_eq!(
-            PageSplitEntry::EMPTY.entry_idx,
-            PageSplitEntry::default().entry_idx
-        );
+                assert_eq!(PageSplitEntry::EMPTY.ppf, PageSplitEntry::default().ppf);
+                assert_eq!(
+                    PageSplitEntry::EMPTY.entry_idx,
+                    PageSplitEntry::default().entry_idx
+                );
 
-        // A zero timestamp can never match `trace_link_time_stamp`, which
-        // starts at 1 — that is what makes an unlinked slot unusable.
-        assert_eq!(TraceLink::EMPTY.timestamp, 0);
-        let cache = BxICache::new();
-        assert_eq!(cache.trace_link_time_stamp, 1);
-        assert!(
-            cache.trace_links[0].target(cache.trace_link_time_stamp, 0).is_none(),
-            "a fresh link slot must not resolve"
-        );
+                // A zero timestamp can never match `trace_link_time_stamp`,
+                // which starts at 1 — that is what makes an unlinked slot
+                // unusable.
+                assert_eq!(TraceLink::EMPTY.timestamp, 0);
+                let cache = BxICache::new();
+                assert_eq!(cache.trace_link_time_stamp, 1);
+                assert!(
+                    cache.trace_links[0].target(cache.trace_link_time_stamp, 0).is_none(),
+                    "a fresh link slot must not resolve"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
 

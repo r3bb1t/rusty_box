@@ -653,7 +653,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         rip: u64,
     ) {
         assert_eq!(emu.cpu().get_exception_diag()[vector as usize], 1);
-        assert_eq!(emu.cpu().rip(), handler + 1);
+        // The delivered fault is the one instruction the run was allowed:
+        // Bochs cpu.cc `cpu_loop` counts it (`icount++` in the setjmp
+        // handler), so execution stops on the handler's first byte.
+        assert_eq!(emu.cpu().rip(), handler);
         assert_eq!(emu.reg_read(X86Reg::Rsp), STACK_TOP - 40);
         let mut pushed_rip = [0u8; 8];
         emu.mem_read(STACK_TOP - 40, &mut pushed_rip).unwrap();
@@ -820,44 +823,40 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 for &(width, off, want_ac) in cases {
                     for is_write in [false, true] {
+                        let mut ctx = emu.exec_ctx(0);
                         // Re-arm every iteration: delivering the previous
                         // exception runs CPL-0 machinery that may clear
                         // user_pl, and the check requires both conditions.
-                        emu.cpu_mut().alignment_check_mask = 0xf;
-                        emu.cpu_mut().user_pl = true;
+                        ctx.alignment_check_mask = 0xf;
+                        ctx.user_pl = true;
 
-                        let before = emu.cpu().get_exception_diag()[ac];
+                        let before = ctx.get_exception_diag()[ac];
                         let addr = BASE + off;
-                        let _ = match (width, is_write) {
-                            ("word", false) => emu
-                                .cpu_mut()
-                                .read_linear_word(BxSegregs::Ds, addr)
-                                .map(|_| ()),
-                            ("word", true) => {
-                                emu.cpu_mut().write_linear_word(BxSegregs::Ds, addr, 0)
+                        let outcome = match (width, is_write) {
+                            ("word", false) => {
+                                ctx.read_linear_word(BxSegregs::Ds, addr).map(|_| ())
                             }
-                            ("dword", false) => emu
-                                .cpu_mut()
-                                .read_linear_dword(BxSegregs::Ds, addr)
-                                .map(|_| ()),
-                            ("dword", true) => {
-                                emu.cpu_mut().write_linear_dword(BxSegregs::Ds, addr, 0)
+                            ("word", true) => ctx.write_linear_word(BxSegregs::Ds, addr, 0),
+                            ("dword", false) => {
+                                ctx.read_linear_dword(BxSegregs::Ds, addr).map(|_| ())
                             }
-                            (_, false) => emu
-                                .cpu_mut()
-                                .read_linear_qword(BxSegregs::Ds, addr)
-                                .map(|_| ()),
-                            (_, true) => {
-                                emu.cpu_mut().write_linear_qword(BxSegregs::Ds, addr, 0)
+                            ("dword", true) => ctx.write_linear_dword(BxSegregs::Ds, addr, 0),
+                            (_, false) => {
+                                ctx.read_linear_qword(BxSegregs::Ds, addr).map(|_| ())
                             }
+                            (_, true) => ctx.write_linear_qword(BxSegregs::Ds, addr, 0),
                         };
-                        let raised_ac = emu.cpu().get_exception_diag()[ac] > before;
+                        let raised_ac = ctx.get_exception_diag()[ac] > before;
                         let dir = if is_write { "write" } else { "read" };
                         if want_ac {
                             assert!(
                                 raised_ac,
                                 "{dir}_linear_{width} at +{off} must raise #AC before the \
                                  TLB walk — missing check_alignment call or too-narrow mask"
+                            );
+                            assert!(
+                                outcome.is_err(),
+                                "{dir}_linear_{width} at +{off}: #AC aborts the access"
                             );
                         } else {
                             assert!(
@@ -870,17 +869,18 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 }
 
                 // Byte accessors take no ac_mask in Bochs and must never #AC.
-                emu.cpu_mut().alignment_check_mask = 0xf;
-                emu.cpu_mut().user_pl = true;
-                let before = emu.cpu().get_exception_diag()[ac];
-                let _ = emu.cpu_mut().read_linear_byte(BxSegregs::Ds, BASE + 1);
-                emu.cpu_mut().alignment_check_mask = 0xf;
-                emu.cpu_mut().user_pl = true;
-                let _ = emu.cpu_mut().write_linear_byte(BxSegregs::Ds, BASE + 1, 0);
+                let mut ctx = emu.exec_ctx(0);
+                ctx.alignment_check_mask = 0xf;
+                ctx.user_pl = true;
+                let before = ctx.get_exception_diag()[ac];
+                let read = ctx.read_linear_byte(BxSegregs::Ds, BASE + 1);
+                ctx.alignment_check_mask = 0xf;
+                ctx.user_pl = true;
+                let write = ctx.write_linear_byte(BxSegregs::Ds, BASE + 1, 0);
                 assert_eq!(
-                    emu.cpu().get_exception_diag()[ac],
+                    ctx.get_exception_diag()[ac],
                     before,
-                    "byte accesses are never alignment-checked"
+                    "byte accesses are never alignment-checked (read {read:?}, write {write:?})"
                 );
             })
             .unwrap()
@@ -906,23 +906,24 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 // Disarmed: alignment_check_mask is 0 unless CS.RPL==3 with
                 // CR0.AM and EFLAGS.AC, so nothing faults.
-                assert_eq!(emu.cpu().alignment_check_mask, 0);
+                let mut ctx = emu.exec_ctx(0);
+                assert_eq!(ctx.alignment_check_mask, 0);
                 for (addr, mask) in [(0x1001u64, WORD), (0x1003, DWORD), (0x1007, QWORD)] {
                     assert!(
-                        emu.cpu_mut().check_alignment(addr, mask).is_ok(),
+                        ctx.check_alignment(addr, mask).is_ok(),
                         "no #AC while the mask is disarmed"
                     );
                 }
 
                 // Arm exactly what handle_alignment_check() would set.
-                emu.cpu_mut().alignment_check_mask = 0xf;
-                emu.cpu_mut().user_pl = true;
+                ctx.alignment_check_mask = 0xf;
+                ctx.user_pl = true;
 
                 // Naturally aligned accesses still pass at every width.
                 for (addr, mask) in [(0x1000u64, WORD), (0x1000, DWORD), (0x1000, QWORD),
                                      (0x1002, WORD), (0x1004, DWORD), (0x1008, QWORD)] {
                     assert!(
-                        emu.cpu_mut().check_alignment(addr, mask).is_ok(),
+                        ctx.check_alignment(addr, mask).is_ok(),
                         "aligned access at {addr:#x} mask {mask} must not fault"
                     );
                 }
@@ -935,13 +936,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     (0x1004, QWORD, "qword at +4"),
                     (0x1001, QWORD, "qword at +1"),
                 ] {
-                    let before = emu.cpu().get_exception_diag()[Exception::Ac as usize];
+                    let before = ctx.get_exception_diag()[Exception::Ac as usize];
                     assert!(
-                        emu.cpu_mut().check_alignment(addr, mask).is_err(),
+                        ctx.check_alignment(addr, mask).is_err(),
                         "{name} must fault"
                     );
                     assert_eq!(
-                        emu.cpu().get_exception_diag()[Exception::Ac as usize],
+                        ctx.get_exception_diag()[Exception::Ac as usize],
                         before + 1,
                         "{name} must raise #AC specifically"
                     );
@@ -950,10 +951,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // Bochs gates the check on `user`: a supervisor access never
                 // faults, even with the mask armed. `user_pl` is forced false
                 // around descriptor loads and other CPL-0 accesses.
-                emu.cpu_mut().user_pl = false;
+                ctx.user_pl = false;
                 for (addr, mask) in [(0x1001u64, WORD), (0x1003, DWORD), (0x1005, QWORD)] {
                     assert!(
-                        emu.cpu_mut().check_alignment(addr, mask).is_ok(),
+                        ctx.check_alignment(addr, mask).is_ok(),
                         "#AC applies to user-privilege accesses only"
                     );
                 }

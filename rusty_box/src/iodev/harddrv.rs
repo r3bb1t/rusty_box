@@ -5273,7 +5273,11 @@ fn snapshot_media_hash(bytes: &[u8]) -> u64 {
 }
 
 #[cfg(feature = "std")]
-#[cfg_attr(not(unix), allow(unused_variables))]
+#[allow(
+    unused_variables,
+    reason = "each platform reads one half: unix the (device, inode) in `metadata`, \
+              elsewhere a hash of `path`"
+)]
 fn snapshot_file_identity(
     metadata: &std::fs::Metadata,
     path: &str,
