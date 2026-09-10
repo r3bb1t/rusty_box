@@ -778,6 +778,20 @@ const MATRIX: &[Step] = &[
         envs: &[],
         stdout_marker: None,
     },
+    Step {
+        // Every other step passes `--release`, so this is the only one that
+        // compiles `#[cfg(debug_assertions)]` code: the debug-only diagnostic
+        // counters and the tests that assert on them, all in `rusty_box`.
+        // GitHub CI's `cargo test` is a debug build and compiles every such
+        // block, so one this suite never compiles is one that fails there.
+        // `check` gives the compiler's verdict without building debug
+        // binaries; `--all-targets --all-features` reaches every test, example
+        // and feature-gated block.
+        name: "debug-assertions check (all targets, all features)",
+        args: &["check", "-p", "rusty_box", "--all-targets", "--all-features"],
+        envs: &[],
+        stdout_marker: None,
+    },
 ];
 
 const FULL_MATRIX: &[Step] = &[
