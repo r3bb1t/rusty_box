@@ -2149,18 +2149,12 @@ impl VgaCore {
 
     /// Whether the adapter is presenting a character grid rather than pixels.
     ///
-    /// Bochs vgacore.cc `update()` tests `graphics_alpha` together with the
-    /// memory mapping, because a text aperture is what makes the character
-    /// generator the picture source.
+    /// Bochs vgacore.cc `update()` decides on `graphics_alpha` alone. The
+    /// memory map selects the window the CPU reaches video memory through, not
+    /// what the CRTC scans out — which is why Linux's vgacon can move the map to
+    /// A0000 to load a font into plane 2 while the screen stays a text screen.
     pub(crate) fn in_text_mode(&self) -> bool {
-        let graphics_alpha = (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
-        let memory_mapping = VgaMemoryMapping::from_u8(
-            (self.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT)
-                & GFX_MISC_MEMORY_MAP_MASK,
-        );
-        !graphics_alpha
-            && (memory_mapping == VgaMemoryMapping::MonoText32k
-                || memory_mapping == VgaMemoryMapping::ColorText32k)
+        (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) == 0
     }
 
     /// The character grid the current CRTC/sequencer programming describes, or
@@ -2853,16 +2847,7 @@ impl VgaCore {
     /// addressed, so it must trap and can never carry page-tracked dirt. Only
     /// a card's linear framebuffer can, and that is the card's to draw.
     fn refresh_frame<S: DisplaySink>(&mut self, sink: &mut S) -> Refreshed {
-        let graphics_alpha = (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
-        let memory_mapping = VgaMemoryMapping::from_u8(
-            (self.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT)
-                & GFX_MISC_MEMORY_MAP_MASK,
-        );
-        let is_text_mode = (!graphics_alpha)
-            && (memory_mapping == VgaMemoryMapping::MonoText32k
-                || memory_mapping == VgaMemoryMapping::ColorText32k);
-
-        if is_text_mode {
+        if self.in_text_mode() {
             return self.refresh_text_mode(sink);
         }
 
@@ -4327,6 +4312,41 @@ mod tests {
         assert_eq!(geometry.rows, 50);
         assert_eq!(geometry.char_height, 8);
         assert_eq!(geometry.pixel_height, 400);
+    }
+
+    /// Linux's vgacon loads a console font by moving the memory map to A0000
+    /// while the adapter stays alphanumeric (GR06 = 0x00). Bochs vgacore.cc
+    /// `update()` decides text or graphics on `graphics_alpha` alone, so that
+    /// is still a character grid.
+    #[test]
+    fn an_alphanumeric_adapter_mapped_at_a0000_is_still_text() {
+        let mut vga = text_mode_vga(80, 16, 400);
+        vga.graphics_regs[GFX_REG_MISC] = 0x00;
+        assert!(vga.in_text_mode());
+        let geometry = vga.text_geometry().expect("still a character grid");
+        assert_eq!((geometry.cols, geometry.rows), (80, 25));
+    }
+
+    /// The same register state reaches the front end as a text frame. Drawn
+    /// through the planar graphics path instead, the character and attribute
+    /// bytes decode as pixels: regular stripes wherever the screen holds spaces.
+    #[test]
+    fn a_font_load_draws_a_text_frame_not_planar_pixels() {
+        let mut vga = card();
+        vga.core.vga_enabled = true;
+        vga.core.video_enabled = true;
+        vga.core.seq_regs[SEQ_REG_RESET] = 0x03;
+        vga.core.crtc_regs[CRTC_HORIZ_DISPLAY_END] = 79;
+        vga.core.crtc_regs[CRTC_MAX_SCAN_LINE] = 15 & CRTC_MSL_MASK;
+        vga.core.crtc_regs[CRTC_VERT_DISPLAY_END] = (399u16 & 0xFF) as u8;
+        vga.core.crtc_regs[CRTC_OVERFLOW] = CRTC_OVERFLOW_VDE_BIT8;
+        vga.core.crtc_regs[CRTC_OFFSET] = 40;
+        vga.core.graphics_regs[GFX_REG_MISC] = 0x00;
+
+        let sink = draw(&mut vga);
+        assert!(sink.tiles.is_empty(), "no planar tiles for an alphanumeric adapter");
+        assert!(sink.text_frames > 0, "the frame is drawn as text");
+        assert_eq!(sink.dimensions.map(|dims| dims.font_height), Some(16));
     }
 
     /// The cursor is valid anywhere on the displayed page. Capping the page at
