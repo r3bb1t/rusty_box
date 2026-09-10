@@ -32,11 +32,14 @@ use crate::shell::widgets::{
     action_tile_enabled, hairline_above, hardware_row, home_fact, status_text, ShellStateBadge,
 };
 use crate::shell::widgets::{
-    action_tile, field_row, metadata_text, page_header, status_dot, ActionTileWeight,
+    action_tile, field_row, metadata_text, page_header, primary_button, status_dot,
+    ActionTileWeight,
 };
 #[cfg(target_arch = "wasm32")]
 use egui::Color32;
-use egui::{RichText, Stroke};
+use egui::RichText;
+#[cfg(target_os = "android")]
+use egui::Stroke;
 // The wasm build drives the machine directly from the frame loop below; the
 // native build hands it to a runner thread instead.
 #[cfg(target_arch = "wasm32")]
@@ -1722,18 +1725,14 @@ impl NativeShellApp {
         ui.add_space(SPACE_GROUP);
         ui.separator();
         ui.horizontal_wrapped(|ui| {
-            let save = egui::Button::new(
-                RichText::new("Save settings to config file")
-                    .strong()
-                    .color(BG_BASE),
-            )
-            .fill(ACCENT_CYAN)
-            .stroke(Stroke::NONE);
-            if ui.add(save).clicked() {
+            if ui
+                .add(primary_button("Save settings to config file"))
+                .clicked()
+            {
                 self.save_settings_to_config_file();
             }
             if let Some(path) = &self.config.config_path {
-                ui.label(RichText::new(format!("→ {}", path.display())).color(TEXT_MUTED));
+                ui.label(metadata_text("Config", &path.display().to_string()));
             }
         });
 
@@ -2208,10 +2207,7 @@ impl DiskCreatorPanel {
                         } else {
                             "Create image"
                         };
-                        let create = egui::Button::new(RichText::new(action).strong().color(BG_BASE))
-                            .fill(ACCENT_CYAN)
-                            .stroke(Stroke::NONE);
-                        if ui.add(create).clicked() {
+                        if ui.add(primary_button(action)).clicked() {
                             created_image = self.create_image();
                         }
 

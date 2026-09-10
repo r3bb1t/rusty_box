@@ -2,11 +2,9 @@
 //! labelled row its controls sit on, the status dot and badge, the hairlines
 //! that join stacked panels, and the action tiles.
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::shell::theme::ACCENT_CYAN;
 use crate::shell::theme::{
-    shell_card_frame, BG_BASE, BG_CARD, BG_PANEL, SPACE_GROUP, STROKE_HAIRLINE, TEXT_BODY,
-    TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TITLE,
+    shell_card_frame, ACCENT_CYAN, BG_BASE, BG_CARD, BG_PANEL, SPACE_GROUP, STROKE_HAIRLINE,
+    TEXT_BODY, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TITLE,
 };
 use egui::{Color32, RichText, Stroke, WidgetInfo, WidgetType};
 
@@ -146,6 +144,16 @@ pub(crate) fn home_fact(ui: &mut egui::Ui, label: &str, value: &str) {
     });
 }
 
+/// The one filled button a pane carries: its primary verb, as strong text in
+/// `BG_BASE` on an `ACCENT_CYAN` fill with no stroke. Every other button in
+/// the shell rests on the hairline, so the fill alone says which verb is the
+/// pane's.
+pub(crate) fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text).strong().color(BG_BASE))
+        .fill(ACCENT_CYAN)
+        .stroke(Stroke::NONE)
+}
+
 /// Which card in a row of actions carries the eye. The primary card keeps its
 /// accent outline at rest and a filled accent button; a secondary card rests
 /// on the hairline and only takes its accent when hovered.
@@ -218,11 +226,7 @@ pub(crate) fn action_tile_enabled(
                     );
                     ui.label(RichText::new(body).size(TEXT_SECONDARY).color(TEXT_MUTED));
                     let button = match weight {
-                        ActionTileWeight::Primary => {
-                            egui::Button::new(RichText::new(title).strong().color(BG_BASE))
-                                .fill(accent)
-                                .stroke(Stroke::NONE)
-                        }
+                        ActionTileWeight::Primary => primary_button(title),
                         ActionTileWeight::Secondary => {
                             egui::Button::new(RichText::new(title).color(TEXT_PRIMARY))
                                 .fill(BG_PANEL)

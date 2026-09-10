@@ -12,11 +12,11 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::VmBarAction;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::theme::{ACCENT_CYAN, BG_BASE, BG_PANEL, TEXT_BODY, TEXT_CAPTION, TEXT_PRIMARY};
+use crate::shell::theme::{BG_PANEL, TEXT_BODY, TEXT_CAPTION, TEXT_PRIMARY};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::widgets::{hairline_below, ShellStateBadge};
+use crate::shell::widgets::{hairline_below, primary_button, ShellStateBadge};
 #[cfg(not(target_arch = "wasm32"))]
-use egui::{RichText, Stroke};
+use egui::RichText;
 
 /// What the bar needs to know to draw itself. Borrowed, so the bar cannot
 /// change any of it.
@@ -224,9 +224,7 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                     // beside its neighbours.
                     let can_start = !state.running && !state.start_pending;
                     let power_on = if can_start {
-                        egui::Button::new(RichText::new(POWER_ON).strong().color(BG_BASE))
-                            .fill(ACCENT_CYAN)
-                            .stroke(Stroke::NONE)
+                        primary_button(POWER_ON)
                     } else {
                         egui::Button::new(POWER_ON)
                     };

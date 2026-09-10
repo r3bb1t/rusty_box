@@ -105,8 +105,9 @@ understanding either.
 Left: a sidebar-collapse chevron, the VM name, the state pill.
 Right: the verbs.
 
-- `Power on` is the **only filled button in the entire shell**. It is disabled
-  while running or starting.
+- `Power on` is the bar's **primary verb, and so its one filled button**: as §3
+  rules, each pane carries a single filled primary, and every other button
+  rests on the hairline. It is disabled while running or starting.
 - `Power off` and `Restart` are ghost buttons, enabled only while running.
 - **On the Console page only**, the bar also carries `Serial`, `Capture mouse`
   and `Send Ctrl+Alt+Del`. Page-local controls belong to their page; they are
