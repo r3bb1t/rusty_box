@@ -1,14 +1,28 @@
-//! Rusty Box UEFI — boots DLX Linux via full BIOS POST.
+//! Rusty Box UEFI — runs the embedded DLX Linux disk from BIOS POST.
 //!
-//! Everything embedded at compile time: BIOS, VGA BIOS, DLX disk image.
-//! Normal BIOS boot path — identical to the desktop dlxlinux example.
-//! No Rust allocator required — all large structs placed via UEFI page allocation.
+//! The BIOS, the VGA BIOS and the DLX disk image are embedded at compile time.
+//! The machine is driven with `Emulator::step` in 100,000-instruction budgets,
+//! and what the guest writes to the debug port and to COM1 is printed on the
+//! UEFI console; a console that refuses a write ends the run with the
+//! firmware's status. Keys go in through `Keyboard::tap`, which renders each
+//! one in the guest's active scancode set: F1 before POST, then `root` and
+//! Enter once 50 million instructions have run.
+//!
+//! Neither is an answer to a prompt. Bochs rombios asks for no F1: its POST
+//! reads a key only in `interactive_bootkey`, which discards every pending
+//! keystroke first. The app does not watch the screen, so it does not answer
+//! LILO's `boot:` prompt either — on the DLX image that prompt waits for a key
+//! with no timeout — and the login keys land on whatever reads the keyboard at
+//! 50 million instructions, not on a detected `login:`. Reaching a DLX shell
+//! takes the screen-watching loop of `rusty_box/examples/dlxlinux`.
+//!
+//! No Rust allocator: every large structure lives in UEFI boot-services pages.
 
 #![no_main]
 #![no_std]
 
 use core::mem::MaybeUninit;
-use log::{error, info};
+use log::{error, info, warn};
 use uefi::prelude::*;
 
 use rusty_box::{
@@ -16,6 +30,7 @@ use rusty_box::{
     emulator::{
         AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder, RunBudget,
     },
+    iodev::scancodes::BxKey,
     memory::BxMemoryStubC,
 };
 
@@ -29,7 +44,10 @@ const DLX_CYLINDERS: u16 = 306;
 const DLX_HEADS: u8 = 4;
 const DLX_SPT: u8 = 17;
 
-fn print_bytes(bytes: &[u8]) {
+/// Print guest bytes on the UEFI console: printable ASCII as it is, `\n` as
+/// CR LF, every other byte dropped. Fails with the firmware's error the first
+/// time the console refuses a string.
+fn print_bytes(bytes: &[u8]) -> uefi::Result {
     let mut buf = [0u16; 128];
     let mut pos = 0;
     for &b in bytes {
@@ -47,44 +65,46 @@ fn print_bytes(bytes: &[u8]) {
         pos += 1;
         if pos >= buf.len() - 2 {
             buf[pos] = 0;
+            // SAFETY: the loop stores only printable ASCII, CR and LF below
+            // `pos`, so the slice has no interior NUL; `buf[pos]` ends it.
             let s = unsafe { uefi::CStr16::from_u16_with_nul_unchecked(&buf[..=pos]) };
-            let _ = uefi::system::with_stdout(|out| {
-                let _ = out.output_string(s);
-            });
+            uefi::system::with_stdout(|out| out.output_string(s))?;
             pos = 0;
         }
     }
     if pos > 0 {
         buf[pos] = 0;
+        // SAFETY: as above — no interior NUL below `pos`, `buf[pos]` ends it.
         let s = unsafe { uefi::CStr16::from_u16_with_nul_unchecked(&buf[..=pos]) };
-        let _ = uefi::system::with_stdout(|out| {
-            let _ = out.output_string(s);
-        });
+        uefi::system::with_stdout(|out| out.output_string(s))?;
     }
+    Ok(())
 }
 
 /// Drain an iterator of bytes and print them. Avoids Vec allocation.
-fn drain_and_print(iter: impl Iterator<Item = u8>) {
+fn drain_and_print(iter: impl Iterator<Item = u8>) -> uefi::Result {
     let mut tmp = [0u8; 256];
     let mut pos = 0;
     for b in iter {
         tmp[pos] = b;
         pos += 1;
         if pos == tmp.len() {
-            print_bytes(&tmp[..pos]);
+            print_bytes(&tmp[..pos])?;
             pos = 0;
         }
     }
     if pos > 0 {
-        print_bytes(&tmp[..pos]);
+        print_bytes(&tmp[..pos])?;
     }
+    Ok(())
 }
 
 macro_rules! bail {
     ($($arg:tt)*) => {{ error!($($arg)*); uefi::boot::stall(10_000_000); return Status::ABORTED; }};
 }
 
-/// Allocate `count` zeroed pages via UEFI boot services.
+/// Allocate `count` pages via UEFI boot services. The firmware does not
+/// promise their contents, so callers zero what they use.
 fn alloc_pages(count: usize) -> *mut u8 {
     uefi::boot::allocate_pages(
         uefi::boot::AllocateType::AnyPages,
@@ -102,8 +122,7 @@ fn alloc_zeroed_for<T>() -> *mut T {
     if ptr.is_null() {
         panic!("UEFI page allocation failed for {} bytes", size);
     }
-    // allocate_pages returns zeroed memory (LOADER_DATA from firmware)
-    // but let's be safe:
+    // UEFI AllocatePages does not promise zeroed pages.
     unsafe {
         core::ptr::write_bytes(ptr, 0, size);
     }
@@ -142,8 +161,21 @@ fn main() -> Status {
             out("xmm4") _, out("xmm5") _,
         );
     }
-    let _ = unsafe { uefi::boot::free_pages(stack_base, stack_pages) };
-    unsafe { core::mem::transmute::<usize, Status>(result) }
+    let status = unsafe { core::mem::transmute::<usize, Status>(result) };
+    // SAFETY: `stack_base` is the `stack_pages`-page block allocated above, and
+    // `run` has returned, so nothing runs on that stack any more.
+    match unsafe { uefi::boot::free_pages(stack_base, stack_pages) } {
+        Ok(()) => status,
+        Err(e) => {
+            error!("freeing the {stack_pages}-page run stack failed: {e:?}");
+            // A failed run keeps its own status; a clean one reports the leak.
+            if status == Status::SUCCESS {
+                e.status()
+            } else {
+                status
+            }
+        }
+    }
 }
 
 /// Actual entry point — runs on a large heap-allocated stack.
@@ -168,7 +200,7 @@ fn run() -> Status {
 
     // --- Allocate large structs via UEFI pages (no Rust allocator) ---
 
-    // 1. CPU (~17-50MB, mostly BxICache fixed arrays)
+    // 1. CPU (its size is logged below)
     info!(
         "Allocating CPU ({} bytes)...",
         core::mem::size_of::<BxCpuC>()
@@ -218,7 +250,7 @@ fn run() -> Status {
         }
     };
 
-    // 3. Emulator struct (~2-3MB, embeds DeviceManager with VGA/IDE buffers)
+    // 3. The machine itself (its size is logged below)
     info!(
         "Allocating Emulator ({} bytes)...",
         core::mem::size_of::<Emulator>()
@@ -245,13 +277,12 @@ fn run() -> Status {
     emu.prepare_run();
 
     info!("Starting BIOS boot...");
-    // F1, to skip the BIOS keyboard-error prompt.
-    let queued = emu.keyboard().scancodes(&[0x3B, 0xBB]);
-    if queued != 2 {
-        info!("keyboard ring was full; F1 not queued");
+    // An F1 tap before POST, rendered in the guest's active scancode set.
+    if !emu.keyboard().tap(BxKey::F1) {
+        warn!("the keyboard refused part of the F1 tap");
     }
 
-    // Main loop — mirrors run_interactive
+    // Main loop: step, print what the guest wrote, stop on a terminal outcome.
     let batch: u64 = 100_000;
     let max: u64 = 20_000_000_000;
     let mut total: u64 = 0;
@@ -269,19 +300,16 @@ fn run() -> Status {
         // progress budget, not an instruction count.
         total += outcome.progress.count();
 
-
-        // Drain and print BIOS/serial output (no Vec allocation)
-        {
-            let mut had_output = false;
-            for b in emu.debug_port().take_output() {
-                if !had_output {
-                    had_output = true;
-                }
-                // Print byte-by-byte through print_bytes
-                print_bytes(&[b]);
-            }
+        // Print what the guest wrote to the debug port and to COM1 (no Vec
+        // allocation). The console is this app's only output, so one that
+        // refuses a write ends the run with the firmware's status.
+        let printed = drain_and_print(emu.debug_port().take_output()).and_then(|()| {
+            drain_and_print(emu.serial(0).expect("COM1 is always modelled").take_output())
+        });
+        if let Err(e) = printed {
+            error!("console write failed at {}M: {:?}", total / 1_000_000, e);
+            return e.status();
         }
-        drain_and_print(emu.serial(0).expect("COM1 is always modelled").take_output());
 
         // Every terminal cause, not just the CPU shutdown state: a guest that
         // powers off through ACPI S5 leaves the CPU perfectly healthy, so
@@ -297,25 +325,29 @@ fn run() -> Status {
             break;
         }
 
-
-
-        // Auto-login after kernel boots
+        // `root` + Enter once 50 million instructions have run, one tap per
+        // key, stopping at the first key the keyboard does not take whole so
+        // no later key lands after a lost one.
         if !login_sent && total > 50_000_000 {
             login_sent = true;
-            let login = [0x13u8, 0x93, 0x18, 0x98, 0x18, 0x98, 0x14, 0x94, 0x1C, 0x9C];
-            let sent = emu.keyboard().scancodes(&login);
-            if sent != login.len() {
-                info!("login sequence truncated at {sent} of {}", login.len());
+            const LOGIN: [BxKey; 5] = [BxKey::R, BxKey::O, BxKey::O, BxKey::T, BxKey::Enter];
+            let typed = LOGIN.iter().take_while(|&&key| emu.keyboard().tap(key)).count();
+            if typed != LOGIN.len() {
+                warn!(
+                    "the keyboard refused part of login key {} of {}; the rest were not sent",
+                    typed + 1,
+                    LOGIN.len()
+                );
             }
         }
 
         #[cfg(feature = "verbose")]
         if total % 500_000 < batch {
             info!(
-                "  {}k instr, RIP={:#x}, batch={}, IF={}",
+                "  {}k instr, RIP={:#x}, batch={:?}, IF={}",
                 total / 1000,
                 emu.cpu().rip(),
-                n,
+                outcome.progress,
                 emu.cpu().interrupts_enabled()
             );
         }

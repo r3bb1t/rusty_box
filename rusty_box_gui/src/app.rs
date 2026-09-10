@@ -1324,10 +1324,11 @@ impl NativeShellApp {
                             .changed()
                     });
                     // Which engine retires the guest's instructions. The
-                    // hypervisor is offered only by a build that carries it on
-                    // a host that has it, because choosing it otherwise is
-                    // refused at power-on rather than quietly downgraded — see
-                    // `RunError::NoHypervisor`.
+                    // hypervisor is offered in the builds that carry its path —
+                    // Windows, with `hv-whp` and without `guest-trace`, the gate
+                    // `runner.rs` compiles the engine under. The host is not
+                    // asked here: a host without the platform is refused at
+                    // power-on (`RunError::NoHypervisor`).
                     field_row(ui, "Engine", |ui| {
                         egui::ComboBox::from_id_salt("Engine")
                             .selected_text(engine_label(self.settings.engine))
@@ -1339,7 +1340,11 @@ impl NativeShellApp {
                                         engine_label(crate::config::Engine::Interpreter),
                                     )
                                     .changed();
-                                #[cfg(all(feature = "hv-whp", windows))]
+                                #[cfg(all(
+                                    not(feature = "guest-trace"),
+                                    feature = "hv-whp",
+                                    windows
+                                ))]
                                 {
                                     changed |= ui
                                         .selectable_value(
@@ -3783,7 +3788,7 @@ fn create_browser_hard_disk_bytes(
         .map_err(|error| error.to_string())?;
     if geometry.final_bytes > BROWSER_MAX_DOWNLOAD_BYTES {
         return Err(
-            "browser downloads are capped at 64 MiB; use the desktop app for sparse large disks"
+            "browser downloads are capped at 64 MiB; use the desktop app for larger disks"
                 .to_owned(),
         );
     }

@@ -261,6 +261,9 @@ fn run_alpine() -> Result<()> {
             format!("{}/binaries/bios/VGABIOS-lgpl-latest.bin", ws),
             format!("{}/../binaries/bios/VGABIOS-lgpl-latest.bin", ws),
             "binaries/bios/VGABIOS-lgpl-latest.bin".to_string(),
+            format!("{}/cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin", ws),
+            format!("{}/../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin", ws),
+            "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin".to_string(),
         ];
         let vga_strs: Vec<&str> = vga_candidates.iter().map(|s| s.as_str()).collect();
         let vga_bios = find_file(&vga_strs);

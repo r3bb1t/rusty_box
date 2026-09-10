@@ -1,7 +1,8 @@
 //! WASM-compatible eframe application for Rusty Box.
 //!
-//! Single-threaded cooperative execution: each frame calls `step_batch()`
-//! to advance the emulator, then renders the VGA framebuffer as an egui
+//! Single-threaded cooperative execution: each frame calls `Emulator::step`
+//! until the frame's instruction budget is spent or the guest stops, then
+//! renders the VGA framebuffer as an egui
 //! texture. No threads, no Arc<Mutex<>> — the emulator and display are
 //! owned directly by the app.
 
@@ -35,7 +36,7 @@ const DLX_CYLINDERS: u16 = 306;
 const DLX_HEADS: u8 = 4;
 const DLX_SPT: u8 = 17;
 
-/// Instructions per sub-batch (cpu_loop_n_with_io may return early)
+/// Instruction budget of one `Emulator::step` call.
 const BATCH_SIZE: u64 = 50_000;
 /// Total instruction budget per frame (~200K * 60fps = ~12M IPS target)
 const FRAME_BUDGET: u64 = 200_000;
@@ -286,21 +287,19 @@ impl WasmEmulatorApp {
 
         ctx.input(|i| {
             for event in &i.events {
-                match event {
-                    egui::Event::Text(text) => {
-                        for ch in text.chars() {
-                            let seq = rusty_box::gui::char_to_scancode_sequence(ch);
-                            // Stops at the first byte the guest's ring refuses,
-                            // so a full ring drops whole keys rather than
-                            // leaving the guest a make with no break.
-                            let _sent = emu.keyboard().scancodes(&seq);
-                        }
+                for seq in key_sequences(event) {
+                    // `scancodes` stops at the first byte the guest's ring
+                    // refuses and returns how many it took. Nothing re-sends
+                    // the rest: a full ring can leave the guest a make with no
+                    // break, or a prefix with no code, so the dropped bytes
+                    // are logged.
+                    let sent = emu.keyboard().scancodes(&seq);
+                    if sent < seq.len() {
+                        log::warn!(
+                            "guest keyboard buffer full: dropped scancodes {:02X?}",
+                            &seq[sent..]
+                        );
                     }
-                    egui::Event::Key { key, pressed, .. } => {
-                        let seq = egui_key_to_scancodes(*key, *pressed);
-                        let _sent = emu.keyboard().scancodes(&seq);
-                    }
-                    _ => {}
                 }
             }
         });
@@ -648,9 +647,10 @@ impl eframe::App for WasmEmulatorApp {
                             // Whichever unit the machine measures in: this is a
                             // frame budget, not an instruction count.
                             frame_executed += outcome.progress.count();
-                            // Terminal covers a guest ACPI power-off, which
-                            // leaves the CPU healthy and so was previously
-                            // invisible here — the frame loop just kept going.
+                            // A terminal outcome ends the run for good. It
+                            // includes a guest ACPI power-off, which leaves the
+                            // CPU healthy, so the run's end is read from here and
+                            // never from the CPU's state.
                             if outcome.is_terminal() {
                                 self.shutdown = true;
                                 break;
@@ -660,7 +660,7 @@ impl eframe::App for WasmEmulatorApp {
                             }
                         }
                         Err(e) => {
-                            log::error!("step_batch error: {:?}", e);
+                            log::error!("step error: {:?}", e);
                             self.shutdown = true;
                             break;
                         }
@@ -698,6 +698,29 @@ impl eframe::App for WasmEmulatorApp {
 
 // ---- PS/2 scancode mapping for egui keys ----
 
+/// The Set 2 scancode sequences one egui input event sends the guest: one per
+/// character of an `Event::Text`, one per `Event::Key`, each handed to the
+/// keyboard in a single call.
+///
+/// `Event::Text` carries every key that types a character, the space bar
+/// included. `Event::Key` is translated only for the keys
+/// [`egui_key_to_scancodes`] maps, none of which eframe reports as text; any
+/// other key yields an empty sequence, because a key that types a character
+/// reaches the guest through its `Event::Text` and one that types nothing is
+/// not sent. So a single press reaches the guest once.
+fn key_sequences(event: &egui::Event) -> Vec<Vec<u8>> {
+    match event {
+        egui::Event::Text(text) => text
+            .chars()
+            .map(rusty_box::gui::char_to_scancode_sequence)
+            .collect(),
+        egui::Event::Key { key, pressed, .. } => vec![egui_key_to_scancodes(*key, *pressed)],
+        _ => Vec::new(),
+    }
+}
+
+/// Set 2 scancodes for the keys egui reports without text. A key that types
+/// a character is absent here: it arrives as `Event::Text` instead.
 fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
     let (extended, make_code) = match key {
         egui::Key::Escape => (false, 0x76u8),
@@ -716,7 +739,6 @@ fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
         egui::Key::Enter => (false, 0x5A),
         egui::Key::Tab => (false, 0x0D),
         egui::Key::Backspace => (false, 0x66),
-        egui::Key::Space => (false, 0x29),
         egui::Key::Delete => (true, 0x71),
         egui::Key::Insert => (true, 0x70),
         egui::Key::Home => (true, 0x6C),
@@ -744,4 +766,39 @@ fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
         seq.push(make_code);
     }
     seq
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn space_key(pressed: bool) -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: Some(egui::Key::Space),
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// One press of the space bar, in the order egui reports it — the key
+    /// going down, the text it typed, the key coming up — reaches the guest
+    /// as exactly one make and one break.
+    #[test]
+    fn one_space_press_reaches_the_guest_once() {
+        let press = [
+            space_key(true),
+            egui::Event::Text(" ".to_owned()),
+            space_key(false),
+        ];
+
+        let sent: Vec<u8> = press
+            .iter()
+            .flat_map(key_sequences)
+            .flatten()
+            .collect();
+
+        assert_eq!(sent, [0x29, 0xF0, 0x29]);
+    }
 }

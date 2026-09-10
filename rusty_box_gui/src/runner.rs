@@ -131,6 +131,16 @@ where
 {
     init_tracing(config.log_level);
 
+    // A build without the hypervisor path cannot honour `--engine whp`. It
+    // refuses before reading or creating anything, for the reason a host
+    // without the platform is refused below: a run that silently went to the
+    // interpreter under the hypervisor's name is a measurement nobody can
+    // trust.
+    #[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
+    if config.engine == Engine::Whp {
+        return Err(RunError::NoHypervisorEngine);
+    }
+
     let bios_data = read_required_file("BIOS", &config.bios)?;
     let vga_data = match &config.vga_bios {
         Some(path) => Some(read_vga_bios_file(path)?),
@@ -937,6 +947,31 @@ mod tests {
         // overwrite = true still forces a fresh full-size image.
         assert_eq!(fs::metadata(&disk).unwrap().len(), 10_321_920);
         remove_test_file(&disk);
+    }
+
+    /// `--engine whp` in a build that carries no hypervisor path is refused,
+    /// and refused before the startup disk the configuration names is created.
+    #[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
+    #[test]
+    fn a_build_without_the_hypervisor_refuses_the_whp_engine_before_creating_media() {
+        let disk = unique_temp_path("rusty-box-gui-no-engine-disk");
+        let mut config = disk_creation_config(disk.clone(), false);
+        config.engine = Engine::Whp;
+        let bios = config.bios.clone();
+        fs::write(&bios, [0xEA]).unwrap();
+
+        let result = run_resolved(config);
+        let disk_exists = fs::metadata(&disk).is_ok();
+        if disk_exists {
+            remove_test_file(&disk);
+        }
+        remove_test_file(&bios);
+
+        assert!(
+            matches!(result, Err(RunError::NoHypervisorEngine)),
+            "expected the WHP engine to be refused, got {result:?}"
+        );
+        assert!(!disk_exists, "a refused run created its startup disk");
     }
 
     #[test]

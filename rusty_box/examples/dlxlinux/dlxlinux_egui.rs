@@ -60,8 +60,10 @@ fn main() {
         &workspace_root,
         &[
             "binaries/bios/VGABIOS-lgpl-latest.bin",
+            "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin",
             "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin",
             "VGABIOS-lgpl-latest.bin",
+            "../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin",
             "../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin",
         ],
         |data| data.len() % 512 == 0,

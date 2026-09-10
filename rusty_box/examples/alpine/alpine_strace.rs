@@ -13,7 +13,7 @@
 //! default is serial-only, so that path only fills the serial console panel.
 //!
 //! ```bash
-//! cargo run --release --example alpine_strace --features "std,instrumentation,gui-egui"
+//! cargo run --release --example alpine_strace --features "std,gui-egui"
 //! ```
 //!
 //! Env:
@@ -359,6 +359,7 @@ fn run_emulator(boot: &BootConfig, shared: Arc<Mutex<SharedDisplay>>) -> Result<
                 .expect("BIOS-bochs-latest not found");
             let vga = find_file(&[
                 "binaries/bios/VGABIOS-lgpl-latest.bin",
+                "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin",
                 "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin",
             ]);
             builder = builder

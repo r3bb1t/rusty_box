@@ -9,7 +9,7 @@
 //! ## Run
 //!
 //! ```bash
-//! cargo run --release --example shellcode_trace --features "std,instrumentation"
+//! cargo run --release --example shellcode_trace --features std
 //! ```
 
 #![cfg(feature = "std")]
