@@ -578,6 +578,7 @@ fn record_egui_error(shared: &Arc<Mutex<SharedDisplay>>, error: &RunError) {
         display.start_pending = false;
         display.reset_requested = false;
         display.runtime_error = Some(format!("Emulator startup failed: {error}"));
+        display.startup_status = None;
     }
 }
 
@@ -990,6 +991,26 @@ mod tests {
             shared.lock().unwrap().drain_serial_input(),
             Vec::<u8>::new()
         );
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_failed_start_reports_no_startup_step_in_progress() {
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        {
+            let mut display = shared.lock().unwrap();
+            display.startup_status = Some(String::from("Creating disk image…"));
+            display.start_pending = true;
+            display.emu_running = true;
+        }
+
+        record_egui_error(&shared, &RunError::MissingDiskCreatePath);
+
+        let display = shared.lock().unwrap();
+        assert!(display.startup_status.is_none());
+        assert!(!display.emu_running);
+        assert!(!display.start_pending);
+        assert!(display.runtime_error.is_some());
     }
 
     #[cfg(feature = "gui-egui")]
