@@ -746,6 +746,38 @@ const MATRIX: &[Step] = &[
         stdout_marker: None,
     },
     Step {
+        // Every other `rusty_box` test step is `--lib`, which runs no doc
+        // example. A `no_run` example still has to compile, and one that
+        // names a path the crate no longer exports fails only here.
+        name: "doc examples",
+        args: &["test", "--release", "-p", "rusty_box", "--doc"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        // The doctrine's compile-fail fixtures: each proves a rule by the
+        // exact diagnostic that enforces it (R2, R3). The goldens are rustc's
+        // rendered output, so they move when the code they quote moves —
+        // regenerate with `TRYBUILD=overwrite` once the rule is confirmed to
+        // still hold. The registry is `#![cfg(feature = "std")]`, so the
+        // feature is named here rather than inherited from the defaults: a
+        // default set without it would compile the registry to nothing and
+        // pass.
+        name: "doctrine compile-fail fixtures",
+        args: &[
+            "test",
+            "--release",
+            "-p",
+            "rusty_box",
+            "--features",
+            "std",
+            "--test",
+            "compile_fail",
+        ],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
         // The GUI's browser front end is the only consumer of several
         // `#[cfg(target_arch = "wasm32")]` code paths, so no other step in
         // this suite compiles them. One such path went stale unnoticed.
