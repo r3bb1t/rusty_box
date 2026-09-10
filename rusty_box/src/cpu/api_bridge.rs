@@ -9,11 +9,79 @@
 //! - `Emulator::cpu_snapshot`
 //! - `Emulator::setup_cpu_mode` (and friends)
 
+use super::arch_state::{SegmentAttributeParts, SegmentAttributes, SegmentState};
 use super::decoder::BxSegregs;
 use super::instrumentation::X86Reg;
-use super::{BxCpuC, BxCpuIdTrait};
+use super::BxCpuC;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+/// The default operand and address size a segment carries — the descriptor's
+/// D/B and L bits as one value.
+///
+/// Bochs descriptor.h keeps `d_b` and `l` as separate bits, but only three of
+/// their four combinations exist: a 64-bit code segment must have D clear, so
+/// `L=1, D=1` is not a segment, it is a typo. Naming the three states (R2)
+/// also removes a subtler trap. Spelled as a `code16` bool, the parameter
+/// described a *code* segment, and a caller reasonably passed `false` for the
+/// data segments of a real-mode machine — which set B on SS, making the stack
+/// 32-bit. Every push then went to `ESP` instead of `SP`, ran off the 64 KiB
+/// segment limit and raised #SS, so no real-mode guest could take an
+/// interrupt, service a call, or return from one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SegmentSize {
+    /// D/B = 0, L = 0 — real mode's segments and 16-bit protected mode. On SS
+    /// this is what selects `SP` as the stack pointer.
+    Bits16,
+    /// D/B = 1, L = 0.
+    Bits32,
+    /// L = 1, and D/B = 0 with it. Code segments only; long mode's data
+    /// segments keep [`SegmentSize::Bits32`], as the descriptors a 64-bit
+    /// operating system loads do.
+    Long64,
+}
+
+impl SegmentSize {
+    /// Bochs descriptor.h `d_b`.
+    pub(crate) const fn d_b(self) -> bool {
+        matches!(self, Self::Bits32)
+    }
+
+    /// Bochs descriptor.h `l`.
+    pub(crate) const fn long64(self) -> bool {
+        matches!(self, Self::Long64)
+    }
+}
+
+/// A descriptor's 20-bit limit field together with the granularity bit that
+/// scales it — the two halves of one answer, so no caller can set one and
+/// forget the other.
+pub(crate) struct ScaledLimit {
+    /// What the descriptor's limit field holds.
+    pub(crate) field: u32,
+    /// Whether that field counts 4 KiB pages rather than bytes (G).
+    pub(crate) page_granular: bool,
+}
+
+impl ScaledLimit {
+    /// Encode a byte limit — the segment's last addressable offset — the way a
+    /// descriptor must. The field is 20 bits, so byte granularity reaches
+    /// 0xFFFFF and nothing past it is expressible without pages. Bochs
+    /// descriptor.h `parse_descriptor`.
+    pub(crate) const fn of(byte_limit: u32) -> Self {
+        if byte_limit > 0x000F_FFFF {
+            Self {
+                field: byte_limit >> 12,
+                page_granular: true,
+            }
+        } else {
+            Self {
+                field: byte_limit,
+                page_granular: false,
+            }
+        }
+    }
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // ── RFLAGS / EFLAGS ────────────────────────────────────────────────
 
     #[inline]
@@ -26,6 +94,23 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.eflags = super::eflags::EFlags::from_bits_retain(v as u32);
         // Keep lazy store in sync when API callers rewrite the full flags word.
         self.set_eflags_oszapc(v as u32);
+        // A write to EFLAGS moves IF, and IF is what gates external interrupts
+        // — Bochs flag_ctrl_pro.cc calls `handleInterruptMaskChange` from every
+        // path that can change it, `STI` included. Omitting it here made the
+        // API's IF a lie: reset leaves IF clear, which masks the pending-INTR
+        // event, so a caller that set IF through this setter still had the
+        // event masked. `signal_event` then never armed the boundary check and
+        // the machine could not take an external interrupt at all, however
+        // correctly the controller asserted it.
+        self.handle_interrupt_mask_change();
+        // TF set implies the boundary is armed: the single-step latch is set
+        // only in `handle_async_event`'s tail, which the loop reaches only
+        // when this word is non-zero — Bochs flag_ctrl_pro.cc setEFlags,
+        // `if (get_TF()) async_event = 1`. Raised rather than assigned,
+        // divergence D5.
+        if self.eflags.contains(super::eflags::EFlags::TF) {
+            self.raise_async_event();
+        }
     }
 
     // ── Segment selectors (raw) ────────────────────────────────────────
@@ -58,42 +143,118 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Set segment to a flat-cache state used by `CpuSetupMode::*`.
     /// Writes both selector and descriptor cache so later instructions see
     /// a valid, flat segment without needing a GDT reload.
+    ///
+    /// `limit` is a byte limit, already scaled: the segment's last addressable
+    /// offset, not the 20-bit field a descriptor encodes.
+    ///
+    /// Loading a segment is more than a write to its cache. Bochs
+    /// segment_ctrl_pro.cc `load_seg_reg` re-derives the fetch-mode mask, drops
+    /// the prefetch queue and re-evaluates alignment checking when CS moves,
+    /// and drops the stack cache when SS does — so this does too, rather than
+    /// leaving the new segment behind windows still describing the old one.
     pub(crate) fn set_seg_for_api(
         &mut self,
         reg: X86Reg,
         selector: u16,
         base: u64,
         limit: u32,
-        code16: bool,
-        long: bool,
+        size: SegmentSize,
     ) {
-        let idx = match reg {
-            X86Reg::Es => BxSegregs::Es as usize,
-            X86Reg::Cs => BxSegregs::Cs as usize,
-            X86Reg::Ss => BxSegregs::Ss as usize,
-            X86Reg::Ds => BxSegregs::Ds as usize,
-            X86Reg::Fs => BxSegregs::Fs as usize,
-            X86Reg::Gs => BxSegregs::Gs as usize,
+        let seg = match reg {
+            X86Reg::Es => BxSegregs::Es,
+            X86Reg::Cs => BxSegregs::Cs,
+            X86Reg::Ss => BxSegregs::Ss,
+            X86Reg::Ds => BxSegregs::Ds,
+            X86Reg::Fs => BxSegregs::Fs,
+            X86Reg::Gs => BxSegregs::Gs,
             _ => return,
         };
-        let s = &mut self.sregs[idx];
-        s.selector.value = selector;
-        s.selector.rpl = (selector & 0x3) as u8;
-        s.selector.ti = ((selector >> 2) & 1) as u16;
-        s.selector.index = selector >> 3;
-        s.cache.valid = super::descriptor::SEG_VALID_CACHE;
-        s.cache.segment = true;
-        s.cache.p = true;
-        // DPL follows RPL for the flat-setup path.
-        s.cache.dpl = s.selector.rpl;
-        // type: code=0xB (exec/read/accessed), data=0x3 (read/write/accessed)
-        s.cache.r#type = if matches!(reg, X86Reg::Cs) { 0xB } else { 0x3 };
-        s.cache.u.set_segment_base(base);
-        s.cache.u.set_segment_limit_scaled(limit);
-        s.cache.u.set_segment_g(true);
-        s.cache.u.set_segment_d_b(!code16 && !long);
-        s.cache.u.set_segment_l(long);
-        s.cache.u.set_segment_avl(false);
+        // Granularity is not free to choose: Bochs cpu.cc `reset` leaves real
+        // mode's 0xFFFF segments byte-granular because a 20-bit field holds
+        // them, and claiming G on one describes a segment no descriptor could
+        // have produced.
+        let scaled = ScaledLimit::of(limit);
+        let state = SegmentState {
+            selector,
+            base,
+            limit: scaled.field,
+            attributes: SegmentAttributes::new(SegmentAttributeParts {
+                // code = 0xB (exec/read/accessed), data = 0x3 (read/write/accessed)
+                kind: if matches!(reg, X86Reg::Cs) { 0xB } else { 0x3 },
+                // DPL follows RPL for the flat-setup path.
+                dpl: (selector & 0x3) as u8,
+                code_or_data: true,
+                present: true,
+                available: false,
+                long: size.long64(),
+                default_big: size.d_b(),
+                granular: scaled.page_granular,
+            }),
+        };
+        self.load_segment(seg, &state);
+    }
+
+    /// Load one segment register and everything the processor derives from it.
+    ///
+    /// The ONE place a segment is written outside the guest's own
+    /// `load_seg_reg` (Bochs segment_ctrl_pro.cc), which this mirrors: the
+    /// public setup path and an imported architectural state both arrive here,
+    /// so neither can acquire a derived-state bug the other does not have
+    /// (R5). Loading a segment is not a write to a cache — CS decides the
+    /// fetch-mode mask, the prefetch window and whether alignment checking
+    /// applies, and SS owns the stack window.
+    pub(crate) fn load_segment(&mut self, seg: BxSegregs, state: &SegmentState) {
+        let idx = seg as usize;
+        {
+            let s = &mut self.sregs[idx];
+            super::segment_ctrl_pro::parse_selector(state.selector, &mut s.selector);
+            // A descriptor that is not present describes nothing, and saying
+            // otherwise is not a harmless overstatement. Bochs
+            // segment_ctrl_pro.cc leaves the cache invalid for a null selector,
+            // and everything downstream believes the flag: a system-management
+            // entry writes every valid segment into SMRAM, and the `RSM` that
+            // reads it back refuses a descriptor whose type is zero and whose
+            // cache claimed to be valid — shutting the processor down inside
+            // the firmware's own SMI handler.
+            s.cache.valid = if state.attributes.is_present() {
+                super::descriptor::SEG_VALID_CACHE
+            } else {
+                0
+            };
+            s.cache.segment = state.attributes.is_code_or_data();
+            s.cache.p = state.attributes.is_present();
+            s.cache.dpl = state.attributes.dpl();
+            s.cache.r#type = state.attributes.kind();
+            s.cache.u.set_segment_base(state.base);
+            s.cache.u.set_segment_limit_scaled(state.scaled_limit());
+            s.cache.u.set_segment_g(state.attributes.is_granular());
+            s.cache.u.set_segment_d_b(state.attributes.is_default_big());
+            s.cache.u.set_segment_l(state.attributes.is_long());
+            s.cache.u.set_segment_avl(state.attributes.is_available());
+        }
+
+        if seg == BxSegregs::Cs {
+            self.invalidate_prefetch_q();
+            // In long mode the CS just loaded decides which sub-mode the
+            // processor is in — its L bit switches 64-bit against
+            // compatibility — so the mode is re-derived from the new segment
+            // before anything reads it. Bochs segment_ctrl_pro.cc
+            // load_seg_reg does exactly this, and only in long mode, where
+            // the comment notes a mode change can happen at all. Without it
+            // a processor imported across a compatibility↔64-bit transition
+            // keeps the OLD segment's sub-mode: a fetch through an L=1
+            // segment is then limit-checked as though the limit meant
+            // something, and an exception delivery walks eight-byte gates
+            // through a sixteen-byte IDT.
+            if self.long_mode() {
+                self.handle_cpu_mode_change();
+            }
+            self.update_fetch_mode_mask();
+            self.handle_alignment_check();
+        }
+        if seg == BxSegregs::Ss {
+            self.invalidate_stack_cache();
+        }
     }
 
     /// Enable CR0.PE and update fetch mode / alignment state.
@@ -143,17 +304,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.cr4.get()
     }
 
-    /// CR4 controls SSE and AVX readiness through OSFXSR and OSXSAVE, and the
-    /// icache state gate reads that readiness out of `fetch_mode_mask`. Refresh
-    /// it here for the same reason `set_cr4` does after a guest `MOV CR4`:
-    /// leaving it stale would let the gate admit an AVX instruction the guest
-    /// has just disabled, or reject one it has just enabled.
+    /// Write CR4 and everything that follows from it.
+    ///
+    /// The checks a guest `MOV CR4` performs are deliberately absent — an API
+    /// caller states the register it wants and cannot be handed a fault — but
+    /// the consequences are not optional. CR4 decides SSE and AVX readiness
+    /// through OSFXSR and OSXSAVE, which the icache state gate reads out of
+    /// `fetch_mode_mask`; eleven of its bits change how a linear address
+    /// translates, so cached translations must go; PKE and PKS change the
+    /// protection-key mask; LA57 changes the width of a linear address.
+    /// [`Self::commit_cr4_write`] is the one statement of all of it, shared
+    /// with the guest's own path (R5).
     #[inline]
     pub(crate) fn set_cr4_raw_for_api(&mut self, v: u32) {
-        self.cr4.set32(v);
-        self.handle_fpu_mmx_mode_change();
-        self.handle_sse_mode_change();
-        self.handle_avx_mode_change();
+        self.commit_cr4_write(u64::from(v));
     }
 
     /// CR8 is not modeled as a dedicated field — it's sourced from the
@@ -173,22 +337,29 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     // ── CR0 / CR3 raw writes (for `reg_write`) ─────────────────────────
 
-    /// Write CR0 without BOCHS-level checks. Used by `reg_write` where
-    /// the caller has taken responsibility for validity.
+    /// Write CR0 without the checks a guest `MOV CR0` performs, and with every
+    /// consequence it has.
     ///
-    /// CR0.TS and CR0.EM feed the SSE/AVX readiness bits that the icache state
-    /// gate reads out of `fetch_mode_mask`, and `update_fetch_mode_mask` alone
-    /// would not refresh them — it deliberately preserves the FPU/SSE/AVX bits
-    /// and only recomputes D_B and LONG64. They stay correct here because
-    /// `handle_cpu_mode_change` ends by calling `handle_avx_mode_change`.
+    /// The validity of the value is the caller's; what follows from it is not.
+    /// CR0.TS and CR0.EM gate x87, MMX and SSE in the icache state gate, and
+    /// `handle_cpu_mode_change` does not recompute those — it ends at
+    /// `handle_avx_mode_change`, which touches only the AVX, opmask and EVEX
+    /// bits. PG, WP and PE additionally invalidate cached translations and the
+    /// protection-key mask. [`Self::commit_cr0_write`] states all of it once,
+    /// shared with the guest's own path (R5).
     #[inline]
     pub(crate) fn set_cr0_raw_for_api(&mut self, v: u32) {
-        self.cr0.set32(v);
-        self.handle_alignment_check();
-        self.handle_cpu_mode_change();
-        self.update_fetch_mode_mask();
+        self.commit_cr0_write(v);
     }
 
+    /// Write CR3 and drop every cached translation.
+    ///
+    /// Bochs crregs.cc `SetCR3` flushes non-global entries only, because a
+    /// guest reload of CR3 is architecturally defined to preserve global
+    /// pages. This flushes all of them: over-invalidation costs a re-walk and
+    /// cannot be observed by the guest, and an API caller writing CR3 is
+    /// usually installing a whole new address space rather than performing the
+    /// architectural reload.
     #[inline]
     pub(crate) fn set_cr3_raw_for_api(&mut self, v: u64) {
         self.cr3 = v;
@@ -222,9 +393,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.dr7.get32() as u64
     }
 
+    /// Write DR7 and drop every cached translation.
+    ///
+    /// Bochs crregs.cc `MOV_DdRd` flushes the TLB after a DR7 write, because
+    /// an entry cached while a breakpoint was disabled would keep serving
+    /// accesses that must now be checked against it. Arming a data breakpoint
+    /// through the API has to reach the guest the same way arming one from
+    /// inside it does.
     #[inline]
     pub(crate) fn set_dr7_for_api(&mut self, v: u64) {
         self.dr7.set32(v as u32);
+        self.tlb_flush();
     }
 
     // ── Descriptor tables ─────────────────────────────────────────────
@@ -285,11 +464,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     #[inline]
     pub(crate) fn tsc_for_api(&self) -> u64 {
-        self.get_virtual_tsc(self.system_ticks())
+        self.get_virtual_tsc(self.cpu_local_ticks())
     }
     #[inline]
     pub(crate) fn set_tsc_for_api(&mut self, v: u64) {
-        let t = self.system_ticks();
+        let t = self.cpu_local_ticks();
         self.set_tsc(v, t);
     }
 
@@ -299,9 +478,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(crate) fn efer_for_api(&self) -> u64 {
         self.efer.get32() as u64
     }
+    /// Write EFER whole, including LMA, and recompute the processor's mode.
+    ///
+    /// This is the register-level write, not the MSR one: a caller stating
+    /// EFER through `reg_write` is describing a processor, so LMA is theirs to
+    /// set. `WRMSR` cannot do that, and `write_msr_for_api` keeps the
+    /// architectural rule instead.
+    ///
+    /// EFER.LMA is what `handle_cpu_mode_change` reads to choose between
+    /// 64-bit and compatibility mode, so writing it without recomputing leaves
+    /// `cpu_mode` describing a processor that no longer exists — the same
+    /// shape of defect as a segment written without its derived state.
     #[inline]
     pub(crate) fn set_efer_for_api(&mut self, v: u64) {
         self.efer.set32(v as u32);
+        self.handle_cpu_mode_change();
     }
 
     // ── CPL / icount ──────────────────────────────────────────────────
@@ -326,10 +517,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         use super::msr::*;
         let apicbase = self.msr.apicbase as u64;
         let v = match msr {
-            BX_MSR_TSC => self.get_virtual_tsc(self.system_ticks()),
+            BX_MSR_TSC => self.get_virtual_tsc(self.cpu_local_ticks()),
             BX_MSR_APICBASE => apicbase,
             BX_MSR_PLATFORM_ID => 0,
-            BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.system_ticks()),
+            BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.cpu_local_ticks()),
             BX_MSR_TSC_DEADLINE => self.lapic.get_tsc_deadline(),
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr as u64,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr,
@@ -354,7 +545,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         use super::msr::*;
         match msr {
             BX_MSR_TSC => {
-                let t = self.system_ticks();
+                let t = self.cpu_local_ticks();
                 self.set_tsc(val, t);
             }
             BX_MSR_APICBASE => {
@@ -363,7 +554,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_PLATFORM_ID => return Err(super::CpuError::UnimplementedInstruction), // read-only
             BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => { /* ignore write */ }
             BX_MSR_TSC_DEADLINE => {
-                let current_ticks = self.system_ticks();
+                let current_ticks = self.cpu_local_ticks();
                 self.lapic.set_tsc_deadline(val, current_ticks);
                 self.sync_lapic_events();
             }
@@ -376,22 +567,30 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_FMASK => self.msr.fmask = val as u32,
             BX_MSR_KERNELGSBASE => self.msr.kernelgsbase = val,
             BX_MSR_TSC_AUX => self.msr.tsc_aux = val as u32,
-            BX_MSR_EFER => self.efer.set32(val as u32),
+            // Bochs crregs.cc `SetEFER`: reserved bits are refused, and LMA is
+            // NOT the writer's to set — it tracks CR0.PG and EFER.LME, so a
+            // `WRMSR` preserves whatever it already was. Writing the register
+            // whole is `reg_write(Efer, …)`; this is the MSR, and an MSR write
+            // through the API must mean what the guest's `WRMSR` means.
+            BX_MSR_EFER => {
+                let val32 = val as u32;
+                if (val32 & !self.efer_suppmask) != 0 {
+                    return Err(super::CpuError::UnsupportedCpuOperation {
+                        operation: "WRMSR EFER: reserved bits set for this processor",
+                    });
+                }
+                use super::crregs::BxEfer;
+                self.efer = BxEfer::from_bits_truncate(
+                    (val32 & self.efer_suppmask & !BxEfer::LMA.bits())
+                        | (self.efer.get32() & BxEfer::LMA.bits()),
+                );
+                self.handle_cpu_mode_change();
+            }
             BX_MSR_FSBASE => self.set_msr_fsbase(val),
             BX_MSR_GSBASE => self.set_msr_gsbase(val),
             _ => return Err(super::CpuError::UnimplementedInstruction),
         }
         Ok(())
-    }
-
-    /// Translate a linear (virtual) address to physical using current page tables.
-    /// Returns Err if the translation faults (page not present, protection violation).
-    pub(crate) fn translate_linear_for_api(&self, laddr: u64) -> super::Result<u64> {
-        self.translate_linear_system_read(laddr)
-    }
-
-    pub(crate) fn translate_linear_with_cr3_for_api(&self, laddr: u64, cr3: u64) -> Option<u64> {
-        self.translate_linear_with_cr3(laddr, cr3)
     }
 
     // ── FPU read/write ─────────────────────────────────────────────
@@ -411,8 +610,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(crate) fn fpu_write_st(&mut self, index: usize, val: [u8; 10]) {
         use super::softfloat3e::softfloat_types::ExtFloat80;
         let phys = (self.the_i387.tos as usize + index) & 7;
-        let signif = u64::from_le_bytes(val[..8].try_into().unwrap());
-        let sign_exp = u16::from_le_bytes(val[8..10].try_into().unwrap());
+        // Ten bytes by type: eight of significand then two of sign-and-
+        // exponent, the layout `fpu_read_st` writes. Constant indices into a
+        // fixed array are checked when this compiles, where slicing and
+        // converting deferred the same question to run time and answered it
+        // with a panic that could not fire.
+        let signif = u64::from_le_bytes([
+            val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+        ]);
+        let sign_exp = u16::from_le_bytes([val[8], val[9]]);
         self.the_i387.st_space[phys] = ExtFloat80 { signif, sign_exp };
     }
 
@@ -940,8 +1146,10 @@ fn trunc_u32(v: u64) -> u32 {
 
 use crate::cpu::instrumentation::CpuAccess;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> CpuAccess
-    for BxCpuC<'_, I, T>
+/// Hooks reach guest memory, so the accessor they are handed is the
+/// execution context rather than the CPU alone.
+impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
+    for crate::cpu::exec_ctx::ExecCtx<'_, T>
 {
     fn reg_read(&self, reg: X86Reg) -> u64 {
         self.api_reg_read(reg)
@@ -951,7 +1159,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> CpuAccess
         self.api_reg_write(reg, val)
     }
 
-    fn mem_read(&self, addr: u64, buf: &mut [u8]) -> bool {
+    fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> bool {
         for (i, slot) in buf.iter_mut().enumerate() {
             *slot = self.mem_read_byte(addr + i as u64);
         }
@@ -965,21 +1173,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> CpuAccess
         true
     }
 
-    fn virt_read(&self, vaddr: u64, buf: &mut [u8]) -> bool {
+    fn virt_read(&mut self, vaddr: u64, buf: &mut [u8]) -> bool {
         virt_read_chunked(
             buf,
             vaddr,
-            |va| self.translate_linear_for_diag(va),
-            |pa| self.mem_read_byte(pa),
+            |ctx: &mut Self, va| ctx.translate_linear_for_diag(va),
+            self,
         )
     }
 
-    fn virt_read_with_cr3(&self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool {
+    fn virt_read_with_cr3(&mut self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool {
         virt_read_chunked(
             buf,
             vaddr,
-            |va| self.translate_linear_with_cr3(va, cr3),
-            |pa| self.mem_read_byte(pa),
+            |ctx: &mut Self, va| ctx.translate_linear_with_cr3(va, cr3),
+            self,
         )
     }
 
@@ -1002,53 +1210,190 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> CpuAccess
 /// `translate(va) -> Option<pa>` once per page and `read_byte(pa) -> u8` for
 /// each byte. Returns `true` on success, `false` if any page translation
 /// fails (partial read leaves earlier pages populated).
-fn virt_read_chunked<Tr, Rd>(buf: &mut [u8], start_va: u64, translate: Tr, read_byte: Rd) -> bool
+/// Walk `buf` one page at a time, translating each page before reading it.
+///
+/// `ctx` is threaded through rather than captured, because translating and
+/// reading both need it mutably and a closure capturing it could only do one
+/// of the two.
+fn virt_read_chunked<C, Tr>(buf: &mut [u8], start_va: u64, translate: Tr, ctx: &mut C) -> bool
 where
-    Tr: Fn(u64) -> Option<u64>,
-    Rd: Fn(u64) -> u8,
+    C: ReadsPhysical,
+    Tr: Fn(&mut C, u64) -> Option<u64>,
 {
     let mut off: usize = 0;
     while off < buf.len() {
         let va = start_va.wrapping_add(off as u64);
-        let page_off = usize::try_from(va & 0xFFF).expect("page offset fits usize");
+        let page_off = crate::convert::page_offset(va);
         let chunk = (0x1000 - page_off).min(buf.len() - off);
-        let Some(pa) = translate(va) else {
+        let Some(pa) = translate(ctx, va) else {
             return false;
         };
         for i in 0..chunk {
-            buf[off + i] = read_byte(pa + i as u64);
+            buf[off + i] = ctx.read_physical_byte(pa + i as u64);
         }
         off += chunk;
     }
     true
 }
 
+/// The one operation [`virt_read_chunked`] needs from what it is reading.
+trait ReadsPhysical {
+    fn read_physical_byte(&mut self, paddr: u64) -> u8;
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> ReadsPhysical
+    for crate::cpu::exec_ctx::ExecCtx<'_, T>
+{
+    #[inline]
+    fn read_physical_byte(&mut self, paddr: u64) -> u8 {
+        self.mem_read_byte(paddr)
+    }
+}
+
 // ─────────────────────────── pre_* hook firing ───────────────────────────
 //
-// These methods live on BxCpuC (not on the registry) because they need to
-// build a `HookCtx` wrapping `&mut BxCpuC` while simultaneously calling into
-// the tracer. We split-borrow by `take()`-ing the tracer out of the registry
-// Option slot, running the hook, then putting it back. `None` is visible
-// only during the hook call — user code can't observe it.
+// These methods live on the execution context (not on the registry) because
+// they need to build a `HookCtx` wrapping it while simultaneously calling
+// into the tracer. We split-borrow by `take()`-ing the tracer out of the
+// registry Option slot, running the hook, then putting it back. `None` is
+// visible only during the hook call — user code can't observe it.
 
-#[cfg(feature = "instrumentation")]
 use crate::cpu::instrumentation::{HookCtx, InstrAction};
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Fire the `pre_syscall` trait hook. Called from `syscall()` /
     /// `sysenter()` BEFORE the architectural CS/RIP transition. The hook
     /// returns an `InstrAction` which the caller inspects to decide whether
     /// to execute the transition, skip it, stop the loop, or both.
-    #[cfg(feature = "instrumentation")]
     pub(crate) fn fire_pre_syscall(&mut self) -> InstrAction {
-        let Some(mut tracer) = self.instrumentation.tracer.take() else {
-            return InstrAction::Continue;
-        };
+        // The hook wants `&mut` on the whole processor, and the tracer lives
+        // inside the processor — so it is moved out for the call and put back
+        // after. `Instrumentation: Default` is what lets a real tracer sit in
+        // the slot meanwhile instead of an absence every reader would have to
+        // answer for.
+        let mut tracer = core::mem::take(&mut self.instrumentation.tracer);
         let action = {
             let mut ctx = HookCtx::new(self);
             tracer.pre_syscall(&mut ctx)
         };
-        self.instrumentation.tracer = Some(tracer);
+        self.instrumentation.tracer = tracer;
         action
+    }
+}
+
+/// A host writing a control register must leave the processor in the state the
+/// guest would have left it in.
+///
+/// These are the registers whose write does more than store a number, driven
+/// the way `Emulator::reg_write` and `Emulator::msr_write` drive them. Each
+/// assertion is something the guest can tell apart — which instructions it may
+/// execute, how wide a linear address is, what `RDMSR` returns.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::crregs::{BxCr0, BxCr4, BxEfer};
+    use crate::cpu::exec_ctx::TestMachine;
+    use crate::cpu::msr::BX_MSR_EFER;
+    use crate::cpu::opcodes_table::FetchModeMask;
+    use crate::cpu::ResetReason;
+
+    /// CR0.TS and CR0.EM are what make x87, MMX and SSE unavailable. A host
+    /// setting them has to close the same doors a guest `MOV CR0` closes, or
+    /// the processor keeps executing instructions it should now refuse.
+    #[test]
+    fn setting_cr0_ts_through_the_api_makes_x87_and_sse_unavailable() {
+        let mut machine = TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+
+        // SSE additionally needs the OS to have said it can save the state,
+        // so enable OSFXSR first — through the API, which is also what proves
+        // the CR4 path refreshes the gate.
+        cpu.api_reg_write(X86Reg::Cr4, u64::from(BxCr4::OSFXSR.bits()));
+        assert!(cpu.fetch_mode_mask.contains(FetchModeMask::FPU_MMX_OK));
+        assert!(cpu.fetch_mode_mask.contains(FetchModeMask::SSE_OK));
+
+        let with_ts = u64::from(cpu.cr0.get32() | BxCr0::TS.bits());
+        cpu.api_reg_write(X86Reg::Cr0, with_ts);
+        assert!(
+            !cpu.fetch_mode_mask.contains(FetchModeMask::FPU_MMX_OK),
+            "CR0.TS must make x87 and MMX unavailable"
+        );
+        assert!(
+            !cpu.fetch_mode_mask.contains(FetchModeMask::SSE_OK),
+            "CR0.TS must make SSE unavailable"
+        );
+
+        let without_ts = u64::from(cpu.cr0.get32() & !BxCr0::TS.bits());
+        cpu.api_reg_write(X86Reg::Cr0, without_ts);
+        assert!(cpu.fetch_mode_mask.contains(FetchModeMask::FPU_MMX_OK));
+        assert!(cpu.fetch_mode_mask.contains(FetchModeMask::SSE_OK));
+
+        // CR0.EM closes the same doors by a different route.
+        let with_em = u64::from(cpu.cr0.get32() | BxCr0::EM.bits());
+        cpu.api_reg_write(X86Reg::Cr0, with_em);
+        assert!(!cpu.fetch_mode_mask.contains(FetchModeMask::FPU_MMX_OK));
+        assert!(!cpu.fetch_mode_mask.contains(FetchModeMask::SSE_OK));
+    }
+
+    /// CR4.LA57 decides how many bits of a linear address the processor
+    /// actually uses, which decides which addresses are canonical — so a
+    /// mis-tracked width is a `#GP` the guest either takes or escapes wrongly.
+    #[test]
+    fn writing_cr4_through_the_api_retracks_the_linear_address_width() {
+        let mut machine = TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+        assert_eq!(cpu.linaddr_width, 48, "four-level paging by default");
+
+        cpu.api_reg_write(X86Reg::Cr4, u64::from(BxCr4::LA57.bits()));
+        assert_eq!(cpu.linaddr_width, 57, "CR4.LA57 widens the linear address");
+
+        cpu.api_reg_write(X86Reg::Cr4, 0);
+        assert_eq!(cpu.linaddr_width, 48, "and clearing it narrows again");
+    }
+
+    /// `WRMSR` cannot set EFER.LMA — the processor owns that bit, and derives
+    /// it from CR0.PG and EFER.LME. Writing the register whole is a different
+    /// act, available to a host that is describing a processor rather than
+    /// executing inside one, and only there does LMA come from the caller.
+    #[test]
+    fn an_efer_msr_write_leaves_lma_alone_and_a_register_write_does_not() {
+        let mut machine = TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+
+        // Describe a processor already in long mode.
+        cpu.api_reg_write(X86Reg::Efer, u64::from((BxEfer::LME | BxEfer::LMA).bits()));
+        assert!(cpu.efer.lma(), "a register write states LMA");
+        assert!(cpu.efer.lme());
+
+        // A guest clearing LME by `WRMSR` does not thereby leave long mode.
+        cpu.write_msr_for_api(BX_MSR_EFER, 0)
+            .expect("EFER accepts a value with no reserved bits");
+        assert!(
+            cpu.efer.lma(),
+            "WRMSR must not clear LMA — it is the processor's, not the writer's"
+        );
+        assert!(!cpu.efer.lme(), "everything else the WRMSR wrote does land");
+
+        // And the register write can take it away again.
+        cpu.api_reg_write(X86Reg::Efer, 0);
+        assert!(!cpu.efer.lma());
+    }
+
+    /// A value with bits this processor does not implement is refused, the way
+    /// the guest's own `WRMSR` refuses it with `#GP(0)`. A host cannot be
+    /// handed a fault, so it is handed the refusal instead — silently masking
+    /// the bits would leave the caller believing a processor it does not have.
+    #[test]
+    fn an_efer_msr_write_refuses_bits_this_processor_does_not_implement() {
+        let mut machine = TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+
+        let unsupported = !u64::from(cpu.efer_suppmask) & 0xFFFF_FFFF;
+        assert_ne!(unsupported, 0, "some EFER bit must be unimplemented");
+        assert!(cpu.write_msr_for_api(BX_MSR_EFER, unsupported).is_err());
     }
 }

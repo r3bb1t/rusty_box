@@ -6,10 +6,22 @@
 //! owned directly by the app.
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder, RunBudget,
+    },
     gui::shared_display::SharedDisplay,
 };
+
+/// The VGA BIOS padded to a whole number of 512-byte option-ROM blocks, which
+/// is what the ROM window expects.
+fn padded_vga_bios() -> Vec<u8> {
+    let mut data = VGA_BIOS_DATA.to_vec();
+    let remainder = data.len() % 512;
+    if remainder != 0 {
+        data.resize(data.len() + (512 - remainder), 0);
+    }
+    data
+}
 
 // Embedded binary assets (compiled into the WASM)
 const BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
@@ -58,7 +70,7 @@ enum BootMode {
 /// The eframe application — owns the emulator and display directly.
 pub struct WasmEmulatorApp {
     boot_mode: BootMode,
-    emulator: Option<Box<Emulator<'static, Corei7SkylakeX>>>,
+    emulator: Option<Box<Emulator>>,
     display: SharedDisplay,
     texture: Option<egui::TextureHandle>,
     initialized: bool,
@@ -103,40 +115,26 @@ impl WasmEmulatorApp {
     /// Initialize the emulator for DLX Linux (embedded disk).
     fn initialize_dlx(&mut self) {
         let config = EmulatorConfig {
-            guest_memory_size: 32 * 1024 * 1024,
-            host_memory_size: 32 * 1024 * 1024,
+            memory: MemorySize::bytes(32 * 1024 * 1024),
             memory_block_size: 128 * 1024,
-            ips: 300_000_000,
+            ips: Ips::new(300_000_000),
             pci_enabled: true,
             ..Default::default()
         };
 
-        let result = (|| -> rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>> {
-            let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
-            emu.init_memory_and_pc_system()?;
-
-            let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
-            emu.load_bios(BIOS_DATA, bios_load_addr)?;
-
-            let mut vga_data = VGA_BIOS_DATA.to_vec();
-            let remainder = vga_data.len() % 512;
-            if remainder != 0 {
-                vga_data.resize(vga_data.len() + (512 - remainder), 0);
-            }
-            emu.load_optional_rom(&vga_data, 0xC0000)?;
-
-            emu.init_cpu_and_devices()?;
-            emu.configure_memory_in_cmos(640, 31 * 1024);
-            emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
-            emu.configure_boot_sequence(2, 0, 0); // Boot from disk
-
-            emu.attach_disk_data(0, 0, DISK_DATA.to_vec(), DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT);
-
-            emu.init_gui(0, &[])?;
-            emu.reset(ResetReason::Hardware)?;
-            emu.start();
-            emu.force_vga_update();
-
+        let result = (|| -> rusty_box::Result<Box<Emulator>> {
+            let vga_data = padded_vga_bios();
+            let mut emu = MachineBuilder::new(config)
+                .bios(BIOS_DATA)
+                .vga_bios(&vga_data)
+                .boot_order(BootOrder::just(BootDevice::Disk))
+                .disk_bytes(
+                    AtaSlot::PRIMARY_MASTER,
+                    DISK_DATA.to_vec(),
+                    DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT),
+                )
+                .build()?;
+            emu.display().force_update();
             Ok(emu)
         })();
 
@@ -147,50 +145,31 @@ impl WasmEmulatorApp {
     fn initialize_alpine(&mut self, iso_data: Vec<u8>) {
         let ram_size = 256 * 1024 * 1024; // 256 MB for Alpine
         let config = EmulatorConfig {
-            guest_memory_size: ram_size,
-            host_memory_size: ram_size,
+            memory: MemorySize::bytes(ram_size),
             memory_block_size: 128 * 1024,
-            ips: 300_000_000,
+            ips: Ips::new(300_000_000),
             pci_enabled: true,
             ..Default::default()
         };
 
-        let result = (|| -> rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>> {
-            let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
-            emu.init_memory_and_pc_system()?;
-
-            let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
-            emu.load_bios(BIOS_DATA, bios_load_addr)?;
-
-            let mut vga_data = VGA_BIOS_DATA.to_vec();
-            let remainder = vga_data.len() % 512;
-            if remainder != 0 {
-                vga_data.resize(vga_data.len() + (512 - remainder), 0);
-            }
-            emu.load_optional_rom(&vga_data, 0xC0000)?;
-
-            emu.init_cpu_and_devices()?;
-
-            // 256 MB: 640 KB conventional + ~255 MB extended
-            let ext_kb = ((ram_size / 1024) - 1024).min(u16::MAX as usize);
-            emu.configure_memory_in_cmos(640, ext_kb as u16);
-            emu.configure_boot_sequence(3, 0, 0); // Boot from CD-ROM
-
-            // Attach CD-ROM on secondary channel (channel 1, drive 0)
-            emu.attach_cdrom_data(1, 0, iso_data);
-
-            emu.init_gui(0, &[])?;
-            emu.reset(ResetReason::Hardware)?;
-            emu.start();
-            emu.force_vga_update();
-
+        let result = (|| -> rusty_box::Result<Box<Emulator>> {
+            let vga_data = padded_vga_bios();
+            // The CMOS memory size comes from the configuration, so the guest
+            // is told about all 256 MB.
+            let mut emu = MachineBuilder::new(config)
+                .bios(BIOS_DATA)
+                .vga_bios(&vga_data)
+                .boot_order(BootOrder::just(BootDevice::Cdrom))
+                .cdrom_bytes(AtaSlot::SECONDARY_MASTER, iso_data)
+                .build()?;
+            emu.display().force_update();
             Ok(emu)
         })();
 
         self.finish_init(result);
     }
 
-    fn finish_init(&mut self, result: rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>>) {
+    fn finish_init(&mut self, result: rusty_box::Result<Box<Emulator>>) {
         match result {
             Ok(emu) => {
                 self.emulator = Some(emu);
@@ -311,16 +290,15 @@ impl WasmEmulatorApp {
                     egui::Event::Text(text) => {
                         for ch in text.chars() {
                             let seq = rusty_box::gui::char_to_scancode_sequence(ch);
-                            for sc in &seq {
-                                emu.send_scancode(*sc);
-                            }
+                            // Stops at the first byte the guest's ring refuses,
+                            // so a full ring drops whole keys rather than
+                            // leaving the guest a make with no break.
+                            let _sent = emu.keyboard().scancodes(&seq);
                         }
                     }
                     egui::Event::Key { key, pressed, .. } => {
                         let seq = egui_key_to_scancodes(*key, *pressed);
-                        for sc in &seq {
-                            emu.send_scancode(*sc);
-                        }
+                        let _sent = emu.keyboard().scancodes(&seq);
                     }
                     _ => {}
                 }
@@ -665,14 +643,19 @@ impl eframe::App for WasmEmulatorApp {
             if let Some(ref mut emu) = self.emulator {
                 let mut frame_executed = 0u64;
                 while frame_executed < FRAME_BUDGET {
-                    match emu.step_batch(BATCH_SIZE) {
-                        Ok((executed, is_shutdown)) => {
-                            frame_executed += executed;
-                            if is_shutdown {
+                    match emu.step(RunBudget::Instructions(BATCH_SIZE)) {
+                        Ok(outcome) => {
+                            // Whichever unit the machine measures in: this is a
+                            // frame budget, not an instruction count.
+                            frame_executed += outcome.progress.count();
+                            // Terminal covers a guest ACPI power-off, which
+                            // leaves the CPU healthy and so was previously
+                            // invisible here — the frame loop just kept going.
+                            if outcome.is_terminal() {
                                 self.shutdown = true;
                                 break;
                             }
-                            if executed == 0 {
+                            if outcome.progress.stalled() {
                                 break;
                             }
                         }
@@ -684,7 +667,7 @@ impl eframe::App for WasmEmulatorApp {
                     }
                 }
                 self.total_instructions += frame_executed;
-                emu.update_display(&mut self.display);
+                emu.display().render_into(&mut self.display);
             }
         }
 

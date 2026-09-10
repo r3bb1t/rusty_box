@@ -14,27 +14,26 @@
 //! based on PIRQ routing registers. Each PIRQ can be mapped to any
 //! ISA IRQ or disabled (bit 7 = 1).
 
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
+use rusty_box_devices::api::ChipsetEffect;
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
 };
 
 #[cfg(feature = "std")]
 const PIIX3_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0e];
 
 #[cfg(feature = "std")]
-fn invalid_piix3_snapshot(message: &'static str) -> io::Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_piix3_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
 fn validate_piix3_snapshot_identity(
     saved: &[u8; PCI_CONF_SIZE],
     live: &[u8; PCI_CONF_SIZE],
-) -> io::Result<()> {
+) -> SnapResult<()> {
     for index in PIIX3_SNAPSHOT_IDENTITY_BYTES {
         if saved[index] != live[index] {
             return Err(invalid_piix3_snapshot(
@@ -137,7 +136,7 @@ impl BxPiix3 {
     /// Bochs: bx_piix3_c::init() (pci2isa.cc)
     pub fn new() -> Self {
         let mut bridge = Self {
-            devfunc: super::pci::pci_device(1, 0), // 0x08
+            devfunc: rusty_box_devices::pci::pci_device(1, 0), // 0x08
             pci_conf: [0; PCI_CONF_SIZE],
             elcr1: 0,
             elcr2: 0,
@@ -293,13 +292,31 @@ impl BxPiix3 {
         }
     }
 
-    // ─── PCI Configuration Space ─────────────────────────────────────────
+}
+
+// ─── PCI Configuration Space ─────────────────────────────────────────────
+
+impl rusty_box_devices::pci::PciDevice for BxPiix3 {
+    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 0);
+    type WriteEffects = Piix3WriteEffects;
+
+    /// Read from PCI configuration space.
+    fn pci_read(&self, address: u8, io_len: u8) -> u32 {
+        let mut value: u32 = 0;
+        for i in 0..io_len as usize {
+            let addr = address as usize + i;
+            if addr < PCI_CONF_SIZE {
+                value |= (self.pci_conf[addr] as u32) << (i * 8);
+            }
+        }
+        value
+    }
 
     /// Write to PCI configuration space.
     /// Bochs: bx_piix3_c::pci_write_handler() (pci2isa.cc)
     /// Returns which deferred memory-subsystem updates the caller must apply
     /// (the XBCS register changed a bit affecting BIOS-ROM write-enable).
-    pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> Piix3WriteEffects {
+    fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> Piix3WriteEffects {
         let mut effects = Piix3WriteEffects::default();
         // BARs are read-only
         if (0x10..0x34).contains(&address) {
@@ -394,17 +411,22 @@ impl BxPiix3 {
         effects
     }
 
+}
+
+impl BxPiix3 {
     /// Apply the XBCS register (0x4E) BIOS-write-enable bits to the memory
     /// subsystem. Bochs: bx_piix3_c::pci_write_handler() (pci2isa.cc) case
     /// 0x4e's `DEV_mem_set_bios_write`/`DEV_mem_set_bios_rom_access` calls.
     /// Idempotent: derives state from the already-committed
     /// `pci_conf[0x4E]`, so it is safe to call any number of times from the
     /// shared machine-boundary drain.
-    pub fn apply_bios_write_to_memory<'c>(&self, mem: &mut crate::memory::BxMemC<'c>) {
+    pub fn bios_rom_effect(&self) -> ChipsetEffect {
         let v = self.pci_conf[0x4E];
-        mem.set_bios_write_enabled((v & 0x04) != 0);
-        mem.set_bios_rom_access(crate::memory::BIOS_ROM_LOWER, (v & 0x40) != 0);
-        mem.set_bios_rom_access(crate::memory::BIOS_ROM_EXTENDED, (v & 0x80) != 0);
+        ChipsetEffect::BiosRom {
+            write_enabled: (v & 0x04) != 0,
+            lower: (v & 0x40) != 0,
+            extended: (v & 0x80) != 0,
+        }
     }
 
     /// Re-sync the I/O APIC enable state and MMIO base from the committed PIIX3
@@ -412,28 +434,13 @@ impl BxPiix3 {
     /// 0x4f/0x80 call `DEV_ioapic_set_enabled(pci_conf[0x4f] & 0x01,
     /// (pci_conf[0x80] & 0x3f) << 10)`. Derived entirely from `pci_conf`, so this
     /// is idempotent and safe to call any number of times from the shared
-    /// machine-boundary drain. Returns whether the IOAPIC MMIO mapping actually
-    /// changed (so the caller can invalidate CPU caches over the affected pages).
-    pub fn apply_ioapic_enable<'c>(
-        &self,
-        ioapic: &mut super::ioapic::BxIoApic,
-        mem: &mut crate::memory::BxMemC<'c>,
-    ) -> crate::Result<bool> {
-        let enabled = (self.pci_conf[0x4F] & 0x01) != 0;
-        let base_offset = ((self.pci_conf[0x80] as u16) & 0x3F) << 10;
-        ioapic.set_enabled_with_mem(enabled, base_offset, mem)
-    }
-
-    /// Read from PCI configuration space.
-    pub fn pci_read(&self, address: u8, io_len: u8) -> u32 {
-        let mut value: u32 = 0;
-        for i in 0..io_len as usize {
-            let addr = address as usize + i;
-            if addr < PCI_CONF_SIZE {
-                value |= (self.pci_conf[addr] as u32) << (i * 8);
-            }
+    /// machine-boundary drain. The machine applies it and reports whether the
+    /// MMIO mapping actually moved, so it can invalidate the affected pages.
+    pub fn ioapic_enable_effect(&self) -> ChipsetEffect {
+        ChipsetEffect::IoApicEnable {
+            enabled: (self.pci_conf[0x4F] & 0x01) != 0,
+            base_offset: ((self.pci_conf[0x80] as u16) & 0x3F) << 10,
         }
-        value
     }
 
     // ─── PCI IRQ Routing ─────────────────────────────────────────────────
@@ -504,7 +511,7 @@ impl BxPiix3 {
     /// Exact byte count for this ISA bridge's contribution to the combined
     /// PCI payload. The enclosing PCI codec owns the section-version prefix.
     #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         let config_len = u64::try_from(PCI_CONF_SIZE)
             .map_err(|_| invalid_piix3_snapshot("PIIX3 config size does not fit u64"))?;
         let irq_cells = checked_snapshot_len_mul(4, 16)?;
@@ -523,7 +530,7 @@ impl BxPiix3 {
 
     /// Stream the mutable PIIX3 configuration, PIC-routing, and reset state.
     #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         writer.write_u8(self.devfunc)?;
         writer.write_bytes(&self.pci_conf)?;
         writer.write_u8(self.elcr1)?;
@@ -549,10 +556,10 @@ impl BxPiix3 {
     /// PCI interrupt edges. Those effects are restored once every component
     /// of the enclosing PCI section has validated.
     #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         let devfunc = reader.read_u8()?;
         let mut pci_conf = [0u8; PCI_CONF_SIZE];
         reader.read_bytes(&mut pci_conf)?;
@@ -576,7 +583,7 @@ impl BxPiix3 {
             _ => return Err(invalid_piix3_snapshot("snapshot PIIX3 reset reason is invalid")),
         };
 
-        let expected_devfunc = super::pci::pci_device(1, 0);
+        let expected_devfunc = rusty_box_devices::pci::pci_device(1, 0);
         if self.devfunc != expected_devfunc || devfunc != self.devfunc {
             return Err(invalid_piix3_snapshot(
                 "snapshot PIIX3 device/function does not match live topology",
@@ -629,6 +636,7 @@ impl BxPiix3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_box_devices::pci::PciDevice;
 
     #[test]
     fn test_piix3_new() {
@@ -746,27 +754,33 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_bios_write_to_memory_drives_mem_from_xbcs() {
-        use crate::memory::{BxMemC, BxMemoryStubC};
-
+    fn bios_rom_effect_describes_xbcs() {
         let mut bridge = BxPiix3::new();
         bridge.reset();
-        let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-        let mut mem = BxMemC::new(stub, false);
 
         // Bit2 set -> BIOS write enabled; bits 6-7 clear -> both rom-access
         // region bits disabled.
         bridge.pci_write(0x4E, 0x04, 1);
-        bridge.apply_bios_write_to_memory(&mut mem);
-        assert!(mem.bios_write_enabled());
-        assert_eq!(mem.bios_rom_access(), 0x00);
+        assert_eq!(
+            bridge.bios_rom_effect(),
+            ChipsetEffect::BiosRom {
+                write_enabled: true,
+                lower: false,
+                extended: false
+            }
+        );
 
         // Bit2 clear, bits 6+7 set -> BIOS write disabled; both rom-access
         // region bits enabled.
         bridge.pci_write(0x4E, 0xC0, 1);
-        bridge.apply_bios_write_to_memory(&mut mem);
-        assert!(!mem.bios_write_enabled());
-        assert_eq!(mem.bios_rom_access(), 0x03); // BIOS_ROM_LOWER | BIOS_ROM_EXTENDED
+        assert_eq!(
+            bridge.bios_rom_effect(),
+            ChipsetEffect::BiosRom {
+                write_enabled: false,
+                lower: true,
+                extended: true
+            }
+        );
     }
 
     #[test]
@@ -837,22 +851,36 @@ mod tests {
         let mut bridge = BxPiix3::new();
         bridge.reset();
 
+        // The bridge describes the state; the chipset carries it out. This
+        // drives both steps by hand so the relocation behaviour stays covered
+        // without a whole DeviceManager.
+        let apply = |bridge: &BxPiix3, ioapic: &mut BxIoApic, mem: &mut BxMemC| {
+            let ChipsetEffect::IoApicEnable {
+                enabled,
+                base_offset,
+            } = bridge.ioapic_enable_effect()
+            else {
+                panic!("the PIIX3 must describe I/O APIC enable as such")
+            };
+            ioapic.set_enabled_with_mem(enabled, base_offset, mem).unwrap()
+        };
+
         // pci_conf[0x4f]=1, [0x80]=0 -> enabled at default base. Idempotent
         // no-op because init already enabled at 0xFEC00000.
         bridge.pci_conf[0x4F] = 0x01;
         bridge.pci_conf[0x80] = 0x00;
-        assert!(!bridge.apply_ioapic_enable(&mut ioapic, &mut mem).unwrap());
+        assert!(!apply(&bridge, &mut ioapic, &mut mem));
         assert!(ioapic.is_enabled());
         assert_eq!(ioapic.base_address(), 0xFEC0_0000);
 
         // Relocate via 0x80: base offset (0x04 & 0x3f) << 10 = 0x1000.
         bridge.pci_conf[0x80] = 0x04;
-        assert!(bridge.apply_ioapic_enable(&mut ioapic, &mut mem).unwrap());
+        assert!(apply(&bridge, &mut ioapic, &mut mem));
         assert_eq!(ioapic.base_address(), 0xFEC0_1000);
 
         // Disable via 0x4f bit 0 = 0.
         bridge.pci_conf[0x4F] = 0x00;
-        assert!(bridge.apply_ioapic_enable(&mut ioapic, &mut mem).unwrap());
+        assert!(apply(&bridge, &mut ioapic, &mut mem));
         assert!(!ioapic.is_enabled());
     }
 }

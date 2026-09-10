@@ -37,34 +37,6 @@ pub enum InstrAction {
 
 // ─────────────────────────── Hook handle ───────────────────────────
 
-#[cfg(feature = "instrumentation")]
-/// Opaque identifier for a registered hook.
-///
-/// Returned by `Emulator::hook_add_*` methods and consumed by
-/// `Emulator::hook_del`. Cannot be constructed externally — eliminates
-/// a whole class of "passed wrong integer" bugs.
-///
-/// `#[repr(transparent)]` keeps the layout identical to `u64` so that
-/// future C bindings can cast freely.
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[must_use = "HookHandle must be stored to later remove the hook, or explicitly discarded with `let _ = ...`"]
-pub struct HookHandle(u64);
-
-#[cfg(feature = "instrumentation")]
-impl HookHandle {
-    #[inline]
-    pub(crate) const fn new(id: u64) -> Self {
-        Self(id)
-    }
-
-    /// Raw numeric value — useful for FFI bridges and serialization.
-    #[inline]
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
-
 // ─────────────────────────── HookMask ───────────────────────────
 
 bitflags! {
@@ -363,60 +335,6 @@ bitflags! {
 }
 
 // ─────────────────────────── Hook event types ───────────────────────────
-
-#[cfg(feature = "instrumentation")]
-/// Memory hook category — selects which kind of accesses fire the hook.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MemHookType {
-    Read,
-    Write,
-    /// Both read and write.
-    ReadWrite,
-    /// Instruction fetch.
-    Fetch,
-    /// All four (read, write, RW, execute).
-    All,
-}
-
-#[cfg(feature = "instrumentation")]
-impl MemHookType {
-    #[inline]
-    pub(crate) fn matches(self, rw: MemAccessRW) -> bool {
-        match self {
-            Self::All => true,
-            Self::Read => matches!(rw, MemAccessRW::Read | MemAccessRW::RW),
-            Self::Write => matches!(rw, MemAccessRW::Write | MemAccessRW::RW),
-            Self::ReadWrite => {
-                matches!(rw, MemAccessRW::Read | MemAccessRW::Write | MemAccessRW::RW)
-            }
-            Self::Fetch => matches!(rw, MemAccessRW::Execute),
-        }
-    }
-}
-
-#[cfg(feature = "instrumentation")]
-/// I/O port hook category.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum IoHookType {
-    /// IN instructions (port read).
-    In,
-    /// OUT instructions (port write).
-    Out,
-    /// Both.
-    InOut,
-}
-
-#[cfg(feature = "instrumentation")]
-impl IoHookType {
-    #[inline]
-    pub(crate) fn matches(self, rw: MemAccessRW) -> bool {
-        match self {
-            Self::InOut => true,
-            Self::In => matches!(rw, MemAccessRW::Read),
-            Self::Out => matches!(rw, MemAccessRW::Write),
-        }
-    }
-}
 
 /// Memory access hook event. Single-pointer payload at the call site.
 #[derive(Debug, Clone, Copy)]
@@ -883,6 +801,28 @@ pub enum CpuSetupMode {
     /// CR4.PAE=1 EFER.LME=1 EFER.LMA=1 CS.L=1, segments base=0.
     /// Use for PE64, ELF64, x64 shellcode, kernel snapshots.
     FlatLong64,
+}
+
+impl CpuSetupMode {
+    /// The first physical address guest code may occupy without colliding
+    /// with the structures `Emulator::setup_cpu_mode` writes for this mode.
+    ///
+    /// Every mode but real writes a flat GDT low in memory, and `FlatLong64`
+    /// additionally builds the identity page tables. Code placed below this
+    /// is overwritten by the setup — and in long mode, overwriting the PML4
+    /// means the first fetch page-faults with nothing executed and no other
+    /// sign that anything is wrong. Page-aligned, so it is directly usable as
+    /// a load address.
+    pub const fn first_free_physical_address(self) -> u64 {
+        match self {
+            // Writes no tables of its own; the guest owns all of memory.
+            CpuSetupMode::RealMode => 0,
+            // A flat GDT at 0x0800, three descriptors wide.
+            CpuSetupMode::Protected16 | CpuSetupMode::FlatProtected32 => 0x1000,
+            // The GDT, then PML4, PDPT and four page directories from 0x1000.
+            CpuSetupMode::FlatLong64 => 0x7000,
+        }
+    }
 }
 
 // ─────────────────────────── ExitSet ───────────────────────────

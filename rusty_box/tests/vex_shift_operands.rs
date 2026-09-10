@@ -17,16 +17,16 @@
 
 #![cfg(feature = "std")]
 
-use rusty_box::cpu::{core_i7_skylake::Corei7SkylakeX, CpuSetupMode, X86Reg};
+use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 const CODE: u64 = 0x0020_0000;
 
-fn avx_emulator() -> Box<Emulator<'static, Corei7SkylakeX>> {
+fn avx_emulator() -> Box<Emulator> {
     let cfg = EmulatorConfig::default();
     let mut emu =
-        Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");
+        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");
     emu.reg_write(
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
@@ -40,7 +40,7 @@ fn avx_emulator() -> Box<Emulator<'static, Corei7SkylakeX>> {
     emu
 }
 
-fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, code: &[u8], steps: u64) {
+fn run(emu: &mut Emulator, code: &[u8], steps: u64) {
     let park = CODE + code.len() as u64;
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]);

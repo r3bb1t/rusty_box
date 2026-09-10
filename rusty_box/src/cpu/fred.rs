@@ -5,7 +5,7 @@
 //! Mirrors Bochs cpu/fred.cc — FRED event delivery, ERETS/ERETU return
 //! instructions, and LKGS helper.
 
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
+use crate::cpu::BxCpuC;
 
 use super::cpu::Exception;
 use super::decoder::{BxSegregs, Instruction};
@@ -17,7 +17,7 @@ use super::Result;
 /// Selector RPL mask: clears RPL bits.
 const BX_SELECTOR_RPL_MASK: u64 = 0xFFFC;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // CSL (Current Stack Level) — low 2 bits of ia32_fred_cfg
     // ========================================================================
@@ -153,7 +153,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Augmented SS: old SS selector | flags | event_info
         let mut old_ss = self.sregs[BxSegregs::Ss as usize].selector.value as u64;
-        if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
+        if self.interrupts_inhibited(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS) {
             old_ss |= 1 << 16;
         }
         if matches!(
@@ -288,7 +288,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // NMI masking
         if matches!(int_type, InterruptType::Nmi) {
-            self.mask_event(Self::BX_EVENT_NMI);
+            self.mask_event(BxCpuC::<T>::BX_EVENT_NMI);
         }
 
         // Final cleanup
@@ -326,7 +326,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prev_rsp = self.rsp();
 
         // Skip error code
-        self.set_rsp(self.rsp().wrapping_add(8));
+        let rsp = self.rsp().wrapping_add(8);
+        self.set_rsp(rsp);
 
         let new_rip = self.pop_64()?;
         let temp_cs = self.pop_64()?;
@@ -383,18 +384,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Update event-related state
         let sti_block = (temp_ss >> 16) & 0x1 != 0;
         if sti_block && self.get_if() != 0 {
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS);
+            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS);
         }
 
         let pending_db = (temp_ss >> 17) & 0x1 != 0;
         if pending_db && self.eflags.contains(EFlags::TF) {
-            self.debug_trap |= Self::BX_DEBUG_SINGLE_STEP_BIT;
+            self.debug_trap |= BxCpuC::<T>::BX_DEBUG_SINGLE_STEP_BIT;
             self.async_event = 1;
         }
 
         let nmi_unblock = (temp_ss >> 18) & 0x1 != 0;
         if nmi_unblock {
-            self.unmask_event(Self::BX_EVENT_NMI);
+            self.unmask_event(BxCpuC::<T>::BX_EVENT_NMI);
         }
 
         Ok(())
@@ -427,7 +428,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prev_rsp = self.rsp();
 
         // Skip error code
-        self.set_rsp(self.rsp().wrapping_add(8));
+        let rsp = self.rsp().wrapping_add(8);
+        self.set_rsp(rsp);
 
         let mut new_rip = self.pop_64()?;
         let temp_cs = self.pop_64()?;
@@ -511,7 +513,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     tracing::error!("ERETU: attempt to return to compatibility mode while MSR_IA32_PL3_SSP[63:32] != 0");
                     return self.exception(Exception::Gp, 0);
                 }
-                self.set_ssp(self.msr.ia32_pl_ssp[3]);
+                let ssp = self.msr.ia32_pl_ssp[3];
+                self.set_ssp(ssp);
             }
             if self.shadow_stack_enabled(0) && self.msr.ia32_pl_ssp[0] != self.ssp() {
                 tracing::error!("ERETU: supervisor shadow stack SSP mismatch");
@@ -544,13 +547,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Event-related state
             let pending_db = (temp_ss >> 17) & 0x1 != 0;
             if pending_db && self.eflags.contains(EFlags::TF) {
-                self.debug_trap |= Self::BX_DEBUG_SINGLE_STEP_BIT;
+                self.debug_trap |= BxCpuC::<T>::BX_DEBUG_SINGLE_STEP_BIT;
                 self.async_event = 1;
             }
 
             let nmi_unblock = (temp_ss >> 18) & 0x1 != 0;
             if nmi_unblock {
-                self.unmask_event(Self::BX_EVENT_NMI);
+                self.unmask_event(BxCpuC::<T>::BX_EVENT_NMI);
             }
 
             return Ok(());
@@ -577,7 +580,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 tracing::error!("ERETU: attempt to return to compatibility mode while MSR_IA32_PL3_SSP[63:32] != 0");
                 return self.exception(Exception::Gp, 0);
             }
-            self.set_ssp(self.msr.ia32_pl_ssp[3]);
+            let ssp = self.msr.ia32_pl_ssp[3];
+            self.set_ssp(ssp);
         }
         if self.shadow_stack_enabled(0) && self.msr.ia32_pl_ssp[0] != self.ssp() {
             tracing::error!("ERETU: supervisor shadow stack SSP mismatch");
@@ -599,13 +603,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Event-related state
         let pending_db = (temp_ss >> 17) & 0x1 != 0;
         if pending_db && self.eflags.contains(EFlags::TF) {
-            self.debug_trap |= Self::BX_DEBUG_SINGLE_STEP_BIT;
+            self.debug_trap |= BxCpuC::<T>::BX_DEBUG_SINGLE_STEP_BIT;
             self.async_event = 1;
         }
 
         let nmi_unblock = (temp_ss >> 18) & 0x1 != 0;
         if nmi_unblock {
-            self.unmask_event(Self::BX_EVENT_NMI);
+            self.unmask_event(BxCpuC::<T>::BX_EVENT_NMI);
         }
 
         Ok(())

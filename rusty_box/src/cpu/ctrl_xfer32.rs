@@ -3,13 +3,12 @@
 //! Based on Bochs ctrl_xfer32.cc
 
 use super::{
-    cpu::{BxCpuC, Exception},
-    cpuid::BxCpuIdTrait,
+    cpu::Exception,
     decoder::{BxSegregs, Instruction},
     error::{CpuError, Result},
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Helper functions for branching
     // =========================================================================
@@ -90,7 +89,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eip = self.eip();
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
         self.branch_near32(new_eip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, rip);
         Ok(())
     }
 
@@ -101,7 +101,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let new_eip = self.get_gpr32(dst);
         self.branch_near32(new_eip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
-        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, rip);
         Ok(())
     }
 
@@ -113,7 +114,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let new_eip = self.v_read_dword(seg, eaddr)?;
         self.branch_near32(new_eip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
-        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, rip);
         Ok(())
     }
 
@@ -146,7 +148,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
 
         self.branch_near32(new_eip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Call, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Call, rip);
         Ok(())
     }
 
@@ -164,7 +167,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         self.branch_near32(new_eip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
-        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
         Ok(())
     }
 
@@ -192,7 +196,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         self.branch_near32(new_eip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
-        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
         Ok(())
     }
 
@@ -221,7 +226,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             );
         }
         self.branch_near32(return_eip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
         Ok(())
     }
 
@@ -231,7 +237,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let imm16 = instr.iw();
 
         self.branch_near32(return_eip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
 
         let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
         if ss_d_b {
@@ -520,7 +527,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         disp32: u32,
     ) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         if self.protected_mode() {
@@ -554,7 +561,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Called by CALL32_Ap and CALL32_Ep
     fn call_far32(&mut self, _instr: &Instruction, cs_raw: u16, disp32: u32) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         if self.protected_mode() {
@@ -627,14 +634,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Far JMP instructions (32-bit)
     // =========================================================================
 
-    /// JMP32_Ap - Far jump with absolute pointer (32-bit)
-    /// Matching C++ ctrl_xfer32.cc (similar to CALL32_Ap but for jump)
-    pub fn jmp32_ap(&mut self, instr: &Instruction) -> Result<()> {
-        let cs_raw = instr.iw2();
-        let disp32 = instr.id();
-        self.jmp_far32(instr, cs_raw, disp32)
-    }
-
     /// JMP32_Ep - Far jump indirect (32-bit)
     /// Matching C++ ctrl_xfer32.cc (similar to JMP16_Ep but 32-bit)
     pub fn jmp32_ep(&mut self, instr: &Instruction) -> Result<()> {
@@ -665,7 +664,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Matching C++ ctrl_xfer32.cc (similar to RETfar16 but 32-bit)
     pub fn retfar32(&mut self, _instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         if self.protected_mode() {
@@ -702,7 +701,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Matching C++ ctrl_xfer32.cc
     pub fn retfar32_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         let imm16 = instr.iw();

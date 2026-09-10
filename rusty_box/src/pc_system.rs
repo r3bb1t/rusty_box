@@ -20,14 +20,14 @@ use bitflags::bitflags;
 use thiserror::Error;
 
 use crate::config::BxPhyAddress;
+use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
 use crate::cpu::ResetReason;
+use crate::emulator::DeviceClock;
 
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -198,28 +198,28 @@ const TIMER_WIRE_FIXED_LEN: u64 = 17;
 const FIRED_OWNER_WIRE_LEN: u64 = TIMER_OWNER_WIRE_LEN + 4;
 
 #[cfg(feature = "std")]
-fn snapshot_invalid_data(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn snapshot_invalid_data(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn snapshot_usize_to_u32(value: usize) -> io::Result<u32> {
+fn snapshot_usize_to_u32(value: usize) -> SnapResult<u32> {
     u32::try_from(value).map_err(|_| snapshot_invalid_data("snapshot value does not fit in u32"))
 }
 
 #[cfg(feature = "std")]
-fn snapshot_usize_to_u64(value: usize) -> io::Result<u64> {
+fn snapshot_usize_to_u64(value: usize) -> SnapResult<u64> {
     u64::try_from(value).map_err(|_| snapshot_invalid_data("snapshot value does not fit in u64"))
 }
 
 #[cfg(feature = "std")]
-fn max_lapic_timer_owners() -> io::Result<usize> {
+fn max_lapic_timer_owners() -> SnapResult<usize> {
     usize::try_from(crate::params::BX_MAX_SMP_THREADS_SUPPORTED)
         .map_err(|_| snapshot_invalid_data("LAPIC timer capacity does not fit in usize"))
 }
 
 #[cfg(feature = "std")]
-fn timer_owner_wire_parts(owner: TimerOwner) -> io::Result<(u8, u32)> {
+fn timer_owner_wire_parts(owner: TimerOwner) -> SnapResult<(u8, u32)> {
     let fixed = |tag| Ok((tag, 0));
 
     match owner {
@@ -268,14 +268,14 @@ fn timer_owner_wire_parts(owner: TimerOwner) -> io::Result<(u8, u32)> {
 }
 
 #[cfg(feature = "std")]
-fn write_timer_owner<W: Write>(writer: &mut W, owner: TimerOwner) -> io::Result<()> {
+fn write_timer_owner<W: SnapWrite>(writer: &mut W, owner: TimerOwner) -> SnapResult<()> {
     let (tag, argument) = timer_owner_wire_parts(owner)?;
     writer.write_u8(tag)?;
     writer.write_u32(argument)
 }
 
 #[cfg(feature = "std")]
-fn read_timer_owner<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<TimerOwner> {
+fn read_timer_owner<R: SnapRead>(reader: &mut R) -> SnapResult<TimerOwner> {
     let tag = reader.read_u8()?;
     let argument = reader.read_u32()?;
 
@@ -344,7 +344,7 @@ fn read_timer_owner<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Timer
 }
 
 #[cfg(feature = "std")]
-fn validate_timer_id(id: &[u8; BX_MAX_TIMER_ID_LEN]) -> io::Result<()> {
+fn validate_timer_id(id: &[u8; BX_MAX_TIMER_ID_LEN]) -> SnapResult<()> {
     let mut terminated = false;
     for &byte in id {
         if byte == 0 {
@@ -383,7 +383,7 @@ fn validate_snapshot_state_fields(
     num_fired: usize,
     enable_a20: bool,
     a20_mask: BxPhyAddress,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     if ips == 0 {
         return Err(snapshot_invalid_data("configured IPS is zero"));
     }
@@ -580,6 +580,17 @@ pub struct BxPcSystemC {
     fired_owner_counts: [u32; BX_MAX_TIMERS],
     /// Number of distinct entries in `fired_owners`.
     num_fired: usize,
+    /// Which clock this machine's devices run on.
+    ///
+    /// A copy of the machine's own configuration, kept here because it is what
+    /// an engine can reach: an engine is handed [`PcIo`](crate::emulator::PcIo)
+    /// and never the machine, and the answer decides whether it may hand the
+    /// local APIC to a backend. Written once, by the machine, at
+    /// initialisation; a snapshot does not carry it, for the reason
+    /// [`DeviceClock`] states — the same guest image is correct under either,
+    /// and the machine that restores it is the one that knows who turns its
+    /// wheel.
+    device_clock: DeviceClock,
 }
 
 impl Default for BxPcSystemC {
@@ -617,6 +628,7 @@ impl BxPcSystemC {
             fired_owners: [TimerOwner::NullTimer; BX_MAX_TIMERS],
             fired_owner_counts: [0; BX_MAX_TIMERS],
             num_fired: 0,
+            device_clock: DeviceClock::Ticks,
         };
 
         // Register the null timer as timer 0
@@ -656,6 +668,48 @@ impl BxPcSystemC {
     pub fn ips(&self) -> u64 {
         self.ips
     }
+
+    /// Tell this PC system which clock its machine's devices run on.
+    ///
+    /// The machine's own configuration, published here so an engine that is
+    /// handed only [`PcIo`](crate::emulator::PcIo) can read it. Set at machine
+    /// initialisation and never after: the answer decides how the machine's
+    /// interrupts are routed, and a machine that changed it mid-run would have
+    /// two routings live at once.
+    #[inline]
+    pub(crate) fn set_device_clock(&mut self, clock: DeviceClock) {
+        self.device_clock = clock;
+    }
+
+    /// Which clock this machine's devices run on. See [`DeviceClock`].
+    #[inline]
+    #[must_use]
+    pub fn device_clock(&self) -> DeviceClock {
+        self.device_clock
+    }
+
+    /// The rate emulated time advances at.
+    ///
+    /// Non-zero by construction, which is the whole reason the type exists:
+    /// every conversion divides by it, and configuration reaches this field
+    /// from outside. A machine configured with zero would divide by it here
+    /// rather than inside a device, so the fallback is stated once — Bochs's
+    /// own `cpu.ips` default — instead of at each of the sites that used to
+    /// carry the raw number.
+    pub(crate) fn rate(&self) -> ClockHz {
+        ClockHz::new(self.ips).unwrap_or(ClockHz::BOCHS_DEFAULT)
+    }
+
+    /// Emulated time as a device is handed it: a reading, and the rate it
+    /// advances at, as one value.
+    ///
+    /// The single place the two are married (R5). Before, seven call sites
+    /// each paired `time_ticks()` with `ips()` by hand, and every device that
+    /// wanted microseconds divided for itself.
+    pub(crate) fn clock_at(&self, now_ticks: u64) -> VmClock {
+        VmClock::new(VmInstant::from_ticks(now_ticks), self.rate())
+    }
+
 
     // ========================================================================
     // Timer tick mechanism — matches Bochs pc_system.h
@@ -1182,6 +1236,24 @@ impl BxPcSystemC {
     /// Deactivate a timer.
     ///
     /// Corresponds to `bx_pc_system_c::deactivate_timer()` in Bochs (pc_system.cc).
+    /// Absolute tick at which a timer is due. Pair with
+    /// [`Self::timer_is_active`] — an unarmed timer reads zero.
+    #[cfg(test)]
+    pub(crate) fn timer_time_to_fire(&self, timer_index: usize) -> u64 {
+        self.timers[timer_index].time_to_fire
+    }
+
+    /// Whether this timer is armed and counting down.
+    ///
+    /// What a caller arming a ONE-SHOT has to ask first: arming an already
+    /// armed one-shot pushes its deadline out, so a machine that re-armed on
+    /// every service would keep moving the fire further away and never reach
+    /// it. Bochs has no counterpart because Bochs arms the 8042's timer
+    /// continuously and never asks (divergence H6).
+    pub(crate) fn timer_is_active(&self, timer_index: usize) -> bool {
+        self.timers[timer_index].flags.contains(TimerFlags::ACTIVE)
+    }
+
     pub fn deactivate_timer(&mut self, timer_index: usize) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
         self.timers[timer_index].flags.remove(TimerFlags::ACTIVE);
@@ -1273,11 +1345,13 @@ impl BxPcSystemC {
         min
     }
 
-    /// Return the earliest active non-null timer deadline in absolute ticks.
+    /// The earliest active non-null timer deadline, as an ABSOLUTE tick — a
+    /// point on the machine's timeline, not a duration. For "how long until
+    /// it fires" use `ticks_to_next_timer_deadline`.
     ///
     /// The central scheduler uses this fixed-storage query to cap an elapsed
     /// step before a device callback can rearm another owner.
-    pub fn next_timer_deadline_ticks(&self) -> Option<u64> {
+    pub fn next_timer_deadline_at(&self) -> Option<u64> {
         let mut deadline: Option<u64> = None;
         for timer in self.timers[..self.num_timers].iter() {
             if !timer.flags.contains(TimerFlags::ACTIVE) || timer.owner == TimerOwner::NullTimer {
@@ -1289,6 +1363,19 @@ impl BxPcSystemC {
             });
         }
         deadline
+    }
+
+    /// How many ticks from now until the earliest armed timer fires, or `None`
+    /// when nothing is armed and time may be advanced freely.
+    ///
+    /// Zero means a deadline is already due at the current tick — reported
+    /// honestly rather than rounded up, because a caller that needs forward
+    /// progress knows to ask for at least one tick and a caller that is only
+    /// asking "how long may I sleep" needs the truth.
+    pub fn ticks_to_next_timer_deadline(&self) -> Option<u64> {
+        let now = self.time_ticks();
+        self.next_timer_deadline_at()
+            .map(|deadline| deadline.saturating_sub(now))
     }
 
 
@@ -1328,12 +1415,18 @@ impl BxPcSystemC {
         (owners, counts, count)
     }
 
+}
+
+#[cfg(feature = "std")]
+impl crate::snapshot::SnapshotSection for BxPcSystemC {
+    const TAG: u32 = crate::snapshot::SEC_PC_SYSTEM;
+    type Restored = ();
+
     /// Return the exact v3 payload length for this PC-system object.
     ///
     /// The payload owns its section-version prefix and streams every timer
     /// slot, so the section writer never needs a staging buffer.
-    #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         self.validate_snapshot_v3_state()?;
 
         let mut len = 0u64;
@@ -1383,8 +1476,7 @@ impl BxPcSystemC {
 
     /// Stream the complete v3 PC-system state, including all timer ownership
     /// and pending timer-dispatch work.
-    #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.validate_snapshot_v3_state()?;
 
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
@@ -1433,11 +1525,10 @@ impl BxPcSystemC {
     /// Callback topology is intentionally not represented here: device codecs
     /// retain their host anchors and validate their saved timer handles through
     /// `validate_timer_handle_owner` after this object has restored.
-    #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         let section_version = reader.read_u32()?;
         if section_version != SNAPSHOT_SECTION_VERSION {
             return Err(snapshot_invalid_data("unsupported PC-system section version"));
@@ -1490,7 +1581,6 @@ impl BxPcSystemC {
             *owner = read_timer_owner(reader)?;
             *count = reader.read_u32()?;
         }
-        reader.finish_exact()?;
 
         validate_snapshot_state_fields(
             ips,
@@ -1529,6 +1619,9 @@ impl BxPcSystemC {
         Ok(())
     }
 
+}
+
+impl BxPcSystemC {
     /// Locate the registered slot owned by `owner`, if any.
     #[cfg(feature = "std")]
     pub(crate) fn find_timer_slot_by_owner(&self, owner: TimerOwner) -> Option<usize> {
@@ -1552,7 +1645,7 @@ impl BxPcSystemC {
         &self,
         handle: usize,
         expected: TimerOwner,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         timer_owner_wire_parts(expected)?;
         if handle >= self.num_timers {
             return Err(snapshot_invalid_data("timer handle is outside the registered range"));
@@ -1571,7 +1664,7 @@ impl BxPcSystemC {
     }
 
     #[cfg(feature = "std")]
-    fn validate_snapshot_v3_state(&self) -> io::Result<()> {
+    fn validate_snapshot_v3_state(&self) -> SnapResult<()> {
         validate_snapshot_state_fields(
             self.ips,
             self.curr_countdown,
@@ -1592,6 +1685,9 @@ impl BxPcSystemC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::{SnapError, SnapshotReader};
+    #[cfg(feature = "std")]
+    use crate::snapshot::SnapshotSection;
 
     #[test]
     fn test_new_pc_system() {
@@ -1949,7 +2045,7 @@ mod tests {
         assert_eq!(pc.get_num_ticks_left_next_event(), 100);
         pc.activate_timer_at_ticks(earlier, now + 50, false).unwrap();
         assert_eq!(pc.get_num_ticks_left_next_event(), 50);
-        assert_eq!(pc.next_timer_deadline_ticks(), Some(now + 50));
+        assert_eq!(pc.next_timer_deadline_at(), Some(now + 50));
         assert_eq!(pc.time_ticks(), now);
 
         pc.tickn(50);
@@ -1995,7 +2091,6 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn snapshot_timer_owner_phase_roundtrip_rejects_owner_mismatch() {
-        use std::io::Cursor;
 
         let mut source = BxPcSystemC::new();
         source.initialize(1_000_000);
@@ -2009,16 +2104,16 @@ mod tests {
             .unwrap();
 
         let mut payload = Vec::new();
-        source.save_snapshot_v3(&mut payload).unwrap();
+        source.save(&mut payload).unwrap();
 
         let mut restored = BxPcSystemC::new();
         restored.initialize(1_000_000);
         let mut reader =
-            SnapshotReader::new(Cursor::new(payload.as_slice()), payload.len() as u64).unwrap();
-        restored.restore_snapshot_v3(&mut reader).unwrap();
+            SnapshotReader::new(payload.as_slice(), payload.len() as u64).unwrap();
+        restored.restore(&mut reader).unwrap();
 
         assert_eq!(restored.time_ticks(), source.time_ticks());
-        assert_eq!(restored.next_timer_deadline_ticks(), Some(deadline));
+        assert_eq!(restored.next_timer_deadline_at(), Some(deadline));
         assert_eq!(restored.timer_countdown(handle), 41);
         restored
             .validate_timer_handle_owner(handle, TimerOwner::CmosPeriodic)
@@ -2026,7 +2121,7 @@ mod tests {
         let mismatch = restored
             .validate_timer_handle_owner(handle, TimerOwner::CmosOneSecond)
             .unwrap_err();
-        assert_eq!(mismatch.kind(), ErrorKind::InvalidData);
+        assert!(matches!(mismatch, SnapError::Invalid(_)), "{mismatch:?}");
 
         restored.tickn(40);
         assert!(!restored.has_fired_timers());
@@ -2045,7 +2140,6 @@ mod tests {
         // a since-departed deadline until the next `countdown_event`. Saving
         // in that state — reached by every real long boot — must succeed and
         // round-trip, and the machine must still recompute correctly.
-        use std::io::Cursor;
 
         let mut source = BxPcSystemC::new();
         source.initialize(1_000_000);
@@ -2059,20 +2153,20 @@ mod tests {
             .unwrap();
         source.activate_timer_at_ticks(far, source.time_ticks() + 500, true).unwrap();
         source.activate_timer_at_ticks(near, source.time_ticks() + 40, false).unwrap();
-        assert_eq!(source.next_timer_deadline_ticks(), Some(source.time_ticks() + 40));
+        assert_eq!(source.next_timer_deadline_at(), Some(source.time_ticks() + 40));
 
         // Deactivate the timer the countdown points at; the countdown is NOT
         // re-narrowed, so it now precedes the earliest active deadline (500).
         source.deactivate_timer(near).unwrap();
 
         let mut payload = Vec::new();
-        source.save_snapshot_v3(&mut payload).unwrap();
+        source.save(&mut payload).unwrap();
 
         let mut restored = BxPcSystemC::new();
         restored.initialize(1_000_000);
         let mut reader =
-            SnapshotReader::new(Cursor::new(payload.as_slice()), payload.len() as u64).unwrap();
-        restored.restore_snapshot_v3(&mut reader).unwrap();
+            SnapshotReader::new(payload.as_slice(), payload.len() as u64).unwrap();
+        restored.restore(&mut reader).unwrap();
         assert_eq!(restored.time_ticks(), source.time_ticks());
 
         // The stale countdown wakes early, fires nothing, and recomputes to

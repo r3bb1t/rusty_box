@@ -1,5 +1,6 @@
 use crate::args::{Args, BootDevice, DiskGeometry, DisplayBackend, LogLevel};
 use crate::error::RunError;
+use rusty_box::cpu::decoder::features::X86Feature;
 use rusty_box::params::{BxParamError, BxParams};
 use rusty_box::CpuidFreq;
 use std::{
@@ -108,8 +109,70 @@ pub struct LoggingToml {
     pub level: Option<LogLevel>,
 }
 
+/// Which engine retires the guest's instructions.
+///
+/// Named rather than a bool because a third is already foreseen — a KVM leaf
+/// on Linux — and because a reader of `--engine whp` should not have to know
+/// which way round a flag points.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Deserialize,
+    serde::Serialize,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Engine {
+    /// This port's own interpreter. Everywhere, and the default.
+    #[default]
+    Interpreter,
+    /// The Windows Hypervisor Platform. Needs the `hv-whp` feature and a host
+    /// that has the platform enabled.
+    Whp,
+}
+
+/// Which processor the machine offers its guest.
+///
+/// A machine setting, not an engine one. A guest keeps what it enabled across
+/// a switch from the hypervisor to the interpreter, so both must offer the
+/// same processor or the switch changes the hardware underneath it.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum CpuCapabilities {
+    /// This port's own processor model, whole. The same guest sees the same
+    /// processor on every host, which is what makes a run reproducible — and
+    /// what a guest under study must have.
+    #[default]
+    Preset,
+    /// The model, narrowed to what this host can also carry.
+    ///
+    /// Needed by a machine that may run on the hypervisor: `XSETBV` is not a
+    /// trapped instruction there, so a guest that believes the preset enables
+    /// a register file the silicon lacks, and the platform then refuses the
+    /// whole processor state.
+    HostShared,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedConfig {
+    /// Which engine retires the guest's instructions.
+    pub engine: Engine,
+    /// Which processor the machine offers its guest.
+    pub cpu_capabilities: CpuCapabilities,
     pub memory_mib: u32,
     pub host_memory_mib: u32,
     pub memory_block_kib: u32,
@@ -330,6 +393,8 @@ fn resolve_config_with_base(
     validate_boot_order(&boot_order, disk.is_some(), cdrom.is_some())?;
 
     Ok(ResolvedConfig {
+        engine: args.engine,
+        cpu_capabilities: args.cpu_capabilities,
         memory_mib,
         host_memory_mib,
         memory_block_kib,
@@ -825,6 +890,64 @@ fn auto_detect_chs(path: &Path) -> Result<DiskGeometry, RunError> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+impl CpuCapabilities {
+    /// Narrow `params` to the processor a guest can be offered under this
+    /// setting.
+    ///
+    /// Only the features whose state a guest must enable through `XCR0` are
+    /// considered, because those are the ones a host can refuse outright: the
+    /// guest turns the component on itself and the register file has to exist.
+    /// An instruction the host lacks but whose state it carries is this port's
+    /// to emulate either way.
+    pub fn narrow(self, params: BxParams) -> BxParams {
+        match self {
+            Self::Preset => params,
+            Self::HostShared => {
+                let carried = host_xsave_components();
+                /// `CPUID.D:0` bits 5, 6 and 7 — the opmask registers, the
+                /// upper half of ZMM0-15, and ZMM16-31. A guest enables them
+                /// together, so a host either carries the set or none of it.
+                const AVX512_STATE: u64 = (1 << 5) | (1 << 6) | (1 << 7);
+                /// Bit 2 — the upper half of the YMM registers.
+                const AVX_STATE: u64 = 1 << 2;
+
+                let mut narrowed = params;
+                if carried & AVX512_STATE != AVX512_STATE {
+                    narrowed = narrowed.excluding(X86Feature::IsaAvx512);
+                }
+                if carried & AVX_STATE == 0 {
+                    narrowed = narrowed.excluding(X86Feature::IsaAvx);
+                }
+                // `MONITOR`/`MWAIT` unconditionally, whatever the host's own
+                // processor can do: the guest does not run on the host's
+                // processor directly, it runs in a partition, and the platform
+                // does not offer the instruction pair to one. A guest told it
+                // has them commits to them permanently — Linux selects
+                // `mwait_idle` at boot and never reconsiders — so this cannot
+                // be discovered and worked around later.
+                narrowed.excluding(X86Feature::IsaMonitorMwait)
+            }
+        }
+    }
+}
+
+/// The extended-state components this host's processor can hold, as
+/// `CPUID.D:0` reports them in EDX:EAX.
+///
+/// Answering zero where the leaf cannot be asked is the conservative reading —
+/// it narrows the machine rather than widening it — but no host this runs on
+/// lacks the leaf.
+#[cfg(target_arch = "x86_64")]
+fn host_xsave_components() -> u64 {
+    let reported = core::arch::x86_64::__cpuid_count(0xD, 0);
+    (u64::from(reported.edx) << 32) | u64::from(reported.eax)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn host_xsave_components() -> u64 {
+    0
+}
+
 pub(crate) fn detect_disk_geometry(path: &Path) -> Result<DiskGeometry, RunError> {
     auto_detect_chs(path)
 }

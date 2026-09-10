@@ -4,8 +4,8 @@
 //! Based on Bochs cpu/tasking.cc
 
 use super::{
+    cpu::BxCpuC,
     cpu::Exception,
-    cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
     descriptor::{
         is_code_segment, is_code_segment_non_conforming, is_code_segment_readable, is_data_segment,
@@ -23,9 +23,7 @@ pub(super) const BX_TASK_FROM_IRET: u32 = 1;
 pub(super) const BX_TASK_FROM_JUMP: u32 = 2;
 pub(super) const BX_TASK_FROM_INT: u32 = 3;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
-    super::cpu::BxCpuC<'_, I, T>
-{
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
     /// Perform task switch
     /// Based on BX_CPU_C::task_switch in tasking.cc
     #[allow(clippy::too_many_arguments)]
@@ -42,12 +40,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
         tracing::trace!("task_switch(): ENTER, source={}", source);
 
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // Discard any traps and inhibits for new context; traps will
         // resume upon return. (Bochs tasking.cc)
-        self.debug_trap &= !Self::BX_DEBUG_SINGLE_STEP_BIT;
+        self.debug_trap &= !BxCpuC::<T>::BX_DEBUG_SINGLE_STEP_BIT;
         self.inhibit_mask = 0;
 
         // SVM task switch intercept — if the guest has the intercept enabled,
@@ -341,11 +339,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
         self.tr.cache.r#type |= 2; // mark TSS in TR as busy
 
         // Step 9: Set TS flag in CR0 (matches line 472)
-        self.cr0.set32(self.cr0.get32() | (1 << 3));
+        let cr0 = self.cr0.get32() | (1 << 3);
+        self.cr0.set32(cr0);
 
         // Task switch clears LE/L3/L2/L1/L0 in DR7 (Bochs tasking.cc)
-        self.dr7
-            .set32(self.dr7.get32() & !Self::DR7_LOCAL_ENABLE_MASK);
+        let dr7 = self.dr7.get32() & !BxCpuC::<T>::DR7_LOCAL_ENABLE_MASK;
+        self.dr7.set32(dr7);
 
         // CR3 change — after commit point (Bochs tasking.cc)
         if tss_descriptor.r#type >= 9
@@ -658,7 +657,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
 
         // Check TSS T (debug trap) bit — 386 TSS only (Bochs tasking.cc)
         if tss_descriptor.r#type >= 9 && (trap_word & 0x1) != 0 {
-            self.debug_trap |= Self::BX_DEBUG_TRAP_TASK_SWITCH_BIT;
+            self.debug_trap |= BxCpuC::<T>::BX_DEBUG_TRAP_TASK_SWITCH_BIT;
             self.async_event = 1;
             tracing::debug!("task_switch: T bit set in new TSS");
         }

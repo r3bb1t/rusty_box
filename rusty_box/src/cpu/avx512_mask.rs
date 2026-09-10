@@ -7,14 +7,13 @@
 
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
 };
 
 /// Helper: read opmask register value (full 64-bit)
 #[inline]
-fn read_opmask<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_opmask<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     idx: u8,
 ) -> u64 {
     cpu.opmask_rrx(idx as usize)
@@ -22,8 +21,8 @@ fn read_opmask<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
 
 /// Helper: write opmask register with width mask
 #[inline]
-fn write_opmask_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_opmask_masked<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     idx: u8,
     val: u64,
     mask: u64,
@@ -41,7 +40,7 @@ const MASK_Q: u64 = u64::MAX;
 // KMOV — Move opmask register
 // ========================================================================
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // --- KMOV register-to-register ---
 
     /// KMOVB KGb, KEb (VEX.L0.66.0F.W0 90 /r) — register form

@@ -55,7 +55,7 @@ const ANDROID_STORAGE_PERMISSION_REQUEST_THROTTLE: Duration = Duration::from_mil
 const ANDROID_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION: &str =
     "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION";
 type AndroidEmulator =
-    Box<rusty_box::emulator::Emulator<'static, rusty_box::cpu::core_i7_skylake::Corei7SkylakeX>>;
+    Box<rusty_box::emulator::Emulator<rusty_box::cpu::core_i7_skylake::Corei7SkylakeX>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AndroidIsoSource {
@@ -1056,7 +1056,7 @@ fn run_alpine_emulator_worker(
 
     let mut emu: AndroidEmulator =
         Emulator::<Corei7SkylakeX>::new(config).map_err(|error| format!("{error:?}"))?;
-    emu.stop_flag = stop_flag;
+    emu.set_stop_flag(stop_flag);
     emu.set_gui(AndroidBridgeGui::new(Arc::clone(&shared)));
     emu.init_memory_and_pc_system()
         .map_err(|error| format!("{error:?}"))?;
@@ -1091,7 +1091,7 @@ fn run_alpine_emulator_worker(
     let interactive_budget = FRAME_BUDGET.max(BATCH_SIZE);
 
     let run_result = loop {
-        if emu.stop_flag.load(Ordering::Relaxed) {
+        if emu.stop_flag().load(Ordering::Relaxed) {
             break Ok(());
         }
 

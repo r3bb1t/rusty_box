@@ -14,6 +14,12 @@ pub enum Error {
     PcSystem(#[from] crate::pc_system::PcSystemError),
 
     #[error(transparent)]
+    Build(#[from] crate::emulator::BuildError),
+
+    #[error(transparent)]
+    Engine(#[from] crate::emulator::EngineRefusal),
+
+    #[error(transparent)]
     Infallible(#[from] core::convert::Infallible),
 
     #[error(transparent)]

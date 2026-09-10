@@ -51,7 +51,12 @@ impl TermGui {
 
     fn restore_terminal_mode(&mut self) {
         if self.raw_mode_active {
-            let _ = crossterm::terminal::disable_raw_mode();
+            // Runs on the teardown path, so a failure here cannot be
+            // propagated — but it leaves the user's terminal in raw mode,
+            // which is worth saying out loud.
+            if let Err(error) = crossterm::terminal::disable_raw_mode() {
+                tracing::warn!("terminal left in raw mode: {error}");
+            }
             self.raw_mode_active = false;
         }
     }

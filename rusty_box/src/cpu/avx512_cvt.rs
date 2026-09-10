@@ -29,7 +29,6 @@ use super::softfloat3e::uint_convert::{
 };
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
@@ -38,7 +37,7 @@ use super::{
 // unused-import lint is allowed rather than losing the no-std resolution.
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use crate::cpu::float::FloatExt;
+use rusty_box_core::FloatExt;
 
 // ============================================================================
 // Helper functions (duplicated from avx512.rs — module-private there)
@@ -67,8 +66,8 @@ fn qword_elements(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -82,16 +81,16 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register with dword-granularity masking, zeroing upper bits beyond VL
-fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -111,8 +110,8 @@ fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 /// clearing dwords 2 and 3 outright rather than leaving them to the opmask, so
 /// under merge masking with those bits clear the destination must not keep its
 /// old contents.
-fn write_zmm_masked_n<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_n<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -136,8 +135,8 @@ fn write_zmm_masked_n<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 
 /// Write `nelements` *words* with masking and clear everything above. Used by
 /// VCVTPS2PH, whose n singles become n words — half a vector.
-fn write_zmm_masked_w_half<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_w_half<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -158,8 +157,8 @@ fn write_zmm_masked_w_half<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Inst
 }
 
 /// Write ZMM register with qword-granularity masking
-fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -182,8 +181,8 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 }
 
 /// Read source as dword vector from register or memory
-fn read_src_dword<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_src_dword<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -198,8 +197,8 @@ fn read_src_dword<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// (VCVTDQ2PD, VCVTPS2PD), whose def entries pair
 /// `LOAD_BROADCAST_Half_VectorD` with `LOAD_BROADCAST_MASK_Half_VectorD`
 /// because the source holds half as many elements as the destination.
-fn read_src_half_dword<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_src_half_dword<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
@@ -212,8 +211,8 @@ fn read_src_half_dword<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrume
 /// Read source as qword vector from register or memory. Callers (VCVTPD2DQ,
 /// VCVTTPD2DQ, VCVTPD2PS) pair `LOAD_BROADCAST_VectorQ` with
 /// `LOAD_BROADCAST_MASK_VectorQ`.
-fn read_src_qword<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_src_qword<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -226,7 +225,7 @@ fn read_src_qword<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// Round an f32 to nearest integer as i32, matching MXCSR rounding mode.
 /// MXCSR RC: 0=nearest, 1=down, 2=up, 3=truncate
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VCVTDQ2PS — Convert packed signed dwords to SP FP
     // EVEX.0F.W0 5B /r
@@ -239,7 +238,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_dword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -264,7 +263,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_dword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -290,7 +289,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_dword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -345,7 +344,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_qword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -378,7 +377,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_qword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -433,7 +432,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_qword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -458,7 +457,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_dword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -483,7 +482,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_dword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -509,7 +508,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_dword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -538,7 +537,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_qword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -655,7 +654,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_qword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -703,7 +702,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_qword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -739,7 +738,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_qword(self, instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -781,7 +780,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_half_dword(self, instr)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -901,8 +900,6 @@ mod tests {
 
     // ---- AVX512_DQ qword <-> float, driven through the dispatcher ----------
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::BxSegregs;
     use crate::cpu::xmm::MXCSR_RESET;
     use rusty_box_decoder::opcode::Opcode;
@@ -923,15 +920,18 @@ mod tests {
         i
     }
 
-    fn cpu() -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC<'static, AmdRyzen>> {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
-        c.mxcsr.mxcsr = MXCSR_RESET;
-        c
+    /// Returns the machine, not the context — see the note in avx512_round.
+    fn cpu() -> crate::cpu::exec_ctx::TestMachine {
+        let mut m =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        m.ctx().mxcsr.mxcsr = MXCSR_RESET;
+        m
     }
 
     #[test]
     fn qword_to_double_and_back_round_trips_both_signednesses() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         // -3 as signed is 3 below zero; as unsigned it is 2^64-3, which is
         // not representable exactly and rounds to 2^64.
         c.vmm[1].set_zmm64u(0, (-3i64) as u64);
@@ -967,7 +967,8 @@ mod tests {
 
     #[test]
     fn pd2qq_rounds_by_mxcsr_while_tpd2qq_truncates() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm64u(0, 2.5f64.to_bits());
         c.vmm[1].set_zmm64u(1, 3.5f64.to_bits());
 
@@ -993,7 +994,8 @@ mod tests {
 
     #[test]
     fn single_to_qword_reads_only_the_low_half_of_the_source() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         // VL256 produces 4 qwords from 4 dwords, so the source dwords sit in
         // the low 128 bits even though the destination spans 256.
         for (i, v) in [1.5f32, -2.5, 3.75, 4.0].into_iter().enumerate() {
@@ -1017,7 +1019,8 @@ mod tests {
 
     #[test]
     fn qword_to_single_writes_half_a_vector() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm64u(0, 3);
         c.vmm[1].set_zmm64u(1, u64::MAX); // 2^64-1: not exact in f32
         c.vmm[1].set_zmm64u(2, 7);
@@ -1045,7 +1048,8 @@ mod tests {
         // outright, not left to the opmask. Deriving the count from an output
         // VL of 128 instead would treat them as maskable and, under merge
         // masking with those bits clear, leave the destination's old contents.
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.opmask[1].set_rrx(0b0011); // elements 0,1 active; 2,3 clear
         for i in 0..4 {
             c.vmm[0].set_zmm32u(i, 0xDEAD_BEEF);

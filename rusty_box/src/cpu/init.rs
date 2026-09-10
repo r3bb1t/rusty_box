@@ -41,16 +41,52 @@ pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
 // ResetReason is defined in cpu/mod.rs (always available without alloc)
 use super::ResetReason;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Turn one ISA extension on or off in the bitmask every gate reads.
+    ///
+    /// The bitmask is what decides whether an opcode decodes and what
+    /// [`Self::get_xcr0_allow_mask`] will let a guest enable, so this is the
+    /// one place a feature is granted or withheld (R5). `CPUID` answers the
+    /// leaves that depend on it from the same bitmask, which is what keeps a
+    /// guest from being told it has a register file `XSETBV` would refuse.
+    pub(super) fn set_isa_extension(&mut self, feature: X86Feature, present: bool) {
+        let index = feature as usize;
+        let (word, bit) = (index / 32, 1u32 << (index % 32));
+        if present {
+            self.ia_extensions_bitmask[word] |= bit;
+        } else {
+            self.ia_extensions_bitmask[word] &= !bit;
+        }
+    }
+
     pub fn initialize(&mut self, _config: BxParams) -> Result<()> {
         tracing::debug!("Initialized cpu model {}", self.cpuid.get_name());
 
         // Populate ISA extensions bitmask from CPUID model — matches Bochs init.cc
         self.ia_extensions_bitmask = self.cpuid.get_isa_extensions_bitmask();
+        // Then what the machine was configured to add or hold back — Bochs
+        // `cpuid: avx=0` and friends, which edit the same bitmask before
+        // anything reads it. Both lists are empty unless a caller filled them,
+        // so a machine that says nothing gets its model's processor whole.
+        //
+        // Exclusion runs second and therefore wins: a caller naming the same
+        // feature twice is asking a question with one sensible answer, which
+        // is the narrower one.
+        for feature in _config.cpu_include_features.iter() {
+            self.set_isa_extension(*feature, true);
+        }
+        for feature in _config.cpu_exclude_features.iter() {
+            self.set_isa_extension(*feature, false);
+        }
         let tsc_deadline_supported =
             self.bx_cpuid_support_isa_extension(X86Feature::IsaTscDeadline);
         self.lapic
             .set_tsc_deadline_supported(tsc_deadline_supported);
+        // Bochs apic.cc constructor: `xapic = simulate_xapic`. The processor is
+        // built over a zeroed allocation, so the model it simulates is written
+        // here, before the first `reset` reads it to choose the local APIC's
+        // version register, ID width and spurious-vector layout.
+        self.lapic.set_simulated_apic_model();
         self.cpu_topology = _config.cpu_topology();
 
         // Establish the per-pkey allow-mask invariant documented on `rd_pkey`
@@ -87,11 +123,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // permanently `None` by construction, so AMX is unsupported and no init is
         // required.
 
-        self.vmcb = if self.bx_cpuid_support_isa_extension(X86Feature::IsaSvm) {
-            Some(VmcbCache::default())
-        } else {
-            None
-        };
+        // Bochs cpu.h keeps `vmcb` as a plain member, so a model without SVM
+        // has a zeroed block nothing reads rather than an absence every
+        // caller has to answer for. Whether the model has SVM is `CPUID`'s to
+        // say, and `svm_supported` is the one place that asks.
+        self.vmcb = VmcbCache::default();
 
         self.init_msrs();
 
@@ -312,16 +348,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.msr.apicbase |= 0x100;
         }
         self.lapic.set_base(self.msr.apicbase);
-        self.lapic.enable_xapic_extensions();
+        // Bochs init.cc: the AMD extended xAPIC registers exist only on a model
+        // whose CPUID claims BX_ISA_XAPIC_EXT.
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaXapicExt) {
+            self.lapic.enable_xapic_extensions();
+        }
         if self.bx_cpuid != 0 {
             // Bochs init.cc: every non-bootstrap CPU is an application
             // processor and halts in WAIT_FOR_SIPI after RESET/INIT. Do not
             // gate this on the current topology value; no-alloc callers may
             // provide fixed AP storage before deciding how many APs to expose.
-            self.mask_event(Self::BX_EVENT_INIT | Self::BX_EVENT_SMI | Self::BX_EVENT_NMI);
-            self.eflags.remove(EFlags::IF_);
-            self.activity_state = CpuActivityState::WaitForSipi;
-            self.async_event |= Self::BX_ASYNC_EVENT_SLEEP;
+            // Bochs init.cc: enter_sleep_state(BX_ACTIVITY_STATE_WAIT_FOR_SIPI),
+            // which masks INIT/SMI/NMI and clears IF on the way in.
+            self.enter_sleep_state(CpuActivityState::WaitForSipi);
         }
 
         self.efer.set32(0);
@@ -386,23 +425,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // invalidate the code prefetch queue
         self.eip_page_bias = 0;
         self.eip_page_window_size = 0;
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
 
         // invalidate current stack page
         self.esp_page_bias = 0;
         self.esp_page_window_size = 0;
-        self.esp_host_ptr = None;
-
-        #[cfg(feature = "bx_debugger")]
-        {
-            self.stop_reason = 0;
-            self.magic_break = 0;
-            self.trace = false;
-            self.trace_reg = false;
-            self.trace_mem = false;
-            self.mode_break = false;
-            self.vmexit_break = false;
-        }
 
         // Reset the Floating Point Unit
         if source == ResetReason::Hardware {
@@ -452,7 +479,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.handle_cpu_context_change();
 
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_any() {
             let reset_type = match source {
                 ResetReason::Hardware => super::instrumentation::ResetType::Hardware,
@@ -478,10 +504,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_stack_cache();
         self.dtlb.flush();
         self.itlb.flush();
-        // Every entry is now invalid, so the pin sidecar's per-slot host
-        // pointers are all zero: memset instead of the full pinned_host_page
-        // rescan (Track B — full-flush pin publication).
-        self.clear_active_tlb_pin_hosts();
     }
 
     /// Flush all TLB entries (both DTLB and ITLB) and invalidate prefetch/stack caches.
@@ -505,11 +527,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `wakeup_monitor` here would disarm a monitor (and wake an MWAIT / cancel
     /// the mwaitx timer) that a snapshot restore has just reinstated.
     pub(crate) fn invalidate_host_memory_mappings(&mut self) {
-        self.vmcbhostptr = 0;
+        self.vmcb_host_offset = None;
         self.tlb_flush_hosts();
         self.i_cache.break_links();
         self.i_cache.flush_all();
-        self.sync_vmcb_pin();
+        // The bases those mappings were measured from need no clearing: they
+        // are taken when an `ExecCtx` is assembled, so the next execution scope
+        // measures them fresh against whatever backing it is handed. Dropping
+        // the mappings here is what leaves nothing behind that names the old
+        // one.
     }
 
     /// Flush non-global TLB entries only (preserves entries with G bit set).
@@ -518,9 +544,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn tlb_flush_non_global(&mut self) {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
-        // Track B: fuse pin publication into the invalidation walk instead of
-        // the full 5120-slot refresh_tlb_pin rescan (sync_active_tlb_pin).
-        self.flush_non_global_and_publish_pin();
+        self.flush_non_global_tlbs();
         // Bochs paging.cc TLB_flushNonGlobal — disarm the monitor / wake MWAIT.
         self.wakeup_monitor();
         // Bochs paging.cc — iCache.breakLinks()
@@ -536,7 +560,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn tlb_invlpg(&mut self, laddr: u64) {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
-        self.invlpg_and_publish_pin(laddr);
+        self.invlpg_tlbs(laddr);
         // Bochs paging.cc TLB_invlpg — a remapped monitored page must not leave
         // a subsequent MWAIT waiting forever.
         self.wakeup_monitor();
@@ -545,13 +569,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn invalidate_prefetch_q(&mut self) {
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_bias = 0;
         self.eip_page_window_size = 0;
     }
 
     pub(super) fn invalidate_stack_cache(&mut self) {
-        self.esp_host_ptr = None;
         self.esp_page_bias = 0;
         self.esp_page_window_size = 0;
     }
@@ -564,15 +587,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // event stays in pending_event but is_unmasked_event_pending()
         // returns false. When IF=1, the event is unmasked, and if it was
         // pending, async_event is set to trigger delivery at next boundary.
+        // A virtual interrupt and an interrupt-window exit are IF-maskable on
+        // exactly the same terms as a real external interrupt, so all four
+        // move together.
+        let if_gated = Self::BX_EVENT_PENDING_INTR
+            | Self::BX_EVENT_PENDING_LAPIC_INTR
+            | Self::BX_EVENT_PENDING_VMX_VIRTUAL_INTR
+            | Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING;
+
         if self.eflags.contains(super::eflags::EFlags::IF_) {
-            // EFLAGS.IF was set — unmask external interrupt events
-            // Bochs flag_ctrl_pro.cc: unmask both PIC and LAPIC events
-            self.unmask_event(Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR);
-        } else {
-            // EFLAGS.IF was cleared — mask external interrupt events
-            // Bochs flag_ctrl_pro.cc: mask both PIC and LAPIC events
-            self.mask_event(Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR);
+            self.unmask_event(if_gated);
+            return;
         }
+
+        // Bochs flag_ctrl_pro.cc: with external-interrupt exiting set, a VMX
+        // guest's EFLAGS.IF does not block interrupts at all — they leave to
+        // the host instead. What IF still gates there is the guest's own
+        // virtual interrupt and its interrupt window.
+        if self.in_vmx_guest
+            && self.vmcs.pin_based_ctls
+                & super::vmx::VMX_PIN_BASED_VMEXEC_CTRL_EXTERNAL_INTERRUPT_VMEXIT
+                != 0
+        {
+            self.mask_event(
+                Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING
+                    | Self::BX_EVENT_PENDING_VMX_VIRTUAL_INTR,
+            );
+            self.unmask_event(Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR);
+            return;
+        }
+
+        self.mask_event(if_gated);
     }
 
     /// Enable VMX in IA32_FEATURE_CONTROL MSR for external firmware.
@@ -718,7 +763,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// allocator checks can run again.
     fn set_VMCBPTR(&mut self, vmcb_ptr: u64) {
         self.vmcbptr = vmcb_ptr;
-        self.vmcbhostptr = 0;
-        self.sync_vmcb_pin();
+        self.vmcb_host_offset = None;
     }
 }

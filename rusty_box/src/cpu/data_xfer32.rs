@@ -4,14 +4,13 @@
 // Mirrors Bochs cpp/cpu/data_xfer32.cc
 
 use crate::cpu::decoder::{BxSegregs, Instruction};
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 /// MOV_GdEd_R: MOV r32, r/m32 (register form)
 /// Opcode: 0x8B, ModRM: r32, r/m32 (register)
 /// operands.dst = destination register
 /// operands.src1 = source register
-pub fn MOV_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_GdEd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst_idx = instr.dst() as usize;
@@ -24,8 +23,8 @@ pub fn MOV_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// MOV_EdGd_R: MOV r/m32, r32 (register form)
 /// Opcode: 0x89, ModRM: r/m32, r32 (register)
 /// Decoder swaps for 16/32-bit store: operands.dst = rm (DESTINATION), operands.src1 = nnn (SOURCE)
-pub fn MOV_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_EdGd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let val = cpu.get_gpr32(instr.src1() as usize); // nnn = source
@@ -36,8 +35,8 @@ pub fn MOV_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// Opcode: 0xC7, ModRM: r/m32, imm32 (register)
 /// operands.dst = destination register
 /// Immediate value stored in operand_data.Id
-pub fn MOV_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_EdId_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst_idx = instr.dst() as usize;
@@ -49,8 +48,8 @@ pub fn MOV_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// MOV_GdEd_M: MOV r32, r/m32 (memory form)
 /// Opcode: 0x8B, ModRM: r32, r/m32 (memory)
 /// Bochs: MOV32_GdEdM
-pub fn MOV_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_GdEd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -65,8 +64,8 @@ pub fn MOV_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// Opcode: 0x89, ModRM: r/m32, r32 (memory)
 /// Bochs: MOV32_EdGdM
 /// Decoder swaps for 16/32-bit store: operands.src1 (src()) = nnn = SOURCE register
-pub fn MOV_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_EdGd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -79,8 +78,8 @@ pub fn MOV_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// MOV_EdId_M: MOV r/m32, imm32 (memory form)
 /// Opcode: 0xC7, ModRM: r/m32, imm32 (memory)
 /// Bochs: MOV_EdIdM
-pub fn MOV_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_EdId_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -92,8 +91,8 @@ pub fn MOV_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// MOVZX_GdEb_M: MOVZX r32, r/m8 (memory form)
 /// Bochs: MOVZX_GdEbM
-pub fn MOVZX_GdEb_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOVZX_GdEb_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -106,8 +105,8 @@ pub fn MOVZX_GdEb_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 
 /// MOVZX_GdEw_M: MOVZX r32, r/m16 (memory form)
 /// Bochs: MOVZX_GdEwM
-pub fn MOVZX_GdEw_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOVZX_GdEw_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -123,8 +122,8 @@ pub fn MOVZX_GdEw_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 // =========================================================================
 
 /// MOV r32, r/m32 - unified (Bochs: MOV_GdEdR / MOV_GdEdM)
-pub fn MOV_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_GdEd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -136,8 +135,8 @@ pub fn MOV_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// MOV r/m32, r32 - unified (Bochs: MOV_EdGdR / MOV_EdGdM)
-pub fn MOV_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -149,8 +148,8 @@ pub fn MOV_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// MOV r/m32, imm32 - unified (Bochs: MOV_EdIdR / MOV_EdIdM)
-pub fn MOV_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_EdId<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -162,8 +161,8 @@ pub fn MOV_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// MOVZX r32, r/m8 - unified (Bochs: MOVZX_GdEbR / MOVZX_GdEbM)
-pub fn MOVZX_GdEb_unified<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOVZX_GdEb_unified<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -175,8 +174,8 @@ pub fn MOVZX_GdEb_unified<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instr
 }
 
 /// MOVZX r32, r/m16 - unified (Bochs: MOVZX_GdEwR / MOVZX_GdEwM)
-pub fn MOVZX_GdEw_unified<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOVZX_GdEw_unified<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -190,8 +189,8 @@ pub fn MOVZX_GdEw_unified<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instr
 /// MOV_EAX_Id: MOV EAX, imm32 (register direct)
 /// Opcodes: 0xB8-0xBF (0xB8 + register index)
 /// operands.dst = register index
-pub fn MOV_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_EAX_Id<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst_idx = instr.dst() as usize;
@@ -204,8 +203,8 @@ pub fn MOV_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// Opcode: 0x0F 0xB6, ModRM: r32, r/m8
 /// Original: bochs/cpu/data_xfer32.cc MOVZX_GdEbM/MOVZX_GdEbR
 /// Zero extend byte operand into dword destination
-pub fn MOVZX_GdEb<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOVZX_GdEb<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst_reg = instr.dst() as usize;
@@ -222,8 +221,8 @@ pub fn MOVZX_GdEb<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// Opcode: 0x0F 0xB7, ModRM: r32, r/m16
 /// Original: bochs/cpu/data_xfer32.cc MOVZX_GdEwM/MOVZX_GdEwR
 /// Zero extend word operand into dword destination
-pub fn MOVZX_GdEw<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOVZX_GdEw<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst_reg = instr.dst() as usize;
@@ -240,8 +239,8 @@ pub fn MOVZX_GdEw<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// Opcode: 0xA1
 /// Original: bochs/cpu/data_xfer32.cc MOV_EAXOd
 /// Load EAX from memory at direct address (seg:offset)
-pub fn MOV_EAXOd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_EAXOd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
@@ -255,8 +254,8 @@ pub fn MOV_EAXOd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 /// Opcode: 0xA3
 /// Original: bochs/cpu/data_xfer32.cc MOV_OdEAX
 /// Store EAX to memory at direct address (seg:offset)
-pub fn MOV_OdEAX<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn MOV_OdEAX<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());

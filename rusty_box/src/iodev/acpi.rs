@@ -19,12 +19,10 @@
 
 use bitflags::bitflags;
 
-#[cfg(feature = "std")]
-use std::io::{self, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -94,6 +92,18 @@ bitflags! {
         /// Suspend enable (bit 13) — triggers sleep state transition
         const SUS_EN  = 1 << 13;
     }
+}
+
+/// What an ACPI config-space write asks the machine to do. The PM and SMBus
+/// register blocks each live at a programmable I/O base, and the controller
+/// cannot move its own port registrations.
+///
+/// Bochs re-registers them inline in `pci_write_handler` (acpi.cc); here the
+/// I/O bus lives outside the device, so the request travels back as data.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AcpiWriteEffects {
+    pub pm_base_changed: bool,
+    pub sm_base_changed: bool,
 }
 
 /// I/O access mask for PM register space (64 ports).
@@ -226,7 +236,7 @@ pub struct BxAcpiCtrl {
 /// relocates from the live PM/SM I/O ranges before committing these bases.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AcpiSnapshotRestore {
+pub struct AcpiSnapshotRestore {
     pub(crate) pm_base: u32,
     pub(crate) sm_base: u32,
     pub(crate) overflow_timer_handle: Option<usize>,
@@ -240,12 +250,12 @@ impl Default for BxAcpiCtrl {
 
 impl BxAcpiCtrl {
     #[cfg(feature = "std")]
-    fn invalid_snapshot_v3(message: &'static str) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, message)
+    fn invalid_snapshot_v3(message: &'static str) -> SnapError {
+        SnapError::Invalid(message)
     }
 
     #[cfg(feature = "std")]
-    fn validate_snapshot_v3_pci_identity(pci_conf: &[u8; PCI_CONF_SIZE]) -> io::Result<()> {
+    fn validate_snapshot_v3_pci_identity(pci_conf: &[u8; PCI_CONF_SIZE]) -> SnapResult<()> {
         const PIIX4_PM_IDENTITY: [(usize, u8); 8] = [
             (0x00, 0x86),
             (0x01, 0x80),
@@ -272,7 +282,7 @@ impl BxAcpiCtrl {
         pm_base: u32,
         sm_base: u32,
         pci_conf: &[u8; PCI_CONF_SIZE],
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         let pmbar = u32::from_le_bytes([
             pci_conf[0x40],
             pci_conf[0x41],
@@ -325,7 +335,7 @@ impl BxAcpiCtrl {
         pci_conf: &[u8; PCI_CONF_SIZE],
         pm_base: u32,
         sm_base: u32,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         const PM_STATUS_MASK: u16 = 0x8731;
         const PM_ENABLE_MASK: u16 = 0x0521;
         const PM_CONTROL_MASK: u16 = 0x3C07;
@@ -361,9 +371,15 @@ impl BxAcpiCtrl {
         Self::validate_snapshot_v3_bases(pm_base, sm_base, pci_conf)
     }
 
+}
+
+#[cfg(feature = "std")]
+impl crate::snapshot::SnapshotSection for BxAcpiCtrl {
+    const TAG: u32 = crate::snapshot::SEC_ACPI;
+    type Restored = AcpiSnapshotRestore;
+
     /// Exact byte count for the single-section ACPI v3 payload.
-    #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         self.validate_snapshot_v3_state(
             self.devfunc,
             self.uefi_enabled,
@@ -429,9 +445,8 @@ impl BxAcpiCtrl {
     }
 
     /// Stream all serializable ACPI state into a versioned v3 section payload.
-    #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        self.snapshot_v3_len()?;
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
+        self.snapshot_len()?;
 
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         writer.write_u8(self.devfunc)?;
@@ -468,11 +483,10 @@ impl BxAcpiCtrl {
     ///
     /// PM/SM bases and the raw timer slot are returned for parent-owned
     /// validation and atomic topology relocation.
-    #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<AcpiSnapshotRestore> {
+        reader: &mut R,
+    ) -> SnapResult<AcpiSnapshotRestore> {
         let section_version = reader.read_u32()?;
         if section_version != SNAPSHOT_SECTION_VERSION {
             return Err(Self::invalid_snapshot_v3(
@@ -513,7 +527,6 @@ impl BxAcpiCtrl {
         let irq9_level = reader.read_bool()?;
         let pm_base = reader.read_u32()?;
         let sm_base = reader.read_u32()?;
-        reader.finish_exact()?;
 
         self.validate_snapshot_v3_state(
             devfunc,
@@ -554,6 +567,9 @@ impl BxAcpiCtrl {
         })
     }
 
+}
+
+impl BxAcpiCtrl {
     /// Recreate host-only timer anchors and derive SCI without injecting an edge.
     #[cfg(feature = "std")]
     pub(crate) fn post_restore_snapshot_v3(&mut self, system_ticks: u64) -> bool {
@@ -623,6 +639,23 @@ impl BxAcpiCtrl {
 
     /// Reset the ACPI controller.
     /// Bochs: bx_acpi_ctrl_c::reset() (acpi.cc)
+    /// The chipset store this controller is asking for, if any.
+    ///
+    /// Bochs acpi.cc PM1_CNT suspend-to-ram (S3) calls `DEV_cmos_set_reg(0xF,
+    /// 0xFE)` — the shutdown-status byte the BIOS reads on the resume path —
+    /// before requesting the hardware reset. A device reaches only its own
+    /// state, so the store is described here and performed by the chipset.
+    pub(crate) fn take_pending_effect(
+        &mut self,
+    ) -> Option<rusty_box_devices::api::ChipsetEffect> {
+        core::mem::take(&mut self.suspend_to_ram_pending).then_some(
+            rusty_box_devices::api::ChipsetEffect::CmosByte {
+                index: 0x0F,
+                value: 0xFE,
+            },
+        )
+    }
+
     pub fn reset(&mut self) {
         // PCI command/status (acpi.cc)
         self.pci_conf[0x04] = 0x00;
@@ -838,6 +871,35 @@ impl BxAcpiCtrl {
         self.overflow_remaining_from_usec(self.live_time_usec(system_ticks))
     }
 
+    /// The device's single scheduler timer — the PM-clock overflow.
+    pub(crate) const OVERFLOW_TIMER_LOCAL: u16 = 0;
+
+    #[inline]
+    const fn overflow_timer_key() -> rusty_box_devices::api::TimerKey {
+        rusty_box_devices::api::TimerKey {
+            device: rusty_box_devices::api::DeviceKind::Acpi,
+            local: Self::OVERFLOW_TIMER_LOCAL,
+        }
+    }
+
+    /// Publish the SCI line and the freshly predicted overflow deadline.
+    ///
+    /// Bochs acpi.cc re-evaluates both after every PM1 register access, so the
+    /// guest observes them before execution resumes; here they land on the
+    /// interrupt and timer capabilities directly rather than being latched.
+    fn drain_effects(
+        &mut self,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+        delay_usec: Option<u64>,
+    ) {
+        ctx.irq
+            .set_level(rusty_box_devices::api::IrqLine(9), self.irq9_level);
+        match delay_usec {
+            Some(delay) => ctx.timers.arm_oneshot_usec(Self::overflow_timer_key(), delay),
+            None => ctx.timers.cancel(Self::overflow_timer_key()),
+        }
+    }
+
     /// Service the ACPI PM-overflow timer owner and return a rearm delay.
     ///
     /// A realtime pc-system deadline is only a prediction. If its callback is
@@ -859,6 +921,19 @@ impl BxAcpiCtrl {
     /// Bochs: set_irq_level() (acpi.cc)
     fn set_irq_level(&mut self, level: bool) {
         self.irq9_level = level;
+    }
+
+    /// The host pressed the machine's power button.
+    ///
+    /// Bochs acpi.cc raises `PWRBTN_STS` and re-evaluates SCI, which is all a
+    /// power button physically does: an ACPI-aware guest sees the status bit,
+    /// takes the interrupt if it enabled `PWRBTN_EN`, and decides for itself
+    /// whether to shut down. A guest that ignores it keeps running — which is
+    /// the behaviour a real machine has, and the reason this cannot be a
+    /// "power off" verb.
+    pub(crate) fn press_power_button(&mut self, system_ticks: u64) {
+        self.pmsts |= PmStatus::PWRBTN_STS.bits();
+        self.pm_update_sci(system_ticks);
     }
 
     /// Handle SMI command (ACPI enable/disable).
@@ -1114,20 +1189,23 @@ impl BxAcpiCtrl {
         }
     }
 
-    // ─── PCI Configuration Space ─────────────────────────────────────────
+}
+
+// ─── PCI Configuration Space ─────────────────────────────────────────────
+
+impl rusty_box_devices::pci::PciDevice for BxAcpiCtrl {
+    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 3);
+    type WriteEffects = AcpiWriteEffects;
 
     /// Write to PCI configuration space.
     /// Bochs: pci_write_handler() (acpi.cc)
-    ///
-    /// Returns (pm_base_changed, sm_base_changed) to signal that the emulator
-    /// should re-register I/O ports.
-    pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> (bool, bool) {
+    fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> AcpiWriteEffects {
         let mut pm_base_change = false;
         let mut sm_base_change = false;
 
         // Addresses 0x10-0x33 are ignored (BAR region) — acpi.cc
         if (0x10..0x34).contains(&address) {
-            return (false, false);
+            return AcpiWriteEffects::default();
         }
 
         for i in 0..io_len as usize {
@@ -1213,11 +1291,14 @@ impl BxAcpiCtrl {
             }
         }
 
-        (pm_base_change, sm_base_change)
+        AcpiWriteEffects {
+            pm_base_changed: pm_base_change,
+            sm_base_changed: sm_base_change,
+        }
     }
 
     /// Read from PCI configuration space.
-    pub fn pci_read(&self, address: u8, io_len: u8) -> u32 {
+    fn pci_read(&self, address: u8, io_len: u8) -> u32 {
         let mut value: u32 = 0;
         for i in 0..io_len as usize {
             let addr = address as usize + i;
@@ -1228,6 +1309,9 @@ impl BxAcpiCtrl {
         value
     }
 
+}
+
+impl BxAcpiCtrl {
     /// Check if an I/O port address falls within the PM base range.
     pub fn is_pm_port(&self, port: u16) -> bool {
         self.pm_base != 0 && (port as u32 & 0xFFC0) == self.pm_base
@@ -1277,11 +1361,95 @@ fn muldiv64(a: u64, b: u32, c: u32) -> u64 {
     (res_hi << 32) | res_lo
 }
 
+// ─── Device-API conversion ───────────────────────────────────────────────────
+
+impl rusty_box_devices::api::PioDevice for BxAcpiCtrl {
+    fn pio_read(
+        &mut self,
+        port: u16,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+    ) -> u32 {
+        let value = self.read(port, len.bytes(), ctx.clock.now().ticks());
+        let delay = self.overflow_delay_usec(ctx.clock.now().ticks());
+        self.drain_effects(ctx, delay);
+        value
+    }
+
+    fn pio_write(
+        &mut self,
+        port: u16,
+        value: u32,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+    ) {
+        self.write(port, value, len.bytes(), ctx.clock.now().ticks());
+        let delay = self.overflow_delay_usec(ctx.clock.now().ticks());
+        self.drain_effects(ctx, delay);
+    }
+}
+
+impl rusty_box_devices::api::TimedDevice for BxAcpiCtrl {
+    /// The PM clock is free-running, so a coalesced expiry is serviced once
+    /// per elapsed period — Bochs acpi.cc re-arms from inside the callback and
+    /// each pass re-predicts the next overflow.
+    fn timer_fired(
+        &mut self,
+        _local: u16,
+        fires: u32,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+    ) {
+        let mut delay = None;
+        for _ in 0..fires {
+            delay = self.overflow_timer(ctx.clock.now().ticks());
+        }
+        self.drain_effects(ctx, delay);
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_box_devices::pci::PciDevice;
+
+    /// A power button is a request the guest may refuse, and the guest says
+    /// whether it wants to hear about it by setting `PWRBTN_EN`. Pressing it
+    /// always raises the status bit — that is the button being pressed — but
+    /// raises SCI only for a guest that asked for the interrupt.
+    ///
+    /// Getting this wrong in the permissive direction would interrupt a guest
+    /// that never armed the button; in the strict direction it would drop the
+    /// press entirely and an ACPI-aware guest would never shut down.
+    #[test]
+    fn the_power_button_interrupts_only_a_guest_that_armed_it() {
+        let mut acpi = BxAcpiCtrl::new();
+        acpi.pmen = 0;
+
+        acpi.press_power_button(0);
+
+        assert_ne!(
+            acpi.pmsts & PmStatus::PWRBTN_STS.bits(),
+            0,
+            "the press is recorded whether or not the guest is listening"
+        );
+        assert!(
+            !acpi.irq9_level,
+            "a guest that never set PWRBTN_EN must not be interrupted"
+        );
+
+        let mut armed = BxAcpiCtrl::new();
+        armed.pmen = PmEnable::PWRBTN_EN.bits();
+
+        armed.press_power_button(0);
+
+        assert_ne!(armed.pmsts & PmStatus::PWRBTN_STS.bits(), 0);
+        assert!(
+            armed.irq9_level,
+            "a guest that armed the button must take the SCI"
+        );
+    }
 
     #[test]
     fn test_acpi_new() {
@@ -1387,9 +1555,14 @@ mod tests {
         // Write PM base = 0xB000 via PCI config 0x40-0x43
         // Byte at 0x40: (0x00 & 0xC0) | 0x01 = 0x01
         // Byte at 0x41: 0xB0
-        acpi.pci_write(0x40, 0x01, 1); // Low byte with I/O indicator
-        let (changed, _) = acpi.pci_write(0x41, 0xB0, 1);
-        assert!(changed);
+        // Low byte with the I/O indicator: the window is still at 0, so
+        // nothing has moved yet.
+        assert_eq!(
+            acpi.pci_write(0x40, 0x01, 1),
+            AcpiWriteEffects::default()
+        );
+        let effects = acpi.pci_write(0x41, 0xB0, 1);
+        assert!(effects.pm_base_changed);
         assert_eq!(acpi.pm_base, 0xB000);
     }
 
@@ -1444,7 +1617,11 @@ mod tests {
         assert!(!acpi.smi_request_pending);
 
         // The BIOS smm_init: pci_config_writel(d, 0x58, value | (1 << 25)).
-        acpi.pci_write(0x58, 1 << 25, 4);
+        // 0x58 is not a BAR, so nothing outside the device has to move.
+        assert_eq!(
+            acpi.pci_write(0x58, 1 << 25, 4),
+            AcpiWriteEffects::default()
+        );
         acpi.generate_smi(0x00);
         assert!(acpi.smi_request_pending, "APMC_EN set: SMI delivered");
 
@@ -1510,25 +1687,31 @@ mod tests {
         let mut acpi = BxAcpiCtrl::new();
 
         // Establish a real PM base first.
-        acpi.pci_write(0x40, 0x0000_B000, 4);
+        assert!(acpi.pci_write(0x40, 0x0000_B000, 4).pm_base_changed);
         assert_eq!(acpi.pm_base, 0xB000);
 
         // All-ones size probe must NOT relocate the window.
-        let (pm_changed, _) = acpi.pci_write(0x40, 0xFFFF_FFFF, 4);
-        assert!(!pm_changed, "a size probe must not signal a base change");
+        let effects = acpi.pci_write(0x40, 0xFFFF_FFFF, 4);
+        assert!(
+            !effects.pm_base_changed,
+            "a size probe must not signal a base change"
+        );
         assert_eq!(acpi.pm_base, 0xB000, "PM window must stay put");
 
         // Re-writing the same base is also not a change.
-        let (pm_changed, _) = acpi.pci_write(0x40, 0x0000_B000, 4);
-        assert!(!pm_changed);
+        let effects = acpi.pci_write(0x40, 0x0000_B000, 4);
+        assert!(!effects.pm_base_changed);
         assert_eq!(acpi.pm_base, 0xB000);
 
         // The SM BAR behaves identically (16-port alignment -> 0xFFF0 probe).
-        acpi.pci_write(0x90, 0x0000_B100, 4);
+        assert!(acpi.pci_write(0x90, 0x0000_B100, 4).sm_base_changed);
         let sm_base = acpi.sm_base;
         assert_eq!(sm_base, 0xB100);
-        let (_, sm_changed) = acpi.pci_write(0x90, 0xFFFF_FFFF, 4);
-        assert!(!sm_changed, "a size probe must not signal a base change");
+        let effects = acpi.pci_write(0x90, 0xFFFF_FFFF, 4);
+        assert!(
+            !effects.sm_base_changed,
+            "a size probe must not signal a base change"
+        );
         assert_eq!(acpi.sm_base, 0xB100, "SM window must stay put");
     }
 

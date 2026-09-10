@@ -7,8 +7,7 @@
 //! This file handles VEX.L=1 (256-bit) and EVEX-specific instructions.
 
 use super::{
-    cpu::{BxCpuC, Exception},
-    cpuid::BxCpuIdTrait,
+    cpu::Exception,
     decoder::{features::X86Feature, BxSegregs, Instruction},
     softfloat3e::{
         f128::{SOFTFLOAT_MULADD_SUB_C, SOFTFLOAT_MULADD_SUB_PROD},
@@ -21,6 +20,29 @@ use super::{
     sse_fp::mxcsr_to_softfloat_status_word,
     xmm::{BxPackedXmmRegister, BxPackedYmmRegister, BxPackedZmmRegister},
 };
+
+/// Bochs sse_pfp.cc `softfloat_status_word_rc_override` — on a register
+/// operand with EVEX.b, L'L is the embedded rounding mode rather than the
+/// vector length, and every exception is both suppressed and masked (the
+/// SAE half of "static rounding, suppress all exceptions").
+///
+/// A free function rather than a method: it reads only the instruction, never
+/// CPU state, so the `&self` it used to take was vestigial. Keeping it off the
+/// CPU is what lets the AVX handlers move onto `ExecCtx` while `sse_pfp`, which
+/// shares this helper, stays where it is.
+#[inline]
+pub(super) fn softfloat_rc_override(
+    status: &mut crate::cpu::softfloat3e::softfloat::SoftFloatStatus,
+    instr: &Instruction,
+) {
+    if instr.mod_c0() && instr.get_evex_b() != 0 && instr.get_vl() == 2 {
+        status.softfloat_rounding_mode = instr.get_rc();
+        status.softfloat_suppress_exception =
+            crate::cpu::softfloat3e::softfloat::ALL_EXCEPTIONS_MASK;
+        status.softfloat_exception_masks =
+            crate::cpu::softfloat3e::softfloat::ALL_EXCEPTIONS_MASK;
+    }
+}
 
 #[derive(Clone, Copy)]
 enum VexFpLogicalOp {
@@ -186,7 +208,7 @@ impl AMX {
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VZEROUPPER / VZEROALL (VEX.0F 77)
     // ========================================================================
@@ -2489,7 +2511,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         if self.scalar_element_mask(instr) {
             let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             let v = result.xmm32u(0);
             let h = self.read_xmm_reg(instr.src2()).xmm32u(0);
             let w = if instr.mod_c0() {
@@ -2528,7 +2550,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         if self.scalar_element_mask(instr) {
             let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             let v = result.xmm64u(0);
             let h = self.read_xmm_reg(instr.src2()).xmm64u(0);
             let w = if instr.mod_c0() {
@@ -2549,25 +2571,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             self.write_xmm_reg(dst_idx, result);
             Ok(())
-        }
-    }
-
-    /// Bochs sse_pfp.cc `softfloat_status_word_rc_override` — on a register
-    /// operand with EVEX.b, L'L is the embedded rounding mode rather than the
-    /// vector length, and every exception is both suppressed and masked (the
-    /// SAE half of "static rounding, suppress all exceptions").
-    #[inline]
-    pub(super) fn softfloat_rc_override(
-        &self,
-        status: &mut crate::cpu::softfloat3e::softfloat::SoftFloatStatus,
-        instr: &Instruction,
-    ) {
-        if instr.mod_c0() && instr.get_evex_b() != 0 && instr.get_vl() == 2 {
-            status.softfloat_rounding_mode = instr.get_rc();
-            status.softfloat_suppress_exception =
-                crate::cpu::softfloat3e::softfloat::ALL_EXCEPTIONS_MASK;
-            status.softfloat_exception_masks =
-                crate::cpu::softfloat3e::softfloat::ALL_EXCEPTIONS_MASK;
         }
     }
 

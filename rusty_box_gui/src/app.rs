@@ -10,7 +10,41 @@ use std::sync::{
     {Arc, Mutex},
 };
 
-use egui::{Color32, RichText, Stroke};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::destination::{SidebarAction, VmBarAction};
+use crate::shell::destination::{Destination, ShellPage};
+use crate::shell::sidebar::VmLibraryEntry;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::theme::{SPACE_ITEM, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_DISPLAY};
+use crate::shell::theme::{
+    configure_shell_style, shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED,
+    BG_BASE, BG_PANEL, SPACE_GROUP, SPACE_PAGE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    TEXT_TITLE,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::vm_bar::VmBarState;
+#[cfg(target_arch = "wasm32")]
+use crate::shell::widgets::disabled_tile;
+#[cfg(target_os = "android")]
+use crate::shell::widgets::hairline_below;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::widgets::{
+    action_tile_enabled, hairline_above, home_fact, path_field_width, selection_row, status_text,
+    RowMark, ShellStateBadge, BROWSE, HOME_FACT_GAP, ROOT_INDENT,
+};
+use crate::shell::widgets::{
+    action_tile, field_row, metadata_text, page_header, primary_button, status_dot,
+    ActionTileWeight,
+};
+#[cfg(target_arch = "wasm32")]
+use egui::Color32;
+use egui::RichText;
+#[cfg(target_os = "android")]
+use egui::Stroke;
+// The wasm build drives the machine directly from the frame loop below; the
+// native build hands it to a runner thread instead.
+#[cfg(target_arch = "wasm32")]
+use rusty_box::emulator::RunBudget;
 use rusty_box::params::{
     BxParams, BX_CPU_CORES_LIMIT, BX_CPU_HT_THREADS_LIMIT, BX_CPU_PROCESSORS_LIMIT,
     BX_MAX_SMP_THREADS_SUPPORTED,
@@ -21,13 +55,6 @@ use rusty_box_bximage::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use rusty_box_bximage::{create_flat_hard_disk, create_floppy, ExistingFilePolicy};
-
-const BG_BASE: Color32 = Color32::from_rgb(0x0B, 0x0F, 0x14);
-const BG_PANEL: Color32 = Color32::from_rgb(0x11, 0x18, 0x21);
-const BG_CARD: Color32 = Color32::from_rgb(0x17, 0x21, 0x2B);
-const STROKE_HAIRLINE: Color32 = Color32::from_rgb(0x26, 0x34, 0x43);
-const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xE8, 0xEE, 0xF5);
-const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x98, 0xA8);
 
 /// Common pre-boot VBE resolutions offered by the Display panel picker.
 const VGA_MODE_PRESETS: &[(u16, u16)] = &[
@@ -44,10 +71,12 @@ fn vga_mode_label(mode: Option<crate::config::VgaMode>) -> String {
         Some(mode) => format!("{}×{} @ {}bpp", mode.width, mode.height, mode.bpp),
     }
 }
-const ACCENT_CYAN: Color32 = Color32::from_rgb(0x46, 0xD9, 0xC7);
-const ACCENT_BLUE: Color32 = Color32::from_rgb(0x6A, 0xA8, 0xFF);
-const ACCENT_AMBER: Color32 = Color32::from_rgb(0xF2, 0xB8, 0x4B);
-const ACCENT_RED: Color32 = Color32::from_rgb(0xFF, 0x5C, 0x6C);
+
+/// The device list takes a fixed column; the detail card takes the rest.
+/// A card's width is the layout's decision, never the card's own.
+#[cfg(not(target_arch = "wasm32"))]
+const HARDWARE_LIST_WIDTH: f32 = 150.0;
+
 #[cfg(target_arch = "wasm32")]
 const BROWSER_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -185,6 +214,8 @@ struct NativeVmSettings {
     boot_order: Vec<crate::args::BootDevice>,
     pci: bool,
     sync_slowdown: bool,
+    /// Which engine retires the guest's instructions.
+    engine: crate::config::Engine,
     max_instructions: u64,
     log_level: crate::args::LogLevel,
     bios_path: String,
@@ -222,6 +253,7 @@ impl NativeVmSettings {
             boot_order: config.boot_order.clone(),
             pci: config.pci,
             sync_slowdown: config.sync_slowdown,
+            engine: config.engine,
             max_instructions: if config.max_instructions == u64::MAX {
                 0
             } else {
@@ -237,7 +269,13 @@ impl NativeVmSettings {
             disk_path: disk.map_or_else(String::new, |disk| disk.path.display().to_string()),
             disk_channel: disk.map_or(0, |disk| disk.channel),
             disk_drive: disk.map_or(0, |disk| disk.drive),
-            disk_chs_override: None,
+            // The geometry the configuration already resolved, carried rather
+            // than re-derived. Detecting it a second time here is a second
+            // answer for the same disk, and the two disagree whenever the
+            // image's sector count is not a multiple of the detected heads
+            // times sectors-per-track: the tail of the image becomes
+            // unreachable, which is where a boot loader keeps its map.
+            disk_chs_override: disk.map(|disk| disk.geometry),
             disk_creation: disk.and_then(|disk| disk.creation.clone()),
             cdrom_enabled: cdrom.is_some(),
             cdrom_path: cdrom.map_or_else(String::new, |cdrom| cdrom.path.display().to_string()),
@@ -267,6 +305,7 @@ impl NativeVmSettings {
             })?;
         config.pci = self.pci;
         config.sync_slowdown = self.sync_slowdown;
+        config.engine = self.engine;
         config.max_instructions = if self.max_instructions == 0 {
             u64::MAX
         } else {
@@ -418,14 +457,6 @@ impl NativeVmProfile {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ShellPage {
-    Home,
-    Console,
-    Hardware,
-    Images,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HardwareDevice {
     Memory,
     Processors,
@@ -457,46 +488,10 @@ impl HardwareDevice {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VmLibraryEntry {
-    name: String,
-    boot: String,
-    memory: String,
-    disk: String,
-    cdrom: String,
-}
-
-impl VmLibraryEntry {
-    fn new(
-        name: impl Into<String>,
-        boot: impl Into<String>,
-        memory: impl Into<String>,
-        disk: impl Into<String>,
-        cdrom: impl Into<String>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            boot: boot.into(),
-            memory: memory.into(),
-            disk: disk.into(),
-            cdrom: cdrom.into(),
-        }
-    }
-
-    fn matches_filter(&self, filter: &str) -> bool {
-        filter.is_empty()
-            || self.name.to_ascii_lowercase().contains(filter)
-            || self.boot.to_ascii_lowercase().contains(filter)
-            || self.disk.to_ascii_lowercase().contains(filter)
-            || self.cdrom.to_ascii_lowercase().contains(filter)
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct ShellChrome {
-    selected_page: ShellPage,
+    destination: Destination,
     selected_hardware: HardwareDevice,
-    selected_vm: usize,
     vm_library: Vec<VmLibraryEntry>,
     library_filter: String,
     show_serial: bool,
@@ -507,9 +502,8 @@ pub(crate) struct ShellChrome {
 impl Default for ShellChrome {
     fn default() -> Self {
         Self {
-            selected_page: ShellPage::Home,
+            destination: Destination::default(),
             selected_hardware: HardwareDevice::Memory,
-            selected_vm: 0,
             vm_library: Vec::new(),
             library_filter: String::new(),
             show_serial: true,
@@ -520,6 +514,19 @@ impl Default for ShellChrome {
 }
 
 impl ShellChrome {
+    pub(crate) fn page(&self) -> ShellPage {
+        self.destination.page()
+    }
+
+    pub(crate) fn selected_vm(&self) -> usize {
+        self.destination.vm()
+    }
+
+    /// Moves to a page of the VM already shown.
+    pub(crate) fn go_to(&mut self, page: ShellPage) {
+        self.destination = self.destination.select_page(page);
+    }
+
     fn with_library(vm_library: Vec<VmLibraryEntry>) -> Self {
         Self {
             vm_library,
@@ -539,11 +546,6 @@ impl ShellChrome {
 
 fn shell_should_draw_library(chrome: &ShellChrome) -> bool {
     chrome.show_library
-}
-
-#[cfg(test)]
-fn shell_menu_labels() -> [&'static str; 4] {
-    ["File", "Edit", "VM", "Help"]
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -741,39 +743,6 @@ pub(crate) fn status_snapshot(
     }
 }
 
-fn configure_shell_style(ctx: &egui::Context) {
-    use egui::{style::Selection, Theme, ThemePreference, Vec2};
-
-    ctx.set_theme(ThemePreference::Dark);
-    ctx.style_mut_of(Theme::Dark, |style| {
-        style.visuals.panel_fill = BG_BASE;
-        style.visuals.window_fill = BG_PANEL;
-        style.visuals.extreme_bg_color = Color32::from_rgb(0x07, 0x0A, 0x0E);
-        style.visuals.hyperlink_color = ACCENT_BLUE;
-        style.visuals.text_cursor.stroke.color = ACCENT_CYAN;
-        style.visuals.selection = Selection {
-            bg_fill: Color32::from_rgb(0x1E, 0x5F, 0x62),
-            stroke: Stroke::new(1.0_f32, ACCENT_CYAN),
-        };
-        style.visuals.widgets.noninteractive.bg_fill = BG_PANEL;
-        style.visuals.widgets.inactive.bg_fill = BG_CARD;
-        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(0x1D, 0x2A, 0x36);
-        style.visuals.widgets.active.bg_fill = Color32::from_rgb(0x21, 0x35, 0x43);
-        style.visuals.widgets.inactive.fg_stroke.color = TEXT_PRIMARY;
-        style.visuals.widgets.hovered.fg_stroke.color = Color32::WHITE;
-        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-        style.spacing.button_padding = Vec2::new(12.0, 6.0);
-    });
-}
-
-fn shell_card_frame() -> egui::Frame {
-    egui::Frame::new()
-        .fill(BG_CARD)
-        .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-        .corner_radius(12)
-        .inner_margin(egui::Margin::same(16))
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeShellApp {
     pub fn new(
@@ -847,7 +816,7 @@ impl NativeShellApp {
                 }
             });
         });
-        ui.add_space(12.0);
+        ui.add_space(SPACE_GROUP);
     }
 
     fn take_runtime_error_notice(&mut self) {
@@ -864,7 +833,7 @@ impl NativeShellApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn handle_native_dropped_files(&mut self, ctx: &egui::Context) {
-        if self.chrome.selected_page != ShellPage::Images {
+        if self.chrome.page() != ShellPage::Images {
             return;
         }
 
@@ -885,455 +854,344 @@ impl NativeShellApp {
         }
     }
 
-    fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("vm_menu_bar")
-            .exact_size(32.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::symmetric(12, 4)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let status = self.runtime_status();
-                    let running = status.running;
-                    let start_blocked = running || status.start_pending;
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Open Console").clicked() {
-                            self.chrome.selected_page = ShellPage::Console;
-                            ui.close();
-                        }
-                        if ui.button("Duplicate VM Profile").clicked() {
-                            self.duplicate_selected_profile();
-                            ui.close();
-                        }
-                        if ui.button("Create Disk Image").clicked() {
-                            self.chrome.selected_page = ShellPage::Images;
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button("Quit").clicked() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.menu_button("Edit", |ui| {
-                        if ui.button("Clear Library Search").clicked() {
-                            self.chrome.library_filter.clear();
-                            ui.close();
-                        }
-                    });
-                    ui.menu_button("VM", |ui| {
-                        if ui
-                            .add_enabled(!start_blocked, egui::Button::new("Power On"))
-                            .clicked()
-                        {
-                            self.start_vm();
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(running, egui::Button::new("Power Off"))
-                            .clicked()
-                        {
-                            self.request_power_off();
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(running, egui::Button::new("Restart VM"))
-                            .clicked()
-                        {
-                            self.request_reset();
-                            ui.close();
-                        }
-                    });
-                    ui.menu_button("Input", |ui| {
-                        if ui
-                            .add_enabled(running, egui::Button::new("Send Ctrl+Alt+Del"))
-                            .clicked()
-                        {
-                            self.emulator.send_ctrl_alt_del();
-                            ui.close();
-                        }
-                        let captured = self.emulator.mouse_captured();
-                        let label = if captured {
-                            "Release Mouse"
-                        } else {
-                            "Capture Mouse"
-                        };
-                        if ui.add_enabled(running, egui::Button::new(label)).clicked() {
-                            self.emulator.toggle_mouse_capture();
-                            ui.close();
-                        }
-                    });
-                    ui.menu_button("Help", |ui| {
-                        if ui.button("About Rusty Box Workstation").clicked() {
-                            self.chrome.show_about = true;
-                            ui.close();
-                        }
-                    });
-                    ui.separator();
-                    self.nav_button(ui, ShellPage::Home, "Home");
-                    self.nav_button(ui, ShellPage::Console, "Console");
-                    self.nav_button(ui, ShellPage::Hardware, "Hardware");
-                    self.nav_button(ui, ShellPage::Images, "Images");
-                    if ui
-                        .add_enabled(!start_blocked, egui::Button::new("Power On"))
-                        .clicked()
-                    {
-                        self.start_vm();
-                    }
-                });
-            });
+    /// Draws the VM bar and acts on its click. The bar reports what was asked
+    /// for; the verbs that change the machine's state go through the same
+    /// methods every other surface uses, so the bar cannot reach a state the
+    /// rest of the shell cannot.
+    fn draw_vm_bar(&mut self, ui: &mut egui::Ui) {
+        let status = self.runtime_status();
+        let action = crate::shell::vm_bar::draw_vm_bar(
+            ui,
+            VmBarState {
+                name: &self.vm_info.name,
+                badge: shell_state_badge(&status, self.has_error_notice()),
+                running: status.running,
+                start_pending: status.start_pending,
+                on_console: self.chrome.page() == ShellPage::Console,
+                serial_shown: self.chrome.show_serial,
+                mouse_captured: self.emulator.mouse_captured(),
+            },
+        );
+        match action {
+            None => {}
+            Some(VmBarAction::ToggleSidebar) => {
+                self.chrome.show_library = !self.chrome.show_library;
+            }
+            Some(VmBarAction::PowerOn) => self.start_vm(),
+            Some(VmBarAction::PowerOff) => self.request_power_off(),
+            Some(VmBarAction::Restart) => self.request_reset(),
+            Some(VmBarAction::ToggleSerial) => {
+                self.chrome.show_serial = !self.chrome.show_serial;
+            }
+            Some(VmBarAction::ToggleMouseCapture) => self.emulator.toggle_mouse_capture(),
+            Some(VmBarAction::SendCtrlAltDel) => self.emulator.send_ctrl_alt_del(),
+            Some(VmBarAction::ShowAbout) => self.chrome.show_about = true,
+            Some(VmBarAction::Quit) => {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
     }
 
-    fn draw_toolbar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("vm_toolbar")
-            .exact_size(46.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(0x0D, 0x13, 0x1A))
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::symmetric(14, 6)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let status = self.runtime_status();
-                    let running = status.running;
-                    let start_blocked = running || status.start_pending;
-                    let primary = if running {
-                        "▶ Console"
-                    } else if status.start_pending {
-                        "▶ Starting…"
-                    } else {
-                        "▶ Power On"
-                    };
-                    if ui
-                        .add_enabled(running || !start_blocked, egui::Button::new(primary))
-                        .clicked()
-                    {
-                        if running {
-                            self.chrome.selected_page = ShellPage::Console;
-                        } else {
-                            self.start_vm();
-                        }
-                    }
-                    if ui
-                        .add_enabled(running, egui::Button::new("■ Power Off"))
-                        .clicked()
-                    {
-                        self.request_power_off();
-                    }
-                    if ui
-                        .add_enabled(running, egui::Button::new("↻ Restart VM"))
-                        .clicked()
-                    {
-                        self.request_reset();
-                    }
-                    if ui.button("▣ Hardware").clicked() {
-                        self.chrome.selected_page = ShellPage::Hardware;
-                    }
-                    if ui.button("＋ New Image").clicked() {
-                        self.chrome.selected_page = ShellPage::Images;
-                    }
-                    ui.checkbox(&mut self.chrome.show_library, "Library");
-                    ui.checkbox(&mut self.chrome.show_serial, "Serial");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(&self.vm_info.name)
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                    });
-                });
-            });
+    /// Draws the tree and acts on its click. A page of the VM already shown is
+    /// a move; a different VM is a profile switch, which goes through
+    /// `select_profile` so that profile's config and settings are loaded too.
+    fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
+        let badge = shell_state_badge(&self.runtime_status(), self.has_error_notice());
+        let visible = self.chrome.visible_vm_indices();
+        let action = crate::shell::sidebar::draw_sidebar(
+            ui,
+            &self.chrome.vm_library,
+            &visible,
+            self.chrome.destination,
+            &mut self.chrome.library_filter,
+            badge,
+        );
+        match action {
+            None => {}
+            Some(SidebarAction::DuplicateSelected) => self.duplicate_selected_profile(),
+            Some(SidebarAction::Select(destination)) => {
+                if destination.vm() == self.chrome.destination.vm() {
+                    self.chrome.go_to(destination.page());
+                } else {
+                    self.select_profile(destination.vm());
+                }
+            }
+        }
     }
 
-    fn draw_library(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("vm_library")
-            .resizable(true)
-            .default_size(250.0)
-            .min_size(210.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::same(14)),
-            )
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Library")
-                        .size(16.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                if ui.button("＋ Duplicate VM Profile").clicked() {
-                    self.duplicate_selected_profile();
-                }
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.chrome.library_filter)
-                        .hint_text("Type here to search"),
-                );
-                ui.add_space(8.0);
-                ui.label(RichText::new("▾ My Computer").color(TEXT_MUTED));
-
-                let visible = self.chrome.visible_vm_indices();
-                let mut delete_requested = false;
-                let mut selected_index = None;
-                for index in visible {
-                    let mut delete_clicked = false;
-                    let clicked = {
-                        let entry = &self.chrome.vm_library[index];
-                        let selected = ui.selectable_label(
-                            self.chrome.selected_vm == index,
-                            format!("  ▣ {}", entry.name),
-                        );
-                        if self.chrome.selected_vm == index {
-                            ui.indent(format!("vm_library_metadata_{index}"), |ui| {
-                                ui.label(metadata_text("Boot", &entry.boot));
-                                ui.label(metadata_text("Memory", &entry.memory));
-                                ui.label(metadata_text("Disk", &entry.disk));
-                                ui.label(metadata_text("CD/DVD", &entry.cdrom));
-                                let status = self.runtime_status();
-                                let delete_enabled = !status.running
-                                    && !status.start_pending
-                                    && self.profiles.len() > 1;
-                                delete_clicked = ui
-                                    .add_enabled(
-                                        delete_enabled,
-                                        egui::Button::new("Delete Profile"),
-                                    )
-                                    .clicked();
-                            });
-                        }
-                        selected.clicked()
-                    };
-                    if delete_clicked {
-                        delete_requested = true;
-                    } else if clicked {
-                        selected_index = Some(index);
-                    }
-                }
-                if delete_requested {
-                    self.delete_selected_profile();
-                } else if let Some(index) = selected_index {
-                    self.select_profile(index);
-                }
-                if self.chrome.vm_library.is_empty() {
-                    ui.label(RichText::new("No VM sessions registered").color(TEXT_MUTED));
-                }
-            });
+    /// Whether the shell is currently showing the user an error notice; the
+    /// state badge reads it as a fault until the notice is dismissed.
+    fn has_error_notice(&self) -> bool {
+        self.shell_notice
+            .as_ref()
+            .is_some_and(|notice| notice.kind == ShellNoticeKind::Error)
     }
 
     fn draw_status_strip(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("vm_status_strip")
-            .exact_size(30.0)
+        let strip = egui::Panel::bottom("vm_status_strip")
+            .exact_size(28.0)
             .frame(
                 egui::Frame::new()
                     .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::symmetric(14, 4)),
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     if self.shared.is_poisoned() {
                         status_dot(ui, ACCENT_RED);
-                        ui.label(
-                            RichText::new("State unavailable")
-                                .monospace()
-                                .size(11.0)
-                                .color(ACCENT_RED),
-                        );
+                        ui.label(status_text("State unavailable").color(ACCENT_RED));
                         return;
                     }
 
                     let snapshot = self.runtime_status();
-                    let state = if snapshot.running {
-                        "Running"
-                    } else if snapshot.start_pending {
-                        "Starting"
-                    } else {
-                        "Stopped"
-                    };
-                    let state_color = if snapshot.running {
-                        ACCENT_CYAN
-                    } else if snapshot.start_pending {
-                        ACCENT_AMBER
+                    let badge = shell_state_badge(&snapshot, self.has_error_notice());
+                    status_dot(ui, badge.color);
+                    ui.label(status_text(badge.label).color(badge.color));
+                    ui.separator();
+                    ui.label(
+                        status_text(engine_label(self.settings.engine)).color(TEXT_PRIMARY),
+                    );
+                    ui.separator();
+                    ui.label(
+                        status_text(format!(
+                            "{} MB · {}",
+                            self.vm_info.memory_mib,
+                            cpu_count_label(self.vm_info.cpus)
+                        ))
+                        .color(TEXT_MUTED),
+                    );
+                    ui.separator();
+                    // A published rate is a fact and reads in the data accent;
+                    // an absent one is drawn muted so it cannot pass for zero.
+                    let ips_color = if snapshot.ips > 0 {
+                        ACCENT_BLUE
                     } else {
                         TEXT_MUTED
                     };
-                    status_dot(ui, state_color);
-                    ui.label(
-                        RichText::new(state)
-                            .monospace()
-                            .size(11.0)
-                            .color(state_color),
-                    );
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format_ips_u32(snapshot.ips))
-                            .monospace()
-                            .size(11.0)
-                            .color(ACCENT_BLUE),
-                    );
-                    ui.separator();
-                    let reset = if snapshot.reset_requested {
-                        "Restart queued"
-                    } else {
-                        "Ready"
-                    };
-                    ui.label(
-                        RichText::new(reset)
-                            .monospace()
-                            .size(11.0)
-                            .color(TEXT_MUTED),
-                    );
+                    ui.label(status_text(format_ips_u32(snapshot.ips)).color(ips_color));
+                    if snapshot.reset_requested {
+                        ui.separator();
+                        ui.label(status_text("Restart queued").color(ACCENT_AMBER));
+                    }
                 });
             });
+        hairline_above(ui, strip.response.rect);
+    }
+
+    /// The phone form factor's page navigation. Android hides the sidebar, so
+    /// on a phone the pages are reached from this strip drawn directly above
+    /// them: the current one carries the text weight and an accent rule, the
+    /// rest sit muted.
+    #[cfg(target_os = "android")]
+    fn draw_android_tab_strip(&mut self, ui: &mut egui::Ui) {
+        let strip = egui::Panel::top("vm_tab_strip")
+            .exact_size(36.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(BG_PANEL)
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    self.nav_button(ui, ShellPage::Home, "Home");
+                    self.nav_button(ui, ShellPage::Console, "Console");
+                    self.nav_button(ui, ShellPage::Hardware, "Hardware");
+                    self.nav_button(ui, ShellPage::Images, "Images");
+                });
+            });
+        hairline_below(ui, strip.response.rect);
     }
 
     fn draw_central(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.take_runtime_error_notice();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG_BASE))
-            .show(ui, |ui| match self.chrome.selected_page {
-                ShellPage::Home => self.draw_home_page(ui),
-                ShellPage::Console => self.draw_console_page(ui, frame),
-                ShellPage::Hardware => self.draw_hardware_page(ui),
-                ShellPage::Images => self.draw_images_page(ui),
+            .show(ui, |ui| {
+                #[cfg(target_os = "android")]
+                self.draw_android_tab_strip(ui);
+                match self.chrome.page() {
+                    ShellPage::Home => self.draw_home_page(ui),
+                    ShellPage::Console => self.draw_console_page(ui, frame),
+                    ShellPage::Hardware => self.draw_hardware_page(ui),
+                    ShellPage::Images => self.draw_images_page(ui),
+                }
             });
     }
 
     fn draw_home_page(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            self.draw_shell_notice(ui);
-            ui.add_space(24.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new("RUSTY BOX WORKSTATION")
-                        .size(26.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                ui.label(
-                    RichText::new("Graphite VM library for x86 experiments").color(TEXT_MUTED),
-                );
-            });
-            ui.add_space(24.0);
-            shell_card_frame().show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Selected VM").strong().color(TEXT_PRIMARY));
-                    let mut name_changed = false;
-                    if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm) {
-                        name_changed |= ui
-                            .add(
-                                egui::TextEdit::singleline(&mut profile.name)
-                                    .desired_width(220.0),
-                            )
-                            .changed();
-                    }
-                    if ui.button("Duplicate VM Profile").clicked() {
-                        self.duplicate_selected_profile();
-                    }
+            egui::Frame::new()
+                .inner_margin(egui::Margin::same(SPACE_PAGE))
+                .show(ui, |ui| {
+                    self.draw_shell_notice(ui);
+                    self.draw_home_header(ui);
+                    ui.add_space(SPACE_GROUP);
                     let status = self.runtime_status();
-                    let delete_enabled =
-                        !status.running && !status.start_pending && self.profiles.len() > 1;
-                    if ui
-                        .add_enabled(delete_enabled, egui::Button::new("Delete Profile"))
-                        .clicked()
-                    {
-                        self.delete_selected_profile();
-                    }
-                    if ui.button("Hardware Settings").clicked() {
-                        self.chrome.selected_page = ShellPage::Hardware;
-                    }
-                    if name_changed {
-                        if let Err(message) = self.apply_pending_settings() {
-                            self.shell_notice = Some(ShellNotice::error(message));
-                        }
-                    }
+                    let start_enabled = !status.running && !status.start_pending;
+                    ui.columns(3, |columns| {
+                        action_tile_enabled(
+                            &mut columns[0],
+                            "Power On VM",
+                            "Start this VM with the settings selected below.",
+                            ACCENT_CYAN,
+                            ActionTileWeight::Primary,
+                            start_enabled,
+                            || self.start_vm(),
+                        );
+                        // Cyan is the primary verb's colour and no other tile
+                        // is a verb, so the two shortcuts rest on the hairline.
+                        action_tile(
+                            &mut columns[1],
+                            "Create Disk Image",
+                            "Build bximage-compatible hard disks and floppies.",
+                            STROKE_HAIRLINE,
+                            ActionTileWeight::Secondary,
+                            || self.chrome.go_to(ShellPage::Images),
+                        );
+                        action_tile(
+                            &mut columns[2],
+                            "Hardware Settings",
+                            "Inspect boot media and VM hardware limits.",
+                            STROKE_HAIRLINE,
+                            ActionTileWeight::Secondary,
+                            || self.chrome.go_to(ShellPage::Hardware),
+                        );
+                    });
                 });
-                ui.label(
-                    RichText::new(
-                        "Profiles are independent launch configurations. Power on starts only the selected VM.",
+        });
+    }
+
+    /// The selected VM as the Summary page's headline: its state badge and
+    /// engine, its editable name, the facts the tree already summarises about
+    /// it, and the one profile verb that has no other home — delete. Power
+    /// belongs to the VM bar and duplication to the sidebar's `+`, so neither
+    /// is repeated here.
+    fn draw_home_header(&mut self, ui: &mut egui::Ui) {
+        let status = self.runtime_status();
+        let badge = shell_state_badge(&status, self.has_error_notice());
+        shell_card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                status_dot(ui, badge.color);
+                ui.label(status_text(badge.label).color(badge.color));
+                ui.label(status_text("·").color(TEXT_MUTED));
+                ui.label(status_text(engine_label(self.settings.engine)).color(TEXT_MUTED));
+            });
+            let mut name_changed = false;
+            if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm()) {
+                name_changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut profile.name)
+                            .font(egui::FontId::proportional(TEXT_DISPLAY))
+                            .desired_width(320.0),
                     )
-                    .color(TEXT_MUTED),
-                );
-            });
-            ui.add_space(16.0);
-            let status = self.runtime_status();
-            let start_enabled = !status.running && !status.start_pending;
-            ui.columns(3, |columns| {
-                action_tile_enabled(
-                    &mut columns[0],
-                    "Power On VM",
-                    "Start this VM with the settings selected below.",
-                    ACCENT_CYAN,
-                    start_enabled,
-                    || self.start_vm(),
-                );
-                action_tile(
-                    &mut columns[1],
-                    "Create Disk Image",
-                    "Build bximage-compatible hard disks and floppies.",
-                    ACCENT_BLUE,
-                    || self.chrome.selected_page = ShellPage::Images,
-                );
-                action_tile(
-                    &mut columns[2],
-                    "Hardware Settings",
-                    "Inspect boot media and VM hardware limits.",
-                    ACCENT_AMBER,
-                    || self.chrome.selected_page = ShellPage::Hardware,
-                );
-            });
+                    .changed();
+            }
+            if name_changed {
+                if let Err(message) = self.apply_pending_settings() {
+                    self.shell_notice = Some(ShellNotice::error(message));
+                }
+            }
+            ui.add_space(SPACE_ITEM);
+            if let Some(entry) = self.chrome.vm_library.get(self.chrome.selected_vm()) {
+                let cpus = cpu_count_label(self.vm_info.cpus);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = HOME_FACT_GAP;
+                    home_fact(ui, "Memory", &entry.memory);
+                    home_fact(ui, "Processors", &cpus);
+                    home_fact(ui, "Boot", &entry.boot);
+                    home_fact(ui, "CD/DVD", &entry.cdrom);
+                    home_fact(ui, "Disk", &entry.disk);
+                });
+            }
+            ui.add_space(SPACE_ITEM);
+            let delete_enabled =
+                !status.running && !status.start_pending && self.profiles.len() > 1;
+            if ui
+                .add_enabled(delete_enabled, egui::Button::new("Delete Profile"))
+                .clicked()
+            {
+                self.delete_selected_profile();
+            }
+            ui.label(
+                RichText::new(
+                    "Profiles are independent launch configurations. Power on starts only the selected VM.",
+                )
+                .size(TEXT_CAPTION)
+                .color(TEXT_MUTED),
+            );
         });
     }
 
     fn draw_console_page(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.draw_shell_notice(ui);
+        let status = self.runtime_status();
+        // The embedded view owns the whole console region in every state — the
+        // serial panel stays readable while the VM is off. The shell supplies
+        // only the words for the powered-off display, and none while the
+        // machine runs or is about to.
+        let placeholder = if status.running || status.start_pending {
+            None
+        } else {
+            Some(powered_off_placeholder())
+        };
         self.emulator
-            .ui_embedded_with_serial(ui, frame, self.chrome.show_serial);
+            .ui_embedded_with_serial(ui, frame, self.chrome.show_serial, placeholder);
     }
 
     fn draw_hardware_page(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            self.draw_shell_notice(ui);
-            ui.horizontal(|ui| {
-                shell_card_frame().show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.set_min_width(190.0);
-                        ui.label(RichText::new("Devices").strong().color(TEXT_PRIMARY));
-                        ui.add_space(8.0);
-                        for device in HardwareDevice::ALL {
-                            if ui
-                                .selectable_label(
-                                    self.chrome.selected_hardware == device,
-                                    device.label(),
-                                )
-                                .clicked()
-                            {
-                                self.chrome.selected_hardware = device;
-                            }
-                        }
-                    });
-                });
-                shell_card_frame().show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.set_min_width(520.0);
-                        ui.label(
-                            RichText::new(format!(
-                                "Hardware Summary  |  {}",
-                                self.chrome.selected_hardware.label()
-                            ))
-                            .size(18.0)
-                            .strong(),
-                        );
-                        ui.separator();
-                        self.draw_hardware_detail(ui);
-                    });
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(SPACE_PAGE))
+            .show(ui, |ui| {
+                self.draw_shell_notice(ui);
+                page_header(ui, "Hardware", "Settings apply at power-on.");
+                let height = ui.available_height();
+                // A card stands exactly as tall as its column when its content
+                // is the column less the frame's total margin: the padding and
+                // the hairline on both edges.
+                let card_content_height =
+                    (height - shell_card_frame().total_margin().sum().y).max(0.0);
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(HARDWARE_LIST_WIDTH, height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            // The list is a navigator: it sits on the panel
+                            // surface `selection_row` paints its selection over.
+                            shell_card_frame().fill(BG_PANEL).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.set_min_height(card_content_height);
+                                for device in HardwareDevice::ALL {
+                                    let mark = if self.chrome.selected_hardware == device {
+                                        RowMark::Destination
+                                    } else {
+                                        RowMark::Plain
+                                    };
+                                    if selection_row(ui, device.label(), ROOT_INDENT, mark, None)
+                                        .clicked()
+                                    {
+                                        self.chrome.selected_hardware = device;
+                                    }
+                                }
+                            });
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            shell_card_frame().show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.set_min_height(card_content_height);
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    self.draw_hardware_detail(ui);
+                                });
+                            });
+                        },
+                    );
                 });
             });
-        });
     }
 
     fn draw_hardware_detail(&mut self, ui: &mut egui::Ui) {
@@ -1345,15 +1203,14 @@ impl NativeShellApp {
             HardwareDevice::Memory => {
                 let memory_step = if cfg!(target_os = "android") { 64 } else { 1 };
                 let memory_block_step = if cfg!(target_os = "android") { 64 } else { 1 };
-                hardware_intro(
+                page_header(
                     ui,
                     "Memory",
                     "Edit guest memory, host memory, and allocation block size before power-on.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Guest memory").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Guest memory", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.memory_mib,
                             1,
@@ -1362,11 +1219,10 @@ impl NativeShellApp {
                             editable,
                             memory_step,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Host memory").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Host memory", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.host_memory_mib,
                             1,
@@ -1375,11 +1231,10 @@ impl NativeShellApp {
                             editable,
                             memory_step,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Memory block").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Memory block", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.memory_block_kib,
                             1,
@@ -1388,21 +1243,20 @@ impl NativeShellApp {
                             editable,
                             memory_block_step,
                             None,
-                        );
+                        )
                     });
                 });
             }
             HardwareDevice::Processors => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Virtual CPU",
                     "Select virtual processors and pacing before power-on. Max instructions of 0 means unlimited.",
                 );
                 detail_row(ui, "Virtual processors", &self.vm_info.cpus.to_string());
                 ui.add_enabled_ui(editable, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Sockets").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Sockets", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.cpu_sockets,
                             1,
@@ -1411,15 +1265,10 @@ impl NativeShellApp {
                             editable,
                             1,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Cores / socket")
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Cores / socket", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.cpu_cores,
                             1,
@@ -1428,15 +1277,10 @@ impl NativeShellApp {
                             editable,
                             1,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Threads / core")
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Threads / core", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.cpu_threads,
                             1,
@@ -1445,7 +1289,7 @@ impl NativeShellApp {
                             editable,
                             1,
                             None,
-                        );
+                        )
                     });
                     let total = self
                         .settings
@@ -1460,10 +1304,11 @@ impl NativeShellApp {
                     } else {
                         RichText::new(format!("{total} logical CPUs")).color(TEXT_MUTED)
                     };
-                    ui.label(total_text);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("IPS target").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    field_row(ui, "", |ui| {
+                        ui.label(total_text);
+                    });
+                    changed |= field_row(ui, "IPS target", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.ips,
                             1,
@@ -1472,18 +1317,42 @@ impl NativeShellApp {
                             editable,
                             1_000_000,
                             Some(1_000_000.0),
-                        );
+                        )
                     });
-                    changed |= ui
-                        .checkbox(&mut self.settings.sync_slowdown, "Sync slowdown")
-                        .changed();
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Max instructions")
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                        changed |= draw_u64_field(
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(&mut self.settings.sync_slowdown, "Sync slowdown")
+                            .changed()
+                    });
+                    // Which engine retires the guest's instructions. The
+                    // hypervisor is offered only by a build that carries it on
+                    // a host that has it, because choosing it otherwise is
+                    // refused at power-on rather than quietly downgraded — see
+                    // `RunError::NoHypervisor`.
+                    field_row(ui, "Engine", |ui| {
+                        egui::ComboBox::from_id_salt("Engine")
+                            .selected_text(engine_label(self.settings.engine))
+                            .show_ui(ui, |ui| {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut self.settings.engine,
+                                        crate::config::Engine::Interpreter,
+                                        engine_label(crate::config::Engine::Interpreter),
+                                    )
+                                    .changed();
+                                #[cfg(all(feature = "hv-whp", windows))]
+                                {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut self.settings.engine,
+                                            crate::config::Engine::Whp,
+                                            engine_label(crate::config::Engine::Whp),
+                                        )
+                                        .changed();
+                                }
+                            });
+                    });
+                    changed |= field_row(ui, "Max instructions", |ui| {
+                        draw_u64_field(
                             ui,
                             &mut self.settings.max_instructions,
                             0,
@@ -1492,19 +1361,21 @@ impl NativeShellApp {
                             editable,
                             1_000_000,
                             Some(1.0),
-                        );
+                        )
                     });
                 });
             }
             HardwareDevice::Devices => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Devices",
                     "PCI and boot order apply at the next Power On.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    changed |= ui.checkbox(&mut self.settings.pci, "Enable PCI").changed();
-                    ui.add_space(6.0);
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(&mut self.settings.pci, "Enable PCI").changed()
+                    });
+                    ui.add_space(SPACE_ITEM);
                     ui.label(
                         RichText::new("Boot order (first match boots)")
                             .strong()
@@ -1516,26 +1387,22 @@ impl NativeShellApp {
                     let mut remove: Option<usize> = None;
                     let len = self.settings.boot_order.len();
                     for (index, device) in self.settings.boot_order.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("{}. {device}", index + 1))
-                                    .color(TEXT_PRIMARY),
-                            );
+                        field_row(ui, &format!("{}. {device}", index + 1), |ui| {
                             if ui
-                                .add_enabled(index > 0, egui::Button::new("▲"))
+                                .add_enabled(index > 0, egui::Button::new("⏶"))
                                 .on_hover_text("Move earlier")
                                 .clicked()
                             {
                                 move_up = Some(index);
                             }
                             if ui
-                                .add_enabled(index + 1 < len, egui::Button::new("▼"))
+                                .add_enabled(index + 1 < len, egui::Button::new("⏷"))
                                 .on_hover_text("Move later")
                                 .clicked()
                             {
                                 move_down = Some(index);
                             }
-                            if ui.button("✕").on_hover_text("Remove").clicked() {
+                            if ui.button("×").on_hover_text("Remove").clicked() {
                                 remove = Some(index);
                             }
                         });
@@ -1559,37 +1426,42 @@ impl NativeShellApp {
                     ] {
                         if !self.settings.boot_order.contains(&device) {
                             let attached = self.settings.is_boot_device_attached(device);
-                            if ui
-                                .add_enabled(attached, egui::Button::new(format!("Add {device}")))
-                                .clicked()
-                            {
-                                self.settings.boot_order.push(device);
-                                changed = true;
-                            }
+                            field_row(ui, "", |ui| {
+                                if ui
+                                    .add_enabled(
+                                        attached,
+                                        egui::Button::new(format!("Add {device}")),
+                                    )
+                                    .clicked()
+                                {
+                                    self.settings.boot_order.push(device);
+                                    changed = true;
+                                }
+                            });
                         }
                     }
                 });
                 detail_row(ui, "Effective boot order", &self.vm_info.boot);
             }
             HardwareDevice::HardDisk => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Hard disk",
                     "Attach or detach hard disk media for the next launch.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    changed |= ui
-                        .checkbox(&mut self.settings.disk_enabled, "Enable hard disk")
-                        .changed();
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("Disk path").strong().color(TEXT_PRIMARY));
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(&mut self.settings.disk_enabled, "Enable hard disk")
+                            .changed()
+                    });
+                    field_row(ui, "Disk path", |ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.disk_path)
-                                    .desired_width(360.0),
+                                    .desired_width(path_field_width(ui)),
                             )
                             .changed();
-                        if ui.button("Browse").clicked() {
+                        if ui.button(BROWSE).clicked() {
                             if let Some(path) = pick_native_file() {
                                 self.settings.disk_path = path.display().to_string();
                                 self.settings.disk_enabled = true;
@@ -1597,52 +1469,52 @@ impl NativeShellApp {
                             }
                         }
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("ATA channel").strong().color(TEXT_PRIMARY));
+                    field_row(ui, "ATA channel", |ui| {
                         changed |= ui
                             .add(egui::DragValue::new(&mut self.settings.disk_channel).range(0..=1))
                             .changed();
-                        ui.label(RichText::new("drive").strong().color(TEXT_PRIMARY));
+                        ui.label(RichText::new("drive").color(TEXT_MUTED));
                         changed |= ui
                             .add(egui::DragValue::new(&mut self.settings.disk_drive).range(0..=1))
                             .changed();
                     });
 
                     let mut override_enabled = self.settings.disk_chs_override.is_some();
-                    if ui
-                        .checkbox(&mut override_enabled, "Override CHS geometry")
-                        .on_hover_text(
-                            "Force a specific cylinders/heads/sectors geometry instead of \
-                             auto-detecting it from the image size.",
-                        )
-                        .changed()
-                    {
-                        self.settings.disk_chs_override = override_enabled.then(|| {
-                            self.config.disk.as_ref().map_or(
-                                crate::args::DiskGeometry {
-                                    cylinders: 16_383,
-                                    heads: 16,
-                                    sectors_per_track: 63,
-                                },
-                                |disk| disk.geometry,
+                    field_row(ui, "", |ui| {
+                        if ui
+                            .checkbox(&mut override_enabled, "Override CHS geometry")
+                            .on_hover_text(
+                                "Force a specific cylinders/heads/sectors geometry instead of \
+                                 auto-detecting it from the image size.",
                             )
-                        });
-                        changed = true;
-                    }
+                            .changed()
+                        {
+                            self.settings.disk_chs_override = override_enabled.then(|| {
+                                self.config.disk.as_ref().map_or(
+                                    crate::args::DiskGeometry {
+                                        cylinders: 16_383,
+                                        heads: 16,
+                                        sectors_per_track: 63,
+                                    },
+                                    |disk| disk.geometry,
+                                )
+                            });
+                            changed = true;
+                        }
+                    });
                     if let Some(chs) = &mut self.settings.disk_chs_override {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Cylinders").strong().color(TEXT_PRIMARY));
+                        field_row(ui, "Cylinders", |ui| {
                             changed |= ui
                                 .add(
                                     egui::DragValue::new(&mut chs.cylinders)
                                         .range(1..=(rusty_box_bximage::BOCHS_MAX_CYLINDERS - 1) as u32),
                                 )
                                 .changed();
-                            ui.label(RichText::new("heads").strong().color(TEXT_PRIMARY));
+                            ui.label(RichText::new("heads").color(TEXT_MUTED));
                             changed |= ui
                                 .add(egui::DragValue::new(&mut chs.heads).range(1..=u8::MAX))
                                 .changed();
-                            ui.label(RichText::new("sectors").strong().color(TEXT_PRIMARY));
+                            ui.label(RichText::new("sectors").color(TEXT_MUTED));
                             changed |= ui
                                 .add(
                                     egui::DragValue::new(&mut chs.sectors_per_track)
@@ -1663,28 +1535,28 @@ impl NativeShellApp {
                     detail_row(ui, "Attached disk", "None");
                 }
                 if ui.button("Create disk image").clicked() {
-                    self.chrome.selected_page = ShellPage::Images;
+                    self.chrome.go_to(ShellPage::Images);
                 }
             }
             HardwareDevice::CdDvd => {
-                hardware_intro(
+                page_header(
                     ui,
                     "CD/DVD",
                     "Attach or detach ISO media and optionally boot it first.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    changed |= ui
-                        .checkbox(&mut self.settings.cdrom_enabled, "Enable CD/DVD")
-                        .changed();
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("ISO path").strong().color(TEXT_PRIMARY));
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(&mut self.settings.cdrom_enabled, "Enable CD/DVD")
+                            .changed()
+                    });
+                    field_row(ui, "ISO path", |ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.cdrom_path)
-                                    .desired_width(360.0),
+                                    .desired_width(path_field_width(ui)),
                             )
                             .changed();
-                        if ui.button("Browse").clicked() {
+                        if ui.button(BROWSE).clicked() {
                             if let Some(path) = pick_native_file() {
                                 self.settings.cdrom_path = path.display().to_string();
                                 self.settings.cdrom_enabled = true;
@@ -1692,35 +1564,36 @@ impl NativeShellApp {
                             }
                         }
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("ATA channel").strong().color(TEXT_PRIMARY));
+                    field_row(ui, "ATA channel", |ui| {
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut self.settings.cdrom_channel).range(0..=1),
                             )
                             .changed();
-                        ui.label(RichText::new("drive").strong().color(TEXT_PRIMARY));
+                        ui.label(RichText::new("drive").color(TEXT_MUTED));
                         changed |= ui
                             .add(egui::DragValue::new(&mut self.settings.cdrom_drive).range(0..=1))
                             .changed();
                     });
                     let mut boot_cdrom = self.settings.boot_order.first()
                         == Some(&crate::args::BootDevice::Cdrom);
-                    if ui.checkbox(&mut boot_cdrom, "Boot CD/DVD first").changed() {
-                        // Reposition the CD/DVD within the boot order without
-                        // disturbing the other devices' relative order.
-                        self.settings
-                            .boot_order
-                            .retain(|device| *device != crate::args::BootDevice::Cdrom);
-                        if boot_cdrom {
+                    field_row(ui, "", |ui| {
+                        if ui.checkbox(&mut boot_cdrom, "Boot CD/DVD first").changed() {
+                            // Reposition the CD/DVD within the boot order without
+                            // disturbing the other devices' relative order.
                             self.settings
                                 .boot_order
-                                .insert(0, crate::args::BootDevice::Cdrom);
-                        } else {
-                            self.settings.boot_order.push(crate::args::BootDevice::Cdrom);
+                                .retain(|device| *device != crate::args::BootDevice::Cdrom);
+                            if boot_cdrom {
+                                self.settings
+                                    .boot_order
+                                    .insert(0, crate::args::BootDevice::Cdrom);
+                            } else {
+                                self.settings.boot_order.push(crate::args::BootDevice::Cdrom);
+                            }
+                            changed = true;
                         }
-                        changed = true;
-                    }
+                    });
                 });
                 if let Some(cdrom) = &self.config.cdrom {
                     detail_row(
@@ -1733,92 +1606,99 @@ impl NativeShellApp {
                 }
             }
             HardwareDevice::Display => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Display and ROMs",
                     "BIOS, VGA BIOS, and logging are applied on the next Power On.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("BIOS path").strong().color(TEXT_PRIMARY));
+                    field_row(ui, "BIOS path", |ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.bios_path)
-                                    .desired_width(360.0),
+                                    .desired_width(path_field_width(ui)),
                             )
                             .changed();
-                        if ui.button("Browse").clicked() {
+                        if ui.button(BROWSE).clicked() {
                             if let Some(path) = pick_native_file() {
                                 self.settings.bios_path = path.display().to_string();
                                 changed = true;
                             }
                         }
                     });
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("VGA BIOS path").strong().color(TEXT_PRIMARY));
+                    field_row(ui, "VGA BIOS path", |ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.vga_bios_path)
-                                    .desired_width(360.0),
+                                    .desired_width(path_field_width(ui)),
                             )
                             .changed();
-                        if ui.button("Browse").clicked() {
+                        if ui.button(BROWSE).clicked() {
                             if let Some(path) = pick_native_file() {
                                 self.settings.vga_bios_path = path.display().to_string();
                                 changed = true;
                             }
                         }
                     });
-                    egui::ComboBox::from_label("Log level")
-                        .selected_text(format!("{:?}", self.settings.log_level))
-                        .show_ui(ui, |ui| {
-                            for (level, label) in [
-                                (crate::args::LogLevel::Trace, "trace"),
-                                (crate::args::LogLevel::Debug, "debug"),
-                                (crate::args::LogLevel::Info, "info"),
-                                (crate::args::LogLevel::Warn, "warn"),
-                                (crate::args::LogLevel::Error, "error"),
-                            ] {
-                                changed |= ui
-                                    .selectable_value(&mut self.settings.log_level, level, label)
-                                    .changed();
-                            }
-                        });
+                    field_row(ui, "Log level", |ui| {
+                        egui::ComboBox::from_id_salt("Log level")
+                            .selected_text(format!("{:?}", self.settings.log_level))
+                            .show_ui(ui, |ui| {
+                                for (level, label) in [
+                                    (crate::args::LogLevel::Trace, "trace"),
+                                    (crate::args::LogLevel::Debug, "debug"),
+                                    (crate::args::LogLevel::Info, "info"),
+                                    (crate::args::LogLevel::Warn, "warn"),
+                                    (crate::args::LogLevel::Error, "error"),
+                                ] {
+                                    changed |= ui
+                                        .selectable_value(&mut self.settings.log_level, level, label)
+                                        .changed();
+                                }
+                            });
+                    });
 
-                    egui::ComboBox::from_label("Display resolution")
-                        .selected_text(vga_mode_label(self.settings.vga_mode))
-                        .show_ui(ui, |ui| {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.settings.vga_mode,
-                                    None,
-                                    "Default (VGA / VBE)",
-                                )
-                                .changed();
-                            for &(w, h) in VGA_MODE_PRESETS {
-                                let mode = crate::config::VgaMode {
-                                    width: w,
-                                    height: h,
-                                    bpp: 32,
-                                };
+                    field_row(ui, "Display resolution", |ui| {
+                        egui::ComboBox::from_id_salt("Display resolution")
+                            .selected_text(vga_mode_label(self.settings.vga_mode))
+                            .show_ui(ui, |ui| {
                                 changed |= ui
                                     .selectable_value(
                                         &mut self.settings.vga_mode,
-                                        Some(mode),
-                                        format!("{w}×{h} @ 32bpp"),
+                                        None,
+                                        "Default (VGA / VBE)",
                                     )
                                     .changed();
-                            }
-                        });
-                    ui.label(
-                        RichText::new(
-                            "Raises the VBE ceiling so the guest can select this mode (via GRUB \
-                             gfxpayload / vesafb).",
-                        )
-                        .color(TEXT_MUTED),
-                    );
-                    changed |= ui
-                        .checkbox(
+                                for &(w, h) in VGA_MODE_PRESETS {
+                                    let mode = crate::config::VgaMode {
+                                        width: w,
+                                        height: h,
+                                        bpp: 32,
+                                    };
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut self.settings.vga_mode,
+                                            Some(mode),
+                                            format!("{w}×{h} @ 32bpp"),
+                                        )
+                                        .changed();
+                                }
+                            });
+                    });
+                    field_row(ui, "", |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(
+                                    "Raises the VBE ceiling so the guest can select this mode (via \
+                                     GRUB gfxpayload / vesafb).",
+                                )
+                                .color(TEXT_MUTED),
+                            )
+                            .wrap(),
+                        );
+                    });
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(
                             &mut self.settings.pci_vga,
                             "Register VGA on PCI (experimental KMS / bochs-drm)",
                         )
@@ -1826,7 +1706,8 @@ impl NativeShellApp {
                             "Exposes the adapter as PCI 1234:1111 so Linux bochs-drm can bind for \
                              a full KMS framebuffer. Experimental — verify with a guest boot.",
                         )
-                        .changed();
+                        .changed()
+                    });
                 });
                 detail_row(ui, "Adapter", "VGA text/graphics framebuffer");
                 detail_row(ui, "Applied BIOS", &self.vm_info.bios.display().to_string());
@@ -1836,7 +1717,7 @@ impl NativeShellApp {
                     &format_path_for_summary(self.vm_info.vga_bios.as_deref()),
                 );
                 if ui.button("Open console").clicked() {
-                    self.chrome.selected_page = ShellPage::Console;
+                    self.chrome.go_to(ShellPage::Console);
                 }
             }
         }
@@ -1847,19 +1728,22 @@ impl NativeShellApp {
             }
         }
 
-        ui.add_space(12.0);
+        ui.add_space(SPACE_GROUP);
         ui.separator();
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Save settings to config file").clicked() {
+            if ui
+                .add(primary_button("Save settings to config file"))
+                .clicked()
+            {
                 self.save_settings_to_config_file();
             }
             if let Some(path) = &self.config.config_path {
-                ui.label(RichText::new(format!("→ {}", path.display())).color(TEXT_MUTED));
+                ui.label(metadata_text("Config", &path.display().to_string()));
             }
         });
 
         if !editable {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_ITEM);
             ui.label(RichText::new("Power off before changing VM hardware.").color(ACCENT_AMBER));
         }
     }
@@ -1933,23 +1817,41 @@ impl NativeShellApp {
         }
     }
 
+    /// The phone form factor's navigation. Android hides the sidebar, so on a
+    /// phone this strip is the only way off the page it is drawn on.
+    #[cfg(target_os = "android")]
     fn nav_button(&mut self, ui: &mut egui::Ui, page: ShellPage, label: &str) {
-        if ui
-            .selectable_label(self.chrome.selected_page == page, label)
-            .clicked()
-        {
-            self.chrome.selected_page = page;
+        let selected = self.chrome.page() == page;
+        let text = RichText::new(label)
+            .size(14.0)
+            .color(if selected { TEXT_PRIMARY } else { TEXT_MUTED });
+        let text = if selected { text.strong() } else { text };
+        let response = ui.add(
+            egui::Button::new(text)
+                .frame_when_inactive(false)
+                .min_size(egui::vec2(0.0, ui.available_height())),
+        );
+        if selected {
+            let rect = response.rect;
+            ui.painter().hline(
+                rect.x_range(),
+                rect.bottom() - 1.0,
+                Stroke::new(2.0_f32, ACCENT_CYAN),
+            );
+        }
+        if response.clicked() {
+            self.chrome.go_to(page);
         }
     }
 
     fn apply_pending_settings(&mut self) -> Result<(), String> {
         self.settings.apply_to_config(&mut self.config)?;
-        if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm) {
+        if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm()) {
             profile.config.clone_from(&self.config);
             profile.settings.clone_from(&self.settings);
             self.refresh_selected_profile_metadata()?;
             self.config
-                .clone_from(&self.profiles[self.chrome.selected_vm].config);
+                .clone_from(&self.profiles[self.chrome.selected_vm()].config);
         } else {
             self.vm_info = NativeVmInfo::from_config(&self.config);
         }
@@ -1957,7 +1859,7 @@ impl NativeShellApp {
     }
 
     fn refresh_selected_profile_metadata(&mut self) -> Result<(), String> {
-        let index = self.chrome.selected_vm;
+        let index = self.chrome.selected_vm();
         if index >= self.profiles.len() {
             return Ok(());
         }
@@ -1990,15 +1892,13 @@ impl NativeShellApp {
             self.shell_notice = Some(ShellNotice::error(message));
             return;
         }
-        self.chrome.selected_vm = index;
+        self.chrome.destination = self.chrome.destination.select_vm(index);
         let profile = &self.profiles[index];
         self.config = profile.config.clone();
         self.settings = profile.settings.clone();
         if let Err(message) = self.refresh_selected_profile_metadata() {
             self.shell_notice = Some(ShellNotice::error(message));
-            return;
         }
-        self.chrome.selected_page = ShellPage::Home;
     }
 
     fn duplicate_selected_profile(&mut self) {
@@ -2009,7 +1909,7 @@ impl NativeShellApp {
             self.shell_notice = Some(ShellNotice::error(message));
             return;
         }
-        let base = self.chrome.selected_vm.min(self.profiles.len() - 1);
+        let base = self.chrome.selected_vm().min(self.profiles.len() - 1);
         let name = format!("{} Copy {}", self.profiles[base].name, self.profiles.len());
         let profile = self.profiles[base].duplicate(name);
         self.profiles.push(profile);
@@ -2039,13 +1939,16 @@ impl NativeShellApp {
             return;
         }
 
-        let index = self.chrome.selected_vm.min(self.profiles.len() - 1);
-        self.profiles.remove(index);
-        if index < self.chrome.vm_library.len() {
-            self.chrome.vm_library.remove(index);
+        let removed = self.chrome.selected_vm().min(self.profiles.len() - 1);
+        self.profiles.remove(removed);
+        if removed < self.chrome.vm_library.len() {
+            self.chrome.vm_library.remove(removed);
         }
-        self.chrome.selected_vm = index.min(self.profiles.len() - 1);
-        let profile = &self.profiles[self.chrome.selected_vm];
+        self.chrome.destination = self
+            .chrome
+            .destination
+            .clamped_after_removal(removed, self.profiles.len());
+        let profile = &self.profiles[self.chrome.selected_vm()];
         self.config = profile.config.clone();
         self.settings = profile.settings.clone();
         if let Err(message) = self.refresh_selected_profile_metadata() {
@@ -2056,7 +1959,7 @@ impl NativeShellApp {
     fn start_vm(&mut self) {
         let snapshot = self.runtime_status();
         if snapshot.running {
-            self.chrome.selected_page = ShellPage::Console;
+            self.chrome.go_to(ShellPage::Console);
             return;
         }
         if snapshot.start_pending {
@@ -2075,7 +1978,7 @@ impl NativeShellApp {
             .send(NativeEmulatorCommand::Start(self.config.clone()))
         {
             Ok(()) => {
-                self.chrome.selected_page = ShellPage::Console;
+                self.chrome.go_to(ShellPage::Console);
             }
             Err(_) => {
                 if let Ok(mut display) = self.shared.lock() {
@@ -2115,11 +2018,11 @@ impl NativeShellApp {
                     let start_blocked = running || status.start_pending;
                     ui.menu_button("File", |ui| {
                         if ui.button("Home").clicked() {
-                            self.chrome.selected_page = ShellPage::Home;
+                            self.chrome.go_to(ShellPage::Home);
                             ui.close();
                         }
                         if ui.button("Create Disk Image").clicked() {
-                            self.chrome.selected_page = ShellPage::Images;
+                            self.chrome.go_to(ShellPage::Images);
                             ui.close();
                         }
                         ui.separator();
@@ -2209,7 +2112,7 @@ impl eframe::App for NativeShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.handle_native_dropped_files(ui.ctx());
         #[cfg(target_os = "android")]
-        if self.chrome.selected_page == ShellPage::Console {
+        if self.chrome.page() == ShellPage::Console {
             self.draw_android_console_header(ui);
             self.draw_status_strip(ui);
             self.draw_central(ui, frame);
@@ -2217,10 +2120,9 @@ impl eframe::App for NativeShellApp {
             return;
         }
 
-        self.draw_menu_bar(ui);
-        self.draw_toolbar(ui);
+        self.draw_vm_bar(ui);
         if shell_should_draw_library(&self.chrome) {
-            self.draw_library(ui);
+            self.draw_sidebar(ui);
         }
         self.draw_status_strip(ui);
         self.draw_central(ui, frame);
@@ -2233,97 +2135,99 @@ impl DiskCreatorPanel {
     fn ui_page(&mut self, ui: &mut egui::Ui) -> Option<CreatedImage> {
         let mut created_image = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(12.0);
-            shell_card_frame().show(ui, |ui| {
-                ui.label(
-                    RichText::new("Disk Images")
-                        .size(22.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                ui.label(
-                    RichText::new(
-                        "Create flat hard disks and floppy images using the bximage backend.",
-                    )
-                    .color(TEXT_MUTED),
-                );
-            });
-            ui.add_space(12.0);
+            egui::Frame::new()
+                .inner_margin(egui::Margin::same(SPACE_PAGE))
+                .show(ui, |ui| {
+                    page_header(
+                        ui,
+                        "Disk images",
+                        "Create flat hard disks and floppy images with the bximage backend.",
+                    );
+                    shell_card_frame().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        field_row(ui, "Kind", |ui| {
+                            ui.radio_value(&mut self.kind, CreatorKind::HardDisk, "Hard disk");
+                            ui.radio_value(&mut self.kind, CreatorKind::Floppy, "Floppy");
+                        });
 
-            shell_card_frame().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.kind, CreatorKind::HardDisk, "Hard Disk");
-                    ui.selectable_value(&mut self.kind, CreatorKind::Floppy, "Floppy");
-                });
-                ui.separator();
-
-                #[cfg(not(target_arch = "wasm32"))]
-                ui.horizontal(|ui| {
-                    ui.label("Path");
-                    ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(360.0));
-                    if ui.button("Browse...").clicked() {
-                        self.choose_native_image_path();
-                    }
-                });
-
-                #[cfg(target_arch = "wasm32")]
-                ui.horizontal(|ui| {
-                    ui.label("Filename");
-                    ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(300.0));
-                });
-
-                match self.kind {
-                    CreatorKind::HardDisk => {
-                        ui.horizontal(|ui| {
-                            ui.label("Size");
+                        #[cfg(not(target_arch = "wasm32"))]
+                        field_row(ui, "Path", |ui| {
                             ui.add(
-                                egui::TextEdit::singleline(&mut self.hard_disk_size)
-                                    .hint_text("20G")
-                                    .desired_width(120.0),
+                                egui::TextEdit::singleline(&mut self.path)
+                                    .desired_width(path_field_width(ui)),
                             );
-                            ui.label(
-                                RichText::new("Examples: 10M, 512M, 20G, 512").color(TEXT_MUTED),
+                            if ui.button(BROWSE).clicked() {
+                                self.choose_native_image_path();
+                            }
+                        });
+
+                        #[cfg(target_arch = "wasm32")]
+                        field_row(ui, "Filename", |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.path)
+                                    .desired_width(320.0),
                             );
                         });
-                    }
-                    CreatorKind::Floppy => {
-                        egui::ComboBox::from_label("Floppy format")
-                            .selected_text(self.floppy_format.friendly_label())
-                            .show_ui(ui, |ui| {
-                                for format in FloppyFormat::ALL {
-                                    ui.selectable_value(
-                                        &mut self.floppy_format,
-                                        format,
-                                        format.friendly_label(),
+
+                        match self.kind {
+                            CreatorKind::HardDisk => {
+                                field_row(ui, "Size", |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.hard_disk_size)
+                                            .hint_text("20G")
+                                            .desired_width(120.0),
                                     );
+                                    ui.label(
+                                        RichText::new("Examples: 10M, 512M, 20G, 512")
+                                            .size(TEXT_SECONDARY)
+                                            .color(TEXT_MUTED),
+                                    );
+                                });
+                            }
+                            CreatorKind::Floppy => {
+                                field_row(ui, "Floppy format", |ui| {
+                                    egui::ComboBox::from_id_salt("Floppy format")
+                                        .selected_text(self.floppy_format.friendly_label())
+                                        .show_ui(ui, |ui| {
+                                            for format in FloppyFormat::ALL {
+                                                ui.selectable_value(
+                                                    &mut self.floppy_format,
+                                                    format,
+                                                    format.friendly_label(),
+                                                );
+                                            }
+                                        });
+                                });
+                            }
+                        }
+
+                        #[cfg(not(target_arch = "wasm32"))]
+                        field_row(ui, "", |ui| {
+                            ui.checkbox(&mut self.overwrite, "Overwrite existing file");
+                        });
+
+                        ui.add_space(SPACE_GROUP);
+                        let action = if cfg!(target_arch = "wasm32") {
+                            "Download image"
+                        } else {
+                            "Create image"
+                        };
+                        if ui.add(primary_button(action)).clicked() {
+                            created_image = self.create_image();
+                        }
+
+                        if let Some(status) = &self.status {
+                            match status {
+                                CreatorStatus::Success(message) => {
+                                    ui.colored_label(ACCENT_CYAN, message);
                                 }
-                            });
-                    }
-                }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                ui.checkbox(&mut self.overwrite, "Overwrite existing file");
-
-                let action = if cfg!(target_arch = "wasm32") {
-                    "Download image"
-                } else {
-                    "Create image"
-                };
-                if ui.button(action).clicked() {
-                    created_image = self.create_image();
-                }
-
-                if let Some(status) = &self.status {
-                    match status {
-                        CreatorStatus::Success(message) => {
-                            ui.colored_label(ACCENT_CYAN, message);
+                                CreatorStatus::Error(message) => {
+                                    ui.colored_label(ACCENT_RED, message);
+                                }
+                            }
                         }
-                        CreatorStatus::Error(message) => {
-                            ui.colored_label(ACCENT_RED, message);
-                        }
-                    }
-                }
-            });
+                    });
+                });
         });
         created_image
     }
@@ -2420,7 +2324,7 @@ impl DiskCreatorPanel {
 
 #[cfg(target_arch = "wasm32")]
 type WebEmulator =
-    Box<rusty_box::emulator::Emulator<'static, rusty_box::cpu::core_i7_skylake::Corei7SkylakeX>>;
+    Box<rusty_box::emulator::Emulator>;
 
 #[cfg(target_arch = "wasm32")]
 pub struct WebShellApp {
@@ -2447,6 +2351,9 @@ pub struct WebShellApp {
     frame_count: u64,
     /// Previous PS/2 button bitmask for relative mouse forwarding.
     web_prev_mouse_buttons: u8,
+    /// The modifiers held at the end of the previous frame, so each Shift,
+    /// Ctrl and Alt edge is forwarded once.
+    web_held_modifiers: rusty_box::gui::host_input::HeldModifiers,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2457,14 +2364,11 @@ enum WebBootMode {
 }
 #[cfg(any(test, target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Assembling a machine is one blocking call, so the browser gets a frame to
+/// paint the notice before it runs.
 enum WebStartupStage {
-    CreateEmulator,
-    InitializeMemory,
-    LoadBios,
-    LoadVgaBios,
-    InitializeDevices,
-    AttachMedia,
-    StartEmulator,
+    Announce,
+    BuildMachine,
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -2490,7 +2394,6 @@ enum WebConsoleSurface {
 #[cfg(target_arch = "wasm32")]
 struct WebStartupState {
     stage: WebStartupStage,
-    emulator: Option<WebEmulator>,
     iso_data: Option<Vec<u8>>,
     memory_mib: usize,
     cpu_count: u32,
@@ -2500,8 +2403,7 @@ struct WebStartupState {
 impl WebStartupState {
     fn new(iso_data: Vec<u8>, memory_mib: usize, cpu_count: u32) -> Self {
         Self {
-            stage: WebStartupStage::CreateEmulator,
-            emulator: None,
+            stage: WebStartupStage::Announce,
             iso_data: Some(iso_data),
             memory_mib,
             cpu_count,
@@ -2553,26 +2455,16 @@ const WEB_STARTUP_STEPS_PER_FRAME: usize = 1;
 #[cfg(any(test, target_arch = "wasm32"))]
 fn web_next_startup_stage(stage: WebStartupStage) -> Option<WebStartupStage> {
     match stage {
-        WebStartupStage::CreateEmulator => Some(WebStartupStage::InitializeMemory),
-        WebStartupStage::InitializeMemory => Some(WebStartupStage::LoadBios),
-        WebStartupStage::LoadBios => Some(WebStartupStage::LoadVgaBios),
-        WebStartupStage::LoadVgaBios => Some(WebStartupStage::InitializeDevices),
-        WebStartupStage::InitializeDevices => Some(WebStartupStage::AttachMedia),
-        WebStartupStage::AttachMedia => Some(WebStartupStage::StartEmulator),
-        WebStartupStage::StartEmulator => None,
+        WebStartupStage::Announce => Some(WebStartupStage::BuildMachine),
+        WebStartupStage::BuildMachine => None,
     }
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
 fn web_startup_stage_label(stage: WebStartupStage) -> &'static str {
     match stage {
-        WebStartupStage::CreateEmulator => "Allocating guest memory",
-        WebStartupStage::InitializeMemory => "Allocating guest memory",
-        WebStartupStage::LoadBios => "Loading BIOS",
-        WebStartupStage::LoadVgaBios => "Loading VGA BIOS",
-        WebStartupStage::InitializeDevices => "Initializing devices",
-        WebStartupStage::AttachMedia => "Attaching boot media",
-        WebStartupStage::StartEmulator => "Starting CPU",
+        WebStartupStage::Announce => "Allocating guest memory",
+        WebStartupStage::BuildMachine => "Starting virtual machine",
     }
 }
 
@@ -2659,10 +2551,9 @@ fn web_uploaded_media_config(
 ) -> rusty_box::emulator::EmulatorConfig {
     let ram_size = memory_mib * 1024 * 1024;
     rusty_box::emulator::EmulatorConfig {
-        guest_memory_size: ram_size,
-        host_memory_size: ram_size,
+        memory: rusty_box::emulator::MemorySize::bytes(ram_size),
         memory_block_size: 128 * 1024,
-        ips: 300_000_000,
+        ips: rusty_box::emulator::Ips::new(300_000_000),
         pci_enabled: true,
         cpu_params: BxParams::default()
             .with_topology(cpu_count, 1, 1)
@@ -2710,6 +2601,7 @@ impl WebShellApp {
             cached_ips: 0.0,
             frame_count: 0,
             web_prev_mouse_buttons: 0,
+            web_held_modifiers: rusty_box::gui::host_input::HeldModifiers::default(),
         }
     }
 
@@ -2721,7 +2613,7 @@ impl WebShellApp {
             self.web_cpu_count,
         ));
         self.boot_mode = WebBootMode::UploadedMedia;
-        self.chrome.selected_page = ShellPage::Console;
+        self.chrome.go_to(ShellPage::Console);
         self.initialized = false;
         self.init_error = None;
         self.shutdown = false;
@@ -2764,89 +2656,34 @@ impl WebShellApp {
         };
 
         match startup.stage {
-            WebStartupStage::CreateEmulator => {
-                let emu = rusty_box::emulator::Emulator::<
-                    rusty_box::cpu::core_i7_skylake::Corei7SkylakeX,
-                >::new(web_uploaded_media_config(
-                    startup.memory_mib,
-                    startup.cpu_count,
-                ))
-                .map_err(|error| format!("{error:?}"))?;
-                startup.emulator = Some(emu);
-            }
-            WebStartupStage::InitializeMemory => {
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before memory initialization")
-                    .init_memory_and_pc_system()
-                    .map_err(|error| format!("{error:?}"))?;
-            }
-            WebStartupStage::LoadBios => {
-                let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before BIOS load")
-                    .load_bios(BIOS_DATA, bios_load_addr)
-                    .map_err(|error| format!("{error:?}"))?;
-            }
-            WebStartupStage::LoadVgaBios => {
+            WebStartupStage::Announce => {}
+            WebStartupStage::BuildMachine => {
+                let iso_data = startup.iso_data.take().ok_or_else(|| {
+                    "uploaded boot media was not available during startup".to_owned()
+                })?;
                 let mut vga_data = VGA_BIOS_DATA.to_vec();
                 let remainder = vga_data.len() % 512;
                 if remainder != 0 {
                     vga_data.resize(vga_data.len() + (512 - remainder), 0);
                 }
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before VGA BIOS load")
-                    .load_optional_rom(&vga_data, 0xC0000)
-                    .map_err(|error| format!("{error:?}"))?;
-            }
-            WebStartupStage::InitializeDevices => {
-                let emu = startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before device initialization");
-                emu.init_cpu_and_devices()
-                    .map_err(|error| format!("{error:?}"))?;
-                let ram_size = startup.memory_mib * 1024 * 1024;
-                let ext_kb = ((ram_size / 1024) - 1024).min(u16::MAX as usize);
-                emu.configure_memory_in_cmos(640, ext_kb as u16);
-                emu.configure_boot_sequence(3, 0, 0);
-            }
-            WebStartupStage::AttachMedia => {
-                let iso_data = startup.iso_data.take().ok_or_else(|| {
-                    "uploaded boot media was not available during startup".to_owned()
-                })?;
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before media attach")
-                    .attach_cdrom_data(1, 0, iso_data);
-            }
-            WebStartupStage::StartEmulator => {
-                let emu = startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before emulator start");
-                emu.init_gui(0, &[]).map_err(|error| format!("{error:?}"))?;
-                emu.reset(rusty_box::cpu::ResetReason::Hardware)
-                    .map_err(|error| format!("{error:?}"))?;
-                emu.start();
-                emu.force_vga_update();
-                return Ok(Some(
-                    startup
-                        .emulator
-                        .take()
-                        .expect("startup emulator should exist after start"),
-                ));
+                use rusty_box::emulator::{AtaSlot, BootDevice, BootOrder, MachineBuilder};
+                let mut emu = MachineBuilder::new(web_uploaded_media_config(
+                    startup.memory_mib,
+                    startup.cpu_count,
+                ))
+                .bios(BIOS_DATA)
+                .vga_bios(&vga_data)
+                .boot_order(BootOrder::just(BootDevice::Cdrom))
+                .cdrom_bytes(AtaSlot::SECONDARY_MASTER, iso_data)
+                .build()
+                .map_err(|error| format!("{error:?}"))?;
+                emu.display().force_update();
+                return Ok(Some(emu));
             }
         }
 
         startup.stage = web_next_startup_stage(startup.stage)
-            .expect("startup stage should advance until StartEmulator");
+            .expect("startup stage should advance until the machine is built");
         Ok(None)
     }
 
@@ -2859,9 +2696,9 @@ impl WebShellApp {
 
     fn handle_primary_toolbar_action(&mut self) {
         if self.web_has_vm() {
-            self.chrome.selected_page = ShellPage::Console;
+            self.chrome.go_to(ShellPage::Console);
         } else {
-            self.chrome.selected_page = ShellPage::Home;
+            self.chrome.go_to(ShellPage::Home);
             self.open_file_picker();
         }
     }
@@ -2982,14 +2819,22 @@ impl WebShellApp {
                     frame_executed,
                     web_time::Instant::now().duration_since(frame_start),
                 ) {
-                    match emu.step_batch(WEB_BATCH_SIZE) {
-                        Ok((executed, is_shutdown)) => {
-                            frame_executed = frame_executed.saturating_add(executed);
-                            if is_shutdown {
+                    match emu.step(RunBudget::Instructions(WEB_BATCH_SIZE)) {
+                        Ok(outcome) => {
+                            // Whichever unit the machine measures in: this
+                            // paces a frame, and a frame is over when enough
+                            // has happened, not when a particular kind has.
+                            frame_executed =
+                                frame_executed.saturating_add(outcome.progress.count());
+                            // Every terminal cause, not just a CPU shutdown: a
+                            // guest that powers itself off through ACPI leaves
+                            // the CPU healthy, so testing the CPU alone would
+                            // keep pumping a machine that asked to be off.
+                            if outcome.is_terminal() {
                                 self.shutdown = true;
                                 break;
                             }
-                            if executed == 0 {
+                            if outcome.progress.stalled() {
                                 break;
                             }
                         }
@@ -3001,33 +2846,26 @@ impl WebShellApp {
                     }
                 }
                 self.total_instructions = self.total_instructions.saturating_add(frame_executed);
-                emu.update_display(&mut self.display);
+                emu.display().render_into(&mut self.display);
             }
         }
     }
 
+    /// Forward this frame's keyboard to the guest, with the `Emulator` as the
+    /// sink (single-threaded wasm applies events immediately) — the same
+    /// translator the native shell feeds through its shared display. A widget
+    /// that has asked for the keyboard (the Library search box) keeps it, as
+    /// on native; the translator consumes what it forwards.
     fn process_keyboard(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
         let Some(emu) = &mut self.emulator else {
             return;
         };
-        ctx.input(|input| {
-            for event in &input.events {
-                match event {
-                    egui::Event::Text(text) => {
-                        for ch in text.chars() {
-                            for (key, pressed) in rusty_box::gui::char_to_bx_key_sequence(ch) {
-                                emu.send_key(key, pressed);
-                            }
-                        }
-                    }
-                    egui::Event::Key { key, pressed, .. } => {
-                        if let Some(bx_key) = egui_key_to_bx_key(*key) {
-                            emu.send_key(bx_key, *pressed);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        let held = self.web_held_modifiers;
+        self.web_held_modifiers = ctx.input_mut(|input| {
+            rusty_box::gui::host_input::translate_egui_keyboard(input, held, &mut **emu)
         });
     }
 
@@ -3115,7 +2953,7 @@ impl WebShellApp {
                             ui.close();
                         }
                         if ui.button("Create Disk Image").clicked() {
-                            self.chrome.selected_page = ShellPage::Images;
+                            self.chrome.go_to(ShellPage::Images);
                             ui.close();
                         }
                     });
@@ -3170,10 +3008,10 @@ impl WebShellApp {
                         self.reset_web_vm();
                     }
                     if ui.button("▣ Hardware").clicked() {
-                        self.chrome.selected_page = ShellPage::Hardware;
+                        self.chrome.go_to(ShellPage::Hardware);
                     }
-                    if ui.button("＋ New Image").clicked() {
-                        self.chrome.selected_page = ShellPage::Images;
+                    if ui.button("+ New Image").clicked() {
+                        self.chrome.go_to(ShellPage::Images);
                     }
                     ui.checkbox(&mut self.chrome.show_library, "Library");
                     ui.checkbox(&mut self.chrome.show_serial, "Serial");
@@ -3206,16 +3044,16 @@ impl WebShellApp {
                         .hint_text("Type here to search"),
                 );
                 ui.add_space(8.0);
-                ui.label(RichText::new("▾ My Computer").color(TEXT_MUTED));
+                ui.label(RichText::new("⏷ My Computer").color(TEXT_MUTED));
                 let visible = self.chrome.visible_vm_indices();
                 for index in visible {
                     let clicked = {
                         let entry = &self.chrome.vm_library[index];
                         let selected = ui.selectable_label(
-                            self.chrome.selected_vm == index,
+                            self.chrome.selected_vm() == index,
                             format!("  ▣ {}", entry.name),
                         );
-                        if self.chrome.selected_vm == index {
+                        if self.chrome.selected_vm() == index {
                             ui.indent(format!("web_library_metadata_{index}"), |ui| {
                                 ui.label(metadata_text("Boot", &entry.boot));
                                 ui.label(metadata_text("Memory", &entry.memory));
@@ -3226,8 +3064,7 @@ impl WebShellApp {
                         selected.clicked()
                     };
                     if clicked {
-                        self.chrome.selected_vm = index;
-                        self.chrome.selected_page = ShellPage::Home;
+                        self.chrome.destination = Destination::new(index, ShellPage::Home);
                     }
                 }
             });
@@ -3279,7 +3116,7 @@ impl WebShellApp {
     fn draw_central(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG_BASE))
-            .show(ui, |ui| match self.chrome.selected_page {
+            .show(ui, |ui| match self.chrome.page() {
                 ShellPage::Home => self.draw_web_home_page(ui),
                 ShellPage::Console => self.draw_web_console_page(ui),
                 ShellPage::Hardware => self.draw_web_hardware_page(ui),
@@ -3310,7 +3147,8 @@ impl WebShellApp {
                     &mut columns[0],
                     WEB_BOOT_MEDIA_ACTION_LABEL,
                     WEB_BOOT_MEDIA_ACTION_DESCRIPTION,
-                    ACCENT_BLUE,
+                    ACCENT_CYAN,
+                    ActionTileWeight::Primary,
                     || self.open_file_picker(),
                 );
                 disabled_tile(
@@ -3323,7 +3161,8 @@ impl WebShellApp {
                     "Create Disk Image",
                     "Download bximage-compatible zero-filled images.",
                     ACCENT_CYAN,
-                    || self.chrome.selected_page = ShellPage::Images,
+                    ActionTileWeight::Secondary,
+                    || self.chrome.go_to(ShellPage::Images),
                 );
             });
         });
@@ -3357,7 +3196,7 @@ impl WebShellApp {
                     .startup
                     .as_ref()
                     .map(|startup| startup.stage)
-                    .unwrap_or(WebStartupStage::CreateEmulator);
+                    .unwrap_or(WebStartupStage::Announce);
                 ui.centered_and_justified(|ui| {
                     ui.vertical_centered(|ui| {
                         ui.spinner();
@@ -3469,7 +3308,7 @@ impl WebShellApp {
     fn draw_web_hardware_detail(&mut self, ui: &mut egui::Ui) {
         match self.chrome.selected_hardware {
             HardwareDevice::Memory => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Browser memory",
                     "Choose guest RAM before boot. Wasm32 can address up to 4 GiB, but allocation still depends on browser and device memory.",
@@ -3509,7 +3348,7 @@ impl WebShellApp {
                 }
             }
             HardwareDevice::Processors => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Cooperative CPU",
                     "Select virtual processors before boot. Browser execution still uses frame-sized batches to keep the UI responsive.",
@@ -3545,7 +3384,7 @@ impl WebShellApp {
                 }
             }
             HardwareDevice::Devices => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Browser devices",
                     "The browser build exposes a fixed virtual machine profile and does not persist hardware edits.",
@@ -3554,7 +3393,7 @@ impl WebShellApp {
                 detail_row(ui, "Boot media", "Upload on Home");
             }
             HardwareDevice::HardDisk => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Browser disk images",
                     "The browser does not attach host disks. Use Images to download flat disk or floppy images.",
@@ -3567,7 +3406,7 @@ impl WebShellApp {
                     (Some(name), Some(byte_len)) => web_uploaded_media_summary(name, byte_len),
                     _ => "No uploaded media".to_owned(),
                 };
-                hardware_intro(
+                page_header(
                     ui,
                     "Uploaded boot media",
                     "Home opens a browser file picker and attaches the selected image as bootable CD/DVD media.",
@@ -3576,7 +3415,7 @@ impl WebShellApp {
                 detail_row(ui, "Boot mode", "Uploaded boot image");
             }
             HardwareDevice::Display => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Canvas display",
                     "The VGA framebuffer is uploaded as an egui texture and scaled with nearest-neighbor filtering.",
@@ -3588,10 +3427,10 @@ impl WebShellApp {
     }
     fn nav_button(&mut self, ui: &mut egui::Ui, page: ShellPage, label: &str) {
         if ui
-            .selectable_label(self.chrome.selected_page == page, label)
+            .selectable_label(self.chrome.page() == page, label)
             .clicked()
         {
-            self.chrome.selected_page = page;
+            self.chrome.go_to(page);
         }
     }
 
@@ -3609,7 +3448,7 @@ impl WebShellApp {
         self.clear_uploaded_media_metadata();
         if self.boot_mode != WebBootMode::Launcher {
             self.boot_mode = WebBootMode::Launcher;
-            self.chrome.selected_page = ShellPage::Home;
+            self.chrome.go_to(ShellPage::Home);
         }
     }
 }
@@ -3640,7 +3479,7 @@ impl eframe::App for WebShellApp {
         if web_should_pump_emulator_this_frame(advanced_startup_this_frame, has_input_this_frame) {
             self.pump_emulator();
         }
-        if self.chrome.selected_page == ShellPage::Console {
+        if self.chrome.page() == ShellPage::Console {
             self.process_keyboard(ui.ctx());
         }
         self.update_ips();
@@ -3671,7 +3510,7 @@ fn draw_about_window(ctx: &egui::Context, chrome: &mut ShellChrome) {
         .resizable(false)
         .open(&mut chrome.show_about)
         .show(ctx, |ui| {
-            ui.label(RichText::new("Rusty Box Workstation").size(18.0).strong());
+            ui.label(RichText::new("Rusty Box Workstation").size(TEXT_TITLE).strong());
             ui.label("VMware-style shell for Rusty Box emulator sessions.");
             ui.separator();
             ui.label(metadata_text(
@@ -3687,18 +3526,6 @@ fn draw_about_window(ctx: &egui::Context, chrome: &mut ShellChrome) {
                 "upload ISO, download generated images",
             ));
         });
-}
-
-fn metadata_text(label: &str, value: &str) -> RichText {
-    RichText::new(format!("{label}: {value}"))
-        .size(11.0)
-        .color(TEXT_MUTED)
-}
-
-fn hardware_intro(ui: &mut egui::Ui, title: &str, body: &str) {
-    ui.label(RichText::new(title).size(16.0).strong().color(TEXT_PRIMARY));
-    ui.label(RichText::new(body).color(TEXT_MUTED));
-    ui.add_space(10.0);
 }
 
 #[cfg(target_os = "android")]
@@ -3815,17 +3642,48 @@ fn draw_u64_field(
     ui.add_enabled(editable, widget).changed()
 }
 
+/// A read-only fact on the pane's grid: the caption in the label column, the
+/// value beside it, wrapping so a long path stays inside the card.
 fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.horizontal_wrapped(|ui| {
-        ui.set_min_width(150.0);
-        ui.label(RichText::new(label).strong().color(TEXT_PRIMARY));
-        ui.label(RichText::new(value).color(TEXT_MUTED));
+    field_row(ui, label, |ui| {
+        ui.add(egui::Label::new(RichText::new(value).color(TEXT_PRIMARY)).wrap());
     });
 }
 
-fn status_dot(ui: &mut egui::Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 3.5, color);
+#[cfg(not(target_arch = "wasm32"))]
+fn cpu_count_label(cpus: u32) -> String {
+    if cpus == 1 {
+        "1 CPU".to_owned()
+    } else {
+        format!("{cpus} CPUs")
+    }
+}
+
+/// The badge for a runner status: cyan runs, amber waits, red has faulted, and
+/// idle is muted.
+#[cfg(not(target_arch = "wasm32"))]
+fn shell_state_badge(status: &ShellStatus, faulted: bool) -> ShellStateBadge {
+    if status.running {
+        ShellStateBadge {
+            label: "Running",
+            color: ACCENT_CYAN,
+        }
+    } else if status.start_pending {
+        ShellStateBadge {
+            label: "Starting",
+            color: ACCENT_AMBER,
+        }
+    } else if faulted {
+        ShellStateBadge {
+            label: "Faulted",
+            color: ACCENT_RED,
+        }
+    } else {
+        ShellStateBadge {
+            label: "Stopped",
+            color: TEXT_MUTED,
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3841,6 +3699,38 @@ fn format_ips_u32(ips: u32) -> String {
     }
 }
 
+/// The Console's powered-off display: the shell's copy on the shell's type
+/// scale, laid out as one centred block so the embedded view can place it as a
+/// single label. The `rusty_box` crate learns neither the palette nor that the
+/// power verbs live in a bar above the console.
+#[cfg(not(target_arch = "wasm32"))]
+fn powered_off_placeholder() -> rusty_box::gui::ConsolePlaceholder {
+    use egui::text::{LayoutJob, TextFormat};
+    use egui::{Align, FontId};
+
+    let mut job = LayoutJob::default();
+    job.halign = Align::Center;
+    job.append(
+        "This VM is powered off\n",
+        0.0,
+        TextFormat {
+            font_id: FontId::proportional(TEXT_TITLE),
+            color: TEXT_MUTED,
+            ..Default::default()
+        },
+    );
+    job.append(
+        "Power on in the bar above to start it.",
+        0.0,
+        TextFormat {
+            font_id: FontId::proportional(TEXT_CAPTION),
+            color: TEXT_MUTED,
+            ..Default::default()
+        },
+    );
+    rusty_box::gui::ConsolePlaceholder(job)
+}
+
 #[cfg(target_arch = "wasm32")]
 fn format_ips_f64(ips: f64) -> String {
     if ips >= 1_000_000.0 {
@@ -3852,49 +3742,6 @@ fn format_ips_f64(ips: f64) -> String {
     } else {
         "---".to_owned()
     }
-}
-
-fn action_tile(
-    ui: &mut egui::Ui,
-    title: &str,
-    body: &str,
-    accent: Color32,
-    on_click: impl FnMut(),
-) {
-    action_tile_enabled(ui, title, body, accent, true, on_click);
-}
-
-fn action_tile_enabled(
-    ui: &mut egui::Ui,
-    title: &str,
-    body: &str,
-    accent: Color32,
-    enabled: bool,
-    mut on_click: impl FnMut(),
-) {
-    shell_card_frame().show(ui, |ui| {
-        ui.set_min_height(150.0);
-        let title_color = if enabled { TEXT_PRIMARY } else { TEXT_MUTED };
-        ui.label(RichText::new(title).size(18.0).strong().color(title_color));
-        ui.label(RichText::new(body).color(TEXT_MUTED));
-        ui.add_space(16.0);
-        let button = egui::Button::new(RichText::new(title).strong())
-            .fill(Color32::from_rgb(0x1E, 0x35, 0x43))
-            .stroke(Stroke::new(1.0_f32, accent));
-        if ui.add_enabled(enabled, button).clicked() {
-            on_click();
-        }
-    });
-}
-
-#[cfg(target_arch = "wasm32")]
-fn disabled_tile(ui: &mut egui::Ui, title: &str, body: &str) {
-    shell_card_frame().show(ui, |ui| {
-        ui.set_min_height(150.0);
-        ui.label(RichText::new(title).size(18.0).strong().color(TEXT_MUTED));
-        ui.label(RichText::new(body).color(TEXT_MUTED));
-        ui.add_enabled(false, egui::Button::new("Unavailable"));
-    });
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -3969,45 +3816,12 @@ fn js_error(error: wasm_bindgen::JsValue) -> String {
         .unwrap_or_else(|| "browser JavaScript operation failed".to_owned())
 }
 
-#[cfg(target_arch = "wasm32")]
-/// Map an egui key to the guest key it represents.
-///
-/// The guest key (not a raw scancode) is what gets delivered, so the keyboard
-/// controller can render it through the guest's active scancode set — Bochs
-/// keyboard.cc `gen_scancode`. Returns `None` for keys the guest has no
-/// equivalent for; printable characters arrive separately as `egui::Event::Text`.
-fn egui_key_to_bx_key(key: egui::Key) -> Option<rusty_box::iodev::scancodes::BxKey> {
-    use rusty_box::iodev::scancodes::BxKey;
-    Some(match key {
-        egui::Key::Escape => BxKey::Esc,
-        egui::Key::F1 => BxKey::F1,
-        egui::Key::F2 => BxKey::F2,
-        egui::Key::F3 => BxKey::F3,
-        egui::Key::F4 => BxKey::F4,
-        egui::Key::F5 => BxKey::F5,
-        egui::Key::F6 => BxKey::F6,
-        egui::Key::F7 => BxKey::F7,
-        egui::Key::F8 => BxKey::F8,
-        egui::Key::F9 => BxKey::F9,
-        egui::Key::F10 => BxKey::F10,
-        egui::Key::F11 => BxKey::F11,
-        egui::Key::F12 => BxKey::F12,
-        egui::Key::Enter => BxKey::Enter,
-        egui::Key::Tab => BxKey::Tab,
-        egui::Key::Backspace => BxKey::Backspace,
-        egui::Key::ArrowUp => BxKey::Up,
-        egui::Key::ArrowDown => BxKey::Down,
-        egui::Key::ArrowLeft => BxKey::Left,
-        egui::Key::ArrowRight => BxKey::Right,
-        egui::Key::Home => BxKey::Home,
-        egui::Key::End => BxKey::End,
-        egui::Key::PageUp => BxKey::PageUp,
-        egui::Key::PageDown => BxKey::PageDown,
-        egui::Key::Delete => BxKey::Delete,
-        egui::Key::Insert => BxKey::Insert,
-        egui::Key::Space => BxKey::Space,
-        _ => return None,
-    })
+/// What an engine is called in the window.
+fn engine_label(engine: crate::config::Engine) -> &'static str {
+    match engine {
+        crate::config::Engine::Interpreter => "Interpreter",
+        crate::config::Engine::Whp => "Windows Hypervisor",
+    }
 }
 
 #[cfg(test)]
@@ -4040,6 +3854,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn test_resolved_config() -> crate::config::ResolvedConfig {
         crate::config::ResolvedConfig {
+            engine: crate::config::Engine::Interpreter,
+            cpu_capabilities: crate::config::CpuCapabilities::Preset,
             memory_mib: 256,
             host_memory_mib: 256,
             memory_block_kib: 128,
@@ -4103,7 +3919,8 @@ mod tests {
     #[test]
     fn shell_starts_on_home_page() {
         let chrome = ShellChrome::default();
-        assert_eq!(chrome.selected_page, ShellPage::Home);
+        assert_eq!(chrome.page(), ShellPage::Home);
+        assert_eq!(chrome.selected_vm(), 0);
     }
 
     #[test]
@@ -4136,14 +3953,6 @@ mod tests {
         assert!(shell_should_draw_library(&chrome));
         chrome.show_library = false;
         assert!(!shell_should_draw_library(&chrome));
-    }
-
-    #[test]
-    fn shell_menu_labels_omit_redundant_view_and_tabs() {
-        let labels = shell_menu_labels();
-        assert_eq!(labels, ["File", "Edit", "VM", "Help"]);
-        assert!(!labels.contains(&"View"));
-        assert!(!labels.contains(&"Tabs"));
     }
 
     #[test]
@@ -4234,17 +4043,15 @@ mod tests {
     #[test]
     fn web_uploaded_media_startup_is_split_across_frames() {
         assert_eq!(WEB_STARTUP_STEPS_PER_FRAME, 1);
+        // The notice is painted on its own frame, so the browser is never
+        // asked to render it and run the blocking build in the same one.
         assert_eq!(
-            web_next_startup_stage(WebStartupStage::CreateEmulator),
-            Some(WebStartupStage::InitializeMemory)
+            web_next_startup_stage(WebStartupStage::Announce),
+            Some(WebStartupStage::BuildMachine)
         );
-        assert_eq!(web_next_startup_stage(WebStartupStage::StartEmulator), None);
+        assert_eq!(web_next_startup_stage(WebStartupStage::BuildMachine), None);
         assert_eq!(
-            web_startup_stage_label(WebStartupStage::CreateEmulator),
-            "Allocating guest memory"
-        );
-        assert_eq!(
-            web_startup_stage_label(WebStartupStage::InitializeMemory),
+            web_startup_stage_label(WebStartupStage::Announce),
             "Allocating guest memory"
         );
     }
@@ -4682,7 +4489,7 @@ mod tests {
         app.duplicate_selected_profile();
 
         assert_eq!(app.profiles.len(), 2);
-        assert_eq!(app.chrome.selected_vm, 1);
+        assert_eq!(app.chrome.selected_vm(), 1);
         assert_eq!(app.chrome.vm_library[1].memory, "512 MB");
         app.profiles[1].name = "Copy VM".to_owned();
         app.apply_pending_settings().unwrap();
@@ -4692,7 +4499,7 @@ mod tests {
         app.delete_selected_profile();
 
         assert_eq!(app.profiles.len(), 1);
-        assert_eq!(app.chrome.selected_vm, 0);
+        assert_eq!(app.chrome.selected_vm(), 0);
         assert_eq!(app.vm_info.name, "Base VM");
         assert_eq!(app.chrome.vm_library[0].name, "Base VM");
     }
@@ -4728,12 +4535,12 @@ mod tests {
     fn native_profile_selection_refuses_while_running() {
         let (mut app, _command_rx) = native_test_app();
         app.duplicate_selected_profile();
-        assert_eq!(app.chrome.selected_vm, 1);
+        assert_eq!(app.chrome.selected_vm(), 1);
         app.shared.lock().unwrap().emu_running = true;
 
         app.select_profile(0);
 
-        assert_eq!(app.chrome.selected_vm, 1);
+        assert_eq!(app.chrome.selected_vm(), 1);
         assert_eq!(
             app.shell_notice,
             Some(ShellNotice::warning(

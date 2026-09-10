@@ -1815,6 +1815,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3694,12 +3700,15 @@ dependencies = [
  "libc",
  "libm",
  "paste",
+ "rusty_box_core",
  "rusty_box_decoder",
+ "rusty_box_devices",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "trybuild",
 ]
 
 [[package]]
@@ -3723,12 +3732,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_box_core"
+version = "0.0.3"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "rusty_box_decoder"
 version = "0.0.2"
 dependencies = [
  "bitflags 2.13.1",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rusty_box_devices"
+version = "0.0.3"
+dependencies = [
+ "rusty_box_core",
+ "tracing",
 ]
 
 [[package]]
@@ -3743,9 +3767,10 @@ dependencies = [
  "rfd",
  "rusty_box",
  "rusty_box_bximage",
+ "rusty_box_whp_engine",
  "serde",
  "thiserror 2.0.18",
- "toml",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "wasm-bindgen",
@@ -3784,6 +3809,36 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+]
+
+[[package]]
+name = "rusty_box_whp"
+version = "0.0.3"
+dependencies = [
+ "bitflags 2.13.1",
+ "rusty_box_core",
+ "rusty_box_whp_sys",
+ "tracing",
+]
+
+[[package]]
+name = "rusty_box_whp_engine"
+version = "0.0.3"
+dependencies = [
+ "rusty_box",
+ "rusty_box_core",
+ "rusty_box_whp",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rusty_box_whp_sys"
+version = "0.0.3"
+dependencies = [
+ "rusty_box_core",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3903,6 +3958,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "serde_spanned"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+dependencies = [
+ "serde_core",
 ]
 
 [[package]]
@@ -4203,6 +4267,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "target-triple"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3a6bfce3d99adfa72d24750a61f782f3036a81e7f86d8841ee1326deaebd171"
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4213,6 +4283,15 @@ dependencies = [
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
 ]
 
 [[package]]
@@ -4361,9 +4440,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
 dependencies = [
  "serde",
- "serde_spanned",
+ "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "toml_edit 0.22.27",
+]
+
+[[package]]
+name = "toml"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c96ecdfa941c8fc4fcaed14f99ada8ebed502eef533015095a07e3301d4c3c"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned 1.1.1",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.1",
 ]
 
 [[package]]
@@ -4392,7 +4486,7 @@ checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
 dependencies = [
  "indexmap",
  "serde",
- "serde_spanned",
+ "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "toml_write",
  "winnow 0.7.15",
@@ -4424,6 +4518,12 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "toml_writer"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tracing"
@@ -4501,6 +4601,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "trybuild"
+version = "1.0.120"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e605bf6b39357663d8ba4e984f8be8da8df6bb32e81031d6889024ea8fd68e4"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "target-triple",
+ "termcolor",
+ "toml 1.1.3+spec-1.1.0",
+]
+
+[[package]]
 name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4538,7 +4653,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -8,9 +8,9 @@
 //! - stack32.rs: 32-bit stack instructions (PUSH/POP r32, PUSHAD, POPAD, etc.)
 //! - stack64.rs: 64-bit stack instructions (PUSH/POP r64, etc.)
 
-use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::BxSegregs};
+use super::decoder::BxSegregs;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Helper functions for stack operations
     // Based on Bochs stack.h and stack.cc

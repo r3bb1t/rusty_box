@@ -5,10 +5,10 @@ use crate::{
     cpu::{
         cpu::BX_ASYNC_EVENT_STOP_TRACE,
         decoder::{decode32, decode64, DecodeError, Instruction, Opcode},
+        exec_ctx::ExecCtx,
         tlb::{lpf_of, page_offset, ppf_of},
-        BxCpuC, BxCpuIdTrait, Result,
+        BxCpuC, Result,
     },
-    memory::BxMemC,
 };
 
 /// Number of entries in the machine-wide SMC page-write-stamp table.
@@ -99,6 +99,18 @@ pub struct BxICacheEntry {
 // pAddr + traceMask + tlen + the `i` pointer, which our `mpool_start_idx` stands in.
 const _: () = assert!(core::mem::size_of::<BxICacheEntry>() == 24);
 
+impl BxICacheEntry {
+    /// An entry holding no trace. `p_addr` carries the invalid sentinel, which
+    /// is what `find_entry` tests — exactly the state `BxICache::new` used to
+    /// build per element at run time.
+    pub(super) const INVALID: Self = Self {
+        p_addr: BX_ICACHE_INVALID_PHY_ADDRESS,
+        trace_mask: 0,
+        tlen: 0,
+        mpool_start_idx: 0,
+    };
+}
+
 pub struct BxICache {
     pub(crate) entry: [BxICacheEntry; BX_ICACHE_ENTRIES],
     /// Large array (~15 MB) — struct should be heap-allocated (e.g. via Box).
@@ -123,7 +135,7 @@ pub struct BxICache {
 ///
 /// `packed` holds the target trace's mpool start index in bits 0..20
 /// (`BX_ICACHE_MEM_POOL` = 576K < 2^20) and its tlen in bits 20..27
-/// (tlen ≤ `BX_MAX_TRACE_LENGTH` + 1 dummy = 33). `expected_rip` is a
+/// (tlen ≤ `BX_MAX_TRACE_LENGTH` = 32). `expected_rip` is a
 /// host-side-stronger guard than Bochs carries: Bochs trusts the stored
 /// target unconditionally, which tolerates a virtual-aliasing edge (two
 /// mappings of one physical code page); the RIP check can only *refuse* a
@@ -136,6 +148,14 @@ pub(crate) struct TraceLink {
 }
 
 impl TraceLink {
+    /// An unlinked slot, identical to `TraceLink::default()`. A zero timestamp
+    /// can never match `trace_link_time_stamp`, which starts at 1.
+    pub(crate) const EMPTY: Self = Self {
+        timestamp: 0,
+        packed: 0,
+        expected_rip: 0,
+    };
+
     #[inline]
     pub(crate) fn store(timestamp: u32, start: usize, tlen: usize, expected_rip: u64) -> Self {
         debug_assert!(start < (1 << 20) && tlen < (1 << 7));
@@ -167,12 +187,18 @@ struct PageSplitEntry {
     entry_idx: usize,
 }
 
+impl PageSplitEntry {
+    /// An unused split slot. `ppf` carries the invalid sentinel, which is what
+    /// the split lookup tests.
+    const EMPTY: Self = Self {
+        ppf: BX_ICACHE_INVALID_PHY_ADDRESS,
+        entry_idx: 0,
+    };
+}
+
 impl Default for PageSplitEntry {
     fn default() -> Self {
-        Self {
-            ppf: BX_ICACHE_INVALID_PHY_ADDRESS,
-            entry_idx: 0,
-        }
+        Self::EMPTY
     }
 }
 
@@ -183,19 +209,20 @@ impl Default for BxICache {
 }
 
 impl BxICache {
-    pub fn new() -> Self {
+    /// A flushed icache, constructible in a const context.
+    ///
+    /// `const` so the whole cache can live in `.bss` under no_alloc instead of
+    /// being written field-by-field into a raw allocation. That rules out
+    /// `core::array::from_fn`, which is not const — every array is built from a
+    /// const element instead.
+    pub const fn new() -> Self {
         Self {
-            entry: core::array::from_fn(|_| BxICacheEntry {
-                p_addr: BX_ICACHE_INVALID_PHY_ADDRESS,
-                trace_mask: 0,
-                tlen: 0,
-                mpool_start_idx: 0,
-            }),
-            mpool: core::array::from_fn(|_| Instruction::default()),
+            entry: [BxICacheEntry::INVALID; BX_ICACHE_ENTRIES],
+            mpool: [Instruction::EMPTY; BX_ICACHE_MEM_POOL],
             mpindex: 0,
             next_page_split_index: 0,
-            page_split_index: core::array::from_fn(|_| PageSplitEntry::default()),
-            trace_links: [TraceLink::default(); BX_ICACHE_MEM_POOL],
+            page_split_index: [PageSplitEntry::EMPTY; BX_ICACHE_PAGE_SPLIT_ENTRIES],
+            trace_links: [TraceLink::EMPTY; BX_ICACHE_MEM_POOL],
             // Start at 1 so zero-initialized link slots can never match.
             trace_link_time_stamp: 1,
         }
@@ -479,14 +506,22 @@ fn is_incomplete_decode_error(error: &DecodeError) -> bool {
     )
 }
 
-fn gen_dummy_icache_entry(i: &mut Instruction) {
-    // Matching C++ line 88-90: genDummyICacheEntry
-    i.set_ilen(0);
-    i.set_ia_opcode(Opcode::InsertedOpcode);
-    // Note: In C++, execute1 is set to &BX_CPU_C::BxEndTrace
-    // In Rust, we check for Opcode::InsertedOpcode in cpu_loop_n and set async_event
-}
-
+/// Why there is no end-of-trace marker in a trace.
+///
+/// Bochs `genDummyICacheEntry` writes one — an `ilen` of zero and
+/// `execute1 = BxEndTrace` — and `serveICacheMiss` appends it to the trace and
+/// counts it in `tlen`. Both are inside `#if
+/// BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS`, and that is `0` in the shipped
+/// configuration (`config.h.in`).
+///
+/// The marker exists only for the chaining build, where handlers tail-call one
+/// another instead of returning, so nothing tests `++i == last` and something
+/// has to stop the chain. This port's loop is the other shape: it holds a
+/// `trace_end` and tests it, exactly as Bochs does with chaining off. A marker
+/// here was a dispatch, a branch and an mpool slot per trace, all to reach a
+/// handler whose only job was to announce an end the loop already knew.
+///
+/// [`flush_smc`] declines to write one for a separate and harder reason.
 /// Check if an opcode ends trace construction — the exact `BX_TRACE_END`
 /// flag set from Bochs `ia_opcodes.def`.
 ///
@@ -616,22 +651,22 @@ fn is_trace_end_opcode(opcode: Opcode) -> bool {
     )
 }
 
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     fn bx_end_trace(&mut self) {
         self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
     }
+}
 
+/// Trace construction runs on the execution context: filling a trace decodes
+/// guest bytes and stamps the machine-wide SMC write table, so it needs the CPU
+/// and memory live at once (Bochs `BX_CPU_C::serveICacheMiss`, icache.cc, which
+/// reaches the same state through `BX_MEM(0)`).
+impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
     pub(super) fn serve_icache_miss(
         &mut self,
         eip_biased: u32,
         p_addr: BxPhyAddress,
-        mem: &'c mut BxMemC<'c>,
-        cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<BxICacheEntry> {
-        // Raw pointer for stamp-table marking after `mem` is moved into
-        // boundary_fetch below (same reborrow discipline as cpu_loop's
-        // mem_ptr; the borrows never overlap).
-        let mem_raw: *mut BxMemC<'c> = mem;
         // Get entry index first to avoid borrow conflicts
         let entry_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
 
@@ -649,7 +684,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         let remaining_in_page = self.eip_page_window_size - eip_biased;
         let fetch_ptr_slice = self
-            .eip_fetch_ptr
+            .fetch_window_bytes()
             .ok_or(crate::cpu::CpuError::CpuNotInitialized)?;
         if eip_biased as usize >= fetch_ptr_slice.len() {
             tracing::error!(
@@ -778,7 +813,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         is_trace_end_opcode(self.i_cache.mpool[current_mpindex].get_ia_opcode());
 
                     // BX_INSTR_OPCODE (matching C++ icache.cc)
-                    #[cfg(feature = "instrumentation")]
                     if self.instrumentation.active.has_exec() {
                         let rip =
                             self.prev_rip + (current_page_offset as u64 - (page_offset as u64));
@@ -790,13 +824,19 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         } else {
                             super::instrumentation::CodeSize::Bits16
                         };
+                        // Disjoint fields of the CPU: the event borrows the
+                        // decoded instruction out of `i_cache` while the tracer
+                        // is called through `instrumentation`. Naming the CPU
+                        // is what makes that disjointness visible — reaching
+                        // both through `Deref` would borrow the whole context.
+                        let cpu: &mut BxCpuC<T> = self;
                         let ev = super::instrumentation::OpcodeEvent {
                             rip,
-                            instr: &self.i_cache.mpool[current_mpindex],
+                            instr: &cpu.i_cache.mpool[current_mpindex],
                             bytes,
                             size,
                         };
-                        self.instrumentation.fire_opcode(&ev);
+                        cpu.instrumentation.fire_opcode(&ev);
                     }
 
                     // Update trace mask
@@ -848,11 +888,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                                 entry.trace_mask |= trace_mask;
                                 entry.trace_mask
                             };
-                            // SAFETY: no live borrow of mem at this point (see mem_raw above).
-                            unsafe { (*mem_raw).smc_mark_icache_mask(current_p_addr, full_mask) };
+                            self.memory.smc_mark_icache_mask(current_p_addr, full_mask);
                             self.i_cache.mpindex = current_mpindex + merged;
-                            self.i_cache
-                                .commit_trace(self.i_cache.entry[entry_idx].tlen as usize);
+                            let merged_tlen = self.i_cache.entry[entry_idx].tlen as usize;
+                            self.i_cache.commit_trace(merged_tlen);
                             let entry = self.i_cache.entry[entry_idx].clone();
                             return Ok(entry);
                         }
@@ -939,7 +978,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     // Call boundary_fetch (matching C++ line 150)
                     // Pass the current remaining bytes to page boundary
                     let boundary_instr =
-                        self.boundary_fetch(current_fetch_ptr, current_remaining, mem, cpus)?;
+                        self.boundary_fetch(current_fetch_ptr, current_remaining)?;
 
                     // Store instruction in mpool (check bounds first)
                     if current_mpindex >= BX_ICACHE_MEM_POOL {
@@ -957,27 +996,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         // tlen is already set to 1 above; mpool_start_idx was already set above.
                     }
 
-                    // SAFETY: boundary_fetch's borrow of mem ended above (see mem_raw).
-                    unsafe {
-                        (*mem_raw).smc_mark_icache_mask(p_addr, 0x80000000);
-                        (*mem_raw).smc_mark_icache_mask(self.p_addr_fetch_page, 0x1);
-                    }
-
-                    // Add end-of-trace opcode if not in debugger (matching C++ line 158-163)
-                    // TODO: Check debugger active state
-                    {
-                        if current_mpindex < BX_ICACHE_MEM_POOL {
-                            let entry = &mut self.i_cache.entry[entry_idx];
-                            entry.tlen += 1; /* Add the inserted end of trace opcode */
-                            gen_dummy_icache_entry(&mut self.i_cache.mpool[current_mpindex]);
-                            current_mpindex += 1;
-                        }
-                    }
+                    let fetch_page = self.p_addr_fetch_page;
+                    self.memory.smc_mark_icache_mask(p_addr, 0x80000000);
+                    self.memory.smc_mark_icache_mask(fetch_page, 0x1);
 
                     self.i_cache.mpindex = current_mpindex;
                     let entry = self.i_cache.entry[entry_idx].clone();
-                    self.i_cache
-                        .commit_page_split_trace(self.p_addr_fetch_page, entry_idx);
+                    self.i_cache.commit_page_split_trace(fetch_page, entry_idx);
                     return Ok(entry);
                 }
             }
@@ -988,20 +1013,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             let entry = &mut self.i_cache.entry[entry_idx];
             entry.trace_mask |= trace_mask;
         }
-        // SAFETY: no live borrow of mem at this point (see mem_raw above).
-        unsafe { (*mem_raw).smc_mark_icache_mask(current_p_addr, trace_mask) };
-
-        // Add end-of-trace opcode if not in debugger (matching C++ line 210-214)
-        // TODO: Check debugger active state
-        {
-            // Check bounds before accessing mpool
-            if current_mpindex < BX_ICACHE_MEM_POOL {
-                // Note: tlen will be incremented here, then used below
-                gen_dummy_icache_entry(&mut self.i_cache.mpool[current_mpindex]);
-                current_mpindex += 1;
-                tlen += 1; /* Add the inserted end of trace opcode */
-            }
-        }
+        self.memory.smc_mark_icache_mask(current_p_addr, trace_mask);
 
         // Update entry tlen (matching C++ line 217). Bochs entry->i points at the
         // first mpool instruction; our mpool_start_idx (set earlier) plays that role.
@@ -1019,8 +1031,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         &mut self,
         fetch_ptr: &[u8],
         remaining_in_page: usize,
-        mem: &'c mut BxMemC<'c>,
-        cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<Instruction> {
         let mut fetch_buffer = [0u8; 32];
 
@@ -1057,15 +1067,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // The 2nd chunk of the instruction is on the next page.
         // Set RIP to the 0th byte of the 2nd page, and force a prefetch
         // (matching C++ line 274-275)
-        self.set_rip(self.rip() + remaining_in_page as u64);
-        // Call prefetch directly - same lifetime as serve_icache_miss
-        self.prefetch(mem, cpus)?;
+        let split_rip = self.rip();
+        self.set_rip(split_rip + remaining_in_page as u64);
+        self.prefetch()?;
 
         let fetch_buffer_limit = (self.eip_page_window_size as usize).min(15);
 
         // We can fetch straight from the 0th byte, which is eipFetchPtr
         let next_page_fetch_ptr = self
-            .eip_fetch_ptr
+            .fetch_window_bytes()
             .ok_or(crate::cpu::CpuError::CpuNotInitialized)?;
 
         // Read leftover bytes in next page (matching C++ line 287-289)
@@ -1121,10 +1131,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // Restore EIP since we fudged it to start at the 2nd page boundary.
         // (matching C++ line 306: RIP = BX_CPU_THIS_PTR prev_rip)
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
 
         // BX_INSTR_OPCODE (matching C++ icache.cc)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_exec() {
             let rip = self.prev_rip;
             let bytes = &fetch_buffer[..instr.ilen() as usize];
@@ -1146,7 +1156,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         Ok(instr)
     }
+}
 
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     fn merge_traces_internal(
         &mut self,
         current_entry_idx: usize,
@@ -1203,9 +1215,8 @@ mod smc_mask_tests {
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::{smc_cache_line_mask, BxICache, BxICacheEntry, Opcode, BX_ICACHE_INVALID_PHY_ADDRESS};
     use crate::{
-        cpu::{core_i7_skylake::Corei7SkylakeX, cpu::Exception, CpuSetupMode, X86Reg},
+        cpu::{CpuSetupMode, X86Reg},
         emulator::{Emulator, EmulatorConfig},
-        error::Error,
     };
 
     #[test]
@@ -1217,8 +1228,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert_eq!(smc_cache_line_mask(0x0f80, 0x0080), 1 << 31);
     }
 
+    // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
+    // (or a `debug_assert!`), which do not exist in a release build.
+    #[cfg(debug_assertions)]
     #[test]
     fn boundary_reserved_vvvv_executes_ia_error_not_decoder_failure() {
+        use crate::{cpu::cpu::Exception, error::Error};
+
         const CODE: u64 = 0x20_0ffe;
         const IDT: u64 = 0x28_0000;
         const HANDLER: u64 = 0x29_0000;
@@ -1228,7 +1244,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 for opcode in [0x19, 0x39] {
-                    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    let mut emu = Emulator::new_with_mode(
                         EmulatorConfig::default(),
                         CpuSetupMode::FlatLong64,
                     )
@@ -1262,7 +1278,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     result.unwrap();
 
                     assert_eq!(emu.cpu().get_exception_diag()[Exception::Ud as usize], 1);
-                    assert_eq!(emu.cpu().rip(), HANDLER + 1);
+                    // The delivered #UD is the one instruction the run was
+                    // allowed: Bochs cpu.cc `cpu_loop` counts it (`icount++`
+                    // in the setjmp handler), so execution stops on the
+                    // handler's first byte.
+                    assert_eq!(emu.cpu().rip(), HANDLER);
                     assert_eq!(emu.reg_read(X86Reg::Rsp), STACK_TOP - 40);
                     let mut pushed_rip = [0u8; 8];
                     emu.mem_read(STACK_TOP - 40, &mut pushed_rip).unwrap();
@@ -1296,7 +1316,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatLong64,
                 )
@@ -1327,11 +1347,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                         Opcode::Nop,
                         Opcode::Nop,
                         Opcode::RetOp64,
-                        // rusty appends the InsertedOpcode trace terminator
-                        // (Bochs genDummyICacheEntry) inside tlen.
-                        Opcode::InsertedOpcode,
                     ],
-                    "trace must span the not-taken JZ and end at RET"
+                    "a trace spans the not-taken JZ, ends at RET, and holds \
+                     nothing the guest did not write"
                 );
             })
             .unwrap()
@@ -1353,7 +1371,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatLong64,
                 )
@@ -1432,5 +1450,86 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap()
             .join()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod const_initialiser_tests {
+    use super::*;
+
+    /// The icache's arrays are now built from const elements rather than
+    /// `core::array::from_fn`, which is not const. Each element must be the
+    /// same value the closure produced — a flushed cache whose entries do not
+    /// carry the invalid sentinel would serve stale traces on the first lookup.
+    #[test]
+    fn const_elements_match_the_flushed_state_they_replace() {
+        // `BxICache::new()` returns the whole cache by value, and a debug
+        // build materialises it on the stack — more than a default test
+        // thread holds.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                assert_eq!(BxICacheEntry::INVALID.p_addr, BX_ICACHE_INVALID_PHY_ADDRESS);
+                assert_eq!(BxICacheEntry::INVALID.trace_mask, 0);
+                assert_eq!(BxICacheEntry::INVALID.tlen, 0);
+                assert_eq!(BxICacheEntry::INVALID.mpool_start_idx, 0);
+
+                assert_eq!(PageSplitEntry::EMPTY.ppf, PageSplitEntry::default().ppf);
+                assert_eq!(
+                    PageSplitEntry::EMPTY.entry_idx,
+                    PageSplitEntry::default().entry_idx
+                );
+
+                // A zero timestamp can never match `trace_link_time_stamp`,
+                // which starts at 1 — that is what makes an unlinked slot
+                // unusable.
+                assert_eq!(TraceLink::EMPTY.timestamp, 0);
+                let cache = BxICache::new();
+                assert_eq!(cache.trace_link_time_stamp, 1);
+                assert!(
+                    cache.trace_links[0].target(cache.trace_link_time_stamp, 0).is_none(),
+                    "a fresh link slot must not resolve"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod power_on_state_tests {
+    use super::*;
+
+    /// A freshly constructed CPU must arrive with a FLUSHED icache, not merely
+    /// a zeroed one. Zero is a meaningful value for both validity guards:
+    /// `find_entry` matches an entry whose `p_addr` equals the fetch address,
+    /// so a zeroed entry claims physical address 0; and `TraceLink::target`
+    /// matches a link whose timestamp equals `trace_link_time_stamp`, so a
+    /// zeroed stamp validates every never-written link. The allocation is
+    /// zeroed, so this only holds because construction flushes.
+    #[test]
+    fn a_constructed_cpu_starts_with_a_flushed_icache() {
+        let cpu = crate::cpu::builder::BxCpuBuilder::new().build().unwrap();
+
+        assert_eq!(
+            cpu.i_cache.entry[0].p_addr, BX_ICACHE_INVALID_PHY_ADDRESS,
+            "a zeroed entry would be served for a fetch at physical address 0"
+        );
+        assert!(
+            cpu.i_cache.find_entry(0, 0).is_none(),
+            "physical address 0 must not hit an unfilled icache"
+        );
+        assert_ne!(
+            cpu.i_cache.trace_link_time_stamp, 0,
+            "a zero stamp is the value every zeroed TraceLink carries"
+        );
+        assert!(
+            cpu.i_cache.trace_links[0]
+                .target(cpu.i_cache.trace_link_time_stamp, 0)
+                .is_none(),
+            "an unwritten trace link must not resolve"
+        );
     }
 }

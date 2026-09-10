@@ -21,7 +21,6 @@ use super::softfloat3e::softfloat::{softfloat_get_exception_flags, SoftFloatStat
 use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedZmmRegister,
 };
@@ -30,7 +29,7 @@ use super::{
 // unused-import lint is allowed rather than losing the no-std resolution.
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use crate::cpu::float::FloatExt;
+use rusty_box_core::FloatExt;
 
 /// Width pairing of a VPMOV widening conversion, named after the mnemonic
 /// suffix: `Bw` is byte-to-word, `Dq` dword-to-qword, and so on.
@@ -96,8 +95,8 @@ fn vl_bytes(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -111,16 +110,16 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register, zeroing upper bits beyond VL
-fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -144,8 +143,8 @@ fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// Write ZMM register for qword operations
-fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -167,7 +166,7 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VMOVDQU32/64 — Unaligned move (EVEX-encoded)
     // ========================================================================
@@ -2336,7 +2335,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let s2 = self.read_evex_rm_ps(instr, ne)?; // rm
         let m = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
             if (m >> i) & 1 != 0 {
@@ -2361,7 +2360,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let s2 = self.read_evex_rm_pd(instr, ne)?; // rm
         let m = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
             if (m >> i) & 1 != 0 {
@@ -2421,7 +2420,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         let m = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
             if (m >> i) & 1 != 0 {
@@ -2443,7 +2442,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         let m = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
             if (m >> i) & 1 != 0 {
@@ -2570,8 +2569,6 @@ mod tests {
     //! that, because a wrong-width handler produces a correct-looking result
     //! everywhere except the masked lanes.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::{BxSegregs, Instruction};
     use rusty_box_decoder::opcode::Opcode;
 
@@ -2611,7 +2608,9 @@ mod tests {
             (Opcode::EvexVandpdVpdHpdWpd, 0x0000_0000_0000_0022u64),
             (Opcode::EvexVxorpdVpdHpdWpd, 0x1111_1111_2222_22DDu64),
         ] {
-            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
             cpu.vmm[1].set_zmm64u(0, 0x1111_1111_2222_2222);
             cpu.vmm[1].set_zmm64u(1, 0x3333_3333_4444_4444);
             cpu.vmm[2].set_zmm64u(0, 0x0000_0000_0000_00FF);
@@ -2643,7 +2642,9 @@ mod tests {
 
     #[test]
     fn vpandnq_negates_src1_at_qword_granularity() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmm64u(0, 0x0000_0000_0000_00F0);
         cpu.vmm[1].set_zmm64u(0, 0xFFFF_FFFF_FFFF_FFFF);
         cpu.vmm[0].set_zmm64u(0, 0xDEAD_BEEF_DEAD_BEEF);
@@ -2689,7 +2690,9 @@ mod tests {
 
     #[test]
     fn operand_order_vpsub_subtracts_rm_from_vvvv() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmm32u(0, 10); // vvvv
         cpu.vmm[1].set_zmm32u(0, 3); // rm
         cpu.execute_instruction(&evex_unmasked(Opcode::EvexVpsubdVdqHdqWdq))
@@ -2705,7 +2708,9 @@ mod tests {
 
     #[test]
     fn operand_order_vpandn_negates_vvvv() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmm32u(0, 0x0000_00F0); // vvvv — the negated side
         cpu.vmm[1].set_zmm32u(0, 0xFFFF_FFFF); // rm
         cpu.execute_instruction(&evex_unmasked(Opcode::EvexVpandndVdqHdqWdq))
@@ -2715,7 +2720,9 @@ mod tests {
 
     #[test]
     fn operand_order_vpcmpgtd_compares_vvvv_against_rm() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmm32u(0, 5); // vvvv
         cpu.vmm[1].set_zmm32u(0, 3); // rm
         cpu.vmm[2].set_zmm32u(1, 3);
@@ -2731,7 +2738,9 @@ mod tests {
 
     #[test]
     fn operand_order_vpshufb_takes_its_control_bytes_from_rm() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         // vvvv is the data, rm is the shuffle control.
         for i in 0..16 {
             cpu.vmm[2].set_zmmubyte(i, (0xA0 + i) as u8);
@@ -2750,7 +2759,9 @@ mod tests {
 
     #[test]
     fn operand_order_vpblendm_takes_vvvv_where_the_mask_is_clear() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for i in 0..4 {
             cpu.vmm[2].set_zmm32u(i, 0x1111_1111); // vvvv
             cpu.vmm[1].set_zmm32u(i, 0x2222_2222); // rm
@@ -2767,7 +2778,9 @@ mod tests {
 
     #[test]
     fn operand_order_variable_shift_counts_come_from_rm() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmm32u(0, 0x0000_0100); // vvvv: the value
         cpu.vmm[2].set_zmm32u(1, 0x0000_0100);
         cpu.vmm[1].set_zmm32u(0, 4); // rm: per-element counts
@@ -2780,7 +2793,9 @@ mod tests {
 
     #[test]
     fn operand_order_vinserti32x4_inserts_rm_into_vvvv() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for i in 0..8 {
             cpu.vmm[2].set_zmm32u(i, 0x1111_1111); // vvvv: the base vector
         }
@@ -2800,7 +2815,9 @@ mod tests {
 
     #[test]
     fn operand_order_kandnw_negates_vvvv() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.bx_write_opmask(2, 0x00F0); // vvvv
         cpu.bx_write_opmask(1, 0xFFFF); // rm
         let mut i = evex_unmasked(Opcode::KandnwKgwKhwKew);
@@ -2814,7 +2831,9 @@ mod tests {
 
     #[test]
     fn duplication_moves_copy_in_the_direction_the_opcode_names() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for (n, v) in [10u32, 11, 12, 13].into_iter().enumerate() {
             cpu.vmm[1].set_zmm32u(n, v); // one-operand form reads src() = src1()
         }
@@ -2844,7 +2863,9 @@ mod tests {
 
     #[test]
     fn valignd_concatenates_vvvv_above_rm_and_windows_from_the_bottom() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for (n, v) in [20u32, 21, 22, 23].into_iter().enumerate() {
             cpu.vmm[2].set_zmm32u(n, v); // vvvv — the high half
         }

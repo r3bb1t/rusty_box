@@ -16,10 +16,9 @@
 //! all guest-visible times and IRQ edges match Bochs exactly.
 
 use crate::config::BxPhyAddress;
+use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
 #[cfg(feature = "std")]
-use crate::snapshot::{checked_snapshot_len_add, SnapshotReader, SnapshotWriteExt};
-#[cfg(feature = "std")]
-use std::io::{self, Read, Write};
+use crate::snapshot::{checked_snapshot_len_add, SnapError, SnapRead, SnapResult, SnapWrite};
 
 /// Bochs hpet.cc `HPET_BASE`.
 pub(crate) const HPET_BASE: BxPhyAddress = 0xFED0_0000;
@@ -161,13 +160,12 @@ pub struct BxHpetC {
     pub(crate) timers: [HpetTimer; HPET_NUM_TIMERS],
     /// PC-system one-shot handles, one per comparator (Bochs `timer_id`).
     pub(crate) timer_handles: [Option<usize>; HPET_NUM_TIMERS],
-    /// Emulated-tick cursor of the current access — stamped by the CPU MMIO
-    /// slow path (`system_ticks()`) or the emulator before servicing a fire.
-    /// Bochs reads `bx_pc_system.time_nsec()` directly; this cursor carries
-    /// the identical clock into handler context.
-    now_ticks: u64,
-    /// Tick rate for the nsec conversions (pc_system `ips`).
-    ips: u64,
+    /// Emulated time at the current access — stamped by the CPU MMIO slow
+    /// path or by the emulator before servicing a fire. Bochs reads
+    /// `bx_pc_system.time_nsec()` directly; this carries the identical clock
+    /// into handler context, rate included, so the nanosecond conversions
+    /// below are the clock's own and not this device's arithmetic.
+    clock: VmClock,
     pending: HpetPending,
 }
 
@@ -192,8 +190,7 @@ impl BxHpetC {
             hpet_reference_time: 0,
             timers: [HpetTimer::new(); HPET_NUM_TIMERS],
             timer_handles: [None; HPET_NUM_TIMERS],
-            now_ticks: 0,
-            ips: 0,
+            clock: VmClock::new(VmInstant::from_ticks(0), ClockHz::BOCHS_DEFAULT),
             pending: HpetPending::new(),
         }
     }
@@ -221,9 +218,8 @@ impl BxHpetC {
     }
 
     /// Stamp the emulated-time cursor for the next handler call.
-    pub(crate) fn set_now(&mut self, now_ticks: u64, ips: u64) {
-        self.now_ticks = now_ticks;
-        self.ips = ips;
+    pub(crate) fn set_now(&mut self, clock: VmClock) {
+        self.clock = clock;
     }
 
     /// Whether queued side effects await an emulator drain.
@@ -283,22 +279,7 @@ impl BxHpetC {
     /// Emulated nanoseconds at the stamped cursor — the value Bochs reads
     /// from `bx_pc_system.time_nsec()` (pc_system.cc conversion).
     fn time_nsec(&self) -> u64 {
-        if self.ips == 0 {
-            return 0;
-        }
-        let nsec = (u128::from(self.now_ticks) * 1_000_000_000u128) / u128::from(self.ips);
-        u64::try_from(nsec).unwrap_or(u64::MAX)
-    }
-
-    /// Emulated pc-system ticks for a nanosecond delta. Bochs pc_system.cc
-    /// `activate_timer_nsec` computes `(Bit64u)(double(nsec) * m_ips / 1000.0)`
-    /// — a truncating (floor) conversion. Matched with integer floor division:
-    /// a floored deadline may fire before the comparator crossing, and
-    /// `timer_fired` finds `time_between` false and re-arms, exactly like Bochs
-    /// (the IRQ lands on the same tick either way).
-    fn nsec_to_pc_ticks(&self, nsec: u64) -> u64 {
-        let ticks = (u128::from(nsec) * u128::from(self.ips)) / 1_000_000_000u128;
-        u64::try_from(ticks).unwrap_or(u64::MAX)
+        self.clock.nanos()
     }
 
     /// Bochs `hpet_get_ticks`.
@@ -413,7 +394,7 @@ impl BxHpetC {
         }
         diff = diff.clamp(HPET_MIN_ALLOWED_PERIOD, HPET_MAX_ALLOWED_PERIOD);
         let deadline =
-            self.now_ticks.saturating_add(self.nsec_to_pc_ticks(Self::ticks_to_ns(diff)));
+            self.clock.after_nanos_floor(Self::ticks_to_ns(diff)).ticks();
         self.pending.timer_ops[index] = Some(HpetTimerOp::ArmAtTicks(deadline));
     }
 
@@ -523,16 +504,42 @@ impl BxHpetC {
     }
 
     /// Memory-system dispatch entry (Bochs static `hpet_write`).
+    /// A write whose buffer is shorter than the length it declares is
+    /// rejected like every other malformed access here, rather than taken on
+    /// trust. `len` is the caller's claim about the access; `data` is what it
+    /// actually brought, and only the second can be read.
     pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) {
         match len {
             4 if addr & 0x3 == 0 => {
-                let value = u32::from_le_bytes(data[..4].try_into().expect("len checked"));
-                self.write_aligned(addr, value, true);
+                let Some(bytes) = data.first_chunk::<4>() else {
+                    tracing::error!(
+                        "HPET: 4-byte write at {:#x} carrying only {} bytes",
+                        addr,
+                        data.len()
+                    );
+                    return;
+                };
+                self.write_aligned(addr, u32::from_le_bytes(*bytes), true);
             }
             8 if addr & 0x7 == 0 => {
-                let value = u64::from_le_bytes(data[..8].try_into().expect("len checked"));
-                self.write_aligned(addr, value as u32, false);
-                self.write_aligned(addr + 4, (value >> 32) as u32, true);
+                let Some(bytes) = data.first_chunk::<8>() else {
+                    tracing::error!(
+                        "HPET: 8-byte write at {:#x} carrying only {} bytes",
+                        addr,
+                        data.len()
+                    );
+                    return;
+                };
+                // Bochs hpet.cc splits a 64-bit write into its two dwords,
+                // arming only on the upper one so a comparator sees the whole
+                // value before it re-arms. Reading each dword straight out of
+                // the buffer says that plainly, where assembling a u64 and
+                // shifting it back apart spends two truncating casts to end
+                // up in the same place.
+                let low = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                let high = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                self.write_aligned(addr, low, false);
+                self.write_aligned(addr + 4, high, true);
             }
             _ => {
                 tracing::error!("HPET: unsupported write at {:#x} len={}", addr, len);
@@ -749,9 +756,12 @@ impl BxHpetC {
 const HPET_SNAPSHOT_VERSION: u32 = 1;
 
 #[cfg(feature = "std")]
-impl BxHpetC {
+impl crate::snapshot::SnapshotSection for BxHpetC {
+    const TAG: u32 = crate::snapshot::SEC_HPET;
+    type Restored = ();
+
     /// Byte length of the HPET snapshot section (fixed layout).
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         // Bochs hpet.cc register_state(): config, isr, hpet_counter, plus
         // per-timer {config, cmp, fsb, period}. version u32 + 3 × u64 +
         // HPET_NUM_TIMERS × 4 × u64.
@@ -768,7 +778,7 @@ impl BxHpetC {
     /// reference exactly as Bochs does. The comparator pc-system timers are
     /// re-registered by `register_timer_owners`, so their handles are not part
     /// of the format; the pending queue is always empty at a snapshot boundary.
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         debug_assert!(
             !self.has_pending_work(),
             "HPET snapshot taken with side effects still queued"
@@ -792,13 +802,12 @@ impl BxHpetC {
     /// the omitted reference/last_checked fields start at zero; rusty_box
     /// restores in place, so it zeroes them explicitly to reproduce Bochs's
     /// counter-restore behavior exactly.
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         if reader.read_u32()? != HPET_SNAPSHOT_VERSION {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(SnapError::Invalid(
                 "unsupported HPET snapshot section version",
             ));
         }
@@ -823,9 +832,55 @@ impl BxHpetC {
     }
 }
 
+/// The HPET register block as a memory-mapped device.
+///
+/// Bochs hpet.cc reads `bx_pc_system.time_nsec()` inside the handler, so the
+/// counter a guest observes is the one live at the access; the context carries
+/// that clock.
+///
+/// One window, so the id is not consulted. The register decode masks with
+/// `& 0x3ff` and the window is the 1 KiB block at the fixed, 1 KiB-aligned
+/// [`HPET_BASE`], so the offset and the physical address agree on every bit the
+/// decode looks at.
+impl rusty_box_devices::api::MmioDevice for BxHpetC {
+    #[inline]
+    fn mmio_read(
+        &mut self,
+        _window: rusty_box_devices::api::WindowId,
+        at: rusty_box_devices::api::WindowOffset,
+        len: u32,
+        data: &mut [u8],
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+    ) {
+        self.set_now(ctx.clock);
+        self.mem_read(at.get(), len, data);
+    }
+
+    #[inline]
+    fn mmio_write(
+        &mut self,
+        _window: rusty_box_devices::api::WindowId,
+        at: rusty_box_devices::api::WindowOffset,
+        len: u32,
+        data: &[u8],
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+    ) {
+        self.set_now(ctx.clock);
+        self.mem_write(at.get(), len, data);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tick reading under this module's IPS — what the HPET is handed now
+    /// instead of the two numbers it used to divide for itself.
+    fn clock_at(ticks: u64) -> VmClock {
+        VmClock::new(VmInstant::from_ticks(ticks), ClockHz::new(IPS).unwrap())
+    }
+    #[cfg(feature = "std")]
+    use crate::snapshot::SnapshotSection;
 
     const IPS: u64 = 1_000_000_000; // 1 tick per ns keeps conversions exact
 
@@ -833,7 +888,7 @@ mod tests {
         let mut hpet = BxHpetC::new();
         hpet.reset();
         let _ = hpet.take_pending();
-        hpet.set_now(0, IPS);
+        hpet.set_now(clock_at(0));
         hpet.write_aligned(HPET_BASE + u64::from(HPET_CFG), HPET_CFG_ENABLE as u32, true);
         hpet
     }
@@ -854,12 +909,12 @@ mod tests {
         let _ = hpet.take_pending();
 
         // 1000 ns at 10 ns per HPET tick = 100 counter ticks.
-        hpet.set_now(1_000, IPS);
+        hpet.set_now(clock_at(1_000));
         assert_eq!(hpet.read_aligned(HPET_BASE + u64::from(HPET_COUNTER)), 100);
 
         // Disabling latches the counter; time passing no longer moves it.
         hpet.write_aligned(HPET_BASE + u64::from(HPET_CFG), 0, true);
-        hpet.set_now(5_000, IPS);
+        hpet.set_now(clock_at(5_000));
         assert_eq!(hpet.read_aligned(HPET_BASE + u64::from(HPET_COUNTER)), 100);
     }
 
@@ -867,7 +922,7 @@ mod tests {
     fn oneshot_comparator_queues_an_exactly_anchored_deadline() {
         let mut hpet = enabled_hpet();
         let _ = hpet.take_pending();
-        hpet.set_now(1_000, IPS);
+        hpet.set_now(clock_at(1_000));
 
         // Timer 0: edge, enabled, 32-bit, comparator 150 HPET ticks. The
         // 32-bit CFG write truncates the ~0 reset comparator to 0 so the
@@ -889,7 +944,7 @@ mod tests {
         );
 
         // The fire at that instant raises the routed IRQ as an edge pair.
-        hpet.set_now(1_500, IPS);
+        hpet.set_now(clock_at(1_500));
         hpet.timer_fired(0);
         let fired = hpet.take_pending();
         assert!(fired.irq_op_count >= 2);
@@ -901,7 +956,7 @@ mod tests {
     fn legacy_mode_gates_pit_and_rtc_and_reroutes_timer0() {
         let mut hpet = enabled_hpet();
         let _ = hpet.take_pending();
-        hpet.set_now(0, IPS);
+        hpet.set_now(clock_at(0));
 
         hpet.write_aligned(
             HPET_BASE + u64::from(HPET_CFG),
@@ -921,13 +976,13 @@ mod tests {
         );
         hpet.write_aligned(t0 + u64::from(HPET_TN_CMP), 10, true);
         let _ = hpet.take_pending();
-        hpet.set_now(100, IPS);
+        hpet.set_now(clock_at(100));
         hpet.timer_fired(0);
         let fired = hpet.take_pending();
         assert_eq!(fired.irq_ops[..fired.irq_op_count], [(0, false), (0, true)]);
 
         // Leaving legacy mode re-enables the PIT/RTC pins (Bochs reset too).
-        hpet.set_now(100, IPS);
+        hpet.set_now(clock_at(100));
         hpet.write_aligned(HPET_BASE + u64::from(HPET_CFG), HPET_CFG_ENABLE as u32, true);
         let pending = hpet.take_pending();
         assert_eq!(pending.pit_irq_gate, Some(true));
@@ -938,7 +993,7 @@ mod tests {
     fn periodic_timer_advances_its_comparator_past_the_current_tick() {
         let mut hpet = enabled_hpet();
         let _ = hpet.take_pending();
-        hpet.set_now(0, IPS);
+        hpet.set_now(clock_at(0));
 
         // Timer 0 periodic (32-bit): SETVAL, comparator 100, period 100.
         let t0 = HPET_BASE + 0x100;
@@ -951,7 +1006,7 @@ mod tests {
         let _ = hpet.take_pending();
 
         // Fire at HPET tick 100 (= 1000 ns): comparator steps to 200.
-        hpet.set_now(1_000, IPS);
+        hpet.set_now(clock_at(1_000));
         hpet.timer_fired(0);
         assert_eq!(hpet.timers[0].cmp, 200);
         let pending = hpet.take_pending();
@@ -962,7 +1017,7 @@ mod tests {
     fn level_timer_latches_isr_and_status_write_clears_it() {
         let mut hpet = enabled_hpet();
         let _ = hpet.take_pending();
-        hpet.set_now(0, IPS);
+        hpet.set_now(clock_at(0));
 
         let t0 = HPET_BASE + 0x100;
         hpet.write_aligned(
@@ -973,7 +1028,7 @@ mod tests {
         hpet.write_aligned(t0 + u64::from(HPET_TN_CMP), 10, true);
         let _ = hpet.take_pending();
 
-        hpet.set_now(200, IPS);
+        hpet.set_now(clock_at(200));
         hpet.timer_fired(0);
         assert_eq!(hpet.isr & 1, 1, "level mode must latch the status bit");
         let fired = hpet.take_pending();
@@ -990,7 +1045,7 @@ mod tests {
     fn snapshot_round_trips_bochs_register_state_and_zeroes_reference_fields() {
         let mut hpet = enabled_hpet();
         let _ = hpet.take_pending();
-        hpet.set_now(0, IPS);
+        hpet.set_now(clock_at(0));
 
         // Program timer 0 (32-bit periodic) and timer 1 (edge), latch some
         // status, and let the reference cursor advance via a fire so the
@@ -1004,7 +1059,7 @@ mod tests {
         hpet.write_aligned(t0 + u64::from(HPET_TN_CMP), 100, true);
         let t1 = HPET_BASE + 0x120;
         hpet.write_aligned(t1 + u64::from(HPET_TN_ROUTE), 0xdead_beef, true);
-        hpet.set_now(1_000, IPS);
+        hpet.set_now(clock_at(1_000));
         hpet.timer_fired(0);
         let _ = hpet.take_pending();
 
@@ -1019,8 +1074,8 @@ mod tests {
             .collect();
 
         let mut blob = Vec::new();
-        hpet.save_snapshot_v3(&mut blob).unwrap();
-        assert_eq!(blob.len() as u64, hpet.snapshot_v3_len().unwrap());
+        hpet.save(&mut blob).unwrap();
+        assert_eq!(blob.len() as u64, hpet.snapshot_len().unwrap());
 
         let mut restored = BxHpetC::new();
         restored.reset();
@@ -1032,7 +1087,7 @@ mod tests {
 
         let mut reader =
             crate::snapshot::SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
-        restored.restore_snapshot_v3(&mut reader).unwrap();
+        restored.restore(&mut reader).unwrap();
         reader.finish_exact().unwrap();
 
         // Bochs register_state fields round-trip exactly.

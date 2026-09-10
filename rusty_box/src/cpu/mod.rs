@@ -9,21 +9,21 @@ pub use instrumentation::{
     MemType, MemUnmapped, MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent,
     PrefetchHint, ResetType, TlbCntrl, X86Reg,
 };
-#[cfg(feature = "instrumentation")]
-pub use instrumentation::{HookHandle, InstrumentationError, IoHookType, MemHookType};
 
-/// Reason for CPU reset (always available, no alloc needed).
-#[derive(Debug, PartialEq, Copy, Clone)]
-pub enum ResetReason {
-    Software = 10,
-    Hardware = 11,
-}
+/// The decoded instruction every [`Instrumentation`] execution hook is handed.
+/// Re-exported beside the trait so implementing one needs a single import.
+pub use decoder::Instruction;
+
+/// Re-exported where the CPU's consumers already look for it; a reset is a
+/// machine event, so the type itself is arch-neutral and lives in the core.
+pub use rusty_box_core::ResetReason;
 
 // Core CPU emulation modules (no alloc needed)
 pub mod error;
 pub use error::{CpuError, Result};
 
 pub(crate) mod api_bridge;
+pub mod arch_state;
 
 pub(super) mod access;
 pub(super) mod aes;
@@ -63,6 +63,7 @@ pub(super) mod cet;
 #[allow(clippy::module_inception)]
 pub mod cpu;
 mod cpu_getters_and_setters;
+pub(crate) mod exec_ctx;
 pub(super) mod cpu_macros;
 pub(super) mod cpudb;
 pub(super) mod cpuid;
@@ -81,10 +82,10 @@ pub(super) mod descriptor;
 pub(super) mod dispatcher;
 pub mod eflags;
 pub(super) mod event;
+pub(crate) use event::{AcknowledgedInterrupt, TrapDischarge};
 pub(super) mod exception;
 pub(super) mod flag_ctrl;
 pub(super) mod flag_ctrl_pro;
-pub(crate) mod float;
 pub(super) mod fpu;
 pub(super) mod fred;
 pub(super) mod gf2;
@@ -151,3 +152,4 @@ pub use cpuid::{BxCpuIdTrait, CpuidFreq};
 
 pub use cpudb::amd::amd_ryzen::AmdRyzen;
 pub use cpudb::intel::*;
+pub use cpudb::CpuModel;

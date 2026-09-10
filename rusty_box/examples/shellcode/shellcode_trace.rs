@@ -12,14 +12,13 @@
 //! cargo run --release --example shellcode_trace --features "std,instrumentation"
 //! ```
 
-#![cfg(all(feature = "std", feature = "instrumentation"))]
+#![cfg(feature = "std")]
 
 use rusty_box::{
     cpu::{
-        core_i7_skylake::Corei7SkylakeX, CpuSetupMode, HookCtx, HookMask, InstrAction,
-        Instrumentation, ResetReason, X86Reg,
+        CpuSetupMode, HookCtx, HookMask, InstrAction, Instrumentation, X86Reg,
     },
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{Emulator, EmulatorConfig, Ips, MemorySize},
 };
 
 /// `msfvenom -p linux/x64/shell_reverse_tcp LHOST=127.0.0.1 LPORT=4444 -f raw`
@@ -99,9 +98,8 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let cfg = EmulatorConfig {
-        guest_memory_size: GUEST_RAM,
-        host_memory_size: GUEST_RAM,
-        ips: 1_000_000_000,
+        memory: MemorySize::bytes(GUEST_RAM),
+        ips: Ips::new(1_000_000_000),
         pci_enabled: false,
         ..EmulatorConfig::default()
     };
@@ -109,11 +107,11 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         next_fd: 3,
         ..Default::default()
     };
-    let mut emu =
-        Emulator::<Corei7SkylakeX, Tracer>::new_with_instrumentation(cfg.clone(), tracer)?;
-    emu.init_memory_and_pc_system()?;
-    unsafe { emu.cpu_mut_unchecked() }.reset(ResetReason::Hardware);
-    emu.setup_cpu_mode(CpuSetupMode::FlatLong64)?;
+    let mut emu = Emulator::<Tracer>::new_with_mode_and_instrumentation(
+        cfg.clone(),
+        CpuSetupMode::FlatLong64,
+        tracer,
+    )?;
 
     emu.mem_write(SHELLCODE_BASE, SHELLCODE)?;
     emu.reg_write(X86Reg::Rsp, STACK_TOP);

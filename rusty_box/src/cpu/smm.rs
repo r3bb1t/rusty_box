@@ -7,7 +7,6 @@
 //! a special real-mode-like execution environment at smbase + 0x8000.
 
 use super::{
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction, BX_GENERAL_REGISTERS},
     descriptor::{
         SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
@@ -133,113 +132,7 @@ pub(super) enum SMMRAM_Fields {
 
 use SMMRAM_Fields::*;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
-    pub(super) fn init_smram() -> Result<[u32; SMRAM_FIELD_LAST as _]> {
-        let mut smram_map = [0; SMRAM_FIELD_LAST as _];
-        smram_map[SMRAM_FIELD_SMBASE_OFFSET as usize] = smram_translate(0x7f00);
-        smram_map[SMRAM_FIELD_SMM_REVISION_ID as usize] = smram_translate(0x7efc);
-        smram_map[SMRAM_FIELD_RAX_HI32 as usize] = smram_translate(0x7ffc);
-        smram_map[SMRAM_FIELD_EAX as usize] = smram_translate(0x7ff8);
-        smram_map[SMRAM_FIELD_RCX_HI32 as usize] = smram_translate(0x7ff4);
-        smram_map[SMRAM_FIELD_ECX as usize] = smram_translate(0x7ff0);
-        smram_map[SMRAM_FIELD_RDX_HI32 as usize] = smram_translate(0x7fec);
-        smram_map[SMRAM_FIELD_EDX as usize] = smram_translate(0x7fe8);
-        smram_map[SMRAM_FIELD_RBX_HI32 as usize] = smram_translate(0x7fe4);
-        smram_map[SMRAM_FIELD_EBX as usize] = smram_translate(0x7fe0);
-        smram_map[SMRAM_FIELD_RSP_HI32 as usize] = smram_translate(0x7fdc);
-        smram_map[SMRAM_FIELD_ESP as usize] = smram_translate(0x7fd8);
-        smram_map[SMRAM_FIELD_RBP_HI32 as usize] = smram_translate(0x7fd4);
-        smram_map[SMRAM_FIELD_EBP as usize] = smram_translate(0x7fd0);
-        smram_map[SMRAM_FIELD_RSI_HI32 as usize] = smram_translate(0x7fcc);
-        smram_map[SMRAM_FIELD_ESI as usize] = smram_translate(0x7fc8);
-        smram_map[SMRAM_FIELD_RDI_HI32 as usize] = smram_translate(0x7fc4);
-        smram_map[SMRAM_FIELD_EDI as usize] = smram_translate(0x7fc0);
-        smram_map[SMRAM_FIELD_R8_HI32 as usize] = smram_translate(0x7fbc);
-        smram_map[SMRAM_FIELD_R8 as usize] = smram_translate(0x7fb8);
-        smram_map[SMRAM_FIELD_R9_HI32 as usize] = smram_translate(0x7fb4);
-        smram_map[SMRAM_FIELD_R9 as usize] = smram_translate(0x7fb0);
-        smram_map[SMRAM_FIELD_R10_HI32 as usize] = smram_translate(0x7fac);
-        smram_map[SMRAM_FIELD_R10 as usize] = smram_translate(0x7fa8);
-        smram_map[SMRAM_FIELD_R11_HI32 as usize] = smram_translate(0x7fa4);
-        smram_map[SMRAM_FIELD_R11 as usize] = smram_translate(0x7fa0);
-        smram_map[SMRAM_FIELD_R12_HI32 as usize] = smram_translate(0x7f9c);
-        smram_map[SMRAM_FIELD_R12 as usize] = smram_translate(0x7f98);
-        smram_map[SMRAM_FIELD_R13_HI32 as usize] = smram_translate(0x7f94);
-        smram_map[SMRAM_FIELD_R13 as usize] = smram_translate(0x7f90);
-        smram_map[SMRAM_FIELD_R14_HI32 as usize] = smram_translate(0x7f8c);
-        smram_map[SMRAM_FIELD_R14 as usize] = smram_translate(0x7f88);
-        smram_map[SMRAM_FIELD_R15_HI32 as usize] = smram_translate(0x7f84);
-        smram_map[SMRAM_FIELD_R15 as usize] = smram_translate(0x7f80);
-        smram_map[SMRAM_FIELD_RIP_HI32 as usize] = smram_translate(0x7f7c);
-        smram_map[SMRAM_FIELD_EIP as usize] = smram_translate(0x7f78);
-        smram_map[SMRAM_FIELD_RFLAGS_HI32 as usize] = smram_translate(0x7f74);
-        smram_map[SMRAM_FIELD_EFLAGS as usize] = smram_translate(0x7f70);
-        smram_map[SMRAM_FIELD_DR6_HI32 as usize] = smram_translate(0x7f6c);
-        smram_map[SMRAM_FIELD_DR6 as usize] = smram_translate(0x7f68);
-        smram_map[SMRAM_FIELD_DR7_HI32 as usize] = smram_translate(0x7f64);
-        smram_map[SMRAM_FIELD_DR7 as usize] = smram_translate(0x7f60);
-        smram_map[SMRAM_FIELD_CR0_HI32 as usize] = smram_translate(0x7f5c);
-        smram_map[SMRAM_FIELD_CR0 as usize] = smram_translate(0x7f58);
-        smram_map[SMRAM_FIELD_CR3_HI32 as usize] = smram_translate(0x7f54);
-        smram_map[SMRAM_FIELD_CR3 as usize] = smram_translate(0x7f50);
-        smram_map[SMRAM_FIELD_CR4_HI32 as usize] = smram_translate(0x7f4c);
-        smram_map[SMRAM_FIELD_CR4 as usize] = smram_translate(0x7f48);
-        smram_map[SMRAM_FIELD_SSP_HI32 as usize] = smram_translate(0x7f44);
-        smram_map[SMRAM_FIELD_SSP as usize] = smram_translate(0x7f40);
-        smram_map[SMRAM_FIELD_EFER_HI32 as usize] = smram_translate(0x7ed4);
-        smram_map[SMRAM_FIELD_EFER as usize] = smram_translate(0x7ed0);
-        smram_map[SMRAM_FIELD_IO_INSTRUCTION_RESTART as usize] = smram_translate(0x7ec8);
-        smram_map[SMRAM_FIELD_AUTOHALT_RESTART as usize] = smram_translate(0x7ec8);
-        smram_map[SMRAM_FIELD_NMI_MASK as usize] = smram_translate(0x7ec8);
-        smram_map[SMRAM_FIELD_TR_BASE_HI32 as usize] = smram_translate(0x7e9c);
-        smram_map[SMRAM_FIELD_TR_BASE as usize] = smram_translate(0x7e98);
-        smram_map[SMRAM_FIELD_TR_LIMIT as usize] = smram_translate(0x7e94);
-        smram_map[SMRAM_FIELD_TR_SELECTOR_AR as usize] = smram_translate(0x7e90);
-        smram_map[SMRAM_FIELD_IDTR_BASE_HI32 as usize] = smram_translate(0x7e8c);
-        smram_map[SMRAM_FIELD_IDTR_BASE as usize] = smram_translate(0x7e88);
-        smram_map[SMRAM_FIELD_IDTR_LIMIT as usize] = smram_translate(0x7e84);
-        smram_map[SMRAM_FIELD_LDTR_BASE_HI32 as usize] = smram_translate(0x7e7c);
-        smram_map[SMRAM_FIELD_LDTR_BASE as usize] = smram_translate(0x7e78);
-        smram_map[SMRAM_FIELD_LDTR_LIMIT as usize] = smram_translate(0x7e74);
-        smram_map[SMRAM_FIELD_LDTR_SELECTOR_AR as usize] = smram_translate(0x7e70);
-        smram_map[SMRAM_FIELD_GDTR_BASE_HI32 as usize] = smram_translate(0x7e6c);
-        smram_map[SMRAM_FIELD_GDTR_BASE as usize] = smram_translate(0x7e68);
-        smram_map[SMRAM_FIELD_GDTR_LIMIT as usize] = smram_translate(0x7e64);
-        smram_map[SMRAM_FIELD_ES_BASE_HI32 as usize] = smram_translate(0x7e0c);
-        smram_map[SMRAM_FIELD_ES_BASE as usize] = smram_translate(0x7e08);
-        smram_map[SMRAM_FIELD_ES_LIMIT as usize] = smram_translate(0x7e04);
-        smram_map[SMRAM_FIELD_ES_SELECTOR_AR as usize] = smram_translate(0x7e00);
-        smram_map[SMRAM_FIELD_CS_BASE_HI32 as usize] = smram_translate(0x7e1c);
-        smram_map[SMRAM_FIELD_CS_BASE as usize] = smram_translate(0x7e18);
-        smram_map[SMRAM_FIELD_CS_LIMIT as usize] = smram_translate(0x7e14);
-        smram_map[SMRAM_FIELD_CS_SELECTOR_AR as usize] = smram_translate(0x7e10);
-        smram_map[SMRAM_FIELD_SS_BASE_HI32 as usize] = smram_translate(0x7e2c);
-        smram_map[SMRAM_FIELD_SS_BASE as usize] = smram_translate(0x7e28);
-        smram_map[SMRAM_FIELD_SS_LIMIT as usize] = smram_translate(0x7e24);
-        smram_map[SMRAM_FIELD_SS_SELECTOR_AR as usize] = smram_translate(0x7e20);
-        smram_map[SMRAM_FIELD_DS_BASE_HI32 as usize] = smram_translate(0x7e3c);
-        smram_map[SMRAM_FIELD_DS_BASE as usize] = smram_translate(0x7e38);
-        smram_map[SMRAM_FIELD_DS_LIMIT as usize] = smram_translate(0x7e34);
-        smram_map[SMRAM_FIELD_DS_SELECTOR_AR as usize] = smram_translate(0x7e30);
-        smram_map[SMRAM_FIELD_FS_BASE_HI32 as usize] = smram_translate(0x7e4c);
-        smram_map[SMRAM_FIELD_FS_BASE as usize] = smram_translate(0x7e48);
-        smram_map[SMRAM_FIELD_FS_LIMIT as usize] = smram_translate(0x7e44);
-        smram_map[SMRAM_FIELD_FS_SELECTOR_AR as usize] = smram_translate(0x7e40);
-        smram_map[SMRAM_FIELD_GS_BASE_HI32 as usize] = smram_translate(0x7e5c);
-        smram_map[SMRAM_FIELD_GS_BASE as usize] = smram_translate(0x7e58);
-        smram_map[SMRAM_FIELD_GS_LIMIT as usize] = smram_translate(0x7e54);
-        smram_map[SMRAM_FIELD_GS_SELECTOR_AR as usize] = smram_translate(0x7e50);
-
-        for (index, value) in smram_map.iter().enumerate() {
-            let value = *value;
-            if value >= SMM_SAVE_STATE_MAP_SIZE {
-                return Err(CpuError::SmramMap { index, value });
-            }
-        }
-
-        Ok(smram_map)
-    }
-
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // RSM — Resume from System Management Mode (opcode 0F AA)
     // Bochs: smm.cc
@@ -269,7 +162,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Bochs smm.cc RSM: release the events held while in SMM.
         self.unmask_event(
-            Self::BX_EVENT_SMI | Self::BX_EVENT_NMI | Self::BX_EVENT_VMX_VIRTUAL_NMI,
+            BxCpuC::<T>::BX_EVENT_SMI
+                | BxCpuC::<T>::BX_EVENT_NMI
+                | BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI,
         );
 
         // Read 128 dwords from SMRAM at smbase + 0x10000 (counting down)
@@ -293,16 +188,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return Err(super::error::CpuError::CpuLoopRestart);
         }
 
-
         // Bochs smm.cc RSM ends with BX_NEXT_TRACE(i): RSM is a serializing
         // trace-terminating instruction. The cpu_loop 'trace loop only breaks
         // to re-fetch when async_event is set (cpu.cc); every other
         // trace-ending control transfer (ctrl_xfer*.cc JMP/CALL/RET/IRET) sets
         // BX_ASYNC_EVENT_STOP_TRACE from its handler for exactly this reason.
         // Without it, after RSM restores the outer RIP the loop advances
-        // `instr_idx` into the *next* slot of the now-defunct SMM-handler trace
-        // (its trailing InsertedOpcode boundary marker), executing it under the
-        // SMM trace's stale real-mode `is_real` and masking RIP to 16 bits.
+        // `instr_idx` into the *next* slot of the now-defunct SMM-handler
+        // trace, executing whatever it holds under that trace's stale
+        // real-mode `is_real` and masking RIP to 16 bits.
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
 
         Ok(())
@@ -335,7 +229,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // virtual-NMI are held pending for the duration of SMM; RSM
         // unmasks them again.
         self.mask_event(
-            Self::BX_EVENT_SMI | Self::BX_EVENT_NMI | Self::BX_EVENT_VMX_VIRTUAL_NMI,
+            BxCpuC::<T>::BX_EVENT_SMI
+                | BxCpuC::<T>::BX_EVENT_NMI
+                | BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI,
         );
 
         // Save CPU state to SMRAM
@@ -392,10 +288,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.sregs[cs_idx].cache.dpl = 0;
         self.sregs[cs_idx].cache.segment = true;
         self.sregs[cs_idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
-        self.sregs[cs_idx]
-            .cache
-            .u
-            .set_segment_base(self.smbase as u64);
+        let smbase = self.smbase as u64;
+        self.sregs[cs_idx].cache.u.set_segment_base(smbase);
         self.sregs[cs_idx]
             .cache
             .u
@@ -469,8 +363,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // of the GPR pairs and into RIP_HI32/EIP/RFLAGS_HI32/EFLAGS/DR6/DR7.
         for n in 0..BX_GENERAL_REGISTERS {
             let val = self.gen_reg[n].rrx();
-            saved_state[map[SMRAM_FIELD_RAX_HI32 as usize + 2 * n] as usize] =
-                (val >> 32) as u32;
+            saved_state[map[SMRAM_FIELD_RAX_HI32 as usize + 2 * n] as usize] = (val >> 32) as u32;
             saved_state[map[SMRAM_FIELD_EAX as usize + 2 * n] as usize] = val as u32;
         }
 
@@ -604,10 +497,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 "SMM Restore: enable VMX {} mode",
                 if self.in_vmx_guest { "guest" } else { "host" }
             );
-            saved_cr0 |= (super::crregs::BxCr0::PG
-                | super::crregs::BxCr0::NE
-                | super::crregs::BxCr0::PE)
-                .bits();
+            saved_cr0 |=
+                (super::crregs::BxCr0::PG | super::crregs::BxCr0::NE | super::crregs::BxCr0::PE)
+                    .bits();
             saved_cr4 |= super::crregs::BxCr4::VMXE.bits();
         }
 
@@ -670,8 +562,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tracing::error!("SMM restore: CR4.PCIDE must be clear when not in long mode !");
             return false;
         }
-        if self.cr4.pae() && self.cr0.pg() && self.cr0.pe() && self.efer.lme() && !self.efer.lma()
-        {
+        if self.cr4.pae() && self.cr0.pg() && self.cr0.pe() && self.efer.lme() && !self.efer.lma() {
             tracing::error!(
                 "SMM restore: If EFER.LMA = 1 <=> CR4.PAE, CR0.PG, CR0.PE, EFER.LME=1 !"
             );
@@ -849,22 +740,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     fn smram_read_physical_dword(&mut self, paddr: u64) -> u32 {
-        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            let mut data = [0u8; 4];
-        if mem.read_physical_page(self.active_tlb_pins(), policy, paddr as _, 4, &mut data)
-            .is_ok()
         {
-            return u32::from_le_bytes(data);
-        } }
+            let policy = self.access_policy(paddr);
+            let mut data = [0u8; 4];
+            if self
+                .read_physical_routed(policy, paddr as _, 4, &mut data)
+                .is_ok()
+            {
+                return u32::from_le_bytes(data);
+            }
+        }
         0 // Return 0 if memory not accessible
     }
 
     fn smram_write_physical_dword(&mut self, paddr: u64, value: u32) {
-        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } { let mut data = value.to_le_bytes();
-        // SMM state save write — physical RAM write cannot meaningfully fail
-        let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr as _, 4, &mut data);
-        // Bochs handleSMC flushes the writer synchronously at the store.
-        self.smc_sync_after_phys_write(); }
+        {
+            let policy = self.access_policy(paddr);
+            let mut data = value.to_le_bytes();
+            if let Err(e) = self.write_physical_routed(policy, paddr as _, 4, &mut data) {
+                // The save area is what RSM restores from, so a dropped store
+                // here is state loss the guest sees on resume. Bochs's
+                // access_write_physical cannot fail; ours reports a malformed
+                // address, which is worth saying out loud.
+                tracing::warn!("SMM state save write to {:#x} failed: {:?}", paddr, e);
+            }
+            // Bochs handleSMC flushes the writer synchronously at the store.
+            self.smc_sync_after_phys_write();
+        }
     }
 }
 
@@ -931,29 +833,24 @@ const SEG_FIELDS: [(
 mod tests {
     use super::super::builder::BxCpuBuilder;
     use super::*;
-    use crate::cpu::core_i7_skylake::Corei7SkylakeX;
+    use crate::cpu::exec_ctx::TestMachine;
     use crate::cpu::ResetReason;
     use crate::memory::{BxMemC, BxMemoryStubC};
-    use core::ptr::NonNull;
 
     const MIB: usize = 1024 * 1024;
 
     /// BSP with 4 MiB of real backing memory attached — enough to cover the
     /// default SMBASE 0x30000 save area at 0x3fe00..0x40000.
-    fn cpu_with_memory() -> (
-        alloc::boxed::Box<BxCpuC<'static, Corei7SkylakeX>>,
-        alloc::boxed::Box<BxMemC<'static>>,
-    ) {
-        let mut mem = alloc::boxed::Box::new(BxMemC::new(
+    fn cpu_with_memory() -> TestMachine {
+        let mut memory = BxMemC::new(
             BxMemoryStubC::create_and_init(4 * MIB, 4 * MIB, 128 * 1024)
                 .expect("memory allocation"),
             false,
-        ));
-        mem.set_a20_mask(u64::MAX);
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        );
+        memory.set_a20_mask(u64::MAX);
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
-        cpu.set_mem_bus_ptr(NonNull::from(mem.as_mut()));
-        (cpu, mem)
+        TestMachine::from_parts(cpu, memory)
     }
 
     #[test]
@@ -962,14 +859,18 @@ mod tests {
         // consumer contract for the save-area layout: it reads the revision
         // byte at SMBASE+0xfefc, takes the x86-64 branch on 0x64, writes the
         // new SMBASE (0xa0000) into SMBASE+0xff00, and RSM must relocate.
-        let (mut cpu, _mem) = cpu_with_memory();
+        let mut machine = cpu_with_memory();
+        let mut cpu = machine.ctx();
         assert_eq!(cpu.smbase, 0x30000, "hardware-reset SMBASE");
 
         // Distinctive 64-bit state that only survives a 64-bit save map.
         cpu.gen_reg[15].set_rrx(0xdead_beef_cafe_f00d); // R15
         cpu.gen_reg[8].set_rrx(0x1122_3344_5566_7788); // R8
         let gs = super::super::decoder::BxSegregs::Gs as usize;
-        cpu.sregs[gs].cache.u.set_segment_base(0xffff_8000_1234_5678);
+        cpu.sregs[gs]
+            .cache
+            .u
+            .set_segment_base(0xffff_8000_1234_5678);
 
         cpu.enter_system_management_mode();
         assert!(cpu.in_smm);
@@ -1000,7 +901,8 @@ mod tests {
 
     #[test]
     fn smm_entry_environment_matches_bochs() {
-        let (mut cpu, _mem) = cpu_with_memory();
+        let mut machine = cpu_with_memory();
+        let mut cpu = machine.ctx();
         // Set CR0 bits the entry must NOT touch (ET, NE) plus ones it clears.
         let cr0_before = cpu.cr0.get32();
         cpu.enter_system_management_mode();
@@ -1022,7 +924,8 @@ mod tests {
 
     #[test]
     fn rsm_with_inconsistent_image_shuts_down() {
-        let (mut cpu, _mem) = cpu_with_memory();
+        let mut machine = cpu_with_memory();
+        let mut cpu = machine.ctx();
         cpu.enter_system_management_mode();
 
         // Corrupt the saved CR4 image with unsupported bits (Bochs
@@ -1055,19 +958,21 @@ mod tests {
     /// SMBASE 0x30000, which is plain DRAM with no routing involved.
     #[test]
     fn relocated_smbase_save_area_is_routed_under_the_vga_window() {
-        use crate::iodev::vga::BxVgaC;
-        use crate::memory::{CpuMemoryPolicy, CpuTlbPin, MemoryDeviceId};
+        use crate::memory::CpuMemoryPolicy;
 
-        let (mut cpu, mut mem) = cpu_with_memory();
+        let mut machine = cpu_with_memory();
 
-        // VGA owns 0xa0000-0xbffff, exactly as the machine registers it.
-        let mut vga = alloc::boxed::Box::new(BxVgaC::new());
-        let vga_id = MemoryDeviceId::Vga(&mut *vga as *mut BxVgaC);
-        mem.register_memory_handlers(vga_id, 0xA0000, 0xBFFFF)
+        // VGA's legacy aperture owns 0xa0000-0xbffff, exactly as the machine
+        // registers it. The map stores the owner's token, so no device
+        // instance is needed to establish who the range belongs to.
+        let vga_id = crate::iodev::DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Legacy.id());
+        machine
+            .memory_mut()
+            .register_memory_handlers(vga_id, 0xA0000, 0xBFFFF)
             .expect("VGA handler registration");
         // SMRAM control 0x0a: available, not open, not restricted.
-        mem.enable_smram(false, false);
-        cpu.set_mem_bus_ptr(NonNull::from(mem.as_mut()));
+        machine.memory_mut().enable_smram(false, false);
+        let mut cpu = machine.ctx();
 
         // Post-relocation SMBASE, and a GPR value that must survive the trip.
         cpu.smbase = 0xa0000;
@@ -1085,15 +990,14 @@ mod tests {
 
         // The save state must be in DRAM, not in the VGA planes: read the
         // backing RAM directly, bypassing every routing decision.
-        let pins = [CpuTlbPin::new(&*cpu)];
         let mut raw = [0u8; 4];
-        assert_eq!(mem.read_ram(&pins, 0xafefc, &mut raw).unwrap(), 4);
+        assert_eq!(cpu.memory.read_ram(0xafefc, &mut raw).unwrap(), 4);
         assert_eq!(
             u32::from_le_bytes(raw),
             SMM_REVISION_ID,
             "SMM entry must write the save state to DRAM under the VGA window"
         );
-        assert_eq!(mem.read_ram(&pins, 0xaffe0, &mut raw).unwrap(), 4);
+        assert_eq!(cpu.memory.read_ram(0xaffe0, &mut raw).unwrap(), 4);
         assert_eq!(
             u32::from_le_bytes(raw),
             0xdead_1234,
@@ -1103,18 +1007,15 @@ mod tests {
         // A non-SMM read of the same address must NOT see SMRAM: it belongs to
         // the VGA handler while DOPEN is clear.
         let mut via_vga = [0xffu8; 4];
-        mem.read_physical_page(
-            &pins,
-            CpuMemoryPolicy::default(),
-            0xafefc,
-            4,
-            &mut via_vga,
-        )
-        .expect("non-SMM read is served by the VGA handler");
-        assert_ne!(
-            u32::from_le_bytes(via_vga),
-            SMM_REVISION_ID,
-            "outside SMM the save area must stay hidden behind the VGA window"
+        assert_eq!(
+            cpu.memory
+                .read_physical_page(CpuMemoryPolicy::default(), 0xafefc, 4, &mut via_vga,)
+                .expect("non-SMM read resolves"),
+            crate::memory::PhysAccess::Mmio(crate::memory::mmio_map::MmioHit {
+                token: crate::iodev::DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Legacy.id()),
+                offset: 0xafefc - 0xa0000,
+            }),
+            "outside SMM the save area is the VGA window's, not DRAM's"
         );
 
         // ...and the CPU's own SMM-mode read of it does see SMRAM.
@@ -1127,24 +1028,32 @@ mod tests {
         // A DEVICE access never reaches SMRAM, even with the window wide open.
         // Bochs memory.cc guards the whole SMRAM block with `if (cpu != NULL)`,
         // so DMA and device-issued writes fall through to the VGA handler.
-        mem.enable_smram(true, false);
+        cpu.memory.enable_smram(true, false);
         let mut via_cpu = [0xffu8; 4];
-        mem.read_physical_page(&pins, CpuMemoryPolicy::default(), 0xafefc, 4, &mut via_cpu)
-            .expect("CPU read with SMRAM open");
+        assert_eq!(
+            cpu.memory
+                .read_physical_page(CpuMemoryPolicy::default(), 0xafefc, 4, &mut via_cpu)
+                .expect("CPU read with SMRAM open"),
+            crate::memory::PhysAccess::Done,
+            "with SMRAM open a CPU access is served by memory, not a device"
+        );
         assert_eq!(
             u32::from_le_bytes(via_cpu),
             SMM_REVISION_ID,
             "with SMRAM open a CPU access sees the save area"
         );
         let mut via_device = [0xffu8; 4];
-        mem.read_physical_page(&pins, CpuMemoryPolicy::device(), 0xafefc, 4, &mut via_device)
-            .expect("device read with SMRAM open");
-        assert_ne!(
-            u32::from_le_bytes(via_device),
-            SMM_REVISION_ID,
+        assert_eq!(
+            cpu.memory
+                .read_physical_page(CpuMemoryPolicy::device(), 0xafefc, 4, &mut via_device)
+                .expect("device read with SMRAM open"),
+            crate::memory::PhysAccess::Mmio(crate::memory::mmio_map::MmioHit {
+                token: crate::iodev::DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Legacy.id()),
+                offset: 0xafefc - 0xa0000,
+            }),
             "a device access must never see SMRAM (Bochs memory.cc cpu != NULL)"
         );
-        mem.enable_smram(false, false);
+        cpu.memory.enable_smram(false, false);
 
         // Instruction fetch inside SMM must get a direct DRAM span for the
         // handler page (Bochs getHostMemAddr: SMRAM direct access is granted
@@ -1152,25 +1061,25 @@ mod tests {
         // takes the slow, fully-checked physical path.
         let policy = CpuMemoryPolicy::new(true, false);
         assert!(
-            mem.get_host_mem_addr_pinned(
-                0xa8000,
-                crate::cpu::rusty_box::MemoryAccessType::Execute,
-                &pins,
-                policy,
-            )
-            .unwrap()
-            .is_some(),
+            cpu.memory
+                .get_host_mem_addr(
+                    0xa8000,
+                    crate::cpu::rusty_box::MemoryAccessType::Execute,
+                    policy,
+                )
+                .unwrap()
+                .is_some(),
             "SMM code fetch at SMBASE+0x8000 must map straight to DRAM"
         );
         assert!(
-            mem.get_host_mem_addr_pinned(
-                0xa8000,
-                crate::cpu::rusty_box::MemoryAccessType::RW,
-                &pins,
-                policy,
-            )
-            .unwrap()
-            .is_none(),
+            cpu.memory
+                .get_host_mem_addr(
+                    0xa8000,
+                    crate::cpu::rusty_box::MemoryAccessType::RW,
+                    policy,
+                )
+                .unwrap()
+                .is_none(),
             "SMM data access must be vetoed here and fall back to the physical path"
         );
 
@@ -1198,10 +1107,11 @@ mod tests {
     #[test]
     fn smm_roundtrip_leaves_the_non_gpr_register_slots_alone() {
         use crate::cpu::decoder::{
-            BX_GENERAL_REGISTERS, BX_NIL_REGISTER, BX_TMP_REGISTER, BX_64BIT_REG_RIP,
+            BX_64BIT_REG_RIP, BX_GENERAL_REGISTERS, BX_NIL_REGISTER, BX_TMP_REGISTER,
         };
 
-        let (mut cpu, _mem) = cpu_with_memory();
+        let mut machine = cpu_with_memory();
+        let mut cpu = machine.ctx();
 
         // Distinctive sentinels that neither DR6 (0xffff0ff0) nor DR7 (0x400)
         // could produce, so a clobber is unambiguous.
@@ -1240,5 +1150,113 @@ mod tests {
             "BX_NIL_REGISTER must stay zero — it is the base of no-base \
              addressing forms, so any other value displaces every [disp32] access"
         );
+    }
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    pub(super) fn init_smram() -> Result<[u32; SMRAM_FIELD_LAST as _]> {
+        let mut smram_map = [0; SMRAM_FIELD_LAST as _];
+        smram_map[SMRAM_FIELD_SMBASE_OFFSET as usize] = smram_translate(0x7f00);
+        smram_map[SMRAM_FIELD_SMM_REVISION_ID as usize] = smram_translate(0x7efc);
+        smram_map[SMRAM_FIELD_RAX_HI32 as usize] = smram_translate(0x7ffc);
+        smram_map[SMRAM_FIELD_EAX as usize] = smram_translate(0x7ff8);
+        smram_map[SMRAM_FIELD_RCX_HI32 as usize] = smram_translate(0x7ff4);
+        smram_map[SMRAM_FIELD_ECX as usize] = smram_translate(0x7ff0);
+        smram_map[SMRAM_FIELD_RDX_HI32 as usize] = smram_translate(0x7fec);
+        smram_map[SMRAM_FIELD_EDX as usize] = smram_translate(0x7fe8);
+        smram_map[SMRAM_FIELD_RBX_HI32 as usize] = smram_translate(0x7fe4);
+        smram_map[SMRAM_FIELD_EBX as usize] = smram_translate(0x7fe0);
+        smram_map[SMRAM_FIELD_RSP_HI32 as usize] = smram_translate(0x7fdc);
+        smram_map[SMRAM_FIELD_ESP as usize] = smram_translate(0x7fd8);
+        smram_map[SMRAM_FIELD_RBP_HI32 as usize] = smram_translate(0x7fd4);
+        smram_map[SMRAM_FIELD_EBP as usize] = smram_translate(0x7fd0);
+        smram_map[SMRAM_FIELD_RSI_HI32 as usize] = smram_translate(0x7fcc);
+        smram_map[SMRAM_FIELD_ESI as usize] = smram_translate(0x7fc8);
+        smram_map[SMRAM_FIELD_RDI_HI32 as usize] = smram_translate(0x7fc4);
+        smram_map[SMRAM_FIELD_EDI as usize] = smram_translate(0x7fc0);
+        smram_map[SMRAM_FIELD_R8_HI32 as usize] = smram_translate(0x7fbc);
+        smram_map[SMRAM_FIELD_R8 as usize] = smram_translate(0x7fb8);
+        smram_map[SMRAM_FIELD_R9_HI32 as usize] = smram_translate(0x7fb4);
+        smram_map[SMRAM_FIELD_R9 as usize] = smram_translate(0x7fb0);
+        smram_map[SMRAM_FIELD_R10_HI32 as usize] = smram_translate(0x7fac);
+        smram_map[SMRAM_FIELD_R10 as usize] = smram_translate(0x7fa8);
+        smram_map[SMRAM_FIELD_R11_HI32 as usize] = smram_translate(0x7fa4);
+        smram_map[SMRAM_FIELD_R11 as usize] = smram_translate(0x7fa0);
+        smram_map[SMRAM_FIELD_R12_HI32 as usize] = smram_translate(0x7f9c);
+        smram_map[SMRAM_FIELD_R12 as usize] = smram_translate(0x7f98);
+        smram_map[SMRAM_FIELD_R13_HI32 as usize] = smram_translate(0x7f94);
+        smram_map[SMRAM_FIELD_R13 as usize] = smram_translate(0x7f90);
+        smram_map[SMRAM_FIELD_R14_HI32 as usize] = smram_translate(0x7f8c);
+        smram_map[SMRAM_FIELD_R14 as usize] = smram_translate(0x7f88);
+        smram_map[SMRAM_FIELD_R15_HI32 as usize] = smram_translate(0x7f84);
+        smram_map[SMRAM_FIELD_R15 as usize] = smram_translate(0x7f80);
+        smram_map[SMRAM_FIELD_RIP_HI32 as usize] = smram_translate(0x7f7c);
+        smram_map[SMRAM_FIELD_EIP as usize] = smram_translate(0x7f78);
+        smram_map[SMRAM_FIELD_RFLAGS_HI32 as usize] = smram_translate(0x7f74);
+        smram_map[SMRAM_FIELD_EFLAGS as usize] = smram_translate(0x7f70);
+        smram_map[SMRAM_FIELD_DR6_HI32 as usize] = smram_translate(0x7f6c);
+        smram_map[SMRAM_FIELD_DR6 as usize] = smram_translate(0x7f68);
+        smram_map[SMRAM_FIELD_DR7_HI32 as usize] = smram_translate(0x7f64);
+        smram_map[SMRAM_FIELD_DR7 as usize] = smram_translate(0x7f60);
+        smram_map[SMRAM_FIELD_CR0_HI32 as usize] = smram_translate(0x7f5c);
+        smram_map[SMRAM_FIELD_CR0 as usize] = smram_translate(0x7f58);
+        smram_map[SMRAM_FIELD_CR3_HI32 as usize] = smram_translate(0x7f54);
+        smram_map[SMRAM_FIELD_CR3 as usize] = smram_translate(0x7f50);
+        smram_map[SMRAM_FIELD_CR4_HI32 as usize] = smram_translate(0x7f4c);
+        smram_map[SMRAM_FIELD_CR4 as usize] = smram_translate(0x7f48);
+        smram_map[SMRAM_FIELD_SSP_HI32 as usize] = smram_translate(0x7f44);
+        smram_map[SMRAM_FIELD_SSP as usize] = smram_translate(0x7f40);
+        smram_map[SMRAM_FIELD_EFER_HI32 as usize] = smram_translate(0x7ed4);
+        smram_map[SMRAM_FIELD_EFER as usize] = smram_translate(0x7ed0);
+        smram_map[SMRAM_FIELD_IO_INSTRUCTION_RESTART as usize] = smram_translate(0x7ec8);
+        smram_map[SMRAM_FIELD_AUTOHALT_RESTART as usize] = smram_translate(0x7ec8);
+        smram_map[SMRAM_FIELD_NMI_MASK as usize] = smram_translate(0x7ec8);
+        smram_map[SMRAM_FIELD_TR_BASE_HI32 as usize] = smram_translate(0x7e9c);
+        smram_map[SMRAM_FIELD_TR_BASE as usize] = smram_translate(0x7e98);
+        smram_map[SMRAM_FIELD_TR_LIMIT as usize] = smram_translate(0x7e94);
+        smram_map[SMRAM_FIELD_TR_SELECTOR_AR as usize] = smram_translate(0x7e90);
+        smram_map[SMRAM_FIELD_IDTR_BASE_HI32 as usize] = smram_translate(0x7e8c);
+        smram_map[SMRAM_FIELD_IDTR_BASE as usize] = smram_translate(0x7e88);
+        smram_map[SMRAM_FIELD_IDTR_LIMIT as usize] = smram_translate(0x7e84);
+        smram_map[SMRAM_FIELD_LDTR_BASE_HI32 as usize] = smram_translate(0x7e7c);
+        smram_map[SMRAM_FIELD_LDTR_BASE as usize] = smram_translate(0x7e78);
+        smram_map[SMRAM_FIELD_LDTR_LIMIT as usize] = smram_translate(0x7e74);
+        smram_map[SMRAM_FIELD_LDTR_SELECTOR_AR as usize] = smram_translate(0x7e70);
+        smram_map[SMRAM_FIELD_GDTR_BASE_HI32 as usize] = smram_translate(0x7e6c);
+        smram_map[SMRAM_FIELD_GDTR_BASE as usize] = smram_translate(0x7e68);
+        smram_map[SMRAM_FIELD_GDTR_LIMIT as usize] = smram_translate(0x7e64);
+        smram_map[SMRAM_FIELD_ES_BASE_HI32 as usize] = smram_translate(0x7e0c);
+        smram_map[SMRAM_FIELD_ES_BASE as usize] = smram_translate(0x7e08);
+        smram_map[SMRAM_FIELD_ES_LIMIT as usize] = smram_translate(0x7e04);
+        smram_map[SMRAM_FIELD_ES_SELECTOR_AR as usize] = smram_translate(0x7e00);
+        smram_map[SMRAM_FIELD_CS_BASE_HI32 as usize] = smram_translate(0x7e1c);
+        smram_map[SMRAM_FIELD_CS_BASE as usize] = smram_translate(0x7e18);
+        smram_map[SMRAM_FIELD_CS_LIMIT as usize] = smram_translate(0x7e14);
+        smram_map[SMRAM_FIELD_CS_SELECTOR_AR as usize] = smram_translate(0x7e10);
+        smram_map[SMRAM_FIELD_SS_BASE_HI32 as usize] = smram_translate(0x7e2c);
+        smram_map[SMRAM_FIELD_SS_BASE as usize] = smram_translate(0x7e28);
+        smram_map[SMRAM_FIELD_SS_LIMIT as usize] = smram_translate(0x7e24);
+        smram_map[SMRAM_FIELD_SS_SELECTOR_AR as usize] = smram_translate(0x7e20);
+        smram_map[SMRAM_FIELD_DS_BASE_HI32 as usize] = smram_translate(0x7e3c);
+        smram_map[SMRAM_FIELD_DS_BASE as usize] = smram_translate(0x7e38);
+        smram_map[SMRAM_FIELD_DS_LIMIT as usize] = smram_translate(0x7e34);
+        smram_map[SMRAM_FIELD_DS_SELECTOR_AR as usize] = smram_translate(0x7e30);
+        smram_map[SMRAM_FIELD_FS_BASE_HI32 as usize] = smram_translate(0x7e4c);
+        smram_map[SMRAM_FIELD_FS_BASE as usize] = smram_translate(0x7e48);
+        smram_map[SMRAM_FIELD_FS_LIMIT as usize] = smram_translate(0x7e44);
+        smram_map[SMRAM_FIELD_FS_SELECTOR_AR as usize] = smram_translate(0x7e40);
+        smram_map[SMRAM_FIELD_GS_BASE_HI32 as usize] = smram_translate(0x7e5c);
+        smram_map[SMRAM_FIELD_GS_BASE as usize] = smram_translate(0x7e58);
+        smram_map[SMRAM_FIELD_GS_LIMIT as usize] = smram_translate(0x7e54);
+        smram_map[SMRAM_FIELD_GS_SELECTOR_AR as usize] = smram_translate(0x7e50);
+
+        for (index, value) in smram_map.iter().enumerate() {
+            let value = *value;
+            if value >= SMM_SAVE_STATE_MAP_SIZE {
+                return Err(CpuError::SmramMap { index, value });
+            }
+        }
+
+        Ok(smram_map)
     }
 }

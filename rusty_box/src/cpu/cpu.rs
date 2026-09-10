@@ -1,7 +1,6 @@
 #![allow(non_snake_case, unused_variables, unused_assignments, dead_code)]
 #![allow(unused_unsafe)]
 
-use core::{cell::Cell, marker::PhantomData, ptr::NonNull};
 
 use crate::{
     config::{BxAddress, BxPhyAddress, BxPtrEquiv},
@@ -11,8 +10,7 @@ use crate::{
         decoder::{features::X86Feature, BxSegregs, BX_64BIT_REG_RIP},
         rusty_box::MemoryAccessType,
         smm::SMMRAM_Fields,
-        tlb::{lpf_of, ppf_of, TLBEntry, Tlb},
-        CpuError,
+        tlb::{lpf_of, ppf_of, Tlb},
     },
     impl_eflag,
     memory::{BxMemC, CpuMemoryPolicy},
@@ -31,7 +29,6 @@ use super::{
     icache::BxICache,
     lazy_flags::BxLazyflagsEntry,
     svm::VmcbCache,
-    tlb::BxHostpageaddr,
     vmx::{VmcsCache, VmcsMapping, VmxCap},
     xmm::{BxMxcsr, BxZmmReg},
     Result,
@@ -330,13 +327,34 @@ impl From<CpuActivityState> for u8 {
     }
 }
 
+/// How a CPU reads machine time.
+///
+/// Bochs reads `bx_pc_system.time_ticks()` unconditionally because the PC
+/// system is a global. Here the machine is borrowed per slice, and the answer
+/// differs three ways: a CPU outside a slice has no machine clock at all, a
+/// uniprocessor reads it live, and an SMP CPU holds the round-start epoch
+/// until the emulator completes the round. Three states, so three variants —
+/// a sentinel denominator could not express the first one (R2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum SliceClock {
+    /// Not executing against a machine: only this CPU's own ticks are real.
+    Detached,
+    /// Uniprocessor. Machine time is the live pc-system clock plus whatever
+    /// this CPU has retired since `cpu_ticks_at_sync` was folded into it, so
+    /// fast-REP bulk transfers advance time exactly like Bochs `BX_TICKN`.
+    LiveUp { cpu_ticks_at_sync: u64 },
+    /// SMP. Every CPU sees the epoch captured when the round began; the
+    /// emulator advances global time once the whole round completes.
+    FrozenRound { epoch: u64 },
+}
+
 #[allow(unused)]
 //#[derive(Debug)]
-pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentation = ()> {
+pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     pub(super) bx_cpuid: u32,
     pub(super) cpu_topology: CpuTopology,
 
-    pub(super) cpuid: I,
+    pub(super) cpuid: crate::cpu::cpudb::CpuModel,
 
     pub(super) ia_extensions_bitmask: [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE],
 
@@ -524,10 +542,23 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// global interrupt enable flag, when zero all external interrupt disabled
     pub(super) svm_gif: bool,
     pub(super) vmcbptr: BxPhyAddress,
-    pub(super) vmcbhostptr: BxHostpageaddr,
+    /// Direct backing for the VMCB, as an offset into the memory allocation,
+    /// or `None` when the accessors must go through the handler-aware
+    /// physical-access paths instead.
+    ///
+    /// Bochs svm.cc keeps a host pointer here (`vmcbhostptr`). An offset says
+    /// the same thing without depending on where the allocation currently
+    /// sits, and is what the eviction sidecar publishes.
+    pub(super) vmcb_host_offset: Option<usize>,
     pub(super) vmcb_memtype: BxMemType,
 
-    pub(super) vmcb: Option<VmcbCache>,
+    /// The processor's copy of the guest VMCB's host-state and control areas.
+    ///
+    /// Always present, as in Bochs cpu.h. A model without SVM simply never
+    /// reads it: whether SVM exists is a question for [`Self::svm_supported`],
+    /// which asks CPUID, rather than a second answer stored here that two
+    /// places could disagree about.
+    pub(super) vmcb: VmcbCache,
 
     pub(super) in_event: bool,
 
@@ -563,8 +594,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
 
     // Bochs uses jmp_buf for exception longjmp; we use CpuLoopRestart instead
     pub(super) last_exception_type: i32,
-
-    pub(super) cpuloop_stack_anchor: Option<&'c [u8]>,
 
     // Perf counters (for diagnosing slowdowns)
     pub(crate) perf_icache_miss: u64,
@@ -699,15 +728,19 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     // Boundaries of current code page, based on EIP
     pub(super) eip_page_bias: BxAddress,
     pub(super) eip_page_window_size: u32,
-    // pub(super) eip_fetch_ptr: &'c [u8],
-    pub(super) eip_fetch_ptr: Option<&'c [u8]>,
+    /// Where the current instruction-fetch window lives in the allocation.
+    ///
+    /// Bochs cpu.cc holds a raw `eipFetchPtr` here. Recording the location
+    /// instead of the pointer means the window survives being described
+    /// without a base in hand — the eviction sidecar publishes it directly —
+    /// and it is what removes the last borrowed pointer from this struct.
+    pub(super) eip_fetch_window: Option<super::tlb::FetchWindow>,
     pub(super) p_addr_fetch_page: BxPhyAddress, // Guest physical address of current instruction page
 
     // Boundaries of current stack page, based on ESP
     // Linear address of current stack page
     pub(super) esp_page_bias: BxAddress,
     pub(super) esp_page_window_size: u32,
-    pub(super) esp_host_ptr: Option<&'c [u8]>,
     /// Guest physical address of current stack page
     pub(super) p_addr_stack_page: BxPhyAddress,
 
@@ -719,42 +752,30 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
 
     pub(super) stats: BxCpuStatistics,
 
-    #[cfg(feature = "bx_debugger")]
-    pub(super) watchpoint: BxPhyAddress,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) break_point: u8,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) magic_break: u8,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) stop_reason: u8,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) trace: bool,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) trace_reg: bool,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) trace_mem: bool,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) mode_break: bool,
-
-    #[cfg(feature = "bx_debugger")]
-    pub(super) vmexit_break: bool,
-
-    #[cfg(feature = "bx_debugger")]
-    pub(super) show_flag: u32,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) guard_found: BxGuardFound,
-
     /// Instrumentation: monomorphized tracer + closure hooks.
     /// With `T = ()` and no closures registered, this is 4 bytes (the bitmask).
     pub(crate) instrumentation: super::instrumentation::InstrumentationRegistry<T>,
 
-    #[cfg(feature = "instrumentation")]
     pub(crate) page_permissions: Option<crate::memory::permissions::PagePermissions>,
 
     pub(crate) mmio: crate::memory::mmio::MmioRegistry,
 
-    pub(crate) dtlb: Tlb<BX_DTLB_SIZE>,
-    pub(super) itlb: Tlb<BX_ITLB_SIZE>,
+    /// Data TLB. Only ever caches identity-backed guest RAM, so its entries
+    /// name a page by its number within the RAM allocation.
+    ///
+    /// Those page numbers are resolved against `ExecCtx::mem_host_base`, so an
+    /// entry outliving the base it was filled against would read the wrong
+    /// memory. Every path that moves the base already invalidates the mappings
+    /// first (`invalidate_all_cpu_host_mappings`, called before memory re-init,
+    /// on snapshot restore, and on any A20 or chipset remap), and residency
+    /// cannot stop being an identity map mid-life — a stub with full
+    /// residency never swaps a block out. Anything new that moves the base
+    /// must flush this TLB.
+    pub(crate) dtlb: Tlb<super::tlb::RamPage, BX_DTLB_SIZE>,
+    /// Instruction TLB. Fetch also runs out of ROM and the bogus page, so its
+    /// entries are offsets into the whole allocation, resolved against
+    /// `ExecCtx::mem_alloc_base` rather than the identity guest-RAM base.
+    pub(super) itlb: Tlb<super::tlb::AllocPage, BX_ITLB_SIZE>,
 
     pub(super) pdptrcache: PdptrCache,
 
@@ -777,37 +798,19 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /* Now other not so obvious fields */
     pub(super) smram_map: [u32; SMMRAM_Fields::SMRAM_FIELD_LAST as _],
 
-    pub(super) phantom: PhantomData<I>,
-
-
-    /// Used for direct memory access on TLB hits, bypassing pinned host mapping.
-    /// SAFETY: Only valid during cpu_loop when memory is valid.
-    pub(crate) mem_host_base: *mut u8,
-    /// Usable guest RAM length (not including ROM/bogus).  Physical addresses below this
-    /// (and outside VGA/MMIO ranges) can be accessed directly via mem_host_base.
-    pub(crate) mem_host_len: usize,
-
-    /// Stable all-CPU pin slice wired for one execution batch. It is a raw
-    /// descriptor slice so the currently running CPU is never shared-borrowed.
-    active_tlb_pins: *const crate::memory::CpuTlbPin,
-    active_tlb_pin_count: usize,
-    /// The externally-owned sidecar for this active memory scope. It never
-    /// points at CPU storage, so allocator checks do not alias this CPU's
-    /// mutable instruction-execution borrow.
-    active_tlb_pin_sidecar: Option<NonNull<crate::memory::CpuTlbPin>>,
-    /// True when TLB/VMCB state changed without an active external sidecar.
-    /// Clean sidecars are maintained slot-by-slot and need no full rescan at
-    /// the next bounded CPU memory scope.
-    tlb_pin_dirty: Cell<bool>,
+    /// Residency epoch this CPU's allocation-based caches were filled at —
+    /// the instruction TLB, the bounded fetch window and the VMCB backing.
+    ///
+    /// Those three measure from the allocation base, so unlike data-TLB
+    /// mappings they stay populated when residency is partial and can be
+    /// stranded by a block swap. Instruction fetch compares this against
+    /// `BxMemC::swap_epoch()` and discards them when it moves. The data TLB
+    /// needs no such check: it measures from the identity guest-RAM base,
+    /// which does not exist under partial residency, so it holds no direct
+    /// mapping in exactly the regime where blocks move.
+    pub(crate) fetch_epoch: u64,
 
     /// Optional memory system pointer (MMIO/ROM handler access), wired during execution.
-    ///
-    /// This mirrors Bochs' v2h/getHostMemAddr model: the CPU can attempt direct host access
-    /// when allowed, and fall back to handler-aware reads/writes when access is vetoed.
-    ///
-    /// It must only be set for the duration of a CPU execution call and cleared afterwards.
-    pub(super) mem_bus: Option<NonNull<crate::memory::BxMemC<'c>>>,
-
     /// SMP scheduling quantum — Bochs BXPN_SMP_QUANTUM (`cpu: quantum=N`),
     /// range 1-32, default 16. Caps SMP trace length in serve_icache_miss
     /// (Bochs icache.cc) so a CPU returns to the round-robin scheduler after
@@ -821,23 +824,11 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// round-robin slice boundary, which no other cpu can execute before.
     pub(crate) smc_seq_seen: u64,
 
-    /// Optional I/O bus (device port handlers), wired by the emulator during execution.
+    /// How this CPU reads machine time, established when a slice begins.
     ///
-    /// This is a raw pointer to avoid borrow checker overhead in the hot path.
-    /// It must only be set for the duration of a CPU execution call and cleared afterwards.
-    pub(super) io_bus: Option<NonNull<crate::iodev::BxDevicesC>>,
-
-    /// Optional PC system pointer for timer queries (getNumCpuTicksLeftNextEvent).
-    /// Wired by the emulator during execution, cleared afterwards.
-    pub(super) pc_system_ptr: Option<NonNull<crate::pc_system::BxPcSystemC>>,
-    /// `pc_system.time_ticks()` captured when the emulator wired this CPU for
-    /// the current batch/round.
-    pub(super) pc_system_ticks_at_sync: u64,
-    /// CPU tick clock (`cpu_ticks()`) corresponding to `pc_system_ticks_at_sync`.
-    pub(super) pc_system_cpu_ticks_at_sync: u64,
-    /// A value of one selects live UP time. SMP retains the captured
-    /// round-start epoch until the emulator completes the round.
-    pub(super) pc_system_tick_denominator: u64,
+    /// Survives slice teardown because it is per-CPU state, while the
+    /// machine it refers to is borrowed per slice by `ExecCtx`.
+    pub(super) slice_clock: SliceClock,
 
     /// Debug flags for one-time boot diagnostics (no globals).
     ///
@@ -845,33 +836,119 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// Bit 1: reported real-mode IVT vector to 0000:0000
     pub(super) boot_debug_flags: u8,
 }
-/// Clears transient direct-memory wiring even when CPU execution exits through
-/// an error path. It holds only a raw pointer to the currently borrowed CPU;
-/// the guard itself never aliases CPU state and cannot outlive the call.
-struct CpuMemoryWiringGuard<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> {
-    cpu: *mut BxCpuC<'c, I, T>,
-}
-
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
-    CpuMemoryWiringGuard<'c, I, T>
-{
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Mode-dispatching address resolver (matches BX_CPU_RESOLVE_ADDR).
+    /// Returns 64-bit effective address in long mode, zero-extended 32-bit otherwise.
     #[inline]
-    fn new(cpu: &mut BxCpuC<'c, I, T>) -> Self {
-        Self { cpu }
+    pub fn resolve_addr(&self, instr: &Instruction) -> u64 {
+        // Bochs BX_CPU_RESOLVE_ADDR: (i)->as64L() ? BxResolve64 : BxResolve32
+        // Must use per-instruction address-size attribute, NOT CPU mode.
+        // In 64-bit mode with 67h prefix, as64_l()==0 → use 32-bit resolution.
+        if instr.as64_l() != 0 {
+            self.resolve_addr64(instr)
+        } else {
+            u64::from(self.resolve_addr32(instr))
+        }
     }
-}
+    /// Resolve effective address (matches BX_CPU_RESOLVE_ADDR)
+    #[inline]
+    pub fn resolve_addr32(&self, instr: &Instruction) -> u32 {
+        let base_reg = instr.sib_base() as usize;
+        let mut eaddr = if base_reg < 16 {
+            self.get_gpr32(base_reg)
+        } else if base_reg == BX_64BIT_REG_RIP {
+            // RIP-relative addressing (64-bit mode only, mod=0 rm=5).
+            // gen_reg[RIP] already advanced by ilen before execution.
+            // Truncate to u32 — works for addresses below 4GB.
+            self.gen_reg[BX_64BIT_REG_RIP].rrx() as u32
+        } else {
+            0
+        };
 
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Drop
-    for CpuMemoryWiringGuard<'c, I, T>
-{
-    fn drop(&mut self) {
-        // SAFETY: `new` receives the live CPU borrowed by its enclosing
-        // cpu-loop call. The guard is local to that call and drops first.
-        unsafe { (*self.cpu).clear_execution_memory_wiring() };
+        eaddr = eaddr.wrapping_add(instr.displ32s() as u32);
+
+        let index_reg = instr.sib_index();
+        if index_reg != 4 {
+            let index_val = if index_reg < 16 {
+                self.get_gpr32(index_reg as usize)
+            } else {
+                0
+            };
+            let scale = instr.sib_scale();
+            eaddr = eaddr.wrapping_add(index_val << scale);
+        }
+
+        if instr.as32_l() == 0 {
+            eaddr & 0xFFFF
+        } else {
+            eaddr
+        }
     }
-}
+    /// Resolve effective address (64-bit addressing mode)
+    /// Matching BX_CPU_RESOLVE_ADDR_64
+    /// Made pub(crate) so it can be accessed from ctrl_xfer64.rs
+    pub(crate) fn resolve_addr64(&self, instr: &Instruction) -> u64 {
+        // Calculate: base + (index << scale) + displacement
+        // base_reg: 0-15 = GPR, 16 = RIP (for RIP-relative), 19 = NIL (no base)
+        // gen_reg[16] holds RIP (already advanced by ilen before execution),
+        // gen_reg[19] = NIL register (always 0).
+        // Matching Bochs: ResolveModrm reads gen_reg[base] directly.
+        let base_reg = instr.sib_base() as usize;
+        let mut eaddr = if base_reg < self.gen_reg.len() {
+            self.get_gpr64(base_reg)
+        } else {
+            0
+        };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+        eaddr = eaddr.wrapping_add(instr.displ32s() as u64);
+
+        let index_reg = instr.sib_index();
+        if index_reg != 4 {
+            // 4 means no index
+            let index_val = if index_reg < 16 {
+                self.get_gpr64(index_reg as usize)
+            } else {
+                0
+            };
+            let scale = instr.sib_scale();
+            eaddr = eaddr.wrapping_add(index_val << scale);
+        }
+
+        eaddr
+    }
+    /// Read 8-bit register with extend8bitL support (matches BX_READ_8BIT_REGx)
+    ///
+    /// Bochs macro: ext ? gen_reg[index].rl : (index<4 ? gen_reg[index].rl : gen_reg[index-4].rh)
+    /// When REX present (extend8bit_l != 0): indices 4-7 = SPL/BPL/SIL/DIL (low byte of RSP-RDI)
+    /// Without REX: indices 4-7 = AH/CH/DH/BH (high byte of RAX-RBX)
+    pub fn read_8bit_regx(&self, reg_idx: usize, extend8bit_l: u8) -> u8 {
+        if extend8bit_l != 0 || (reg_idx & 4) == 0 {
+            // REX present OR index 0-3: low byte of gen_reg[index]
+            self.gen_reg[reg_idx].rl()
+        } else {
+            // No REX, index 4-7: high byte of gen_reg[index-4] (AH/CH/DH/BH)
+            let reg16_idx = reg_idx & 0x3;
+            (self.get_gpr16(reg16_idx) >> 8) as u8
+        }
+    }
+    /// Write 8-bit register with extend8bitL support (matches BX_WRITE_8BIT_REGx)
+    pub fn write_8bit_regx(&mut self, reg_idx: usize, extend8bit_l: u8, val: u8) {
+        if extend8bit_l != 0 || (reg_idx & 4) == 0 {
+            // REX present OR index 0-3: low byte of gen_reg[index]
+            self.gen_reg[reg_idx].set_rl(val);
+        } else {
+            // No REX, index 4-7: high byte of gen_reg[index-4] (AH/CH/DH/BH)
+            let reg16_idx = reg_idx & 0x3;
+            let current = self.get_gpr16(reg16_idx);
+            let new_val = (current & 0x00FF) | ((val as u16) << 8);
+            self.set_gpr16(reg16_idx, new_val);
+        }
+    }
+    /// Returns true if direction flag is set (decrement mode)
+    #[inline]
+    pub(super) fn get_df(&self) -> bool {
+        self.eflags.contains(EFlags::DF)
+    }
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
     /// Persistent sleep sentinel set by enter_sleep_state (HLT/MWAIT).
     /// Matches Bochs proc_ctrl.cc `async_event = 1` — survives the
@@ -946,6 +1023,29 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     #[inline]
     pub(crate) fn request_scheduler_boundary(&mut self) {
         self.async_event |= BX_ASYNC_EVENT_SCHEDULER_BOUNDARY;
+    }
+
+    /// Whether the machine has to service its boundary before this processor
+    /// runs on.
+    ///
+    /// The reading half of the latch above, for a caller that must react to a
+    /// request without consuming it — an execution engine sees the request
+    /// first, and has to hand the processor back with the request intact for
+    /// the scheduler to take.
+    #[must_use]
+    #[inline]
+    pub fn wants_a_machine_boundary(&self) -> bool {
+        self.async_event & BX_ASYNC_EVENT_SCHEDULER_BOUNDARY != 0
+    }
+
+    /// Ask for this processor's next instruction boundary to check for
+    /// asynchronous work.
+    ///
+    /// Bochs sets `async_event = 1` from wherever the work arose; this is the
+    /// same thing said once, so nothing outside the processor writes the field.
+    #[inline]
+    pub(crate) fn raise_async_event(&mut self) {
+        self.async_event |= 1;
     }
 
     /// Take the scheduler boundary latch after CPU execution wiring has been
@@ -1055,240 +1155,42 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 }
 
-
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Non-global TLB flush (Bochs paging.cc `TLB_flushNonGlobal`).
     #[inline]
-    pub(crate) fn active_tlb_pins(&self) -> &[crate::memory::CpuTlbPin] {
-        if self.active_tlb_pins.is_null() {
-            &[]
-        } else {
-            // SAFETY: cpu_loop wires this stable slice for its duration.
-            unsafe {
-                core::slice::from_raw_parts(self.active_tlb_pins, self.active_tlb_pin_count)
-            }
-        }
-    }
-    /// Copy every currently valid host mapping into an external pin sidecar.
-    ///
-    /// Full rescans are needed only when the sidecar is created or CPU state
-    /// changed outside a wired scope. Wired execution publishes each mapping
-    /// install or invalidation synchronously.
-    #[inline]
-    pub(crate) fn refresh_tlb_pin(&self, pin: &crate::memory::CpuTlbPin) {
-        pin.clear_tlb_hosts();
-        for slot in 0..BX_DTLB_SIZE {
-            pin.set_dtlb_host(slot, self.dtlb.pinned_host_page(slot));
-        }
-        for slot in 0..BX_ITLB_SIZE {
-            pin.set_itlb_host(slot, self.itlb.pinned_host_page(slot));
-        }
-        pin.set_vmcb_host(if self.in_svm_guest {
-            self.vmcbhostptr as usize
-        } else {
-            0
-        });
-        match self.eip_fetch_ptr {
-            Some(slice) => pin.set_fetch_window(slice.as_ptr() as usize, slice.len()),
-            None => pin.set_fetch_window(0, 0),
-        }
-        self.tlb_pin_dirty.set(false);
+    pub(crate) fn flush_non_global_tlbs(&mut self) {
+        self.dtlb.flush_non_global();
+        self.itlb.flush_non_global();
     }
 
-    /// Refresh a sidecar only when CPU state changed outside a wired scope.
+    /// Single-page INVLPG (Bochs paging.cc `TLB_invlpg`).
     #[inline]
-    pub(crate) fn refresh_tlb_pin_if_dirty(&self, pin: &crate::memory::CpuTlbPin) {
-        if self.tlb_pin_dirty.get() {
-            self.refresh_tlb_pin(pin);
-        }
-    }
-    /// Returns the sidecar owned by the current wired CPU memory scope.
-    #[inline]
-    fn active_tlb_pin_sidecar(&self) -> Option<&crate::memory::CpuTlbPin> {
-        self.active_tlb_pin_sidecar.map(|pin| {
-            // SAFETY: `wire_memory_access` stores a descriptor belonging to
-            // the stable caller-provided pin slice and `clear_memory_access`
-            // clears it before that scope ends.
-            unsafe { pin.as_ref() }
-        })
-    }
-
-    /// Publish the pin sidecar after a FULL TLB flush (`dtlb.flush()` +
-    /// `itlb.flush()`), where every entry is now invalid.
-    ///
-    /// After a full flush `refresh_tlb_pin`'s per-slot rescan would write zero
-    /// to all `BX_DTLB_SIZE + BX_ITLB_SIZE` slots (every `pinned_host_page`
-    /// returns 0 for an invalid entry), so a single `clear_tlb_hosts` memset
-    /// reproduces it far more cheaply. The caller must have already invalidated
-    /// the prefetch queue, so the (now-empty) fetch window is correctly zeroed
-    /// too. `clear_tlb_hosts` also zeros `vmcb_host`; the flush does not change
-    /// SVM state, so an active guest's VMCB backing must be re-pinned — omitting
-    /// this would UNDER-pin it (use-after-free). Over-pinning is always safe;
-    /// under-pinning is the bug this guards against.
-    #[inline]
-    pub(crate) fn clear_active_tlb_pin_hosts(&self) {
-        if let Some(pin) = self.active_tlb_pin_sidecar() {
-            pin.clear_tlb_hosts();
-            if self.in_svm_guest {
-                pin.set_vmcb_host(self.vmcbhostptr as usize);
-            }
-            self.tlb_pin_dirty.set(false);
-        } else {
-            self.tlb_pin_dirty.set(true);
-        }
-    }
-
-    /// Non-global TLB flush (Bochs paging.cc `TLB_flushNonGlobal`) with pin
-    /// publication fused into the invalidation walk (Track B). Clears only the
-    /// pin slots the walk actually invalidates, then republishes the O(1) VMCB
-    /// and fetch-window pins — producing exactly the sidecar state a full
-    /// `refresh_tlb_pin` rescan would, at O(entries invalidated) instead of
-    /// O(`BX_DTLB_SIZE` + `BX_ITLB_SIZE`).
-    ///
-    /// Correctness rests on the pin invariant: a kept (global) entry's slot
-    /// already equals its live host pointer because every install publishes via
-    /// `sync_dtlb_pin_slot` / `sync_itlb_pin_slot`, so leaving it untouched
-    /// matches the fresh rescan. This never under-pins: every slot cleared here
-    /// belongs to an entry the same call just invalidated. Over-pinning is safe.
-    #[inline]
-    pub(crate) fn flush_non_global_and_publish_pin(&mut self) {
-        match self.active_tlb_pin_sidecar {
-            Some(pin_ptr) => {
-                // SAFETY: the sidecar lives in the caller-owned pin slice, not
-                // inside the CPU, so it is separately addressable from
-                // self.dtlb/itlb. `as_ref` yields a reference decoupled from the
-                // `&mut self` borrow, which is what lets the mutable TLB walks
-                // below publish into it. The single-threaded CPU/memory scope
-                // serializes all sidecar mutation.
-                let pin: &crate::memory::CpuTlbPin = unsafe { pin_ptr.as_ref() };
-                self.dtlb
-                    .flush_non_global_publishing(|slot| pin.set_dtlb_host(slot, 0));
-                self.itlb
-                    .flush_non_global_publishing(|slot| pin.set_itlb_host(slot, 0));
-                self.republish_scalar_pins(pin);
-                self.tlb_pin_dirty.set(false);
-            }
-            None => {
-                self.dtlb.flush_non_global();
-                self.itlb.flush_non_global();
-                self.tlb_pin_dirty.set(true);
-            }
-        }
-    }
-
-    /// Single-page INVLPG (Bochs paging.cc `TLB_invlpg`) with pin publication
-    /// fused into the invalidation (Track B). The non-split path touches at most
-    /// one DTLB and one ITLB slot; the split-large path publishes every slot its
-    /// scan clears. See `flush_non_global_and_publish_pin` for the invariant.
-    #[inline]
-    pub(crate) fn invlpg_and_publish_pin(&mut self, laddr: BxAddress) {
-        match self.active_tlb_pin_sidecar {
-            Some(pin_ptr) => {
-                // SAFETY: see `flush_non_global_and_publish_pin`.
-                let pin: &crate::memory::CpuTlbPin = unsafe { pin_ptr.as_ref() };
-                self.dtlb
-                    .invlpg_publishing(laddr, |slot| pin.set_dtlb_host(slot, 0));
-                self.itlb
-                    .invlpg_publishing(laddr, |slot| pin.set_itlb_host(slot, 0));
-                self.republish_scalar_pins(pin);
-                self.tlb_pin_dirty.set(false);
-            }
-            None => {
-                self.dtlb.invlpg(laddr);
-                self.itlb.invlpg(laddr);
-                self.tlb_pin_dirty.set(true);
-            }
-        }
-    }
-
-    /// Republish the O(1) non-TLB host pins (VMCB backing + bounded fetch
-    /// window) exactly as `refresh_tlb_pin` does, so a fused flush leaves the
-    /// sidecar byte-identical to a full rescan for those fields. A TLB flush
-    /// does not change SVM state, but rewriting them is O(1) and removes any
-    /// dependence on a pre-existing VMCB/fetch-window invariant.
-    #[inline]
-    fn republish_scalar_pins(&self, pin: &crate::memory::CpuTlbPin) {
-        pin.set_vmcb_host(if self.in_svm_guest {
-            self.vmcbhostptr as usize
-        } else {
-            0
-        });
-        match self.eip_fetch_ptr {
-            Some(slice) => pin.set_fetch_window(slice.as_ptr() as usize, slice.len()),
-            None => pin.set_fetch_window(0, 0),
-        }
-    }
-
-    /// Publish one freshly installed DTLB host pointer without re-copying the
-    /// full 5120-entry sidecar on each page walk.
-    #[inline]
-    pub(crate) fn sync_dtlb_pin_slot(&self, laddr: BxAddress, len: u32) {
-        if let Some(pin) = self.active_tlb_pin_sidecar() {
-            let slot = self.dtlb.get_index_of(laddr, len);
-            pin.set_dtlb_host(slot, self.dtlb.pinned_host_page(slot));
-        } else {
-            self.tlb_pin_dirty.set(true);
-        }
+    pub(crate) fn invlpg_tlbs(&mut self, laddr: BxAddress) {
+        self.dtlb.invlpg(laddr);
+        self.itlb.invlpg(laddr);
     }
 
     /// Discard a colliding DTLB mapping before a page walk can allocate
-    /// backing, then immediately publish the removal to the eviction sidecar.
+    /// backing.
     #[inline]
-    pub(crate) fn invalidate_dtlb_pin_slot(&mut self, laddr: BxAddress, len: u32) {
+    pub(crate) fn invalidate_dtlb_slot(&mut self, laddr: BxAddress, len: u32) {
         self.dtlb.invalidate_slot(laddr, len);
-        self.sync_dtlb_pin_slot(laddr, len);
     }
 
-    /// Publish one freshly installed ITLB host pointer.
+    /// Discard a colliding ITLB mapping, and the direct fetch slice with it,
+    /// before a miss can allocate backing memory.
+    ///
+    /// Only the window is dropped, never the page geometry: this runs inside
+    /// `prefetch`, after `eip_page_bias` and `eip_page_window_size` already
+    /// describe the page being fetched, and the arms below re-establish the
+    /// window against that geometry. Retiring the whole prefetch queue here
+    /// would erase the size the in-flight refill is still measured against.
     #[inline]
-    pub(crate) fn sync_itlb_pin_slot(&self, laddr: BxAddress, len: u32) {
-        if let Some(pin) = self.active_tlb_pin_sidecar() {
-            let slot = self.itlb.get_index_of(laddr, len);
-            pin.set_itlb_host(slot, self.itlb.pinned_host_page(slot));
-        } else {
-            self.tlb_pin_dirty.set(true);
-        }
-    }
-    /// Discard a colliding ITLB mapping before a miss can allocate backing
-    /// memory, then immediately publish the removal to the eviction sidecar.
-    #[inline]
-    pub(crate) fn invalidate_itlb_pin_slot(&mut self, laddr: BxAddress, len: u32) {
-        self.eip_fetch_ptr = None;
+    pub(crate) fn invalidate_itlb_slot(&mut self, laddr: BxAddress, len: u32) {
+        self.eip_fetch_window = None;
         self.itlb.invalidate_slot(laddr, len);
-        self.sync_itlb_pin_slot(laddr, len);
-        self.sync_fetch_window_pin();
     }
 
-    /// Publish the current bounded instruction-fetch window to the eviction
-    /// sidecar. `eip_fetch_ptr` (Bochs cpu.cc `eipFetchPtr`) may reference a
-    /// sub-page resident block that no ITLB slot pins; without this interval
-    /// a data access could evict the backing block and leave the retained
-    /// fetch pointer dangling.
-    #[inline]
-    pub(crate) fn sync_fetch_window_pin(&self) {
-        if let Some(pin) = self.active_tlb_pin_sidecar() {
-            match self.eip_fetch_ptr {
-                Some(slice) => pin.set_fetch_window(slice.as_ptr() as usize, slice.len()),
-                None => pin.set_fetch_window(0, 0),
-            }
-        } else {
-            self.tlb_pin_dirty.set(true);
-        }
-    }
-
-
-    /// Publish an SVM guest/VMCB host-pointer transition.
-    #[inline]
-    pub(crate) fn sync_vmcb_pin(&self) {
-        if let Some(pin) = self.active_tlb_pin_sidecar() {
-            pin.set_vmcb_host(if self.in_svm_guest {
-                self.vmcbhostptr as usize
-            } else {
-                0
-            });
-        } else {
-            self.tlb_pin_dirty.set(true);
-        }
-    }
     pub fn is_canonical(&self, addr: BxAddress) -> bool {
         Self::is_canonical_to_width(addr, self.linaddr_width.into())
     }
@@ -1352,6 +1254,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) const BX_DEBUG_TRAP_HIT: u32 = 1 << 12; // internal "a breakpoint fired" flag
     pub(super) const BX_DEBUG_SINGLE_STEP_BIT: u32 = 1 << 14; // BS flag in DR6 (bit 14)
     pub(super) const BX_DEBUG_TRAP_TASK_SWITCH_BIT: u32 = 0x8000; // BT flag in DR6
+    /// The bits of `debug_trap` a `#DB` reports — DR6[15:12]: hit, DR access,
+    /// single step, task switch. The B0–B3 match bits below them deliver
+    /// nothing on their own. Bochs event.cc handleAsyncEvent `debug_trap & 0xf000`.
+    pub(super) const BX_DEBUG_TRAP_DELIVERABLE: u32 = 0xF000;
 
     // ── Hardware debug (DR7 R/W field) breakpoint type ──
     // Bochs cpu.h enum: instruction-execution breakpoint (R/W == 00b).
@@ -1386,6 +1292,23 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs event.cc: `(inhibit_mask & mask) == mask` — ALL bits must match.
     pub(crate) fn interrupts_inhibited(&self, mask: u32) -> bool {
         self.icount <= self.inhibit_icount && (self.inhibit_mask & mask) == mask
+    }
+
+    /// Whether the trap the previous instruction owes may not be delivered
+    /// at this boundary: `MOV SS` and `POP SS` hold it off for exactly one
+    /// instruction. Bochs event.cc handleAsyncEvent, the Priority-4 guard.
+    #[inline]
+    pub(crate) fn debug_trap_inhibited(&self) -> bool {
+        self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG)
+    }
+
+    /// Whether `debug_trap` holds something a `#DB` will report.
+    ///
+    /// The one reading of the latch (R5): the interpreter's boundary and an
+    /// execution engine's errand tail both decide "deliver or clear" by this.
+    #[inline]
+    pub(crate) fn owes_a_debug_trap(&self) -> bool {
+        self.debug_trap & Self::BX_DEBUG_TRAP_DELIVERABLE != 0
     }
 }
 
@@ -1491,7 +1414,7 @@ pub struct BxRegsMsr {
     pub(crate) ia32_spec_ctrl: u32, // SCA
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /* CPL == 3 */
     #[inline]
     pub(super) fn user_pl(&self) -> bool {
@@ -1532,24 +1455,93 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.sregs[seg].cache.u.segment_base().wrapping_add(offset)
         }
     }
+}
 
-    /// Read 64-bit qword from memory (matching mem_read_qword)
-    pub(super) fn mem_read_qword(&self, laddr: u64) -> u64 {
-        // Read 8 bytes from memory
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
+    /// Cold path: handle fatal errors from instruction execution.
+    /// Separated from the hot inner loop to keep the hot path small for better
+    /// instruction cache utilization.
+    #[cold]
+    #[inline(never)]
+    fn handle_execution_error(
+        &self,
+        e: crate::cpu::CpuError,
+        instr: &Instruction,
+    ) -> super::Result<()> {
+        use crate::cpu::CpuError;
+        match e {
+            CpuError::CpuNotInitialized => {
+                // Silent — CPU shutting down
+            }
+            CpuError::UnimplementedOpcode { ref opcode } => {
+                let rip = self.prev_rip; // prev_rip was the RIP before advancement
+                let cs_base = self.sregs[BxSegregs::Cs as usize].cache.u.segment_base();
+                let laddr = cs_base + rip;
+                let cs_value = self.cs_selector_value();
+                let instr_bytes: [u8; 16] = if let Some(fetch_ptr) = &self.fetch_window_bytes() {
+                    let page_base = cs_base + self.eip_page_bias;
+                    let offset = (rip.wrapping_sub(page_base)) as usize;
+                    let ilen = instr.ilen() as usize;
+                    if offset < fetch_ptr.len() && offset + ilen <= fetch_ptr.len() {
+                        let mut buf = [0u8; 16];
+                        let copy_len = ilen.min(16);
+                        buf[..copy_len].copy_from_slice(&fetch_ptr[offset..offset + copy_len]);
+                        buf
+                    } else {
+                        [0u8; 16]
+                    }
+                } else {
+                    [0u8; 16]
+                };
+                let ilen = instr.ilen() as usize;
+                tracing::error!(
+                    "UNIMPLEMENTED OPCODE: {:?} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
+                    opcode, rip, cs_value, rip, laddr, &instr_bytes[..ilen.min(16)]
+                );
+            }
+            _ => {
+                let rip = self.prev_rip;
+                let cs_value = self.cs_selector_value();
+                let opcode = instr.get_ia_opcode();
+                tracing::error!(
+                    "CPU ERROR at icount={} RIP={:#x} CS={:#x} opcode={:?}: {}",
+                    self.icount,
+                    rip,
+                    cs_value,
+                    opcode,
+                    e
+                );
+                tracing::error!(
+                    "  EAX={:#x} ECX={:#x} EDX={:#x} EBX={:#x} ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
+                    self.get_gpr32(0), self.get_gpr32(1), self.get_gpr32(2), self.get_gpr32(3),
+                    self.get_gpr32(4), self.get_gpr32(5), self.get_gpr32(6), self.get_gpr32(7)
+                );
+            }
+        }
+        Err(e)
+    }
+
+    /// Read a qword from PHYSICAL memory, little-endian.
+    ///
+    /// Physical, not linear: `mem_read_byte` masks A20 and goes straight to
+    /// the host mapping, applying no paging. That is what lets the page-table
+    /// and EPT walkers use it to read their own entries — a linear read would
+    /// translate an entry's address through the very tables being walked.
+    pub(super) fn mem_read_qword(&mut self, paddr: u64) -> u64 {
         let bytes = [
-            self.mem_read_byte(laddr),
-            self.mem_read_byte(laddr + 1),
-            self.mem_read_byte(laddr + 2),
-            self.mem_read_byte(laddr + 3),
-            self.mem_read_byte(laddr + 4),
-            self.mem_read_byte(laddr + 5),
-            self.mem_read_byte(laddr + 6),
-            self.mem_read_byte(laddr + 7),
+            self.mem_read_byte(paddr),
+            self.mem_read_byte(paddr + 1),
+            self.mem_read_byte(paddr + 2),
+            self.mem_read_byte(paddr + 3),
+            self.mem_read_byte(paddr + 4),
+            self.mem_read_byte(paddr + 5),
+            self.mem_read_byte(paddr + 6),
+            self.mem_read_byte(paddr + 7),
         ];
         u64::from_le_bytes(bytes)
     }
 
-    /// Write 64-bit qword to memory (matching mem_write_qword)
+    /// Write a qword to PHYSICAL memory, little-endian. See `mem_read_qword`.
     pub(super) fn mem_write_qword(&mut self, paddr: u64, value: u64) {
         // Write 8 bytes to memory
         let bytes = value.to_le_bytes();
@@ -1641,30 +1633,11 @@ impl Uintr {
     }
 }
 
-#[cfg(feature = "bx_debugger")]
-#[derive(Debug, Default)]
-pub(super) struct BxDbgGuardState {
-    /// cs:eip and linear addr of instruction at guard point
-    cs: u32,
-    eip: BxAddress,
-    laddr: BxAddress,
-    // 00 - 16 bit, 01 - 32 bit, 10 - 64-bit, 11 - illegal
-    code_32_64: u32, // CS seg size at guard point
-}
-
-#[cfg(feature = "bx_debugger")]
-#[derive(Debug, Default)]
-pub(super) struct BxGuardFound {
-    guard_found: u32,
-    icount_max: u64, // stop after completing this many instructions
-    iaddr_index: u32,
-    guard_state: BxDbgGuardState,
-}
-
 /// Type alias for instruction handler function pointer
-pub(super) type InstructionHandler<I, T> = fn(&mut BxCpuC<'_, I, T>, &Instruction) -> Result<()>;
+pub(super) type InstructionHandler<T> =
+    fn(&mut super::exec_ctx::ExecCtx<'_, T>, &Instruction) -> Result<()>;
 
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Bochs `signal_event()`: set event bit and force async check.
     /// Called by PIC (via raw pointer) when master int_pin asserts.
     #[inline]
@@ -1685,6 +1658,36 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     pub(crate) fn clear_event(&mut self, event: u32) {
         // Bochs cpu.h: pending_event &= ~event (event IS the bitmask)
         self.pending_event &= !event;
+    }
+
+    /// Publish the legacy 8259's INTR line onto this processor, through LINT0.
+    ///
+    /// The machine's one place (R5) where the 8259's level becomes a processor
+    /// event. Four callers reach the same wire — a port write serviced mid
+    /// slice, the level republished at every scheduler boundary, `raise_intr` /
+    /// `clear_intr` from `BxPcSystemC`, and a snapshot restore — and a gate
+    /// applied at three of them is a gate the fourth walks around.
+    ///
+    /// **The gate is the divergence from Bochs** (`docs/bochs-parity-divergences.md`
+    /// D6, and `docs/bochs-upstream-bugs.md`). Bochs wires the 8259 straight to
+    /// this event from `bx_pc_system_c::raise_INTR`, so LVT0 gates nothing there
+    /// and a guest that masks LINT0 keeps taking legacy interrupts. Linux's
+    /// `check_timer()` decides whether its I/O APIC works by masking LINT0 and
+    /// watching the tick stop, so honouring the mask is what lets that probe
+    /// reach its true answer.
+    ///
+    /// Only the bootstrap processor holds that wire (`BxLocalApic::preset_lint0`),
+    /// which is why an application processor draining the bus latch mid slice
+    /// now declines the line instead of taking it: the level itself is not
+    /// consumed, and the next scheduler boundary republishes it onto the
+    /// bootstrap processor, where it belongs.
+    #[inline]
+    pub(crate) fn set_legacy_intr_level(&mut self, asserted: bool) {
+        if asserted && self.lapic.lint0_admits_ext_int() {
+            self.signal_event(Self::BX_EVENT_PENDING_INTR);
+        } else {
+            self.clear_event(Self::BX_EVENT_PENDING_INTR);
+        }
     }
 
     /// Bochs `mask_event()`: add event bits to event_mask so they won't fire.
@@ -1716,16 +1719,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         (self.pending_event & !self.event_mask & event_bits) != 0
     }
 
-    #[inline]
-    pub(crate) fn set_io_bus_ptr(&mut self, io: NonNull<crate::iodev::BxDevicesC>) {
-        self.io_bus = Some(io);
-    }
-
-    #[inline]
-    pub(crate) fn clear_io_bus(&mut self) {
-        self.io_bus = None;
-    }
-
     // ── Instrumentation helpers (no-op when `instrumentation` feature disabled) ──
 
     /// Fire the `repeat_iteration` hook for string/IO REP instructions.
@@ -1733,116 +1726,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     #[inline(always)]
     pub(crate) fn on_repeat_iteration(
         &mut self,
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         instr: &super::decoder::Instruction,
     ) {
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_exec() {
             let rip = self.prev_rip;
             self.instrumentation.fire_repeat_iteration(rip, instr);
         }
-    }
-
-    /// Conditional near branch (16-bit). Fires `cnear_branch_taken`/
-    /// `cnear_branch_not_taken` hooks. RIP is already at fallthrough when this
-    /// helper is called (cpu_loop increments RIP before execute).
-    #[inline(always)]
-    pub(crate) fn conditional_branch16(&mut self, taken: bool, new_ip: u16) -> Result<()> {
-        if taken {
-            self.branch_near16(new_ip)?;
-            #[cfg(feature = "instrumentation")]
-            if self.instrumentation.active.has_branch() {
-                let src = self.prev_rip;
-                self.instrumentation.fire_branch(
-                    &super::instrumentation::BranchEvent::CnearTaken {
-                        src_rip: src,
-                        dst_rip: new_ip as u64,
-                    },
-                );
-            }
-        } else {
-            #[cfg(feature = "instrumentation")]
-            if self.instrumentation.active.has_branch() {
-                let src = self.prev_rip;
-                let fall = self.rip();
-                self.instrumentation.fire_branch(
-                    &super::instrumentation::BranchEvent::CnearNotTaken {
-                        src_rip: src,
-                        fallthrough_rip: fall,
-                    },
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Conditional near branch (32-bit). See `conditional_branch16`.
-    #[inline(always)]
-    pub(crate) fn conditional_branch32(&mut self, taken: bool, new_eip: u32) -> Result<()> {
-        if taken {
-            self.branch_near32(new_eip)?;
-            #[cfg(feature = "instrumentation")]
-            if self.instrumentation.active.has_branch() {
-                let src = self.prev_rip;
-                self.instrumentation.fire_branch(
-                    &super::instrumentation::BranchEvent::CnearTaken {
-                        src_rip: src,
-                        dst_rip: new_eip as u64,
-                    },
-                );
-            }
-        } else {
-            #[cfg(feature = "instrumentation")]
-            if self.instrumentation.active.has_branch() {
-                let src = self.prev_rip;
-                let fall = self.rip();
-                self.instrumentation.fire_branch(
-                    &super::instrumentation::BranchEvent::CnearNotTaken {
-                        src_rip: src,
-                        fallthrough_rip: fall,
-                    },
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Conditional near branch (64-bit). See `conditional_branch16`.
-    /// Takes `&Instruction` because `branch_near64` extracts the displacement
-    /// from the instruction itself.
-    #[inline(always)]
-    pub(crate) fn conditional_branch64(
-        &mut self,
-        taken: bool,
-        instr: &super::decoder::Instruction,
-    ) -> Result<()> {
-        if taken {
-            self.branch_near64(instr)?;
-            #[cfg(feature = "instrumentation")]
-            if self.instrumentation.active.has_branch() {
-                let src = self.prev_rip;
-                let dst = self.rip();
-                self.instrumentation.fire_branch(
-                    &super::instrumentation::BranchEvent::CnearTaken {
-                        src_rip: src,
-                        dst_rip: dst,
-                    },
-                );
-            }
-        } else {
-            #[cfg(feature = "instrumentation")]
-            if self.instrumentation.active.has_branch() {
-                let src = self.prev_rip;
-                let fall = self.rip();
-                self.instrumentation.fire_branch(
-                    &super::instrumentation::BranchEvent::CnearNotTaken {
-                        src_rip: src,
-                        fallthrough_rip: fall,
-                    },
-                );
-            }
-        }
-        Ok(())
     }
 
     /// Fire an unconditional near branch hook (JMP/CALL/RET/LOOP).
@@ -1853,7 +1742,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         what: super::instrumentation::BranchType,
         new_rip: u64,
     ) {
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_branch() {
             let src = self.prev_rip;
             self.instrumentation
@@ -1862,10 +1750,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     src_rip: src,
                     dst_rip: new_rip,
                 });
-        }
-        #[cfg(not(feature = "instrumentation"))]
-        {
-            let _ = (what, new_rip);
         }
     }
 
@@ -1878,7 +1762,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         new_cs: u16,
         new_rip: u64,
     ) {
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_branch() {
             let src_rip = self.prev_rip;
             self.instrumentation
@@ -1889,10 +1772,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     dst_cs: new_cs,
                     dst_rip: new_rip,
                 });
-        }
-        #[cfg(not(feature = "instrumentation"))]
-        {
-            let _ = (what, prev_cs, new_cs, new_rip);
         }
     }
 
@@ -1906,7 +1785,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         data: &[u8],
         rw: super::instrumentation::MemAccessRW,
     ) {
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_mem() {
             let ev = super::instrumentation::LinAccess {
                 lin: laddr,
@@ -1917,22 +1795,18 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             };
             self.instrumentation.fire_lin_access(&ev);
         }
-        #[cfg(not(feature = "instrumentation"))]
-        {
-            let _ = (laddr, paddr, data, rw);
-        }
     }
 
     /// Initialize a BxCpuC on a pre-allocated, zeroed buffer.
     ///
     /// # Safety
-    /// `ptr` must point to a zeroed buffer of at least `size_of::<BxCpuC<I, T>>()`
+    /// `ptr` must point to a zeroed buffer of at least `size_of::<BxCpuC<T>>()`
     /// bytes, properly aligned, exclusively owned, and valid for `'static`.
     pub unsafe fn init_on_ptr(ptr: *mut Self)
     where
         T: Default,
     {
-        core::ptr::addr_of_mut!((*ptr).cpuid).write(I::new());
+        core::ptr::addr_of_mut!((*ptr).cpuid).write(crate::cpu::cpudb::CpuModel::default());
         core::ptr::addr_of_mut!((*ptr).ignore_bad_msrs).write(true);
         core::ptr::addr_of_mut!((*ptr).a20_mask).write(0xFFFF_FFFF_FFFF_FFFF);
         core::ptr::addr_of_mut!((*ptr).last_exception_type).write(-1);
@@ -1942,48 +1816,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         core::ptr::addr_of_mut!((*ptr).itlb).write(super::tlb::Tlb::new());
     }
 
-    #[inline]
-    pub fn set_pc_system_ptr(&mut self, ps: NonNull<crate::pc_system::BxPcSystemC>) {
-        self.set_pc_system_ptr_with_tick_denominator(ps, 1);
-    }
-
-    #[inline]
-    pub fn set_pc_system_ptr_with_tick_denominator(
-        &mut self,
-        ps: NonNull<crate::pc_system::BxPcSystemC>,
-        tick_denominator: u64,
-    ) {
-        self.pc_system_ptr = Some(ps);
-        // SAFETY: PcSystem pointer is valid for the duration of the CPU batch.
-        self.pc_system_ticks_at_sync = unsafe { ps.as_ref().time_ticks() };
-        self.pc_system_cpu_ticks_at_sync = self.cpu_ticks();
-        self.pc_system_tick_denominator = tick_denominator.max(1);
-    }
-
-    #[inline]
-    pub fn clear_pc_system(&mut self) {
-        self.pc_system_ptr = None;
-    }
-
-    // ── Safe accessor methods for NonNull device pointers ──────────────
-    // Each centralizes the single `unsafe` deref so all call sites are safe.
-
-    #[inline(always)]
-    pub(super) fn io_bus_mut(&mut self) -> Option<&mut crate::iodev::BxDevicesC> {
-        self.io_bus.map(|mut p| unsafe { p.as_mut() })
-    }
-
-    #[inline(always)]
-    pub(super) fn pc_system_mut(&mut self) -> Option<&mut crate::pc_system::BxPcSystemC> {
-        self.pc_system_ptr.map(|mut p| unsafe { p.as_mut() })
-    }
-
-    #[inline(always)]
-    pub(super) fn pc_system_ref(&self) -> Option<&crate::pc_system::BxPcSystemC> {
-        self.pc_system_ptr.map(|p| unsafe { p.as_ref() })
-    }
-
-
     /// Snapshot the CPU state handler-aware memory needs before it is
     /// mutably borrowed. `addr` is already A20-adjusted so MONITOR observes
     /// exactly the same physical page as the memory mapping decision.
@@ -1992,199 +1824,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         CpuMemoryPolicy::new(self.smm_mode(), self.is_monitor(addr & !0xfff, 0xfff))
     }
 
-    /// Snapshot memory-access policy and borrow the external memory bus.
-    ///
-    /// # Safety
-    ///
-    /// The caller must be in the exclusive wired CPU-memory scope: no other
-    /// reference to this memory bus may be live, and the returned borrow must
-    /// not outlive that scope.  `wire_memory_access`/`clear_memory_access`
-    /// establish these bounds for CPU execution.
-    #[inline(always)]
-    pub(super) unsafe fn mem_bus_with_policy(
-        &self,
-        addr: BxPhyAddress,
-    ) -> Option<(CpuMemoryPolicy, &mut crate::memory::BxMemC<'c>)> {
-        let mem_bus = self.mem_bus?;
-        let a20_addr = unsafe { mem_bus.as_ref().a20_addr(addr) };
-        let policy = self.memory_access_policy(a20_addr);
-        let mem = unsafe { &mut *mem_bus.as_ptr() };
-        // HPET registers convert emulated time inside the memory handler
-        // (Bochs hpet.cc reads bx_pc_system.time_nsec() there); stamp this
-        // access with the CPU's live clock so mid-batch counter reads are
-        // exact. Range-gated so ordinary slow-path accesses pay one compare.
-        if (crate::iodev::hpet::HPET_BASE
-            ..crate::iodev::hpet::HPET_BASE + crate::iodev::hpet::HPET_LEN)
-            .contains(&a20_addr)
-        {
-            let ips = self
-                .pc_system_ref()
-                .map(|ps| ps.ips())
-                .unwrap_or(0);
-            mem.stamp_hpet_access_clock(self.system_ticks(), ips);
-        }
-        Some((policy, mem))
-    }
-
-    /// Apply final I/O state after a port dispatch.
-    ///
-    /// I/O runs through raw device pointers while an instruction is executing.
-    /// The producer collapses PIC edge activity to a final physical level and
-    /// separately latches scheduler-owned work; this consumer makes both
-    /// visible only after the raw I/O borrow ends.
-    #[inline]
-    pub(super) fn sync_io_events(&mut self) {
-        let (pic_intr_level, hrq_level, scheduler_boundary_requested) =
-            if let Some(io) = self.io_bus_mut() {
-                (
-                    io.take_pic_intr_level(),
-                    io.take_hrq_level(),
-                    io.take_scheduler_boundary_requested(),
-                )
-            } else {
-                (None, None, false)
-            };
-
-        if let Some(level) = pic_intr_level {
-            if level {
-                self.signal_event(Self::BX_EVENT_PENDING_INTR);
-            } else {
-                self.clear_event(Self::BX_EVENT_PENDING_INTR);
-            }
-        }
-        if let Some(level) = hrq_level {
-            // Bochs pc_system.cc set_HRQ: `HRQ = val; if (val)
-            // BX_CPU(0)->async_event = 1;` — the OUT that unmasked a pending
-            // DRQ makes HRQ visible at this CPU's very next instruction
-            // boundary, where handle_async_event services HLDA.
-            if let Some(ps) = self.pc_system_mut() {
-                ps.set_hrq(level);
-            }
-            if level {
-                self.async_event |= 1;
-            }
-        }
-        if scheduler_boundary_requested {
-            self.request_scheduler_boundary();
-        }
-    }
-
-    /// Check HRQ (DMA Hold Request) state from pc_system.
-    /// Matches Bochs `BX_HRQ` macro (pc_system.h) which reads
-    /// `bx_pc_system.HRQ`. Returns false if pc_system is not wired.
-    #[inline]
-    pub(super) fn get_hrq(&self) -> bool {
-        if let Some(ps) = self.pc_system_ref() {
-            ps.get_hrq()
-        } else {
-            false
-        }
-    }
-
-    /// Bochs `bx_pc_system.getNumCpuTicksLeftNextEvent()` — caps FastRep transfer counts
-    /// so that timers fire on schedule.
-    #[inline]
-    pub(super) fn ticks_left_next_event(&self) -> u32 {
-        if let Some(ps) = self.pc_system_ref() {
-            ps.get_num_cpu_ticks_left_next_event()
-        } else {
-            u32::MAX // no cap when not wired (tests)
-        }
-    }
-
-    /// Probe pc_system countdown during FastRep bulk operations.
-    ///
-    /// When countdown would expire, sets STOP_TRACE to force a trace break so
-    /// the outer emulator loop can advance pc_system time exactly once and fire
-    /// `countdown_event()`.
-    #[inline]
-    pub(super) fn tickn_fastrep(&mut self, n: usize) {
-        if let Some(ps) = self.pc_system_ref() {
-            if ps.countdown_would_expire_after(n as u32) {
-                self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
-            }
-        }
-    }
-
-    #[inline]
-    pub fn set_mem_bus_ptr(&mut self, mem: NonNull<crate::memory::BxMemC<'c>>) {
-        self.mem_bus = Some(mem);
-    }
-    /// Wire memory and the complete stable machine pin set for a bounded
-    /// CPU-side operation. `current_pin` is the externally-owned descriptor
-    /// for this CPU; it is refreshed before CPU execution can mutate TLB/VMCB
-    /// state and remains valid through the scope.
-    #[inline]
-    pub(crate) fn wire_memory_access(
-        &mut self,
-        mem: NonNull<crate::memory::BxMemC<'c>>,
-        pins: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
-    ) {
-        debug_assert!(pins.iter().any(|pin| core::ptr::eq(pin, current_pin)));
-        self.refresh_tlb_pin_if_dirty(current_pin);
-        self.active_tlb_pin_sidecar = Some(NonNull::from(current_pin));
-        self.set_mem_bus_ptr(mem);
-        self.active_tlb_pins = pins.as_ptr();
-        self.active_tlb_pin_count = pins.len();
-    }
-
-    /// Tear down a `wire_memory_access` scope.
-    #[inline]
-    pub(crate) fn clear_memory_access(&mut self) {
-        self.active_tlb_pins = core::ptr::null();
-        self.active_tlb_pin_count = 0;
-        self.active_tlb_pin_sidecar = None;
-        self.clear_mem_bus();
-    }
-    #[inline]
-    fn clear_execution_memory_wiring(&mut self) {
-        self.mem_host_base = core::ptr::null_mut();
-        self.mem_host_len = 0;
-        self.clear_memory_access();
-    }
-
-
-    #[inline]
-    pub fn clear_mem_bus(&mut self) {
-        self.mem_bus = None;
-    }
-
-    /// Check whether a direct bulk write would overlap cached guest code.
-    ///
-    /// The probe is intentionally non-mutating: callers can abandon the bulk
-    /// path and let the scalar RMW access perform Bochs-ordered invalidation
-    /// before the corresponding external side effect.
-    #[inline]
-    pub(crate) fn smc_range_has_cached_code(&self, p_addr: BxPhyAddress, len: u32) -> bool {
-        let Some(mem_bus) = self.mem_bus else {
-            return true;
-        };
-        // SAFETY: mem_bus is wired for the duration of CPU execution and this
-        // shared probe does not mutate memory or alias a mutable borrow.
-        let mem = unsafe { mem_bus.as_ref() };
-        mem.smc_range_has_stamps(p_addr, len)
-    }
-
-    /// Bochs icache.h `bxPageWriteStampTable::decWriteStamp` + icache.cc
-    /// `handleSMC`: check a store against the machine-wide write-stamp table.
-    /// On a hit the event is queued for every cpu; this (writing) cpu applies
-    /// it immediately below — flush affected traces and stop the current
-    /// trace — exactly Bochs's synchronous behavior for the writer. Sibling
-    /// cpus are flushed by the emulator's drain before their next slice,
-    /// which the single-threaded round-robin scheduler guarantees runs first.
-    #[inline]
-    pub(crate) fn smc_write_check(&mut self, p_addr: BxPhyAddress, len: u32) {
-        let Some(mem_bus) = self.mem_bus else { return };
-        // SAFETY: mem_bus is wired for the duration of cpu execution (same
-        // invariant as every other mem_bus access); BxCpuC and BxMemC are
-        // distinct objects, so this temporary &mut never aliases self.
-        let mem = unsafe { &mut *mem_bus.as_ptr() };
-        mem.smc_dec_write_stamp(p_addr, len);
-        if mem.smc_seq_next() > self.smc_seq_seen {
-            self.smc_apply_pending(mem, true);
-        }
-    }
 
     /// Apply queued SMC invalidations this cpu has not seen yet (watermark).
     /// The per-cpu body of Bochs icache.cc `handleSMC`'s all-processors loop:
@@ -2208,6 +1847,107 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
         }
     }
+}
+
+/// Machine-clock and bus helpers. Each reads a sibling field of the machine,
+/// so each belongs on the context rather than on the CPU.
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
+    /// Take the machine clock for a slice that is about to run.
+    ///
+    /// Bochs advances `bx_pc_system` inside the CPU loop; here the scheduler
+    /// owns that clock, so each slice records how to read it. This must run
+    /// once per slice: stamp it coarser and uniprocessor time double-counts
+    /// every tick already folded into the pc system, which walks the TSC and
+    /// every armed deadline forward silently.
+    #[inline]
+    pub(super) fn begin_slice_clock(&mut self, tick_denominator: u64) {
+        let clock = if tick_denominator <= 1 {
+            SliceClock::LiveUp {
+                cpu_ticks_at_sync: self.cpu_ticks(),
+            }
+        } else {
+            SliceClock::FrozenRound {
+                epoch: self.pc_system.time_ticks(),
+            }
+        };
+        let (cpu, _mem, _devices, _pc_system) = self.slice_parts();
+        cpu.slice_clock = clock;
+    }
+
+    /// Apply final I/O state after a port dispatch.
+    ///
+    /// The producer collapses PIC edge activity to a final physical level and
+    /// separately latches scheduler-owned work; this consumer makes both
+    /// visible once the device borrow ends. It is the only drain of
+    /// `take_pic_intr_level`, so an IRQ raised by an OUT reaches the CPU here
+    /// or nowhere.
+    #[inline]
+    pub(super) fn sync_io_events(&mut self) {
+        let mut parts = self.cpu_with_io();
+        parts.io.sync_io_events(parts.cpu);
+    }
+
+    /// Check HRQ (DMA Hold Request) state from pc_system.
+    /// Matches Bochs `BX_HRQ` macro (pc_system.h) which reads
+    /// `bx_pc_system.HRQ`.
+    #[inline]
+    pub(super) fn get_hrq(&self) -> bool {
+        self.pc_system.get_hrq()
+    }
+
+    /// Bochs `bx_pc_system.getNumCpuTicksLeftNextEvent()` — caps FastRep
+    /// transfer counts so that timers fire on schedule.
+    #[inline]
+    pub(super) fn ticks_left_next_event(&self) -> u32 {
+        self.pc_system.get_num_cpu_ticks_left_next_event()
+    }
+
+    /// Probe pc_system countdown during FastRep bulk operations.
+    ///
+    /// When the countdown would expire, set STOP_TRACE so the outer emulator
+    /// loop advances pc_system time exactly once and fires `countdown_event()`.
+    ///
+    /// Deliberately NON-MUTATING. Bochs decrements `currCountdown` inside the
+    /// handler; here each call site charges `count - 1` to `tick_surplus` and
+    /// the scheduler advances the pc system once per slice. Turning this into
+    /// a real `tickn` would count every elapsed tick twice and accelerate
+    /// every guest timer — it compiles clean and only the tick-conservation
+    /// assertion in emulator/tests.rs catches it.
+    #[inline]
+    /// `n` is a `u32` because the countdown is: taking a `usize` and casting
+    /// it down here would have truncated a large count into a small one
+    /// silently, and the callers all hold a page-bounded `u32` already.
+    pub(super) fn tickn_fastrep(&mut self, n: u32) {
+        if self.pc_system.countdown_would_expire_after(n) {
+            self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+        }
+    }
+}
+/// Code-write stamps and the port-E9 console: both reach past the CPU into the
+/// machine, so they run on the execution context.
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
+    /// Check whether a direct bulk write would overlap cached guest code.
+    ///
+    /// The probe is intentionally non-mutating: callers can abandon the bulk
+    /// path and let the scalar RMW access perform Bochs-ordered invalidation
+    /// before the corresponding external side effect.
+    #[inline]
+    pub(crate) fn smc_range_has_cached_code(&self, p_addr: BxPhyAddress, len: u32) -> bool {
+        self.memory.smc_range_has_stamps(p_addr, len)
+    }
+
+    /// Bochs icache.h `bxPageWriteStampTable::decWriteStamp` + icache.cc
+    /// `handleSMC`: check a store against the machine-wide write-stamp table.
+    /// On a hit the event is queued for every cpu; this (writing) cpu applies
+    /// it immediately below — flush affected traces and stop the current
+    /// trace — exactly Bochs's synchronous behavior for the writer. Sibling
+    /// cpus are flushed by the emulator's drain before their next slice,
+    /// which the single-threaded round-robin scheduler guarantees runs first.
+    #[inline]
+    pub(crate) fn smc_write_check(&mut self, p_addr: BxPhyAddress, len: u32) {
+        self.memory.smc_dec_write_stamp(p_addr, len);
+        self.smc_sync_after_phys_write();
+    }
 
     /// After a handler-aware physical write (`write_physical_page`) issued
     /// from cpu context, apply any SMC invalidation it queued to THIS cpu
@@ -2215,26 +1955,25 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// synchronously at the store.
     #[inline]
     pub(crate) fn smc_sync_after_phys_write(&mut self) {
-        let Some(mem_bus) = self.mem_bus else { return };
-        // SAFETY: same mem_bus wiring invariant as smc_write_check.
-        let mem = unsafe { &*mem_bus.as_ptr() };
-        if mem.smc_seq_next() > self.smc_seq_seen {
-            self.smc_apply_pending(mem, true);
+        if self.memory.smc_seq_next() > self.smc_seq_seen {
+            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
+            cpu.smc_apply_pending(mem, true);
         }
     }
 
     #[inline]
     pub(crate) fn debug_putc(&mut self, ch: u8) {
         let current_ticks = self.system_ticks();
-        let dispatched = if let Some(io) = self.io_bus_mut() {
-            io.outp(0x00E9, ch as u32, 1, current_ticks);
-            true
-        } else {
-            false
-        };
-        if dispatched {
-            self.sync_io_events();
-        }
+        self.devices.outp(
+            0x00E9,
+            ch as u32,
+            1,
+            current_ticks,
+            self.pc_system,
+            self.device_manager,
+            self.memory,
+        );
+        self.sync_io_events();
     }
 
     #[inline]
@@ -2263,14 +2002,21 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         self.debug_put_hex_u8((v >> 8) as u8);
         self.debug_put_hex_u8(v as u8);
     }
+}
 
+/// Machine-driven interrupt injection: delivery reads the IDT/IVT and pushes a
+/// stack frame, so it needs memory alongside the CPU (Bochs event.cc
+/// `HandleExtInterrupt`).
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
     /// Inject an external (hardware) interrupt vector into the CPU.
     ///
     /// This is used by the outer emulator loop to deliver PIC interrupts and
     /// wake the CPU from `HLT`, mirroring Bochs' event/timer driven flow.
     ///
-    /// Note: callers must ensure the memory bus is wired (`mem_bus` set) so that
-    /// stack pushes and IVT/IDT reads work correctly.
+    /// `interrupt` reads the IDT/IVT and pushes the frame through the CPU's
+    /// wired bus rather than this context's `memory`, so a caller outside a
+    /// scheduler slice wires that bus for the call.
+    ///
     /// Inject an external interrupt via the unified interrupt() dispatch.
     /// Based on Bochs event.cc HandleExtInterrupt (lines 133-184).
     ///
@@ -2284,7 +2030,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
 
         // BOCHS BX_INSTR_HWINTERRUPT(cpu_id, vector, cs, eip)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_hw_interrupt() {
             let cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
                 .selector
@@ -2297,7 +2042,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Diagnostic ring for the pf_diag tripwire (see field docs).
         #[cfg(feature = "std")]
         {
-            self.irq_diag_ring[self.irq_diag_idx % 32] = (self.icount, vector, self.rip());
+            let slot = self.irq_diag_idx % 32;
+            let sample = (self.icount, vector, self.rip());
+            self.irq_diag_ring[slot] = sample;
             self.irq_diag_idx = self.irq_diag_idx.wrapping_add(1);
         }
 
@@ -2306,7 +2053,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Clear stop-trace and sleep sentinel so execution can resume.
         // BX_ASYNC_EVENT_SLEEP (bit 0) must be cleared here because this path
         // bypasses handle_async_event's tail which normally clears async_event.
-        self.async_event &= !(BX_ASYNC_EVENT_STOP_TRACE | Self::BX_ASYNC_EVENT_SLEEP);
+        self.async_event &= !(BX_ASYNC_EVENT_STOP_TRACE | BxCpuC::<T>::BX_ASYNC_EVENT_SLEEP);
 
         // Mark as external interrupt (EXT=1) — affects error codes pushed
         // during any exception that occurs during interrupt delivery.
@@ -2351,7 +2098,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             other => other,
         }
     }
+}
 
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// True if the CPU is halted or waiting for an event.
     ///
     /// We use this to decide when the outer emulator loop should inject
@@ -2366,50 +2115,30 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     pub fn is_in_shutdown(&self) -> bool {
         matches!(self.activity_state, CpuActivityState::Shutdown)
     }
+}
 
-    /// Execute CPU loop with an attached I/O bus (port handlers).
-    ///
-    /// This sets the bus, pc_system, pic, and dma pointers for the duration of the call
-    /// and clears them afterwards.
-    #[allow(clippy::too_many_arguments)]
+/// The execution loop, which needs the machine and not just the CPU.
+///
+/// These live on `ExecCtx` because the dispatcher does: an opcode handler that
+/// touches memory cannot be reached from a bare `&mut BxCpuC`. Everything the
+/// loop does to CPU state alone still reads `self.…` through `Deref`; only the
+/// calls that need memory alongside the CPU destructure first.
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
+    /// Execute one scheduler slice: the slice clock is captured on entry, so
+    /// device time advances against machine ticks rather than this CPU's own.
     #[inline]
-    pub(crate) fn cpu_loop_n_with_io(
+    pub(crate) fn cpu_loop_n_slice(
         &mut self,
-        mem: &'c mut BxMemC<'c>,
-        cpus: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
         strict_instruction_budget: bool,
         pc_tick_denominator: u64,
-        io: NonNull<crate::iodev::BxDevicesC>,
-        pc_system: NonNull<crate::pc_system::BxPcSystemC>,
-        pic: Option<&mut crate::pic::BxPicC>,
-        dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
-        self.set_io_bus_ptr(io);
-        self.set_pc_system_ptr_with_tick_denominator(pc_system, pc_tick_denominator);
-        let result = if strict_instruction_budget {
-            self.cpu_loop_n_impl::<false, true>(
-                mem,
-                cpus,
-                current_pin,
-                max_instructions,
-                pic,
-                dma,
-            )
+        self.begin_slice_clock(pc_tick_denominator);
+        if strict_instruction_budget {
+            self.cpu_loop_n_impl::<false, true>(max_instructions)
         } else {
-            self.cpu_loop_n_impl::<false, false>(
-                mem,
-                cpus,
-                current_pin,
-                max_instructions,
-                pic,
-                dma,
-            )
-        };
-        self.clear_io_bus();
-        self.clear_pc_system();
-        result
+            self.cpu_loop_n_impl::<false, false>(max_instructions)
+        }
     }
 
     /// Execute exactly one icache trace with an attached I/O bus, then return.
@@ -2419,106 +2148,38 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Exceptions also end the slice (Bochs main.cc `bx_begin_simulation`
     /// setjmp lands back in the scheduler loop). `max_instructions` remains a
     /// safety cap only — the icache already caps SMP traces at the quantum.
-    #[allow(clippy::too_many_arguments)]
     #[inline]
-    pub(crate) fn cpu_run_trace_with_io(
+    pub(crate) fn cpu_run_trace_slice(
         &mut self,
-        mem: &'c mut BxMemC<'c>,
-        cpus: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
         strict_instruction_budget: bool,
         pc_tick_denominator: u64,
-        io: NonNull<crate::iodev::BxDevicesC>,
-        pc_system: NonNull<crate::pc_system::BxPcSystemC>,
-        pic: Option<&mut crate::pic::BxPicC>,
-        dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
-        self.set_io_bus_ptr(io);
-        self.set_pc_system_ptr_with_tick_denominator(pc_system, pc_tick_denominator);
-        let result = if strict_instruction_budget {
-            self.cpu_loop_n_impl::<true, true>(
-                mem,
-                cpus,
-                current_pin,
-                max_instructions,
-                pic,
-                dma,
-            )
+        self.begin_slice_clock(pc_tick_denominator);
+        if strict_instruction_budget {
+            self.cpu_loop_n_impl::<true, true>(max_instructions)
         } else {
-            self.cpu_loop_n_impl::<true, false>(
-                mem,
-                cpus,
-                current_pin,
-                max_instructions,
-                pic,
-                dma,
-            )
-        };
-        self.clear_io_bus();
-        self.clear_pc_system();
-        result
-    }
-
-    pub(crate) fn cpu_loop(
-        &mut self,
-        mem: &'c mut BxMemC<'c>,
-        cpus: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
-    ) -> super::Result<()> {
-        let _stack_anchor = 0;
-
-        self.cpuloop_stack_anchor = None;
-
-        // Bochs uses setjmp here; we use CpuLoopRestart via Rust error propagation.
-        // We get here either by a normal function call, or by a CpuLoopRestart
-        // back from an exception() call.  In either case, commit the
-        // new EIP/ESP, and set up other environmental fields.  This code
-        // mirrors similar code below, after the interrupt() call.
-
-        self.prev_rip = self.rip();
-        self.speculative_rsp = false;
-
-        if self.in_vmx_guest {
-            let vm = &mut self.vmcs;
-
-            if vm.shadow_stack_prematurely_busy {
-                return Err(CpuError::ShadowStackPrematurelyBusy);
-            }
-            vm.shadow_stack_prematurely_busy = false; // for safety
+            self.cpu_loop_n_impl::<true, false>(max_instructions)
         }
-
-        // Execute instructions in a loop. Use unsafe to work around lifetime issues with
-        // the mem borrow across loop iterations (each call is independent but compiler
-        // doesn't see it due to the 'c lifetime binding).
-        //
-        // SAFETY: We cast mem to a shorter-lived reference for each loop iteration.
-        // Each call to get_icache_entry is independent and completes before the next iteration.
-
-        self.cpu_loop_n(mem, cpus, current_pin, 1_000_000, None, None)?;
-        Ok(())
     }
 
-    /// Execute CPU loop with a maximum instruction count.
+    /// The tail of Bochs cpu.cc `cpu_loop`'s landing preamble, which runs where
+    /// its `setjmp` returns — that is, on the restart paths below, right after
+    /// they commit `prev_rip` and clear `speculative_rsp`.
     ///
-    /// Returns Ok(instructions_executed) when limit is reached or async event occurs.
-    pub(crate) fn cpu_loop_n(
-        &mut self,
-        mem: &'c mut BxMemC<'c>,
-        cpus: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
-        max_instructions: u64,
-        pic: Option<&mut crate::pic::BxPicC>,
-        dma: Option<&mut crate::dma::BxDmaC>,
-    ) -> super::Result<u64> {
-        self.cpu_loop_n_impl::<false, false>(
-            mem,
-            cpus,
-            current_pin,
-            max_instructions,
-            pic,
-            dma,
-        )
+    /// A shadow-stack busy bit must never survive the exception that unwound
+    /// into this point: `call_far.cc` sets it across a far call's shadow-stack
+    /// update and clears it once the update completes, so seeing it here means
+    /// a fault escaped between the two. Bochs `BX_PANIC`s and then clears it
+    /// anyway; clearing is what stops a later `VMexit` reading a stale flag
+    /// (`vmexit.cc` returns early on it), so the recovery matters more than the
+    /// abort.
+    #[inline]
+    fn commit_restart_shadow_stack(&mut self) {
+        if self.in_vmx_guest && self.vmcs.shadow_stack_prematurely_busy {
+            tracing::error!("shadow stack left prematurely busy across an exception");
+            self.vmcs.shadow_stack_prematurely_busy = false;
+        }
     }
 
     /// Shared body of `cpu_loop_n` / `cpu_run_trace_with_io`.
@@ -2527,30 +2188,19 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// `cpu_run_trace`: the call returns at the first trace boundary, when an
     /// async event breaks the trace, or when an exception restarts the loop
     /// (Bochs main.cc setjmp returns control to the SMP scheduler).
-    fn cpu_loop_n_impl<
-        const STOP_AFTER_ONE_TRACE: bool,
-        const STRICT_INSTRUCTION_BUDGET: bool,
-    >(
+    fn cpu_loop_n_impl<const STOP_AFTER_ONE_TRACE: bool, const STRICT_INSTRUCTION_BUDGET: bool>(
         &mut self,
-        mem: &'c mut BxMemC<'c>,
-        cpus: &[crate::memory::CpuTlbPin],
-        current_pin: &crate::memory::CpuTlbPin,
         max_instructions: u64,
-        mut pic: Option<&mut crate::pic::BxPicC>,
-        mut dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
-        // Wire the memory system pointer for the duration of this execution call.
-        // This enables Bochs-style "host-pointer-or-fallback" access in mem_read/mem_write.
-        // Reborrow `mem` so we don't move the `&mut` binding.
-        self.a20_mask = mem.a20_mask();
-        self.wire_memory_access(NonNull::from(&mut *mem), cpus, current_pin);
-        let _memory_wiring = CpuMemoryWiringGuard::new(self);
-
-        // Direct pointers are available only for a complete, identity-backed
-        // guest RAM mapping. All other accesses use the wired memory bus.
-        let (host_base, host_len) = mem.identity_guest_base();
-        self.mem_host_base = host_base;
-        self.mem_host_len = host_len;
+        // The A20 mask is CPU-side state that mirrors a chipset line, so it is
+        // taken once per execution call rather than read through memory on
+        // every access. Scoped, because the loop below calls back through
+        // `self` — the dispatcher is an `ExecCtx` method, so it cannot run
+        // while these borrows are alive.
+        {
+            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
+            cpu.a20_mask = mem.a20_mask();
+        }
 
         let mut iteration = 0u64;
         // `iteration` is the batch budget counter (one per handler dispatch).
@@ -2602,8 +2252,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             // Cooperative stop request (Bochs kill_bochs_request analogue):
             // any hook may set `stop_request` to break out of the batch. Latency
             // is at most one trace (~10-20 instructions).
+            //
+            // Consumed here so it cannot re-break every later slice of this
+            // processor, and reported through `stop_honored` so the machine
+            // driving the loop learns a hook ended the slice rather than a
+            // budget — without which the request dies at this line.
             if self.instrumentation.stop_request {
                 self.instrumentation.stop_request = false;
+                self.instrumentation.stop_honored = true;
                 break Ok(iteration);
             }
 
@@ -2656,29 +2312,17 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     && matches!(self.activity_state, CpuActivityState::Active)
                 {
                     self.async_event = 0;
-                } else if self.handle_async_event(
-                    pic.as_deref_mut(),
-                    dma.as_deref_mut(),
-                    Some(mem),
-                    cpus,
-                ) {
+                } else if self.handle_async_event() {
                     // Slow path: real async event (interrupt, HLT, shutdown, etc.)
                     break Ok(iteration);
                 }
             }
 
-            // Get raw pointer to mem before the loop to work around borrow checker
-            // SAFETY: We'll use this raw pointer to create new references after borrows are released
-            let mem_ptr: *mut BxMemC<'c> = mem;
-
-            // SAFETY: We extend the lifetime of mem temporarily for this call only.
-            // The borrow is released at the end of the expression.
             #[cfg(feature = "profiling")]
             let _t0 = std::time::Instant::now();
-            // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
-            let (mut instr_idx, mut trace_end) = unsafe {
-                let mem_extended: &'c mut BxMemC<'c> = &mut *mem_ptr;
-                match self.get_icache_entry(mem_extended, cpus) {
+            let (mut instr_idx, mut trace_end) = {
+                let entry = self.get_icache_entry();
+                match entry {
                     Ok((start, tlen)) => (start, start + tlen),
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
                         // Bochs setjmp handler (cpu.cc): icount++, then
@@ -2687,6 +2331,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         iteration += 1;
                         self.prev_rip = self.rip();
                         self.speculative_rsp = false;
+                        self.commit_restart_shadow_stack();
+                        // Bochs cpu.cc: the longjmp landing commits RIP and
+                        // falls into the loop, whose top runs `handleAsyncEvent`
+                        // for a fault raised while fetching exactly as for one
+                        // raised while executing. A sleep state survives this
+                        // clear on the SLEEP bit `enter_sleep_state` raises.
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                         if STOP_AFTER_ONE_TRACE {
                             // Bochs main.cc: the SMP-loop setjmp ends this
@@ -2710,7 +2360,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             let is_real = self.real_mode();
 
             // Unicorn-inspired: fire block hook at trace (basic block) start
-            #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_block() {
                 let block_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
                 let block_len = (trace_end - instr_idx) as u16;
@@ -2724,7 +2373,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 //
                 // instr_idx is always a valid mpool index: it starts at a get_icache_entry
                 // mpool_start_idx and only advances within [start, start+tlen), and
-                // serve_icache_miss guarantees start + BX_MAX_TRACE_LENGTH + 1 <= mpool length.
+                // serve_icache_miss guarantees start + BX_MAX_TRACE_LENGTH <= mpool length.
                 // The debug_assert enforces that invariant in debug/test builds; release keeps
                 // the per-instruction bounds check elided.
                 debug_assert!(
@@ -2750,25 +2399,31 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
                 let ilen_val = instr_ref().ilen();
-                // ilen=0 is valid ONLY for InsertedOpcode (trace boundary marker).
-                // Debug-only sanity check — Bochs does not validate ilen in the hot loop,
-                // and the decoder already guarantees 1..=15 (or 0 for InsertedOpcode).
+                // Every instruction in a trace is one the guest wrote, so every
+                // one has a real length: 1..=15, the architectural bounds the
+                // decoder enforces. A zero would mean a synthetic entry reached
+                // the dispatch path — the shape this port deliberately does not
+                // build (see `icache.rs`, beside `flush_smc`) — and it would be
+                // counted as an instruction and charged a tick.
+                //
+                // Debug-only: Bochs does not validate ilen in its hot loop.
                 #[cfg(debug_assertions)]
-                if ilen_val == 0 || ilen_val > 15 {
-                    let oc = instr_ref().get_ia_opcode();
-                    assert!(
-                        ilen_val == 0 && oc == super::decoder::Opcode::InsertedOpcode,
-                        "Invalid ilen={} opcode={:?} at RIP={:#x}",
-                        ilen_val,
-                        oc,
-                        self.gen_reg[BX_64BIT_REG_RIP].rrx()
-                    );
-                }
-                self.gen_reg[BX_64BIT_REG_RIP]
-                    .set_rrx(self.gen_reg[BX_64BIT_REG_RIP].rrx() + ilen_val as u64);
+                assert!(
+                    (1..=15).contains(&ilen_val),
+                    "Invalid ilen={} opcode={:?} at RIP={:#x}",
+                    ilen_val,
+                    instr_ref().get_ia_opcode(),
+                    self.gen_reg[BX_64BIT_REG_RIP].rrx()
+                );
+                // Read then write, rather than nesting the two. Reaching the
+                // register file through `Deref` makes each `self.gen_reg`
+                // a separate deref call, so the inner read and the outer write
+                // overlap where direct field access did not.
+                let advanced = self.gen_reg[BX_64BIT_REG_RIP].rrx() + ilen_val as u64;
+                self.gen_reg[BX_64BIT_REG_RIP].set_rrx(advanced);
                 if is_real {
-                    self.gen_reg[BX_64BIT_REG_RIP]
-                        .set_rrx(self.gen_reg[BX_64BIT_REG_RIP].rrx() & 0xFFFF);
+                    let wrapped = self.gen_reg[BX_64BIT_REG_RIP].rrx() & 0xFFFF;
+                    self.gen_reg[BX_64BIT_REG_RIP].set_rrx(wrapped);
                 }
 
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
@@ -2779,7 +2434,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
 
                 // Bochs BX_INSTR_BEFORE_EXECUTION(cpu_id, i)
-                #[cfg(feature = "instrumentation")]
                 if self.instrumentation.active.has_exec() {
                     let rip_before = self.prev_rip;
                     self.instrumentation
@@ -2805,11 +2459,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         iteration += 1;
                         self.prev_rip = self.rip();
                         self.speculative_rsp = false;
-                        // If triple fault set Shutdown, exit cleanly instead of restarting.
-                        if matches!(self.activity_state, CpuActivityState::Shutdown) {
-                            tracing::trace!("CPU shutdown — exiting cpu_loop");
-                            break 'cpu_loop Ok(iteration);
-                        }
+                        self.commit_restart_shadow_stack();
+                        // Bochs cpu.cc: the loop top's `handleAsyncEvent` ->
+                        // `handleWaitForEvent` is where a non-ACTIVE state is
+                        // read, and where a pending INIT/NMI/SMI gets its
+                        // chance to wake a CPU that triple-faulted.
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                         if STOP_AFTER_ONE_TRACE {
                             // Bochs main.cc: the SMP-loop setjmp ends this
@@ -2832,7 +2486,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // Bochs BX_INSTR_AFTER_EXECUTION(cpu_id, i)
                 // Use prev_rip BEFORE updating it — that's the address of the instruction
                 // we just executed (matches BOCHS semantics).
-                #[cfg(feature = "instrumentation")]
                 if self.instrumentation.active.has_exec() {
                     let executed_rip = self.prev_rip;
                     self.instrumentation
@@ -2842,6 +2495,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // Bochs cpu.cc — prev_rip = RIP AFTER execution ("commit new RIP")
                 self.prev_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
                 // Bochs cpu.cc — icount++
+                //
+                // Unconditional because a trace holds nothing but guest
+                // instructions: this port builds no end-of-trace marker, for
+                // the reasons in `icache.rs` beside `flush_smc`. While one was
+                // built, it was dispatched and counted here, and that was
+                // guest-VISIBLE rather than a reporting error — `cpu_ticks()`
+                // is `icount + tick_surplus` and is the machine's time source,
+                // so a phantom tick per trace brought every device deadline
+                // forward.
                 self.icount += 1;
                 #[cfg(feature = "profiling")]
                 {
@@ -2890,14 +2552,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                             instr_idx = start;
                             trace_end = start + tlen;
                             if STRICT_INSTRUCTION_BUDGET {
-                                let trace_budget = usize::try_from(
-                                    max_instructions.saturating_sub(iteration),
-                                )
-                                .unwrap_or(usize::MAX);
-                                trace_end =
-                                    trace_end.min(instr_idx.saturating_add(trace_budget));
+                                let trace_budget =
+                                    usize::try_from(max_instructions.saturating_sub(iteration))
+                                        .unwrap_or(usize::MAX);
+                                trace_end = trace_end.min(instr_idx.saturating_add(trace_budget));
                             }
-                            #[cfg(feature = "instrumentation")]
                             if self.instrumentation.active.has_block() {
                                 let block_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
                                 let block_len = (trace_end - instr_idx) as u16;
@@ -2924,10 +2583,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     }
                     // Chain to new trace without breaking to outer loop
                     // (matching C++ line 218-220: entry=getICacheEntry; i=entry->i; last=...)
-                    // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
-                    let (start, tlen) = unsafe {
-                        let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
-                        match self.get_icache_entry(mem_reborrowed, cpus) {
+                    let (start, tlen) = {
+                        let chained = self.get_icache_entry();
+                        match chained {
                             Ok(v) => v,
                             Err(crate::cpu::CpuError::CpuLoopRestart) => {
                                 // Bochs setjmp handler: icount++, prev_rip = RIP
@@ -2951,7 +2609,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     }
 
                     // Unicorn-inspired: fire block hook at trace (basic block) start
-                    #[cfg(feature = "instrumentation")]
                     if self.instrumentation.active.has_block() {
                         let block_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
                         let block_len = (trace_end - instr_idx) as u16;
@@ -2979,84 +2636,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // (the dispatch counter carried by the Ok breaks) does not count.
         result.map(|_| self.icount.wrapping_sub(icount_start))
     }
+}
 
-    /// Cold path: handle fatal errors from instruction execution.
-    /// Separated from the hot inner loop to keep the hot path small for better
-    /// instruction cache utilization.
-    #[cold]
-    #[inline(never)]
-    fn handle_execution_error(
-        &self,
-        e: crate::cpu::CpuError,
-        instr: &Instruction,
-    ) -> super::Result<()> {
-        use crate::cpu::CpuError;
-        match e {
-            CpuError::CpuNotInitialized => {
-                // Silent — CPU shutting down
-            }
-            CpuError::UnimplementedOpcode { ref opcode } => {
-                let rip = self.prev_rip; // prev_rip was the RIP before advancement
-                let cs_base = self.sregs[BxSegregs::Cs as usize].cache.u.segment_base();
-                let laddr = cs_base + rip;
-                let cs_value = self.cs_selector_value();
-                let instr_bytes: [u8; 16] = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
-                    let page_base = cs_base + self.eip_page_bias;
-                    let offset = (rip.wrapping_sub(page_base)) as usize;
-                    let ilen = instr.ilen() as usize;
-                    if offset < fetch_ptr.len() && offset + ilen <= fetch_ptr.len() {
-                        let mut buf = [0u8; 16];
-                        let copy_len = ilen.min(16);
-                        buf[..copy_len].copy_from_slice(&fetch_ptr[offset..offset + copy_len]);
-                        buf
-                    } else {
-                        [0u8; 16]
-                    }
-                } else {
-                    [0u8; 16]
-                };
-                let ilen = instr.ilen() as usize;
-                tracing::error!(
-                    "UNIMPLEMENTED OPCODE: {:?} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
-                    opcode, rip, cs_value, rip, laddr, &instr_bytes[..ilen.min(16)]
-                );
-            }
-            _ => {
-                let rip = self.prev_rip;
-                let cs_value = self.cs_selector_value();
-                let opcode = instr.get_ia_opcode();
-                tracing::error!(
-                    "CPU ERROR at icount={} RIP={:#x} CS={:#x} opcode={:?}: {}",
-                    self.icount,
-                    rip,
-                    cs_value,
-                    opcode,
-                    e
-                );
-                tracing::error!(
-                    "  EAX={:#x} ECX={:#x} EDX={:#x} EBX={:#x} ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
-                    self.get_gpr32(0), self.get_gpr32(1), self.get_gpr32(2), self.get_gpr32(3),
-                    self.get_gpr32(4), self.get_gpr32(5), self.get_gpr32(6), self.get_gpr32(7)
-                );
-            }
-        }
-        Err(e)
-    }
-
-    fn fetch_next_instruction(
-        &mut self,
-        mem: &'c mut BxMemC<'c>,
-        cpus: &[crate::memory::CpuTlbPin],
-    ) -> Result<Instruction> {
-        let mem_ptr: *mut BxMemC<'c> = mem;
-        // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
-        let (mpool_start_idx, _tlen) = unsafe {
-            let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
-            self.get_icache_entry(mem_reborrowed, cpus)?
-        };
-        Ok(self.i_cache.mpool[mpool_start_idx])
-    }
-
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Bochs cpu.cc `linkTrace`, loop-continuation form: after a taken direct
     /// near branch, try to continue at the branch target's cached trace
     /// without returning to the outer loop or re-hashing per branch.
@@ -3105,16 +2687,22 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             super::icache::TraceLink::store(stamp, start, tlen, rip);
         Some((start, tlen))
     }
+}
+
+/// Instruction fetch runs on the execution context: a lookup can walk page
+/// tables, refill the fetch window and decode guest bytes, all of which need
+/// memory alongside the CPU (Bochs reaches it through `BX_MEM(0)`).
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
+    fn fetch_next_instruction(&mut self) -> Result<Instruction> {
+        let (mpool_start_idx, _tlen) = self.get_icache_entry()?;
+        Ok(self.i_cache.mpool[mpool_start_idx])
+    }
 
     /// Look up the instruction cache for the current RIP.
     /// Returns (mpool_start_idx, tlen) to avoid cloning BxICacheEntry on the hot path.
     /// Matching Bochs cpu.cc getICacheEntry().
     #[inline]
-    fn get_icache_entry(
-        &mut self,
-        mem: &'c mut BxMemC<'c>,
-        cpus: &[crate::memory::CpuTlbPin],
-    ) -> Result<(usize, usize)> {
+    fn get_icache_entry(&mut self) -> Result<(usize, usize)> {
         // Apply machine-wide SMC invalidations this cpu has not seen before
         // consulting the icache — device DMA (Bochs memory.cc
         // dmaWritePhysicalPage) and non-store cpu write paths queue events
@@ -3122,8 +2710,20 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // synchronously in icache.cc handleSMC; the watermark makes this a
         // single compare per trace lookup. No STOP_TRACE: there is no
         // running trace at a lookup boundary.
-        if mem.smc_seq_next() > self.smc_seq_seen {
-            self.smc_apply_pending(mem, false);
+        if self.memory.smc_seq_next() > self.smc_seq_seen {
+            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
+            cpu.smc_apply_pending(mem, false);
+        }
+        // Discard allocation-based caches if guest blocks moved since they were
+        // filled. This belongs HERE, where the fetch window is consumed, and
+        // not in `prefetch`, where it is merely refilled: `prefetch` runs only
+        // when `needs_prefetch` below is true, so an instruction whose data
+        // access evicted its own code block would otherwise have the next
+        // instruction fetched straight out of the still-"valid" window — which
+        // by then names another guest block's bytes.
+        {
+            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
+            cpu.revalidate_allocation_caches(mem);
         }
         // Check if we need to prefetch a new page. Bochs cpu.cc getICacheEntry:
         // `bx_address eipBiased = RIP + eipPageBias; if (eipBiased >=
@@ -3135,12 +2735,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // window's page base alias back into it and execute the OLD page's
         // bytes at the new RIP (the Ubuntu 'logger' ASLR segfault).
         let mut eip_biased_64 = self.rip().wrapping_add(self.eip_page_bias);
-        let needs_prefetch = self.eip_page_window_size == 0
-            || eip_biased_64 >= u64::from(self.eip_page_window_size);
-        // Get raw pointer to mem before calling prefetch() to work around borrow checker
-        // SAFETY: addr_of_mut avoids creating intermediate reference; pointer valid for fn scope
-        let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
-
+        let needs_prefetch =
+            self.eip_page_window_size == 0 || eip_biased_64 >= u64::from(self.eip_page_window_size);
         if needs_prefetch {
             #[cfg(feature = "profiling")]
             {
@@ -3148,11 +2744,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             }
             let mut retry_count = 0;
             loop {
-                // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
-                let mem_reborrowed: &'c mut BxMemC<'c> = unsafe { &mut *mem_ptr };
-                self.prefetch(mem_reborrowed, cpus)?;
+                self.prefetch()?;
 
-                if self.eip_page_window_size == 0 || self.eip_fetch_ptr.is_none() {
+                if self.eip_page_window_size == 0 || self.eip_fetch_window.is_none() {
                     retry_count += 1;
                     if retry_count > 10 {
                         tracing::error!("prefetch retry limit exceeded, RIP={:#x}", self.rip());
@@ -3170,7 +2764,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 if eip_biased_64 >= u64::from(self.eip_page_window_size) {
                     tracing::trace!("eip_biased ({}) >= eip_page_window_size ({}) after prefetch, RIP={:#x}, retrying",
                         eip_biased_64, self.eip_page_window_size, self.rip());
-                    self.eip_fetch_ptr = None;
+                    self.eip_fetch_window = None;
                     self.eip_page_window_size = 0;
                     retry_count += 1;
                     if retry_count > 10 {
@@ -3188,9 +2782,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let eip_biased = eip_biased_64 as u32;
 
         // Physical address for this instruction
-        let p_addr: BxPhyAddress = self
-            .p_addr_fetch_page
-            .wrapping_add(u64::from(eip_biased));
+        let p_addr: BxPhyAddress = self.p_addr_fetch_page.wrapping_add(u64::from(eip_biased));
 
         // Direct icache lookup without cloning BxICacheEntry.
         // We only need mpool_start_idx and tlen from the entry.
@@ -3210,14 +2802,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.perf_icache_miss += 1;
         }
 
-        // SAFETY: prefetch() borrow is released before serve_icache_miss is called
-        let miss_entry = unsafe {
-            let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
-            self.serve_icache_miss(eip_biased, p_addr, mem_reborrowed, cpus)?
-        };
+        let miss_entry = self.serve_icache_miss(eip_biased, p_addr)?;
         Ok((miss_entry.mpool_start_idx, miss_entry.tlen as usize))
     }
+}
 
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn get_gpr32(&self, idx: usize) -> u32 {
         // Must handle indices 0-15 (R8D-R15D via REX in 64-bit mode)
         // Matches set_gpr32() which uses direct array access
@@ -3238,6 +2828,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Bochs SET_FLAGS_OSZAPC_ADD_32: works for ADD and ADC
         // (result already includes the carry-in from ADC).
         self.oszapc.set_oszapc_add_32(op1, op2, res);
+    }
+
+    /// SET_FLAGS_OSZAPC_SUB_64: update all six arithmetic flags after a 64-bit sub.
+    pub(super) fn update_flags_sub64(&mut self, op1: u64, op2: u64, res: u64) {
+        self.oszapc.set_oszapc_sub_64(op1, op2, res);
     }
 
     pub(super) fn update_flags_sub32(&mut self, op1: u32, op2: u32, res: u32) {
@@ -3422,11 +3017,46 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     //  * page boundary:            4k
     //  * ROM boundary:             2k (dont care since we are only reading)
     //  * segment boundary:         any
-    pub(super) fn prefetch(
-        &mut self,
-        mem: &'c mut BxMemC<'c>,
-        pins: &[crate::memory::CpuTlbPin],
-    ) -> Result<()> {
+    /// Discard allocation-based caches if guest blocks moved since they were
+    /// filled (doctrine R5 — the single consumer of the residency epoch).
+    ///
+    /// The instruction TLB, the bounded fetch window and the VMCB backing all
+    /// address the whole allocation rather than the identity guest-RAM base,
+    /// because instruction fetch also runs out of ROM and out of relocated
+    /// blocks. That is exactly what makes them survivable across a swap and
+    /// therefore stale-able by one — the case the per-CPU pin sidecar used to
+    /// prevent by vetoing eviction.
+    ///
+    /// Called from `get_icache_entry`, once per instruction fetch — the point
+    /// where the fetch window is CONSUMED. Checking at refill instead would
+    /// miss the case that matters: `prefetch` runs only when the window is
+    /// exhausted, so an instruction that evicts its own code block leaves the
+    /// window nominally valid and the next fetch would read another block's
+    /// bytes out of the reused slot.
+    ///
+    /// Free in every configuration that does not swap: with full residency the
+    /// epoch is a constant, so this is one compare against an unchanging value
+    /// and never the branch that is taken.
+    #[inline(always)]
+    fn revalidate_allocation_caches(&mut self, mem: &BxMemC) {
+        let epoch = mem.swap_epoch();
+        if epoch == self.fetch_epoch {
+            return;
+        }
+        self.itlb.flush();
+        // The whole prefetch queue, not the window alone: `get_icache_entry`
+        // decides whether to refill from `eip_page_window_size`, so a window
+        // retired while the size still describes the page RIP sits in yields a
+        // fetch that neither holds bytes nor asks for any. Bias, size and
+        // window move together at every site that drops them.
+        self.invalidate_prefetch_q();
+        self.vmcb_host_offset = None;
+        self.fetch_epoch = epoch;
+    }
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
+    pub(super) fn prefetch(&mut self) -> Result<()> {
         let laddr: BxAddress;
         let page_offset;
 
@@ -3544,11 +3174,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let lpf = lpf_of(laddr);
 
         // Check TLB entry - extract values to avoid holding mutable borrow
+        let user_pl = self.user_pl;
         let (tlb_hit, tlb_ppf, tlb_host_addr) = {
-            let tlb_entry = self.itlb.get_entry_of(laddr, 0);
-            let hit = (tlb_entry.lpf == lpf)
-                && (tlb_entry.access_bits & (1 << u32::from(self.user_pl))) != 0;
-            (hit, tlb_entry.ppf, tlb_entry.host_page_addr)
+            let tlb_entry = self.itlb.entry_of(laddr, 0);
+            let hit =
+                (tlb_entry.lpf == lpf) && (tlb_entry.access_bits & (1 << u32::from(user_pl))) != 0;
+            (hit, tlb_entry.ppf, tlb_entry.host_page)
         };
 
         // Track whether translate_linear succeeded so we can populate the iTLB afterward.
@@ -3574,20 +3205,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             // page.  Its mapping and prefetch slice must be gone before the
             // page walk or direct mapping can ask the block allocator to
             // replace it.
-            self.invalidate_itlb_pin_slot(laddr, 0);
+            self.invalidate_itlb_slot(laddr, 0);
             // TLB miss - need to walk page tables
-            // Get a20_mask before borrowing mem mutably
-            let a20_mask = mem.a20_mask();
-            // Create a dummy TLB entry (not actually used for page walk)
-            let dummy_tlb_entry = TLBEntry::default();
-            match self.translate_linear(
-                &dummy_tlb_entry,
-                laddr,
-                self.user_pl,
-                MemoryAccessType::Execute,
-                a20_mask,
-                mem,
-            ) {
+            let a20_mask = self.memory.a20_mask();
+            match self.translate_linear(laddr, user_pl, MemoryAccessType::Execute, a20_mask) {
                 Ok((p_addr, walk_lpf_mask)) => {
                     self.p_addr_fetch_page = ppf_of(p_addr);
                     itlb_should_update = true;
@@ -3622,35 +3243,49 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         let mut direct_page_mapping = false;
         if let Some(fetch_ptr) = fetch_ptr_option {
-            let fetch_ptr_as_ptr =
-                // SAFETY: an ITLB entry is installed only for a complete
-                // contiguous host page (see below).
-                unsafe { super::access::host_slice_u8(fetch_ptr as *const u8, 4096) };
-            self.eip_fetch_ptr = Some(fetch_ptr_as_ptr);
-            direct_page_mapping = true;
+            // Two levels: the outer says the ITLB hit, the inner whether that
+            // entry carries a direct mapping. The fill below only ever installs
+            // an entry together with its page, so a hit always carries one —
+            // but the previous code unwrapped only the outer level and would
+            // have built a 4096-byte slice from a null pointer had that ever
+            // stopped holding. Treating the absent page as "no direct mapping"
+            // is what it means.
+            //
+            // The entry already names the page by allocation offset, so the
+            // window is that offset verbatim and no pointer is formed at all.
+            // An ITLB entry covers a complete contiguous page, hence 4096.
+            match fetch_ptr {
+                Some(page) => {
+                    self.eip_fetch_window = Some(super::tlb::FetchWindow {
+                        start: page.alloc_offset(),
+                        len: 4096,
+                    });
+                    direct_page_mapping = true;
+                }
+                None => self.eip_fetch_window = None,
+            }
         } else {
-            let mem_len = mem.get_memory_len();
+            let mem_len = self.memory.get_memory_len();
             let page_base = self.p_addr_fetch_page;
             let current_p_addr = page_base.wrapping_add(u64::from(page_offset));
-            let page_policy = self.memory_access_policy(mem.a20_addr(page_base));
+            let page_policy = self.memory_access_policy(self.memory.a20_addr(page_base));
 
-            let mem_ptr: *mut BxMemC<'c> = mem;
-            let page_mapping = unsafe {
-                (&mut *mem_ptr)
-                    .get_host_mem_addr_pinned(
-                        page_base,
-                        MemoryAccessType::Execute,
-                        pins,
-                        page_policy,
-                    )
-                    .map(|mapping| mapping.map(|slice| (slice.as_mut_ptr(), slice.len())))
-            };
+            // The answer is a range, not the bytes, so the borrow of `memory`
+            // ends with the call and the arms below can borrow it again.
+            let mut direct_page_offset: Option<usize> = None;
+            let page_mapping = self.memory.host_mem_range(
+                page_base,
+                MemoryAccessType::Execute,
+                page_policy,
+            );
             match page_mapping {
-                Ok(Some((fetch_ptr, fetch_len))) if fetch_len >= 4096 => {
+                Ok(Some(ref range)) if range.len() >= 4096 => {
                     // An ITLB host page is necessarily a full contiguous page.
-                    self.eip_fetch_ptr = Some(unsafe {
-                        super::access::host_slice_u8(fetch_ptr as *const u8, 4096)
+                    self.eip_fetch_window = Some(super::tlb::FetchWindow {
+                        start: range.start,
+                        len: 4096,
                     });
+                    direct_page_offset = Some(range.start);
                     direct_page_mapping = true;
                 }
                 Ok(Some(_)) => {
@@ -3660,59 +3295,55 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     // the next lookup refill at its boundary.  It must never
                     // create an ITLB page mapping from this short slice.
                     let current_policy =
-                        self.memory_access_policy(mem.a20_addr(current_p_addr));
-                    let current_mapping = unsafe {
-                        (&mut *mem_ptr)
-                            .get_host_mem_addr_pinned(
-                                current_p_addr,
-                                MemoryAccessType::Execute,
-                                pins,
-                                current_policy,
-                            )
-                            .map(|mapping| {
-                                mapping.map(|slice| (slice.as_mut_ptr(), slice.len()))
-                            })
-                    };
+                        self.memory_access_policy(self.memory.a20_addr(current_p_addr));
+                    let current_mapping = self.memory.host_mem_range(
+                        current_p_addr,
+                        MemoryAccessType::Execute,
+                        current_policy,
+                    );
                     match current_mapping {
-                        Ok(Some((fetch_ptr, available))) => {
-                            let page_remaining = self
-                                .eip_page_window_size
-                                .saturating_sub(page_offset) as usize;
+                        Ok(Some(range)) => {
+                            // Taking the minimum in the window's own type is
+                            // what removes the question of whether the result
+                            // fits back into it. The clamp cannot decide the
+                            // outcome: a block that long would still lose to
+                            // `page_remaining`, which is at most a page.
+                            let available = u32::try_from(range.len()).unwrap_or(u32::MAX);
+                            let page_remaining =
+                                self.eip_page_window_size.saturating_sub(page_offset);
                             let fetch_len = available.min(page_remaining);
                             if fetch_len != 0 {
                                 self.p_addr_fetch_page = current_p_addr;
                                 self.eip_page_bias = 0u64.wrapping_sub(self.rip());
-                                self.eip_page_window_size = fetch_len
-                                    .try_into()
-                                    .expect("resident block length exceeds u32");
-                                self.eip_fetch_ptr = Some(unsafe {
-                                    super::access::host_slice_u8(
-                                        fetch_ptr as *const u8,
-                                        fetch_len,
-                                    )
+                                self.eip_page_window_size = fetch_len;
+                                self.eip_fetch_window = Some(super::tlb::FetchWindow {
+                                    start: range.start,
+                                    len: crate::convert::usize_from_u32(fetch_len),
                                 });
                             } else {
-                                self.eip_fetch_ptr = None;
+                                self.eip_fetch_window = None;
                             }
                         }
                         Ok(None) | Err(_) => {
-                            self.eip_fetch_ptr = None;
+                            self.eip_fetch_window = None;
                         }
                     }
                 }
                 Ok(None) => {
-                    self.eip_fetch_ptr = None;
+                    self.eip_fetch_window = None;
                 }
                 Err(error) => {
                     tracing::trace!("Failed to get host mem addr for fetch: {error:?}");
-                    self.eip_fetch_ptr = None;
+                    self.eip_fetch_window = None;
                 }
             }
             // Only complete page mappings can be placed in the ITLB.  In
             // particular, sub-page guest blocks are not host-contiguous.
             if itlb_should_update && direct_page_mapping {
-                if let Some(fp) = self.eip_fetch_ptr {
-                    let host_page_ptr = fp.as_ptr() as super::tlb::BxHostpageaddr;
+                if let Some(offset) = direct_page_offset {
+                    // Where memory said the page lives, stored verbatim — the
+                    // entry never has to be recovered from the window pointer.
+                    let host_page = super::tlb::AllocPage::from_alloc_offset(offset);
                     let ppf = self.p_addr_fetch_page;
                     let access_bits = 1u32 << (self.user_pl as u32);
                     let tlb_entry = self.itlb.get_entry_of(lpf, 0);
@@ -3724,32 +3355,31 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     // page's every 4 KiB frame dies on one INVLPG (Bochs
                     // paging.cc translate_linear `tlbEntry->lpf_mask`).
                     tlb_entry.lpf_mask = itlb_lpf_mask;
-                    tlb_entry.host_page_addr = host_page_ptr;
+                    tlb_entry.host_page = host_page;
                 }
                 if itlb_lpf_mask > 0xFFF {
                     // Bochs paging.cc: `if (isExecute) ITLB.split_large = true`
                     // — routes INVLPG through the mask-aware scan path.
                     self.itlb.split_large = true;
                 }
-                self.sync_itlb_pin_slot(lpf, 0);
             }
-            let eip_biased =
-                (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
+            let eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
             let p_addr = self.p_addr_fetch_page.wrapping_add(u64::from(eip_biased));
-            if self.eip_fetch_ptr.is_none() && p_addr >= mem_len.try_into()? {
+            if self.eip_fetch_window.is_none() && p_addr >= mem_len.try_into()? {
                 // Address is beyond available memory - set to no direct access
                 tracing::trace!("prefetch: address {p_addr:#x} beyond memory limit {mem_len:#x} and no ROM mapping");
-                self.eip_fetch_ptr = None;
+                self.eip_fetch_window = None;
             }
         }
 
         // Publish the final fetch window from every arm above, including
         // full-page windows installed without a matching ITLB slot.
-        self.sync_fetch_window_pin();
 
         Ok(())
     }
+}
 
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(super) fn long64_mode(&self) -> bool {
         self.cpu_mode == CpuMode::Long64
     }
@@ -3763,11 +3393,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     pub(crate) fn smm_mode(&self) -> bool {
         self.in_smm
     }
+}
 
-    // =========================================================================
-    // Error handlers matching original C++ BxError, BxNoFPU, etc.
-    // =========================================================================
+// =========================================================================
+// Error handlers matching original C++ BxError, BxNoFPU, etc.
+// =========================================================================
 
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
     /// BxError - Invalid instruction handler
     /// Matches BX_CPU_C::BxError from proc_ctrl.cc
     /// Raises #UD (Undefined Instruction) exception
@@ -3788,9 +3420,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
 
         // Unicorn-inspired: give hooks a chance to suppress #UD for unrecognized opcodes
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_invalid_insn() {
-            if self.instrumentation.fire_invalid_instruction(self.prev_rip) {
+            let prev_rip = self.prev_rip;
+            if self.instrumentation.fire_invalid_instruction(prev_rip) {
                 return Ok(());
             }
         }
@@ -4002,11 +3634,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         tracing::warn!("BxNoAMX: AMX instruction executed but AMX not available");
         Ok(())
     }
+}
 
-    // =========================================================================
-    // Handler assignment (assign_handler) matching original C++ assignHandler
-    // =========================================================================
+// =========================================================================
+// Handler assignment (assign_handler) matching original C++ assignHandler
+// =========================================================================
 
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Assign handler function for instruction execution
     ///
     /// This function selects the appropriate handler function for an instruction based on:
@@ -4035,7 +3669,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         &mut self,
         instr: &mut Instruction,
         fetch_mode_mask: super::opcodes_table::FetchModeMask,
-    ) -> Result<(bool, Option<InstructionHandler<I, T>>)> {
+    ) -> Result<(bool, Option<InstructionHandler<T>>)> {
         use super::opcodes_table::{get_opcode_entry, FetchModeMask, OpFlags};
         use crate::cpu::decoder::Opcode;
 
@@ -4052,7 +3686,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let is_reg_form = instr.mod_c0();
 
         // Handler assignment logic (matching original lines 2045-2061)
-        let mut selected_handler: Option<InstructionHandler<I, T>> = None;
+        let mut selected_handler: Option<InstructionHandler<T>> = None;
         let mut is_bx_error = false; // Track if BxError handler was assigned
 
         if let Some(entry) = &opcode_entry {
@@ -4227,49 +3861,14 @@ mod tests {
     use crate::{
         cpu::{
             builder::BxCpuBuilder,
-            cpudb::intel::core_i7_skylake::Corei7SkylakeX,
-            decoder::BxSegregs,
             crregs::{BxCr0, BxCr4},
+            decoder::BxSegregs,
+            exec_ctx::exec_with,
         },
-        memory::{BxMemC, BxMemoryStubC, CpuTlbPin},
+        memory::{BxMemC, BxMemoryStubC},
         params::BxParams,
-        pc_system::{BxPcSystemC, TimerOwner},
+        pc_system::TimerOwner,
     };
-
-    #[test]
-    fn fetch_window_pin_cleared_by_itlb_invalidation() {
-        // Bochs cpu.cc prefetch: `eipFetchPtr` remains valid until the next
-        // refill. The publisher must pin its exact host span and the ITLB
-        // invalidation path must clear both the pointer and the pin.
-        static CODE: [u8; 0x80] = [0x90; 0x80];
-
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
-
-        cpu.eip_fetch_ptr = Some(&CODE);
-        cpu.sync_fetch_window_pin();
-        let start = CODE.as_ptr() as usize;
-        assert!(pin.is_range_pinned(start, start + CODE.len()));
-        // Only the exact window is pinned, not neighbouring ranges.
-        assert!(!pin.is_range_pinned(start + CODE.len(), start + 2 * CODE.len()));
-
-        cpu.invalidate_itlb_pin_slot(0, 0);
-        assert!(cpu.eip_fetch_ptr.is_none());
-        assert!(!pin.is_range_pinned(start, start + CODE.len()));
-
-        // The full-rescan recovery path republishes a live window.
-        cpu.eip_fetch_ptr = Some(&CODE);
-        cpu.refresh_tlb_pin(&pin);
-        assert!(pin.is_range_pinned(start, start + CODE.len()));
-
-        cpu.clear_memory_access();
-    }
 
     #[test]
     fn page_walk_direct_ad_writes_invalidate_dword_and_qword_cached_code() {
@@ -4280,37 +3879,27 @@ mod tests {
         const PAE_TABLE: u64 = 0x4000;
         const PAGE_ENTRY: u64 = CODE_PAGE | 0x3; // present + writable
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.linaddr_width = 48;
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
         );
-        let mem_ptr: *mut BxMemC<'_> = &mut mem;
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
-        let (host_base, host_len) = mem.identity_guest_base();
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
 
         // The leaf PTE itself starts as executable code.  Cache it through the
         // normal prefetch/decode path while paging is off, then make a real
         // legacy system write walk update that physical cache line.
-        mem.write_ram(
-            pins,
-            LEGACY_DIRECTORY,
-            &(LEGACY_TABLE | 0x3).to_le_bytes(),
-        )
-        .unwrap();
-        mem.write_ram(pins, LEGACY_TABLE, &PAGE_ENTRY.to_le_bytes())
+        mem.write_ram(LEGACY_DIRECTORY, &(LEGACY_TABLE | 0x3).to_le_bytes())
+            .unwrap();
+        mem.write_ram(LEGACY_TABLE, &PAGE_ENTRY.to_le_bytes())
             .unwrap();
         cpu.cpu_mode = CpuMode::Long64;
         cpu.cr0 = BxCr0::empty();
         cpu.cr4 = BxCr4::empty();
         cpu.set_rip(LEGACY_TABLE);
         cpu.prev_rip = LEGACY_TABLE;
-        let (legacy_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+        let (legacy_mpool, _) =
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         let legacy_mode = cpu.fetch_mode_mask.bits().into();
         assert!(cpu.i_cache.find_entry(LEGACY_TABLE, legacy_mode).is_some());
         assert!(mem.smc_range_has_stamps(LEGACY_TABLE, 4));
@@ -4320,13 +3909,15 @@ mod tests {
         cpu.cr0 = BxCr0::PE | BxCr0::PG;
         cpu.cr3 = LEGACY_DIRECTORY;
         cpu.async_event = 0;
+        let legacy_pa =
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.translate_linear_system_write(0))
+                .unwrap();
         assert_eq!(
-            cpu.translate_linear_system_write(0).unwrap(),
-            CODE_PAGE,
+            legacy_pa, CODE_PAGE,
             "the legacy direct system-write walk must resolve the leaf"
         );
         let mut legacy_pte = [0; 4];
-        mem.read_ram(pins, LEGACY_TABLE, &mut legacy_pte).unwrap();
+        mem.read_ram(LEGACY_TABLE, &mut legacy_pte).unwrap();
         assert_eq!(
             u32::from_le_bytes(legacy_pte) & 0x60,
             0x60,
@@ -4348,21 +3939,23 @@ mod tests {
         cpu.set_rip(LEGACY_TABLE);
         cpu.prev_rip = LEGACY_TABLE;
         let (legacy_reloaded, _) =
-            unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         assert_ne!(legacy_reloaded, legacy_mpool);
         let legacy_instr = cpu.i_cache.mpool[legacy_reloaded];
-        cpu.execute_instruction(&legacy_instr).unwrap();
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, |ctx| {
+            ctx.execute_instruction(&legacy_instr)
+        })
+        .unwrap();
 
         // Repeat with the PAE direct qword walker.  Its PTE line is likewise
         // decoded into a live trace before the architectural A/D write.
-        mem.write_ram(pins, PAE_DIRECTORY, &(PAE_TABLE | 0x3).to_le_bytes())
+        mem.write_ram(PAE_DIRECTORY, &(PAE_TABLE | 0x3).to_le_bytes())
             .unwrap();
-        mem.write_ram(pins, PAE_TABLE, &PAGE_ENTRY.to_le_bytes())
-            .unwrap();
+        mem.write_ram(PAE_TABLE, &PAGE_ENTRY.to_le_bytes()).unwrap();
         cpu.invalidate_prefetch_q();
         cpu.set_rip(PAE_TABLE);
         cpu.prev_rip = PAE_TABLE;
-        let (pae_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+        let (pae_mpool, _) = exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         let pae_mode = cpu.fetch_mode_mask.bits().into();
         assert!(cpu.i_cache.find_entry(PAE_TABLE, pae_mode).is_some());
         assert!(mem.smc_range_has_stamps(PAE_TABLE, 8));
@@ -4373,13 +3966,15 @@ mod tests {
         cpu.cr4 = BxCr4::PAE;
         cpu.pdptrcache.entry[0] = PAE_DIRECTORY | 0x1;
         cpu.async_event = 0;
+        let pae_pa =
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.translate_linear_system_write(0))
+                .unwrap();
         assert_eq!(
-            cpu.translate_linear_system_write(0).unwrap(),
-            CODE_PAGE,
+            pae_pa, CODE_PAGE,
             "the PAE direct system-write walk must resolve the leaf"
         );
         let mut pae_pte = [0; 8];
-        mem.read_ram(pins, PAE_TABLE, &mut pae_pte).unwrap();
+        mem.read_ram(PAE_TABLE, &mut pae_pte).unwrap();
         assert_eq!(
             u64::from_le_bytes(pae_pte) & 0x60,
             0x60,
@@ -4399,13 +3994,14 @@ mod tests {
         cpu.set_rip(PAE_TABLE);
         cpu.prev_rip = PAE_TABLE;
         let (pae_reloaded, _) =
-            unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         assert_ne!(pae_reloaded, pae_mpool);
         let pae_instr = cpu.i_cache.mpool[pae_reloaded];
-        cpu.execute_instruction(&pae_instr).unwrap();
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, |ctx| {
+            ctx.execute_instruction(&pae_instr)
+        })
+        .unwrap();
 
-
-        cpu.clear_memory_access();
     }
 
     #[test]
@@ -4417,19 +4013,12 @@ mod tests {
         const NEW_SECOND_CODE_PAGE: u64 = 0x5000;
         const SPLIT_RIP: u64 = 0x0ffe;
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.linaddr_width = 48;
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
         );
-        let mem_ptr: *mut BxMemC<'_> = &mut mem;
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
-        let (host_base, host_len) = mem.identity_guest_base();
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
 
         // Flat 32-bit protected code with two virtual pages.  The five-byte
         // MOV begins two bytes before the boundary, so `get_icache_entry`
@@ -4446,33 +4035,34 @@ mod tests {
         cpu.cr3 = PAGE_DIRECTORY;
         cpu.update_fetch_mode_mask();
 
-        mem.write_ram(pins, PAGE_DIRECTORY, &(PAGE_TABLE | 0x3).to_le_bytes())
+        mem.write_ram(PAGE_DIRECTORY, &(PAGE_TABLE | 0x3).to_le_bytes())
             .unwrap();
-        mem.write_ram(pins, PAGE_TABLE, &(FIRST_CODE_PAGE | 0x3).to_le_bytes())
+        mem.write_ram(PAGE_TABLE, &(FIRST_CODE_PAGE | 0x3).to_le_bytes())
             .unwrap();
-        mem.write_ram(
-            pins,
-            PAGE_TABLE + 4,
-            &(OLD_SECOND_CODE_PAGE | 0x3).to_le_bytes(),
-        )
-        .unwrap();
-        mem.write_ram(pins, FIRST_CODE_PAGE + 0x0ffe, &[0xb8, 0x78])
+        mem.write_ram(PAGE_TABLE + 4, &(OLD_SECOND_CODE_PAGE | 0x3).to_le_bytes())
             .unwrap();
-        mem.write_ram(pins, OLD_SECOND_CODE_PAGE, &[0x56, 0x34, 0x12])
+        mem.write_ram(FIRST_CODE_PAGE + 0x0ffe, &[0xb8, 0x78])
             .unwrap();
-        mem.write_ram(pins, NEW_SECOND_CODE_PAGE, &[0x99, 0x88, 0x77])
+        mem.write_ram(OLD_SECOND_CODE_PAGE, &[0x56, 0x34, 0x12])
+            .unwrap();
+        mem.write_ram(NEW_SECOND_CODE_PAGE, &[0x99, 0x88, 0x77])
             .unwrap();
 
         cpu.set_rip(SPLIT_RIP);
         cpu.prev_rip = SPLIT_RIP;
-        let (old_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+        let (old_mpool, _) = exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         let fetch_mode = cpu.fetch_mode_mask.bits().into();
         assert!(
-            cpu.i_cache.find_entry(FIRST_CODE_PAGE + 0x0ffe, fetch_mode).is_some(),
+            cpu.i_cache
+                .find_entry(FIRST_CODE_PAGE + 0x0ffe, fetch_mode)
+                .is_some(),
             "normal lookup must commit the primary page-split trace"
         );
         let old_instr = cpu.i_cache.mpool[old_mpool];
-        cpu.execute_instruction(&old_instr).unwrap();
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, |ctx| {
+            ctx.execute_instruction(&old_instr)
+        })
+        .unwrap();
         assert_eq!(
             cpu.get_gpr32(0),
             0x1234_5678,
@@ -4482,12 +4072,8 @@ mod tests {
         // Remap only the second virtual page and perform the architectural TLB
         // link break.  No write touches the first-page code line: correctness
         // depends specifically on invalidating the primary live split entry.
-        mem.write_ram(
-            pins,
-            PAGE_TABLE + 4,
-            &(NEW_SECOND_CODE_PAGE | 0x3).to_le_bytes(),
-        )
-        .unwrap();
+        mem.write_ram(PAGE_TABLE + 4, &(NEW_SECOND_CODE_PAGE | 0x3).to_le_bytes())
+            .unwrap();
         cpu.tlb_flush();
         assert!(
             cpu.i_cache
@@ -4499,20 +4085,22 @@ mod tests {
         cpu.async_event = 0;
         cpu.set_rip(SPLIT_RIP);
         cpu.prev_rip = SPLIT_RIP;
-        let (new_mpool, _) = unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
+        let (new_mpool, _) = exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         assert_ne!(
             new_mpool, old_mpool,
             "a primary cache hit after remapping would reuse stale split code"
         );
         let new_instr = cpu.i_cache.mpool[new_mpool];
-        cpu.execute_instruction(&new_instr).unwrap();
+        crate::cpu::exec_ctx::exec_with(&mut cpu, &mut mem, |ctx| {
+            ctx.execute_instruction(&new_instr)
+        })
+        .unwrap();
         assert_eq!(
             cpu.get_gpr32(0),
             0x7788_9978,
             "continued decode/dispatch must execute bytes from the remapped second page"
         );
 
-        cpu.clear_memory_access();
     }
 
     #[test]
@@ -4521,25 +4109,33 @@ mod tests {
             .with_topology(1, 2, 1)
             .unwrap()
             .cpu_topology();
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-        cpu.configure_smp(1, topology);
-
-        let mut pc = BxPcSystemC::new();
-        pc.initialize(1_000_000);
-        pc.register_timer(TimerOwner::PciIdeCh0, 1000, false, true, "fastrep")
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        machine.pc_system_mut().initialize(1_000_000);
+        machine
+            .pc_system_mut()
+            .register_timer(TimerOwner::PciIdeCh0, 1000, false, true, "fastrep")
             .unwrap();
-        cpu.set_pc_system_ptr_with_tick_denominator(NonNull::from(&mut pc), 2);
+        let mut cpu = machine.ctx();
+        cpu.configure_smp(1, topology);
+        cpu.begin_slice_clock(2);
 
         assert_eq!(cpu.ticks_left_next_event(), 1000);
 
+        // The probe must NOT advance the clock — the scheduler owns that.
+        let before = cpu.pc_system.time_ticks();
         cpu.tickn_fastrep(1000);
+        assert_eq!(
+            cpu.pc_system.time_ticks(),
+            before,
+            "the FastRep probe must observe the countdown, never advance it"
+        );
 
         assert_ne!(cpu.async_event & BX_ASYNC_EVENT_STOP_TRACE, 0);
     }
 
     #[test]
     fn scheduler_boundary_request_is_distinct_and_taken_explicitly() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.async_event = BX_ASYNC_EVENT_STOP_TRACE;
 
         cpu.request_scheduler_boundary();
@@ -4556,272 +4152,102 @@ mod tests {
     }
 
     #[test]
-    fn fatal_execution_error_tears_down_memory_wiring() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(
-            NonNull::from(&mut mem),
-            core::slice::from_ref(&pin),
-            &pin,
-        );
-        let (host_base, host_len) = mem.identity_guest_base();
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
-
-        let result: super::Result<()> = (|| {
-            let _memory_wiring = CpuMemoryWiringGuard::new(&mut cpu);
-            cpu.handle_execution_error(CpuError::CpuNotInitialized, &Instruction::default())?;
-            Ok(())
-        })();
-
-        assert!(matches!(result, Err(CpuError::CpuNotInitialized)));
-        assert!(cpu.mem_host_base.is_null());
-        assert_eq!(cpu.mem_host_len, 0);
-        assert!(cpu.mem_bus.is_none());
-        assert!(cpu.active_tlb_pins().is_empty());
-        assert!(cpu.active_tlb_pin_sidecar.is_none());
-    }
-
-    #[test]
-    fn unwired_tlb_mutation_refreshes_pin_before_next_memory_scope() {
-        const TARGET: u64 = 0x4000;
-
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        let host_ptr = mem.identity_guest_base().0 as usize + TARGET as usize;
-        let slot = cpu.dtlb.get_index_of(TARGET, 0);
-        let entry = &mut cpu.dtlb.entries[slot];
-        entry.lpf = TARGET;
-        entry.host_page_addr = host_ptr as _;
-        entry.access_bits = 1;
-
-        cpu.sync_dtlb_pin_slot(TARGET, 0);
-        assert!(!pin.is_range_pinned(host_ptr, host_ptr + 0x1000));
-
-        cpu.wire_memory_access(
-            NonNull::from(&mut mem),
-            core::slice::from_ref(&pin),
-            &pin,
-        );
-
-        assert!(pin.is_range_pinned(host_ptr, host_ptr + 0x1000));
-        cpu.clear_memory_access();
-    }
-
-    #[test]
-    fn dtlb_miss_releases_colliding_pin_before_page_walk() {
-        const TARGET: u64 = 0x4000;
-        const OLD_LPF: u64 = 0x8000;
-
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
-        let (host_base, host_len) = mem.identity_guest_base();
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
-        cpu.cpu_mode = CpuMode::Ia32Protected;
-        cpu.cr0 = BxCr0::PE | BxCr0::PG;
-        cpu.cr4 = BxCr4::empty();
-        cpu.cr3 = 0;
-
-        let host_ptr = host_base as usize;
-        let slot = cpu.dtlb.get_index_of(TARGET, 0);
-        let entry = &mut cpu.dtlb.entries[slot];
-        entry.lpf = OLD_LPF;
-        entry.host_page_addr = host_ptr as _;
-        entry.access_bits = 1;
-        cpu.sync_dtlb_pin_slot(TARGET, 0);
-        assert!(pin.is_range_pinned(host_ptr, host_ptr + 0x1000));
-
-        assert!(cpu.translate_data_read(TARGET).is_err());
-        assert!(!pin.is_range_pinned(host_ptr, host_ptr + 0x1000));
-        cpu.clear_execution_memory_wiring();
-    }
-
-    #[test]
-    fn full_tlb_flush_clears_pin_hosts_like_a_full_rescan() {
-        // Track B: `tlb_flush` publishes the pin sidecar via a memset
-        // (`clear_active_tlb_pin_hosts`) instead of the per-slot rescan. Every
-        // pinned DTLB and ITLB host pointer must be gone afterward — exactly
-        // what `refresh_tlb_pin` produces once every entry is invalid.
-        const DTLB_TARGET: u64 = 0x4000;
-        const ITLB_TARGET: u64 = 0x8000;
-
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        let host_base = mem.identity_guest_base().0 as usize;
-        let dtlb_host = host_base + DTLB_TARGET as usize;
-        let itlb_host = host_base + ITLB_TARGET as usize;
-
-        let dslot = cpu.dtlb.get_index_of(DTLB_TARGET, 0);
-        {
-            let e = &mut cpu.dtlb.entries[dslot];
-            e.lpf = DTLB_TARGET;
-            e.host_page_addr = dtlb_host as _;
-            e.access_bits = 1;
-        }
-        let islot = cpu.itlb.get_index_of(ITLB_TARGET, 0);
-        {
-            let e = &mut cpu.itlb.entries[islot];
-            e.lpf = ITLB_TARGET;
-            e.host_page_addr = itlb_host as _;
-            e.access_bits = 1;
-        }
-
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
-        cpu.sync_dtlb_pin_slot(DTLB_TARGET, 0);
-        cpu.sync_itlb_pin_slot(ITLB_TARGET, 0);
-        assert!(pin.is_range_pinned(dtlb_host, dtlb_host + 0x1000));
-        assert!(pin.is_range_pinned(itlb_host, itlb_host + 0x1000));
-
-        cpu.tlb_flush();
-        assert!(!pin.is_range_pinned(dtlb_host, dtlb_host + 0x1000));
-        assert!(!pin.is_range_pinned(itlb_host, itlb_host + 0x1000));
-
-        cpu.clear_memory_access();
-    }
-
-    #[test]
-    fn full_tlb_flush_keeps_the_vmcb_pin_in_an_svm_guest() {
-        // The full-flush memset zeros `vmcb_host`, but the flush does not change
-        // SVM state — under-pinning the VMCB backing would be a use-after-free.
-        // `clear_active_tlb_pin_hosts` re-publishes it while in an SVM guest.
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        let vmcb_host = mem.identity_guest_base().0 as usize + 0x1_0000;
-        cpu.in_svm_guest = true;
-        cpu.vmcbhostptr = vmcb_host as _;
-
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
-        cpu.sync_vmcb_pin();
-        assert!(pin.is_range_pinned(vmcb_host, vmcb_host + 0x1000));
-
-        cpu.tlb_flush();
-        assert!(
-            pin.is_range_pinned(vmcb_host, vmcb_host + 0x1000),
-            "a full flush must not drop the active SVM guest's VMCB pin"
-        );
-
-        cpu.clear_memory_access();
-    }
-
-    #[test]
-    fn incremental_tlb_pins_match_a_fresh_rescan_after_every_op() {
-        // Track B property test. The pin sidecar is maintained incrementally:
-        // installs publish one slot, `flush_non_global_and_publish_pin` and
-        // `invlpg_and_publish_pin` fuse pin removal into the invalidation walk,
-        // and `tlb_flush` memsets. After every operation the sidecar must be
-        // byte-identical to a fresh `refresh_tlb_pin` full rescan — the oracle —
-        // for both an SVM-off and an SVM-on host, or the fused walks would
-        // under-pin (use-after-free) or over-pin (a stale eviction block).
+    fn an_instruction_page_in_rom_resolves_with_no_identity_base_at_all() {
+        // The trap this exists to catch: guest RAM and the allocation start at
+        // the same address whenever residency is full, so measuring an
+        // instruction offset from `mem_host_base` passes every ordinary test.
+        // Here host memory is a fifth of guest memory, so there is no identity
+        // base at all — and the page being fetched is ROM, which is not guest
+        // RAM in any regime. Getting the base wrong is a wild pointer, and
+        // only a machine configured like this one notices.
         const MIB: usize = 1024 * 1024;
+        const BIOS_MARKER: u8 = 0x5A;
 
-        for &svm in &[false, true] {
-            let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-            let mut mem = BxMemC::new(
-                BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).unwrap(),
-                false,
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(5 * MIB, MIB, MIB).unwrap(),
+            false,
+        );
+        mem.set_a20_mask(u64::MAX);
+        let mut rom = std::vec![0u8; 0x10000];
+        rom[0] = BIOS_MARKER;
+        mem.load_ROM(&rom, 0xFFFF_0000, 0).unwrap();
+
+        // The bases are what the execution context derives from this memory:
+        // under partial residency the identity base is null and the allocation
+        // base is not, and instruction fetch measures from the latter.
+        let byte = exec_with(&mut cpu, &mut mem, |ctx| {
+            assert!(
+                ctx.mem_host_base.is_null(),
+                "partial residency must leave no identity base — otherwise this \
+                 test proves nothing"
             );
-            let host_base = mem.identity_guest_base().0 as usize;
+            assert!(!ctx.mem_alloc_base.is_null());
 
-            if svm {
-                cpu.in_svm_guest = true;
-                cpu.vmcbhostptr = (host_base + 0x2_0000) as _;
+            let offset = ctx
+                .memory
+                .host_mem_range(
+                    0xFFFF_0000,
+                    MemoryAccessType::Execute,
+                    crate::memory::CpuMemoryPolicy::default(),
+                )
+                .unwrap()
+                .expect("the BIOS image must be directly fetchable")
+                .start;
+
+            let slot = ctx.itlb.get_index_of(0xFFFF_0000, 0);
+            {
+                let entry = &mut ctx.itlb.entries[slot];
+                entry.lpf = 0xFFFF_0000;
+                entry.host_page = crate::cpu::tlb::AllocPage::from_alloc_offset(offset);
+                entry.access_bits = 1;
             }
 
-            let pin = CpuTlbPin::new(&cpu);
-            let oracle = CpuTlbPin::new(&cpu);
-            cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
-            if svm {
-                cpu.sync_vmcb_pin();
-            }
+            let resolved = crate::cpu::tlb::host_page_ptr(
+                ctx.mem_alloc_base,
+                ctx.itlb.entries[slot].host_page,
+            );
+            // SAFETY: the entry points at the ROM image loaded above.
+            unsafe { *resolved }
+        });
+        assert_eq!(
+            byte, BIOS_MARKER,
+            "a cached ROM page must resolve to the ROM image itself"
+        );
+    }
 
-            // Deterministic xorshift64 — Date/rand are unavailable in tests.
-            let mut state: u64 = 0x9E37_79B9_7F4A_7C15 ^ (svm as u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
-            let mut next = || {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state
-            };
-            // Page-aligned linear address spanning 8192 pages, forcing slot
-            // collisions in both the 1024-entry ITLB and the larger DTLB.
-            let laddr_of = |n: u64| ((n & 0x1FFF) << 12) as u64;
+    #[test]
+    fn a_cached_data_page_resolves_against_the_derived_identity_base() {
+        // A data TLB entry names a page NUMBER, meaningful only alongside the
+        // identity base the execution context derives from its memory. This
+        // pins that a filled entry resolves to the right host address.
+        const TARGET: u64 = 0x4000;
 
-            for _ in 0..2000 {
-                match next() % 6 {
-                    0 | 1 => {
-                        let laddr = laddr_of(next());
-                        let host = host_base + laddr as usize;
-                        let global = (next() & 1) != 0;
-                        let large = (next() & 7) == 0;
-                        let slot = cpu.dtlb.get_index_of(laddr, 0);
-                        {
-                            let e = &mut cpu.dtlb.entries[slot];
-                            e.lpf = laddr;
-                            e.host_page_addr = host as _;
-                            // bit31 == TLB_GLOBAL_PAGE (tlb.rs); low bit is a
-                            // normal access-permission bit marking the entry live.
-                            e.access_bits = 1 | if global { 0x8000_0000 } else { 0 };
-                            e.lpf_mask = if large { 0x1F_FFFF } else { 0xFFF };
-                        }
-                        if large {
-                            cpu.dtlb.split_large = true;
-                        }
-                        cpu.sync_dtlb_pin_slot(laddr, 0);
-                    }
-                    2 => {
-                        let laddr = laddr_of(next());
-                        let host = host_base + laddr as usize;
-                        let global = (next() & 1) != 0;
-                        let slot = cpu.itlb.get_index_of(laddr, 0);
-                        {
-                            let e = &mut cpu.itlb.entries[slot];
-                            e.lpf = laddr;
-                            e.host_page_addr = host as _;
-                            e.access_bits = 1 | if global { 0x8000_0000 } else { 0 };
-                            e.lpf_mask = 0xFFF;
-                        }
-                        cpu.sync_itlb_pin_slot(laddr, 0);
-                    }
-                    3 => {
-                        let laddr = laddr_of(next());
-                        cpu.invlpg_and_publish_pin(laddr);
-                    }
-                    4 => cpu.flush_non_global_and_publish_pin(),
-                    _ => cpu.tlb_flush(),
-                }
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
+            false,
+        );
 
-                cpu.refresh_tlb_pin(&oracle);
-                assert!(
-                    pin.state_matches(&oracle),
-                    "incremental pin diverged from a fresh rescan (svm={svm})"
-                );
-            }
-
-            cpu.clear_memory_access();
+        let slot = cpu.dtlb.get_index_of(TARGET, 0);
+        {
+            let entry = &mut cpu.dtlb.entries[slot];
+            entry.lpf = TARGET;
+            entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(TARGET as usize);
+            entry.access_bits = 1;
         }
+
+        exec_with(&mut cpu, &mut mem, |ctx| {
+            let expected = ctx.mem_host_base.wrapping_add(TARGET as usize);
+            assert_eq!(
+                crate::cpu::tlb::host_page_ptr(
+                    ctx.mem_host_base,
+                    ctx.dtlb.entries[slot].host_page
+                ),
+                expected,
+                "the cached page must resolve to the identity base plus its offset"
+            );
+        });
     }
 
     #[test]
@@ -4831,10 +4257,10 @@ mod tests {
         // the monitor is disarmed and any MWAIT sleep is woken to ACTIVE. The
         // host-side rewire invalidate_host_memory_mappings is NOT a guest flush
         // and must preserve the (possibly just-restored) monitor.
-        use super::{BX_MONITOR_ARMED_BY_MONITOR, CpuActivityState};
+        use super::{CpuActivityState, BX_MONITOR_ARMED_BY_MONITOR};
 
         // Full flush also wakes an MWAIT sleep to ACTIVE.
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
         cpu.activity_state = CpuActivityState::Mwait;
         assert!(cpu.monitor.armed());
@@ -4847,19 +4273,22 @@ mod tests {
         );
 
         // Non-global flush disarms too.
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
         cpu.tlb_flush_non_global();
-        assert!(!cpu.monitor.armed(), "tlb_flush_non_global must disarm the monitor");
+        assert!(
+            !cpu.monitor.armed(),
+            "tlb_flush_non_global must disarm the monitor"
+        );
 
         // Single-page invlpg disarms too.
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
         cpu.tlb_invlpg(0x2000);
         assert!(!cpu.monitor.armed(), "tlb_invlpg must disarm the monitor");
 
         // Host-side rewire must PRESERVE the monitor across its internal flush.
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
         cpu.invalidate_host_memory_mappings();
         assert!(
@@ -4867,75 +4296,174 @@ mod tests {
             "invalidate_host_memory_mappings must not disarm the guest monitor"
         );
     }
+}
 
-    #[test]
-    fn itlb_miss_releases_colliding_pin_before_block_replacement() {
-        const MIB: usize = 1024 * 1024;
-        const TARGET: u64 = 4 * MIB as u64;
-
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(5 * MIB, MIB, MIB).unwrap(),
-            false,
-        );
-        mem.set_a20_mask(u64::MAX);
-        let pin = CpuTlbPin::new(&cpu);
-        let pins = core::slice::from_ref(&pin);
-        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
-
-        mem.write_ram(&[], 0, &[0x5a]).unwrap();
-        let host_ptr = mem
-            .get_host_mem_addr_pinned(
-                0,
-                MemoryAccessType::Read,
-                &[],
-                crate::memory::CpuMemoryPolicy::default(),
-            )
-            .unwrap()
-            .unwrap()
-            .as_ptr() as usize;
-        let slot = cpu.itlb.get_index_of(TARGET, 0);
-        let entry = &mut cpu.itlb.entries[slot];
-        entry.lpf = TARGET;
-        entry.host_page_addr = host_ptr as _;
-        entry.access_bits = 1;
-        cpu.eip_fetch_ptr = Some(&[0]);
-        cpu.sync_itlb_pin_slot(TARGET, 0);
-        assert!(pin.is_range_pinned(host_ptr, host_ptr + MIB));
-
-        cpu.invalidate_itlb_pin_slot(TARGET, 0);
-
-        assert!(cpu.eip_fetch_ptr.is_none());
-        assert!(!pin.is_range_pinned(host_ptr, host_ptr + MIB));
-        mem.write_ram(pins, TARGET, &[0xa5]).unwrap();
-        let mut replaced = [0];
-        assert_eq!(mem.read_ram(pins, TARGET, &mut replaced).unwrap(), 1);
-        assert_eq!(replaced, [0xa5]);
-        cpu.clear_memory_access();
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
+    /// Conditional near branch (16-bit). Fires `cnear_branch_taken`/
+    /// `cnear_branch_not_taken` hooks. RIP is already at fallthrough when this
+    /// helper is called (cpu_loop increments RIP before execute).
+    #[inline(always)]
+    pub(crate) fn conditional_branch16(&mut self, taken: bool, new_ip: u16) -> Result<()> {
+        if taken {
+            self.branch_near16(new_ip)?;
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearTaken {
+                        src_rip: src,
+                        dst_rip: new_ip as u64,
+                    },
+                );
+            }
+        } else {
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                let fall = self.rip();
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearNotTaken {
+                        src_rip: src,
+                        fallthrough_rip: fall,
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 
-    #[test]
-    fn svm_pin_sidecar_tracks_guest_state_transitions() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
-            false,
-        );
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(
-            NonNull::from(&mut mem),
-            core::slice::from_ref(&pin),
-            &pin,
-        );
+    /// Conditional near branch (32-bit). See `conditional_branch16`.
+    #[inline(always)]
+    pub(crate) fn conditional_branch32(&mut self, taken: bool, new_eip: u32) -> Result<()> {
+        if taken {
+            self.branch_near32(new_eip)?;
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearTaken {
+                        src_rip: src,
+                        dst_rip: new_eip as u64,
+                    },
+                );
+            }
+        } else {
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                let fall = self.rip();
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearNotTaken {
+                        src_rip: src,
+                        fallthrough_rip: fall,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
 
-        cpu.in_svm_guest = true;
-        cpu.vmcbhostptr = 0x6000;
-        cpu.sync_vmcb_pin();
-        assert!(pin.is_range_pinned(0x6000, 0x7000));
+    /// Conditional near branch (64-bit). See `conditional_branch16`.
+    /// Takes `&Instruction` because `branch_near64` extracts the displacement
+    /// from the instruction itself.
+    #[inline(always)]
+    pub(crate) fn conditional_branch64(
+        &mut self,
+        taken: bool,
+        instr: &super::decoder::Instruction,
+    ) -> Result<()> {
+        if taken {
+            self.branch_near64(instr)?;
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                let dst = self.rip();
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearTaken {
+                        src_rip: src,
+                        dst_rip: dst,
+                    },
+                );
+            }
+        } else {
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                let fall = self.rip();
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearNotTaken {
+                        src_rip: src,
+                        fallthrough_rip: fall,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
 
-        cpu.in_svm_guest = false;
-        cpu.sync_vmcb_pin();
-        assert!(!pin.is_range_pinned(0x6000, 0x7000));
-        cpu.clear_memory_access();
+    /// Snapshot the access policy for `paddr` before memory is mutably
+    /// borrowed for the access itself.
+    ///
+    /// A20 masking is applied first, because the policy's MONITOR test
+    /// compares against a physical page: measuring it on the unmasked address
+    /// would let MWAIT watch a different page than the one memory then maps.
+    /// This is the only place the pair is formed, so the two cannot disagree
+    /// (R5).
+    pub(super) fn access_policy(&self, paddr: BxPhyAddress) -> CpuMemoryPolicy {
+        let a20_addr = self.memory.a20_addr(paddr);
+        self.memory_access_policy(a20_addr)
+    }
+
+    /// Complete a physical read, running the device if memory reported one.
+    ///
+    /// Memory answers whose an address is and stops; this is the layer that
+    /// can reach both, so it performs the dispatch. Every physical access the
+    /// CPU issues goes through here — a caller that talked to memory directly
+    /// would silently drop MMIO, which is what `PhysAccess` being `#[must_use]`
+    /// prevents.
+    pub(super) fn read_physical_routed(
+        &mut self,
+        policy: CpuMemoryPolicy,
+        paddr: BxPhyAddress,
+        len: usize,
+        data: &mut [u8],
+    ) -> crate::Result<()> {
+        match self.memory.read_physical_page(policy, paddr, len, data)? {
+            crate::memory::PhysAccess::Done => Ok(()),
+            crate::memory::PhysAccess::Mmio(hit) => {
+                // Bochs devices read `bx_pc_system` from inside their handler,
+                // so the tick a guest observes is the one live at the access,
+                // not the wheel's position at the last batch boundary.
+                let now_ticks = self.system_ticks();
+                self.devices.mmio_read(
+                    hit,
+                    len as u32,
+                    data,
+                    now_ticks,
+                    self.pc_system,
+                    self.device_manager,
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Complete a physical write. See [`Self::read_physical_routed`].
+    pub(super) fn write_physical_routed(
+        &mut self,
+        policy: CpuMemoryPolicy,
+        paddr: BxPhyAddress,
+        len: usize,
+        data: &mut [u8],
+    ) -> crate::Result<()> {
+        match self.memory.write_physical_page(policy, paddr, len, data)? {
+            crate::memory::PhysAccess::Done => Ok(()),
+            crate::memory::PhysAccess::Mmio(hit) => {
+                let now_ticks = self.system_ticks();
+                self.devices.mmio_write(
+                    hit,
+                    len as u32,
+                    &data[..len],
+                    now_ticks,
+                    self.pc_system,
+                    self.device_manager,
+                );
+                Ok(())
+            }
+        }
     }
 }

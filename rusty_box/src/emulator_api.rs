@@ -8,29 +8,23 @@
 
 #[cfg(feature = "alloc")]
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-#[cfg(feature = "alloc")]
-use core::sync::atomic::AtomicBool;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(feature = "instrumentation")]
-use core::ops::RangeBounds;
 
-#[cfg(feature = "instrumentation")]
-use crate::cpu::decoder::Instruction;
 #[cfg(feature = "alloc")]
 use crate::cpu::instrumentation::EmuStopReason;
-#[cfg(feature = "instrumentation")]
-use crate::cpu::instrumentation::{
-    BranchEvent, HookHandle, HwInterruptEvent, InstrumentationError, IoHookEvent, IoHookType,
-    MemHookEvent, MemHookType,
-};
+#[cfg(feature = "alloc")]
+use crate::emulator::StopReason;
+use crate::cpu::api_bridge::{ScaledLimit, SegmentSize};
 use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, X86Reg};
-use crate::cpu::BxCpuIdTrait;
 #[cfg(feature = "alloc")]
 use crate::cpu::ResetReason;
-use crate::emulator::Emulator;
+use crate::emulator::{Emulator, SliceEngine};
 #[cfg(feature = "alloc")]
 use crate::emulator::EmulatorConfig;
+use crate::iodev::devices::DeviceManager;
+use crate::iodev::serial::{SerialTxDrain, SERIAL_PORT_COUNT};
+use crate::iodev::{BxDevicesC, DebugconDrain};
 use crate::{Error, Result};
 
 // ─────────────────────────── StopHandle ───────────────────────────
@@ -69,144 +63,114 @@ impl StopHandle {
     }
 }
 
-// ─────────────────────────── Hook registration ───────────────────────────
+// ─────────────────────────── Role handles ───────────────────────────
 //
-// All hook_add_* methods require the `instrumentation` feature because they
-// populate the [`InstrumentationRegistry`] on the CPU, which is itself
-// feature-gated. When the feature is off, the methods simply do not exist.
+// Transient `&mut` borrows of one device role, obtained from the machine and
+// dropped at the end of the expression. Machine internals stay crate-private
+// (doctrine R3) — this is the supported path to device state. Handles are
+// deliberately minimal in this first cut; the automation phase grows them
+// (input injection, display readback, serial `send`) without renaming.
 
-#[cfg(all(feature = "instrumentation", feature = "alloc"))]
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
-    /// Register a hook fired before each instruction whose RIP is in `range`.
-    /// Callback receives `(rip, &Instruction)`.
-    pub fn hook_add_code<R, F>(&mut self, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u64>,
-        F: FnMut(u64, &Instruction) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_code(range, Box::new(cb))
+/// Transient borrow of one UART, from [`Emulator::serial`].
+pub struct Serial<'m> {
+    devices: &'m mut DeviceManager,
+    port: usize,
+}
+
+impl Serial<'_> {
+    /// Drain the bytes the guest has transmitted on this port, in write order.
+    ///
+    /// The buffer is bounded, so a host that never drains loses the oldest
+    /// bytes rather than growing without limit.
+    #[inline]
+    pub fn take_output(&mut self) -> SerialTxDrain<'_> {
+        self.devices.drain_serial_tx(self.port)
+    }
+}
+
+/// Transient borrow of the port-0xE9 debug console, from
+/// [`Emulator::debug_port`].
+///
+/// Bochs `unmapped.cc` `port_e9_hack` — optional upstream, always present
+/// here. BIOS/VGABIOS message ports (0x400-0x403, 0x500-0x503) are a separate
+/// stream and never appear on this one, matching `biosdev.cc`.
+pub struct DebugPort<'m> {
+    devices: &'m mut BxDevicesC,
+}
+
+impl DebugPort<'_> {
+    /// Drain the bytes the guest has written to port 0xE9, in write order.
+    #[inline]
+    pub fn take_output(&mut self) -> DebugconDrain<'_> {
+        self.devices.drain_port_e9_output()
+    }
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
+    /// Borrow UART `port` (0-based; COM1 is 0). `None` when the index is
+    /// outside the modelled set.
+    #[inline]
+    pub fn serial(&mut self, port: usize) -> Option<Serial<'_>> {
+        (port < SERIAL_PORT_COUNT).then(|| Serial {
+            devices: &mut self.device_manager,
+            port,
+        })
     }
 
-    /// Register a hook fired AFTER each instruction whose RIP is in `range`.
-    pub fn hook_add_code_after<R, F>(&mut self, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u64>,
-        F: FnMut(u64, &Instruction) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_code_after(range, Box::new(cb))
+    /// Borrow the port-0xE9 debug console. Present on every profile — it is a
+    /// chipset facility, not a device that can be left unattached.
+    #[inline]
+    pub fn debug_port(&mut self) -> DebugPort<'_> {
+        DebugPort {
+            devices: &mut self.devices,
+        }
     }
 
-    /// Register a memory access hook.
-    pub fn hook_add_mem<R, F>(&mut self, hook_type: MemHookType, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u64>,
-        F: FnMut(&MemHookEvent) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_mem(hook_type, range, Box::new(cb))
+    /// Share this machine's stop flag with another thread, replacing the one
+    /// it was built with. The GUI path uses this so its own reset/close
+    /// controls break the run loop.
+    ///
+    /// Prefer [`Emulator::stop_handle`] when a fresh handle is all that is
+    /// needed; this exists for the case where the *caller* already owns the
+    /// flag that other code watches.
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub fn set_stop_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.stop_flag = flag;
     }
 
-    /// Register a software-interrupt hook (INT n / INT3 / INTO).
-    /// Callback receives the vector.
-    pub fn hook_add_interrupt<F>(&mut self, cb: F) -> HookHandle
-    where
-        F: FnMut(u8) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_interrupt(Box::new(cb))
+    /// Read access to the stop flag. Same shape under every feature setting
+    /// (doctrine R0): `alloc` shares an `Arc`, no-alloc owns the atomic, and
+    /// both hand out `&AtomicBool`.
+    #[inline]
+    pub fn stop_flag(&self) -> &AtomicBool {
+        &self.stop_flag
     }
 
-    /// Register a hardware-interrupt hook (external IRQ delivery).
-    pub fn hook_add_hwinterrupt<F>(&mut self, cb: F) -> HookHandle
-    where
-        F: FnMut(&HwInterruptEvent) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_hw_interrupt(Box::new(cb))
+    /// A20 gate state (Bochs `pc_system.cc` `get_enable_a20`).
+    #[inline]
+    pub fn get_enable_a20(&self) -> bool {
+        self.pc_system.get_enable_a20()
     }
 
-    /// Register a CPU-exception hook.
-    /// Callback receives `(vector, error_code)`.
-    pub fn hook_add_exception<F>(&mut self, cb: F) -> HookHandle
-    where
-        F: FnMut(u8, u32) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_exception(Box::new(cb))
-    }
+}
 
-    /// Register an I/O port hook (IN/OUT instructions).
-    pub fn hook_add_io<R, F>(&mut self, hook_type: IoHookType, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u16>,
-        F: FnMut(&IoHookEvent) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_io(hook_type, range, Box::new(cb))
-    }
+// ─────────────────────────── The observer ───────────────────────────
+//
+// One observer per machine, chosen at COMPILE time as the tracer parameter
+// `T`. It is a trait rather than a set of registered closures, which is what
+// lets it work in every build this port ships: a `no_alloc` machine cannot
+// box a closure, but it can name a type.
 
-    /// Register a branch hook. Fires for conditional, unconditional, and
-    /// far branches; the variant in [`BranchEvent`] tells them apart.
-    pub fn hook_add_branch<R, F>(&mut self, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u64>,
-        F: FnMut(&BranchEvent) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_branch(range, Box::new(cb))
-    }
-
-    /// Register a block hook. Fires at the start of each basic block (trace)
-    /// whose RIP is in range.
-    pub fn hook_add_block<R, F>(&mut self, range: R, cb: F) -> HookHandle
-    where
-        R: RangeBounds<u64>,
-        F: FnMut(u64, u16) + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_block(range, Box::new(cb))
-    }
-
-    /// Register an invalid-instruction hook. Fires before #UD for
-    /// unrecognized opcodes. Return `true` from the callback to suppress
-    /// the exception.
-    pub fn hook_add_invalid_insn<F>(&mut self, cb: F) -> HookHandle
-    where
-        F: FnMut(u64) -> bool + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_invalid_insn(Box::new(cb))
-    }
-
-    /// Register an unmapped-memory hook. Fires before page fault for
-    /// not-present pages. Return `true` to suppress the fault.
-    pub fn hook_add_mem_unmapped<F>(&mut self, cb: F) -> HookHandle
-    where
-        F: FnMut(u64, usize, crate::cpu::instrumentation::MemAccessRW) -> bool + Send + 'static,
-    {
-        self.cpu_mut().instrumentation.add_mem_unmapped(Box::new(cb))
-    }
-
-    /// Remove a previously registered hook.
-    /// Returns `Err(InvalidHandle)` if the handle was already removed or
-    /// never valid.
-    pub fn hook_del(
-        &mut self,
-        handle: HookHandle,
-    ) -> core::result::Result<(), InstrumentationError> {
-        self.cpu_mut().instrumentation.remove(handle)
-    }
-
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Direct typed reference to the installed tracer. Zero-cost field access.
-    /// Panics only if called while a hook is mid-dispatch (the tracer is
-    /// temporarily taken for borrow-splitting) — user code can't observe this.
     pub fn instrumentation(&self) -> &T {
-        self.cpu()
-            .instrumentation
-            .tracer
-            .as_ref()
-            .expect("tracer absent only during hook dispatch")
+        &self.cpu().instrumentation.tracer
     }
 
     /// Mutable reference to the installed tracer.
     pub fn instrumentation_mut(&mut self) -> &mut T {
-        self.cpu_mut()
-            .instrumentation
-            .tracer
-            .as_mut()
-            .expect("tracer absent only during hook dispatch")
+        &mut self.cpu_mut().instrumentation.tracer
     }
 
     /// Recompute the active hook mask from the tracer's `active_hooks()`.
@@ -218,7 +182,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
 // ─────────────────────────── reg_read / reg_write ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Read any register by enum tag. Narrower registers are zero-extended
     /// into the returned `u64`.
     pub fn reg_read(&self, reg: X86Reg) -> u64 {
@@ -330,7 +294,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
 // ─────────────────────────── Wide register read/write ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Read an x87 FPU register as 10 bytes (80-bit extended precision).
     /// `reg` must be Fpr0..Fpr7.
     pub fn reg_read_fp80(&self, reg: X86Reg) -> [u8; 10] {
@@ -572,15 +536,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
 // ─────────────────────────── mem_read / mem_write ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Read bytes from guest physical memory into the caller's buffer.
     /// Returns the number of bytes read (always `buf.len()` on success).
     /// Bypasses MMIO handlers — matches Unicorn `uc_mem_read` semantics.
     pub fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> Result<()> {
-        let pins_ptr = self.tlb_pins().as_ptr();
-        let pins_len = self.tlb_pins().len();
         let copied = self.memory.read_ram(
-            unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) },
             addr,
             buf,
         )?;
@@ -602,10 +563,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     /// Write bytes to guest physical RAM, including swapped blocks.
     pub fn mem_write(&mut self, addr: u64, data: &[u8]) -> Result<()> {
-        let pins_ptr = self.tlb_pins().as_ptr();
-        let pins_len = self.tlb_pins().len();
         let copied = self.memory.write_ram(
-            unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) },
             addr,
             data,
         )?;
@@ -643,7 +601,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     /// Set memory permissions for a physical address range.
     /// Creates the permissions bitmap on first call, sizing it to physical memory.
-    #[cfg(feature = "instrumentation")]
     pub fn mem_protect(
         &mut self,
         addr: u64,
@@ -704,8 +661,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     /// Translate a guest virtual address to guest physical address using
     /// the current page tables (CR3). Returns Err on page fault.
-    pub fn virt_to_phys(&self, vaddr: u64) -> Result<u64> {
-        self.cpu().translate_linear_for_api(vaddr).map_err(Error::Cpu)
+    ///
+    /// Takes `&mut self` because the walk reads the guest's paging structures
+    /// the same way an executing walk does — through the routed physical path,
+    /// which can page a block back in under partial residency.
+    pub fn virt_to_phys(&mut self, vaddr: u64) -> Result<u64> {
+        self.exec_ctx(0)
+            .translate_linear_system_read(vaddr)
+            .map_err(Error::Cpu)
     }
 
     /// Read bytes from guest VIRTUAL memory. Translates through current
@@ -734,7 +697,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             let va = vaddr + offset as u64;
             let page_offset = (va & 0xFFF) as usize;
             let chunk = (0x1000 - page_offset).min(buf.len() - offset);
-            let pa = self.cpu().translate_linear_with_cr3_for_api(va, cr3)
+            let pa = self
+                .exec_ctx(0)
+                .translate_linear_with_cr3(va, cr3)
                 .ok_or_else(|| Error::Memory(crate::memory::MemoryError::PageNotPresent))?;
             self.mem_read(pa, &mut buf[offset..offset + chunk])?;
             offset += chunk;
@@ -824,7 +789,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
 // ─────────────────────────── emu_start / emu_stop ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Obtain a cross-thread [`StopHandle`] that breaks the `emu_start` loop
     /// at its next batch boundary.
     #[cfg(feature = "alloc")]
@@ -842,7 +807,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Execute starting at `begin`. Every limit is optional — pass `None`
     /// for "no limit". Returns when:
     /// - RIP reaches `until` (if set)
-    /// - `count` instructions executed (if set)
+    /// - `count` instructions have retired (if set) — exactly that many, not
+    ///   approximately: a run with a count does not take the throughput path
     /// - `timeout` wall-clock elapsed (if set, std-only)
     /// - `emu_stop`/`StopHandle::stop` was called
     /// - CPU enters HLT/MWAIT with no pending interrupts
@@ -871,14 +837,39 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             }
         }
 
-        let mut executed: u64 = 0;
+        // Counted from the boot processor's own retired-instruction counter,
+        // not from what a batch reports. A multiprocessor batch reports elapsed
+        // TIME — no single processor's instruction count describes a round in
+        // which every processor got a quantum — and a caller asking to run N
+        // instructions is asking about the processor it set RIP on.
+        let started_at = self.cpu().icount_for_api();
+        let executed_now = |machine: &Self| machine.cpu().icount_for_api() - started_at;
         const BATCH: u64 = 4096;
+
+        // An address the caller wants execution to stop AT can only be
+        // honoured by looking after every instruction: a batch that runs past
+        // it leaves RIP somewhere else and the address is simply missed. So a
+        // run that watches addresses single-steps, and one that does not keeps
+        // the full batch. The caller opts into the cost by asking for the
+        // precision.
+        let watching_addresses = until.is_some() || !self.exit_set.is_empty();
+        let stride = if watching_addresses { 1 } else { BATCH };
+
+        // A limit the caller can count has to be honoured exactly, whatever its
+        // size. `step_batch` treats its argument as one INNER batch and then
+        // keeps running whole batches until a 15 ms wall-clock budget is spent,
+        // so a caller asking for thirteen instructions gets however many
+        // thirteen-instruction batches fit in 15 ms — a different number on a
+        // loaded machine than on an idle one. `step_exactly` runs the count and
+        // returns. `step_one` was moved off `step_batch` for this reason; the
+        // count here is the same promise at a larger size.
+        let bounded = watching_addresses || count.is_some();
 
         loop {
             if self.stop_flag.load(Ordering::Relaxed) {
                 return Ok(EmuStopReason::Stopped);
             }
-            if count.is_some_and(|c| executed >= c) {
+            if count.is_some_and(|c| executed_now(self) >= c) {
                 return Ok(EmuStopReason::CountExhausted);
             }
             #[cfg(feature = "std")]
@@ -890,24 +881,46 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             }
 
             let budget = match count {
-                Some(c) => BATCH.min(c - executed),
-                None => BATCH,
+                Some(c) => stride.min(c - executed_now(self)),
+                None => stride,
             };
-            let (n, _shutdown) = self.step_batch(budget)?;
-            executed = executed.saturating_add(n);
+            let outcome = if bounded {
+                self.step_exactly(budget)?
+            } else {
+                self.step(crate::emulator::RunBudget::Instructions(budget))?
+            };
 
+            // The addresses this wrapper watches are its own business, and they
+            // outrank the batch's verdict: reaching `until` is why the caller
+            // asked to run at all, so it is reported even on a batch that also
+            // ran out of budget.
             if until.is_some_and(|a| self.cpu().rip() == a) {
                 return Ok(EmuStopReason::ReachedUntil);
             }
-            // Check exit addresses
             if !self.exit_set.is_empty() {
                 let rip = self.cpu().rip();
                 if self.exit_set.contains(rip) {
                     return Ok(EmuStopReason::ReachedExit(rip));
                 }
             }
-            if n == 0 && self.cpu().is_waiting_for_event() {
-                return Ok(EmuStopReason::Halted);
+
+            // Everything else the batch already determined. This used to be
+            // inferred as `executed == 0 && is_waiting_for_event()`, which
+            // could not see a guest power-off at all and could not tell a
+            // halted machine from a batch that simply retired nothing.
+            match outcome.stop {
+                // An engine refusal reaches a batch's verdict only when the
+                // boundary's own error had nowhere to go; the flag it raised is
+                // the same one this loop tests on entry, and answers `Stopped`
+                // there. The fault itself travels as `CpuError::EngineFault`
+                // out of `step_exactly`/`step` above, which is the path a
+                // refusal takes on every machine that is running one.
+                StopReason::GuestPowerOff
+                | StopReason::StopRequested
+                | StopReason::EngineFault => return Ok(EmuStopReason::Stopped),
+                StopReason::CpuShutdown => return Ok(EmuStopReason::Shutdown),
+                StopReason::Halted => return Ok(EmuStopReason::Halted),
+                StopReason::BudgetExhausted => {}
             }
         }
     }
@@ -919,8 +932,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         'a: 'static,
     {
         self.stop_flag.store(false, Ordering::Relaxed);
-        // step_batch respects the budget
-        let _ = self.step_batch(1)?;
+        // The outcome is machine state the caller can read back at will — the
+        // retired count through the CPU's instruction counter, the stop cause
+        // through the activity state and the stop flag — so nothing is lost by
+        // not returning it from a one-instruction step. It goes through the
+        // strict path: `step_batch(1)` would treat the 1 as an inner batch and
+        // keep running for its wall-clock budget, which is not a step.
+        self.step_exactly(1)?;
         Ok(())
     }
 }
@@ -928,14 +946,25 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 // ─────────────────────────── CpuSetupMode builders ───────────────────────────
 
 #[cfg(feature = "alloc")]
-impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
-    /// Create a new emulator with guest memory allocated but no BIOS loaded,
-    /// pre-configured for the given CPU mode. See [`CpuSetupMode`].
+impl<'a, E: SliceEngine<()> + Default> Emulator<(), E> {
+    /// Create a machine on a NAMED engine, with guest memory allocated but no
+    /// BIOS loaded, pre-configured for the given CPU mode.
+    ///
+    /// `Emulator::<(), WhpEngine>::with_engine(config, CpuSetupMode::RealMode)`
+    /// — the whole point being that the engine is spelled out.
+    ///
+    /// Two names rather than one generic function, because a defaulted type
+    /// parameter binds its default in a TYPE and not in a path: written as
+    /// `Emulator::new_with_mode(…)` into a `let` with no annotation there is
+    /// nothing for the engine to be inferred from, so making that one generic
+    /// would force every caller to name an engine it does not care about.
+    /// [`Emulator::new_with_mode`] is this function with the interpreter
+    /// named, and shares its body rather than repeating it.
     ///
     /// Returns `Box<Self>` because `Emulator` is ~1.4 MB — stack allocation
     /// would silently overflow on most platforms.
-    pub fn new_with_mode(config: EmulatorConfig, mode: CpuSetupMode) -> Result<Box<Self>> {
-        let mut emu = Self::new(config)?;
+    pub fn with_engine(config: EmulatorConfig, mode: CpuSetupMode) -> Result<Box<Self>> {
+        let mut emu = Self::with_tracer_factory(config, || ())?;
         // Minimal init: memory + CPU registers + async event flags. We skip
         // load_bios + pc_system.start etc. since the user will not run a BIOS.
         emu.init_memory_and_pc_system()?;
@@ -947,15 +976,29 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a> Emulator<()> {
+    /// Create a new emulator with guest memory allocated but no BIOS loaded,
+    /// pre-configured for the given CPU mode. See [`CpuSetupMode`].
+    ///
+    /// The interpreter's spelling of [`Emulator::with_engine`].
+    pub fn new_with_mode(config: EmulatorConfig, mode: CpuSetupMode) -> Result<Box<Self>> {
+        Self::with_engine(config, mode)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Create a new emulator pre-configured for the given CPU mode with a
     /// monomorphized tracer. Combines `new_with_instrumentation` + `setup_cpu_mode`.
     pub fn new_with_mode_and_instrumentation(
         config: EmulatorConfig,
         mode: CpuSetupMode,
         tracer: T,
-    ) -> Result<Box<Self>> {
-        let mut emu = Self::new_with_instrumentation(config, tracer)?;
+    ) -> Result<Box<Self>>
+    where
+        E: Default,
+    {
+        let mut emu = Self::with_tracer(config, tracer)?;
         emu.init_memory_and_pc_system()?;
         emu.reset(crate::cpu::ResetReason::Hardware)?;
         emu.setup_cpu_mode(mode)?;
@@ -963,9 +1006,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 }
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Reconfigure an existing emulator for the given CPU mode, skipping BIOS.
-    /// Must be called after `initialize()` (or from `new_with_mode`).
+    /// The machine must already have memory and a PC system, which is what
+    /// [`Emulator::new_with_mode`] arranges.
     pub fn setup_cpu_mode(&mut self, mode: CpuSetupMode) -> Result<()> {
         match mode {
             CpuSetupMode::RealMode => self.setup_real_mode(),
@@ -975,9 +1019,36 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         }
     }
 
-    /// Real mode (default after reset). Ensures A20 enabled and EFLAGS sane.
+    /// Real mode with every segment based at zero, A20 enabled and EFLAGS
+    /// sane — a machine where an address a caller loads code at is the address
+    /// the guest fetches from.
+    ///
+    /// Reset alone is not enough, and the difference is not cosmetic. The
+    /// architectural power-on value of CS is selector 0xF000 with base
+    /// 0xFFFF0000, so a caller that loads code low and sets RIP fetches from
+    /// the top of the ROM aperture instead. That aperture is filled with 0xFF,
+    /// and `FF FF` is an invalid opcode, so such a guest takes #UD on its very
+    /// first instruction and never executes a byte of what was loaded — while
+    /// looking, from the outside, like a guest that ran and vectored somewhere.
+    /// Every documented use of this mode (MBR, DOS binaries, real-mode
+    /// shellcode) loads low, so the reset CS is wrong for all of them.
     fn setup_real_mode(&mut self) -> Result<()> {
-        // Reset already puts us in real mode; just enable A20 and IF.
+        // Selector 0, base 0, the 64 KiB limit real mode gives every segment,
+        // and 16-bit sizing on all six — Bochs cpu.cc `reset`. SS is the one
+        // that bites: with B set, a push writes at ESP rather than SP, walks
+        // straight off the 64 KiB limit and raises #SS, so the machine cannot
+        // take an interrupt or make a call at all.
+        for reg in [
+            X86Reg::Cs,
+            X86Reg::Ds,
+            X86Reg::Es,
+            X86Reg::Ss,
+            X86Reg::Fs,
+            X86Reg::Gs,
+        ] {
+            self.cpu_mut()
+                .set_seg_for_api(reg, 0, 0, 0xFFFF, SegmentSize::Bits16);
+        }
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
         self.cpu_mut().set_rflags_for_api(0x0000_0202); // IF=1, bit1 reserved=1
         Ok(())
@@ -986,18 +1057,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Build a minimal GDT, set descriptor caches, and switch to CR0.PE=1
     /// with 16-bit limits. Rarely used — most callers want `FlatProtected32`.
     fn setup_protected16(&mut self) -> Result<()> {
-        self.install_flat_gdt()?;
-        // CS 16-bit, limit 64KB
-        self.cpu_mut().set_seg_for_api(crate::cpu::instrumentation::X86Reg::Cs,
-        0x08,
-        0,
-        0xFFFF,
-        /*code16*/ true,
-        /*long*/ false,);
-        // Data selectors, 16-bit
-        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
-            self.cpu_mut().set_seg_for_api(reg, 0x10, 0, 0xFFFF, false, false);
-        }
+        self.install_flat_segments(FlatSegments::PROTECTED16)?;
         self.cpu_mut().enter_protected_mode_for_api();
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
@@ -1007,17 +1067,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Flat 32-bit protected mode: CR0.PE=1, segments base=0 limit=4GB,
     /// 32-bit default operand/address size.
     fn setup_flat_protected32(&mut self) -> Result<()> {
-        self.install_flat_gdt()?;
-        // CS 32-bit, 4GB flat
-        self.cpu_mut().set_seg_for_api(X86Reg::Cs,
-        0x08,
-        0,
-        0xFFFFFFFF,
-        /*code16*/ false,
-        /*long*/ false,);
-        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
-            self.cpu_mut().set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
-        }
+        self.install_flat_segments(FlatSegments::FLAT_PROTECTED32)?;
         self.cpu_mut().enter_protected_mode_for_api();
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
@@ -1051,50 +1101,106 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             }
         }
 
-        self.install_flat_gdt()?;
-        // CS in long mode: L=1, D=0
-        self.cpu_mut().set_seg_for_api(X86Reg::Cs,
-        0x08,
-        0,
-        0xFFFFFFFF,
-        /*code16*/ false,
-        /*long*/ true,);
-        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
-            self.cpu_mut().set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
-        }
-
+        self.install_flat_segments(FlatSegments::FLAT_LONG64)?;
         self.cpu_mut().enter_long_mode_for_api(PML4);
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
         Ok(())
     }
 
-    /// Install a minimal flat GDT at 0x800 with null/code/data/TSS
-    /// descriptors. Shared by all protected-mode setups.
-    fn install_flat_gdt(&mut self) -> Result<()> {
+    /// Install a flat GDT at 0x800 and load every segment's descriptor cache
+    /// from the same description, so the two can never disagree about the
+    /// machine they describe.
+    ///
+    /// Both halves in one place is the point. A guest that reloads a segment
+    /// register reads the GDT; everything before that runs off the caches.
+    /// When the two were written independently, a 16-bit setup handed its
+    /// guest 16-bit caches over 32-bit descriptors, and the machine changed
+    /// width the first time it touched its own segments.
+    fn install_flat_segments(&mut self, segments: FlatSegments) -> Result<()> {
         const GDT_BASE: u64 = 0x0800;
+        const CODE_SELECTOR: u16 = 0x08;
+        const DATA_SELECTOR: u16 = 0x10;
+        // Present, DPL 0, S=1; type 1010 = code exec/read non-conforming,
+        // type 0010 = data read/write. Bochs descriptor.h access byte.
+        const CODE_ACCESS: u8 = 0x9A;
+        const DATA_ACCESS: u8 = 0x92;
 
-        // Null descriptor
-        self.mem_write_u64_le(GDT_BASE, 0)?;
-
-        // Code selector at index 1 (selector 0x08):
-        // base=0 limit=0xFFFFF G=1 (4 KiB pages → 4 GiB) P=1 DPL=0 S=1
-        // type=1010 (code, readable, non-conforming) D=1 L=0 AVL=0
-        // For FlatLong64 we overwrite this entry below in enter_long_mode path
-        // via set_seg_for_api which writes descriptor caches directly — the
-        // GDT itself needs a plausible entry so IRET/syscall paths succeed.
-        let code_desc: u64 = 0x00CF9A000000FFFF;
-        self.mem_write_u64_le(GDT_BASE + 0x08, code_desc)?;
-
-        // Data selector at index 2 (selector 0x10):
-        // base=0 limit=0xFFFFF G=1 P=1 DPL=0 S=1 type=0010 (data, writable)
-        let data_desc: u64 = 0x00CF92000000FFFF;
-        self.mem_write_u64_le(GDT_BASE + 0x10, data_desc)?;
-
+        self.mem_write_u64_le(GDT_BASE, 0)?; // null descriptor
+        self.mem_write_u64_le(
+            GDT_BASE + CODE_SELECTOR as u64,
+            flat_descriptor(CODE_ACCESS, segments.code, segments.limit),
+        )?;
+        self.mem_write_u64_le(
+            GDT_BASE + DATA_SELECTOR as u64,
+            flat_descriptor(DATA_ACCESS, segments.data, segments.limit),
+        )?;
         self.cpu_mut().set_gdtr_base_for_api(GDT_BASE);
         self.cpu_mut().set_gdtr_limit_for_api(0x1F);
+
+        self.cpu_mut().set_seg_for_api(
+            X86Reg::Cs,
+            CODE_SELECTOR,
+            0,
+            segments.limit,
+            segments.code,
+        );
+        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
+            self.cpu_mut()
+                .set_seg_for_api(reg, DATA_SELECTOR, 0, segments.limit, segments.data);
+        }
         Ok(())
     }
+}
+
+/// The flat segment layout a [`CpuSetupMode`] installs.
+///
+/// `code` and `data` share a type and long mode is exactly where they differ,
+/// so passing them positionally would let a swap compile into a machine whose
+/// stack is the wrong width. Naming them — and carrying the limit they share —
+/// makes one value the whole description, which is what lets the GDT and the
+/// descriptor caches be written from the same source.
+#[derive(Clone, Copy)]
+struct FlatSegments {
+    code: SegmentSize,
+    /// Also SS, so this is what decides between `SP` and `ESP`.
+    data: SegmentSize,
+    /// Byte limit for every segment: the last addressable offset.
+    limit: u32,
+}
+
+impl FlatSegments {
+    const PROTECTED16: Self = Self {
+        code: SegmentSize::Bits16,
+        data: SegmentSize::Bits16,
+        limit: 0xFFFF,
+    };
+    const FLAT_PROTECTED32: Self = Self {
+        code: SegmentSize::Bits32,
+        data: SegmentSize::Bits32,
+        limit: 0xFFFF_FFFF,
+    };
+    /// Long mode's data segments stay 32-bit — the descriptors a 64-bit
+    /// operating system loads carry D/B set and L clear, because L belongs to
+    /// code segments alone.
+    const FLAT_LONG64: Self = Self {
+        code: SegmentSize::Long64,
+        data: SegmentSize::Bits32,
+        limit: 0xFFFF_FFFF,
+    };
+}
+
+/// Compose a base-zero GDT descriptor. Bochs descriptor.h `parse_descriptor`
+/// read in reverse: limit low 16, access byte at 40, limit high 4 at 48, then
+/// AVL/L/D/G, then base high — all of base being zero here.
+fn flat_descriptor(access: u8, size: SegmentSize, byte_limit: u32) -> u64 {
+    let limit = ScaledLimit::of(byte_limit);
+    u64::from(limit.field & 0xFFFF)
+        | (u64::from(access) << 40)
+        | ((u64::from(limit.field >> 16) & 0xF) << 48)
+        | (u64::from(size.long64()) << 53)
+        | (u64::from(size.d_b()) << 54)
+        | (u64::from(limit.page_granular) << 55)
 }
 
 // ─────────────────────────── Tests ───────────────────────────
@@ -1102,7 +1208,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    use crate::cpu::core_i7_skylake::Corei7SkylakeX;
+    use crate::emulator::MemorySize;
 
     /// Reg read/write round-trip on a fresh emulator.
     #[test]
@@ -1111,7 +1217,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_CAFE_BABE);
                 assert_eq!(emu.reg_read(X86Reg::Rax), 0xDEAD_BEEF_CAFE_BABE);
                 assert_eq!(emu.reg_read(X86Reg::Eax), 0xCAFE_BABE);
@@ -1133,7 +1239,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.initialize().unwrap();
                 let data: [u8; 16] = [
                     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
@@ -1172,7 +1278,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let emu = Emulator::new(config).unwrap();
                 let handle = emu.stop_handle();
                 assert!(!handle.is_stopping());
                 handle.stop();
@@ -1192,7 +1298,7 @@ mod tests {
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
                 let emu =
-                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
                         .unwrap();
                 // CR0.PE should be set
                 let cr0 = emu.reg_read(X86Reg::Cr0);
@@ -1217,7 +1323,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                let emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                     .unwrap();
                 let cr0 = emu.reg_read(X86Reg::Cr0);
                 assert!(cr0 & 0x1 != 0, "CR0.PE not set");
@@ -1233,23 +1339,6 @@ mod tests {
             .unwrap();
     }
 
-    /// Hook registration and deletion round-trip.
-    #[cfg(feature = "instrumentation")]
-    #[test]
-    fn hook_add_del_roundtrip() {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
-                let h = emu.hook_add_code(.., |_, _| {});
-                assert!(emu.hook_del(h).is_ok());
-                assert!(emu.hook_del(h).is_err(), "double-delete must fail");
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
     /// FPU register round-trip: write FP80 bytes, read back.
     #[test]
@@ -1258,7 +1347,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut emu = Emulator::new(cfg).unwrap();
                 let val: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 0x00, 0x40]; // ~2.0 in FP80
                 emu.reg_write_fp80(X86Reg::Fpr0, val);
                 let read_back = emu.reg_read_fp80(X86Reg::Fpr0);
@@ -1276,7 +1365,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut emu = Emulator::new(cfg).unwrap();
                 let val: [u8; 16] = [
                     0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03, 0x04, 0x05,
                     0x06, 0x07, 0x08,
@@ -1300,7 +1389,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut emu = Emulator::new(cfg).unwrap();
                 let mut val = [0u8; 32];
                 for (i, b) in val.iter_mut().enumerate() {
                     *b = i as u8;
@@ -1324,7 +1413,7 @@ mod tests {
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
                 let mut emu =
-                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                         .unwrap();
                 let code_addr = 0x20_0000;
 
@@ -1391,7 +1480,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut emu = Emulator::new(cfg).unwrap();
                 emu.set_exits(&[0x1000, 0x2000, 0x3000]);
                 emu.remove_exit(0x2000);
                 emu.add_exit(0x4000);
@@ -1402,42 +1491,9 @@ mod tests {
             .unwrap();
     }
 
-    /// Block hook registration round-trip.
-    #[cfg(feature = "instrumentation")]
-    #[test]
-    fn hook_add_block_round_trip() {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
-                let h = emu.hook_add_block(.., |_rip, _size| {});
-                assert!(emu.hook_del(h).is_ok());
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
-    /// Invalid instruction hook registration.
-    #[cfg(feature = "instrumentation")]
-    #[test]
-    fn hook_add_invalid_insn() {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
-                let h = emu.hook_add_invalid_insn(|_rip| false);
-                assert!(emu.hook_del(h).is_ok());
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
     /// Memory permissions basic operations.
-    #[cfg(feature = "instrumentation")]
     #[test]
     fn mem_permissions_basic() {
         use crate::cpu::instrumentation::MemPerms;
@@ -1452,6 +1508,69 @@ mod tests {
         assert!(pp.check(0x1000, MemPerms::READ));
         assert!(!pp.check(0x1000, MemPerms::WRITE));
         assert!(!pp.check(0x1000, MemPerms::EXEC));
+    }
+
+    /// Every modelled UART is reachable and nothing past the set is.
+    ///
+    /// The index bound is the only real logic in `serial()` — everything else
+    /// delegates — so this is where an off-by-one would land, and an
+    /// out-of-range index used to panic on a slice index instead of answering
+    /// `None`.
+    #[test]
+    fn serial_handle_covers_exactly_the_modelled_ports() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                for port in 0..SERIAL_PORT_COUNT {
+                    assert!(
+                        emu.serial(port).is_some(),
+                        "COM{} is modelled and must be reachable",
+                        port + 1
+                    );
+                }
+                assert!(emu.serial(SERIAL_PORT_COUNT).is_none());
+                assert!(emu.serial(usize::MAX).is_none());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Bytes the guest writes to port 0xE9 come back out of the debug-port
+    /// handle, in write order.
+    ///
+    /// Asserts the guest-visible property (doctrine R9) rather than the
+    /// buffer that currently carries it: the guest executes real `OUT`
+    /// instructions and the host reads them through the public role handle,
+    /// so a mis-wired handle or a lost byte fails here.
+    #[test]
+    fn debug_port_handle_returns_guest_written_bytes() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu =
+                    Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+                        .unwrap();
+                let code_addr = 0x20_0000;
+
+                // mov al,'O'; out 0xe9,al; mov al,'K'; out 0xe9,al
+                emu.mem_write(
+                    code_addr,
+                    &[0xB0, b'O', 0xE6, 0xE9, 0xB0, b'K', 0xE6, 0xE9],
+                )
+                .unwrap();
+                emu.emu_start(code_addr, None, None, Some(4)).unwrap();
+
+                let out: Vec<u8> = emu.debug_port().take_output().collect();
+                assert_eq!(out, b"OK", "port-0xE9 writes must survive in order");
+
+                // Draining is destructive — a second read sees nothing new.
+                assert!(emu.debug_port().take_output().next().is_none());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// MMIO registry map/unmap.
@@ -1472,5 +1591,273 @@ mod tests {
         assert!(reg.find_mut(0xFEC0_1000).is_none()); // past end
         reg.unmap(0xFEC0_0000, 0x1000);
         assert!(reg.is_empty());
+    }
+
+    /// Guest RAM larger than host RAM, with code and data in different guest
+    /// blocks: every data access relocates a block, and the code block itself
+    /// is a legal eviction victim. Forward progress here rests on the residency
+    /// epoch (memory/mod.rs `swap_epoch`) retiring the stale fetch window.
+    ///
+    /// `setup_flat_long64` owns 0x1000..0x6000 for the page tables, so guest
+    /// code goes above them — code written over the PML4 unmaps the address it
+    /// is executing from and triple-faults before any of this is exercised.
+    #[test]
+    fn swap_regime_executes_across_blocks() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                // 4 MiB guest over 2 MiB host = two resident 1 MiB slots.
+                let cfg = EmulatorConfig {
+                    memory: MemorySize::partially_resident(4 * MIB, 2 * MIB),
+                    memory_block_size: MIB,
+                    ..Default::default()
+                };
+                let mut emu =
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                let code = 0x10000u64;
+                let resident_epoch = emu.memory.swap_epoch();
+                emu.mem_write(
+                    code,
+                    &[
+                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x10, 0x00, // mov al,[0x100000] (block 1)
+                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x20, 0x00, // mov al,[0x200000] (block 2)
+                        0xBB, 0xED, 0x5E, 0x00, 0x00, // mov ebx,0x5EED
+                        0xF4, // hlt
+                    ],
+                )
+                .unwrap();
+                assert_eq!(
+                    emu.emu_start(code, None, None, Some(8)).unwrap(),
+                    EmuStopReason::Halted
+                );
+                assert_eq!(emu.reg_read(X86Reg::Ebx), 0x5EED);
+                assert!(
+                    emu.memory.swap_epoch() > resident_epoch,
+                    "the run must actually have relocated blocks, else this \
+                     configuration is not testing the swap regime at all"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// The same regime driven hard: four times as many guest blocks as resident
+    /// slots, in a loop, so the code block is evicted and reloaded repeatedly
+    /// and every data byte makes a round trip through the overflow file.
+    #[test]
+    fn swap_regime_survives_repeated_code_block_eviction() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                // 8 MiB guest over 2 MiB host = eight blocks, two slots.
+                let cfg = EmulatorConfig {
+                    memory: MemorySize::partially_resident(8 * MIB, 2 * MIB),
+                    memory_block_size: MIB,
+                    ..Default::default()
+                };
+                let mut emu =
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+
+                // One marker per non-code block, so a byte that survives an
+                // eviction round trip is the only way to read it back.
+                for block in 1..8u64 {
+                    emu.mem_write_u8(block * MIB as u64, 0x10 * block as u8 + block as u8)
+                        .unwrap();
+                }
+
+                let code = 0x10000u64;
+                let mut program = vec![0xB9, 0x03, 0x00, 0x00, 0x00]; // mov ecx,3
+                for block in 1..8u64 {
+                    // mov al,[block * 1 MiB]
+                    program.extend_from_slice(&[0x8A, 0x04, 0x25]);
+                    program.extend_from_slice(&((block * MIB as u64) as u32).to_le_bytes());
+                }
+                program.extend_from_slice(&[0xFF, 0xC9]); // dec ecx
+                let back = -((program.len() + 2 - 5) as i64) as i8; // to the loop top
+                program.extend_from_slice(&[0x75, back as u8]); // jnz top
+                program.extend_from_slice(&[0xBB, 0xED, 0x5E, 0x00, 0x00]); // mov ebx,0x5EED
+                program.push(0xF4); // hlt
+                emu.mem_write(code, &program).unwrap();
+
+                assert_eq!(
+                    emu.emu_start(code, None, None, Some(200)).unwrap(),
+                    EmuStopReason::Halted
+                );
+                assert_eq!(emu.reg_read(X86Reg::Ebx), 0x5EED);
+                assert_eq!(emu.reg_read(X86Reg::Ecx), 0, "the loop must have run to zero");
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rax) & 0xFF,
+                    0x77,
+                    "the last load must read the marker its block was swapped out with"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// The two residency topologies the tests above do not reach: a single
+    /// resident slot, where code, page tables and operands all take turns in
+    /// the same 1 MiB of host RAM; and code living in a guest block that is
+    /// neither block 0 nor the block holding the page tables, so one fetch
+    /// needs the page-table block and the code block resident in sequence.
+    ///
+    /// Capacity 1 is the interesting bound: every fetch is guaranteed to evict
+    /// what the previous access just paged in, so nothing but the epoch
+    /// handshake keeps the loop moving forward.
+    #[test]
+    fn swap_regime_converges_at_minimum_residency() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                // (guest MiB, host MiB, code address, marker address, marker)
+                let cases = [
+                    (4usize, 1usize, 0x10000u64, 3 * MIB as u64, 0x33u8),
+                    (8, 2, 5 * MIB as u64 + 0x10000, 7 * MIB as u64, 0x77),
+                ];
+                for (guest_mib, host_mib, code, marker_addr, marker) in cases {
+                    let cfg = EmulatorConfig {
+                        memory: MemorySize::partially_resident(guest_mib * MIB, host_mib * MIB),
+                        memory_block_size: MIB,
+                        ..Default::default()
+                    };
+                    let mut emu =
+                        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                    emu.mem_write_u8(marker_addr, marker).unwrap();
+                    let far = (marker_addr as u32).to_le_bytes();
+                    let mut program = vec![
+                        0xB9, 0x02, 0x00, 0x00, 0x00, // mov ecx,2
+                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x10, 0x00, // mov al,[0x100000]
+                        0x8A, 0x04, 0x25, // mov al,[marker]
+                    ];
+                    program.extend_from_slice(&far);
+                    program.extend_from_slice(&[
+                        0xFF, 0xC9, // dec ecx
+                        0x75, 0xF3, // jnz back to the first load
+                        0xBB, 0xED, 0x5E, 0x00, 0x00, // mov ebx,0x5EED
+                        0xF4, // hlt
+                    ]);
+                    emu.mem_write(code, &program).unwrap();
+
+                    assert_eq!(
+                        emu.emu_start(code, None, None, Some(100)).unwrap(),
+                        EmuStopReason::Halted,
+                        "{guest_mib} MiB guest over {host_mib} MiB host must still retire"
+                    );
+                    assert_eq!(emu.reg_read(X86Reg::Ebx), 0x5EED);
+                    assert_eq!(
+                        emu.reg_read(X86Reg::Rax) & 0xFF,
+                        u64::from(marker),
+                        "the marker must survive its block's eviction round trip"
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// An instruction whose own bytes straddle a guest-block boundary, at every
+    /// residency from one slot to full. This is the `boundary_fetch` path: it
+    /// copies the head of the instruction out of the current window, then calls
+    /// `prefetch` again for the tail — a call that may itself relocate blocks
+    /// while the instruction is half-fetched.
+    ///
+    /// The 2 MiB mark is the boundary to use: it crosses a 4 KiB page, a 2 MiB
+    /// large page and a 1 MiB guest block at once. The 1 MiB mark would not —
+    /// it is the top of the legacy 0xA0000..0xFFFFF VGA/BIOS window, which is
+    /// not plain RAM, so code placed there never lands.
+    #[test]
+    fn swap_regime_fetches_instruction_across_a_block_boundary() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                for host_mib in [1usize, 2, 4] {
+                    let cfg = EmulatorConfig {
+                        memory: MemorySize::partially_resident(4 * MIB, host_mib * MIB),
+                        memory_block_size: MIB,
+                        ..Default::default()
+                    };
+                    let mut emu =
+                        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                    emu.mem_write_u8(3 * MIB as u64, 0x33).unwrap();
+                    // The load ends at 2 MiB - 2, so `mov ebx,imm32` straddles
+                    // the block 1 / block 2 boundary and the HLT lands past it.
+                    let code = 2 * MIB as u64 - 9;
+                    emu.mem_write(
+                        code,
+                        &[
+                            0x8A, 0x04, 0x25, 0x00, 0x00, 0x30, 0x00, // mov al,[0x300000]
+                            0xBB, 0xED, 0x5E, 0x00, 0x00, // mov ebx,0x5EED (straddles)
+                            0xF4, // hlt
+                        ],
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        emu.emu_start(code, None, None, Some(20)).unwrap(),
+                        EmuStopReason::Halted,
+                        "{host_mib} MiB host: the split instruction must retire"
+                    );
+                    assert_eq!(
+                        emu.reg_read(X86Reg::Ebx),
+                        0x5EED,
+                        "{host_mib} MiB host: the immediate comes from the second block"
+                    );
+                    assert_eq!(emu.reg_read(X86Reg::Rax) & 0xFF, 0x33);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A triple fault raised while FETCHING (not while executing) still stops
+    /// the CPU. Writing code over the PML4 unmaps the very page RIP points at,
+    /// so the fetch page walk faults, delivering #PF faults again on the IDT
+    /// read, and the resulting #DF faults once more: shutdown before a single
+    /// instruction retires.
+    ///
+    /// Bochs signals this through `enter_sleep_state` (proc_ctrl.cc), which
+    /// raises the generic `async_event` flag so the top of `cpu_loop` observes
+    /// the non-ACTIVE activity state no matter which longjmp arrived there.
+    #[test]
+    fn triple_fault_during_fetch_reports_shutdown() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                let cfg = EmulatorConfig {
+                    memory: MemorySize::bytes(4 * MIB),
+                    memory_block_size: MIB,
+                    ..Default::default()
+                };
+                let mut emu =
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                // 0x1000 is the PML4 root: this write makes PML4[0] non-present.
+                let code = 0x1000u64;
+                emu.mem_write(code, &[0xBB, 0xED, 0x5E, 0x00, 0x00, 0xF4])
+                    .unwrap();
+                assert_eq!(
+                    emu.emu_start(code, None, None, Some(8)).unwrap(),
+                    EmuStopReason::Shutdown,
+                    "a triple fault during instruction fetch must stop the CPU"
+                );
+                assert!(emu.cpu().is_in_shutdown());
+                // Bochs `enter_sleep_state` clears IF for SHUTDOWN, so nothing
+                // but NMI/SMI/INIT can wake the CPU again.
+                assert_eq!(
+                    emu.reg_read(X86Reg::Eflags) & 0x200,
+                    0,
+                    "shutdown must mask interrupts"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

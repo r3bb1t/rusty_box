@@ -373,6 +373,11 @@ impl Corei7SkylakeX {
 }
 
 impl BxCpuIdTrait for Corei7SkylakeX {
+    const INIT: Self = Self {
+        cpuid_freq: CpuidFreq::None,
+        ips: 4_000_000, // Bochs config.cc BXPN_IPS default; overwritten via set_cpuid_freq()
+    };
+
     fn get_name(&self) -> &'static str {
         "corei7_skylake_x"
     }
@@ -418,10 +423,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
     }
 
     fn new() -> Self {
-        Self {
-            cpuid_freq: CpuidFreq::default(),
-            ips: 4_000_000, // Bochs config.cc BXPN_IPS default; overwritten via set_cpuid_freq()
-        }
+        Self::INIT
     }
 
     /// Returns ISA extensions bitmask for Skylake-X.

@@ -3,13 +3,24 @@
 //! Implements IN and OUT instructions for port I/O.
 //! Mirrors `io.cc` from Bochs.
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-    BxCpuC, BxCpuIdTrait,
-};
+use super::decoder::{BxSegregs, Instruction};
 use crate::cpu::rusty_box::MemoryAccessType;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+/// The running FastRep count, as the countdown probe wants it.
+///
+/// Saturating is the conservative direction and not a papered-over failure:
+/// `tickn_fastrep` asks only whether the PC-system countdown would expire
+/// after `n` iterations, so a saturated count answers "yes, certainly", which
+/// ends the bulk run and hands the rest to the scalar path. Under-reporting
+/// would be the harmful direction, and this cannot do that. In practice a
+/// chunk is capped at one page and at CX, so the count never approaches the
+/// ceiling at all.
+#[inline]
+fn fastrep_budget(iterations: usize) -> u32 {
+    u32::try_from(iterations).unwrap_or(u32::MAX)
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // I/O Privilege Check — Bochs io.cc
     // ========================================================================
@@ -269,16 +280,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let di = self.di() as u32;
         let laddr = self.prepare_rmw_virtual_byte(BxSegregs::Es, di)?;
         self.check_rmw_write_permissions(laddr, 1)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_byte();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &[old_value]);
         let value = self.port_in(port, 1) as u8;
         self.write_rmw_linear_byte(value);
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(1));
+            let di = self.di();
+            self.set_di(di.wrapping_sub(1));
         } else {
-            self.set_di(self.di().wrapping_add(1));
+            let di = self.di();
+            self.set_di(di.wrapping_add(1));
         }
         Ok(())
     }
@@ -288,7 +299,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.write_rmw_linear_word(value);
     }
 
-    #[cfg(feature = "instrumentation")]
     #[inline]
     fn report_ins_rmw_access(&mut self, laddr: u64, bytes: &[u8]) {
         let xlation = self.address_xlation;
@@ -319,17 +329,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Direct bulk execution must not bypass active instrumentation hooks.
     #[inline]
     pub(super) fn direct_rep_bulk_allowed(&self, includes_io: bool) -> bool {
-        #[cfg(feature = "instrumentation")]
         {
             self.page_permissions.is_none()
                 && !self.instrumentation.active.has_exec()
                 && !self.instrumentation.active.has_mem()
                 && (!includes_io || !self.instrumentation.active.has_io())
-        }
-        #[cfg(not(feature = "instrumentation"))]
-        {
-            let _ = includes_io;
-            true
         }
     }
 
@@ -342,16 +346,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // then the port input commits through that same RMW translation.
         let laddr = self.prepare_rmw_virtual_word(BxSegregs::Es, di)?;
         self.check_rmw_word_write_permissions(laddr)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_word();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 2) as u16;
         self.commit_insw_rmw(value);
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(2));
+            let di = self.di();
+            self.set_di(di.wrapping_sub(2));
         } else {
-            self.set_di(self.di().wrapping_add(2));
+            let di = self.di();
+            self.set_di(di.wrapping_add(2));
         }
         Ok(())
     }
@@ -362,16 +366,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let di = self.di() as u32;
         let laddr = self.prepare_rmw_virtual_dword(BxSegregs::Es, di)?;
         self.check_rmw_write_permissions(laddr, 4)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_dword();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 4);
         self.write_rmw_linear_dword(value);
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(4));
+            let di = self.di();
+            self.set_di(di.wrapping_sub(4));
         } else {
-            self.set_di(self.di().wrapping_add(4));
+            let di = self.di();
+            self.set_di(di.wrapping_add(4));
         }
         Ok(())
     }
@@ -385,9 +389,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let edi = self.edi();
         let laddr = self.prepare_rmw_virtual_byte(BxSegregs::Es, edi)?;
         self.check_rmw_write_permissions(laddr, 1)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_byte();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &[old_value]);
         let value = self.port_in(port, 1) as u8;
         self.write_rmw_linear_byte(value);
@@ -409,9 +411,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // not consume destructive MMIO state.
         let laddr = self.prepare_rmw_virtual_word(BxSegregs::Es, edi)?;
         self.check_rmw_word_write_permissions(laddr)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_word();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 2) as u16;
         self.commit_insw_rmw(value);
@@ -431,9 +431,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let edi = self.edi();
         let laddr = self.prepare_rmw_virtual_dword(BxSegregs::Es, edi)?;
         self.check_rmw_write_permissions(laddr, 4)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_dword();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 4);
         self.write_rmw_linear_dword(value);
@@ -456,9 +454,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let value = self.v_read_byte(seg, si)?;
         self.port_out(port, value as u32, 1);
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(1));
+            let si = self.si();
+            self.set_si(si.wrapping_sub(1));
         } else {
-            self.set_si(self.si().wrapping_add(1));
+            let si = self.si();
+            self.set_si(si.wrapping_add(1));
         }
         Ok(())
     }
@@ -471,9 +471,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let value = self.v_read_word(seg, si)?;
         self.port_out(port, value as u32, 2);
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(2));
+            let si = self.si();
+            self.set_si(si.wrapping_sub(2));
         } else {
-            self.set_si(self.si().wrapping_add(2));
+            let si = self.si();
+            self.set_si(si.wrapping_add(2));
         }
         Ok(())
     }
@@ -486,9 +488,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let value = self.v_read_dword(seg, si)?;
         self.port_out(port, value, 4);
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(4));
+            let si = self.si();
+            self.set_si(si.wrapping_sub(4));
         } else {
-            self.set_si(self.si().wrapping_add(4));
+            let si = self.si();
+            self.set_si(si.wrapping_add(4));
         }
         Ok(())
     }
@@ -565,7 +569,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -579,7 +584,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut fastrep_iterations = 0usize;
         let mut event_words_remaining = self.ticks_left_next_event() as usize;
 
-
         if self.direct_rep_bulk_allowed(true) && !self.get_df() && self.async_event == 0 {
             while cx != 0 && event_words_remaining != 0 {
                 let di = self.di();
@@ -590,9 +594,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 else {
                     break;
                 };
-                let page_words = (0x1000usize - (laddr as usize & 0x0fff))
-                    .min(host_remaining)
-                    / 2;
+                let page_words = (0x1000usize - (laddr as usize & 0x0fff)).min(host_remaining) / 2;
                 let segment_words = (0x1_0000usize - usize::from(di)) / 2;
                 let chunk_words = usize::from(cx)
                     .min(page_words)
@@ -624,13 +626,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.tick_surplus += transferred.saturating_sub(1) as u64;
                 fastrep_iterations += transferred;
                 event_words_remaining -= transferred;
-                self.tickn_fastrep(fastrep_iterations);
+                self.tickn_fastrep(fastrep_budget(fastrep_iterations));
                 if cx == 0 {
                     return Ok(());
                 }
                 if self.async_event != 0 {
                     self.assert_rf();
-                    self.set_rip(self.prev_rip);
+                    let prev_rip = self.prev_rip;
+                    self.set_rip(prev_rip);
                     self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                     return Ok(());
                 }
@@ -654,7 +657,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -679,7 +683,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -701,7 +706,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_ecx(ecx);
             }
             if ecx == 0 {
-                self.set_rcx(self.ecx() as u64);
+                let ecx = self.ecx();
+                self.set_rcx(ecx as u64);
                 return Ok(());
             }
             if self.async_event != 0 {
@@ -710,8 +716,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
-        self.set_rcx(self.ecx() as u64);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
+        let ecx = self.ecx();
+        self.set_rcx(ecx as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -737,12 +745,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 else {
                     break;
                 };
-                let page_words = (0x1000usize - (laddr as usize & 0x0fff))
-                    .min(host_remaining)
-                    / 2;
-                let chunk_words = (ecx as usize)
-                    .min(page_words)
-                    .min(event_words_remaining);
+                let page_words = (0x1000usize - (laddr as usize & 0x0fff)).min(host_remaining) / 2;
+                let chunk_words = (ecx as usize).min(page_words).min(event_words_remaining);
                 let Some(bulk_bytes) = chunk_words.checked_mul(2) else {
                     break;
                 };
@@ -769,14 +773,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.tick_surplus += transferred.saturating_sub(1) as u64;
                 fastrep_iterations += transferred;
                 event_words_remaining -= transferred;
-                self.tickn_fastrep(fastrep_iterations);
+                self.tickn_fastrep(fastrep_budget(fastrep_iterations));
                 if ecx == 0 {
                     self.set_rcx(ecx as u64);
                     return Ok(());
                 }
                 if self.async_event != 0 {
                     self.assert_rf();
-                    self.set_rip(self.prev_rip);
+                    let prev_rip = self.prev_rip;
+                    self.set_rip(prev_rip);
                     self.set_rcx(ecx as u64);
                     self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                     return Ok(());
@@ -800,7 +805,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.set_rcx(ecx as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -826,7 +832,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.set_rcx(ecx as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -854,7 +861,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -879,7 +887,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -904,7 +913,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -926,7 +936,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_ecx(ecx);
             }
             if ecx == 0 {
-                self.set_rcx(self.ecx() as u64);
+                let ecx = self.ecx();
+                self.set_rcx(ecx as u64);
                 return Ok(());
             }
             if self.async_event != 0 {
@@ -935,8 +946,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
-        self.set_rcx(self.ecx() as u64);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
+        let ecx = self.ecx();
+        self.set_rcx(ecx as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -956,7 +969,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_ecx(ecx);
             }
             if ecx == 0 {
-                self.set_rcx(self.ecx() as u64);
+                let ecx = self.ecx();
+                self.set_rcx(ecx as u64);
                 return Ok(());
             }
             if self.async_event != 0 {
@@ -965,8 +979,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
-        self.set_rcx(self.ecx() as u64);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
+        let ecx = self.ecx();
+        self.set_rcx(ecx as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -986,7 +1002,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_ecx(ecx);
             }
             if ecx == 0 {
-                self.set_rcx(self.ecx() as u64);
+                let ecx = self.ecx();
+                self.set_rcx(ecx as u64);
                 return Ok(());
             }
             if self.async_event != 0 {
@@ -995,8 +1012,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
-        self.set_rcx(self.ecx() as u64);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
+        let ecx = self.ecx();
+        self.set_rcx(ecx as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1010,9 +1029,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let rdi = self.rdi();
         let laddr = self.prepare_rmw_virtual_byte_64(BxSegregs::Es, rdi)?;
         self.check_rmw_write_permissions(laddr, 1)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_byte();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &[old_value]);
         let value = self.port_in(port, 1) as u8;
         self.write_rmw_linear_byte(value);
@@ -1034,9 +1051,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // not consume destructive MMIO state.
         let laddr = self.prepare_rmw_virtual_word_64(BxSegregs::Es, rdi)?;
         self.check_rmw_word_write_permissions(laddr)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_word();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 2) as u16;
         self.commit_insw_rmw(value);
@@ -1055,9 +1070,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let rdi = self.rdi();
         let laddr = self.prepare_rmw_virtual_dword_64(BxSegregs::Es, rdi)?;
         self.check_rmw_write_permissions(laddr, 4)?;
-        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
         let old_value = self.read_prepared_rmw_dword();
-        #[cfg(feature = "instrumentation")]
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
         let value = self.port_in(port, 4);
         self.write_rmw_linear_dword(value);
@@ -1140,7 +1153,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1163,9 +1177,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 else {
                     break;
                 };
-                let page_words = (0x1000usize - (laddr as usize & 0x0fff))
-                    .min(host_remaining)
-                    / 2;
+                let page_words = (0x1000usize - (laddr as usize & 0x0fff)).min(host_remaining) / 2;
                 let chunk_words = (rcx.min(usize::MAX as u64) as usize)
                     .min(page_words)
                     .min(event_words_remaining);
@@ -1205,13 +1217,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.tick_surplus += transferred.saturating_sub(1) as u64;
                 fastrep_iterations += transferred;
                 event_words_remaining -= transferred;
-                self.tickn_fastrep(fastrep_iterations);
+                self.tickn_fastrep(fastrep_budget(fastrep_iterations));
                 if rcx == 0 {
                     return Ok(());
                 }
                 if self.async_event != 0 {
                     self.assert_rf();
-                    self.set_rip(self.prev_rip);
+                    let prev_rip = self.prev_rip;
+                    self.set_rip(prev_rip);
                     self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                     return Ok(());
                 }
@@ -1235,7 +1248,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1259,7 +1273,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1286,7 +1301,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1311,7 +1327,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1336,7 +1353,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1563,60 +1581,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     /// Bulk-read whole `io_len`-byte port elements into `buf`.
-    /// Returns the number of bytes actually read. If the port doesn't support
-    /// bulk reads (or no IO bus is wired), returns 0.
+    /// Returns the number of bytes actually read; 0 when the port has no bulk
+    /// handler, which leaves the caller to read it one element at a time.
     fn bulk_port_in(&mut self, port: u16, io_len: u8, buf: &mut [u8]) -> usize {
-        #[cfg(not(feature = "alloc"))]
-        let _ = (port, io_len, buf);
-        #[cfg(feature = "alloc")]
         let current_ticks = self.system_ticks();
-        #[cfg(feature = "alloc")]
-        if let Some(io) = self.io_bus_mut() {
-            let bytes_read = io.inp_bulk(port, io_len, buf, current_ticks);
-            self.sync_io_events();
-            return bytes_read;
-        }
-        0
+        let bytes_read = self
+            .devices
+            .inp_bulk(port, io_len, buf, current_ticks, self.device_manager);
+        self.sync_io_events();
+        bytes_read
     }
 
-    /// Read from I/O port.
-    ///
-    /// When the emulator wires an I/O bus, this dispatches to `BxDevicesC::inp`.
-    /// Otherwise it falls back to conservative defaults (useful for unit tests
-    /// that don't wire devices and never execute real firmware).
+    /// Read from I/O port, dispatching to `BxDevicesC::inp`. An unclaimed port
+    /// reads as all-ones there, matching Bochs iodev unmapped port semantics.
     fn port_in(&mut self, port: u16, len: u8) -> u32 {
-        let _ = &port; // used by alloc/instrumentation paths
-                       // BOCHS BX_INSTR_INP(addr, len) — fires before the port read.
-        #[cfg(feature = "instrumentation")]
+        // BOCHS BX_INSTR_INP(addr, len) — fires before the port read.
         if self.instrumentation.active.has_io() {
             self.instrumentation.fire_inp(port, len);
         }
 
-        #[cfg(feature = "alloc")]
         let current_ticks = self.system_ticks();
-        #[cfg(feature = "alloc")]
-        let value = if let Some(io) = self.io_bus_mut() {
-            let value = io.inp(port, len, current_ticks);
-            self.sync_io_events();
-            value
-        } else {
-            match len {
-                1 => 0xFF,
-                2 => 0xFFFF,
-                4 => 0xFFFFFFFF,
-                _ => 0xFF,
-            }
-        };
-        #[cfg(not(feature = "alloc"))]
-        let value = match len {
-            1 => 0xFF,
-            2 => 0xFFFF,
-            4 => 0xFFFFFFFF,
-            _ => 0xFF,
-        };
+        let value = self
+            .devices
+            .inp(port, len, current_ticks, self.pc_system, self.device_manager);
+        self.sync_io_events();
 
         // BOCHS BX_INSTR_INP2(addr, len, val) — fires after the read with the value.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
             let ev = super::instrumentation::IoHookEvent {
                 port,
@@ -1630,13 +1620,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         value
     }
 
-    /// Write to I/O port.
-    ///
-    /// When the emulator wires an I/O bus, this dispatches to `BxDevicesC::outp`.
-    /// Otherwise it is ignored (useful for unit tests without devices).
+    /// Write to I/O port, dispatching to `BxDevicesC::outp`.
     fn port_out(&mut self, port: u16, value: u32, len: u8) {
         // BOCHS BX_INSTR_OUTP(addr, len, val) — fires at the port write.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
             let ev = super::instrumentation::IoHookEvent {
                 port,
@@ -1659,22 +1645,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.rip()
             );
         }
-        #[cfg(feature = "alloc")]
         let current_ticks = self.system_ticks();
-        #[cfg(feature = "alloc")]
-        let dispatched = if let Some(io) = self.io_bus_mut() {
-            io.outp(port, value, len, current_ticks);
-            true
-        } else {
-            false
-        };
-        #[cfg(feature = "alloc")]
-        if dispatched {
-            // fw_cfg and other port handlers may have written guest RAM while
-            // the I/O bus was borrowed. Flush the issuing CPU after that
-            // borrow ends so a cached trace cannot execute a stale tail.
-            self.sync_io_events();
-            self.smc_sync_after_phys_write();
-        }
+        self.devices.outp(
+            port,
+            value,
+            len,
+            current_ticks,
+            self.pc_system,
+            self.device_manager,
+            self.memory,
+        );
+        // fw_cfg and other port handlers may have written guest RAM while the
+        // I/O bus was borrowed. Flush the issuing CPU after that borrow ends so
+        // a cached trace cannot execute a stale tail.
+        self.sync_io_events();
+        self.smc_sync_after_phys_write();
     }
 }

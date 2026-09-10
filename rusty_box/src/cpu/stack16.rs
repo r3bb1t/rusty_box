@@ -2,9 +2,9 @@
 //!
 //! Based on Bochs stack16.cc
 
-use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, eflags::EFlags};
+use super::{cpu::BxCpuC, decoder::Instruction, eflags::EFlags};
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // 16-bit PUSH instructions
     // Based on Bochs stack16.cc
@@ -25,15 +25,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let value = self.v_read_word(seg, eaddr)?;
-        self.push_16(value)?;
-        Ok(())
-    }
-
-    /// PUSH Sw - Push segment register
-    /// Based on Bochs stack16.cc PUSH16_Sw
-    pub fn push16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src = instr.src() as usize;
-        let value = self.sregs[src].selector.value;
         self.push_16(value)?;
         Ok(())
     }
@@ -77,22 +68,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         self.v_write_word(seg, eaddr, value)?;
-        Ok(())
-    }
-
-    /// POP Sw - Pop into segment register
-    /// Based on Bochs stack16.cc POP16_Sw
-    pub fn pop16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let selector_value = self.pop_16()?;
-        let seg = super::decoder::BxSegregs::from(instr.dst());
-
-        self.load_seg_reg(seg, selector_value)?;
-
-        // SS interrupt inhibition: Bochs stack16.cc
-        if seg == super::decoder::BxSegregs::Ss {
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
-        }
-
         Ok(())
     }
 
@@ -311,7 +286,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.load_seg_reg(seg, selector_value)?;
 
         if seg == super::decoder::BxSegregs::Ss {
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
+            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
 
         Ok(())
@@ -350,7 +325,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let imm16 = instr.iw();
         let mut level = instr.ib2() & 0x1F;
 
-        self.push_16(self.bp())?;
+        let bp = self.bp();
+        self.push_16(bp)?;
         let frame_ptr16 = self.sp();
 
         if self.is_stack_32bit() {
@@ -372,7 +348,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.push_16(frame_ptr16)?;
             }
 
-            self.set_esp(self.esp().wrapping_sub(imm16 as u32));
+            let esp = self.esp();
+            self.set_esp(esp.wrapping_sub(imm16 as u32));
 
             // ENTER finishes with memory write check on the final stack pointer
             // the memory is touched but no write actually occurs
@@ -400,7 +377,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.push_16(frame_ptr16)?;
             }
 
-            self.set_sp(self.sp().wrapping_sub(imm16));
+            let sp = self.sp();
+            self.set_sp(sp.wrapping_sub(imm16));
 
             // ENTER finishes with memory write check on the final stack pointer
             // the memory is touched but no write actually occurs

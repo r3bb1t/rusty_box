@@ -22,7 +22,7 @@ pub use egui_gui::{BridgeGui, EguiGui};
 #[cfg(all(feature = "gui-egui", feature = "std"))]
 pub mod eframe_app;
 #[cfg(all(feature = "gui-egui", feature = "std"))]
-pub use eframe_app::RustyBoxApp;
+pub use eframe_app::{ConsolePlaceholder, RustyBoxApp};
 
 #[cfg(feature = "std")]
 pub mod term;

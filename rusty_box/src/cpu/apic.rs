@@ -11,12 +11,10 @@
 use tracing::{debug, error, info};
 
 use crate::config::BxPhyAddress;
-#[cfg(feature = "std")]
-use std::io::{self, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
 };
 
 
@@ -49,9 +47,26 @@ const APIC_ID_MASK_XAPIC: u32 = 0xFF;
 
 /// APIC ID mask for legacy mode (4-bit ID)
 const APIC_ID_MASK_LEGACY: u32 = 0x0F;
-/// Bochs sets `simulate_xapic = true` for APIC builds and uses this global
-/// bus mask for broadcast detection, independent of each LAPIC's version ID.
-const APIC_BUS_ID_MASK: u32 = APIC_ID_MASK_XAPIC;
+
+/// Which APIC model every processor of this build simulates.
+///
+/// Bochs' `simulate_xapic` global (main.cc), which `bx_begin_simulation` sets
+/// true for every BX_SUPPORT_APIC build before any CPU is constructed: the
+/// legacy 4-bit-ID APIC is not reachable there, and each `bx_local_apic_c`
+/// takes its `xapic` from it (apic.cc constructor).
+const SIMULATE_XAPIC: bool = true;
+
+/// Bus-wide APIC ID mask used for broadcast detection, independent of any one
+/// LAPIC's version ID. Bochs main.cc: `apic_id_mask = simulate_xapic ? 0xFF : 0xF`.
+const APIC_BUS_ID_MASK: u32 = if SIMULATE_XAPIC {
+    APIC_ID_MASK_XAPIC
+} else {
+    APIC_ID_MASK_LEGACY
+};
+
+/// Extended-xAPIC support bit of the version register, set by
+/// `enable_xapic_extensions` (Bochs apic.cc) and by nothing else.
+const APIC_VERSION_XAPIC_EXT: u32 = 0x8000_0000;
 
 /// APIC error status constants (Bochs: apic.h)
 const APIC_ERR_ILLEGAL_ADDR: u32 = 0x80;
@@ -115,6 +130,24 @@ impl LvtBits {
     #[inline(always)]
     pub fn timer_mode_field(self) -> u32 {
         (self.bits() >> 17) & 0x3
+    }
+
+    /// Get the delivery mode field (bits 8-10).
+    ///
+    /// The field is three bits wide and every encoding names a mode, so the
+    /// answer is the mode itself rather than a number a caller has to decode.
+    #[inline(always)]
+    pub fn delivery_mode(self) -> ApicDeliveryMode {
+        match (self.bits() >> 8) & 0x7 {
+            0 => ApicDeliveryMode::Fixed,
+            1 => ApicDeliveryMode::LowPriority,
+            2 => ApicDeliveryMode::Smi,
+            3 => ApicDeliveryMode::Reserved,
+            4 => ApicDeliveryMode::Nmi,
+            5 => ApicDeliveryMode::Init,
+            6 => ApicDeliveryMode::Sipi,
+            _ => ApicDeliveryMode::ExtInt,
+        }
     }
 }
 
@@ -524,7 +557,7 @@ impl Default for BxLocalApic {
         Self {
             base_addr: BX_LAPIC_BASE_ADDR,
             mode: ApicMode::GloballyDisabled,
-            xapic: false,
+            xapic: SIMULATE_XAPIC,
             xapic_ext: 0,
             apic_id: 0,
             bus_cpu_count: 1,
@@ -670,6 +703,80 @@ impl BxLocalApic {
         if self.mode == ApicMode::X2apicMode {
             self.ldr = ((self.apic_id & 0xFFFF_FFF0) << 16) | (1 << (self.apic_id & 0xF));
         }
+        // The identity decides who holds the virtual wire, so it is re-derived
+        // whenever the identity changes: a processor built before its id was
+        // assigned would otherwise keep the bootstrap processor's entry.
+        self.preset_lint0();
+    }
+
+    /// Give the bootstrap processor the legacy virtual wire, and no one else.
+    ///
+    /// **A deliberate deviation from the architecture, and the same one KVM and
+    /// QEMU make.** The SDM resets every LVT entry masked ("The LVT register is
+    /// reset to 0s except for the mask bits; these are set to 1s"), leaving
+    /// firmware to program LINT0 into ExtINT for virtual wire mode. Production
+    /// firmware does — EDK2/OVMF, coreboot and SeaBIOS all write it during POST
+    /// — but the BIOS this port ships with does not: the only local-APIC writes
+    /// in Bochs's `bios/` are `APIC_SVR` and `APIC_ICR_LOW`, and `bios/rombios.h`
+    /// does not even name offset 0x350. A processor that honoured a masked
+    /// LINT0 under that firmware would take no legacy interrupt for the whole
+    /// life of the guest.
+    ///
+    /// So the entry is preset here instead, exactly as KVM's
+    /// `KVM_X86_QUIRK_LINT0_REENABLED` does (enabled by default, and
+    /// self-described as a spec deviation for this reason) and as QEMU's
+    /// `apic_reset_common` did with the same literal `0x700` until 2015 —
+    /// removing it there broke coreboot within days.
+    ///
+    /// Only the bootstrap processor gets it: the SDM says one processor at most
+    /// should carry an ExtINT LVT entry, and Linux's `setup_local_APIC` masks
+    /// LINT0 on every application processor for that reason.
+    ///
+    /// The preset only survives because `reset` clears `software_enabled`
+    /// directly instead of writing SVR: a software disable masks every LVT
+    /// entry (`write_spurious_interrupt_register`), so routing reset's disable
+    /// through that writer would close the wire again. KVM's `kvm_lapic_reset`
+    /// takes the same care: the masking lives in its `kvm_lapic_reg_write`
+    /// `APIC_SPIV` arm, and reset calls `apic_set_spiv` directly, bypassing it.
+    fn preset_lint0(&mut self) {
+        /// Unmasked, delivery mode 0b111 (ExtINT). QEMU spelled the same
+        /// constant `0x700` in `apic_reset_common`.
+        const VIRTUAL_WIRE: u32 = 0x0000_0700;
+        self.lvt[LocalVectorTableEntry::Lint0 as usize] = if self.apic_id == 0 {
+            LvtBits::from_raw(VIRTUAL_WIRE)
+        } else {
+            LvtBits::MASKED
+        };
+    }
+
+    /// Whether an 8259 INTR assertion on LINT0 reaches this processor.
+    ///
+    /// The architectural gate on the legacy wire, and the same predicate KVM
+    /// applies in `kvm_apic_accept_pic_intr`: a local APIC that is hardware
+    /// disabled has no LVT to consult at all — the SDM says LINT0 and LINT1
+    /// then behave as the INTR and NMI pins of a processor with no APIC — and
+    /// an enabled one admits the line only through an unmasked LVT0 in ExtINT
+    /// delivery mode.
+    ///
+    /// A software disable needs no term of its own: it masks every LVT entry
+    /// where it happens (`write_spurious_interrupt_register`), so the mask bit
+    /// already carries it.
+    ///
+    /// The engine backends ask the same question of whoever owns LVT0 in their
+    /// topology; when the local APIC is the hypervisor's, that is the shadow
+    /// the fabric keeps (`IrqFabric::lint0_admits_ext_int`).
+    pub(crate) fn lint0_admits_ext_int(&self) -> bool {
+        match self.mode {
+            // Both have IA32_APIC_BASE.EN clear — `StateInvalid` is the
+            // illegal EXTD-without-EN encoding — so the pins bypass the APIC
+            // entirely and there is no LVT to consult.
+            ApicMode::GloballyDisabled | ApicMode::StateInvalid => true,
+            ApicMode::XapicMode | ApicMode::X2apicMode => {
+                let lvt0 = self.lvt[LocalVectorTableEntry::Lint0 as usize];
+                !lvt0.contains(LvtBits::MASKED)
+                    && lvt0.delivery_mode() == ApicDeliveryMode::ExtInt
+            }
+        }
     }
 
     /// Set the APIC bus CPU count from the emulator topology.
@@ -755,6 +862,31 @@ impl BxLocalApic {
         self.xapic
     }
 
+    /// Take the APIC model this build simulates — the `xapic = simulate_xapic`
+    /// line of Bochs' `bx_local_apic_c` constructor (apic.cc).
+    ///
+    /// A processor is built over a zeroed allocation rather than from
+    /// [`Default`], so the model has to be written here for the same reason
+    /// Bochs writes it in the constructor: [`Self::reset`] reads it to choose
+    /// the version register, and every reset afterwards reads it again.
+    #[inline]
+    pub(crate) fn set_simulated_apic_model(&mut self) {
+        self.xapic = SIMULATE_XAPIC;
+    }
+
+    /// Whether this processor implements the AMD extended xAPIC registers.
+    ///
+    /// Bochs asks the CPU at every access (apic.cc read_aligned/write_aligned:
+    /// `cpu->is_cpu_extension_supported(BX_ISA_XAPIC_EXT)`). The answer is
+    /// recorded here in the version register's bit 31, which
+    /// [`Self::enable_xapic_extensions`] sets and nothing else does: the
+    /// register is read-only to the guest and compared on snapshot restore,
+    /// so the bit cannot drift from the model that was built.
+    #[inline]
+    fn xapic_ext_supported(&self) -> bool {
+        self.apic_version_id & APIC_VERSION_XAPIC_EXT != 0
+    }
+
     /// Get current mode.
     #[inline]
     pub(crate) fn get_mode(&self) -> ApicMode {
@@ -785,12 +917,29 @@ impl BxLocalApic {
 
     // ─── Register read ───────────────────────────────────────────────────
 
+    /// The register an APIC MMIO offset selects, or an encoding no arm
+    /// matches when the model has no such register.
+    ///
+    /// Bochs apic.cc read_aligned/write_aligned both open with this: the
+    /// 0x400 block is the AMD extended xAPIC, so a processor without
+    /// `BX_ISA_XAPIC_EXT` is given "some obviously invalid register" and
+    /// falls into the illegal-address arm, exactly as an unimplemented
+    /// offset does.
+    #[inline]
+    fn decode_register(&self, addr: BxPhyAddress) -> u32 {
+        let apic_reg = (addr & 0xFF0) as u32;
+        if apic_reg >= 0x400 && !self.xapic_ext_supported() {
+            return u32::MAX;
+        }
+        apic_reg
+    }
+
     /// Read from a 16-byte-aligned APIC register.
     /// Bochs: read_aligned (apic.cc)
     pub(crate) fn read_aligned(&self, addr: BxPhyAddress, cpu_ticks: u64) -> u32 {
         debug_assert!((addr & 0xF) == 0);
         let mut data: u32 = 0;
-        let apic_reg = (addr & 0xFF0) as u32;
+        let apic_reg = self.decode_register(addr);
 
         match apic_reg {
             // Local APIC ID (apic.cc)
@@ -937,7 +1086,7 @@ impl BxLocalApic {
         value: u32,
         current_ticks: u64,
     ) {
-        let apic_reg = (addr & 0xFF0) as u32;
+        let apic_reg = self.decode_register(addr);
 
         match apic_reg {
             // TPR (apic.cc)
@@ -2040,7 +2189,7 @@ impl BxLocalApic {
     /// Enables XAPIC extensions (IER and SEOI support).
     /// Bochs: enable_xapic_extensions (apic.cc)
     pub(super) fn enable_xapic_extensions(&mut self) {
-        self.apic_version_id |= 0x80000000;
+        self.apic_version_id |= APIC_VERSION_XAPIC_EXT;
         self.xapic_ext = BX_XAPIC_EXT_SUPPORT_IER | BX_XAPIC_EXT_SUPPORT_SEOI;
     }
 
@@ -2079,6 +2228,8 @@ impl BxLocalApic {
         for i in 0..LVT_ENTRY_COUNT {
             self.lvt[i] = LvtBits::MASKED; // all masked
         }
+        // …except LINT0 on the bootstrap processor. See `preset_lint0`.
+        self.preset_lint0();
 
         self.spurious_vector = 0xFF;
         self.software_enabled = false;
@@ -2260,7 +2411,7 @@ impl BxLocalApic {
 
 #[cfg(feature = "std")]
 impl BxLocalApic {
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         if self.pending_ipi_len > PENDING_IPI_CAPACITY
             || self.pending_ipi_head >= PENDING_IPI_CAPACITY
             || self.pending_cpu_event_len > PENDING_CPU_EVENT_CAPACITY
@@ -2305,7 +2456,7 @@ impl BxLocalApic {
         checked_snapshot_len_add(len, 1)
     }
 
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.snapshot_v3_body_len()?;
         writer.write_u64(self.base_addr)?;
         writer.write_u8(self.mode as u8)?;
@@ -2403,10 +2554,10 @@ impl BxLocalApic {
         writer.write_bool(self.timer_deactivate_request)
     }
 
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<LocalApicSnapshotRestore> {
+        reader: &mut R,
+    ) -> SnapResult<LocalApicSnapshotRestore> {
         let base_addr = reader.read_u64()?;
         if base_addr & 0xfff != 0 {
             return Err(Self::snapshot_invalid("LAPIC base is not page aligned"));
@@ -2675,7 +2826,7 @@ impl BxLocalApic {
         Ok(restore)
     }
 
-    fn write_snapshot_handle<W: Write>(writer: &mut W, handle: Option<usize>) -> io::Result<()> {
+    fn write_snapshot_handle<W: SnapWrite>(writer: &mut W, handle: Option<usize>) -> SnapResult<()> {
         writer.write_bool(handle.is_some())?;
         if let Some(handle) = handle {
             writer.write_u64(u64::try_from(handle)
@@ -2684,7 +2835,7 @@ impl BxLocalApic {
         Ok(())
     }
 
-    fn read_snapshot_handle<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Option<usize>> {
+    fn read_snapshot_handle<R: SnapRead>(reader: &mut R) -> SnapResult<Option<usize>> {
         if !reader.read_bool()? {
             return Ok(None);
         }
@@ -2693,7 +2844,7 @@ impl BxLocalApic {
             .map_err(|_| Self::snapshot_invalid("LAPIC timer handle does not fit host"))
     }
 
-    fn read_snapshot_mode(raw: u8) -> io::Result<ApicMode> {
+    fn read_snapshot_mode(raw: u8) -> SnapResult<ApicMode> {
         match raw {
             0 => Ok(ApicMode::GloballyDisabled),
             1 => Ok(ApicMode::StateInvalid),
@@ -2708,7 +2859,7 @@ impl BxLocalApic {
         if combined == 7 { 1 } else { 2 << combined }
     }
 
-    fn validate_snapshot_lvt(index: usize, raw: u32) -> io::Result<()> {
+    fn validate_snapshot_lvt(index: usize, raw: u32) -> SnapResult<()> {
         let mask = *LVT_MASKS.get(index)
             .ok_or_else(|| Self::snapshot_invalid("LAPIC LVT index is invalid"))?;
         if raw & !mask != 0 || (index == LocalVectorTableEntry::Timer as usize && (raw >> 17) & 3 == 3) {
@@ -2720,14 +2871,14 @@ impl BxLocalApic {
         Ok(())
     }
 
-    fn validate_snapshot_icr(icr_lo: u32) -> io::Result<()> {
+    fn validate_snapshot_icr(icr_lo: u32) -> SnapResult<()> {
         if icr_lo & !0x000c_dfff != 0 || ((icr_lo >> 8) & 7) == ApicDeliveryMode::Reserved as u32 {
             return Err(Self::snapshot_invalid("LAPIC ICR encoding is invalid"));
         }
         Ok(())
     }
 
-    fn validate_snapshot_ipi(ipi: PendingIpi, bus_cpu_count: u32) -> io::Result<()> {
+    fn validate_snapshot_ipi(ipi: PendingIpi, bus_cpu_count: u32) -> SnapResult<()> {
         let wire_shorthand = ((ipi.lo_cmd >> 18) & 3) as u8;
         if ipi.shorthand > 3
             || ((ipi.lo_cmd >> 8) & 7) == ApicDeliveryMode::Reserved as u32
@@ -2745,8 +2896,8 @@ impl BxLocalApic {
         Ok(())
     }
 
-    fn snapshot_invalid(message: &'static str) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, message)
+    fn snapshot_invalid(message: &'static str) -> SnapError {
+        SnapError::Invalid(message)
     }
 }
 
@@ -2768,24 +2919,25 @@ mod tests {
     const INIT_VECTOR: u8 = 0;
     const NO_DESTINATION_SHORTHAND: u8 = 0;
 
-    use std::io::Cursor;
 
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::CpuModel;
+    use crate::cpu::ResetReason;
     use crate::snapshot::SnapshotReader;
 
     use super::*;
 
     fn make_lapic() -> BxLocalApic {
         let mut lapic = BxLocalApic::default();
-        lapic.xapic = true;
         lapic.set_tsc_deadline_supported(true);
         lapic.reset(0);
         lapic
     }
 
-    fn restore_v3(source: &BxLocalApic, target: &mut BxLocalApic) -> std::io::Result<()> {
+    fn restore_v3(source: &BxLocalApic, target: &mut BxLocalApic) -> SnapResult<()> {
         let mut bytes = Vec::new();
         source.save_snapshot_v3_body(&mut bytes)?;
-        let mut reader = SnapshotReader::new(Cursor::new(bytes.clone()), bytes.len() as u64)?;
+        let mut reader = SnapshotReader::new(bytes.as_slice(), bytes.len() as u64)?;
         target.restore_snapshot_v3_body(&mut reader)?;
         reader.finish_exact()
     }
@@ -2817,8 +2969,81 @@ mod tests {
             assert_eq!(lapic.ier[i], 0xFFFFFFFF);
         }
         for i in 0..LVT_ENTRY_COUNT {
+            if i == LocalVectorTableEntry::Lint0 as usize {
+                continue; // the virtual wire — see `preset_lint0`
+            }
             assert_eq!(lapic.lvt[i], LvtBits::MASKED); // all masked
         }
+    }
+
+    /// The bootstrap processor comes out of reset holding the legacy virtual
+    /// wire, and no application processor does. Without this the BIOS shipped
+    /// with this port — which never writes offset 0x350 — would leave every
+    /// guest deaf to the 8259 for its whole life.
+    #[test]
+    fn reset_leaves_the_virtual_wire_on_the_bootstrap_processor_alone() {
+        let bsp = make_lapic();
+        assert_eq!(
+            bsp.lvt[LocalVectorTableEntry::Lint0 as usize],
+            LvtBits::from_raw(0x0000_0700),
+            "the bootstrap processor's LINT0 is unmasked ExtINT"
+        );
+        assert!(bsp.lint0_admits_ext_int());
+
+        let mut ap = BxLocalApic::default();
+        ap.set_id(1);
+        ap.reset(0);
+        assert_eq!(
+            ap.lvt[LocalVectorTableEntry::Lint0 as usize],
+            LvtBits::MASKED,
+            "an application processor's LINT0 stays masked"
+        );
+        assert!(!ap.lint0_admits_ext_int());
+    }
+
+    /// The predicate the legacy wire is gated on, over the states a guest can
+    /// actually put LVT0 in. Matches KVM's `kvm_apic_accept_pic_intr`.
+    #[test]
+    fn lint0_admits_ext_int_only_through_an_unmasked_ext_int_entry() {
+        let mut lapic = make_lapic();
+        let lint0 = LocalVectorTableEntry::Lint0 as usize;
+
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0000_0700);
+        assert!(lapic.lint0_admits_ext_int(), "unmasked ExtINT admits");
+
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0001_0700);
+        assert!(!lapic.lint0_admits_ext_int(), "the mask bit refuses");
+
+        // What Linux's `check_timer()` writes when it wants the tick to stop.
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0001_0000);
+        assert!(!lapic.lint0_admits_ext_int(), "masked fixed refuses");
+
+        // A fixed vector on LINT0 is a different interrupt, not the 8259's.
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0000_0031);
+        assert!(!lapic.lint0_admits_ext_int(), "unmasked fixed refuses");
+
+        // Hardware disabled: the pins bypass the APIC, mask bit and all.
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0001_0000);
+        lapic.mode = ApicMode::GloballyDisabled;
+        assert!(lapic.lint0_admits_ext_int(), "a disabled APIC gates nothing");
+    }
+
+    /// A software disable masks every LVT entry, so it closes the legacy wire
+    /// without the predicate needing a term of its own — and reset must not
+    /// reach that masking, or the preset above would never survive.
+    #[test]
+    fn a_software_disable_closes_the_wire_but_reset_does_not() {
+        let mut lapic = make_lapic();
+        assert!(!lapic.software_enabled, "reset leaves the APIC disabled");
+        assert!(
+            lapic.lint0_admits_ext_int(),
+            "reset's disable does not run through the register writer"
+        );
+
+        lapic.write_spurious_interrupt_register(0x1FF); // enable
+        assert!(lapic.software_enabled);
+        lapic.write_spurious_interrupt_register(0x0FF); // disable
+        assert!(!lapic.lint0_admits_ext_int());
     }
 
     #[test]
@@ -3152,6 +3377,9 @@ mod tests {
         assert!(!lapic.timer_active);
     }
 
+    // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
+    // (or a `debug_assert!`), which do not exist in a release build.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "LAPIC timer current count overdue")]
     fn current_timer_count_panics_when_active_timer_is_overdue() {
@@ -3388,5 +3616,97 @@ mod tests {
         source.vmx_timer_active = true;
 
         assert!(restore_v3(&source, &mut make_lapic()).is_ok());
+    }
+
+    /// The local APIC a *built* processor carries is the xAPIC one, because
+    /// that is the only one Bochs builds: `bx_local_apic_c`'s constructor
+    /// takes `xapic = simulate_xapic` (apic.cc) and `bx_begin_simulation`
+    /// sets `simulate_xapic = true` unconditionally for every BX_SUPPORT_APIC
+    /// build (main.cc). Guest-visible consequences, all read here through the
+    /// MMIO window a guest uses: the version register reports P4's six LVT
+    /// entries, and the logical destination register keeps the full eight
+    /// xAPIC ID bits (Bochs apic.cc `ldr & apic_id_mask`, the global mask
+    /// being 0xff).
+    #[test]
+    fn a_built_processor_carries_the_xapic_local_apic_bochs_builds() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+
+        assert!(
+            cpu.lapic.is_xapic(),
+            "every Bochs APIC build simulates the xAPIC model"
+        );
+        assert_eq!(
+            cpu.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x030, 0),
+            0x0005_0014,
+            "the version register reports the P4 xAPIC's six LVT entries"
+        );
+
+        cpu.lapic
+            .write_aligned(BX_LAPIC_BASE_ADDR | 0x0D0, 0xFF00_0000, 0);
+        assert_eq!(
+            cpu.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x0D0, 0),
+            0xFF00_0000,
+            "an xAPIC logical destination is eight bits wide, not four"
+        );
+    }
+
+    /// All eight vector bits of the spurious-interrupt register are the
+    /// guest's on an xAPIC (Bochs apic.cc write_spurious_interrupt_register
+    /// hardwires the low nibble only for the legacy APIC), so a guest can
+    /// program vector 0 and an acknowledge with nothing deliverable can
+    /// answer it.
+    #[test]
+    fn the_xapic_spurious_vector_keeps_every_bit_the_guest_writes() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+
+        cpu.lapic.write_aligned(BX_LAPIC_BASE_ADDR | 0x0F0, 0x100, 0);
+
+        assert_eq!(
+            cpu.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x0F0, 0) & 0xFF,
+            0x00,
+            "the xAPIC's spurious vector is not forced to 0x0f"
+        );
+    }
+
+    /// The AMD extended xAPIC registers answer only on a model whose CPUID
+    /// claims them. Bochs gates both the capability bit and the whole 0x400
+    /// register block on `BX_ISA_XAPIC_EXT` (init.cc `enable_xapic_extensions`
+    /// call site; apic.cc read_aligned/write_aligned), which its cpudb enables
+    /// for Ryzen and not for any Intel model.
+    #[test]
+    fn only_a_model_with_extended_xapic_answers_its_registers() {
+        let mut intel = BxCpuBuilder::new_with_model(CpuModel::corei7_skylake_x())
+            .build()
+            .expect("a processor");
+        intel.reset(ResetReason::Hardware);
+
+        assert_eq!(
+            intel.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x030, 0),
+            0x0005_0014,
+            "a model without extended xAPIC does not set the version's bit 31"
+        );
+        assert_eq!(
+            intel.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x400, 0),
+            0,
+            "the extended feature register is not a register on this model"
+        );
+
+        let mut amd = BxCpuBuilder::new_with_model(CpuModel::amd_ryzen())
+            .build()
+            .expect("a processor");
+        amd.reset(ResetReason::Hardware);
+
+        assert_eq!(
+            amd.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x030, 0),
+            0x8005_0014,
+            "extended xAPIC is advertised in the version register's bit 31"
+        );
+        assert_eq!(
+            amd.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x400, 0),
+            BX_XAPIC_EXT_SUPPORT_IER | BX_XAPIC_EXT_SUPPORT_SEOI,
+            "the extended feature register reports IER and SEOI"
+        );
     }
 }

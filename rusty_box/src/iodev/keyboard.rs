@@ -151,12 +151,10 @@
 //! 0xFF: Reset (returns ACK + 0xAA + device ID 0x00)
 //! ```
 
-#[cfg(feature = "std")]
-use std::io::{Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, SnapshotReader, SnapshotWriteExt, SNAPSHOT_SECTION_VERSION,
+    bounds, checked_snapshot_len_add, SnapError, SnapRead, SnapResult, SnapWrite, SNAPSHOT_SECTION_VERSION,
 };
 
 // I/O Ports
@@ -576,6 +574,20 @@ pub struct BxKeyboardC {
     /// System software reset requested via controller command 0xFE or output-port reset.
     /// Checked by emulator loop to trigger Bochs-compatible software reset.
     pub(crate) reset_requested: Option<crate::cpu::ResetReason>,
+    /// Serial-delay periods this controller has been run for.
+    ///
+    /// Under `DeviceClock::Ticks` the 8042's timer is continuous, so this
+    /// counts periods of guest time that actually elapsed — which is what a
+    /// test asserting that a large advance of device time replayed every
+    /// missed period reads, rather than asserting only that the clock moved.
+    /// Under `DeviceClock::HostTime` the timer is a one-shot armed only when
+    /// something is latched (divergence H6), and this counts the ticks that
+    /// carried it — the guest-visible evidence that host input got in.
+    ///
+    /// Not `#[cfg(test)]`: a machine's driver lives in another crate, and a
+    /// field compiled only into this crate's own test build is invisible to
+    /// it. Surfaced through `Emulator::keyboard_serial_ticks`.
+    pub(crate) serial_fires_seen: u64,
 }
 
 impl Default for BxKeyboardC {
@@ -658,6 +670,7 @@ impl BxKeyboardC {
             kbd_initialized: false,
             scancode_escaped: false,
             reset_requested: None,
+            serial_fires_seen: 0,
         }
     }
 
@@ -1159,14 +1172,22 @@ impl BxKeyboardC {
         }
     }
 
-    /// Queue scancode in internal keyboard ring buffer (keyboard.cc)
+    /// Queue a scancode in the internal keyboard ring — Bochs keyboard.cc.
+    /// Returns whether it fit; a full ring drops the byte, as upstream does.
     ///
     /// The byte is NOT immediately visible in the output buffer. It must be
     /// transferred by `periodic()` (called from the device tick path).
-    fn kbd_enq(&mut self, scancode: u8) {
+    ///
+    /// Reporting rather than logging is what lets the two kinds of caller
+    /// differ. A device replying to its own command cannot un-generate the
+    /// reply, so it can only note the loss and carry on — Bochs's behaviour.
+    /// A host injecting keystrokes CAN act: it stops and retries, which is the
+    /// difference between backpressure and silently feeding a guest a
+    /// truncated key.
+    #[must_use]
+    fn kbd_enq(&mut self, scancode: u8) -> bool {
         if self.kbd_internal_buffer.num_elements >= BX_KBD_ELEMENTS {
-            tracing::warn!("Keyboard: Internal buffer full, ignoring {:#04x}", scancode);
-            return;
+            return false;
         }
 
         let tail = (self.kbd_internal_buffer.head + self.kbd_internal_buffer.num_elements)
@@ -1176,6 +1197,18 @@ impl BxKeyboardC {
 
         if !self.kbd_controller.outb && self.kbd_controller.kbd_clock_enabled {
             self.activate_timer();
+        }
+        true
+    }
+
+    /// Queue a byte the keyboard itself produced — an ACK, a command reply, a
+    /// typematic repeat. Bochs logs a full ring and continues, because a device
+    /// cannot refuse to have generated its own reply; that is the entire
+    /// reaction available here, and naming it once keeps it off the 20-odd
+    /// call sites that would otherwise each have to ignore a result.
+    fn kbd_enq_reply(&mut self, byte: u8) {
+        if !self.kbd_enq(byte) {
+            tracing::warn!("Keyboard: internal buffer full, dropping reply {byte:#04x}");
         }
     }
 
@@ -1218,9 +1251,20 @@ impl BxKeyboardC {
 
     /// Build and enqueue a PS/2 movement packet from the accumulated deltas.
     /// Bochs keyboard.cc create_mouse_packet.
-    fn create_mouse_packet(&mut self, force_enq: bool) {
+    ///
+    /// Returns whether a packet reached the guest. `false` also covers the two
+    /// cases where there was nothing to send — a packet already pending, or no
+    /// movement to report — because from a caller's point of view those are the
+    /// same fact: the guest did not receive a packet from this call.
+    ///
+    /// Unlike the keyboard, this cannot half-deliver: `mouse_enq_packet` checks
+    /// room for the whole 3- or 4-byte packet before writing any of it, exactly
+    /// as Bochs's `mouse_enQ_packet` does, so a full ring drops the packet
+    /// entire rather than leaving the guest a torn one.
+    #[must_use]
+    fn create_mouse_packet(&mut self, force_enq: bool) -> bool {
         if self.mouse_internal_buffer.num_elements != 0 && !force_enq {
-            return;
+            return false;
         }
 
         let mut delta_x = self.mouse.delayed_dx;
@@ -1228,7 +1272,7 @@ impl BxKeyboardC {
         let button_state = self.mouse.button_status | 0x08;
 
         if !force_enq && delta_x == 0 && delta_y == 0 {
-            return;
+            return false;
         }
 
         if delta_x > 254 {
@@ -1282,14 +1326,32 @@ impl BxKeyboardC {
 
         let b4 = self.mouse.delayed_dz.wrapping_neg() as u8;
 
-        self.mouse_enq_packet(b1, b2, b3, b4);
+        self.mouse_enq_packet(b1, b2, b3, b4)
+    }
+
+    /// Flush residual delayed motion during the device's own periodic tick —
+    /// Bochs keyboard.cc `periodic()` calls `create_mouse_packet` here so
+    /// clamped or deferred motion does not stick until the next host event.
+    ///
+    /// The one place the packet verdict is deliberately not propagated, and the
+    /// reason is that it carries nothing a tick could act on: `false` is
+    /// ordinarily just "no motion pending", and when it does mean a full ring
+    /// the deltas stay accumulated and the next tick retries. A host-driven
+    /// update is the opposite case, and reports.
+    fn flush_delayed_mouse_motion(&mut self) {
+        let _flushed_or_nothing_pending = self.create_mouse_packet(false);
     }
 
     /// Flush any pending movement and clear accumulated deltas when the host
     /// toggles PS/2 mouse capture. Bochs keyboard.cc mouse_enabled_changed.
     pub(crate) fn mouse_enabled_changed(&mut self, enabled: bool) {
-        if self.mouse.delayed_dx != 0 || self.mouse.delayed_dy != 0 || self.mouse.delayed_dz != 0 {
-            self.create_mouse_packet(true);
+        if (self.mouse.delayed_dx != 0 || self.mouse.delayed_dy != 0 || self.mouse.delayed_dz != 0)
+            && !self.create_mouse_packet(true)
+        {
+            // The deltas are cleared below regardless, so a refused flush loses
+            // that movement outright. Nothing else can be done — the host has
+            // already changed capture state — but it is worth saying.
+            tracing::debug!("PS/2 mouse ring full on capture change; pending movement discarded");
         }
         self.mouse.delayed_dx = 0;
         self.mouse.delayed_dy = 0;
@@ -1303,22 +1365,34 @@ impl BxKeyboardC {
     /// Host mouse movement / button update. Accumulates relative deltas and
     /// enqueues PS/2 packets as needed. Bochs keyboard.cc mouse_motion (relative
     /// path only; absolute-position tablets are not modeled here).
+    /// Returns whether this update reached the guest as a packet.
+    ///
+    /// `false` covers three different situations that are one fact to a caller:
+    /// the guest put the mouse in remote mode or disabled reporting (it is
+    /// polling, not listening), nothing actually changed, or its 16-byte ring
+    /// was full. Only the last is backpressure, and a host cannot usefully tell
+    /// them apart — in all three the movement did not arrive.
+    ///
+    /// Motion lost this way is largely self-correcting: PS/2 deltas are
+    /// relative and accumulate in `delayed_dx`/`dy`, so a refused packet folds
+    /// into the next one. A refused BUTTON edge does not, which is why this
+    /// reports at all.
     pub(crate) fn mouse_motion(
         &mut self,
         mut delta_x: i32,
         mut delta_y: i32,
         mut delta_z: i32,
         mut button_state: u8,
-    ) {
+    ) -> bool {
         let mut force_enq = false;
 
         // Don't generate interrupts if we are in remote mode.
         if self.mouse.mode == MOUSE_MODE_REMOTE {
-            return;
+            return false;
         }
         // Note: `enable` only applies in stream mode.
         if !self.mouse.enable {
-            return;
+            return false;
         }
 
         // Scale down the motion.
@@ -1339,7 +1413,7 @@ impl BxKeyboardC {
             && delta_z == 0
             && self.mouse.button_status == (button_state & 0x7)
         {
-            return; // useless call, nothing changed
+            return false; // useless call, nothing changed
         }
 
         if self.mouse.button_status != (button_state & 0x7) || delta_z != 0 {
@@ -1373,7 +1447,7 @@ impl BxKeyboardC {
             force_enq = true;
         }
 
-        self.create_mouse_packet(force_enq);
+        self.create_mouse_packet(force_enq)
     }
 
     /// Set timer_pending flag (keyboard.cc)
@@ -1393,6 +1467,24 @@ impl BxKeyboardC {
     /// Return the scheduler's keyboard owner timer handle, if registered.
     pub(crate) fn timer_handle(&self) -> Option<usize> {
         self.timer_handle
+    }
+
+    /// Whether the 8042 has anything for a serial-delay tick to carry.
+    ///
+    /// Under `DeviceClock::Ticks` this is never asked: the timer is CONTINUOUS
+    /// there, exactly as Bochs `keyboard.cc init()` arms it, and fires whether
+    /// or not there is anything to do. A machine on host time cannot afford
+    /// that — a continuous 150 µs timer is a device deadline every 150 µs, and
+    /// a device thread that wakes for it never sleeps — so it arms a ONE-SHOT
+    /// instead, and this is the question that decides when (divergence H6).
+    ///
+    /// All three sources, because all three are what a tick would carry:
+    /// `timer_pending` is a delay some path asked for, and the two IRQ flags
+    /// are a byte latched for the guest that only a tick delivers.
+    pub(crate) fn needs_serial_tick(&self) -> bool {
+        self.kbd_controller.timer_pending != 0
+            || self.kbd_controller.irq1_requested
+            || self.kbd_controller.irq12_requested
     }
 
     /// One continuous serial-delay tick — Bochs keyboard.cc timer_handler:
@@ -1442,14 +1534,14 @@ impl BxKeyboardC {
             self.kbd_internal_buffer.expecting_typematic = false;
             self.kbd_internal_buffer.delay = (value >> 5) & TYPEMATIC_DELAY_MASK;
             self.kbd_internal_buffer.repeat_rate = value & TYPEMATIC_RATE_MASK;
-            self.kbd_enq(KBD_RESP_ACK);
+            self.kbd_enq_reply(KBD_RESP_ACK);
             return;
         }
 
         if self.kbd_internal_buffer.expecting_led_write {
             self.kbd_internal_buffer.led_status = value;
             self.kbd_internal_buffer.expecting_led_write = false;
-            self.kbd_enq(KBD_RESP_ACK);
+            self.kbd_enq_reply(KBD_RESP_ACK);
             return;
         }
 
@@ -1458,21 +1550,21 @@ impl BxKeyboardC {
             if value != 0 {
                 if value < 4 {
                     self.kbd_controller.current_scancodes_set = value - 1;
-                    self.kbd_enq(KBD_RESP_ACK);
+                    self.kbd_enq_reply(KBD_RESP_ACK);
                 } else {
-                    self.kbd_enq(KBD_RESP_ERROR);
+                    self.kbd_enq_reply(KBD_RESP_ERROR);
                 }
             } else {
                 // Query current set: send ACK then set number
-                self.kbd_enq(KBD_RESP_ACK);
-                self.kbd_enq(1 + self.kbd_controller.current_scancodes_set);
+                self.kbd_enq_reply(KBD_RESP_ACK);
+                self.kbd_enq_reply(1 + self.kbd_controller.current_scancodes_set);
             }
             return;
         }
 
         match value {
             0x00 => {
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
             }
             0x05 => {
                 // (mch) trying to get this to work...
@@ -1486,23 +1578,23 @@ impl BxKeyboardC {
             }
             KBD_CMD_ECHO => {
                 // Echo
-                self.kbd_enq(KBD_RESP_ECHO);
+                self.kbd_enq_reply(KBD_RESP_ECHO);
             }
             KBD_CMD_SELECT_SCAN_SET => {
                 // Select alternate scan code set
                 self.kbd_controller.expecting_scancodes_set = true;
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
             }
             KBD_CMD_IDENTIFY => {
                 // Identify keyboard — keyboard.cc
                 if self.kbd_controller.kbd_type != BX_KBD_XT_TYPE {
-                    self.kbd_enq(KBD_RESP_ACK);
+                    self.kbd_enq_reply(KBD_RESP_ACK);
                     if self.kbd_controller.kbd_type == BX_KBD_MF_TYPE {
-                        self.kbd_enq(KBD_ID_MF2_BYTE1);
+                        self.kbd_enq_reply(KBD_ID_MF2_BYTE1);
                         if self.kbd_controller.scancodes_translate {
-                            self.kbd_enq(KBD_ID_MF2_XLAT);
+                            self.kbd_enq_reply(KBD_ID_MF2_XLAT);
                         } else {
-                            self.kbd_enq(KBD_ID_MF2_NO_XLAT);
+                            self.kbd_enq_reply(KBD_ID_MF2_NO_XLAT);
                         }
                     }
                 }
@@ -1510,23 +1602,23 @@ impl BxKeyboardC {
             KBD_CMD_SET_TYPEMATIC => {
                 // Set typematic rate
                 self.kbd_internal_buffer.expecting_typematic = true;
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
             }
             KBD_CMD_ENABLE_SCANNING => {
                 // Enable scanning
                 self.kbd_internal_buffer.scanning_enabled = true;
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
             }
             KBD_CMD_RESET_DISABLE => {
                 // Reset keyboard and disable scanning
                 self.resetinternals(true);
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
                 self.kbd_internal_buffer.scanning_enabled = false;
             }
             KBD_CMD_RESET_ENABLE => {
                 // Reset keyboard and enable scanning
                 self.resetinternals(true);
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
                 self.kbd_internal_buffer.scanning_enabled = true;
             }
             KBD_CMD_RESEND => {
@@ -1537,20 +1629,20 @@ impl BxKeyboardC {
                 // Reset keyboard + BAT — keyboard.cc
                 tracing::trace!("Keyboard: Reset command received");
                 self.resetinternals(true);
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
                 self.kbd_controller.bat_in_progress = true;
-                self.kbd_enq(KBD_RESP_BAT_OK);
+                self.kbd_enq_reply(KBD_RESP_BAT_OK);
             }
             0xD3 => {
-                self.kbd_enq(KBD_RESP_ACK);
+                self.kbd_enq_reply(KBD_RESP_ACK);
             }
             0xF7..=0xFD => {
                 // PS/2 extensions not supported — return error (Bochs returns 0xFE NACK)
-                self.kbd_enq(KBD_RESP_RESEND);
+                self.kbd_enq_reply(KBD_RESP_RESEND);
             }
             _ => {
                 tracing::warn!("Keyboard: Unknown kbd command {:#04x}", value);
-                self.kbd_enq(KBD_RESP_RESEND);
+                self.kbd_enq_reply(KBD_RESP_RESEND);
             }
         }
     }
@@ -1909,11 +2001,7 @@ impl BxKeyboardC {
                 self.kbd_controller.irq1_requested = true;
             }
         } else {
-            // Bochs keyboard.cc periodic(): flush any residual delayed mouse
-            // motion into a packet before servicing the mouse buffer, so clamped
-            // or deferred motion doesn't stick until the next host event. A no-op
-            // when there is no pending motion.
-            self.create_mouse_packet(false);
+            self.flush_delayed_mouse_motion();
             // Try mouse internal buffer
             if self.kbd_controller.aux_clock_enabled && self.mouse_internal_buffer.num_elements > 0
             {
@@ -1956,40 +2044,57 @@ impl BxKeyboardC {
     /// the 8042 is translating (CCB bit 6) each byte goes through
     /// `translation8042`, with a 0xF0 break prefix folded into bit 7 of the
     /// following byte instead of being emitted.
-    pub fn gen_scancode(&mut self, key: super::scancodes::BxKey, pressed: bool) {
+    /// Returns whether EVERY byte of the sequence reached the ring.
+    ///
+    /// A key can be several bytes, and Bochs enqueues them one at a time, so a
+    /// ring that fills mid-sequence leaves the guest an `E0` prefix with no
+    /// code after it — a corrupted keystroke rather than a lost one. That
+    /// truncation is upstream's behaviour and is kept; what is new is saying so,
+    /// which is the only way a host injecting keys can know to slow down.
+    /// `false` also covers a keyboard whose clock is low or whose scanning the
+    /// guest disabled: in every case the key did not get through intact.
+    pub fn gen_scancode(&mut self, key: super::scancodes::BxKey, pressed: bool) -> bool {
         // Ignore scancode if the keyboard clock is driven low.
         if !self.kbd_controller.kbd_clock_enabled {
-            return;
+            return false;
         }
         // Ignore scancode if scanning is disabled.
         if !self.kbd_internal_buffer.scanning_enabled {
-            return;
+            return false;
         }
 
         let set = (self.kbd_controller.current_scancodes_set as usize).min(2);
         let entry = &super::scancodes::SCANCODES[key.index()][set];
         let bytes: &'static [u8] = if pressed { entry.make } else { entry.brek };
 
+        // Every byte is attempted even after one is refused, because Bochs
+        // checks the ring per byte and so must this; the verdict accumulates
+        // rather than short-circuiting.
+        let mut delivered_intact = true;
         if self.kbd_controller.scancodes_translate {
             let mut escaped = 0x00u8;
             for &byte in bytes {
                 if byte == 0xF0 {
                     escaped = 0x80;
                 } else {
-                    self.kbd_enq(TRANSLATION_8042[byte as usize] | escaped);
+                    delivered_intact &= self.kbd_enq(TRANSLATION_8042[byte as usize] | escaped);
                     escaped = 0x00;
                 }
             }
         } else {
             for &byte in bytes {
-                self.kbd_enq(byte);
+                delivered_intact &= self.kbd_enq(byte);
             }
         }
+        delivered_intact
     }
 
-    pub fn send_scancode(&mut self, scancode: u8) {
+    /// Returns whether the byte reached the ring. See `gen_scancode`; a `0xF0`
+    /// break prefix under translation enqueues nothing by design and so always
+    /// reports success.
+    pub fn send_scancode(&mut self, scancode: u8) -> bool {
         if !self.kbd_controller.kbd_clock_enabled || !self.kbd_internal_buffer.scanning_enabled {
-            return;
+            return false;
         }
 
         if self.kbd_controller.scancodes_translate {
@@ -1997,6 +2102,7 @@ impl BxKeyboardC {
             if scancode == 0xF0 {
                 // 0xF0 = Set 2 break prefix: set escaped flag, don't enqueue
                 self.scancode_escaped = true;
+                true
             } else {
                 let escaped = if self.scancode_escaped {
                     0x80u8
@@ -2004,11 +2110,11 @@ impl BxKeyboardC {
                     0x00u8
                 };
                 self.scancode_escaped = false;
-                self.kbd_enq(TRANSLATION_8042[scancode as usize] | escaped);
+                self.kbd_enq(TRANSLATION_8042[scancode as usize] | escaped)
             }
         } else {
             // Raw mode — send bytes unmodified
-            self.kbd_enq(scancode);
+            self.kbd_enq(scancode)
         }
     }
 
@@ -2038,7 +2144,7 @@ impl BxKeyboardC {
 
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct KeyboardSnapshotRestore {
+pub struct KeyboardSnapshotRestore {
     pub(crate) led_status: u8,
     pub(crate) irq1_level: bool,
     pub(crate) irq12_level: bool,
@@ -2051,8 +2157,11 @@ pub(crate) struct KeyboardSnapshotRestore {
 }
 
 #[cfg(feature = "std")]
-impl BxKeyboardC {
-    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+impl crate::snapshot::SnapshotSection for BxKeyboardC {
+    const TAG: u32 = crate::snapshot::SEC_KEYBOARD;
+    type Restored = KeyboardSnapshotRestore;
+
+    fn snapshot_len(&self) -> SnapResult<u64> {
         validate_keyboard_ring(
             self.kbd_internal_buffer.head,
             self.kbd_internal_buffer.num_elements,
@@ -2099,11 +2208,11 @@ impl BxKeyboardC {
         )
     }
 
-    pub(crate) fn save_snapshot_v3<W: Write + ?Sized>(
+    fn save<W: SnapWrite>(
         &self,
         writer: &mut W,
-    ) -> std::io::Result<()> {
-        self.snapshot_v3_len()?;
+    ) -> SnapResult<()> {
+        self.snapshot_len()?;
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         save_keyboard_controller(writer, &self.kbd_controller)?;
         save_keyboard_ring(
@@ -2157,10 +2266,10 @@ impl BxKeyboardC {
         save_reset_request(writer, self.reset_requested)
     }
 
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> std::io::Result<KeyboardSnapshotRestore> {
+        reader: &mut R,
+    ) -> SnapResult<KeyboardSnapshotRestore> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(keyboard_snapshot_invalid(
                 "unsupported keyboard snapshot section version",
@@ -2270,12 +2379,12 @@ impl BxKeyboardC {
 }
 
 #[cfg(feature = "std")]
-fn keyboard_snapshot_invalid(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn keyboard_snapshot_invalid(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn keyboard_ring_capacity(capacity: usize) -> std::io::Result<usize> {
+fn keyboard_ring_capacity(capacity: usize) -> SnapResult<usize> {
     if capacity == 0 || capacity > bounds::MAX_SNAPSHOT_QUEUE_LEN {
         return Err(keyboard_snapshot_invalid(
             "keyboard ring capacity exceeds snapshot bounds",
@@ -2285,12 +2394,12 @@ fn keyboard_ring_capacity(capacity: usize) -> std::io::Result<usize> {
 }
 
 #[cfg(feature = "std")]
-fn controller_queue_capacity() -> std::io::Result<usize> {
+fn controller_queue_capacity() -> SnapResult<usize> {
     keyboard_ring_capacity(BX_KBD_CONTROLLER_QSIZE)
 }
 
 #[cfg(feature = "std")]
-fn validate_keyboard_ring(head: usize, count: usize, capacity: usize) -> std::io::Result<()> {
+fn validate_keyboard_ring(head: usize, count: usize, capacity: usize) -> SnapResult<()> {
     let capacity = keyboard_ring_capacity(capacity)?;
     if head >= capacity || count > capacity {
         return Err(keyboard_snapshot_invalid(
@@ -2301,7 +2410,7 @@ fn validate_keyboard_ring(head: usize, count: usize, capacity: usize) -> std::io
 }
 
 #[cfg(feature = "std")]
-fn keyboard_ring_index(head: usize, offset: usize, capacity: usize) -> std::io::Result<usize> {
+fn keyboard_ring_index(head: usize, offset: usize, capacity: usize) -> SnapResult<usize> {
     validate_keyboard_ring(head, offset, capacity)?;
     head.checked_add(offset)
         .map(|index| index % capacity)
@@ -2309,12 +2418,12 @@ fn keyboard_ring_index(head: usize, offset: usize, capacity: usize) -> std::io::
 }
 
 #[cfg(feature = "std")]
-fn save_keyboard_ring<W: Write + ?Sized>(
+fn save_keyboard_ring<W: SnapWrite>(
     writer: &mut W,
     buffer: &[u8],
     head: usize,
     count: usize,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     validate_keyboard_ring(head, count, buffer.len())?;
     writer.write_u32(
         u32::try_from(head)
@@ -2335,10 +2444,10 @@ fn save_keyboard_ring<W: Write + ?Sized>(
 }
 
 #[cfg(feature = "std")]
-fn restore_keyboard_ring<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_keyboard_ring<R: SnapRead>(
+    reader: &mut R,
     buffer: &mut [u8],
-) -> std::io::Result<(usize, usize)> {
+) -> SnapResult<(usize, usize)> {
     let capacity = keyboard_ring_capacity(buffer.len())?;
     let head = reader.read_count(capacity)?;
     let count = reader.read_count(capacity)?;
@@ -2355,7 +2464,7 @@ fn restore_keyboard_ring<R: Read>(
 }
 
 #[cfg(feature = "std")]
-fn validate_keyboard_controller(controller: &KbdController) -> std::io::Result<()> {
+fn validate_keyboard_controller(controller: &KbdController) -> SnapResult<()> {
     if controller.expecting_port60h > 1 || controller.expecting_mouse_parameter > 1 {
         return Err(keyboard_snapshot_invalid(
             "keyboard command parameter state is invalid",
@@ -2394,7 +2503,7 @@ fn validate_keyboard_controller(controller: &KbdController) -> std::io::Result<(
 fn validate_keyboard_timer_state(
     controller: &KbdController,
     timer_handle: Option<usize>,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     if controller.timer_pending == 1 && timer_handle.is_none() {
         return Err(keyboard_snapshot_invalid(
             "keyboard armed timer has no registered handle",
@@ -2404,7 +2513,7 @@ fn validate_keyboard_timer_state(
 }
 
 #[cfg(feature = "std")]
-fn validate_keyboard_buffer_state(buffer: &KbdInternalBuffer) -> std::io::Result<()> {
+fn validate_keyboard_buffer_state(buffer: &KbdInternalBuffer) -> SnapResult<()> {
     validate_keyboard_ring(buffer.head, buffer.num_elements, BX_KBD_ELEMENTS)?;
     if buffer.delay > TYPEMATIC_DELAY_MASK || buffer.repeat_rate > TYPEMATIC_RATE_MASK {
         return Err(keyboard_snapshot_invalid("keyboard typematic state is invalid"));
@@ -2424,7 +2533,7 @@ fn valid_mouse_mode(mode: u8) -> bool {
 }
 
 #[cfg(feature = "std")]
-fn validate_mouse_state(mouse: &MouseState) -> std::io::Result<()> {
+fn validate_mouse_state(mouse: &MouseState) -> SnapResult<()> {
     if !matches!(mouse.mouse_type, BX_MOUSE_TYPE_PS2 | BX_MOUSE_TYPE_IMPS2) {
         return Err(keyboard_snapshot_invalid("mouse type is invalid"));
     }
@@ -2442,10 +2551,10 @@ fn validate_mouse_state(mouse: &MouseState) -> std::io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn save_keyboard_controller<W: Write + ?Sized>(
+fn save_keyboard_controller<W: SnapWrite>(
     writer: &mut W,
     controller: &KbdController,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     validate_keyboard_controller(controller)?;
     writer.write_bool(controller.pare)?;
     writer.write_bool(controller.tim)?;
@@ -2476,9 +2585,9 @@ fn save_keyboard_controller<W: Write + ?Sized>(
 }
 
 #[cfg(feature = "std")]
-fn restore_keyboard_controller<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> std::io::Result<KbdController> {
+fn restore_keyboard_controller<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<KbdController> {
     let controller = KbdController {
         pare: reader.read_bool()?,
         tim: reader.read_bool()?,
@@ -2512,10 +2621,10 @@ fn restore_keyboard_controller<R: Read>(
 }
 
 #[cfg(feature = "std")]
-fn save_mouse_state<W: Write + ?Sized>(
+fn save_mouse_state<W: SnapWrite>(
     writer: &mut W,
     mouse: &MouseState,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     validate_mouse_state(mouse)?;
     writer.write_u8(mouse.mouse_type)?;
     writer.write_u8(mouse.sample_rate)?;
@@ -2533,9 +2642,9 @@ fn save_mouse_state<W: Write + ?Sized>(
 }
 
 #[cfg(feature = "std")]
-fn restore_mouse_state<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> std::io::Result<MouseState> {
+fn restore_mouse_state<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<MouseState> {
     let mouse = MouseState {
         mouse_type: reader.read_u8()?,
         sample_rate: reader.read_u8()?,
@@ -2556,10 +2665,10 @@ fn restore_mouse_state<R: Read>(
 }
 
 #[cfg(feature = "std")]
-fn save_reset_request<W: Write + ?Sized>(
+fn save_reset_request<W: SnapWrite>(
     writer: &mut W,
     reset: Option<crate::cpu::ResetReason>,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     let tag = match reset {
         None => 0,
         Some(crate::cpu::ResetReason::Software) => 10,
@@ -2573,9 +2682,9 @@ fn save_reset_request<W: Write + ?Sized>(
 }
 
 #[cfg(feature = "std")]
-fn restore_reset_request<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> std::io::Result<Option<crate::cpu::ResetReason>> {
+fn restore_reset_request<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<Option<crate::cpu::ResetReason>> {
     match reader.read_u8()? {
         0 => Ok(None),
         10 => Ok(Some(crate::cpu::ResetReason::Software)),
@@ -2586,6 +2695,78 @@ fn restore_reset_request<R: Read>(
     }
 }
 
+
+// ─── Device-API conversion ───────────────────────────────────────────────────
+
+impl BxKeyboardC {
+    /// IRQ lines the 8042 drives — Bochs keyboard.cc raises IRQ1 for the
+    /// keyboard stream and IRQ12 for the auxiliary (mouse) stream.
+    const IRQ_KEYBOARD: rusty_box_devices::api::IrqLine =
+        rusty_box_devices::api::IrqLine(1);
+    const IRQ_AUX: rusty_box_devices::api::IrqLine = rusty_box_devices::api::IrqLine(12);
+
+    /// Raise whichever streams the controller latched, from the mask its
+    /// periodic callback returns.
+    fn raise_latched(&mut self, irq_mask: u8, ctx: &mut rusty_box_devices::api::DeviceCtx<'_>) {
+        if irq_mask & 0x01 != 0 {
+            ctx.irq.raise(Self::IRQ_KEYBOARD);
+        }
+        if irq_mask & 0x02 != 0 {
+            ctx.irq.raise(Self::IRQ_AUX);
+        }
+    }
+}
+
+impl rusty_box_devices::api::PioDevice for BxKeyboardC {
+    fn pio_read(
+        &mut self,
+        port: u16,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+    ) -> u32 {
+        if port != KBD_DATA_PORT {
+            return self.read(port, len.bytes());
+        }
+        // Reading the output buffer consumes the pending byte, which drops the
+        // stream's interrupt line (Bochs keyboard.cc read: the IRQ is lowered
+        // for whichever stream owned the byte).
+        let result = self.read_data_port_for_device_manager();
+        if let Some(irq) = result.irq_to_lower {
+            ctx.irq.lower(rusty_box_devices::api::IrqLine(irq));
+        }
+        result.value
+    }
+
+    fn pio_write(
+        &mut self,
+        port: u16,
+        value: u32,
+        len: rusty_box_devices::api::IoLen,
+        _ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+    ) {
+        // A command write only queues work; the controller's periodic timer
+        // delivers whatever interrupts it produces.
+        self.write(port, value, len.bytes());
+    }
+}
+
+impl rusty_box_devices::api::TimedDevice for BxKeyboardC {
+    /// The 8042's serial-delay timer is continuous (Bochs keyboard.cc init),
+    /// so it is never re-armed here — the scheduler reloads the period — and
+    /// each elapsed period runs one `periodic(1)` pass.
+    fn timer_fired(
+        &mut self,
+        _local: u16,
+        fires: u32,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+    ) {
+        self.serial_fires_seen = self.serial_fires_seen.saturating_add(u64::from(fires));
+        for _ in 0..fires {
+            let irq_mask = self.timer_callback();
+            self.raise_latched(irq_mask, ctx);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2739,6 +2920,57 @@ mod tests {
         kbd
     }
 
+    /// The mouse differs from the keyboard in a way worth pinning: it is
+    /// all-or-nothing. `mouse_enq_packet` checks room for the whole 3- or
+    /// 4-byte packet before writing any of it (Bochs `mouse_enQ_packet`), so a
+    /// full ring can never leave the guest a torn packet — where the keyboard,
+    /// enqueuing byte by byte, can and does.
+    ///
+    /// It also reports, so a host can tell a delivered movement from a dropped
+    /// one. That matters for button edges, which unlike motion do not fold
+    /// into the next packet.
+    #[test]
+    fn a_full_mouse_ring_refuses_whole_packets_rather_than_tearing_them() {
+        let mut kbd = stream_mouse();
+
+        // Fill the ring with whole packets until one is refused.
+        let mut delivered = 0;
+        for _ in 0..BX_MOUSE_BUFF_SIZE {
+            if !kbd.mouse_motion(4, 4, 0, 0) {
+                break;
+            }
+            delivered += 1;
+        }
+
+        assert!(delivered > 0, "an empty ring must accept the first packet");
+        assert!(
+            !kbd.mouse_motion(4, 4, 0, 0),
+            "a full ring must refuse, and say so"
+        );
+
+        // Whatever is queued is a whole number of packets — never a fragment.
+        let packet_len = if kbd.mouse.im_mode { 4 } else { 3 };
+        assert_eq!(
+            kbd.mouse_internal_buffer.num_elements % packet_len,
+            0,
+            "a refusal must leave only whole packets queued, never a torn one"
+        );
+    }
+
+    /// A guest that put its mouse in remote mode is polling, not listening, so
+    /// nothing is enqueued and the caller is told.
+    #[test]
+    fn a_remote_mode_mouse_reports_that_nothing_was_delivered() {
+        let mut kbd = stream_mouse();
+        kbd.mouse.mode = MOUSE_MODE_REMOTE;
+
+        assert!(!kbd.mouse_motion(4, 4, 0, 0));
+        assert_eq!(
+            kbd.mouse_internal_buffer.num_elements, 0,
+            "remote mode enqueues nothing"
+        );
+    }
+
     fn mouse_byte(kbd: &BxKeyboardC, i: usize) -> u8 {
         let head = kbd.mouse_internal_buffer.head;
         kbd.mouse_internal_buffer.buffer[(head + i) % BX_MOUSE_BUFF_SIZE]
@@ -2869,7 +3101,7 @@ mod tests {
         // with timer_pending == 0).
         assert_eq!(kbd.timer_callback(), 0);
 
-        kbd.kbd_enq(0x1E);
+        assert!(kbd.kbd_enq(0x1E), "an empty ring takes the byte");
         assert_eq!(kbd.kbd_controller.timer_pending, 1);
 
         // Bochs keyboard.cc periodic(): the transfer fire makes the byte
@@ -2951,11 +3183,15 @@ mod tests {
         // 16 queued scancodes, then drops further ones (num_elements caps at 16).
         let mut kbd = BxKeyboardC::new();
         for i in 0..16u8 {
-            kbd.kbd_enq(0x10 + i);
+            assert!(kbd.kbd_enq(0x10 + i), "byte {i} fits inside the 16-entry ring");
         }
         assert_eq!(kbd.kbd_internal_buffer.num_elements, 16, "ring holds 16 entries");
-        // The 17th scancode is dropped, not queued.
-        kbd.kbd_enq(0xFF);
+        // The 17th scancode is dropped, not queued — and says so, which is what
+        // lets a host injecting input back off instead of losing keystrokes.
+        assert!(
+            !kbd.kbd_enq(0xFF),
+            "a full ring must REPORT the refusal, not just silently not grow"
+        );
         assert_eq!(
             kbd.kbd_internal_buffer.num_elements, 16,
             "the 17th scancode is dropped at the Bochs 16-entry limit"

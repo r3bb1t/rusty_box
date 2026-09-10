@@ -3,12 +3,10 @@
 //! Based on Bochs logical32.cc
 
 use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Flag update helpers
     // =========================================================================
@@ -332,39 +330,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     // get_laddr32_seg is defined in logical8.rs to avoid duplicate definitions
 
-    /// Write-back phase of a read-modify-write dword access.
-    /// Uses address_xlation populated by read_rmw_virtual_dword.
-    /// Bochs: write_RMW_linear_dword (access2.cc)
-    #[inline]
-    pub fn write_rmw_linear_dword(&mut self, val: u32) {
-        if self.address_xlation.pages > 2 {
-            // Host pointer cached from TLB hit — direct write
-            self.address_xlation.write_pages_u32(val);
-        } else if self.address_xlation.pages == 1 {
-            let paddr = self.address_xlation.paddress1;
-            if !self.mmio_write(paddr, 4, val as u64) {
-                self.mem_write_dword(paddr, val);
-            }
-        } else {
-            let bytes = val.to_le_bytes();
-            let len1 = self.address_xlation.len1 as usize;
-            let len2 = self.address_xlation.len2 as usize;
-            let p0 = self.address_xlation.paddress1;
-            let p1 = self.address_xlation.paddress2;
-            let first_value = (val as u64) & ((1u64 << (len1 * 8)) - 1);
-            if !self.mmio_write(p0, len1, first_value) {
-                for (index, &byte) in bytes[..len1].iter().enumerate() {
-                    self.mem_write_byte(p0 + index as u64, byte);
-                }
-            }
-            let second_value = (val >> (len1 * 8)) as u64;
-            if !self.mmio_write(p1, len2, second_value) {
-                for (index, &byte) in bytes[len1..].iter().enumerate() {
-                    self.mem_write_byte(p1 + index as u64, byte);
-                }
-            }
-        }
-    }
+
 
     // =========================================================================
     // Memory-form instructions
@@ -554,30 +520,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// CMP_EdGdR: CMP r/m32, r32 (register form)
-    /// Matches BX_CPU_C::CMP_EdGdR
-    pub fn cmp_ed_gd_r(&mut self, instr: &Instruction) {
-        let dst = instr.dst() as usize;
-        let src = instr.src() as usize;
-        let op1 = self.get_gpr32(dst);
-        let op2 = self.get_gpr32(src);
-        let result = op1.wrapping_sub(op2);
-        self.set_flags_oszapc_sub_32(op1, op2, result);
-    }
-
-    /// CMP_EdGdM: CMP r/m32, r32 (memory form)
-    /// Matches BX_CPU_C::CMP_EdGdM
-    pub fn cmp_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let op1_32 = self.v_read_rmw_dword(seg, eaddr)?;
-        let src_reg = instr.src() as usize;
-        let op2_32 = self.get_gpr32(src_reg);
-        let result = op1_32.wrapping_sub(op2_32);
-        self.set_flags_oszapc_sub_32(op1_32, op2_32, result);
-        Ok(())
-    }
-
     /// CMP_EdIdM: CMP r/m32, imm32 (memory form)
     /// Matches BX_CPU_C::CMP_EdIdM
     pub fn cmp_ed_id_m(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -711,36 +653,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Ok(())
         } else {
             self.test_ed_id_m(instr)
-        }
-    }
-
-    /// CMP r32, r/m32 - unified (GdEd: register dest compares with reg or memory)
-    pub fn cmp_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() {
-            self.cmp_gd_ed_r(instr);
-            Ok(())
-        } else {
-            self.cmp_gd_ed_m(instr)
-        }
-    }
-
-    /// CMP r/m32, r32 - unified (EdGd: memory or register compared with register)
-    pub fn cmp_ed_gd(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() {
-            self.cmp_ed_gd_r(instr);
-            Ok(())
-        } else {
-            self.cmp_ed_gd_m(instr)
-        }
-    }
-
-    /// CMP r/m32, imm32 - unified (handles both CmpEdId and CmpEdsIb opcodes)
-    pub fn cmp_ed_id(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() {
-            self.cmp_ed_id_r(instr);
-            Ok(())
-        } else {
-            self.cmp_ed_id_m(instr)
         }
     }
 

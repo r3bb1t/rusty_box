@@ -4,8 +4,7 @@
 //! Based on Bochs cpu/exception.cc protected_mode_int
 
 use super::{
-    cpu::{BxCpuC, Exception},
-    cpuid::BxCpuIdTrait,
+    cpu::Exception,
     decoder::BxSegregs,
     descriptor::{BxDescriptor, BxSegmentReg, BxSelector, SystemAndGateDescriptorEnum},
     eflags::EFlags,
@@ -13,7 +12,7 @@ use super::{
     Result,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Handle interrupt in protected mode via IDT
     /// Based on BX_CPU_C::protected_mode_int in exception.cc
     pub(super) fn protected_mode_int(

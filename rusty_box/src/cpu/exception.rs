@@ -4,7 +4,7 @@ use crate::cpu::{
     decoder::features::X86Feature,
 };
 
-use super::{cpuid::BxCpuIdTrait, BxCpuC, Result};
+use super::Result;
 
 /// Interrupt type, based on BX_INTERRUPT_TYPE in Bochs
 #[derive(Debug, Clone, Copy)]
@@ -248,7 +248,7 @@ const EXCEPTIONS_INFO: [BxExceptionInfo; BX_CPU_HANDLED_EXCEPTIONS as _] = [
     },
 ];
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Bochs `BX_CPU_C::get_exception_type` — returns the exception-type
     /// classification (BENIGN/CONTRIBUTORY/PAGE_FAULT/DOUBLE_FAULT) for
     /// the given vector. Out-of-range vectors return BENIGN. #CP and
@@ -286,8 +286,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Diagnostic ring for the pf_diag tripwire (see cpu.rs field docs).
         #[cfg(feature = "std")]
         {
-            self.exc_diag_ring[self.exc_diag_idx % 32] =
-                (self.icount, vector as u8, error_code, self.prev_rip);
+            let slot = self.exc_diag_idx % 32;
+            self.exc_diag_ring[slot] = (self.icount, vector as u8, error_code, self.prev_rip);
             self.exc_diag_idx = self.exc_diag_idx.wrapping_add(1);
         }
         // Log the caller site for #GP to identify spurious exceptions during debugging
@@ -322,7 +322,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // BOCHS BX_INSTR_EXCEPTION(cpu_id, vector, error_code)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_exception() {
             self.instrumentation
                 .fire_exception(vector as u8, error_code as u32);
@@ -347,10 +346,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         if matches!(exception_class, ExceptionClass::Fault) {
             // restore RIP/RSP to value before error occurred
-            self.set_rip(self.prev_rip);
+            let rip = self.prev_rip;
+            self.set_rip(rip);
             if self.speculative_rsp {
-                self.set_rsp(self.prev_rsp);
-                self.set_ssp(self.prev_ssp);
+                let rsp = self.prev_rsp;
+                self.set_rsp(rsp);
+                let ssp = self.prev_ssp;
+                self.set_ssp(ssp);
             }
             self.speculative_rsp = false;
 
@@ -371,8 +373,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 tracing::error!("TRIPLE FAULT: RIP={:#x} CS={:#06x} vector={:?} error_code={:#x} icount={} CR2={:#x}",
                     rip, cs, vector, error_code, self.icount, self.cr2);
                 self.debug_puts(b"[TRIPLE_FAULT]\n");
-                self.activity_state = super::cpu::CpuActivityState::Shutdown;
-                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                // Bochs exception.cc reaches shutdown through proc_ctrl.cc
+                // `shutdown()` -> `enter_sleep_state`.
+                self.enter_sleep_state(super::cpu::CpuActivityState::Shutdown);
                 return Err(super::error::CpuError::CpuLoopRestart);
             }
         }
@@ -482,13 +485,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Call interrupt handler based on CPU mode
         let vector_u8 = vector as u8;
 
-        // Bochs interrupt() wrapper (exception.cc):
+        // Bochs exception.cc `exception` ends by calling `interrupt`; this
+        // function reproduces `interrupt`'s delivery sequence inline instead
+        // of calling it, so every effect `interrupt` has must be mirrored here
+        // by hand — an R5 hazard: an effect missing from this copy is missing
+        // from every exception. This is one of them. A vectored delivery
+        // resumes execution, whatever state the processor was sleeping in —
+        // a `#DB` owed by `HLT` lands when the wait ends and the handler runs
+        // on an active processor. Before delivery, because delivery can leave
+        // through a nested fault and never reach the loop's tail.
+        self.activity_state = super::cpu::CpuActivityState::Active;
         // Clear debug trap and interrupt inhibition before delivery.
         self.debug_trap = 0;
         self.inhibit_mask = 0;
 
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         if self.real_mode() {

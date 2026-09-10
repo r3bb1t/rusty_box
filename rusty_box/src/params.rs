@@ -165,6 +165,30 @@ impl BxParams {
     }
 
     #[inline]
+    /// Hold a feature back from the processor this machine offers its guest.
+    ///
+    /// Bochs `cpuid: <feature>=0`. The feature leaves the ISA bitmask at
+    /// initialisation, which is what every decode gate, `XSETBV` and the
+    /// `CPUID` leaves derived from it all read — so a guest is never told it
+    /// has something one of them would refuse.
+    ///
+    /// A machine setting rather than an engine one, deliberately: a guest that
+    /// enabled a register file keeps it across a switch between engines, so
+    /// the two must offer the same processor or the switch changes the
+    /// hardware under a running guest.
+    #[must_use]
+    pub fn excluding(mut self, feature: X86Feature) -> Self {
+        self.cpu_exclude_features.push(feature);
+        self
+    }
+
+    /// Offer a feature the model does not carry — Bochs `cpuid: <feature>=1`.
+    #[must_use]
+    pub fn including(mut self, feature: X86Feature) -> Self {
+        self.cpu_include_features.push(feature);
+        self
+    }
+
     pub fn cpu_topology(&self) -> CpuTopology {
         CpuTopology::new_unchecked(self.cpu_nprocessors, self.cpu_ncores, self.cpu_nthreads)
     }

@@ -26,14 +26,13 @@
 //! Ported from `cpp_orig/bochs/iodev/ioapic.cc` (370 lines) and
 //! `cpp_orig/bochs/iodev/ioapic.h` (117 lines).
 
+use super::irq::ServiceRequest;
 use crate::config::BxPhyAddress;
 use crate::memory::BxMemC;
-#[cfg(feature = "std")]
-use std::io::{Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -528,13 +527,7 @@ impl BxIoApic {
     ///
     /// Bochs: `void bx_ioapic_c::write_aligned(bx_phy_address address, Bit32u value)`
     /// (ioapic.cc)
-    pub fn write_aligned(
-        &mut self,
-        address: BxPhyAddress,
-        value: u32,
-        pic: Option<&mut super::pic::BxPicC>,
-        lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
-    ) {
+    pub(crate) fn write_aligned(&mut self, address: BxPhyAddress, value: u32) -> ServiceRequest {
         let offset = (address as u32) & 0xFF;
         tracing::trace!(
             "IOAPIC: write aligned addr={:#010x} offset={:#04x} data={:#010x}",
@@ -547,17 +540,18 @@ impl BxIoApic {
             // Write to IOREGSEL
             // Bochs: ioregsel = value; return; (ioapic.cc)
             self.ioregsel = value;
-            return;
+            return ServiceRequest::NotNeeded;
         }
 
         if offset != 0x10 {
             // Bochs: BX_PANIC(("IOAPIC: write to unsupported address")); (ioapic.cc)
             tracing::error!("IOAPIC: write to unsupported MMIO offset {:#04x}", offset);
-            return;
+            return ServiceRequest::NotNeeded;
         }
 
         // Data register write — dispatch based on IOREGSEL
         // Bochs: switch (ioregsel) { ... } (ioapic.cc)
+        let mut service = ServiceRequest::NotNeeded;
         match self.ioregsel {
             IOREGSEL_ID => {
                 // Set APIC ID from bits [27:24]
@@ -602,7 +596,7 @@ impl BxIoApic {
                         entry.vector(),
                     );
                     // Bochs: service_ioapic(); (ioapic.cc)
-                    self.service_ioapic(pic, lapic);
+                    service = ServiceRequest::Needed;
                 } else {
                     tracing::error!(
                         "IOAPIC: IOREGSEL points to undefined register {:#04x}",
@@ -611,6 +605,7 @@ impl BxIoApic {
                 }
             }
         }
+        service
     }
 
     /// Enable or disable the I/O APIC MMIO region, optionally changing the base offset.
@@ -630,7 +625,7 @@ impl BxIoApic {
         base_offset: u16,
         mem: &mut BxMemC,
     ) -> crate::Result<bool> {
-        let device_id = crate::memory::MemoryDeviceId::IoApic(self as *mut BxIoApic);
+        let device_id = crate::iodev::DevSlot::IOAPIC.mmio_token();
         let mut changed = false;
         if new_enabled != self.enabled {
             if new_enabled {
@@ -697,26 +692,22 @@ impl BxIoApic {
     ///
     /// Bochs: `void bx_ioapic_c::set_irq_level(Bit8u int_in, bool level)` (ioapic.cc)
     ///
-    /// `pic` and `lapic` are threaded through to `service_ioapic()` for
-    /// ExtINT vector lookup and LAPIC delivery respectively.
-    pub fn set_irq_level(
-        &mut self,
-        mut int_in: u8,
-        level: bool,
-        pic: Option<&mut super::pic::BxPicC>,
-        lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
-    ) {
+    /// Servicing needs an 8259 to acknowledge ExtINT entries with, which this
+    /// controller has no way to reach, so the need is reported to the caller —
+    /// see [`IrqFabric`](super::irq::IrqFabric).
+    pub(crate) fn set_pin_level(&mut self, mut int_in: u8, level: bool) -> ServiceRequest {
         // Bochs: if (int_in == 0) int_in = 2; // timer connected to pin #2 (ioapic.cc)
         if int_in == 0 {
             int_in = 2;
         }
 
         if (int_in as usize) >= IOAPIC_NUM_PINS {
-            return;
+            return ServiceRequest::NotNeeded;
         }
 
         let bit: u32 = 1 << int_in;
         let level_bit = if level { bit } else { 0 };
+        let mut service = ServiceRequest::NotNeeded;
 
         // Only act on a change in pin level
         // Bochs: if (((Bit32u)level<<int_in) != (intin & bit)) { ... } (ioapic.cc)
@@ -734,7 +725,7 @@ impl BxIoApic {
                 if level {
                     self.intin |= bit;
                     self.irr |= bit;
-                    self.service_ioapic(pic, lapic);
+                    service = ServiceRequest::Needed;
                 } else {
                     self.intin &= !bit;
                     self.irr &= !bit;
@@ -746,13 +737,14 @@ impl BxIoApic {
                     self.intin |= bit;
                     if !entry.is_masked() {
                         self.irr |= bit;
-                        self.service_ioapic(pic, lapic);
+                        service = ServiceRequest::Needed;
                     }
                 } else {
                     self.intin &= !bit;
                 }
             }
         }
+        service
     }
 
     /// Receive End-of-Interrupt for a specific vector.
@@ -766,6 +758,20 @@ impl BxIoApic {
         // In a full implementation, we would clear the remote_irr bit for
         // any redirect table entry whose vector matches and that is level-triggered.
         // Bochs doesn't do this either — it just logs.
+    }
+
+    /// Whether some redirection entry carrying `vector` is level-triggered with
+    /// its request still standing.
+    ///
+    /// The question an EOI asks of this controller when the Local APIC that
+    /// took the interrupt is a backend's: a level entry keeps its IRR bit until
+    /// its pin drops (`set_pin_level`), so a set bit here means the line is
+    /// still asserted and the interrupt is owed again.
+    pub(crate) fn has_asserted_level_entry(&self, vector: u8) -> bool {
+        (0..IOAPIC_NUM_PINS).any(|pin| {
+            let entry = &self.ioredtbl[pin];
+            entry.vector() == vector && entry.trigger_mode() != 0 && self.irr & (1 << pin) != 0
+        })
     }
 
     /// Scan the IRR for unmasked interrupts and attempt delivery via the APIC bus.
@@ -783,14 +789,15 @@ impl BxIoApic {
     ///
     /// Bochs: `void bx_ioapic_c::service_ioapic()` (ioapic.cc)
     ///
-    /// `pic` is needed for ExtINT delivery mode (calls `pic.iac()`).
-    /// `lapic` is needed for direct LAPIC interrupt delivery.
-    /// Either may be `None`; fallback paths handle the missing dependency.
-    fn service_ioapic(
-        &mut self,
-        mut pic: Option<&mut super::pic::BxPicC>,
-        mut lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
-    ) {
+    /// `extint` answers for a redirection entry in ExtINT delivery mode, where
+    /// Bochs reads the vector with `DEV_pic_iac()`.
+    ///
+    /// Delivery to a Local APIC is never synchronous here: the LAPICs live on
+    /// the CPUs, outside this fabric, so a message is queued and the machine
+    /// routes it at the next boundary (`sync_final_event_levels`). That is why
+    /// no branch below can report Bochs's `done` — `complete_deferred_delivery`
+    /// applies exactly that bookkeeping once the answer is known.
+    pub(crate) fn service<E: super::irq::ExtIntVector>(&mut self, extint: &mut E) {
         tracing::trace!("IOAPIC: servicing (irr={:#010x})", self.irr);
 
         for pin in 0..IOAPIC_NUM_PINS {
@@ -808,81 +815,40 @@ impl BxIoApic {
             // Determine vector
             // Bochs: if (entry->delivery_mode() == 7) vector = DEV_pic_iac();
             // else vector = entry->vector(); (ioapic.cc)
-            let mut needs_pic_iac = false;
             let vector = if entry.delivery_mode() == IoApicDeliveryMode::ExtInt as u8 {
-                // ExtINT: Bochs calls DEV_pic_iac() for the vector (ioapic.cc).
-                if let Some(pic) = pic.as_deref_mut() {
-                    let v = pic.iac();
-                    tracing::trace!(
-                        "IOAPIC: ExtINT mode on pin {} — PIC IAC vector {:#04x}",
-                        pin,
-                        v
-                    );
+                let v = extint.acknowledge();
+                tracing::trace!(
+                    "IOAPIC: ExtINT mode on pin {} — PIC IAC vector {:#04x}",
+                    pin,
                     v
-                } else {
-                    // The emulator will resolve DEV_pic_iac() when it drains
-                    // this deferred delivery with DeviceManager access.
-                    needs_pic_iac = true;
-                    0
-                }
+                );
+                v
             } else {
                 entry.vector()
             };
 
-            // Attempt delivery via APIC bus → Local APIC
+            // Attempt delivery via APIC bus → Local APIC. Bochs
+            // apic_bus_deliver_interrupt rejects lowest-priority delivery in
+            // physical destination mode; anything else is queued for the
+            // machine to route.
             let trigger = entry.trigger_mode();
             let delivery_mode = entry.delivery_mode();
             let dest = entry.destination() as u32;
             let dest_mode = entry.destination_mode();
-            let mut queued = false;
-            let done = if delivery_mode == IoApicDeliveryMode::LowPriority as u8 && dest_mode == 0 {
-                // Bochs apic_bus_deliver_interrupt rejects lowest-priority
-                // delivery in physical destination mode.
-                false
-            } else if let Some(lapic) = lapic.as_deref_mut() {
-                let accepts = if dest_mode != 0 {
-                    lapic.matches_logical_dest(dest)
-                } else {
-                    dest == lapic.get_id() || (dest & APIC_ID_MASK) == APIC_ID_MASK
-                };
-                if accepts {
-                    lapic.deliver(vector, delivery_mode, trigger);
-                }
-                accepts
-            } else if self.enqueue_delivery(
-                pin as u8,
-                vector,
-                delivery_mode,
-                trigger,
-                dest,
-                dest_mode,
-                needs_pic_iac,
-            ) {
+            let queued = !(delivery_mode == IoApicDeliveryMode::LowPriority as u8 && dest_mode == 0)
+                && self.enqueue_delivery(pin as u8, vector, delivery_mode, trigger, dest, dest_mode);
+
+            // Bochs sets the delivery-status bit on both paths: the message is
+            // either in flight or stuck. `complete_deferred_delivery` clears it
+            // once the Local APICs have answered.
+            self.ioredtbl[pin].set_delivery_status();
+            if queued {
+                // Edge-triggered: the request is consumed by the send. A
+                // level-triggered pin keeps IRR until its EOI.
                 if trigger == 0 {
                     self.irr &= !mask;
                 }
-                queued = true;
-                false
             } else {
-                false
-            };
-
-            if queued {
-                self.ioredtbl[pin].set_delivery_status();
-                continue;
-            }
-
-            // Bochs: (ioapic.cc)
-            let entry = &mut self.ioredtbl[pin];
-            if done {
-                // Edge-triggered: clear IRR; level-triggered: keep IRR set
-                if entry.trigger_mode() == 0 {
-                    self.irr &= !mask;
-                }
-                entry.clear_delivery_status();
-                self.stuck_count = 0;
-            } else {
-                entry.set_delivery_status();
                 self.stuck_count += 1;
                 if self.stuck_count > 5 {
                     tracing::debug!("IOAPIC: vector {:#04x} stuck?", vector);
@@ -905,7 +871,6 @@ impl BxIoApic {
         trigger_mode: u8,
         dest: u32,
         dest_mode: u8,
-        needs_pic_iac: bool,
     ) -> bool {
         if self.num_pending_deliveries < self.pending_deliveries.len() {
             self.pending_deliveries[self.num_pending_deliveries] = PendingIoApicDelivery {
@@ -915,7 +880,10 @@ impl BxIoApic {
                 trigger_mode,
                 dest,
                 dest_mode,
-                needs_pic_iac,
+                // The vector is already resolved: an ExtINT entry acknowledged
+                // the 8259 above, in this very call. Only a snapshot written
+                // before the fabric existed can carry an unresolved message.
+                needs_pic_iac: false,
             };
             self.num_pending_deliveries += 1;
             true
@@ -1012,8 +980,11 @@ impl BxIoApic {
 }
 
 #[cfg(feature = "std")]
-impl BxIoApic {
-    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+impl crate::snapshot::SnapshotSection for BxIoApic {
+    const TAG: u32 = crate::snapshot::SEC_IOAPIC;
+    type Restored = ();
+
+    fn snapshot_len(&self) -> SnapResult<u64> {
         validate_ioapic_snapshot_state(self)?;
         let routes = checked_snapshot_len_mul(24, 8)?;
         let queue = checked_snapshot_len_mul(
@@ -1026,11 +997,11 @@ impl BxIoApic {
         checked_snapshot_len_add(queue_prefix, queue)
     }
 
-    pub(crate) fn save_snapshot_v3<W: Write + ?Sized>(
+    fn save<W: SnapWrite>(
         &self,
         writer: &mut W,
-    ) -> std::io::Result<()> {
-        self.snapshot_v3_len()?;
+    ) -> SnapResult<()> {
+        self.snapshot_len()?;
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         writer.write_bool(self.enabled)?;
         writer.write_u32(self.base_addr)?;
@@ -1056,10 +1027,10 @@ impl BxIoApic {
         Ok(())
     }
 
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> std::io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(ioapic_snapshot_invalid(
                 "unsupported IOAPIC snapshot section version",
@@ -1102,12 +1073,12 @@ impl BxIoApic {
 }
 
 #[cfg(feature = "std")]
-fn ioapic_snapshot_invalid(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn ioapic_snapshot_invalid(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn ioapic_queue_capacity() -> std::io::Result<usize> {
+fn ioapic_queue_capacity() -> SnapResult<usize> {
     if IOAPIC_PENDING_DELIVERY_CAPACITY > bounds::MAX_SNAPSHOT_QUEUE_LEN {
         return Err(ioapic_snapshot_invalid(
             "IOAPIC pending queue capacity exceeds snapshot bounds",
@@ -1134,7 +1105,7 @@ fn validate_ioapic_configuration(
     id: u32,
     intin: u32,
     irr: u32,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     let pin_mask = (1u32 << IOAPIC_NUM_PINS) - 1;
     if enabled != live.enabled || base_addr != live.base_addr {
         return Err(ioapic_snapshot_invalid(
@@ -1151,7 +1122,7 @@ fn validate_ioapic_configuration(
 }
 
 #[cfg(feature = "std")]
-fn validate_ioapic_route(lo: u32, hi: u32) -> std::io::Result<()> {
+fn validate_ioapic_route(lo: u32, hi: u32) -> SnapResult<()> {
     if lo & !0x0001_FFFF != 0 || hi & 0x00FF_FFFF != 0 {
         return Err(ioapic_snapshot_invalid(
             "IOAPIC redirection entry contains reserved bits",
@@ -1181,7 +1152,7 @@ fn validate_ioapic_route(lo: u32, hi: u32) -> std::io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn validate_ioapic_snapshot_state(ioapic: &BxIoApic) -> std::io::Result<()> {
+fn validate_ioapic_snapshot_state(ioapic: &BxIoApic) -> SnapResult<()> {
     validate_ioapic_configuration(
         ioapic,
         ioapic.enabled,
@@ -1209,7 +1180,7 @@ fn validate_ioapic_snapshot_state(ioapic: &BxIoApic) -> std::io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn validate_ioapic_delivery(delivery: PendingIoApicDelivery) -> std::io::Result<()> {
+fn validate_ioapic_delivery(delivery: PendingIoApicDelivery) -> SnapResult<()> {
     if usize::from(delivery.pin) >= IOAPIC_NUM_PINS
         || !valid_ioapic_delivery_mode(delivery.delivery_mode)
         || delivery.trigger_mode > 1
@@ -1226,10 +1197,10 @@ fn validate_ioapic_delivery(delivery: PendingIoApicDelivery) -> std::io::Result<
 }
 
 #[cfg(feature = "std")]
-fn save_ioapic_delivery<W: Write + ?Sized>(
+fn save_ioapic_delivery<W: SnapWrite>(
     writer: &mut W,
     delivery: PendingIoApicDelivery,
-) -> std::io::Result<()> {
+) -> SnapResult<()> {
     validate_ioapic_delivery(delivery)?;
     writer.write_u8(delivery.pin)?;
     writer.write_u8(delivery.vector)?;
@@ -1241,9 +1212,9 @@ fn save_ioapic_delivery<W: Write + ?Sized>(
 }
 
 #[cfg(feature = "std")]
-fn restore_ioapic_delivery<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> std::io::Result<PendingIoApicDelivery> {
+fn restore_ioapic_delivery<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<PendingIoApicDelivery> {
     let delivery = PendingIoApicDelivery {
         pin: reader.read_u8()?,
         vector: reader.read_u8()?,
@@ -1273,7 +1244,9 @@ fn restore_ioapic_delivery<R: Read>(
 /// Bochs: `static bool ioapic_read(bx_phy_address a20addr, unsigned len, void *data, void *param)`
 /// (ioapic.cc)
 impl BxIoApic {
-    pub(crate) fn mem_read(&self, addr: BxPhyAddress, len: u32, data: &mut [u8]) -> bool {
+    /// Bochs's handler returns "claimed" unconditionally; the window is ours by
+    /// the time we are called, so there is nothing for a verdict to say.
+    pub(crate) fn mem_read(&self, addr: BxPhyAddress, len: u32, data: &mut [u8]) {
         // Check that access doesn't span a 32-bit boundary
         // Bochs: if((a20addr & ~0x3) != ((a20addr+len-1) & ~0x3)) (ioapic.cc)
         if (addr & !0x3) != ((addr + len as u64 - 1) & !0x3) {
@@ -1282,7 +1255,7 @@ impl BxIoApic {
                 addr,
                 len
             );
-            return true;
+            return;
         }
 
         let value = self.read_aligned(addr & !0x3);
@@ -1304,7 +1277,6 @@ impl BxIoApic {
                 tracing::error!("IOAPIC: unsupported read len={} at addr={:#x}", len, addr);
             }
         }
-        true
     }
 
     /// MMIO write handler for the I/O APIC.
@@ -1314,24 +1286,28 @@ impl BxIoApic {
     ///
     /// Bochs: `static bool ioapic_write(bx_phy_address a20addr, unsigned len, void *data, void *param)`
     /// (ioapic.cc)
-    pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) -> bool {
+    pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) -> ServiceRequest {
         // Bochs: if(a20addr & 0xf) { BX_PANIC(...); return 1; } (ioapic.cc)
         if addr & 0xF != 0 {
             tracing::error!("IOAPIC: write at unaligned address {:#x}", addr);
-            return true;
+            return ServiceRequest::NotNeeded;
         }
 
         // Bochs: (ioapic.cc)
+        // A buffer shorter than the declared length is rejected like every
+        // other malformed access above: `len` is the caller's claim about the
+        // access, `data` is what it actually brought, and only the second can
+        // be read.
         if len == 4 {
-            let value = u32::from_ne_bytes(
-                data[..4]
-                    .try_into()
-                    .expect("IOAPIC write: data too short for 4-byte access"),
-            );
-            self.write_aligned(
-                addr, value, None, // no PIC available in MMIO callback
-                None, // no LAPIC available in MMIO callback
-            );
+            let Some(bytes) = data.first_chunk::<4>() else {
+                tracing::error!(
+                    "IOAPIC: 4-byte write at {:#x} carrying only {} bytes",
+                    addr,
+                    data.len()
+                );
+                return ServiceRequest::NotNeeded;
+            };
+            self.write_aligned(addr, u32::from_ne_bytes(*bytes))
         } else {
             // Non-4-byte writes: only accepted at IOREGSEL offset (0x00)
             let data_offset = (addr & 0xFF) as u32;
@@ -1341,27 +1317,30 @@ impl BxIoApic {
                     len,
                     addr
                 );
-                return true;
+                return ServiceRequest::NotNeeded;
             }
 
-            let value = match len {
-                2 => u16::from_ne_bytes(
-                    data[..2]
-                        .try_into()
-                        .expect("IOAPIC write: data too short for 2-byte access"),
-                ) as u32,
-                1 => data[0] as u32,
+            // Bochs ioapic.cc zero-extends a narrow IOREGSEL write, so both
+            // arms widen with `From` rather than casting.
+            let value = match (len, data.first_chunk::<2>(), data.first()) {
+                (2, Some(bytes), _) => u32::from(u16::from_ne_bytes(*bytes)),
+                (1, _, Some(&byte)) => u32::from(byte),
+                (1 | 2, _, _) => {
+                    tracing::error!(
+                        "IOAPIC: {}-byte write at {:#x} carrying only {} bytes",
+                        len,
+                        addr,
+                        data.len()
+                    );
+                    return ServiceRequest::NotNeeded;
+                }
                 _ => {
                     tracing::error!("IOAPIC: unsupported write len={} at addr={:#x}", len, addr);
-                    return true;
+                    return ServiceRequest::NotNeeded;
                 }
             };
-            self.write_aligned(
-                addr, value, None, // no PIC available in MMIO callback
-                None, // no LAPIC available in MMIO callback
-            );
+            self.write_aligned(addr, value)
         }
-        true
     }
 }
 
@@ -1403,6 +1382,7 @@ impl BxIoApic {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
 
 #[cfg(test)]
 mod tests {
@@ -1501,92 +1481,98 @@ mod tests {
         assert_eq!(value, 0x00170011);
     }
 
+    /// The pin tests drive the controller through its fabric, because that is
+    /// the only thing that can service it: the scan needs an 8259 to
+    /// acknowledge an ExtINT entry with, and this controller has none.
+    fn fabric() -> super::super::irq::IrqFabric {
+        super::super::irq::IrqFabric::new()
+    }
+
     #[test]
     fn test_ioapic_write_read_redirect() {
-        let mut ioapic = BxIoApic::new();
+        let mut fabric = fabric();
 
         // Write low word of entry 0 (IOREGSEL = 0x10)
-        ioapic.ioregsel = 0x10;
-        ioapic.write_aligned(0xFEC00010, 0x00000042, None, None); // vector=0x42, unmasked
+        fabric.ioapic_mut().ioregsel = 0x10;
+        fabric.mmio_write(0x10, 4, &0x0000_0042u32.to_ne_bytes()); // vector=0x42, unmasked
 
         // Read it back
-        ioapic.ioregsel = 0x10;
-        let lo = ioapic.read_aligned(0xFEC00010);
+        fabric.ioapic_mut().ioregsel = 0x10;
+        let lo = fabric.ioapic().read_aligned(0xFEC00010);
         assert_eq!(lo & 0xFF, 0x42);
         assert_eq!(lo & 0x10000, 0); // unmasked
 
         // Write high word of entry 0 (IOREGSEL = 0x11)
-        ioapic.ioregsel = 0x11;
-        ioapic.write_aligned(0xFEC00010, 0x03000000, None, None); // dest = 3
+        fabric.ioapic_mut().ioregsel = 0x11;
+        fabric.mmio_write(0x10, 4, &0x0300_0000u32.to_ne_bytes()); // dest = 3
 
         // Read it back
-        ioapic.ioregsel = 0x11;
-        let hi = ioapic.read_aligned(0xFEC00010);
+        fabric.ioapic_mut().ioregsel = 0x11;
+        let hi = fabric.ioapic().read_aligned(0xFEC00010);
         assert_eq!(hi, 0x03000000);
     }
 
     #[test]
     fn test_irq0_remapped_to_pin2() {
-        let mut ioapic = BxIoApic::new();
+        let mut fabric = fabric();
         // Unmask pin 2 (edge-triggered)
-        ioapic.ioredtbl[2].set_lo_part(0x00000020); // vector=0x20, unmasked
+        fabric.ioapic_mut().ioredtbl[2].set_lo_part(0x00000020); // vector=0x20, unmasked
 
         // Assert IRQ 0 — should be remapped to pin 2
-        ioapic.set_irq_level(0, true, None, None);
-        assert_eq!(ioapic.intin & (1 << 2), 1 << 2);
-        // IRR is cleared because service_ioapic() delivered successfully (edge-triggered)
-        assert_eq!(ioapic.irr & (1 << 2), 0);
+        fabric.set_ioapic_pin(0, true);
+        assert_eq!(fabric.ioapic().intin & (1 << 2), 1 << 2);
+        // IRR is cleared because servicing queued the message (edge-triggered)
+        assert_eq!(fabric.ioapic().irr & (1 << 2), 0);
 
         // Deassert
-        ioapic.set_irq_level(0, false, None, None);
-        assert_eq!(ioapic.intin & (1 << 2), 0);
+        fabric.set_ioapic_pin(0, false);
+        assert_eq!(fabric.ioapic().intin & (1 << 2), 0);
     }
 
     #[test]
     fn test_edge_triggered_irq() {
-        let mut ioapic = BxIoApic::new();
+        let mut fabric = fabric();
         // Unmask pin 5, edge-triggered (bit 15 = 0), vector=0x25
-        ioapic.ioredtbl[5].set_lo_part(0x00000025);
+        fabric.ioapic_mut().ioredtbl[5].set_lo_part(0x00000025);
 
-        // Rising edge triggers interrupt — delivery succeeds immediately (stub)
-        // so IRR is cleared for edge-triggered entries after service_ioapic().
-        ioapic.set_irq_level(5, true, None, None);
-        assert_ne!(ioapic.intin & (1 << 5), 0);
-        // IRR was cleared by service_ioapic (delivery succeeded via stub)
-        assert_eq!(ioapic.irr & (1 << 5), 0);
+        // Rising edge triggers interrupt — servicing queues the message, so
+        // IRR is cleared for edge-triggered entries.
+        fabric.set_ioapic_pin(5, true);
+        assert_ne!(fabric.ioapic().intin & (1 << 5), 0);
+        assert_eq!(fabric.ioapic().irr & (1 << 5), 0);
 
         // Falling edge clears input
-        ioapic.set_irq_level(5, false, None, None);
-        assert_eq!(ioapic.intin & (1 << 5), 0);
+        fabric.set_ioapic_pin(5, false);
+        assert_eq!(fabric.ioapic().intin & (1 << 5), 0);
     }
 
     #[test]
     fn test_level_triggered_irq() {
-        let mut ioapic = BxIoApic::new();
+        let mut fabric = fabric();
         // Unmask pin 10, level-triggered (bit 15 = 1), vector=0x2A
-        ioapic.ioredtbl[10].set_lo_part(0x0000802A); // bit 15 set
+        fabric.ioapic_mut().ioredtbl[10].set_lo_part(0x0000802A); // bit 15 set
 
         // Assert level
-        ioapic.set_irq_level(10, true, None, None);
-        assert_ne!(ioapic.intin & (1 << 10), 0);
-        assert_ne!(ioapic.irr & (1 << 10), 0);
+        fabric.set_ioapic_pin(10, true);
+        assert_ne!(fabric.ioapic().intin & (1 << 10), 0);
+        assert_ne!(fabric.ioapic().irr & (1 << 10), 0);
 
         // Deassert level — both intin and irr cleared
-        ioapic.set_irq_level(10, false, None, None);
-        assert_eq!(ioapic.intin & (1 << 10), 0);
-        assert_eq!(ioapic.irr & (1 << 10), 0);
+        fabric.set_ioapic_pin(10, false);
+        assert_eq!(fabric.ioapic().intin & (1 << 10), 0);
+        assert_eq!(fabric.ioapic().irr & (1 << 10), 0);
     }
 
     #[test]
     fn test_masked_edge_no_irr() {
-        let mut ioapic = BxIoApic::new();
+        let mut fabric = fabric();
         // Pin 3 is masked (default), edge-triggered
-        assert!(ioapic.ioredtbl[3].is_masked());
+        assert!(fabric.ioapic().ioredtbl[3].is_masked());
 
         // Rising edge sets intin but NOT irr (because masked)
-        ioapic.set_irq_level(3, true, None, None);
-        assert_ne!(ioapic.intin & (1 << 3), 0);
-        assert_eq!(ioapic.irr & (1 << 3), 0); // Not set because masked
+        fabric.set_ioapic_pin(3, true);
+        assert_ne!(fabric.ioapic().intin & (1 << 3), 0);
+        assert_eq!(fabric.ioapic().irr & (1 << 3), 0); // Not set because masked
     }
 
     #[test]

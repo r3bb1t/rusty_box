@@ -19,7 +19,6 @@ use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::softfloat3e::softfloat_compare::{f32_compare_predicate, f64_compare_predicate};
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
@@ -76,8 +75,8 @@ fn vl_bytes(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -91,16 +90,16 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register, zeroing upper bits beyond VL (dword masking granularity)
-fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -123,8 +122,8 @@ fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// Write ZMM register for qword operations
-fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -146,8 +145,8 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 }
 
 /// Read src2 dword elements from register or memory
-fn read_rm_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_rm_dwords<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -159,8 +158,8 @@ fn read_rm_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// Read src2 qword elements from register or memory
-fn read_rm_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_rm_qwords<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -175,7 +174,7 @@ fn read_rm_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 // Floating-point comparison predicates (32 predicates, imm8[4:0])
 // ============================================================================
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VCMPPS / VCMPPD — Compare packed FP, producing an opmask
     // EVEX.NDS.W0.0F C2 /r ib and EVEX.NDS.W1.0F C2 /r ib
@@ -207,7 +206,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let predicate = instr.ib() & 0x1F;
         let write_mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
             if (write_mask >> i) & 1 == 0 {
@@ -871,7 +870,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.evex_load_wss_pair(instr)?.zmm32u(0)
             };
             let mut status = self.sse_status();
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             if f32_compare_predicate(instr.ib() & 0x1F, op1, op2, &mut status) {
                 result = 1;
             }
@@ -892,7 +891,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.evex_load_wsd_pair(instr)?.zmm64u(0)
             };
             let mut status = self.sse_status();
-            self.softfloat_rc_override(&mut status, instr);
+            crate::cpu::avx::softfloat_rc_override(&mut status, instr);
             if f64_compare_predicate(instr.ib() & 0x1F, op1, op2, &mut status) {
                 result = 1;
             }
@@ -955,8 +954,8 @@ fn cmp_predicate(imm3: u8, ord: core::cmp::Ordering) -> bool {
 /// Write every byte element up to VL and zero the rest. Used by the
 /// instructions that produce a full vector regardless of the opmask
 /// (VPMOVM2B, VPBLENDMB) — the mask has already been consumed as data.
-fn write_zmm_masked_b_all<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_b_all<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     vl: u8,
@@ -972,8 +971,8 @@ fn write_zmm_masked_b_all<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instr
 }
 
 /// Word-granular counterpart of [`write_zmm_masked_b_all`].
-fn write_zmm_masked_w_all<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_w_all<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     vl: u8,
@@ -1001,8 +1000,6 @@ mod tests {
     //!     takes src1 rather than being merged or zeroed, so it must write
     //!     the full vector.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::{BxSegregs, Instruction};
     use rusty_box_decoder::opcode::Opcode;
 
@@ -1023,7 +1020,9 @@ mod tests {
 
     #[test]
     fn byte_compare_fills_all_64_opmask_bits_at_vl512() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         // Equal everywhere: every one of the 64 byte lanes must set its bit.
         for i in 0..64 {
             cpu.vmm[1].set_zmmubyte(i, 0x5A);
@@ -1042,7 +1041,9 @@ mod tests {
 
     #[test]
     fn the_writemask_gates_which_bits_a_compare_may_set() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for i in 0..16 {
             cpu.vmm[1].set_zmmubyte(i, 1);
             cpu.vmm[2].set_zmmubyte(i, 1);
@@ -1060,7 +1061,9 @@ mod tests {
 
     #[test]
     fn vptestm_and_vptestnm_are_complementary() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[1].set_zmmubyte(0, 0b1100);
         cpu.vmm[2].set_zmmubyte(0, 0b0011); // AND == 0
         cpu.vmm[1].set_zmmubyte(1, 0b1100);
@@ -1079,7 +1082,9 @@ mod tests {
     fn vpcmpb_predicates_cover_signed_and_unsigned_orderings() {
         // 0xFF is -1 signed but 255 unsigned, so the signed and unsigned
         // forms of the same predicate must disagree on it.
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[2].set_zmmubyte(0, 0xFF);
         cpu.vmm[1].set_zmmubyte(0, 0x01);
 
@@ -1106,7 +1111,9 @@ mod tests {
 
     #[test]
     fn vpmovb2m_and_vpmovm2b_round_trip_through_the_sign_bits() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.vmm[1].set_zmmubyte(0, 0x80); // sign set
         cpu.vmm[1].set_zmmubyte(1, 0x7F); // sign clear
         cpu.vmm[1].set_zmmubyte(2, 0xFF); // sign set
@@ -1127,7 +1134,9 @@ mod tests {
 
     #[test]
     fn vpblendmb_takes_src1_where_the_mask_is_clear_rather_than_merging() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         for i in 0..16 {
             cpu.vmm[0].set_zmmubyte(i, 0xAA); // poison: must not survive
             cpu.vmm[2].set_zmmubyte(i, 0x11); // src1
@@ -1163,7 +1172,9 @@ mod tests {
 
     #[test]
     fn vfpclassps_matches_exactly_the_selected_category() {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         for (bits, sel, name) in CLASS_CASES {
             for i in 0..4 {
                 c.vmm[1].set_zmm32u(i, bits);
@@ -1188,7 +1199,9 @@ mod tests {
 
     #[test]
     fn vfpclass_classification_raises_nothing_and_respects_the_writemask() {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
         // A signalling NaN is classified, not signalled: with every SSE
         // exception unmasked this must still complete.
@@ -1213,7 +1226,9 @@ mod tests {
 
     #[test]
     fn vfpclassss_writes_a_single_bit_gated_on_opmask_bit_zero() {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm32u(0, 0x7F80_0000); // +inf
         c.opmask[0].set_rrx(0xFFFF); // must be overwritten, not merged
 
@@ -1242,7 +1257,9 @@ mod tests {
 
     #[test]
     fn vcmpss_writes_one_opmask_bit_and_honours_the_predicate() {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
         c.vmm[2].set_zmm32u(0, 1.5f32.to_bits()); // vvvv
         c.vmm[1].set_zmm32u(0, 1.5f32.to_bits()); // rm

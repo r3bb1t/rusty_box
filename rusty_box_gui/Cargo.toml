@@ -20,13 +20,23 @@ name = "rusty_box_gui"
 path = "src/main.rs"
 
 [features]
-default = ["gui-egui"]
+default = ["gui-egui", "hv-whp"]
 gui-egui = ["rusty_box/gui-egui", "dep:egui", "dep:eframe"]
 windows-gui-subsystem = []
 # Diagnostic build: hook the CPU and record guest process starts/exits,
 # stderr writes, mounts, signals, and CPU exceptions to guest_trace.log.
 # Costs emulation speed; single-CPU configs only. See src/guest_trace.rs.
-guest-trace = ["rusty_box/instrumentation"]
+# The tracer is a plain `Instrumentation` impl, so it needs no feature of
+# rusty_box: an observer is a type, not a registered closure.
+guest-trace = []
+# Run the guest on the Windows Hypervisor Platform instead of the interpreter,
+# chosen with `--engine whp` or from the window's Processors panel.
+#
+# On by default so the choice is offered without a rebuild. It costs the other
+# targets nothing: the dependency it names is declared only under
+# `cfg(windows)`, so enabling the feature elsewhere resolves to nothing, and
+# every use of it is additionally gated on `windows`.
+hv-whp = ["dep:rusty_box_whp_engine"]
 
 [dependencies]
 rusty_box_bximage = { path = "../rusty_box_bximage" }
@@ -45,8 +55,13 @@ rusty_box = { path = "../rusty_box", default-features = false, features = ["std"
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 rfd = "0.17.2"
 
+# The hypervisor engine is a Windows leaf. Optional and target-gated so the
+# other platforms' builds never resolve it.
+[target.'cfg(windows)'.dependencies]
+rusty_box_whp_engine = { path = "../rusty_box_whp_engine", optional = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-rusty_box = { path = "../rusty_box", default-features = false, features = ["alloc", "instrumentation"] }
+rusty_box = { path = "../rusty_box", default-features = false, features = ["alloc"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

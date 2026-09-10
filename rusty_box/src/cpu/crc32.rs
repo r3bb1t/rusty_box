@@ -11,8 +11,6 @@
 //! Uses the exact same BitReflect + mod2_64bit algorithm as Bochs.
 
 use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
 };
 
@@ -68,7 +66,7 @@ fn mod2_64bit(divisor: u64, dividend: u64) -> u32 {
 // Instruction handlers
 // ============================================================================
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// CRC32 r32, r/m64 — Bochs CRC32_GdEqR (64-bit mode only)
     ///
     /// F2 REX.W 0F 38 F1 — CRC32C accumulate qword.

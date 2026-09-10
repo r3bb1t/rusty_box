@@ -46,8 +46,6 @@ use super::softfloat3e::softfloat::{
 };
 use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     sse_fp::mxcsr_to_softfloat_status_word,
     xmm::BxPackedXmmRegister,
@@ -118,7 +116,7 @@ pub(super) fn dppd_lane(
     a
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // SSE FP helpers: status word and source-operand reads
     // ========================================================================
@@ -656,7 +654,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.read_xmm_reg(instr.dst()).xmm32u(0);
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = compare(op1, op2, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.write_eflags_fpu_compare(rc);
@@ -673,7 +671,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.read_xmm_reg(instr.dst()).xmm64u(0);
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = compare(op1, op2, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.write_eflags_fpu_compare(rc);
@@ -772,7 +770,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         let result = f32_to_i32(op, rc, true, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
@@ -785,7 +783,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         let result = f64_to_i32(op, rc, true, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
@@ -798,7 +796,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let result = f32_to_i32_r_min_mag(op, true, false, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.set_gpr32(instr.dst().into(), result as u32);
@@ -810,7 +808,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let result = f64_to_i32_r_min_mag(op, true, false, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.set_gpr32(instr.dst().into(), result as u32);
@@ -822,7 +820,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let result = f32_to_i64_r_min_mag(op, true, false, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.set_gpr64(instr.dst() as usize, result as u64);
@@ -834,7 +832,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let result = f64_to_i64_r_min_mag(op, true, false, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.set_gpr64(instr.dst() as usize, result as u64);
@@ -846,7 +844,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         let result = f32_to_i64(op, rc, true, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
@@ -859,7 +857,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let rc = softfloat_get_rounding_mode(&status);
         let result = f64_to_i64(op, rc, true, &mut status);
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;

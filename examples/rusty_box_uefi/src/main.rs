@@ -7,12 +7,15 @@
 #![no_main]
 #![no_std]
 
+use core::mem::MaybeUninit;
 use log::{error, info};
 use uefi::prelude::*;
 
 use rusty_box::{
-    cpu::{builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX, cpu::BxCpuC, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    cpu::{builder::BxCpuBuilder, cpu::BxCpuC},
+    emulator::{
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder, RunBudget,
+    },
     memory::BxMemoryStubC,
 };
 
@@ -156,10 +159,9 @@ fn run() -> Status {
     );
 
     let config = EmulatorConfig {
-        guest_memory_size: 32 * 1024 * 1024,
-        host_memory_size: 32 * 1024 * 1024,
+        memory: MemorySize::bytes(32 * 1024 * 1024),
         memory_block_size: 128 * 1024,
-        ips: 300_000_000,
+        ips: Ips::new(300_000_000),
         pci_enabled: true,
         ..Default::default()
     };
@@ -169,18 +171,28 @@ fn run() -> Status {
     // 1. CPU (~17-50MB, mostly BxICache fixed arrays)
     info!(
         "Allocating CPU ({} bytes)...",
-        core::mem::size_of::<BxCpuC<Corei7SkylakeX>>()
+        core::mem::size_of::<BxCpuC>()
     );
-    let cpu_ptr: *mut BxCpuC<Corei7SkylakeX> = alloc_zeroed_for();
-    let cpu = unsafe {
-        match BxCpuBuilder::<Corei7SkylakeX>::init_cpu_at(cpu_ptr, ()) {
+    let cpu_ptr: *mut BxCpuC = alloc_zeroed_for();
+    let cpu: &'static mut BxCpuC = unsafe {
+        match BxCpuBuilder::new().init_cpu_at(cpu_ptr, ()) {
             Ok(cpu) => cpu,
             Err(e) => bail!("CPU init failed: {:?}", e),
         }
     };
 
+    // The machine borrows its CPU set as a slice, so the slice itself needs
+    // somewhere to live that outlasts the machine. UEFI pages are never freed
+    // here, which is what makes the `'static` borrow honest — the same reason
+    // the CPU above can be `&'static mut`.
+    let cpu_handles: *mut &'static mut BxCpuC = alloc_zeroed_for();
+    let cpus: &'static mut [&'static mut BxCpuC] = unsafe {
+        cpu_handles.write(cpu);
+        core::slice::from_raw_parts_mut(cpu_handles, 1)
+    };
+
     // 2. Guest RAM buffer (~36MB: 32MB guest + 4MB BIOS ROM + 128KB expansion + pad)
-    let mem_buf_size = rusty_box::config::mem_buffer_size(config.guest_memory_size);
+    let mem_buf_size = rusty_box::config::mem_buffer_size(config.memory.guest_bytes());
     let mem_pages = (mem_buf_size + 4095) / 4096;
     let mem_ptr = alloc_pages(mem_pages);
     if mem_ptr.is_null() {
@@ -197,8 +209,8 @@ fn run() -> Status {
         match BxMemoryStubC::create_from_raw(
             mem_ptr,
             mem_buf_size,
-            config.guest_memory_size,
-            config.host_memory_size,
+            config.memory.guest_bytes(),
+            config.memory.host_bytes(),
             config.memory_block_size,
         ) {
             Ok(s) => s,
@@ -209,43 +221,35 @@ fn run() -> Status {
     // 3. Emulator struct (~2-3MB, embeds DeviceManager with VGA/IDE buffers)
     info!(
         "Allocating Emulator ({} bytes)...",
-        core::mem::size_of::<Emulator<Corei7SkylakeX>>()
+        core::mem::size_of::<Emulator>()
     );
-    let emu_ptr: *mut Emulator<Corei7SkylakeX> = alloc_zeroed_for();
-    let emu = unsafe {
-        match Emulator::<Corei7SkylakeX>::init_at(emu_ptr, cpu, mem_stub, config) {
-            Ok(e) => e,
-            Err(e) => bail!("Emulator init failed: {:?}", e),
-        }
+    let emu_ptr: *mut MaybeUninit<Emulator> = alloc_zeroed_for();
+    // SAFETY: `alloc_zeroed_for` returned firmware pages sized and aligned for
+    // the machine, and nothing else ever borrows them.
+    let emu_storage: &'static mut MaybeUninit<Emulator> = unsafe { &mut *emu_ptr };
+    let emu = match MachineBuilder::new(config)
+        .bios(BIOS_ROM)
+        .vga_bios(VGA_BIOS)
+        .boot_order(BootOrder::just(BootDevice::Disk))
+        .disk_static(
+            AtaSlot::PRIMARY_MASTER,
+            DLX_DISK,
+            DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT),
+        )
+        .build_at(emu_storage, cpus, mem_stub)
+    {
+        Ok(e) => e,
+        Err(e) => bail!("Machine build failed: {:?}", e),
     };
 
-    // --- Initialize hardware ---
-    emu.init_pc_system();
-
-    let bios_addr = !(BIOS_ROM.len() as u64 - 1);
-    if let Err(e) = emu.load_bios(BIOS_ROM, bios_addr) {
-        bail!("BIOS: {:?}", e);
-    }
-    let _ = emu.load_optional_rom(VGA_BIOS, 0xC0000);
-
-    if let Err(e) = emu.init_cpu_and_devices() {
-        bail!("CPU init: {:?}", e);
-    }
-
-    emu.configure_memory_in_cmos_from_config();
-    emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
-    emu.configure_boot_sequence(2, 0, 0);
-    emu.attach_disk_data_ref(0, 0, DLX_DISK, DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT);
-
-    if let Err(e) = emu.reset(ResetReason::Hardware) {
-        bail!("Reset: {:?}", e);
-    }
-    emu.start();
     emu.prepare_run();
 
     info!("Starting BIOS boot...");
-    emu.send_scancode(0x3B); // F1 (skip keyboard error)
-    emu.send_scancode(0xBB);
+    // F1, to skip the BIOS keyboard-error prompt.
+    let queued = emu.keyboard().scancodes(&[0x3B, 0xBB]);
+    if queued != 2 {
+        info!("keyboard ring was full; F1 not queued");
+    }
 
     // Main loop — mirrors run_interactive
     let batch: u64 = 100_000;
@@ -254,20 +258,22 @@ fn run() -> Status {
     let mut login_sent = false;
 
     while total < max {
-        let (n, shutdown) = match emu.step_batch(batch) {
+        let outcome = match emu.step(RunBudget::Instructions(batch)) {
             Ok(result) => result,
             Err(e) => {
                 error!("CPU error at {}M: {:?}", total / 1_000_000, e);
                 break;
             }
         };
-        total += n;
+        // Whichever unit this machine measures in — the loop below is a
+        // progress budget, not an instruction count.
+        total += outcome.progress.count();
 
 
         // Drain and print BIOS/serial output (no Vec allocation)
         {
             let mut had_output = false;
-            for b in emu.devices.drain_port_e9_output() {
+            for b in emu.debug_port().take_output() {
                 if !had_output {
                     had_output = true;
                 }
@@ -275,11 +281,16 @@ fn run() -> Status {
                 print_bytes(&[b]);
             }
         }
-        drain_and_print(emu.device_manager.drain_serial_tx(0));
+        drain_and_print(emu.serial(0).expect("COM1 is always modelled").take_output());
 
-        if shutdown {
+        // Every terminal cause, not just the CPU shutdown state: a guest that
+        // powers off through ACPI S5 leaves the CPU perfectly healthy, so
+        // testing the CPU alone would keep stepping a machine that asked to be
+        // off until this loop hit its own instruction cap.
+        if outcome.is_terminal() {
             info!(
-                "SHUTDOWN at {}k instr, RIP={:#x}",
+                "STOP ({:?}) at {}k instr, RIP={:#x}",
+                outcome.stop,
                 total / 1000,
                 emu.cpu().rip()
             );
@@ -291,8 +302,10 @@ fn run() -> Status {
         // Auto-login after kernel boots
         if !login_sent && total > 50_000_000 {
             login_sent = true;
-            for &sc in &[0x13u8, 0x93, 0x18, 0x98, 0x18, 0x98, 0x14, 0x94, 0x1C, 0x9C] {
-                emu.send_scancode(sc);
+            let login = [0x13u8, 0x93, 0x18, 0x98, 0x18, 0x98, 0x14, 0x94, 0x1C, 0x9C];
+            let sent = emu.keyboard().scancodes(&login);
+            if sent != login.len() {
+                info!("login sequence truncated at {sent} of {}", login.len());
             }
         }
 

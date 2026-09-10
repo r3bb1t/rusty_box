@@ -3,9 +3,9 @@
 //! Based on Bochs data_xfer64.cc
 
 use crate::cpu::decoder::{BxSegregs, Instruction};
-use crate::cpu::{BxCpuC, BxCpuIdTrait, Result};
+use crate::cpu::{Result};
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // 64-bit MOV instructions
     // =========================================================================
@@ -69,17 +69,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// MOV r/m64, r64 (stack form)
-    /// Matching C++ data_xfer64.cc MOV64S_EqGqM
-    pub fn mov64s_eq_gq_m(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr64(instr);
-        let src_reg = instr.src() as usize;
-        let val64 = self.get_gpr64(src_reg);
-
-        self.stack_write_qword_64(eaddr, val64)?;
-        Ok(())
-    }
-
     /// MOV r64, r/m64 (memory form)
     /// Matching C++ data_xfer64.cc MOV_GqEqM
     pub fn mov_gq_eq_m(&mut self, instr: &Instruction) -> Result<()> {
@@ -87,17 +76,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let seg = BxSegregs::from(instr.seg());
         let val64 = self.read_virtual_qword_64(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
-        self.set_gpr64(dst_reg, val64);
-        Ok(())
-    }
-
-    /// MOV r64, r/m64 (stack form)
-    /// Matching C++ data_xfer64.cc MOV64S_GqEqM
-    pub fn mov64s_gq_eq_m(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr64(instr);
-        let val64 = self.stack_read_qword_64(eaddr)?;
-        let dst_reg = instr.dst() as usize;
-
         self.set_gpr64(dst_reg, val64);
         Ok(())
     }
@@ -410,182 +388,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     //       occur even if the MOV does not take place.
     // Matching C++ data_xfer64.cc
 
-    /// Conditional move if overflow (OF=1)
-    /// Matching C++ data_xfer64.cc CMOVO_GqEqR
-    pub fn cmovo_gq_eq_r(&mut self, instr: &Instruction) {
-        if self.get_of() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if not overflow (OF=0)
-    /// Matching C++ data_xfer64.cc CMOVNO_GqEqR
-    pub fn cmovno_gq_eq_r(&mut self, instr: &Instruction) {
-        if !self.get_of() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if below/carry (CF=1)
-    /// Matching C++ data_xfer64.cc CMOVB_GqEqR
-    pub fn cmovb_gq_eq_r(&mut self, instr: &Instruction) {
-        if self.get_cf() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if not below/no carry (CF=0)
-    /// Matching C++ data_xfer64.cc CMOVNB_GqEqR
-    pub fn cmovnb_gq_eq_r(&mut self, instr: &Instruction) {
-        if !self.get_cf() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if zero/equal (ZF=1)
-    /// Matching C++ data_xfer64.cc CMOVZ_GqEqR
-    pub fn cmovz_gq_eq_r(&mut self, instr: &Instruction) {
-        if self.get_zf() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if not zero/not equal (ZF=0)
-    /// Matching C++ data_xfer64.cc CMOVNZ_GqEqR
-    pub fn cmovnz_gq_eq_r(&mut self, instr: &Instruction) {
-        if !self.get_zf() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if below or equal (CF=1 or ZF=1)
-    /// Matching C++ data_xfer64.cc CMOVBE_GqEqR
-    pub fn cmovbe_gq_eq_r(&mut self, instr: &Instruction) {
-        if self.get_cf() || self.get_zf() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if not below or equal/above (CF=0 and ZF=0)
-    /// Matching C++ data_xfer64.cc CMOVNBE_GqEqR
-    pub fn cmovnbe_gq_eq_r(&mut self, instr: &Instruction) {
-        if !self.get_cf() && !self.get_zf() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if sign (SF=1)
-    /// Matching C++ data_xfer64.cc CMOVS_GqEqR
-    pub fn cmovs_gq_eq_r(&mut self, instr: &Instruction) {
-        if self.get_sf() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if not sign (SF=0)
-    /// Matching C++ data_xfer64.cc CMOVNS_GqEqR
-    pub fn cmovns_gq_eq_r(&mut self, instr: &Instruction) {
-        if !self.get_sf() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if parity/parity even (PF=1)
-    /// Matching C++ data_xfer64.cc CMOVP_GqEqR
-    pub fn cmovp_gq_eq_r(&mut self, instr: &Instruction) {
-        if self.get_pf() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if no parity/parity odd (PF=0)
-    /// Matching C++ data_xfer64.cc CMOVNP_GqEqR
-    pub fn cmovnp_gq_eq_r(&mut self, instr: &Instruction) {
-        if !self.get_pf() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if less (SF != OF)
-    /// Matching C++ data_xfer64.cc CMOVL_GqEqR
-    pub fn cmovl_gq_eq_r(&mut self, instr: &Instruction) {
-        if self.get_sf() != self.get_of() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if not less/greater or equal (SF == OF)
-    /// Matching C++ data_xfer64.cc CMOVNL_GqEqR
-    pub fn cmovnl_gq_eq_r(&mut self, instr: &Instruction) {
-        if self.get_sf() == self.get_of() {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if less or equal (ZF=1 or SF!=OF)
-    /// Matching C++ data_xfer64.cc CMOVLE_GqEqR
-    pub fn cmovle_gq_eq_r(&mut self, instr: &Instruction) {
-        if self.get_zf() || (self.get_sf() != self.get_of()) {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
-    /// Conditional move if not less or equal/greater (ZF=0 and SF==OF)
-    /// Matching C++ data_xfer64.cc CMOVNLE_GqEqR
-    pub fn cmovnle_gq_eq_r(&mut self, instr: &Instruction) {
-        if !self.get_zf() && (self.get_sf() == self.get_of()) {
-            let src_reg = instr.src() as usize;
-            let val64 = self.get_gpr64(src_reg);
-            let dst_reg = instr.dst() as usize;
-            self.set_gpr64(dst_reg, val64);
-        }
-    }
-
     // =========================================================================
     // Unified dispatchers (mod_c0 routing for register vs memory)
     // =========================================================================
@@ -594,7 +396,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if instr.mod_c0() {
             let src = instr.src() as usize;
             let dst = instr.dst() as usize;
-            self.set_gpr64(dst, self.get_gpr64(src));
+            let value = self.get_gpr64(src);
+            self.set_gpr64(dst, value);
             Ok(())
         } else {
             self.mov_eq_gq_m(instr)
@@ -805,38 +608,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Helper functions for 64-bit memory operations
     // =========================================================================
 
-    /// Resolve effective address (64-bit addressing mode)
-    /// Matching BX_CPU_RESOLVE_ADDR_64
-    /// Made pub(crate) so it can be accessed from ctrl_xfer64.rs
-    pub(crate) fn resolve_addr64(&self, instr: &Instruction) -> u64 {
-        // Calculate: base + (index << scale) + displacement
-        // base_reg: 0-15 = GPR, 16 = RIP (for RIP-relative), 19 = NIL (no base)
-        // gen_reg[16] holds RIP (already advanced by ilen before execution),
-        // gen_reg[19] = NIL register (always 0).
-        // Matching Bochs: ResolveModrm reads gen_reg[base] directly.
-        let base_reg = instr.sib_base() as usize;
-        let mut eaddr = if base_reg < self.gen_reg.len() {
-            self.get_gpr64(base_reg)
-        } else {
-            0
-        };
 
-        eaddr = eaddr.wrapping_add(instr.displ32s() as u64);
-
-        let index_reg = instr.sib_index();
-        if index_reg != 4 {
-            // 4 means no index
-            let index_val = if index_reg < 16 {
-                self.get_gpr64(index_reg as usize)
-            } else {
-                0
-            };
-            let scale = instr.sib_scale();
-            eaddr = eaddr.wrapping_add(index_val << scale);
-        }
-
-        eaddr
-    }
 
     // read_8bit_regx is defined in logical8.rs to avoid duplicate definitions
 }

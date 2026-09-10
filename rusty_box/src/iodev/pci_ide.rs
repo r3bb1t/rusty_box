@@ -11,15 +11,13 @@
 //! - Physical Region Descriptor (PRD) table processing
 //! - Timer-driven DMA transfers (Bochs pci_ide.cc)
 
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::{
     pc_system::{BxPcSystemC, TimerOwner},
     snapshot::{
-        bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader,
-        SnapshotWriteExt,
+        bounds, checked_snapshot_len_add, checked_snapshot_len_mul,
+        SnapError, SnapRead, SnapResult, SnapWrite,
     },
 };
 
@@ -27,15 +25,15 @@ use crate::{
 const PCI_IDE_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0e];
 
 #[cfg(feature = "std")]
-fn invalid_pci_ide_snapshot(message: &'static str) -> io::Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_pci_ide_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
 fn validate_pci_ide_snapshot_identity(
     saved: &[u8; PCI_CONF_SIZE],
     live: &[u8; PCI_CONF_SIZE],
-) -> io::Result<()> {
+) -> SnapResult<()> {
     for index in PCI_IDE_SNAPSHOT_IDENTITY_BYTES {
         if saved[index] != live[index] {
             return Err(invalid_pci_ide_snapshot(
@@ -59,6 +57,18 @@ struct BmDmaSnapshotState {
     data_ready: bool,
     timer_index: Option<usize>,
 }
+/// What a PIIX3 IDE config-space write asks the machine to do. BAR4, the
+/// 16-port BM-DMA I/O window, is the controller's only relocatable resource,
+/// and the controller cannot move its own port registrations.
+///
+/// Bochs applies this inline in `bx_pci_ide_c::pci_write_handler` (pci_ide.cc)
+/// via `DEV_register_ioread_handler_range`; here the I/O bus lives outside the
+/// device, so the request travels back as data.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PciIdeWriteEffects {
+    pub bmdma_base_changed: bool,
+}
+
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
 
@@ -172,10 +182,10 @@ pub(crate) struct PciIdeSnapshotTopology {
 }
 
 #[cfg(feature = "std")]
-fn write_bmdma_snapshot_state<W: Write>(
+fn write_bmdma_snapshot_state<W: SnapWrite>(
     writer: &mut W,
     state: &BmDmaChannel,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     writer.write_bool(state.cmd_ssbm)?;
     writer.write_bool(state.cmd_rwcon)?;
     writer.write_u8(state.status)?;
@@ -199,9 +209,9 @@ fn write_bmdma_snapshot_state<W: Write>(
 }
 
 #[cfg(feature = "std")]
-fn read_bmdma_snapshot_state<R: Read>(
-    reader: &mut SnapshotReader<R>,
-) -> io::Result<BmDmaSnapshotState> {
+fn read_bmdma_snapshot_state<R: SnapRead>(
+    reader: &mut R,
+) -> SnapResult<BmDmaSnapshotState> {
     let cmd_ssbm = reader.read_bool()?;
     let cmd_rwcon = reader.read_bool()?;
     let status = reader.read_u8()?;
@@ -244,7 +254,7 @@ fn read_bmdma_snapshot_state<R: Read>(
 }
 
 #[cfg(feature = "std")]
-fn validate_bmdma_snapshot_state(state: &BmDmaSnapshotState) -> io::Result<()> {
+fn validate_bmdma_snapshot_state(state: &BmDmaSnapshotState) -> SnapResult<()> {
     if (state.status & !0x67) != 0 {
         return Err(invalid_pci_ide_snapshot(
             "BM-DMA status contains reserved bits",
@@ -269,7 +279,7 @@ fn validate_bmdma_snapshot_state(state: &BmDmaSnapshotState) -> io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn validate_pending_bmdma_timer(request: Option<u32>) -> io::Result<()> {
+fn validate_pending_bmdma_timer(request: Option<u32>) -> SnapResult<()> {
     if matches!(request, Some(delay) if delay != 1) {
         return Err(invalid_pci_ide_snapshot(
             "BM-DMA deferred timer request delay is invalid",
@@ -279,11 +289,11 @@ fn validate_pending_bmdma_timer(request: Option<u32>) -> io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn write_pending_bmdma_timer<W: Write>(
+fn write_pending_bmdma_timer<W: SnapWrite>(
     writer: &mut W,
     owner: u8,
     request: Option<u32>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     validate_pending_bmdma_timer(request)?;
     writer.write_u8(owner)?;
     writer.write_bool(request.is_some())?;
@@ -291,10 +301,10 @@ fn write_pending_bmdma_timer<W: Write>(
 }
 
 #[cfg(feature = "std")]
-fn read_pending_bmdma_timer<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn read_pending_bmdma_timer<R: SnapRead>(
+    reader: &mut R,
     expected_owner: u8,
-) -> io::Result<Option<u32>> {
+) -> SnapResult<Option<u32>> {
     if reader.read_u8()? != expected_owner {
         return Err(invalid_pci_ide_snapshot(
             "BM-DMA deferred timer request has the wrong owner",
@@ -405,6 +415,30 @@ impl BxPciIde {
     /// Drain a deferred one-shot timer arm request (microseconds) for a
     /// channel. Set by the BM-DMA command-register write; the emulator loop
     /// (which owns `BxPcSystemC`) drains it and activates the channel timer.
+    /// Timer id for a bus-master channel, offset past the four seek timers so
+    /// both halves of the IDE controller share one id space.
+    #[inline]
+    pub(crate) const fn bmdma_timer_local(channel: usize) -> u16 {
+        (4 + channel) as u16
+    }
+
+    /// Arm the bus-master callbacks this access produced. Tick-denominated:
+    /// Bochs pci_ide.cc schedules the engine one tick out, and routing that
+    /// through microseconds would round it away.
+    pub(crate) fn drain_bmdma_timers(&mut self, ctx: &mut rusty_box_devices::api::DeviceCtx<'_>) {
+        for channel in 0..2usize {
+            if let Some(delay_ticks) = self.take_pending_timer_arm(channel) {
+                ctx.timers.arm_oneshot_ticks(
+                    rusty_box_devices::api::TimerKey {
+                        device: rusty_box_devices::api::DeviceKind::Ide,
+                        local: Self::bmdma_timer_local(channel),
+                    },
+                    u64::from(delay_ticks),
+                );
+            }
+        }
+    }
+
     pub(crate) fn take_pending_timer_arm(&mut self, channel: usize) -> Option<u32> {
         if channel < 2 {
             self.pending_timer_arm[channel].take()
@@ -536,17 +570,23 @@ impl BxPciIde {
         }
     }
 
-    // ─── PCI Configuration Space ─────────────────────────────────────────
+}
+
+// ─── PCI Configuration Space ─────────────────────────────────────────────
+
+impl rusty_box_devices::pci::PciDevice for BxPciIde {
+    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 1);
+    type WriteEffects = PciIdeWriteEffects;
 
     /// Write to PCI configuration space.
     /// Bochs: bx_pci_ide_c::pci_write_handler() (pci_ide.cc)
     #[inline(never)]
-    pub fn pci_write(&mut self, address: u8, mut value: u32, io_len: u8) -> bool {
+    fn pci_write(&mut self, address: u8, mut value: u32, io_len: u8) -> PciIdeWriteEffects {
         // BAR0-BAR3 and reserved 0x24..0x40 are read-only (Bochs pci_ide.cc
         // pci_write_handler skips 0x10..0x20 and 0x24..0x40; BAR4 at
         // 0x20..0x24 IS writable — the 16-port BM-DMA I/O BAR).
         if (0x10..0x20).contains(&address) || (address > 0x23 && address < 0x40) {
-            return false;
+            return PciIdeWriteEffects::default();
         }
 
         // BAR4 size probe: a full-dword write of >= 0xfffffff0 must read back
@@ -616,11 +656,13 @@ impl BxPciIde {
             }
         }
 
-        bar4_changed
+        PciIdeWriteEffects {
+            bmdma_base_changed: bar4_changed,
+        }
     }
 
     /// Read from PCI configuration space.
-    pub fn pci_read(&self, address: u8, io_len: u8) -> u32 {
+    fn pci_read(&self, address: u8, io_len: u8) -> u32 {
         let mut value: u32 = 0;
         for i in 0..io_len as usize {
             let addr = address as usize + i;
@@ -631,10 +673,13 @@ impl BxPciIde {
         value
     }
 
+}
+
+impl BxPciIde {
     /// Exact byte count for this controller's contribution to the combined
     /// PCI payload. The enclosing PCI codec owns the section-version prefix.
     #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         let config_len = u64::try_from(PCI_CONF_SIZE)
             .map_err(|_| invalid_pci_ide_snapshot("PCI IDE config size does not fit u64"))?;
         let mut channel_state_len = checked_snapshot_len_add(1, 1)?;
@@ -667,7 +712,7 @@ impl BxPciIde {
 
     /// Stream PCI IDE state, including both fixed BM-DMA bounce buffers.
     #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         writer.write_bytes(&self.pci_conf)?;
         writer.write_u32(self.bmdma_base)?;
         for channel in &self.bmdma {
@@ -685,10 +730,10 @@ impl BxPciIde {
     /// I/O base. The parent atomically relocates that live range to the
     /// returned desired base only after all snapshot sections validate.
     #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<PciIdeSnapshotTopology> {
+        reader: &mut R,
+    ) -> SnapResult<PciIdeSnapshotTopology> {
         let mut pci_conf = [0u8; PCI_CONF_SIZE];
         reader.read_bytes(&mut pci_conf)?;
         let desired_bmdma_base = reader.read_u32()?;
@@ -759,7 +804,7 @@ impl BxPciIde {
     pub(crate) fn validate_snapshot_v3_timer_owners(
         &self,
         pc_system: &BxPcSystemC,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         for (channel, owner) in self
             .bmdma
             .iter()
@@ -778,7 +823,8 @@ impl BxPciIde {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use crate::snapshot::SnapshotReader;
+    use rusty_box_devices::pci::PciDevice;
 
 
     #[test]
@@ -834,8 +880,8 @@ mod tests {
         let mut ide = BxPciIde::new();
         ide.reset();
         // BIOS assigns the 16-port I/O BAR (Bochs init_bar_io(4, 16, ...)).
-        let changed = ide.pci_write(0x20, 0x0000C001, 4);
-        assert!(changed);
+        let effects = ide.pci_write(0x20, 0x0000C001, 4);
+        assert!(effects.bmdma_base_changed);
         assert_eq!(ide.bmdma_base, 0xC000);
         assert!(ide.bmdma_present());
         // Low nibble keeps the I/O-space type bit.
@@ -848,13 +894,13 @@ mod tests {
         ide.reset();
         // Size probe: full-ones write must read back the 16-port size mask
         // and must NOT move the committed base.
-        let changed = ide.pci_write(0x20, 0xFFFF_FFFF, 4);
-        assert!(!changed);
+        let effects = ide.pci_write(0x20, 0xFFFF_FFFF, 4);
+        assert!(!effects.bmdma_base_changed);
         assert_eq!(ide.bmdma_base, 0);
         assert_eq!(ide.pci_read(0x20, 4), 0xFFFF_FFF1);
         // The real base write right after the probe commits normally.
-        let changed = ide.pci_write(0x20, 0x0000C001, 4);
-        assert!(changed);
+        let effects = ide.pci_write(0x20, 0x0000C001, 4);
+        assert!(effects.bmdma_base_changed);
         assert_eq!(ide.bmdma_base, 0xC000);
     }
 
@@ -862,7 +908,7 @@ mod tests {
     fn test_bar4_base_survives_reset() {
         let mut ide = BxPciIde::new();
         ide.reset();
-        assert!(ide.pci_write(0x20, 0x0000C001, 4));
+        assert!(ide.pci_write(0x20, 0x0000C001, 4).bmdma_base_changed);
         ide.reset();
         // Bochs pci_ide.cc reset() leaves BAR assignments untouched.
         assert_eq!(ide.bmdma_base, 0xC000);
@@ -904,7 +950,7 @@ mod tests {
     #[test]
     fn pci_ide_snapshot_resumes_mid_bmdma_transfer() {
         let mut ide = BxPciIde::new();
-        assert!(ide.pci_write(0x20, 0x0000_c001, 4));
+        assert!(ide.pci_write(0x20, 0x0000_c001, 4).bmdma_base_changed);
         ide.bmdma_write(0xc004, 0x0000_1200, 4);
         ide.bmdma_write(0xc000, 0x09, 1);
         let channel = &mut ide.bmdma[0];
@@ -935,7 +981,7 @@ mod tests {
         channel.buffer[..64].fill(0);
         ide.pending_timer_arm = [None; 2];
 
-        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
         let topology = ide.restore_snapshot_v3_body(&mut reader).unwrap();
         reader.finish_exact().unwrap();
 

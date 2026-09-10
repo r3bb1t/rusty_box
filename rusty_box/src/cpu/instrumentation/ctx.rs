@@ -1,8 +1,8 @@
 //! `HookCtx` — Unicorn-style hook context giving callbacks full CPU access.
 //!
 //! Exposed through a type-erased trait (`CpuAccess`) so hook signatures don't
-//! need to be generic over `I` / `T`. `BxCpuC<'c, I, T>` implements
-//! `CpuAccess` for all `I: BxCpuIdTrait`, `T: Instrumentation`.
+//! need to be generic over `T`. The execution context implements it: reading
+//! guest memory needs the machine, not just the CPU.
 
 use super::types::{InstrAction, X86Reg};
 
@@ -17,14 +17,17 @@ pub trait CpuAccess {
 
     // ── Memory ────────────────────────────────────────────────────────────
     /// Read from guest physical memory.
-    fn mem_read(&self, addr: u64, buf: &mut [u8]) -> bool;
+    ///
+    /// `&mut` because a guest read is not an observation: it routes through
+    /// device handlers and can page a block back in under partial residency.
+    fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> bool;
     /// Write to guest physical memory.
     fn mem_write(&mut self, addr: u64, data: &[u8]) -> bool;
     /// Read from guest virtual memory using current CR3.
-    fn virt_read(&self, vaddr: u64, buf: &mut [u8]) -> bool;
+    fn virt_read(&mut self, vaddr: u64, buf: &mut [u8]) -> bool;
     /// Read from guest virtual memory using a specific CR3. Useful for
     /// reading user-space strings after kernel has swapped CR3 (KPTI).
-    fn virt_read_with_cr3(&self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool;
+    fn virt_read_with_cr3(&mut self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool;
 
     // ── Control ───────────────────────────────────────────────────────────
     /// Request the CPU loop to stop at the next trace boundary.
@@ -62,7 +65,7 @@ impl<'a> HookCtx<'a> {
     }
 
     #[inline]
-    pub fn mem_read(&self, addr: u64, buf: &mut [u8]) -> bool {
+    pub fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> bool {
         self.cpu.mem_read(addr, buf)
     }
     #[inline]
@@ -70,11 +73,11 @@ impl<'a> HookCtx<'a> {
         self.cpu.mem_write(addr, data)
     }
     #[inline]
-    pub fn virt_read(&self, vaddr: u64, buf: &mut [u8]) -> bool {
+    pub fn virt_read(&mut self, vaddr: u64, buf: &mut [u8]) -> bool {
         self.cpu.virt_read(vaddr, buf)
     }
     #[inline]
-    pub fn virt_read_with_cr3(&self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool {
+    pub fn virt_read_with_cr3(&mut self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool {
         self.cpu.virt_read_with_cr3(vaddr, cr3, buf)
     }
 
@@ -100,7 +103,12 @@ impl<'a> HookCtx<'a> {
     /// `vaddr`, translating via `cr3`. Up to `max_len` bytes. Returns empty
     /// string on translation failure (strace convention).
     #[cfg(feature = "alloc")]
-    pub fn read_cstr_user(&self, vaddr: u64, cr3: u64, max_len: usize) -> alloc::string::String {
+    pub fn read_cstr_user(
+        &mut self,
+        vaddr: u64,
+        cr3: u64,
+        max_len: usize,
+    ) -> alloc::string::String {
         use alloc::string::String;
         if vaddr == 0 || max_len == 0 {
             return String::new();

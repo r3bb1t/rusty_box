@@ -3,13 +3,12 @@
 //! Based on Bochs mult8.cc
 
 use super::{
-    cpu::{BxCpuC, Exception},
-    cpuid::BxCpuIdTrait,
+    cpu::{Exception},
     decoder::Instruction,
     error::Result,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // 8-bit Multiplication and Division
     // =========================================================================

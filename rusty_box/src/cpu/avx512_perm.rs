@@ -5,7 +5,7 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512.cc` shuffle/permute section.
 
-use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, xmm::BxPackedZmmRegister};
+use super::{cpu::BxCpuC, decoder::Instruction, xmm::BxPackedZmmRegister};
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -29,8 +29,8 @@ fn qword_elements(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -44,16 +44,16 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register with dword masking, zeroing upper bits beyond VL
-fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -76,8 +76,8 @@ fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// Write ZMM register with qword masking
-fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -99,7 +99,7 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VSHUFF32x4 — Shuffle 128-bit lanes of two Float32 sources (EVEX)
     // Bochs: VSHUFF32x4_MASK_VpsHpsWpsIbR
@@ -729,8 +729,6 @@ mod tests {
     //! selects between vvvv and r/m — so the same index vector gives
     //! different answers for the two, which is what these tests pin.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::BxSegregs;
     use rusty_box_decoder::opcode::Opcode;
 
@@ -753,7 +751,9 @@ mod tests {
 
     #[test]
     fn vpermt2d_indexes_from_vvvv_across_the_destination_and_rm() {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         for n in 0..4 {
             c.vmm[0].set_zmm32u(n, 100 + n as u32); // dst  = table 0
             c.vmm[1].set_zmm32u(n, 200 + n as u32); // rm   = table 1
@@ -772,7 +772,9 @@ mod tests {
 
     #[test]
     fn vpermi2d_indexes_from_the_destination_across_vvvv_and_rm() {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         for n in 0..4 {
             c.vmm[2].set_zmm32u(n, 100 + n as u32); // vvvv = table 0
             c.vmm[1].set_zmm32u(n, 200 + n as u32); // rm   = table 1
@@ -790,7 +792,9 @@ mod tests {
 
     #[test]
     fn vpermilpd_selects_on_bit_one_within_each_128_bit_lane() {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.vmm[2].set_zmm64u(0, 0xAAAA); // vvvv — the data
         c.vmm[2].set_zmm64u(1, 0xBBBB);
         // Bit 0 is ignored; only bit 1 selects.
@@ -804,7 +808,9 @@ mod tests {
 
     #[test]
     fn vpmullq_keeps_the_low_64_bits_of_the_product() {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.vmm[2].set_zmm64u(0, 0x1_0000_0001);
         c.vmm[1].set_zmm64u(0, 0x1_0000_0001);
         c.vmm[2].set_zmm64u(1, 7);

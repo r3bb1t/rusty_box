@@ -13,31 +13,70 @@ use super::{
     segment_ctrl_pro::parse_selector,
 };
 
+/// `CPUID.7:0:EBX` — AVX512F, DQ, IFMA, PF, ER, CD, BW and VL.
+const CPUID_LEAF7_EBX_AVX512: u32 = (1 << 16)
+    | (1 << 17)
+    | (1 << 21)
+    | (1 << 26)
+    | (1 << 27)
+    | (1 << 28)
+    | (1 << 30)
+    | (1 << 31);
+/// `CPUID.7:0:ECX` — VBMI, VBMI2, VNNI, BITALG and VPOPCNTDQ.
+const CPUID_LEAF7_ECX_AVX512: u32 = (1 << 1) | (1 << 6) | (1 << 11) | (1 << 12) | (1 << 14);
+/// `CPUID.7:0:EDX` — 4VNNIW, 4FMAPS, VP2INTERSECT and FP16.
+const CPUID_LEAF7_EDX_AVX512: u32 = (1 << 2) | (1 << 3) | (1 << 8) | (1 << 23);
+
 const CPUID_LEAF_FEATURE_INFO: u32 = 0x0000_0001;
 const CPUID_LEAF_EXTENDED_TOPOLOGY: u32 = 0x0000_000B;
 const CPUID_OSXSAVE_ECX_BIT: u32 = 1 << 27;
 const CPUID_APIC_EDX_BIT: u32 = 1 << 9;
+/// `CPUID.1:ECX[3]`, `MONITOR`/`MWAIT`.
+const CPUID_MONITOR_ECX_BIT: u32 = 1 << 3;
 const CPUID_LEAF1_EBX_LOW_FIELDS_MASK: u32 = 0x0000_FFFF;
 const CPUID_LEAF1_LOGICAL_COUNT_SHIFT: u32 = 16;
 const CPUID_LEAF1_APIC_ID_SHIFT: u32 = 24;
 const CPUID_APIC_ID_BYTE_MASK: u32 = 0xFF;
 const CPUID_TOPOLOGY_SUBLEAF_SMT: u32 = 0;
 const CPUID_TOPOLOGY_SUBLEAF_CORE: u32 = 1;
-// Leaf 0x0B exposes only SMT (0) and Core (1) levels; subleaf >= 2 is the
-// invalid level handled by the default arm. This named index is used only by
-// the test that asserts subleaf 2 returns all zeros.
-#[cfg(test)]
 const CPUID_TOPOLOGY_SUBLEAF_PACKAGE: u32 = 2;
 const CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT: u32 = 8;
 const CPUID_TOPOLOGY_LEVEL_TYPE_SMT: u32 = 1;
 const CPUID_TOPOLOGY_LEVEL_TYPE_CORE: u32 = 2;
+const CPUID_TOPOLOGY_LEVEL_TYPE_PACKAGE: u32 = 3;
 
 #[inline]
 fn topology_level_ecx(subleaf: u32, level_type: u32) -> u32 {
     subleaf | (level_type << CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT)
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+/// `floor(log2(x))`, and 0 for `x == 0`.
+///
+/// Bochs cpuid.cc `ilog2` counts how many times `x` can be shifted right before
+/// it reaches zero, so `ilog2(0) == 0` — not a mathematical log, and the reason
+/// [`bochs_topology_shift`] does not special-case a single processor.
+#[inline]
+fn ilog2(x: u32) -> u32 {
+    if x == 0 {
+        0
+    } else {
+        u32::BITS - 1 - x.leading_zeros()
+    }
+}
+
+/// The shift CPUID leaf 0xB reports in EAX for a topology level holding
+/// `logical_count` logical processors.
+///
+/// Bochs cpuid.cc `bx_cpuid_t::get_std_cpuid_extended_topology_leaf` spells this
+/// `ilog2(n-1)+1` with no guard for small `n`, so a level holding exactly one
+/// logical processor reports 1 rather than 0. Written the same way here so the
+/// two cannot drift: the `+1` and the `ilog2(0) == 0` convention are what make
+/// the `n == 1` answer come out as Bochs has it.
+pub(crate) fn bochs_topology_shift(logical_count: u32) -> u32 {
+    ilog2(logical_count.wrapping_sub(1)) + 1
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Unified interrupt dispatch — matches Bochs interrupt() in exception.cc
     // =========================================================================
@@ -67,7 +106,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         );
         // BOCHS BX_INSTR_INTERRUPT(cpu_id, vector)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_interrupt() {
             self.instrumentation.fire_interrupt(vector);
         }
@@ -83,7 +121,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.inhibit_mask = 0;
 
         // Invalidate prefetch queue (matches Bochs line 777)
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // RSP_SPECULATIVE — mark speculative RSP so exceptions during delivery
@@ -187,7 +225,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// INTO - Interrupt on overflow (vector 4, only if OF=1)
     /// Based on Bochs INTO in soft_int.cc
-    pub fn into(&mut self, _instr: &Instruction) -> super::Result<()> {
+    ///
+    /// Named `into_overflow` rather than `into`: the mnemonic collides with
+    /// `Into::into`, which every type implements. As an inherent method on the
+    /// CPU it still won resolution, but reached through a `Deref` — as the
+    /// dispatcher now does — the blanket trait method wins instead, and the
+    /// call silently stops being this handler.
+    pub fn into_overflow(&mut self, _instr: &Instruction) -> super::Result<()> {
         if self.get_of() {
             tracing::trace!("INTO: overflow detected, calling INT 4");
             // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
@@ -324,7 +368,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_prefetch_q();
 
         // Unmask NMI on every IRET (Bochs ctrl_xfer16.cc)
-        self.unmask_event(Self::BX_EVENT_NMI);
+        self.unmask_event(BxCpuC::<T>::BX_EVENT_NMI);
 
         // RSP_SPECULATIVE before all mode branches (Bochs ctrl_xfer16.cc)
         self.speculative_rsp = true;
@@ -406,7 +450,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_prefetch_q();
 
         // Unmask NMI on every IRET (Bochs ctrl_xfer32.cc)
-        self.unmask_event(Self::BX_EVENT_NMI);
+        self.unmask_event(BxCpuC::<T>::BX_EVENT_NMI);
 
         // RSP_SPECULATIVE before all mode branches (Bochs ctrl_xfer32.cc)
         self.speculative_rsp = true;
@@ -1038,7 +1082,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.handle_interrupt_mask_change();
 
         // Invalidate prefetch
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // Only log non-exception interrupts to reduce spam (exceptions are logged in exception.rs)
@@ -1116,33 +1160,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
-        // BOCHS BX_INSTR_HLT(cpu_id)
-        #[cfg(feature = "instrumentation")]
-        if self.instrumentation.active.has_hlt_mwait() {
-            self.instrumentation.fire_hlt();
-        }
-
-        // Set activity state to halted (matches Bochs enter_sleep_state)
-        self.activity_state = CpuActivityState::Hlt;
-
-        // Bochs proc_ctrl.cc enter_sleep_state: sets `async_event = 1` (not |= STOP_TRACE).
-        // The value 1 (BX_ASYNC_EVENT_SLEEP bit) survives the `&= ~STOP_TRACE` clearing
-        // at line 226 of Bochs cpu.cc, ensuring the outer cpu_loop calls handle_async_event
-        // on the next iteration to wait for a wake event (interrupt/NMI/SIPI).
-        // Without this persistent bit, the CPU would skip the sleep check and execute
-        // the instruction after HLT instead of sleeping.
-        self.async_event |= BX_ASYNC_EVENT_STOP_TRACE | Self::BX_ASYNC_EVENT_SLEEP;
+        // Bochs proc_ctrl.cc HLT: enter_sleep_state(BX_ACTIVITY_STATE_HLT).
+        self.enter_sleep_state(CpuActivityState::Hlt);
         Ok(())
-    }
-
-    /// XSAVE state component sizes and offsets (Bochs crregs.h)
-    /// Index: XCR0 bit number. (len, offset) for each component.
-    pub(crate) fn bochs_topology_shift(logical_count: u32) -> u32 {
-        if logical_count <= 1 {
-            0
-        } else {
-            u32::BITS - (logical_count - 1).leading_zeros()
-        }
     }
 
     const XSAVE_COMPONENTS: [(u32, u32); 10] = [
@@ -1197,7 +1217,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Input: EAX = function number, ECX = sub-function (for some functions)
     pub fn cpuid(&mut self, _instr: &Instruction) -> super::Result<()> {
         // BOCHS BX_INSTR_CPUID(cpu_id)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cpuid_msr() {
             self.instrumentation.fire_cpuid();
         }
@@ -1238,6 +1257,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     edx &= !CPUID_APIC_EDX_BIT;
                 }
 
+                // ECX bit 3 (MONITOR), withdrawn with the instructions it
+                // promises. A guest believes this bit for the rest of its life:
+                // Linux picks `mwait_idle` at boot and idles there forever, so
+                // a `MONITOR` that is advertised and then faults does not
+                // produce a retry, it produces an invalid opcode in the idle
+                // task and a kernel that panics with "Attempted to kill the
+                // idle task".
+                if !self.bx_cpuid_support_isa_extension(
+                    super::decoder::features::X86Feature::IsaMonitorMwait,
+                ) {
+                    ecx &= !CPUID_MONITOR_ECX_BIT;
+                }
+
                 let topology = self.cpu_topology();
                 ebx = (ebx & CPUID_LEAF1_EBX_LOW_FIELDS_MASK)
                     | ((topology.package_logical_count() & CPUID_APIC_ID_BYTE_MASK)
@@ -1246,10 +1278,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             CPUID_LEAF_EXTENDED_TOPOLOGY => {
                 let topology = self.cpu_topology();
+                // Bochs cpuid.cc `get_std_cpuid_extended_topology_leaf` seeds
+                // every subfunction — valid level or not — with the x2APIC id
+                // in EDX and the subfunction echoed in ECX, then fills in the
+                // level only when one exists. Software enumerates the leaf by
+                // walking ECX until EBX reads zero, so an invalid level still
+                // has to identify its logical processor.
+                eax = 0;
+                ebx = 0;
+                ecx = sub_function;
                 edx = self.bx_cpuid;
                 match sub_function {
                     CPUID_TOPOLOGY_SUBLEAF_SMT => {
-                        eax = Self::bochs_topology_shift(topology.n_threads());
+                        eax = bochs_topology_shift(topology.n_threads());
                         ebx = topology.n_threads();
                         ecx = topology_level_ecx(
                             CPUID_TOPOLOGY_SUBLEAF_SMT,
@@ -1257,22 +1298,46 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                         );
                     }
                     CPUID_TOPOLOGY_SUBLEAF_CORE => {
-                        eax = Self::bochs_topology_shift(topology.package_logical_count());
+                        eax = bochs_topology_shift(topology.package_logical_count());
                         ebx = topology.package_logical_count();
                         ecx = topology_level_ecx(
                             CPUID_TOPOLOGY_SUBLEAF_CORE,
                             CPUID_TOPOLOGY_LEVEL_TYPE_CORE,
                         );
                     }
-                    _ => {
-                        eax = 0;
-                        ebx = 0;
-                        ecx = 0;
-                        edx = 0;
+                    CPUID_TOPOLOGY_SUBLEAF_PACKAGE => {
+                        // Bochs reports the package level only on a
+                        // multi-socket topology; one socket leaves the level
+                        // invalid, which is how software stops enumerating.
+                        if topology.n_processors() > 1 {
+                            eax = bochs_topology_shift(topology.n_processors());
+                            ebx = topology.cpu_count();
+                            ecx = topology_level_ecx(
+                                CPUID_TOPOLOGY_SUBLEAF_PACKAGE,
+                                CPUID_TOPOLOGY_LEVEL_TYPE_PACKAGE,
+                            );
+                        }
                     }
+                    _ => {}
                 }
             }
-            0x00000007 if sub_function == 0 => {}
+            0x00000007 if sub_function == 0 => {
+                // The AVX-512 promises, withdrawn together with the register
+                // file behind them. Subleaf 0 of leaf `D` above answers from
+                // `xcr0_suppmask`, which is derived from the ISA bitmask, so
+                // a feature bit left standing here would tell a guest it has
+                // instructions whose state `XSETBV` then refuses. A guest
+                // believes the feature bit: it enables the component, takes a
+                // fault on the first use, and under a hypervisor hands back a
+                // processor state the platform will not accept at all.
+                if !self
+                    .bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaAvx512)
+                {
+                    ebx &= !CPUID_LEAF7_EBX_AVX512;
+                    ecx &= !CPUID_LEAF7_ECX_AVX512;
+                    edx &= !CPUID_LEAF7_EDX_AVX512;
+                }
+            }
 
             0x0000000D => {
                 if sub_function == 0 {
@@ -1338,8 +1403,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
     use crate::params::BxParams;
 
     const CONFIGURED_APIC_ID: u32 = 5;
@@ -1351,7 +1414,8 @@ mod tests {
             .with_topology(2, 4, 2)
             .unwrap()
             .cpu_topology();
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
         cpu.configure_smp(CONFIGURED_APIC_ID, topology);
         let instr = Instruction::default();
 
@@ -1369,10 +1433,10 @@ mod tests {
         cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
         cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_CORE);
         cpu.cpuid(&instr).unwrap();
-        assert_eq!(
-            cpu.eax(),
-            BxCpuC::<Corei7SkylakeX>::bochs_topology_shift(topology.package_logical_count())
-        );
+        // 4 cores x 2 threads = 8 logical processors below the package, so the
+        // shift to the next level is 3 bits. A literal, not a call to the code
+        // under test — the assertion has to be able to disagree with it.
+        assert_eq!(cpu.eax(), 3);
         assert_eq!(cpu.ebx(), 8);
         assert_eq!(
             cpu.ecx(),
@@ -1380,13 +1444,149 @@ mod tests {
         );
         assert_eq!(cpu.edx(), CONFIGURED_APIC_ID);
 
+        // Two sockets, so the package level exists: shifting the x2APIC id by
+        // 1 leaves the socket id, and 2 x 4 x 2 = 16 logical processors sit
+        // below it. Literals, for the reason given above.
+        cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+        cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_PACKAGE);
+        cpu.cpuid(&instr).unwrap();
+        assert_eq!(cpu.eax(), 1);
+        assert_eq!(cpu.ebx(), 16);
+        assert_eq!(
+            cpu.ecx(),
+            topology_level_ecx(
+                CPUID_TOPOLOGY_SUBLEAF_PACKAGE,
+                CPUID_TOPOLOGY_LEVEL_TYPE_PACKAGE
+            )
+        );
+        assert_eq!(cpu.edx(), CONFIGURED_APIC_ID);
+
+        // An invalid level still echoes the subfunction and the x2APIC id, and
+        // reports EBX = 0 — the terminator software enumerates on.
+        const INVALID_SUBLEAF: u32 = 3;
+        cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+        cpu.set_ecx(INVALID_SUBLEAF);
+        cpu.cpuid(&instr).unwrap();
+        assert_eq!(cpu.eax(), 0);
+        assert_eq!(cpu.ebx(), 0);
+        assert_eq!(cpu.ecx(), INVALID_SUBLEAF);
+        assert_eq!(cpu.edx(), CONFIGURED_APIC_ID);
+    }
+
+    /// Leaf 0xB's core-level EAX, checked the way software actually consumes
+    /// it rather than against either implementation's arithmetic.
+    ///
+    /// SDM Vol 2, CPUID leaf 0BH: EAX[4:0] at sub-leaf *m* is the shift that
+    /// extracts the id of the *next higher* level — so at the core level it
+    /// must cover the SMT bits as well as the core bits. Linux
+    /// `detect_extended_topology` names that value `core_plus_mask_width`
+    /// ("core PLUS") and derives `phys_proc_id = initial_apicid >> it`.
+    ///
+    /// Bochs cpuid.cc `get_std_cpuid_extended_topology_leaf` reports
+    /// `ilog2(ncores-1)+1`, which counts the core bits alone. APIC ids are
+    /// assigned densely from the CPU index (Bochs apic.cc
+    /// `bx_local_apic_c::bx_local_apic_c`), so on 2 x 4 x 2 they pack thread
+    /// into bit 0, core into bits 1-2 and socket into bit 3 — and shifting by
+    /// the core width alone strands the top core bit inside the package id,
+    /// splitting each socket in two. This test therefore fails against the
+    /// upstream formula; see docs/bochs-parity-divergences.md.
+    #[test]
+    fn cpuid_leaf_b_core_shift_separates_sockets_as_software_reads_it() {
+        const PACKAGES: u32 = 2;
+        const CORES: u32 = 4;
+        const THREADS: u32 = 2;
+        const LOGICAL: u32 = PACKAGES * CORES * THREADS;
+        let topology = BxParams::default()
+            .with_topology(PACKAGES, CORES, THREADS)
+            .unwrap()
+            .cpu_topology();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let instr = Instruction::default();
+
+        let mut package_of = Vec::new();
+        for apic_id in 0..LOGICAL {
+            let mut cpu = machine.ctx();
+            cpu.configure_smp(apic_id, topology);
+            cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+            cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_CORE);
+            cpu.cpuid(&instr).unwrap();
+            let core_plus_mask_width = cpu.eax() & 0x1F;
+            package_of.push(apic_id >> core_plus_mask_width);
+        }
+
+        let expected: Vec<u32> = (0..LOGICAL).map(|id| id / (CORES * THREADS)).collect();
+        assert_eq!(
+            package_of, expected,
+            "all 8 logical processors of a socket must derive the same package id"
+        );
+    }
+
+    /// One socket leaves the package level invalid, exactly as Bochs
+    /// cpuid.cc guards `case 2` with `nprocessors > 1`.
+    #[test]
+    fn cpuid_leaf_b_package_level_is_invalid_on_a_single_socket() {
+        let topology = BxParams::default()
+            .with_topology(1, 4, 2)
+            .unwrap()
+            .cpu_topology();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.configure_smp(CONFIGURED_APIC_ID, topology);
+        let instr = Instruction::default();
+
         cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
         cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_PACKAGE);
         cpu.cpuid(&instr).unwrap();
         assert_eq!(cpu.eax(), 0);
-        assert_eq!(cpu.ebx(), 0);
-        assert_eq!(cpu.ecx(), 0);
-        assert_eq!(cpu.edx(), 0);
+        assert_eq!(cpu.ebx(), 0, "no package level to enumerate");
+        assert_eq!(cpu.ecx(), CPUID_TOPOLOGY_SUBLEAF_PACKAGE);
+        assert_eq!(cpu.edx(), CONFIGURED_APIC_ID);
+    }
+
+    /// Bochs cpuid.cc computes leaf 0xB EAX as `ilog2(n-1)+1` with no guard for
+    /// `n == 1`, and its `ilog2(0)` is 0 — so a level holding one logical
+    /// processor reports a shift of 1, NOT 0.
+    ///
+    /// The values below are literals for that reason. Asserting against
+    /// `bochs_topology_shift` would make the test agree with the code whatever
+    /// the code said, which is how this case stayed wrong.
+    #[test]
+    fn cpuid_leaf_b_shift_is_one_on_a_uniprocessor_topology() {
+        let topology = BxParams::default()
+            .with_topology(1, 1, 1)
+            .unwrap()
+            .cpu_topology();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.configure_smp(0, topology);
+        let instr = Instruction::default();
+
+        cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+        cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_SMT);
+        cpu.cpuid(&instr).unwrap();
+        assert_eq!(cpu.eax(), 1, "one thread per core still shifts by 1");
+        assert_eq!(cpu.ebx(), 1);
+
+        cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+        cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_CORE);
+        cpu.cpuid(&instr).unwrap();
+        assert_eq!(cpu.eax(), 1, "one logical processor per package likewise");
+        assert_eq!(cpu.ebx(), 1);
+    }
+
+    /// The shift is a pure function of the level's width; pin the whole small
+    /// range against Bochs `ilog2(n-1)+1` rather than against ourselves.
+    #[test]
+    fn topology_shift_matches_bochs_ilog2_form() {
+        for (logical_count, expected) in
+            [(1u32, 1u32), (2, 1), (3, 2), (4, 2), (5, 3), (8, 3), (9, 4)]
+        {
+            assert_eq!(
+                bochs_topology_shift(logical_count),
+                expected,
+                "leaf 0xB shift for {logical_count} logical processors"
+            );
+        }
     }
 
     #[test]
@@ -1395,7 +1595,8 @@ mod tests {
             .with_topology(2, 2, 2)
             .unwrap()
             .cpu_topology();
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
         cpu.initialize(BxParams::default()).unwrap();
         cpu.configure_smp(LEAF1_TEST_APIC_ID, topology);
         cpu.reset(crate::cpu::ResetReason::Hardware);

@@ -10,8 +10,6 @@
 //! - fpatan.rs: FPATAN arctangent (fpatan.cc)
 //! - fsincos.rs: FSIN/FCOS/FSINCOS/FPTAN trigonometric (fsincos.cc)
 
-use super::super::cpu::BxCpuC;
-use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::Instruction;
 use super::super::i387::*;
 use super::super::softfloat3e::extf80_scale::extf80_scale;
@@ -41,7 +39,7 @@ const FLOATX80_ONE: ExtFloat80 = ExtFloat80 {
 // CPU methods: FPU transcendental instructions
 // ---------------------------------------------------------------------------
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ================================================================
     // FSCALE (D9 FD) -- ST(0) = ST(0) * 2^trunc(ST(1))
     // ================================================================

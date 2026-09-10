@@ -6,14 +6,12 @@
 //! (LLDT and LTR are in segment_ctrl_pro.rs)
 
 use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     descriptor::SegTypeBits,
     Result,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// LGDT - Load Global Descriptor Table Register
     /// Based on Bochs protect_ctrl.cc
     pub fn lgdt_ms(&mut self, instr: &Instruction) -> Result<()> {
@@ -84,12 +82,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             0xFFFF_FFFF
         };
-        self.v_write_word(seg, eaddr, self.gdtr.limit)?;
-        self.v_write_dword(
-            seg,
-            eaddr.wrapping_add(2) & asize_mask,
-            self.gdtr.base as u32,
-        )?;
+        let limit = self.gdtr.limit;
+        self.v_write_word(seg, eaddr, limit)?;
+        let base = self.gdtr.base as u32;
+        self.v_write_dword(seg, eaddr.wrapping_add(2) & asize_mask, base)?;
         Ok(())
     }
 
@@ -162,12 +158,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             0xFFFF_FFFF
         };
-        self.v_write_word(seg, eaddr, self.idtr.limit)?;
-        self.v_write_dword(
-            seg,
-            eaddr.wrapping_add(2) & asize_mask,
-            self.idtr.base as u32,
-        )?;
+        let limit = self.idtr.limit;
+        self.v_write_word(seg, eaddr, limit)?;
+        let base = self.idtr.base as u32;
+        self.v_write_dword(seg, eaddr.wrapping_add(2) & asize_mask, base)?;
         Ok(())
     }
 
@@ -807,8 +801,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
             return Ok(());
         }
-        self.system_write_word(laddr, self.gdtr.limit)?;
-        self.system_write_qword(laddr.wrapping_add(2), self.gdtr.base)?;
+        let limit = self.gdtr.limit;
+        self.system_write_word(laddr, limit)?;
+        let base = self.gdtr.base;
+        self.system_write_qword(laddr.wrapping_add(2), base)?;
         Ok(())
     }
 
@@ -832,8 +828,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
             return Ok(());
         }
-        self.system_write_word(laddr, self.idtr.limit)?;
-        self.system_write_qword(laddr.wrapping_add(2), self.idtr.base)?;
+        let limit = self.idtr.limit;
+        self.system_write_word(laddr, limit)?;
+        let base = self.idtr.base;
+        self.system_write_qword(laddr.wrapping_add(2), base)?;
         Ok(())
     }
 

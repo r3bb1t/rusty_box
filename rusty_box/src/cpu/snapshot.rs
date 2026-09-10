@@ -1,15 +1,13 @@
 //! CPU state save/restore for the snapshot mechanism.
 //! This file lives in cpu/ so it has pub(super) access to BxCpuC fields.
 
-use std::io::{self, Error, ErrorKind, Read, Write};
 
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
 };
 
 use super::{
     cpu::{BxCpuC, CpuActivityState, CpuMode, BX_MSR_MAX_INDEX},
-    cpuid::BxCpuIdTrait,
     crregs::{BxCr0, BxCr4, BxDr6, BxDr7, BxEfer, Xcr0},
     eflags::EFlags,
 };
@@ -19,11 +17,11 @@ use super::{
 // V3 streaming CPU record
 // ============================================================================
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Exact byte count for one CPU body in the v3 CPU section. The enclosing
     /// CPU section owns its version and per-record `{ cpu_id, state_len }`
     /// framing, so this method deliberately has neither.
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         let vmm_count = u64::try_from(self.vmm.len())
             .map_err(|_| snapshot_invalid("vector register count does not fit u64"))?;
         let generic_msr_count = u64::try_from(self.msrs.len())
@@ -50,7 +48,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         &self,
         lapic_base: u64,
         lapic_mode: u64,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         if self.msr.apicbase & !0xfff != lapic_base
             || (self.msr.apicbase >> 10) & 3 != lapic_mode
         {
@@ -64,10 +62,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Streams one architectural CPU record. Host mappings, TLBs, decode
     /// caches, instruction handlers, instrumentation, and diagnostics stay
     /// live and are rebuilt by the machine-level post-restore phase.
-    pub(crate) fn save_snapshot_v3_body<W: Write + ?Sized>(
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(
         &self,
         writer: &mut W,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         if self.vmm.len() > bounds::MAX_SNAPSHOT_COUNT
             || self.msrs.len() > bounds::MAX_SNAPSHOT_COUNT
         {
@@ -220,12 +218,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         writer.write_bool(self.svm_gif)?;
         writer.write_u64(self.vmcbptr)?;
         writer.write_u32(self.vmcb_memtype)?;
-        match &self.vmcb {
-            Some(vmcb) => {
-                writer.write_bool(true)?;
-                save_v3_vmcb_cache(writer, vmcb)?;
-            }
-            None => writer.write_bool(false)?,
+        // Whether the stream carries a VMCB block is a fact about the CPU
+        // MODEL, so it is read from the model rather than from a second copy
+        // kept beside the cache. The wire layout is unchanged: the flag, then
+        // the block when it is set.
+        let has_vmcb = self.svm_supported();
+        writer.write_bool(has_vmcb)?;
+        if has_vmcb {
+            save_v3_vmcb_cache(writer, &self.vmcb)?;
         }
 
         Ok(())
@@ -236,11 +236,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// does not invalidate caches or wire handlers; those machine-wide hooks
     /// run only after every section succeeds. It does rebuild CPU-local
     /// derived state from the decoded architectural inputs.
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
+        reader: &mut R,
         expected_cpu_id: u32,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         if self.bx_cpuid != expected_cpu_id {
             return Err(snapshot_invalid("CPU record does not match configured CPU ID"));
         }
@@ -486,7 +486,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if vmcb_memtype > 8 || self.in_svm_guest && !has_vmcb {
             return Err(snapshot_invalid("SVM state is invalid"));
         }
-        if has_vmcb != self.vmcb.is_some() {
+        // A second line behind the whole-ISA capability check above, which
+        // normally rejects a cross-model image first. It is kept because it
+        // guards this field specifically: it is what makes reading the VMCB
+        // block conditional on the same answer that wrote it.
+        if has_vmcb != self.svm_supported() {
             return Err(snapshot_invalid("SVM capability does not match snapshot"));
         }
         if vmcbptr != 0 && vmcbptr & 0xfff != 0 {
@@ -494,8 +498,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         self.vmcbptr = vmcbptr;
         self.vmcb_memtype = vmcb_memtype;
-        if let Some(vmcb) = &mut self.vmcb {
-            restore_v3_vmcb_cache(reader, vmcb)?;
+        if has_vmcb {
+            restore_v3_vmcb_cache(reader, &mut self.vmcb)?;
         }
 
         // These fields are caches derived by normal CR/mode writes.  They are
@@ -507,40 +511,41 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_fetch_mode_mask();
         self.handle_alignment_check();
 
-        // vmcbhostptr is a host mapping and remains deliberately invalid until
+        // The VMCB backing is a host mapping and stays deliberately absent until
         // the parent restores memory and runs its post-restore cache hook.
-        self.vmcbhostptr = 0;
+        self.vmcb_host_offset = None;
         Ok(())
     }
 }
 
+/// A sink that keeps only the length of what was written to it.
+///
+/// The CPU body's declared length is derived by encoding it once against this,
+/// so the figure cannot disagree with what [`BxCpuC::save_snapshot_v3_body`]
+/// actually writes — the two are the same code path.
 #[derive(Default)]
 struct SnapshotLenWriter {
     len: u64,
 }
 
-impl Write for SnapshotLenWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+impl SnapWrite for SnapshotLenWriter {
+    fn write_bytes(&mut self, bytes: &[u8]) -> SnapResult {
         let bytes_len = u64::try_from(bytes.len())
             .map_err(|_| snapshot_invalid("encoded CPU length does not fit u64"))?;
         self.len = checked_snapshot_len_add(self.len, bytes_len)?;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
 
-fn snapshot_invalid(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn snapshot_invalid(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
-fn write_i32<W: Write + ?Sized>(writer: &mut W, value: i32) -> io::Result<()> {
+fn write_i32<W: SnapWrite>(writer: &mut W, value: i32) -> SnapResult<()> {
     writer.write_u32(u32::from_le_bytes(value.to_le_bytes()))
 }
 
-fn read_i32<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<i32> {
+fn read_i32<R: SnapRead>(reader: &mut R) -> SnapResult<i32> {
     Ok(i32::from_le_bytes(reader.read_u32()?.to_le_bytes()))
 }
 
@@ -554,7 +559,7 @@ fn cpu_mode_to_wire(mode: CpuMode) -> u32 {
     }
 }
 
-fn cpu_mode_from_wire(value: u32) -> io::Result<CpuMode> {
+fn cpu_mode_from_wire(value: u32) -> SnapResult<CpuMode> {
     match value {
         0 => Ok(CpuMode::Ia32Real),
         1 => Ok(CpuMode::Ia32V8086),
@@ -576,7 +581,7 @@ fn activity_state_to_wire(state: CpuActivityState) -> u32 {
     }
 }
 
-fn activity_state_from_wire(value: u32) -> io::Result<CpuActivityState> {
+fn activity_state_from_wire(value: u32) -> SnapResult<CpuActivityState> {
     match value {
         0 => Ok(CpuActivityState::Active),
         1 => Ok(CpuActivityState::Hlt),
@@ -588,7 +593,7 @@ fn activity_state_from_wire(value: u32) -> io::Result<CpuActivityState> {
     }
 }
 
-fn validate_last_exception_type(value: i32) -> io::Result<()> {
+fn validate_last_exception_type(value: i32) -> SnapResult<()> {
     if matches!(value, -1 | 0 | 1 | 2 | 10) {
         Ok(())
     } else {
@@ -602,7 +607,7 @@ fn validate_mode_state(
     efer: BxEfer,
     eflags: EFlags,
     sregs: &[BxSegmentReg; 6],
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let pe = cr0.contains(BxCr0::PE);
     let lma = efer.contains(BxEfer::LMA);
     let vm = eflags.contains(EFlags::VM);
@@ -641,7 +646,7 @@ fn is_canonical_to_width(address: u64, width: u32) -> bool {
 
 use super::descriptor::{BxGlobalSegmentReg, BxSegmentReg};
 
-fn write_v3_seg_reg<W: Write + ?Sized>(writer: &mut W, seg: &BxSegmentReg) -> io::Result<()> {
+fn write_v3_seg_reg<W: SnapWrite>(writer: &mut W, seg: &BxSegmentReg) -> SnapResult<()> {
     writer.write_u16(seg.selector.value)?;
     writer.write_u16(seg.selector.index)?;
     writer.write_u16(seg.selector.ti)?;
@@ -659,10 +664,10 @@ fn write_v3_seg_reg<W: Write + ?Sized>(writer: &mut W, seg: &BxSegmentReg) -> io
     writer.write_bool(seg.cache.u.segment_avl())
 }
 
-fn read_v3_seg_reg<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn read_v3_seg_reg<R: SnapRead>(
+    reader: &mut R,
     seg: &mut BxSegmentReg,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let selector_value = reader.read_u16()?;
     let selector_index = reader.read_u16()?;
     let selector_ti = reader.read_u16()?;
@@ -715,27 +720,27 @@ fn read_v3_seg_reg<R: Read>(
     Ok(())
 }
 
-fn write_v3_global_seg<W: Write + ?Sized>(
+fn write_v3_global_seg<W: SnapWrite>(
     writer: &mut W,
     seg: &BxGlobalSegmentReg,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     writer.write_u64(seg.base)?;
     writer.write_u16(seg.limit)
 }
 
-fn read_v3_global_seg<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn read_v3_global_seg<R: SnapRead>(
+    reader: &mut R,
     seg: &mut BxGlobalSegmentReg,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     seg.base = reader.read_u64()?;
     seg.limit = reader.read_u16()?;
     Ok(())
 }
 
-fn save_v3_fixed_msrs<W: Write + ?Sized>(
+fn save_v3_fixed_msrs<W: SnapWrite>(
     writer: &mut W,
     msr: &super::cpu::BxRegsMsr,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     writer.write_u64(msr.apicbase)?;
     writer.write_u64(msr.star)?;
     writer.write_u64(msr.lstar)?;
@@ -781,11 +786,11 @@ fn save_v3_fixed_msrs<W: Write + ?Sized>(
     writer.write_u32(msr.ia32_spec_ctrl)
 }
 
-fn restore_v3_fixed_msrs<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_v3_fixed_msrs<R: SnapRead>(
+    reader: &mut R,
     msr: &mut super::cpu::BxRegsMsr,
     ia32_xss_suppmask: u32,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     msr.apicbase = reader.read_u64()?;
     msr.star = reader.read_u64()?;
     msr.lstar = reader.read_u64()?;
@@ -836,12 +841,12 @@ fn restore_v3_fixed_msrs<R: Read>(
     Ok(())
 }
 
-fn restore_v3_uintr<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_v3_uintr<R: SnapRead>(
+    reader: &mut R,
     uintr: &mut super::cpu::Uintr,
     supports_uintr: bool,
     linaddr_width: u8,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let ui_handler = reader.read_u64()?;
     let stack_adjust = reader.read_u64()?;
     let uinv = reader.read_u32()?;
@@ -880,10 +885,10 @@ fn restore_v3_uintr<R: Read>(
     Ok(())
 }
 
-fn write_v3_amx<W: Write + ?Sized>(
+fn write_v3_amx<W: SnapWrite>(
     writer: &mut W,
     amx: Option<&super::avx::AMX>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     match amx {
         Some(amx) => {
             writer.write_bool(true)?;
@@ -902,10 +907,10 @@ fn write_v3_amx<W: Write + ?Sized>(
     }
 }
 
-fn restore_v3_amx<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_v3_amx<R: SnapRead>(
+    reader: &mut R,
     amx: &mut Option<alloc::boxed::Box<super::avx::AMX>>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let has_amx = reader.read_bool()?;
     if has_amx != amx.is_some() {
         return Err(snapshot_invalid("AMX capability does not match snapshot"));
@@ -952,10 +957,10 @@ macro_rules! read_v3_fields {
     };
 }
 
-fn save_v3_vmcs_cache<W: Write + ?Sized>(
+fn save_v3_vmcs_cache<W: SnapWrite>(
     writer: &mut W,
     vm: &super::vmx::VmcsCache,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     write_v3_fields!(writer;
         write_bool(vm.launched),
         write_u64(vm.host_cr0), write_u64(vm.host_cr3), write_u64(vm.host_cr4),
@@ -1049,20 +1054,27 @@ fn save_v3_vmcs_cache<W: Write + ?Sized>(
         write_u64(vm.vmread_bitmap_addr), write_u64(vm.vmwrite_bitmap_addr),
         write_u32(vm.vmx_preemption_timer_value), write_u32(vm.tpr_threshold),
         write_u64(vm.virtual_apic_page_addr), write_u64(vm.pi_desc_addr),
-        write_u8(vm.pi_notification_vector), write_u16(vm.vpid),
+        write_u16(vm.pi_notification_vector), write_u16(vm.vpid),
         write_u64(vm.eptptr), write_u64(vm.guest_physical_addr),
         write_u64(vm.vmentry_msr_load_addr), write_u64(vm.vmexit_msr_store_addr),
         write_u64(vm.vmexit_msr_load_addr), write_u32(vm.vmentry_msr_load_cnt),
         write_u32(vm.vmexit_msr_store_cnt), write_u32(vm.vmexit_msr_load_cnt),
-        write_bool(vm.shadow_stack_prematurely_busy)
+        write_bool(vm.shadow_stack_prematurely_busy),
+        // Virtualised-APIC state. RVI/SVI/VPPR are the guest's interrupt
+        // position: restoring without them resumes a guest that has forgotten
+        // which virtual interrupt it was servicing.
+        write_u8(vm.rvi), write_u8(vm.svi), write_u8(vm.vppr)
     );
+    for value in &vm.eoi_exit_bitmap {
+        writer.write_u32(*value)?;
+    }
     Ok(())
 }
 
-fn restore_v3_vmcs_cache<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_v3_vmcs_cache<R: SnapRead>(
+    reader: &mut R,
     vm: &mut super::vmx::VmcsCache,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     read_v3_fields!(reader, vm;
         read_bool => launched,
         read_u64 => host_cr0, read_u64 => host_cr3, read_u64 => host_cr4,
@@ -1159,13 +1171,17 @@ fn restore_v3_vmcs_cache<R: Read>(
         read_u64 => vmread_bitmap_addr, read_u64 => vmwrite_bitmap_addr,
         read_u32 => vmx_preemption_timer_value, read_u32 => tpr_threshold,
         read_u64 => virtual_apic_page_addr, read_u64 => pi_desc_addr,
-        read_u8 => pi_notification_vector, read_u16 => vpid,
+        read_u16 => pi_notification_vector, read_u16 => vpid,
         read_u64 => eptptr, read_u64 => guest_physical_addr,
         read_u64 => vmentry_msr_load_addr, read_u64 => vmexit_msr_store_addr,
         read_u64 => vmexit_msr_load_addr, read_u32 => vmentry_msr_load_cnt,
         read_u32 => vmexit_msr_store_cnt, read_u32 => vmexit_msr_load_cnt,
-        read_bool => shadow_stack_prematurely_busy
+        read_bool => shadow_stack_prematurely_busy,
+        read_u8 => rvi, read_u8 => svi, read_u8 => vppr
     );
+    for value in &mut vm.eoi_exit_bitmap {
+        *value = reader.read_u32()?;
+    }
     if vm.tpr_threshold > 15 {
         return Err(snapshot_invalid("VMCS TPR threshold is invalid"));
     }
@@ -1181,7 +1197,7 @@ fn validate_vmx_state(
     in_vmx_guest: bool,
     in_smm_vmx: bool,
     in_smm_vmx_guest: bool,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let invalid_ptr = super::vmx::BX_INVALID_VMCSPTR;
     if vmcs_memtype > 8
         || vmcsptr != invalid_ptr && vmcsptr & 0x0fff != 0
@@ -1195,10 +1211,10 @@ fn validate_vmx_state(
     Ok(())
 }
 
-fn save_v3_vmcb_cache<W: Write + ?Sized>(
+fn save_v3_vmcb_cache<W: SnapWrite>(
     writer: &mut W,
     vmcb: &super::svm::VmcbCache,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     for seg in &vmcb.host_state.sregs {
         write_v3_seg_reg(writer, seg)?;
     }
@@ -1230,10 +1246,10 @@ fn save_v3_vmcb_cache<W: Write + ?Sized>(
     Ok(())
 }
 
-fn restore_v3_vmcb_cache<R: Read>(
-    reader: &mut SnapshotReader<R>,
+fn restore_v3_vmcb_cache<R: SnapRead>(
+    reader: &mut R,
     vmcb: &mut super::svm::VmcbCache,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     for seg in &mut vmcb.host_state.sregs {
         read_v3_seg_reg(reader, seg)?;
     }
@@ -1291,38 +1307,34 @@ fn restore_v3_vmcb_cache<R: Read>(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::crregs::{BxCr0, BxEfer};
     use crate::cpu::decoder::BxSegregs;
     use crate::cpu::eflags::EFlags;
-    use crate::cpu::svm::VmcbCache;
+    use crate::cpu::CpuModel;
     use crate::cpu::ResetReason;
     use super::CpuMode;
     use crate::snapshot::SnapshotReader;
 
-    /// Round-trip the virtualization (VMX/SVM) state through a CPU snapshot.
-    /// The tail assertions (VMCB pause fields) double as a lockstep check:
-    /// any save/restore misalignment earlier in the blob corrupts them.
+    /// Round-trip the VMX state through a CPU snapshot, on a model that has
+    /// VMX. The tail assertions double as a lockstep check: any save/restore
+    /// misalignment earlier in the blob corrupts them.
+    ///
+    /// VMX and SVM are tested apart because no processor has both, and the
+    /// restore now says so: a machine claiming to be an SVM guest on a model
+    /// without SVM is refused. One test setting both flags was describing a
+    /// processor that cannot exist.
     #[test]
-    fn snapshot_round_trips_virtualization_state() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+    fn snapshot_round_trips_vmx_state() {
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
 
         cpu.in_vmx = true;
         cpu.in_vmx_guest = true;
         cpu.in_smm_vmx = true;
         cpu.in_smm_vmx_guest = true;
-        cpu.in_svm_guest = true;
-        cpu.svm_gif = false;
         cpu.vmcsptr = 0x0012_3000;
         cpu.vmxonptr = 0x0056_7000;
-        cpu.vmcbptr = 0x009A_B000;
-        cpu.vmcbhostptr = 0xDEAD_BEEF; // must NOT survive a restore
-        cpu.msr.svm_hsave_pa = 0x00DE_F000;
-        cpu.msr.svm_vm_cr = 0x2;
 
         cpu.vmcs.launched = true;
         cpu.vmcs.host_cr0 = 0x8000_0031; // first serialized u64 field
@@ -1330,28 +1342,12 @@ mod tests {
         cpu.vmcs.exit_reason = 0x77;
         cpu.vmcs.exit_qualification = 0xABCD_EF01;
 
-        let mut vmcb = VmcbCache::default();
-        vmcb.ctrls.intercept_vector[1] = 0xAA55;
-        vmcb.ctrls.ncr3 = 0x0004_2000;
-        vmcb.ctrls.v_tpr = 0x0F;
-        vmcb.ctrls.nested_paging = true;
-        vmcb.ctrls.pause_filter_count = 0x1111;
-        vmcb.ctrls.pause_filter_threshold = 0x2222;
-        vmcb.ctrls.last_pause_time = 0x3333_4444_5555_6666;
-        vmcb.host_state.rax = 0x7777_8888;
-        vmcb.host_state.eflags = 0x0000_0202;
-        cpu.vmcb = Some(vmcb);
-
         let mut blob = Vec::new();
         cpu.save_snapshot_v3_body(&mut blob).unwrap();
 
-        let mut restored = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut restored = BxCpuBuilder::new().build().unwrap();
         restored.reset(ResetReason::Hardware);
-        // The v3 codec treats the live VMCB cache allocation as immutable
-        // host topology: it must exist before a with-VMCB snapshot decodes.
-        restored.vmcb = Some(VmcbCache::default());
-        let mut reader =
-            SnapshotReader::new(Cursor::new(blob.clone()), blob.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
         restored
             .restore_snapshot_v3_body(&mut reader, cpu.snapshot_cpu_id())
             .unwrap();
@@ -1361,25 +1357,67 @@ mod tests {
         assert!(restored.in_vmx_guest);
         assert!(restored.in_smm_vmx);
         assert!(restored.in_smm_vmx_guest);
-        assert!(restored.in_svm_guest);
-        assert!(!restored.svm_gif);
         assert_eq!(restored.vmcsptr, 0x0012_3000);
         assert_eq!(restored.vmxonptr, 0x0056_7000);
-        assert_eq!(restored.vmcbptr, 0x009A_B000);
-        assert_eq!(
-            restored.vmcbhostptr, 0,
-            "cached host pointer must be re-resolved after restore"
-        );
-        assert_eq!(restored.msr.svm_hsave_pa, 0x00DE_F000);
-        assert_eq!(restored.msr.svm_vm_cr, 0x2);
 
         assert!(restored.vmcs.launched);
         assert_eq!(restored.vmcs.host_cr0, 0x8000_0031);
         assert_eq!(restored.vmcs.guest_cs_selector, 0x1234);
         assert_eq!(restored.vmcs.exit_reason, 0x77);
         assert_eq!(restored.vmcs.exit_qualification, 0xABCD_EF01);
+    }
 
-        let vmcb = restored.vmcb.as_ref().expect("VMCB cache must round-trip");
+    /// Round-trip the SVM state, including the VMCB cache, on a model that
+    /// has SVM. The tail assertions (VMCB pause fields) are the lockstep
+    /// check for this blob.
+    #[test]
+    fn snapshot_round_trips_svm_state_including_the_vmcb_cache() {
+        let mut cpu = BxCpuBuilder::new_with_model(CpuModel::amd_ryzen())
+            .build()
+            .unwrap();
+        cpu.reset(ResetReason::Hardware);
+
+        cpu.in_svm_guest = true;
+        cpu.svm_gif = false;
+        cpu.vmcbptr = 0x009A_B000;
+        cpu.vmcb_host_offset = Some(0xDEAD_BEEF); // must NOT survive a restore
+        cpu.msr.svm_hsave_pa = 0x00DE_F000;
+        cpu.msr.svm_vm_cr = 0x2;
+
+        cpu.vmcb.ctrls.intercept_vector[1] = 0xAA55;
+        cpu.vmcb.ctrls.ncr3 = 0x0004_2000;
+        cpu.vmcb.ctrls.v_tpr = 0x0F;
+        cpu.vmcb.ctrls.nested_paging = true;
+        cpu.vmcb.ctrls.pause_filter_count = 0x1111;
+        cpu.vmcb.ctrls.pause_filter_threshold = 0x2222;
+        cpu.vmcb.ctrls.last_pause_time = 0x3333_4444_5555_6666;
+        cpu.vmcb.host_state.rax = 0x7777_8888;
+        cpu.vmcb.host_state.eflags = 0x0000_0202;
+
+        let mut blob = Vec::new();
+        cpu.save_snapshot_v3_body(&mut blob).unwrap();
+
+        let mut restored = BxCpuBuilder::new_with_model(CpuModel::amd_ryzen())
+            .build()
+            .unwrap();
+        restored.reset(ResetReason::Hardware);
+        let mut reader = SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
+        restored
+            .restore_snapshot_v3_body(&mut reader, cpu.snapshot_cpu_id())
+            .unwrap();
+        reader.finish_exact().unwrap();
+
+        assert!(restored.in_svm_guest);
+        assert!(!restored.svm_gif);
+        assert_eq!(restored.vmcbptr, 0x009A_B000);
+        assert_eq!(
+            restored.vmcb_host_offset, None,
+            "cached host pointer must be re-resolved after restore"
+        );
+        assert_eq!(restored.msr.svm_hsave_pa, 0x00DE_F000);
+        assert_eq!(restored.msr.svm_vm_cr, 0x2);
+
+        let vmcb = &restored.vmcb;
         assert_eq!(vmcb.ctrls.intercept_vector[1], 0xAA55);
         assert_eq!(vmcb.ctrls.ncr3, 0x0004_2000);
         assert_eq!(vmcb.ctrls.v_tpr, 0x0F);
@@ -1391,45 +1429,62 @@ mod tests {
         assert_eq!(vmcb.ctrls.last_pause_time, 0x3333_4444_5555_6666);
     }
 
-    /// The live VMCB cache allocation is host topology, not guest state: a
-    /// no-VMCB snapshot restores into a no-VMCB CPU and is rejected by a
-    /// VMCB-carrying CPU instead of silently dropping the live allocation.
+    /// Whether a snapshot carries a VMCB block is the CPU MODEL's answer, so
+    /// a stream written by a model without SVM restores into another such
+    /// model and is refused by one with SVM — rather than being read as
+    /// though the block were there.
+    ///
+    /// This is the real scenario the check exists for: carrying an image
+    /// between machines. It used to be staged by assigning the cache field
+    /// directly, which tested the field rather than the capability, and could
+    /// pass while the capability check was reading the wrong thing.
     #[test]
-    fn snapshot_round_trips_absent_vmcb() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+    fn a_snapshot_from_a_model_without_svm_is_refused_by_a_model_with_it() {
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
-        assert!(cpu.vmcb.is_none());
+        assert!(
+            !cpu.svm_supported(),
+            "Skylake-X is the no-SVM side of this test"
+        );
 
         let mut blob = Vec::new();
         cpu.save_snapshot_v3_body(&mut blob).unwrap();
 
-        let mut restored = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut restored = BxCpuBuilder::new().build().unwrap();
         restored.reset(ResetReason::Hardware);
-        let mut reader =
-            SnapshotReader::new(Cursor::new(blob.clone()), blob.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
         restored
             .restore_snapshot_v3_body(&mut reader, cpu.snapshot_cpu_id())
             .unwrap();
         reader.finish_exact().unwrap();
-        assert!(restored.vmcb.is_none());
 
-        let mut mismatched = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut mismatched = BxCpuBuilder::new_with_model(CpuModel::amd_ryzen())
+            .build()
+            .unwrap();
         mismatched.reset(ResetReason::Hardware);
-        mismatched.vmcb = Some(VmcbCache::default());
-        let mut reader =
-            SnapshotReader::new(Cursor::new(blob.clone()), blob.len() as u64).unwrap();
+        assert!(
+            mismatched.svm_supported(),
+            "Ryzen is the SVM side of this test"
+        );
+        let mut reader = SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
         let error = mismatched
             .restore_snapshot_v3_body(&mut reader, cpu.snapshot_cpu_id())
             .unwrap_err();
+        // The whole-ISA capability check fires first, and that is the one
+        // that matters: what must not happen is the image loading. Asserting
+        // the SVM-specific message instead would pin which guard wins rather
+        // than the property, and would go green if the SVM guard were the
+        // only one left.
         assert!(
-            error.to_string().contains("SVM capability does not match"),
-            "unexpected rejection: {error}"
+            error.to_string().contains("differs from snapshot")
+                || error.to_string().contains("SVM capability does not match"),
+            "a cross-model image must be refused, not read: {error}"
         );
     }
 
     #[test]
     fn v3_restore_rebuilds_cpu_derived_state() {
-        let mut source = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut source = BxCpuBuilder::new().build().unwrap();
         source.reset(ResetReason::Hardware);
 
         source.cr0.insert(BxCr0::PE | BxCr0::AM | BxCr0::TS);
@@ -1458,7 +1513,7 @@ mod tests {
         let mut bytes = Vec::new();
         source.save_snapshot_v3_body(&mut bytes).unwrap();
 
-        let mut restored = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut restored = BxCpuBuilder::new().build().unwrap();
         restored.reset(ResetReason::Hardware);
         // None of these caches are serialized authoritatively. Seed them with
         // values that cannot accidentally satisfy the restored architecture.
@@ -1466,7 +1521,7 @@ mod tests {
         restored.wr_pkey = [0; 16];
         restored.fetch_mode_mask = Default::default();
         restored.alignment_check_mask = 0;
-        let mut reader = SnapshotReader::new(Cursor::new(bytes.clone()), bytes.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(bytes.as_slice(), bytes.len() as u64).unwrap();
         restored
             .restore_snapshot_v3_body(&mut reader, source.snapshot_cpu_id())
             .unwrap();

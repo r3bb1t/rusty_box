@@ -1,0 +1,37 @@
+[package]
+name = "rusty_box_whp"
+description = "Safe Windows Hypervisor Platform backing for the rusty_box emulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+# The platform seam. Every host call, and the `windows-sys` bindings behind it,
+# live there; this crate turns the seam's verbs into the two lifecycle types and
+# owns the memory a mapping reads. That is the whole reason for the split: the
+# permission to say `unsafe` belongs to a crate whose job is to hold it, so this
+# one can carry a single token and have it mean something.
+rusty_box_whp_sys = { path = "../rusty_box_whp_sys", version = "0.0.3" }
+# The engine seam's vocabulary. A permission on a guest-physical window means
+# the same thing to every backend, so it is defined once rather than per
+# backend — this crate having a real use for it is what keeps that honest.
+rusty_box_core = { workspace = true, features = ["std"] }
+# `SyntheticFeatures` is one named bit per header bitfield plus the composite
+# the design asks for, and `from_bits_retain` / `iter_names` are what let a bank
+# a newer host sets survive into a report instead of being truncated away.
+bitflags = { workspace = true }
+# A refused timer resolution is reported, not fatal — the machine still runs,
+# its device deadlines just land at the system's default tick. Saying so needs
+# somewhere to say it.
+tracing = { workspace = true }
+
+# The workspace `deny` on `unsafe_code` is what makes this crate's one token
+# deliberate: `Partition::map_borrowed` carries an `#[expect(unsafe_code, …)]`
+# naming the contract it states. An `expect` also warns when it goes unfulfilled,
+# so the day that signature stops needing `unsafe` the lint says so — R1's
+# ratchet, written as a lint.
+[lints]
+workspace = true

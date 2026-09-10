@@ -106,6 +106,7 @@ cargo check -p rusty_box_uefi --target x86_64-unknown-uefi
 1. Create a new file in `rusty_box/src/iodev/`
 2. Add the device struct with fixed-size fields (no Vec/String -- use arrays and `&'static str`)
 3. Add it to `DeviceManager` in `rusty_box/src/iodev/devices.rs`
-4. Register port handlers via `register_io_handler(DeviceId::YourDevice, port, "name", mask)`
-5. Wire timer callbacks through `BxPcSystemC` if needed
-6. Verify both `--all-features` and `--no-default-features` compile
+4. Add a `DevSlot` constant in `rusty_box/src/iodev/mod.rs` and register ports via `register_io_handler(DevSlot::YOUR_DEVICE, port, "name", mask)`
+5. Route the slot: implement `PioDevice` and add an arm to `DeviceManager::bind_pio`
+6. Arm timers through the `TimerService` in the device context, not `BxPcSystemC` directly
+7. Verify both `--all-features` and `--no-default-features` compile

@@ -333,6 +333,22 @@ pub struct VmcbCache {
     pub ctrls: SvmControls,
 }
 
+/// What the PAUSE intercept filter decided about one `PAUSE`.
+///
+/// Bochs svm.cc SvmInterceptPause distinguishes three outcomes, and they were
+/// carried here as `Option<bool>` with a comment on each arm saying which was
+/// which. Naming them is the difference between reading the code and decoding
+/// it (R2).
+enum PauseFilterVerdict {
+    /// The gap since the previous `PAUSE` exceeded the threshold: suppress
+    /// this one and reload the counter from the guest's VMCB.
+    ReloadCounter,
+    /// The counter had room: suppress this one and count it down.
+    Suppress,
+    /// No filter, or the counter is exhausted — take the #VMEXIT.
+    Exit,
+}
+
 /// Check if a specific SVM intercept bit is set.
 /// intercept_bitnum values are SVM_INTERCEPT0_*, SVM_INTERCEPT1_*, SVM_INTERCEPT2_*.
 #[inline]
@@ -368,92 +384,129 @@ pub const BX_EVENT_SVM_VIRQ_PENDING: u32 = 1 << 8;
 use super::{
     cet::canonicalize_address,
     cpu::{BxCpuC, Exception},
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     eflags::EFlags,
     exception::InterruptType,
     segment_ctrl_pro::parse_selector,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Whether this processor model implements SVM.
+    ///
+    /// The one place that asks, so the answer cannot be stored somewhere a
+    /// second time and disagree with itself. It decides whether a snapshot
+    /// carries a VMCB block, and whether any of the SVM paths below are
+    /// reachable at all: `VMRUN` on a model without it raises #UD.
+    pub(crate) fn svm_supported(&self) -> bool {
+        self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaSvm)
+    }
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =====================================================================
     //  VMCB physical-memory access helpers
     // =====================================================================
 
+    /// Host address of `offset` bytes into the VMCB, given its allocation
+    /// offset `base`.
+    ///
+    /// Bochs svm.cc ORs the field offset into the cached host pointer. That is
+    /// only equivalent to adding while the pointer is page-aligned and the
+    /// offset stays inside the page — true of a 4 KiB VMCB, but a property of
+    /// the layout rather than of the operation. Adding says what is meant and
+    /// costs the same.
+    #[inline(always)]
+    fn vmcb_host_ptr(&self, base: usize, offset: u32) -> *mut u8 {
+        self.mem_alloc_base
+            .wrapping_add(base)
+            .wrapping_add(offset as usize)
+    }
+
     /// Read a u8 from the VMCB at `offset`.
     fn vmcb_read8(&mut self, offset: u32) -> u8 {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
+        if let Some(base) = self.vmcb_host_offset {
             // Fast path: host pointer available
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const u8;
-            // SAFETY: vmcbhostptr validated by set_vmcbptr; single-threaded
+            let host = self.vmcb_host_ptr(base, offset) as *const u8;
+            // SAFETY: the offset was validated by set_vmcbptr; single-threaded
             unsafe { *host }
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            let mut data = [0u8; 1];
-            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data);
-            data[0]
         } else {
-            0
+            let policy = self.access_policy(paddr);
+            let mut data = [0u8; 1];
+            if let Err(e) = self.read_physical_routed(policy, paddr, 1, &mut data) {
+                tracing::warn!("vmcb_read8({:#010x}) failed: {:?}", offset, e);
+                return 0xff;
+            }
+            data[0]
         }
     }
 
     /// Read a u16 from the VMCB at `offset`.
     fn vmcb_read16(&mut self, offset: u32) -> u16 {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 2];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *const [u8; 2];
             u16::from_le_bytes(unsafe { *host })
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            let mut data = [0u8; 2];
-            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data);
-            u16::from_le_bytes(data)
         } else {
-            0
+            let policy = self.access_policy(paddr);
+            let mut data = [0u8; 2];
+            if let Err(e) = self.read_physical_routed(policy, paddr, 2, &mut data) {
+                tracing::warn!("vmcb_read16({:#010x}) failed: {:?}", offset, e);
+                return 0xffff;
+            }
+            u16::from_le_bytes(data)
         }
     }
 
     /// Read a u32 from the VMCB at `offset`.
     fn vmcb_read32(&mut self, offset: u32) -> u32 {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 4];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *const [u8; 4];
             u32::from_le_bytes(unsafe { *host })
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            let mut data = [0u8; 4];
-            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data);
-            u32::from_le_bytes(data)
         } else {
-            0
+            let policy = self.access_policy(paddr);
+            let mut data = [0u8; 4];
+            if let Err(e) = self.read_physical_routed(policy, paddr, 4, &mut data) {
+                tracing::warn!("vmcb_read32({:#010x}) failed: {:?}", offset, e);
+                return 0xffff_ffff;
+            }
+            u32::from_le_bytes(data)
         }
     }
 
     /// Read a u64 from the VMCB at `offset`.
     fn vmcb_read64(&mut self, offset: u32) -> u64 {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 8];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *const [u8; 8];
             u64::from_le_bytes(unsafe { *host })
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            let mut data = [0u8; 8];
-            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 8, &mut data);
-            u64::from_le_bytes(data)
         } else {
-            0
+            let policy = self.access_policy(paddr);
+            let mut data = [0u8; 8];
+            if let Err(e) = self.read_physical_routed(policy, paddr, 8, &mut data) {
+                tracing::warn!("vmcb_read64({:#010x}) failed: {:?}", offset, e);
+                return u64::MAX;
+            }
+            u64::from_le_bytes(data)
         }
     }
 
     /// Write a u8 to the VMCB at `offset`.
     fn vmcb_write8(&mut self, offset: u32, val: u8) {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut u8;
-            // SAFETY: vmcbhostptr validated; single-threaded
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *mut u8;
+            // SAFETY: the offset was validated by set_vmcbptr; single-threaded
             unsafe {
                 *host = val;
             }
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+        } else {
+            let policy = self.access_policy(paddr);
             let mut data = [val];
-            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data);
+            if let Err(e) = self.write_physical_routed(policy, paddr, 1, &mut data) {
+                tracing::warn!("vmcb_write8({:#010x}) failed: {:?}", offset, e);
+            }
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -462,14 +515,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Write a u16 to the VMCB at `offset`.
     fn vmcb_write16(&mut self, offset: u32, val: u16) {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut [u8; 2];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *mut [u8; 2];
             unsafe {
                 *host = val.to_le_bytes();
             }
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+        } else {
+            let policy = self.access_policy(paddr);
             let mut data = val.to_le_bytes();
-            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data);
+            if let Err(e) = self.write_physical_routed(policy, paddr, 2, &mut data) {
+                tracing::warn!("vmcb_write16({:#010x}) failed: {:?}", offset, e);
+            }
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -478,14 +534,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Write a u32 to the VMCB at `offset`.
     fn vmcb_write32(&mut self, offset: u32, val: u32) {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut [u8; 4];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *mut [u8; 4];
             unsafe {
                 *host = val.to_le_bytes();
             }
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+        } else {
+            let policy = self.access_policy(paddr);
             let mut data = val.to_le_bytes();
-            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data);
+            if let Err(e) = self.write_physical_routed(policy, paddr, 4, &mut data) {
+                tracing::warn!("vmcb_write32({:#010x}) failed: {:?}", offset, e);
+            }
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -494,14 +553,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Write a u64 to the VMCB at `offset`.
     fn vmcb_write64(&mut self, offset: u32, val: u64) {
         let paddr = self.vmcbptr + offset as u64;
-        if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut [u8; 8];
+        if let Some(base) = self.vmcb_host_offset {
+            let host = self.vmcb_host_ptr(base, offset) as *mut [u8; 8];
             unsafe {
                 *host = val.to_le_bytes();
             }
-        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
+        } else {
+            let policy = self.access_policy(paddr);
             let mut data = val.to_le_bytes();
-            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 8, &mut data);
+            if let Err(e) = self.write_physical_routed(policy, paddr, 8, &mut data) {
+                tracing::warn!("vmcb_write64({:#010x}) failed: {:?}", offset, e);
+            }
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -568,27 +630,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.vmcbptr = vmcbptr;
         if vmcbptr != 0 {
             // Try to get a direct host pointer for fast VMCB access
-            if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(vmcbptr) } {
+            {
+                let policy = self.access_policy(vmcbptr);
                 use super::rusty_box::MemoryAccessType;
-                match mem.get_host_mem_addr_pinned(
-                    vmcbptr,
-                    MemoryAccessType::RW,
-                    self.active_tlb_pins(),
-                    policy,
-                ) {
-                    // VMCB accessors directly offset this pointer through PAT.
+                match self
+                    .memory
+                    .host_mem_range(vmcbptr, MemoryAccessType::RW, policy)
+                {
+                    // VMCB accessors directly offset this base through PAT.
                     // A block-backed span may end sooner, in which case the
                     // handler-aware physical-access paths remain authoritative.
-                    Ok(Some(slice)) if slice.len() >= (SVM_GUEST_PAT as usize + 8) => {
-                        self.vmcbhostptr = slice.as_ptr() as super::tlb::BxHostpageaddr
+                    Ok(Some(range)) if range.len() >= (SVM_GUEST_PAT as usize + 8) => {
+                        self.vmcb_host_offset = Some(range.start)
                     }
-                    _ => self.vmcbhostptr = 0,
+                    _ => self.vmcb_host_offset = None,
                 }
             }
         } else {
-            self.vmcbhostptr = 0;
+            self.vmcb_host_offset = None;
         }
-        self.sync_vmcb_pin();
     }
 
     // =====================================================================
@@ -612,7 +672,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let cr4 = self.cr4;
         let pat_msr = self.msr.pat;
 
-        let vmcb = self.vmcb.get_or_insert_with(VmcbCache::default);
+        let vmcb = &mut self.vmcb;
         for n in 0..4 {
             vmcb.host_state.sregs[n] = sregs[n].clone();
         }
@@ -638,12 +698,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn svm_exit_load_host_state(&mut self) {
         self.tsc_offset = 0;
 
-        let host_state = self
-            .vmcb
-            .as_ref()
-            .expect("vmcb must exist during VMEXIT")
-            .host_state
-            .clone();
+        let host_state = self.vmcb.host_state.clone();
 
         for n in 0..4 {
             self.sregs[n] = host_state.sregs[n].clone();
@@ -718,17 +773,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         self.vmcb_write8(SVM_GUEST_CPL, cpl);
 
-        let inhibit = self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS);
+        let inhibit = self.interrupts_inhibited(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS);
         self.vmcb_write8(SVM_CONTROL_INTERRUPT_SHADOW, inhibit as u8);
 
-        let nested_paging = self.vmcb.as_ref().map_or(false, |v| v.ctrls.nested_paging);
+        let nested_paging = self.vmcb.ctrls.nested_paging;
         if nested_paging {
             self.vmcb_write64(SVM_GUEST_PAT, self.msr.pat.U64());
         }
 
         // Save virtual interrupt state
-        let vmcb = self.vmcb.as_mut().expect("vmcb must exist");
-        let v_tpr = vmcb.ctrls.v_tpr;
+        let v_tpr = self.vmcb.ctrls.v_tpr;
         self.vmcb_write8(SVM_CONTROL_VTPR, v_tpr);
         let virq_pending = (self.pending_event & BX_EVENT_SVM_VIRQ_PENDING) != 0;
         self.vmcb_write8(SVM_CONTROL_VIRQ, virq_pending as u8);
@@ -791,7 +845,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
 
         // Store into VMCB cache
-        let vmcb = self.vmcb.get_or_insert_with(VmcbCache::default);
+        let vmcb = &mut self.vmcb;
         vmcb.ctrls.cr_rd_ctrl = cr_rd_ctrl;
         vmcb.ctrls.cr_wr_ctrl = cr_wr_ctrl;
         vmcb.ctrls.dr_rd_ctrl = dr_rd_ctrl;
@@ -978,14 +1032,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.sregs[BxSegregs::Ss as usize].cache.dpl = guest_cpl;
 
         if guest_inhibit {
-            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS);
+            self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS);
         }
 
         self.async_event = 0;
         self.set_eflags_internal(guest_eflags);
 
         // Nested paging: load guest PAT
-        let nested = self.vmcb.as_ref().map_or(false, |v| v.ctrls.nested_paging);
+        let nested = self.vmcb.ctrls.nested_paging;
         if nested {
             self.msr.pat.set_U64(guest_pat);
         }
@@ -1033,16 +1087,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // VMEXITs are FAULT-like: restore RIP/RSP to pre-instruction values
-        self.set_rip(self.prev_rip);
+        let rip = self.prev_rip;
+        self.set_rip(rip);
         if self.speculative_rsp {
-            self.set_rsp(self.prev_rsp);
+            let rsp = self.prev_rsp;
+            self.set_rsp(rsp);
         }
         self.speculative_rsp = false;
 
         self.clear_event(BX_EVENT_SVM_VIRQ_PENDING);
         self.in_svm_guest = false;
         self.svm_gif = false;
-        self.sync_vmcb_pin();
 
         // Write exit reason and info to VMCB
         self.vmcb_write64(SVM_CONTROL64_EXITCODE, reason as i64 as u64);
@@ -1050,14 +1105,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.vmcb_write64(SVM_CONTROL64_EXITINFO2, exitinfo2);
 
         // Clean up event injection field
-        let eventinj = self.vmcb.as_ref().map_or(0, |v| v.ctrls.eventinj);
+        let eventinj = self.vmcb.ctrls.eventinj;
         self.vmcb_write32(SVM_CONTROL32_EVENT_INJECTION, eventinj & !0x8000_0000);
 
         // If exiting during event delivery, save the interrupted event info
         if self.in_event {
-            let vmcb = self.vmcb.as_ref().expect("vmcb must exist");
-            let exitintinfo = vmcb.ctrls.exitintinfo;
-            let error_code = vmcb.ctrls.exitintinfo_error_code;
+            let exitintinfo = self.vmcb.ctrls.exitintinfo;
+            let error_code = self.vmcb.ctrls.exitintinfo_error_code;
             self.vmcb_write32(SVM_CONTROL32_EXITINTINFO, exitintinfo | 0x8000_0000);
             self.vmcb_write32(SVM_CONTROL32_EXITINTINFO_ERROR_CODE, error_code);
             self.in_event = false;
@@ -1095,10 +1149,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs svm.cc SvmInjectEvents()
     fn svm_inject_events(&mut self) -> bool {
         let eventinj = self.vmcb_read32(SVM_CONTROL32_EVENT_INJECTION);
-        {
-            let vmcb = self.vmcb.as_mut().expect("vmcb must exist");
-            vmcb.ctrls.eventinj = eventinj;
-        }
+        self.vmcb.ctrls.eventinj = eventinj;
         if (eventinj & 0x8000_0000) == 0 {
             return true; // No event to inject
         }
@@ -1159,11 +1210,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         );
 
         // Record exit int info for nested event tracking
-        {
-            let vmcb = self.vmcb.as_mut().expect("vmcb must exist");
-            vmcb.ctrls.exitintinfo = eventinj & !0x8000_0000;
-            vmcb.ctrls.exitintinfo_error_code = error_code as u32;
-        }
+        self.vmcb.ctrls.exitintinfo = eventinj & !0x8000_0000;
+        self.vmcb.ctrls.exitintinfo_error_code = u32::from(error_code);
 
         // Deliver the interrupt (this may unwind via CpuLoopRestart on exception)
         let nmi_vector = if int_type as u8 == InterruptType::Nmi as u8 {
@@ -1195,20 +1243,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// sites identically.
     #[inline]
     pub(super) fn svm_intercept_check(&self, intercept_bitnum: u32) -> bool {
-        match &self.vmcb {
-            Some(vmcb) => svm_intercept(&vmcb.ctrls, intercept_bitnum),
-            None => false,
-        }
+        svm_intercept(&self.vmcb.ctrls, intercept_bitnum)
     }
     /// Check if a CR-read intercept is set for register `idx`.
     /// Bochs svm.h SVM_CR_READ_INTERCEPTED.
     #[inline]
     pub(super) fn svm_cr_read_intercepted(&self, idx: u8) -> bool {
         debug_assert!(idx < 16);
-        match &self.vmcb {
-            Some(vmcb) => (vmcb.ctrls.cr_rd_ctrl & (1u16 << idx)) != 0,
-            None => false,
-        }
+        (self.vmcb.ctrls.cr_rd_ctrl & (1u16 << idx)) != 0
     }
 
     /// Check if a CR-write intercept is set for register `idx`.
@@ -1216,10 +1258,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     #[inline]
     pub(super) fn svm_cr_write_intercepted(&self, idx: u8) -> bool {
         debug_assert!(idx < 16);
-        match &self.vmcb {
-            Some(vmcb) => (vmcb.ctrls.cr_wr_ctrl & (1u16 << idx)) != 0,
-            None => false,
-        }
+        (self.vmcb.ctrls.cr_wr_ctrl & (1u16 << idx)) != 0
     }
 
     /// Check if a DR-read intercept is set for register `idx`.
@@ -1227,10 +1266,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     #[inline]
     pub(super) fn svm_dr_read_intercepted(&self, idx: u8) -> bool {
         debug_assert!(idx < 16);
-        match &self.vmcb {
-            Some(vmcb) => (vmcb.ctrls.dr_rd_ctrl & (1u16 << idx)) != 0,
-            None => false,
-        }
+        (self.vmcb.ctrls.dr_rd_ctrl & (1u16 << idx)) != 0
     }
 
     /// Check if a DR-write intercept is set for register `idx`.
@@ -1238,19 +1274,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     #[inline]
     pub(super) fn svm_dr_write_intercepted(&self, idx: u8) -> bool {
         debug_assert!(idx < 16);
-        match &self.vmcb {
-            Some(vmcb) => (vmcb.ctrls.dr_wr_ctrl & (1u16 << idx)) != 0,
-            None => false,
-        }
+        (self.vmcb.ctrls.dr_wr_ctrl & (1u16 << idx)) != 0
     }
 
     /// Check if an exception is intercepted by SVM.
     #[inline]
     fn svm_exception_intercept_check(&self, vector: u32) -> bool {
-        match &self.vmcb {
-            Some(vmcb) => svm_exception_intercepted(&vmcb.ctrls, vector),
-            None => false,
-        }
+        svm_exception_intercepted(&self.vmcb.ctrls, vector)
     }
 
     /// SVM exception intercept handler.
@@ -1269,14 +1299,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         if !self.svm_exception_intercept_check(vector as u32) {
             // Not intercepted — record IDT vectoring information for future VMEXIT
-            if let Some(vmcb) = self.vmcb.as_mut() {
-                vmcb.ctrls.exitintinfo_error_code = errcode as u32;
-                let mut info = vector as u32 | (InterruptType::HardwareException as u32) << 8;
-                if errcode_valid {
-                    info |= 1 << 11;
-                }
-                vmcb.ctrls.exitintinfo = info;
+            self.vmcb.ctrls.exitintinfo_error_code = u32::from(errcode);
+            let mut info = u32::from(vector) | (InterruptType::HardwareException as u32) << 8;
+            if errcode_valid {
+                info |= 1 << 11;
             }
+            self.vmcb.ctrls.exitintinfo = info;
             return Ok(());
         }
 
@@ -1331,7 +1359,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
 
         if msr_map_offset >= 0 {
-            let msrpm_base = self.vmcb.as_ref().map_or(0, |v| v.ctrls.msrpm_base);
+            let msrpm_base = self.vmcb.ctrls.msrpm_base;
             let msr_bitmap_addr = msrpm_base + msr_map_offset as u64;
             let msr_offset = (msr & 0x1fff) * 2 + op;
 
@@ -1369,7 +1397,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         // Read two IOPM bitmap bytes to cover cross-bit accesses (Bochs uses
         // single physical reads since read_physical_byte can't cross 4K).
-        let iopm_base = self.vmcb.as_ref().map_or(0, |v| v.ctrls.iopm_base);
+        let iopm_base = self.vmcb.ctrls.iopm_base;
         let bit_addr = iopm_base + (port as u64 / 8);
         let b0 = self.read_physical_byte(bit_addr);
         let b1 = self.read_physical_byte(bit_addr + 1);
@@ -1463,44 +1491,35 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let currtime = self.system_ticks();
 
         // Pause filter logic — check if we should suppress the VMEXIT
-        let should_suppress = if let Some(vmcb) = self.vmcb.as_mut() {
-            let has_filter =
-                vmcb.ctrls.pause_filter_threshold > 0 || vmcb.ctrls.pause_filter_count > 0;
-            if has_filter {
-                let time_from_last = currtime.wrapping_sub(vmcb.ctrls.last_pause_time);
-                vmcb.ctrls.last_pause_time = currtime;
-                if vmcb.ctrls.pause_filter_threshold > 0
-                    && time_from_last > vmcb.ctrls.pause_filter_threshold as u64
-                {
-                    // Gap exceeds threshold — reset counter from VMCB
-                    Some(true) // signal: reset counter
-                } else if vmcb.ctrls.pause_filter_count > 0 {
-                    vmcb.ctrls.pause_filter_count -= 1;
-                    Some(false) // suppressed, no reset needed
-                } else {
-                    None // counter exhausted, do VMEXIT
-                }
-            } else {
-                None // no filter, do VMEXIT
-            }
+        let vmcb = &mut self.vmcb;
+        let has_filter = vmcb.ctrls.pause_filter_threshold > 0 || vmcb.ctrls.pause_filter_count > 0;
+        let verdict = if !has_filter {
+            PauseFilterVerdict::Exit
         } else {
-            None
+            let time_from_last = currtime.wrapping_sub(vmcb.ctrls.last_pause_time);
+            vmcb.ctrls.last_pause_time = currtime;
+            if vmcb.ctrls.pause_filter_threshold > 0
+                && time_from_last > u64::from(vmcb.ctrls.pause_filter_threshold)
+            {
+                PauseFilterVerdict::ReloadCounter
+            } else if vmcb.ctrls.pause_filter_count > 0 {
+                vmcb.ctrls.pause_filter_count -= 1;
+                PauseFilterVerdict::Suppress
+            } else {
+                PauseFilterVerdict::Exit
+            }
         };
 
-        match should_suppress {
-            Some(true) => {
+        match verdict {
+            PauseFilterVerdict::ReloadCounter => {
                 // Reset counter from VMCB physical memory
                 let count = self.vmcb_read16(SVM_CONTROL16_PAUSE_FILTER_COUNT);
-                if let Some(vmcb) = self.vmcb.as_mut() {
-                    vmcb.ctrls.pause_filter_count = count;
-                }
-                return Ok(());
+                self.vmcb.ctrls.pause_filter_count = count;
+                Ok(())
             }
-            Some(false) => return Ok(()), // suppressed
-            None => {}                    // fall through to VMEXIT
+            PauseFilterVerdict::Suppress => Ok(()),
+            PauseFilterVerdict::Exit => self.svm_vmexit(SvmVmexit::Pause as i32, 0, 0),
         }
-
-        self.svm_vmexit(SvmVmexit::Pause as i32, 0, 0)
     }
 
     /// VM_CR MSR update handler.
@@ -1538,9 +1557,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// bitmap regions, with the read failure logged so the cause is
     /// visible in traces.
     pub(super) fn read_physical_byte(&mut self, paddr: u64) -> u8 {
-        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return 0xff; };
+        let policy = self.access_policy(paddr);
         let mut data = [0u8; 1];
-        match mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data) {
+        match self.read_physical_routed(policy, paddr, 1, &mut data) {
             Ok(()) => data[0],
             Err(e) => {
                 tracing::warn!(
@@ -1608,7 +1627,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.in_svm_guest = true;
         self.svm_gif = true;
-        self.sync_vmcb_pin();
         self.async_event = 1;
 
         // Step 4: Inject events

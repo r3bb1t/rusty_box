@@ -9,33 +9,60 @@
 //! with paging).
 
 use super::{
-    access::{
-        forward_byte_copy, host_fill_bytes, host_offset, host_offset_mut, read_host_byte,
-        read_unaligned_u16, read_unaligned_u32, write_host_byte, write_unaligned_u16,
-        write_unaligned_u32,
-    },
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
+    access::{forward_byte_copy, host_fill_bytes},
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 use crate::{
     config::BxPhyAddress,
+    convert::usize_from_u32,
     cpu::rusty_box::MemoryAccessType,
-    memory::memory_rusty_box::bx_guest_ram_span,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+/// How much of a REP the direct-bulk path may do in one go, proved before any
+/// mutation and stated in both units the callers need.
+///
+/// `elements` is a `u32` because `bytes` is, and a string element is at least
+/// one byte wide: a count too large for a `u32` would have failed the byte
+/// check first. Carrying it as a `usize` and converting back at each use is
+/// what put a `usize::try_from(..).expect(..)` on every FastRep handler —
+/// roughly thirty panics that could not fire, on the emulator's hottest bulk
+/// path.
+#[derive(Clone, Copy)]
+struct BulkSpan {
+    /// String elements the span covers, in the same type as the guest's ECX.
+    elements: u32,
+    /// Bytes those elements occupy.
+    bytes: u32,
+}
+
+/// A proved MOVS chunk: where to copy from, where to, and how much.
+///
+/// Named fields rather than a five-tuple, because two of the five are raw
+/// pointers of opposite direction and the remaining three are all integers —
+/// a positional swap between them would compile.
+struct RepMovsChunk {
+    source: *const u8,
+    destination: *mut u8,
+    /// Physical address of the destination, for the code-write check.
+    destination_paddr: BxPhyAddress,
+    span: BulkSpan,
+}
+
+/// A proved STOS chunk.
+struct RepStosChunk {
+    destination: *mut u8,
+    /// Physical address of the destination, for the code-write check.
+    destination_paddr: BxPhyAddress,
+    span: BulkSpan,
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Helper: Get direction flag (DF)
     // =========================================================================
 
-    /// Returns true if direction flag is set (decrement mode)
-    #[inline]
-    pub(super) fn get_df(&self) -> bool {
-        self.eflags.contains(EFlags::DF)
-    }
+
 
     /// Return an all-or-nothing direct bulk span measured in string elements.
     #[inline]
@@ -45,7 +72,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         source_remaining: Option<usize>,
         destination_remaining: usize,
         element_size: usize,
-    ) -> Option<(usize, u32)> {
+    ) -> Option<BulkSpan> {
         let source_elements = source_remaining
             .unwrap_or(usize::MAX)
             .checked_div(element_size)?;
@@ -57,7 +84,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             .min(event_elements);
         let bytes = elements.checked_mul(element_size)?;
         let bytes = u32::try_from(bytes).ok()?;
-        (elements != 0).then_some((elements, bytes))
+        // An element is at least one byte, so `elements <= bytes` and the byte
+        // check above has already settled this one. Narrowing here rather than
+        // at each use is what lets the count travel as the `u32` the guest's
+        // count register is.
+        let elements = u32::try_from(elements).ok()?;
+        (elements != 0).then_some(BulkSpan { elements, bytes })
     }
 
     /// Check the complete canonical/LASS span before a direct 64-bit bulk access.
@@ -88,7 +120,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         destination_offset: u32,
         guest_count: u32,
         element_size: usize,
-    ) -> super::Result<Option<(*const u8, *mut u8, BxPhyAddress, usize, u32)>> {
+    ) -> super::Result<Option<RepMovsChunk>> {
         if !self.direct_rep_bulk_allowed(false) || self.get_df() || self.async_event != 0 {
             return Ok(None);
         }
@@ -106,7 +138,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let Some(guest_count) = usize::try_from(guest_count).ok() else {
             return Ok(None);
         };
-        let Some((elements, bytes)) = self.fast_rep_elements(
+        let Some(span) = self.fast_rep_elements(
             guest_count,
             Some(source_remaining),
             destination_remaining,
@@ -114,19 +146,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         ) else {
             return Ok(None);
         };
-        if !self.read_virtual_checks(source_seg as usize, source_offset, bytes)
-            || !self.write_virtual_checks(BxSegregs::Es as usize, destination_offset, bytes)
-            || self.smc_range_has_cached_code(destination_paddr, bytes)
+        if !self.read_virtual_checks(source_seg as usize, source_offset, span.bytes)
+            || !self.write_virtual_checks(BxSegregs::Es as usize, destination_offset, span.bytes)
+            || self.smc_range_has_cached_code(destination_paddr, span.bytes)
         {
             return Ok(None);
         }
-        Ok(Some((
-            source_ptr,
-            destination_ptr,
+        Ok(Some(RepMovsChunk {
+            source: source_ptr,
+            destination: destination_ptr,
             destination_paddr,
-            elements,
-            bytes,
-        )))
+            span,
+        }))
     }
 
     /// Prove a complete 32-bit-address STOS direct-transfer chunk before mutation.
@@ -136,7 +167,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         destination_offset: u32,
         guest_count: u32,
         element_size: usize,
-    ) -> super::Result<Option<(*mut u8, BxPhyAddress, usize, u32)>> {
+    ) -> super::Result<Option<RepStosChunk>> {
         if !self.direct_rep_bulk_allowed(false) || self.get_df() || self.async_event != 0 {
             return Ok(None);
         }
@@ -150,17 +181,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let Some(guest_count) = usize::try_from(guest_count).ok() else {
             return Ok(None);
         };
-        let Some((elements, bytes)) =
+        let Some(span) =
             self.fast_rep_elements(guest_count, None, destination_remaining, element_size)
         else {
             return Ok(None);
         };
-        if !self.write_virtual_checks(BxSegregs::Es as usize, destination_offset, bytes)
-            || self.smc_range_has_cached_code(destination_paddr, bytes)
+        if !self.write_virtual_checks(BxSegregs::Es as usize, destination_offset, span.bytes)
+            || self.smc_range_has_cached_code(destination_paddr, span.bytes)
         {
             return Ok(None);
         }
-        Ok(Some((destination_ptr, destination_paddr, elements, bytes)))
+        Ok(Some(RepStosChunk {
+            destination: destination_ptr,
+            destination_paddr,
+            span,
+        }))
     }
 
     /// Prove a complete 64-bit-address MOVS direct-transfer chunk before mutation.
@@ -172,7 +207,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         destination_offset: u64,
         guest_count: u64,
         element_size: usize,
-    ) -> super::Result<Option<(*const u8, *mut u8, BxPhyAddress, usize, u32)>> {
+    ) -> super::Result<Option<RepMovsChunk>> {
         if !self.direct_rep_bulk_allowed(false) || self.get_df() || self.async_event != 0 {
             return Ok(None);
         }
@@ -187,7 +222,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return Ok(None);
         };
         let guest_count = usize::try_from(guest_count).unwrap_or(usize::MAX);
-        let Some((elements, bytes)) = self.fast_rep_elements(
+        let Some(span) = self.fast_rep_elements(
             guest_count,
             Some(source_remaining),
             destination_remaining,
@@ -195,19 +230,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         ) else {
             return Ok(None);
         };
-        if !self.fast_rep_span64(source_laddr, bytes, MemoryAccessType::Read)
-            || !self.fast_rep_span64(destination_laddr, bytes, MemoryAccessType::Write)
-            || self.smc_range_has_cached_code(destination_paddr, bytes)
+        if !self.fast_rep_span64(source_laddr, span.bytes, MemoryAccessType::Read)
+            || !self.fast_rep_span64(destination_laddr, span.bytes, MemoryAccessType::Write)
+            || self.smc_range_has_cached_code(destination_paddr, span.bytes)
         {
             return Ok(None);
         }
-        Ok(Some((
-            source_ptr,
-            destination_ptr,
+        Ok(Some(RepMovsChunk {
+            source: source_ptr,
+            destination: destination_ptr,
             destination_paddr,
-            elements,
-            bytes,
-        )))
+            span,
+        }))
     }
 
     /// Prove a complete 64-bit-address STOS direct-transfer chunk before mutation.
@@ -217,7 +251,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         destination_offset: u64,
         guest_count: u64,
         element_size: usize,
-    ) -> super::Result<Option<(*mut u8, BxPhyAddress, usize, u32)>> {
+    ) -> super::Result<Option<RepStosChunk>> {
         if !self.direct_rep_bulk_allowed(false) || self.get_df() || self.async_event != 0 {
             return Ok(None);
         }
@@ -228,17 +262,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return Ok(None);
         };
         let guest_count = usize::try_from(guest_count).unwrap_or(usize::MAX);
-        let Some((elements, bytes)) =
+        let Some(span) =
             self.fast_rep_elements(guest_count, None, destination_remaining, element_size)
         else {
             return Ok(None);
         };
-        if !self.fast_rep_span64(destination_laddr, bytes, MemoryAccessType::Write)
-            || self.smc_range_has_cached_code(destination_paddr, bytes)
+        if !self.fast_rep_span64(destination_laddr, span.bytes, MemoryAccessType::Write)
+            || self.smc_range_has_cached_code(destination_paddr, span.bytes)
         {
             return Ok(None);
         }
-        Ok(Some((destination_ptr, destination_paddr, elements, bytes)))
+        Ok(Some(RepStosChunk {
+            destination: destination_ptr,
+            destination_paddr,
+            span,
+        }))
     }
 
     // =========================================================================
@@ -254,11 +292,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.write_virtual_byte(BxSegregs::Es, di, byte)?;
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(1));
-            self.set_di(self.di().wrapping_sub(1));
+            let si = self.si().wrapping_sub(1);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(1);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(1));
-            self.set_di(self.di().wrapping_add(1));
+            let si = self.si().wrapping_add(1);
+        self.set_si(si);
+            let di = self.di().wrapping_add(1);
+        self.set_di(di);
         }
 
         Ok(())
@@ -289,11 +331,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.write_virtual_word(BxSegregs::Es, di, word)?;
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(2));
-            self.set_di(self.di().wrapping_sub(2));
+            let si = self.si().wrapping_sub(2);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(2);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(2));
-            self.set_di(self.di().wrapping_add(2));
+            let si = self.si().wrapping_add(2);
+        self.set_si(si);
+            let di = self.di().wrapping_add(2);
+        self.set_di(di);
         }
 
         Ok(())
@@ -323,11 +369,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.write_virtual_dword(BxSegregs::Es, di, dword)?;
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(4));
-            self.set_di(self.di().wrapping_sub(4));
+            let si = self.si().wrapping_sub(4);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(4);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(4));
-            self.set_di(self.di().wrapping_add(4));
+            let si = self.si().wrapping_add(4);
+        self.set_si(si);
+            let di = self.di().wrapping_add(4);
+        self.set_di(di);
         }
 
         Ok(())
@@ -360,9 +410,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.write_virtual_byte(BxSegregs::Es, di, al)?;
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(1));
+            let di = self.di().wrapping_sub(1);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(1));
+            let di = self.di().wrapping_add(1);
+        self.set_di(di);
         }
 
         Ok(())
@@ -389,9 +441,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.write_virtual_word(BxSegregs::Es, di, ax)?;
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(2));
+            let di = self.di().wrapping_sub(2);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(2));
+            let di = self.di().wrapping_add(2);
+        self.set_di(di);
         }
 
         Ok(())
@@ -418,9 +472,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.write_virtual_dword(BxSegregs::Es, di, eax)?;
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(4));
+            let di = self.di().wrapping_sub(4);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(4));
+            let di = self.di().wrapping_add(4);
+        self.set_di(di);
         }
 
         Ok(())
@@ -452,9 +508,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_al(byte);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(1));
+            let si = self.si().wrapping_sub(1);
+        self.set_si(si);
         } else {
-            self.set_si(self.si().wrapping_add(1));
+            let si = self.si().wrapping_add(1);
+        self.set_si(si);
         }
 
         Ok(())
@@ -482,9 +540,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_ax(word);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(2));
+            let si = self.si().wrapping_sub(2);
+        self.set_si(si);
         } else {
-            self.set_si(self.si().wrapping_add(2));
+            let si = self.si().wrapping_add(2);
+        self.set_si(si);
         }
 
         Ok(())
@@ -512,9 +572,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_eax(dword);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(4));
+            let si = self.si().wrapping_sub(4);
+        self.set_si(si);
         } else {
-            self.set_si(self.si().wrapping_add(4));
+            let si = self.si().wrapping_add(4);
+        self.set_si(si);
         }
 
         Ok(())
@@ -549,11 +611,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_sub8(op1, op2, result);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(1));
-            self.set_di(self.di().wrapping_sub(1));
+            let si = self.si().wrapping_sub(1);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(1);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(1));
-            self.set_di(self.di().wrapping_add(1));
+            let si = self.si().wrapping_add(1);
+        self.set_si(si);
+            let di = self.di().wrapping_add(1);
+        self.set_di(di);
         }
 
         Ok(())
@@ -589,11 +655,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_sub16(op1, op2, result);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(2));
-            self.set_di(self.di().wrapping_sub(2));
+            let si = self.si().wrapping_sub(2);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(2);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(2));
-            self.set_di(self.di().wrapping_add(2));
+            let si = self.si().wrapping_add(2);
+        self.set_si(si);
+            let di = self.di().wrapping_add(2);
+        self.set_di(di);
         }
 
         Ok(())
@@ -629,11 +699,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_sub32(op1, op2, result);
 
         if self.get_df() {
-            self.set_si(self.si().wrapping_sub(4));
-            self.set_di(self.di().wrapping_sub(4));
+            let si = self.si().wrapping_sub(4);
+        self.set_si(si);
+            let di = self.di().wrapping_sub(4);
+        self.set_di(di);
         } else {
-            self.set_si(self.si().wrapping_add(4));
-            self.set_di(self.di().wrapping_add(4));
+            let si = self.si().wrapping_add(4);
+        self.set_si(si);
+            let di = self.di().wrapping_add(4);
+        self.set_di(di);
         }
 
         Ok(())
@@ -672,9 +746,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_sub8(al, op2, result);
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(1));
+            let di = self.di().wrapping_sub(1);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(1));
+            let di = self.di().wrapping_add(1);
+        self.set_di(di);
         }
 
         Ok(())
@@ -707,9 +783,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_sub16(ax, op2, result);
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(2));
+            let di = self.di().wrapping_sub(2);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(2));
+            let di = self.di().wrapping_add(2);
+        self.set_di(di);
         }
 
         Ok(())
@@ -742,9 +820,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_sub32(eax, op2, result);
 
         if self.get_df() {
-            self.set_di(self.di().wrapping_sub(4));
+            let di = self.di().wrapping_sub(4);
+        self.set_di(di);
         } else {
-            self.set_di(self.di().wrapping_add(4));
+            let di = self.di().wrapping_add(4);
+        self.set_di(di);
         }
 
         Ok(())
@@ -791,7 +871,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -817,7 +898,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -843,7 +925,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -869,7 +952,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -895,7 +979,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -921,7 +1006,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -947,7 +1033,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -973,7 +1060,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -999,7 +1087,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1024,7 +1113,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1049,7 +1139,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1074,7 +1165,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1099,7 +1191,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1124,7 +1217,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1149,7 +1243,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1174,7 +1269,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1199,7 +1295,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1224,7 +1321,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1249,7 +1347,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1274,7 +1373,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1299,7 +1399,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1318,26 +1419,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         while ecx != 0 && !df {
             let esi = self.esi();
             let edi = self.edi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 1)?
-            else {
+            let Some(chunk) = self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 1)? else {
                 break;
             };
-            forward_byte_copy(src_ptr, dst_ptr, elements);
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rsi(esi.wrapping_add(bytes) as u64);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rsi(u64::from(esi.wrapping_add(bytes)));
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1362,7 +1462,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1377,30 +1478,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         while ecx != 0 && !df {
             let esi = self.esi();
             let edi = self.edi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 2)?
-            else {
+            let Some(chunk) = self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 2)? else {
                 break;
             };
-            forward_byte_copy(
-                src_ptr,
-                dst_ptr,
-                usize::try_from(bytes).expect("u32 fits usize"),
-            );
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rsi(esi.wrapping_add(bytes) as u64);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rsi(u64::from(esi.wrapping_add(bytes)));
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1425,7 +1521,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1440,30 +1537,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         while ecx != 0 && !df {
             let esi = self.esi();
             let edi = self.edi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 4)?
-            else {
+            let Some(chunk) = self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 4)? else {
                 break;
             };
-            forward_byte_copy(
-                src_ptr,
-                dst_ptr,
-                usize::try_from(bytes).expect("u32 fits usize"),
-            );
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rsi(esi.wrapping_add(bytes) as u64);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rsi(u64::from(esi.wrapping_add(bytes)));
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1488,7 +1580,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1502,25 +1595,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // FastRep direct chunks are proved in full before filling.
         while ecx != 0 && !df {
             let edi = self.edi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos32_chunk(edi, ecx, 1)?
-            else {
+            let Some(chunk) = self.fast_rep_stos32_chunk(edi, ecx, 1)? else {
                 break;
             };
-            host_fill_bytes(dst_ptr, al, usize::try_from(bytes).expect("u32 fits usize"));
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            let BulkSpan { elements, bytes } = chunk.span;
+            host_fill_bytes(chunk.destination, al, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1545,7 +1637,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1559,33 +1652,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // FastRep direct chunks are proved in full before filling.
         while ecx != 0 && !df {
             let edi = self.edi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos32_chunk(edi, ecx, 2)?
-            else {
+            let Some(chunk) = self.fast_rep_stos32_chunk(edi, ecx, 2)? else {
                 break;
             };
+            let BulkSpan { elements, bytes } = chunk.span;
             let dst_slice = unsafe {
-                super::access::host_slice_mut_u16(
-                    dst_ptr,
-                    usize::try_from(elements).expect("u32 fits usize"),
-                )
+                super::access::host_slice_mut_u16(chunk.destination, usize_from_u32(elements))
             };
-            for word in dst_slice.iter_mut() {
-                *word = ax;
-            }
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            dst_slice.fill(ax);
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1610,7 +1697,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1624,33 +1712,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // FastRep direct chunks are proved in full before filling.
         while ecx != 0 && !df {
             let edi = self.edi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos32_chunk(edi, ecx, 4)?
-            else {
+            let Some(chunk) = self.fast_rep_stos32_chunk(edi, ecx, 4)? else {
                 break;
             };
+            let BulkSpan { elements, bytes } = chunk.span;
             let dst_slice = unsafe {
-                super::access::host_slice_mut_u32(
-                    dst_ptr,
-                    usize::try_from(elements).expect("u32 fits usize"),
-                )
+                super::access::host_slice_mut_u32(chunk.destination, usize_from_u32(elements))
             };
-            for dword in dst_slice.iter_mut() {
-                *dword = eax;
-            }
-            let elements = u32::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
-            self.set_rdi(edi.wrapping_add(bytes) as u64);
+            dst_slice.fill(eax);
+            self.smc_write_check(chunk.destination_paddr, bytes);
+            self.set_rdi(u64::from(edi.wrapping_add(bytes)));
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
             self.tick_surplus += u64::from(elements) - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
+            self.tickn_fastrep(elements);
             if ecx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1675,7 +1757,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1701,7 +1784,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1727,7 +1811,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1753,7 +1838,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1778,7 +1864,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1803,7 +1890,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1828,7 +1916,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1853,7 +1942,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1878,7 +1968,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1903,7 +1994,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1928,7 +2020,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1953,7 +2046,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1978,7 +2072,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2003,7 +2098,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2028,7 +2124,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2053,7 +2150,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2063,277 +2161,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
 
 
-    #[inline(always)]
-    fn direct_ram_offset(&self, addr: u64, len: usize) -> Option<(BxPhyAddress, usize)> {
-        let a20 = addr & self.a20_mask;
-        let end = a20.checked_add(u64::try_from(len).ok()?)?;
-        let plain = (a20 < 0xA0000 && end <= 0xA0000) || a20 >= 0x100000;
-        if !plain || self.mem_host_base.is_null() {
-            return None;
-        }
-        bx_guest_ram_span(a20, len, self.mem_host_len).map(|span| (a20, span.start))
-    }
-    #[inline(always)]
-    pub(super) fn mem_read_byte(&self, addr: u64) -> u8 {
-        // Fast path: direct host pointer for plain RAM.
-        // This matches what Bochs does via hostPageAddr in TLB entries — the vast
-        // majority of physical accesses hit RAM and can be served with a single
-        // pointer dereference.  We apply A20 masking and check the address is in
-        // the plain-RAM range (below VGA at 0xA0000, or above BIOS shadow at 0x100000).
-        if let Some((_a20_addr, linear)) = self.direct_ram_offset(addr, 1) {
-            return read_host_byte(self.mem_host_base, linear);
-        }
-
-        self.mem_read_byte_slow(addr)
-    }
-
-    /// Slow path for mem_read_byte: MMIO/VGA/ROM through memory system handlers.
-    /// Separated to keep the inlined fast path small for better icache utilization.
-    #[cold]
-    #[inline(never)]
-    fn mem_read_byte_slow(&self, addr: u64) -> u8 {
-        // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
-        {
-            let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
-            if self.lapic.is_selected(a20_addr) {
-                // Read aligned dword, extract requested byte
-                let aligned = a20_addr & !0x3;
-                let dword = self.lapic.read(aligned, 4, self.cpu_ticks());
-                let byte_offset = (a20_addr & 0x3) as u32;
-                return (dword >> (byte_offset * 8)) as u8;
-            }
-        }
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
-        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            if let Ok(Some(slice)) = mem.get_host_mem_addr_pinned(
-                paddr,
-                MemoryAccessType::Read,
-                self.active_tlb_pins(),
-                policy,
-            ) {
-                let val = slice.first().copied().unwrap_or(0);
-                return val;
-            }
-
-            let mut data = [0u8; 1];
-            if mem
-                .read_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data)
-                .is_ok()
-            {
-                return data[0];
-            }
-
-            return 0;
-        }
 
 
-        0
-    }
 
-    #[inline(always)]
-    pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
-        // Fast path: direct host pointer for plain RAM.
-        if let Some((a20_addr, linear)) = self.direct_ram_offset(addr, 1) {
-            write_host_byte(self.mem_host_base, linear, value);
-            self.smc_write_check(a20_addr, 1);
-            return;
-        }
 
-        self.mem_write_byte_slow(addr, value);
-    }
 
-    /// Slow path for mem_write_byte: MMIO/VGA/ROM through memory system handlers.
-    /// Separated to keep the inlined fast path small for better icache utilization.
-    #[cold]
-    #[inline(never)]
-    fn mem_write_byte_slow(&mut self, addr: u64, value: u8) {
-        // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
-        {
-            let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
-            if self.lapic.is_selected(a20_addr) {
-                // Byte-level write to LAPIC: read-modify-write the aligned dword.
-                // In practice, LAPIC is always accessed as dword — this is a safety net.
-                let aligned = a20_addr & !0x3;
-                // The two halves of this RMW take DIFFERENT time domains:
-                // - LAPIC reads convert through `live_ticks(cpu_ticks)` (apic.cc
-                //   get_current_timer_count path), which subtracts the LAPIC's
-                //   `cpu_ticks_at_sync` — the CPU tick clock, like the sibling
-                //   read paths.
-                // - LAPIC writes store the argument directly into tick-domain
-                //   state (apic.cc set_initial_timer_count: `ticksInitial =
-                //   bx_pc_system.time_ticks()`; activation deadlines feed
-                //   pc_system ticks) — `system_ticks()`, like the sibling
-                //   word/dword write paths.
-                let old = self.lapic.read(aligned, 4, self.cpu_ticks());
-                let byte_offset = (a20_addr & 0x3) as u32;
-                let mask = !(0xFFu32 << (byte_offset * 8));
-                let new_val = (old & mask) | ((value as u32) << (byte_offset * 8));
-                let current_ticks = self.system_ticks();
-                self.lapic.write(aligned, new_val, 4, current_ticks);
-                self.sync_lapic_events();
-                return;
-            }
-        }
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
-        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            if let Ok(Some(slice)) = mem.get_host_mem_addr_pinned(
-                paddr,
-                MemoryAccessType::Write,
-                self.active_tlb_pins(),
-                policy,
-            ) {
-                if let Some(b) = slice.get_mut(0) {
-                    *b = value;
-                }
-                self.smc_write_check(paddr, 1);
-                return;
-            }
 
-            // Vetoed: go through handler-aware physical write.
-            let mut data = [value];
-            if let Err(e) =
-                mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data)
-            {
-                tracing::warn!("physical write failed at paddr={:#x}: {e}", paddr);
-            }
-            self.smc_write_check(paddr, 1);
-            return;
-        }
 
-    }
 
-    #[inline(always)]
-    pub(super) fn mem_read_word(&self, addr: u64) -> u16 {
-        let a20_addr = addr & self.a20_mask;
-        let crosses_physical_page = (a20_addr & 0x0fff) == 0x0fff;
-        if !crosses_physical_page {
-            // Fast path: direct host pointer for plain RAM.
-            if let Some((_a20_addr, linear)) = self.direct_ram_offset(addr, 2) {
-                return read_unaligned_u16(host_offset(self.mem_host_base, linear));
-            }
-            if self.lapic.is_selected(a20_addr as BxPhyAddress) {
-                return self.lapic.read(a20_addr as BxPhyAddress, 2, self.cpu_ticks()) as u16;
-            }
-            let paddr = addr as BxPhyAddress;
-            if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-                let mut data = [0u8; 2];
-                if mem
-                    .read_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data)
-                    .is_ok()
-                {
-                    return u16::from_le_bytes(data);
-                }
-            }
-        }
 
-        // A physical page split has no single width-two transaction. Preserve
-        // byte fallback behavior only for that case or after handler failure.
-        let lo = self.mem_read_byte(addr) as u16;
-        let hi = self.mem_read_byte(addr.wrapping_add(1)) as u16;
-        lo | (hi << 8)
-    }
 
-    #[inline(always)]
-    pub(super) fn mem_write_word(&mut self, addr: u64, value: u16) {
-        let a20_addr = addr & self.a20_mask;
-        let crosses_physical_page = (a20_addr & 0x0fff) == 0x0fff;
-        if !crosses_physical_page {
-            // Fast path: direct host pointer for plain RAM.
-            if let Some((a20_addr, linear)) = self.direct_ram_offset(addr, 2) {
-                write_unaligned_u16(host_offset_mut(self.mem_host_base, linear), value);
-                self.smc_write_check(a20_addr, 2);
-                return;
-            }
-            if self.lapic.is_selected(a20_addr as BxPhyAddress) {
-                let current_ticks = self.system_ticks();
-                self.lapic
-                    .write(a20_addr as BxPhyAddress, u32::from(value), 2, current_ticks);
-                self.sync_lapic_events();
-                return;
-            }
-            let paddr = addr as BxPhyAddress;
-            if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-                let mut data = value.to_le_bytes();
-                if mem
-                    .write_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data)
-                    .is_ok()
-                {
-                    self.smc_write_check(paddr, 2);
-                    return;
-                }
-            }
-        }
 
-        // A physical page split has no single width-two transaction. Preserve
-        // byte fallback behavior only for that case or after handler failure.
-        self.mem_write_byte(addr, value as u8);
-        self.mem_write_byte(addr.wrapping_add(1), (value >> 8) as u8);
-    }
 
-    #[inline(always)]
-    pub(super) fn mem_read_dword(&self, addr: u64) -> u32 {
-        let a20_addr = addr & self.a20_mask;
-        // Fast path: direct host pointer for plain RAM
-        if let Some((_a20_addr, linear)) = self.direct_ram_offset(addr, 4) {
-            return read_unaligned_u32(host_offset(self.mem_host_base, linear));
-        }
-        // LAPIC MMIO intercept: 32-bit aligned register access
-        // Bochs apic.cc read() — LAPIC registers are always dword-accessed.
-        if self.lapic.is_selected(a20_addr as BxPhyAddress) {
-            return self.lapic.read(a20_addr as BxPhyAddress, 4, self.cpu_ticks());
-        }
-        // Slow path: route through read_physical_page to hit registered MMIO handlers
-        // (IOAPIC, VGA, etc.) with proper dword access width.
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
-        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            let mut data = [0u8; 4];
-            if mem
-                .read_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data)
-                .is_ok()
-            {
-                return u32::from_le_bytes(data);
-            }
-        }
-        // Fallback: per-word reads
-        let lo = self.mem_read_word(addr) as u32;
-        let hi = self.mem_read_word(addr + 2) as u32;
-        lo | (hi << 16)
-    }
 
-    pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
-        let a20_addr = addr & self.a20_mask;
-        // Fast path: direct host pointer for plain RAM
-        if let Some((a20_addr, linear)) = self.direct_ram_offset(addr, 4) {
-            write_unaligned_u32(host_offset_mut(self.mem_host_base, linear), value);
-            self.smc_write_check(a20_addr, 4);
-            return;
-        }
-        // LAPIC MMIO intercept: 32-bit aligned register access
-        // Bochs apic.cc write() — LAPIC registers are always dword-accessed.
-        if self.lapic.is_selected(a20_addr as BxPhyAddress) {
-            let current_ticks = self.system_ticks();
-            self.lapic
-                .write(a20_addr as BxPhyAddress, value, 4, current_ticks);
-            self.sync_lapic_events();
-            return;
-        }
-        // Slow path: route through write_physical_page to hit registered MMIO handlers
-        // (IOAPIC, VGA, etc.) with proper dword access width.
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
-        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
-            let mut data = value.to_le_bytes();
-            if mem
-                .write_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data)
-                .is_ok()
-            {
-                self.smc_write_check(paddr, 4);
-                return;
-            }
-        }
-        // Fallback: per-word writes
-        self.mem_write_word(addr, value as u16);
-        self.mem_write_word(addr + 2, (value >> 16) as u16);
-    }
+
+
+
 
     // =========================================================================
     // Unified dispatch methods — called from dispatcher.rs
@@ -2838,26 +2681,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 1)?
-            else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 1)? else {
                 break;
             };
-            forward_byte_copy(src_ptr, dst_ptr, elements);
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rsi(rsi.wrapping_add(u64::from(bytes)));
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2882,7 +2724,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2908,30 +2751,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 2)?
-            else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 2)? else {
                 break;
             };
-            forward_byte_copy(
-                src_ptr,
-                dst_ptr,
-                usize::try_from(bytes).expect("u32 fits usize"),
-            );
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rsi(rsi.wrapping_add(u64::from(bytes)));
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2956,7 +2794,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2982,30 +2821,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 4)?
-            else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 4)? else {
                 break;
             };
-            forward_byte_copy(
-                src_ptr,
-                dst_ptr,
-                usize::try_from(bytes).expect("u32 fits usize"),
-            );
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rsi(rsi.wrapping_add(u64::from(bytes)));
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -3030,7 +2864,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3055,25 +2890,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos64_chunk(rdi, rcx, 1)?
-            else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 1)? else {
                 break;
             };
-            host_fill_bytes(dst_ptr, al, usize::try_from(bytes).expect("u32 fits usize"));
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            let BulkSpan { elements, bytes } = chunk.span;
+            host_fill_bytes(chunk.destination, al, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -3098,7 +2932,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3121,33 +2956,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos64_chunk(rdi, rcx, 2)?
-            else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 2)? else {
                 break;
             };
+            let BulkSpan { elements, bytes } = chunk.span;
             let dst_slice = unsafe {
-                super::access::host_slice_mut_u16(
-                    dst_ptr,
-                    elements,
-                )
+                super::access::host_slice_mut_u16(chunk.destination, usize_from_u32(elements))
             };
-            for word in dst_slice.iter_mut() {
-                *word = ax;
-            }
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            dst_slice.fill(ax);
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -3172,7 +3001,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3195,33 +3025,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos64_chunk(rdi, rcx, 4)?
-            else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 4)? else {
                 break;
             };
+            let BulkSpan { elements, bytes } = chunk.span;
             let dst_slice = unsafe {
-                super::access::host_slice_mut_u32(
-                    dst_ptr,
-                    elements,
-                )
+                super::access::host_slice_mut_u32(chunk.destination, usize_from_u32(elements))
             };
-            for dword in dst_slice.iter_mut() {
-                *dword = eax;
-            }
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            dst_slice.fill(eax);
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -3246,7 +3070,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3283,7 +3108,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3318,7 +3144,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3354,7 +3181,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3394,7 +3222,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3418,7 +3247,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3456,7 +3286,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3480,7 +3311,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3518,7 +3350,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3542,7 +3375,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3580,7 +3414,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3604,7 +3439,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3640,7 +3476,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3664,7 +3501,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3700,7 +3538,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3724,7 +3563,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3756,30 +3596,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some((src_ptr, dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 8)?
-            else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 8)? else {
                 break;
             };
-            forward_byte_copy(
-                src_ptr,
-                dst_ptr,
-                usize::try_from(bytes).expect("u32 fits usize"),
-            );
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            let BulkSpan { elements, bytes } = chunk.span;
+            forward_byte_copy(chunk.source, chunk.destination, usize_from_u32(bytes));
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rsi(rsi.wrapping_add(u64::from(bytes)));
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -3804,7 +3639,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3828,33 +3664,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some((dst_ptr, paddr, elements, bytes)) =
-                self.fast_rep_stos64_chunk(rdi, rcx, 8)?
-            else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 8)? else {
                 break;
             };
+            let BulkSpan { elements, bytes } = chunk.span;
             let dst_slice = unsafe {
-                super::access::host_slice_mut_u64(
-                    dst_ptr,
-                    elements,
-                )
+                super::access::host_slice_mut_u64(chunk.destination, usize_from_u32(elements))
             };
-            for qword in dst_slice.iter_mut() {
-                *qword = rax;
-            }
-            let elements = u64::try_from(elements).expect("page-bounded element count");
-            self.smc_write_check(paddr, bytes);
+            dst_slice.fill(rax);
+            self.smc_write_check(chunk.destination_paddr, bytes);
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
-            rcx = rcx.wrapping_sub(elements);
+            rcx = rcx.wrapping_sub(u64::from(elements));
             self.set_rcx(rcx);
-            self.tick_surplus += elements - 1;
-            self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
+            self.tick_surplus += u64::from(elements) - 1;
+            self.tickn_fastrep(elements);
             if rcx == 0 {
                 return Ok(());
             }
             if self.async_event != 0 {
                 self.assert_rf();
-                self.set_rip(self.prev_rip);
+                let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -3879,7 +3709,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3915,7 +3746,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3954,7 +3786,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3979,7 +3812,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -4016,7 +3850,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -4041,7 +3876,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.icount += 1;
         }
         self.assert_rf();
-        self.set_rip(self.prev_rip);
+        let prev_rip = self.prev_rip;
+        self.set_rip(prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }

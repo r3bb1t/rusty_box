@@ -385,7 +385,7 @@ impl SharedDisplay {
         text: &[u8],
         cursor_x: u32,
         cursor_y: u32,
-        tm_info: &crate::iodev::vga::VgaTextModeInfo,
+        tm_info: &rusty_box_devices::display::vga::VgaTextModeInfo,
     ) {
         self.render_text_to_framebuffer(
             text,
@@ -578,7 +578,7 @@ mod tests {
         let mut text = vec![0u8; (shared.screen_cols * shared.screen_rows * 2) as usize];
         text[0] = b'A';
         text[1] = 0x07;
-        let tm_info = crate::iodev::vga::VgaTextModeInfo {
+        let tm_info = rusty_box_devices::display::vga::VgaTextModeInfo {
             start_address: 0,
             cs_start: 14,
             cs_end: 15,
@@ -596,4 +596,74 @@ mod tests {
 
         assert!(shared.fb_dirty);
     }
+}
+
+/// The shared framebuffer as a display sink.
+///
+/// It renders text itself rather than diffing cells, so the previous plane goes
+/// unused; and it sizes in character cells, so a text-mode dimension change is
+/// divided down here. Both are this front end's business, which is the point of
+/// the sink taking the card's vocabulary rather than any one front end's.
+impl rusty_box_devices::display::sink::DisplaySink for SharedDisplay {
+    fn dimension_update(&mut self, dims: rusty_box_devices::display::sink::Dimensions) {
+        if dims.font_width == 0 || dims.font_height == 0 {
+            self.resize_pixels(dims.width, dims.height);
+        } else {
+            self.resize(
+                dims.width / dims.font_width,
+                dims.height / dims.font_height,
+                dims.font_width,
+                dims.font_height,
+            );
+        }
+    }
+
+    fn text_update(
+        &mut self,
+        _previous: &[u8],
+        current: &[u8],
+        cursor: Option<rusty_box_devices::display::sink::CursorPos>,
+        info: &rusty_box_devices::display::vga::VgaTextModeInfo,
+    ) {
+        let (cursor_x, cursor_y) = match cursor {
+            Some(at) => (at.col, at.row),
+            None => (0xffff, 0xffff),
+        };
+        self.render_text_to_framebuffer(
+            current,
+            cursor_x,
+            cursor_y,
+            info.cs_start,
+            info.cs_end,
+            info.line_graphics,
+            u32::from(info.start_address),
+            u32::from(info.line_offset),
+            &info.actl_palette,
+        );
+    }
+
+    fn graphics_tile_update(&mut self, rgba: &[u8], at: rusty_box_devices::display::sink::TilePos) {
+        self.blit_rgba_tile(at.x, at.y, at.width, at.height, rgba);
+    }
+
+    fn palette_change(
+        &mut self,
+        _index: u8,
+        _colour: rusty_box_devices::display::sink::Rgb,
+    ) -> rusty_box_devices::display::sink::Redraw {
+        // Tiles arrive already converted to RGBA, and text carries its
+        // attribute palette in `VgaTextModeInfo`, so this front end holds no
+        // DAC table for a change to invalidate.
+        rusty_box_devices::display::sink::Redraw::NotNeeded
+    }
+
+    fn set_text_charmap(&mut self, map: usize, glyphs: &[u8]) {
+        self.set_text_charmap(map, glyphs);
+    }
+
+    fn clear_screen(&mut self) {
+        self.framebuffer.fill(0);
+    }
+
+    fn flush(&mut self) {}
 }

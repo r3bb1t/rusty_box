@@ -16,8 +16,10 @@
 //!   RB_SNAPSHOT     Snapshot file (default target/snapshot_resume.rbx)
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{
+        AtaSlot, BootDevice, BootOrder, Emulator, EmulatorConfig, Ips, MachineBuilder, MemorySize,
+        RunBudget,
+    },
     gui::NoGui,
 };
 
@@ -87,7 +89,7 @@ fn run(mode: &str) {
     }
 }
 
-fn build_machine(config: &HarnessConfig) -> Box<Emulator<'static, Corei7SkylakeX>> {
+fn build_machine(config: &HarnessConfig) -> Box<Emulator> {
     let workspace_root = workspace_root();
     let bios = std::fs::read(
         workspace_root.join("cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
@@ -100,27 +102,20 @@ fn build_machine(config: &HarnessConfig) -> Box<Emulator<'static, Corei7SkylakeX
 
     let mem_bytes = usize::try_from(config.mem_mib * 1024 * 1024).expect("memory size");
     let emulator_config = EmulatorConfig {
-        guest_memory_size: mem_bytes,
-        host_memory_size: mem_bytes,
-        ips: 120_000_000,
+        memory: MemorySize::bytes(mem_bytes),
+        ips: Ips::new(120_000_000),
         pci_enabled: true,
         ..EmulatorConfig::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(emulator_config).expect("build emulator");
-    emu.set_gui(NoGui::new());
-    emu.init_memory_and_pc_system().expect("init memory/pc-system");
-
-    let bios_load_addr = !(bios.len() as u64 - 1);
-    emu.load_bios(&bios, bios_load_addr).expect("load BIOS");
-    emu.load_optional_rom(&vga_bios, 0xC0000).expect("load VGA BIOS");
-    emu.init_cpu_and_devices().expect("init CPU/devices");
-    emu.configure_memory_in_cmos_from_config();
-    // ELTORITO boot codes: 3 = cdrom first.
-    emu.configure_boot_sequence(3, 0, 0);
-    emu.attach_cdrom(0, 0, &config.iso).expect("attach ISO");
-    emu.reset(ResetReason::Hardware).expect("hardware reset");
-    emu
+    MachineBuilder::new(emulator_config)
+        .gui(NoGui::new())
+        .bios(&bios)
+        .vga_bios(&vga_bios)
+        .boot_order(BootOrder::just(BootDevice::Cdrom))
+        .cdrom_file(AtaSlot::PRIMARY_MASTER, &config.iso)
+        .build()
+        .expect("build machine")
 }
 
 fn workspace_root() -> std::path::PathBuf {
@@ -136,14 +131,21 @@ fn workspace_root() -> std::path::PathBuf {
     }
 }
 
-fn run_instructions(emu: &mut Emulator<'static, Corei7SkylakeX>, budget: u64) -> u64 {
+fn run_instructions(emu: &mut Emulator, budget: u64) -> u64 {
     let mut executed_total = 0u64;
     while executed_total < budget {
         let chunk = (budget - executed_total).min(50_000_000);
-        let (executed, shutdown) = emu.step_batch(chunk).expect("step_batch");
-        assert!(!shutdown, "guest shut down inside the instruction budget");
-        assert!(executed > 0, "guest made no progress");
-        executed_total += executed;
+        let outcome = emu.step(RunBudget::Instructions(chunk)).expect("step");
+        assert!(
+            !outcome.is_terminal(),
+            "guest stopped ({:?}) inside the instruction budget",
+            outcome.stop
+        );
+        assert!(!outcome.progress.stalled(), "guest made no progress");
+        executed_total += outcome
+            .progress
+            .instructions()
+            .expect("this harness boots a uniprocessor machine");
     }
     executed_total
 }

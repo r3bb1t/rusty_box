@@ -11,13 +11,11 @@ use super::{
     avx512::PmovWiden,
     avx512_gather::VexGatherForm,
     avx512_misc::{PmovDst, PmovSat, PmovSrc},
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{Instruction, Opcode},
     Result,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     pub(super) fn execute_instruction(&mut self, instr: &Instruction) -> Result<()> {
         use crate::cpu::arith16;
         use crate::cpu::arith32;
@@ -1185,7 +1183,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::INT1 => self.int1(instr),
             // INTO: Bochs ia_opcodes.def BX_IA_INTO → BX_CPU_C::INTO.
             // Decoder emits Opcode::Int0 for 0xCE (fetchdecode_opmap.h).
-            Opcode::Int0 => self.into(instr),
+            Opcode::Int0 => self.into_overflow(instr),
             Opcode::IretOp16 => {
                 self.iret16(instr)?;
                 Ok(())
@@ -2371,7 +2369,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             | Opcode::Prefetcht1Mb
             | Opcode::Prefetcht2Mb
             | Opcode::PrefetchntaMb => {
-                #[cfg(feature = "instrumentation")]
                 if self.instrumentation.active.has_cache() {
                     use super::instrumentation::PrefetchHint;
                     let hint = match instr.get_ia_opcode() {
@@ -2996,8 +2993,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::PcmpistrmVdqWdqIb => self.pcmpistrm_vdq_wdq_ib(instr),
             Opcode::PcmpistriVdqWdqIb => self.pcmpistri_vdq_wdq_ib(instr),
 
-            // End-of-trace sentinel (matching C++ BxEndTrace).
-            // Sets STOP_TRACE so the inner loop breaks at the async_event check.
+            // Bochs `BxEndTrace`, the end-of-trace sentinel. Nothing in this
+            // port builds one — trace construction leaves a trace holding only
+            // guest instructions (see `icache.rs`, beside `flush_smc`) — so
+            // this arm is reachable only if something starts. It ends the trace
+            // rather than executing an instruction that is not there.
             Opcode::InsertedOpcode => {
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 Ok(())
@@ -5254,11 +5254,8 @@ mod tests {
     use super::*;
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::cpu::CpuMode;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
-    use crate::memory::{BxMemC, BxMemoryStubC, CpuTlbPin};
-    use std::ptr::NonNull;
 
     /// Every opcode a CPU model admits must have somewhere to go.
     ///
@@ -5287,7 +5284,6 @@ mod tests {
     /// or call-position uses — so the parse is exact.
     #[test]
     fn every_opcode_a_model_admits_has_a_dispatcher_arm() {
-        use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
         use crate::cpu::decoder::Opcode;
         use rusty_box_decoder::opcode_isa::OPCODE_VARIANT_COUNT;
 
@@ -5311,8 +5307,11 @@ mod tests {
             handled.len()
         );
 
-        fn missing<I: BxCpuIdTrait>(handled: &std::collections::HashSet<String>) -> Vec<String> {
-            let cpu = BxCpuBuilder::<I>::new().build().unwrap();
+        fn missing(
+            model: crate::cpu::cpudb::CpuModel,
+            handled: &std::collections::HashSet<String>,
+        ) -> Vec<String> {
+            let cpu = BxCpuBuilder::new_with_model(model).build().unwrap();
             (0..OPCODE_VARIANT_COUNT)
                 .map(|i| Opcode::from_u16_const(i as u16))
                 .filter(|op| cpu.isa_resolve_opcode(*op) == *op)
@@ -5431,8 +5430,8 @@ mod tests {
         // the case in point.
         let mut reachable = std::collections::BTreeSet::new();
         for gaps in [
-            missing::<Corei7SkylakeX>(&handled),
-            missing::<AmdRyzen>(&handled),
+            missing(crate::cpu::cpudb::CpuModel::corei7_skylake_x(), &handled),
+            missing(crate::cpu::cpudb::CpuModel::amd_ryzen(), &handled),
         ] {
             reachable.extend(gaps.into_iter().filter(|g| decodable.contains(g)));
         }
@@ -5518,8 +5517,8 @@ mod tests {
         instr
     }
 
-    fn enable_sse<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &mut BxCpuC<'_, I, T>,
+    fn enable_sse<T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut crate::cpu::cpu::BxCpuC<T>,
     ) {
         cpu.cr4.insert(BxCr4::OSFXSR);
         // `BxCpuBuilder::build()` only runs `initialize()`, not a hardware
@@ -5562,7 +5561,9 @@ mod tests {
     }
     #[test]
     fn unimplemented_opcode_error_reports_exact_opcode() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         let mut instr = Instruction::default();
         instr.set_ia_opcode(Opcode::PminsbVdqWdq);
 
@@ -5579,7 +5580,9 @@ mod tests {
 
     #[test]
     fn roundsd_legacy_regression_for_ubuntu_guest_userspace() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
         let instr = make_legacy_round_instr(Opcode::RoundsdVsdWsdIb, 1, 3, 3);
 
@@ -5598,7 +5601,9 @@ mod tests {
 
     #[test]
     fn legacy_sse41_round_family_register_semantics() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
 
         for i in 0..8 {
@@ -5647,7 +5652,9 @@ mod tests {
 
     #[test]
     fn vex_vpminub_ymm_register_regression_for_ubuntu_opcode() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
         let instr = make_vpminmax_instr(Opcode::V256VpminubVdqHdqWdq, 1);
 
@@ -5678,7 +5685,9 @@ mod tests {
             (Opcode::V128VpsadbwVdqHdqWdq, 0, 2),
             (Opcode::V256VpsadbwVdqHdqWdq, 1, 4),
         ] {
-            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
             enable_sse(&mut cpu);
             let instr = make_vpsadbw_instr(opcode, vl);
 
@@ -5720,18 +5729,11 @@ mod tests {
 
     #[test]
     fn vex_vpsadbw_memory_source_uses_rm_operand() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
 
-        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-        let mut mem = BxMemC::new(mem_stub, false);
-        cpu.a20_mask = mem.a20_mask();
-        let (host_base, host_len) = mem.identity_guest_base();
-        assert!(!host_base.is_null());
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
 
         let mut instr = Instruction::default();
         instr.set_ia_opcode(Opcode::V256VpsadbwVdqHdqWdq);
@@ -5775,21 +5777,13 @@ mod tests {
         for qword in 4..8 {
             assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
         }
-        cpu.clear_memory_access();
     }
 
     #[test]
     fn bts_ed_gd_memory_keeps_64_bit_effective_address() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
-        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-        let mut mem = BxMemC::new(mem_stub, false);
-        cpu.a20_mask = mem.a20_mask();
-        let (host_base, host_len) = mem.identity_guest_base();
-        assert!(!host_base.is_null());
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.cpu_mode = CpuMode::Long64;
 
         cpu.linaddr_width = 48;
@@ -5819,21 +5813,13 @@ mod tests {
             0x1234_0000,
             "BTS Ed,Gd in 64-bit address mode must not truncate the memory address"
         );
-        cpu.clear_memory_access();
     }
 
     #[test]
     fn bts_ew_gw_memory_keeps_64_bit_effective_address() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
-        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-        let mut mem = BxMemC::new(mem_stub, false);
-        cpu.a20_mask = mem.a20_mask();
-        let (host_base, host_len) = mem.identity_guest_base();
-        assert!(!host_base.is_null());
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.cpu_mode = CpuMode::Long64;
         cpu.linaddr_width = 48;
 
@@ -5863,7 +5849,6 @@ mod tests {
             0x1200,
             "BTS Ew,Gw in 64-bit address mode must not truncate the memory address"
         );
-        cpu.clear_memory_access();
     }
 
     #[derive(Clone, Copy)]
@@ -5896,7 +5881,9 @@ mod tests {
             (Opcode::VxorpdVpdHpdWpd, VexLogicalOp::Xor),
         ] {
             for (vl, qword_count) in [(0, 2), (1, 4)] {
-                let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
                 enable_sse(&mut cpu);
                 let instr = make_vex_fp_logical_instr(opcode, vl);
                 for qword in 0..8 {
@@ -5937,18 +5924,11 @@ mod tests {
 
     #[test]
     fn vex_vxorps_memory_source_uses_rm_operand() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
 
-        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-        let mut mem = BxMemC::new(mem_stub, false);
-        cpu.a20_mask = mem.a20_mask();
-        let (host_base, host_len) = mem.identity_guest_base();
-        assert!(!host_base.is_null());
-        cpu.mem_host_base = host_base;
-        cpu.mem_host_len = host_len;
-        let pin = CpuTlbPin::new(&cpu);
-        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
 
         let mut instr = Instruction::default();
         instr.set_ia_opcode(Opcode::VxorpsVpsHpsWps);
@@ -5989,12 +5969,13 @@ mod tests {
         for qword in 4..8 {
             assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
         }
-        cpu.clear_memory_access();
     }
 
     #[test]
     fn vex_vpermq_register_semantics_match_bochs() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
 
         let mut instr = Instruction::default();
@@ -6232,7 +6213,9 @@ mod tests {
                             _ => unreachable!(),
                         };
                         let opcode = vex_packed_fma_opcode(form, op, is_double);
-                        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
                         enable_sse(&mut cpu);
 
                         let mut instr = Instruction::default();
@@ -6321,7 +6304,9 @@ mod tests {
             ] {
                 for is_double in [false, true] {
                     let opcode = vex_scalar_fma_opcode(form, op, is_double);
-                    let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                    let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
                     enable_sse(&mut cpu);
 
                     let mut instr = Instruction::default();
@@ -6408,20 +6393,13 @@ mod tests {
                 5.0f64.mul_add(7.0, 3.0),
             ),
         ] {
-            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
             enable_sse(&mut cpu);
             cpu.cpu_mode = CpuMode::Long64;
             cpu.linaddr_width = 48;
 
-            let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-            let mut mem = BxMemC::new(mem_stub, false);
-            cpu.a20_mask = mem.a20_mask();
-            let (host_base, host_len) = mem.identity_guest_base();
-            assert!(!host_base.is_null());
-            cpu.mem_host_base = host_base;
-            cpu.mem_host_len = host_len;
-            let pin = CpuTlbPin::new(&cpu);
-            cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
 
             let mut instr = Instruction::default();
             instr.set_ia_opcode(opcode);
@@ -6458,8 +6436,7 @@ mod tests {
                     "{opcode:?} {form:?} upper qword {qword}"
                 );
             }
-            cpu.clear_memory_access();
-        }
+            }
     }
 
     // Build a scalar-ss FMA instruction: dst=vmm1, src1(rm)=vmm3, src2(vvvv)=vmm2.
@@ -6503,7 +6480,9 @@ mod tests {
             "test inputs must actually discriminate the rounding mode"
         );
 
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
         cpu.mxcsr.mxcsr = 0x1F80 | 0x6000; // all masked, RC = toward-zero
 
@@ -6531,7 +6510,9 @@ mod tests {
         let h = 3.0f32.to_bits();
         let w = 16_777_216.0f32.to_bits();
 
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
         cpu.mxcsr.mxcsr = 0x1F80; // architectural reset: all exceptions masked
         assert!(!cpu.mxcsr.flags().contains(Mxcsr::PE));
@@ -6562,7 +6543,9 @@ mod tests {
         let w = 0.0f32.to_bits();
         let (a, b, c) = (h, v, w); // form 213 → (h, v, w)
 
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
         cpu.mxcsr.mxcsr = 0x1F80 | 0x0040; // all masked + DAZ (bit 6)
 
@@ -6610,7 +6593,9 @@ mod tests {
         let one = 1.0f64.to_bits();
         let five = 5.0f64.to_bits();
 
-        let mut nearest = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut nearest_machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut nearest = nearest_machine.ctx();
         enable_sse(&mut nearest);
         nearest.vmm[1].set_zmm64u(0, one);
         nearest.vmm[3].set_zmm64u(0, five);
@@ -6618,7 +6603,9 @@ mod tests {
             .execute_instruction(&make_legacy_sse_instr(Opcode::DivsdVsdWsd, 1, 3))
             .unwrap();
 
-        let mut toward_zero = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut toward_zero_machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut toward_zero = toward_zero_machine.ctx();
         enable_sse(&mut toward_zero);
         toward_zero.mxcsr.mxcsr = 0x1F80 | 0x6000; // RC = toward zero
         toward_zero.vmm[1].set_zmm64u(0, one);
@@ -6639,7 +6626,9 @@ mod tests {
     fn sse_packed_fp_sets_mxcsr_sticky_exception_flags() {
         use crate::cpu::xmm::Mxcsr;
 
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
         assert!(!cpu.mxcsr.flags().contains(Mxcsr::PE));
 
@@ -6660,7 +6649,9 @@ mod tests {
     fn sse_unmasked_divide_by_zero_raises_and_leaves_destination_alone() {
         use crate::cpu::xmm::Mxcsr;
 
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
         cpu.cr4.insert(BxCr4::OSXMMEXCPT);
         // All masked except #Z (bit 9 = ZM).
@@ -6692,7 +6683,9 @@ mod tests {
         for (opcode, expect_snan_passthrough) in
             [(Opcode::MinsdVsdWsd, true), (Opcode::MaxsdVsdWsd, true)]
         {
-            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
             enable_sse(&mut cpu);
             let src = 2.0f64.to_bits();
             cpu.vmm[1].set_zmm64u(0, f64::NAN.to_bits());
@@ -6708,7 +6701,9 @@ mod tests {
         }
 
         // -0.0 vs +0.0 compare equal, so the second operand wins.
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
         cpu.vmm[1].set_zmm64u(0, (-0.0f64).to_bits());
         cpu.vmm[3].set_zmm64u(0, 0.0f64.to_bits());
@@ -6956,7 +6951,9 @@ mod tests {
     #[test]
     fn vex_vpmin_vpmax_family_register_semantics() {
         for case in all_vpminmax_cases() {
-            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
             enable_sse(&mut cpu);
             let instr = make_vpminmax_instr(case.opcode, case.vl);
             for i in 0..64 {

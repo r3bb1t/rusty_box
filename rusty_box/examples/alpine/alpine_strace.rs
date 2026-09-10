@@ -24,18 +24,11 @@
 //! - `RUSTY_BOX_BOOT`   — `bios` for full BIOS/ISOLINUX boot (serial-only)
 //! - `RUSTY_BOX_NOSYNC` — set to `1` to disable wall-clock slowdown
 
-#![cfg(all(
-    feature = "std",
-    feature = "instrumentation",
-    feature = "gui-egui"
-))]
+#![cfg(all(feature = "std", feature = "gui-egui"))]
 
 use rusty_box::{
-    cpu::{
-        core_i7_skylake::Corei7SkylakeX, HookCtx, HookMask, InstrAction, Instrumentation,
-        ResetReason, X86Reg,
-    },
-    emulator::{Emulator, EmulatorConfig},
+    cpu::{HookCtx, HookMask, InstrAction, Instrumentation, X86Reg},
+    emulator::{AtaSlot, BootDevice, BootOrder, EmulatorConfig, Ips, MemorySize, MachineBuilder},
     gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
     Result,
 };
@@ -348,47 +341,37 @@ fn main() {
 fn run_emulator(boot: &BootConfig, shared: Arc<Mutex<SharedDisplay>>) -> Result<()> {
     let ram_bytes = boot.ram_mb * 1024 * 1024;
     let config = EmulatorConfig {
-        guest_memory_size: ram_bytes,
-        host_memory_size: ram_bytes,
-        ips: 300_000_000,
+        memory: MemorySize::bytes(ram_bytes),
+        ips: Ips::new(300_000_000),
         pci_enabled: true,
         sync_slowdown: boot.sync_slowdown,
         ..EmulatorConfig::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX, StraceTracer>::new_with_instrumentation(
-        config,
-        StraceTracer::default(),
-    )?;
+    let mut builder = MachineBuilder::new(config)
+        .tracer(StraceTracer::default())
+        .gui(BridgeGui::new(Arc::clone(&shared)))
+        .cdrom_file(AtaSlot::SECONDARY_MASTER, &boot.iso_path);
 
-    // Wire the GUI stop flag so closing the window stops execution.
-    emu.stop_flag = Arc::clone(&shared.lock().unwrap().stop_flag);
-    emu.set_gui(BridgeGui::new(Arc::clone(&shared)));
-    emu.init_memory_and_pc_system()?;
-
-    match boot.mode {
+    let mut emu = match boot.mode {
         BootMode::Bios => {
             let bios = find_file(&["cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"])
                 .expect("BIOS-bochs-latest not found");
-            let bios_load_addr = !(bios.len() as u64 - 1);
-            emu.load_bios(&bios, bios_load_addr)?;
-            if let Some(vga) = find_file(&[
+            let vga = find_file(&[
                 "binaries/bios/VGABIOS-lgpl-latest.bin",
                 "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin",
-            ]) {
-                emu.load_optional_rom(&vga, 0xC0000)?;
+            ]);
+            builder = builder
+                .bios(&bios)
+                .boot_order(BootOrder::just(BootDevice::Cdrom));
+            if let Some(ref vga) = vga {
+                builder = builder.vga_bios(vga);
             }
-            emu.init_cpu_and_devices()?;
-            emu.configure_memory_in_cmos_from_config();
-            emu.configure_boot_sequence(3, 0, 0);
-            emu.attach_cdrom(1, 0, &boot.iso_path).expect("attach CDROM");
-            emu.init_gui(0, &[])?;
-            emu.reset(ResetReason::Hardware)?;
-            emu.init_gui_signal_handlers();
-            emu.start();
+            let mut emu = builder.build()?;
             // Pre-queue Enter at the ISOLINUX prompt to accept the ISO default.
             emu.prepare_run();
-            emu.send_string("\n");
+            let _typed = emu.keyboard().type_text("\n");
+            emu
         }
         BootMode::Direct => {
             let iso_data = std::fs::read(&boot.iso_path).expect("read ISO");
@@ -399,17 +382,16 @@ fn run_emulator(boot: &BootConfig, shared: Arc<Mutex<SharedDisplay>>) -> Result<
             let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_|
                 "console=tty0 console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr modules=loop,squashfs,cdrom,sr_mod,isofs modloop=/boot/modloop-virt".into()
             );
-            emu.init_cpu_and_devices()?;
-            emu.configure_memory_in_cmos_from_config();
-            emu.attach_cdrom(1, 0, &boot.iso_path).expect("attach CDROM");
-            emu.init_gui(0, &[])?;
-            emu.reset(ResetReason::Hardware)?;
-            emu.init_gui_signal_handlers();
-            emu.init_vga_text_mode3();
-            emu.start();
+            // No firmware: the kernel goes straight into guest memory.
+            let mut emu = builder.build()?;
+            emu.display().init_text_mode3();
             emu.setup_direct_linux_boot(&vmlinuz, Some(&initramfs), &cmdline)?;
+            emu
         }
-    }
+    };
+
+    // Wire the GUI stop flag so closing the window stops execution.
+    emu.set_stop_flag(Arc::clone(&shared.lock().unwrap().stop_flag));
 
     // run_interactive drives the GUI updates and honors the stop flag internally.
     let result = emu.run_interactive(boot.max_instructions);

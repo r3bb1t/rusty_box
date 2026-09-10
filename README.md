@@ -78,8 +78,6 @@ Emulator<'a, I: BxCpuIdTrait>
 | `alloc` | no | Heap allocation (Box, Vec). Enables `Emulator::new()`, GUI, diagnostics. |
 | `gui-egui` | no | Graphical UI using egui/eframe. |
 | `instrumentation` | no | Closure-based CPU hooks (syscall tracing, memory watchpoints). Implies `alloc`. |
-| `bx_debugger` | no | Built-in debugger support. |
-| `bx_gdb_stub` | no | GDB remote debugging stub. |
 
 ### Build Configurations
 

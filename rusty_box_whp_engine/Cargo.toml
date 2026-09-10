@@ -1,0 +1,42 @@
+[package]
+name = "rusty_box_whp_engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Runs a rusty_box machine's guest on the Windows Hypervisor Platform"
+keywords = ["x86", "emulator", "hypervisor", "whp", "virtualization"]
+categories = ["emulators", "virtualization"]
+
+[lib]
+name = "rusty_box_whp_engine"
+path = "src/lib.rs"
+
+# Proof-carrying, like every other crate that can be: the one lift is the
+# crate-level `expect(unsafe_code)` in `lib.rs`, which names the single
+# obligation this crate discharges — mapping the machine's own memory into a
+# partition. Its ratchet baseline is 1 and stays there.
+[lints]
+workspace = true
+
+# The adapter between the two, and the only crate that knows both. `rusty_box`
+# depends on neither: an engine is chosen by the binary that builds a machine,
+# so the emulator never depends on a backend (REPLAN decision 12). Keeping this
+# separate from `rusty_box_whp` is what leaves that crate a thin host-FFI leaf
+# — one that still compiles, and whose tests still run, on a host with no
+# hypervisor and without pulling an emulator in behind it.
+[dependencies]
+rusty_box = { path = "../rusty_box", features = ["std"] }
+# The tree's time vocabulary. The engine's clock answers a `VmInstant` at the
+# machine's `ClockHz`, so it names the same types the devices read rather than
+# a unit of its own.
+rusty_box_core.workspace = true
+rusty_box_whp = { path = "../rusty_box_whp" }
+tracing.workspace = true
+
+# The boot example turns the engine's own tracing on, which is how a boot that
+# stops says where. Not a dependency of the library.
+[dev-dependencies]
+tracing-subscriber.workspace = true

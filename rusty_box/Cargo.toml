@@ -16,14 +16,11 @@ name = "rusty_box"
 path = "src/lib.rs"
 
 [features]
-default = ["std", "instrumentation", "gui-egui"]
+default = ["std", "gui-egui"]
 
-alloc = ["dep:tracing"]
-std = ["alloc", "tracing/std", "tempfile", "crossterm"]
+alloc = ["dep:tracing", "rusty_box_core/alloc", "rusty_box_devices/alloc"]
+std = ["alloc", "tracing/std", "tempfile", "crossterm", "rusty_box_core/std", "rusty_box_devices/std"]
 gui-egui = ["dep:egui", "dep:eframe"]
-bx_debugger = []
-bx_gdb_stub = []
-instrumentation = ["alloc"]
 profiling = ["std"]
 bench = ["std", "dep:criterion"]
 
@@ -35,6 +32,8 @@ tempfile = { version = "3.20", optional = true }
 bitflags.workspace = true
 paste.workspace = true
 libm = "0.2"
+rusty_box_core.workspace = true
+rusty_box_devices.workspace = true
 rusty_box_decoder = { path = "../rusty_box_decoder" }
 crossterm = { version = "0.29", optional = true }
 egui = { workspace = true, optional = true }
@@ -54,7 +53,7 @@ required-features = ["std"]
 [[example]]
 name = "alpine_strace"
 path = "examples/alpine/alpine_strace.rs"
-required-features = ["std", "instrumentation", "gui-egui"]
+required-features = ["std", "gui-egui"]
 
 [[example]]
 name = "dlxlinux"
@@ -74,7 +73,7 @@ required-features = ["std", "gui-egui"]
 [[example]]
 name = "shellcode_trace"
 path = "examples/shellcode/shellcode_trace.rs"
-required-features = ["std", "instrumentation"]
+required-features = ["std"]
 
 [[example]]
 name = "perfbench"
@@ -95,6 +94,10 @@ libc = { version = "0.2", default-features = false }
 [dev-dependencies]
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
+# Doctrine fixture registry (docs/safety-doctrine.md) — R2/R3 compile-fail pins.
+# Deliberately NOT in the xtask ci matrix: goldens track the local toolchain
+# (regenerate with TRYBUILD=overwrite after a toolchain bump).
+trybuild = "1.0"
 
 [[bench]]
 name = "cpu_bench"

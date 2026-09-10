@@ -14,8 +14,7 @@
 //! - IPS: 15000000
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MemorySize, MachineBuilder},
     gui::{NoGui, TermGui},
     Result,
 };
@@ -57,15 +56,18 @@ fn run_dlxlinux() -> Result<()> {
 
     // Initialize tracing - respect RUST_LOG env var, with WARN as default
     // (set RUST_LOG=debug or RUST_LOG=info to see more detail)
-    let log_level = std::env::var("RUST_LOG")
-        .ok()
-        .and_then(|s| s.parse::<tracing::Level>().ok())
-        .unwrap_or(tracing::Level::WARN);
-
+    // A full filter directive, not a bare level. Parsing `RUST_LOG` as a
+    // `Level` silently swallows anything targeted — `RUST_LOG=irq=debug` fails
+    // to parse and falls back to WARN, so a trace someone added to chase a bug
+    // simply never appears and its absence reads as evidence. Targets are the
+    // whole point of having them.
     tracing_subscriber::fmt()
         .without_time()
-        .with_target(false)
-        .with_max_level(log_level)
+        .with_target(true)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
 
     println!("╔════════════════════════════════════════════════════════════╗");
@@ -134,7 +136,12 @@ fn run_dlxlinux() -> Result<()> {
         workspace_root.join("binaries/bios/VGABIOS-lgpl-latest.bin"),
         workspace_root.join("binaries/bios/VGABIOS-lgpl-latest-cirrus.bin"),
         workspace_root.join("binaries/bios/VGABIOS-lgpl-latest-debug.bin"),
-        // Mirrored Bochs BIOS directory
+        // Mirrored Bochs BIOS directory (upstream keeps LGPL VGA BIOSes in a
+        // VGABIOS-lgpl/ subdirectory; older snapshots had them alongside the
+        // system BIOS, so both layouts are probed)
+        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest-cirrus.bin"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest-debug.bin"),
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin"),
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest-cirrus.bin"),
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest-debug.bin"),
@@ -210,133 +217,54 @@ fn run_dlxlinux() -> Result<()> {
     let config = EmulatorConfig {
         // Match bochsrc.bxrc: 32 MB RAM
         // Stack overflow fixed by Boxing icache.mpool and returning Box<Emulator>
-        guest_memory_size: 32 * 1024 * 1024, // 32 MB
-        host_memory_size: 32 * 1024 * 1024,  // 32 MB
+        memory: MemorySize::bytes(32 * 1024 * 1024), // 32 MB
         memory_block_size: 128 * 1024,
-        ips: 300_000_000,
+        ips: Ips::new(300_000_000),
         pci_enabled: true,
         ..Default::default()
     };
 
     tracing::info!(
         "Creating emulator: {} MB RAM, {} MIPS",
-        config.guest_memory_size / (1024 * 1024),
-        config.ips / 1_000_000,
+        config.memory.guest_bytes() / (1024 * 1024),
+        config.ips.per_second() / 1_000_000,
     );
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
+    // =========================================================================
+    // Assemble the machine
+    // =========================================================================
+    // The builder performs the whole Bochs main.cc bring-up: memory, BIOS,
+    // CPUs, devices, CMOS, media, GUI, reset, timers — in that order.
+    tracing::info!("Assembling machine...");
+    let disk_path_str = disk_path.to_string_lossy().to_string();
+    let mut builder = MachineBuilder::new(config)
+        .bios(&bios_data)
+        .boot_order(BootOrder::just(BootDevice::Disk))
+        .disk_file(
+            AtaSlot::PRIMARY_MASTER,
+            &disk_path_str,
+            DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT),
+        );
 
-    // =========================================================================
-    // Set up GUI (must be done BEFORE initialize() to match original Bochs)
-    // =========================================================================
     if headless {
-        emu.set_gui(NoGui::new());
-        tracing::info!("✓ GUI set (NoGui / headless)");
+        builder = builder.gui(NoGui::new());
         println!("(headless) RUSTY_BOX_HEADLESS=1: terminal repaint disabled");
     } else {
-        let term_gui = TermGui::new();
-        emu.set_gui(term_gui);
-        tracing::info!("✓ GUI set (TermGui)");
+        builder = builder.gui(TermGui::new());
     }
 
-    // =========================================================================
-    // Initialize hardware - Part 1: Memory and PC system
-    // =========================================================================
-    // Following original Bochs sequence from main.cc:
-    // 1. Memory init (line 1312)
-    // 2. Load BIOS (line 1315)
-    // 3. CPU init (line 1337)
-    // 4. Device init (line 1353)
-    tracing::info!("Initializing hardware...");
-    emu.init_memory_and_pc_system()?;
-
-    // =========================================================================
-    // Load BIOS ROMs (AFTER memory init, BEFORE CPU init)
-    // =========================================================================
-    // BIOS must be loaded at 0xF0000 (matching original Bochs)
-    // This makes it accessible in the F000 segment (0xF0000-0xFFFFF)
-    // The memory system maps 0xE0000-0xFFFFF to BIOS ROM via bios_map_last128k()
-    // At CPU reset, CS.base is specially set to 0xFFFF0000, allowing the first
-    // instruction fetch from 0xFFFFFFF0 to access the same ROM data
-    let bios_size = bios_data.len() as u64;
-    // Calculate BIOS load address following original Bochs logic:
-    // romaddress = ~(size - 1) for reset vector support (misc_mem.cc)
-    // 64KB BIOS:  ~0xFFFF = 0xFFFF0000 (ends at 4GB, wraps in u32)
-    // 128KB BIOS: ~0x1FFFF = 0xFFFE0000
-    // Validation: (romaddress + size) should wrap to 0 OR equal 0x100000
-    let bios_load_addr = !(bios_size - 1);
-    tracing::info!(
-        "BIOS size: {} bytes ({} KB), load address: {:#x}",
-        bios_size,
-        bios_size / 1024,
-        bios_load_addr
-    );
-    emu.load_bios(&bios_data, bios_load_addr)?;
-    tracing::info!("✓ Loaded system BIOS at {:#x}", bios_load_addr);
-
-    // Load VGA BIOS at 0xC0000 (optional)
-    if let Some((_vga_path, vga_data)) = vga_bios {
-        emu.load_optional_rom(&vga_data, 0xC0000)?;
-        tracing::info!("✓ Loaded VGA BIOS at 0xC0000");
+    if let Some((_vga_path, ref vga_data)) = vga_bios {
+        builder = builder.vga_bios(vga_data);
     }
 
-    // =========================================================================
-    // Initialize hardware - Part 2: CPU and devices
-    // =========================================================================
-    emu.init_cpu_and_devices()?;
-
-    // =========================================================================
-    // Configure CMOS (AFTER device initialization)
-    // =========================================================================
-    // Configure CMOS for 32 MB memory (matches bochsrc.bxrc)
-    // Uses guest_memory_size from config (32 MB) — avoids double-counting base_kb
-    emu.configure_memory_in_cmos_from_config();
-
-    // Configure hard drive geometry in CMOS (matching Bochs harddrv.cc)
-    // Sets type=0xF (extended) + registers 0x19, 0x1B-0x23 for drive 0
-    emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
-
-    // Configure boot sequence: boot from hard disk first (matching Bochs floppy.cc)
-    // ELTORITO boot device codes: 0=none, 1=floppy, 2=hard disk, 3=cdrom
-    emu.configure_boot_sequence(2, 0, 0);
-
-    // =========================================================================
-    // Attach disk image
-    // =========================================================================
-    tracing::info!("Attaching disk image: {}", disk_path.display());
-    let disk_path_str = disk_path.to_string_lossy().to_string();
-    emu.attach_disk(0, 0, &disk_path_str, DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT)
-        .expect("Failed to attach disk image");
+    let mut emu = builder.build()?;
     tracing::info!(
-        "✓ Disk attached: CHS={}/{}/{}",
+        "✓ Machine ready: BIOS {} KB, disk CHS={}/{}/{}",
+        bios_data.len() / 1024,
         DLX_CYLINDERS,
         DLX_HEADS,
         DLX_SPT
     );
-
-    // =========================================================================
-    // Initialize GUI (sets up terminal, but signal handlers after reset)
-    // =========================================================================
-    emu.init_gui(0, &[])?;
-    tracing::info!("✓ Terminal GUI initialized");
-
-    // =========================================================================
-    // Hardware reset (enables A20, resets CPU and devices)
-    // =========================================================================
-    emu.reset(ResetReason::Hardware)?;
-    tracing::info!("✓ Hardware reset complete");
-
-    // =========================================================================
-    // Initialize GUI signal handlers (after reset, before start_timers)
-    // =========================================================================
-    emu.init_gui_signal_handlers();
-    tracing::info!("✓ GUI signal handlers initialized");
-
-    // =========================================================================
-    // Start timers (after signal handlers, matching original Bochs line 1384)
-    // =========================================================================
-    emu.start();
-    tracing::info!("✓ Timers started");
 
     // =========================================================================
     // Show boot state
@@ -351,7 +279,7 @@ fn run_dlxlinux() -> Result<()> {
     );
     println!(
         "║  A20    = {}                                          ║",
-        if emu.pc_system.get_enable_a20() {
+        if emu.get_enable_a20() {
             "enabled "
         } else {
             "disabled"
@@ -451,6 +379,10 @@ fn run_dlxlinux() -> Result<()> {
     // the TTY input buffer, but do_keyboard_interrupt() still calls unblank_screen()
     // and resets the inactivity timer).
     const KEEP_ALIVE_SCANCODE: &[u8] = &[0x12, 0xF0, 0x12]; // Left Shift
+    // Enter make+break: boots the default image at the `LILO boot:` prompt.
+    // The DLX image's LILO is configured with `prompt` and no timeout, so it
+    // waits for a keypress indefinitely.
+    const LILO_ENTER_SCANCODES: &[u8] = &[0x5A, 0xF0, 0x5A];
 
     // In headless mode: run in 20M-instruction phases. After the kernel HLTs (~132M),
     // inject a Shift keep-alive every phase to prevent the console blank timer from
@@ -463,6 +395,7 @@ fn run_dlxlinux() -> Result<()> {
         let mut total_executed: u64 = 0;
         let mut run_result: Result<u64> = Ok(0);
         let mut logged_in = false;
+        let mut lilo_boot_entered = false;
         let phase_size: u64 = 1_000_000;
 
         'phases: loop {
@@ -484,8 +417,23 @@ fn run_dlxlinux() -> Result<()> {
                 // Print VGA preview: every 1M before login, every 50M after
                 let print_interval = if logged_in { 50_000_000 } else { 1_000_000 };
                 if total_executed % print_interval == 0 || !logged_in {
-                    let rows = emu.vga_all_text_rows();
+                    // The whole aperture, not just the displayed page: this
+                    // watches for prompts the CRTC start address may have
+                    // scrolled away from.
+                    let rows = emu.display().dump_text_aperture();
                     let has_login = rows.iter().any(|r| r.contains("login:"));
+
+                    // Boot the default image at the LILO prompt (waits forever
+                    // otherwise — DLX's LILO has `prompt` with no timeout).
+                    let at_lilo = rows.iter().any(|r| r.contains("LILO boot:"));
+                    if at_lilo && !lilo_boot_entered {
+                        println!(
+                            "(headless) LILO prompt detected — injecting Enter at {}M instructions",
+                            total_executed / 1_000_000
+                        );
+                        let _sent = emu.keyboard().scancodes(LILO_ENTER_SCANCODES);
+                        lilo_boot_entered = true;
+                    }
 
                     let non_empty: Vec<&str> = rows
                         .iter()
@@ -513,17 +461,13 @@ fn run_dlxlinux() -> Result<()> {
                             "(headless) Injecting 'root\\n' at {}M instructions",
                             total_executed / 1_000_000
                         );
-                        for &sc in LOGIN_SCANCODES {
-                            emu.send_scancode(sc);
-                        }
+                        let _sent = emu.keyboard().scancodes(LOGIN_SCANCODES);
                         logged_in = true;
                     }
                 }
 
                 // Keep-alive: reset console blank timer
-                for &sc in KEEP_ALIVE_SCANCODE {
-                    emu.send_scancode(sc);
-                }
+                let _sent = emu.keyboard().scancodes(KEEP_ALIVE_SCANCODE);
             }
         }
         run_result
@@ -563,7 +507,7 @@ fn run_dlxlinux() -> Result<()> {
 
     // In headless mode (and even with GUI), also print any remaining Bochs-style
     // debug-port output that might not have been drained during execution.
-    let e9 = emu.devices.take_port_e9_output();
+    let e9: Vec<u8> = emu.debug_port().take_output().collect();
     if !e9.is_empty() {
         println!();
         println!("===== BOCHS DEBUG PORT OUTPUT (0xE9) =====");
@@ -601,7 +545,9 @@ fn run_dlxlinux() -> Result<()> {
     // In headless mode, dump the current VGA text screen
     if headless {
         println!("\n===== VGA TEXT DUMP =====");
-        println!("{}", emu.vga_text_dump());
+        if let Some(text) = emu.display().text() {
+            println!("{}", text.to_text());
+        }
     }
 
     Ok(())

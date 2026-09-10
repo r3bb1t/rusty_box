@@ -4,12 +4,11 @@
 
 use super::{
     cpu::{BxCpuC, Exception},
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     error::{CpuError, Result},
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Helper functions for branching
     // =========================================================================
@@ -63,7 +62,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         if !self.is_canonical(new_rip) {
-            self.set_rsp(self.prev_rsp);
+            let rsp = self.prev_rsp;
+            self.set_rsp(rsp);
             self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
@@ -95,7 +95,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         if !self.is_canonical(new_rip) {
-            self.set_rsp(self.prev_rsp);
+            let rsp = self.prev_rsp;
+            self.set_rsp(rsp);
             self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
@@ -114,7 +115,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Matching C++ ctrl_xfer64.cc CALL64_Ep
     pub fn call64_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 173)
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // Resolve effective address
@@ -196,7 +197,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Matching C++ ctrl_xfer64.cc JMP64_Ep
     pub fn jmp64_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 432)
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // Resolve effective address
@@ -248,7 +249,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         if !self.is_canonical(new_rip) {
-            self.set_rsp(self.prev_rsp);
+            let rsp = self.prev_rsp;
+            self.set_rsp(rsp);
             self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
@@ -313,14 +315,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         if !self.is_canonical(return_rip) {
             // Restore RSP before exception (RSP_SPECULATIVE rollback)
-            self.set_rsp(self.prev_rsp);
+            let rsp = self.prev_rsp;
+            self.set_rsp(rsp);
             self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
         }
 
         self.set_rip(return_rip);
-        self.set_rsp(self.rsp().wrapping_add(instr.iw() as u64));
+        let rsp = self.rsp().wrapping_add(instr.iw() as u64);
+        self.set_rsp(rsp);
 
         // RSP_COMMIT (matching C++ line 71)
         self.speculative_rsp = false;
@@ -333,7 +337,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Note: return_protected is RSP safe
     pub fn retfar64_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 80)
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // BX_ASSERT(protected_mode()) — in 64-bit mode we are always in protected mode
@@ -368,14 +372,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.svm_vmexit(super::svm::SvmVmexit::Iret as i32, 0, 0);
         }
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // VMX: nmi_unblocking_iret = true (matching C++ line 471)
         // (We don't have VMX guest mode, but set for completeness)
 
         // Unmask NMI (matching C++ line 478)
-        self.unmask_event(Self::BX_EVENT_NMI);
+        self.unmask_event(BxCpuC::<T>::BX_EVENT_NMI);
 
         // BX_ASSERT(long_mode()) — matching C++ line 488
 

@@ -24,8 +24,9 @@
 //! ```
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder,
+    },
     gui::{NoGui, TermGui},
     Result,
 };
@@ -80,13 +81,15 @@ fn parse_chs(s: &str) -> Option<(u16, u8, u8)> {
     Some((c, h, s))
 }
 
-fn read_guest_u32(emu: &mut Emulator<'_, Corei7SkylakeX>, addr: u64) -> Option<u32> {
+fn read_guest_u32(emu: &mut Emulator, addr: u64) -> Option<u32> {
     let mut bytes = [0; 4];
     emu.mem_read(addr, &mut bytes).ok()?;
     Some(u32::from_le_bytes(bytes))
 }
 
-fn read_guest_u16(emu: &mut Emulator<'_, Corei7SkylakeX>, addr: u64) -> Option<u16> {
+/// Only the debug-assertions BDA dump reads a 16-bit guest field.
+#[cfg(debug_assertions)]
+fn read_guest_u16(emu: &mut Emulator, addr: u64) -> Option<u16> {
     let mut bytes = [0; 2];
     emu.mem_read(addr, &mut bytes).ok()?;
     Some(u16::from_le_bytes(bytes))
@@ -286,76 +289,49 @@ fn run_alpine() -> Result<()> {
     // Create and configure emulator
     // =========================================================================
     let config = EmulatorConfig {
-        guest_memory_size: ram_bytes,
-        host_memory_size: ram_bytes,
+        memory: MemorySize::bytes(ram_bytes),
         memory_block_size: 128 * 1024,
-        ips: 300_000_000,
+        ips: Ips::new(300_000_000),
         pci_enabled: true,
         ..Default::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
+    // =========================================================================
+    // Assemble the machine
+    // =========================================================================
+    let disk_path_str = disk_path.to_string_lossy().to_string();
+    let mut builder = MachineBuilder::new(config).bios(&bios_data);
 
-    // =========================================================================
-    // Set up GUI
-    // =========================================================================
     if headless {
-        emu.set_gui(NoGui::new());
+        builder = builder.gui(NoGui::new());
         println!("(headless) RUSTY_BOX_HEADLESS=1: terminal repaint disabled");
     } else {
-        let term_gui = TermGui::new();
-        emu.set_gui(term_gui);
+        builder = builder.gui(TermGui::new());
     }
 
-    // =========================================================================
-    // Initialize hardware
-    // =========================================================================
-    emu.init_memory_and_pc_system()?;
-
-    // Load BIOS
-    let bios_size = bios_data.len() as u64;
-    let bios_load_addr = !(bios_size - 1);
-    emu.load_bios(&bios_data, bios_load_addr)?;
-
-    // Load VGA BIOS
-    if let Some((_vga_path, vga_data)) = vga_bios {
-        emu.load_optional_rom(&vga_data, 0xC0000)?;
+    if let Some((_vga_path, ref vga_data)) = vga_bios {
+        builder = builder.vga_bios(vga_data);
     }
-
-    // Initialize CPU and devices
-    emu.init_cpu_and_devices()?;
-
-    // =========================================================================
-    // Configure CMOS
-    // =========================================================================
-    // Use the bytes-based API that correctly handles large RAM sizes
-    emu.configure_memory_in_cmos_from_config();
-
-    let disk_path_str = disk_path.to_string_lossy().to_string();
 
     if is_iso {
-        // CD-ROM boot: attach as ATAPI device on channel 1, master (drive 0)
-        // Matches Bochs config: ata1-master: type=cdrom (secondary channel, 0x170, IRQ 15)
-        emu.configure_boot_sequence(3, 0, 0); // 3 = cdrom first
-        emu.attach_cdrom(1, 0, &disk_path_str)
-            .expect("Failed to attach CD-ROM image");
+        // Bochs config `ata1-master: type=cdrom` — the secondary channel
+        // (0x170, IRQ 15).
+        builder = builder
+            .boot_order(BootOrder::just(BootDevice::Cdrom))
+            .cdrom_file(AtaSlot::SECONDARY_MASTER, &disk_path_str);
         println!("  CD-ROM attached on ata1-master: {}", disk_path_str);
     } else {
-        // Hard disk boot: configure CHS geometry and attach
-        emu.configure_disk_geometry_in_cmos(0, cylinders, heads, spt);
-        emu.configure_boot_sequence(2, 0, 0); // 2 = hard disk first
-        emu.attach_disk(0, 0, &disk_path_str, cylinders.into(), heads, spt)
-            .expect("Failed to attach disk image");
+        builder = builder
+            .boot_order(BootOrder::just(BootDevice::Disk))
+            .disk_file(
+                AtaSlot::PRIMARY_MASTER,
+                &disk_path_str,
+                DiskGeometry::new(cylinders.into(), heads, spt),
+            );
         println!("  Disk attached: CHS={}/{}/{}", cylinders, heads, spt);
     }
 
-    // =========================================================================
-    // Initialize GUI and reset
-    // =========================================================================
-    emu.init_gui(0, &[])?;
-    emu.reset(ResetReason::Hardware)?;
-    emu.init_gui_signal_handlers();
-    emu.start();
+    let mut emu = builder.build()?;
 
     // =========================================================================
     // Show boot state
@@ -370,7 +346,7 @@ fn run_alpine() -> Result<()> {
     );
     println!(
         "║  A20    = {}                                         ║",
-        if emu.pc_system.get_enable_a20() {
+        if emu.get_enable_a20() {
             "enabled "
         } else {
             "disabled"
@@ -506,14 +482,12 @@ fn run_alpine() -> Result<()> {
             let rip = emu.cpu().rip();
             let mode = emu.get_cpu_mode_str();
             let cs = emu.cpu().get_cs_selector();
-            let (ata_reads, _) = emu.device_manager.ata_io_counts();
             println!(
-                "[{:>4}M] RIP={:#010x} CS={:04x} mode={:<11} ATA_rd={} EAX={:08x} ECX={:08x}",
+                "[{:>4}M] RIP={:#010x} CS={:04x} mode={:<11} EAX={:08x} ECX={:08x}",
                 total_executed / 1_000_000,
                 rip,
                 cs,
                 mode,
-                ata_reads,
                 emu.cpu().eax(),
                 emu.cpu().ecx()
             );
@@ -571,15 +545,13 @@ fn run_alpine() -> Result<()> {
                     "[{}M] Injecting Enter key to boot prompt",
                     total_executed / 1_000_000
                 );
-                for &sc in ENTER_SCANCODE {
-                    emu.send_scancode(sc);
-                }
+                let _sent = emu.keyboard().scancodes(ENTER_SCANCODE);
                 enter_injected = true;
             }
 
             // Dump debug port output periodically to see ISOLINUX messages
             if phase_num % 10 == 0 {
-                let e9 = emu.devices.take_port_e9_output();
+                let e9: Vec<u8> = emu.debug_port().take_output().collect();
                 if !e9.is_empty() {
                     let text = String::from_utf8_lossy(&e9);
                     for line in text.lines().take(5) {
@@ -593,7 +565,7 @@ fn run_alpine() -> Result<()> {
 
             // Check VGA text for boot progress
             if total_executed >= 100_000_000 {
-                let vga_text = emu.vga_scan_text_memory();
+                let vga_text = emu.display().describe_text_aperture();
                 let has_login = vga_text.contains("login:");
 
                 let preview: Vec<&str> = vga_text
@@ -622,14 +594,10 @@ fn run_alpine() -> Result<()> {
                         "(headless) Injecting 'root\\n' at {}M instructions",
                         total_executed / 1_000_000
                     );
-                    for &sc in LOGIN_SCANCODES {
-                        emu.send_scancode(sc);
-                    }
+                    let _sent = emu.keyboard().scancodes(LOGIN_SCANCODES);
                     logged_in = true;
                 } else {
-                    for &sc in KEEP_ALIVE_SCANCODE {
-                        emu.send_scancode(sc);
-                    }
+                    let _sent = emu.keyboard().scancodes(KEEP_ALIVE_SCANCODE);
                 }
             }
         }
@@ -666,7 +634,7 @@ fn run_alpine() -> Result<()> {
     }
 
     // Debug port output
-    let e9 = emu.devices.take_port_e9_output();
+    let e9: Vec<u8> = emu.debug_port().take_output().collect();
     if !e9.is_empty() {
         println!();
         println!("===== BOCHS DEBUG PORT OUTPUT (0xE9) =====");
@@ -734,7 +702,11 @@ fn run_alpine() -> Result<()> {
         );
 
         println!("\n===== SERIAL (COM1) OUTPUT =====");
-        let serial_bytes: Vec<u8> = emu.device_manager.drain_serial_tx(0).collect();
+        let serial_bytes: Vec<u8> = emu
+            .serial(0)
+            .expect("COM1 is always modelled")
+            .take_output()
+            .collect();
         if serial_bytes.is_empty() {
             println!("  (no serial output)");
         } else {
