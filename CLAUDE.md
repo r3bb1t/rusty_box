@@ -33,7 +33,7 @@ Rusty Box is a Rust port of the Bochs x86 emulator -- a complete CPU/system emul
 ## Build Commands
 
 ```bash
-cargo xtask ci                                # THE gate suite (9 steps + doctrine ratchets); run before every commit
+cargo xtask ci                                # THE gate suite (every step in xtask/src/ci.rs + doctrine ratchets); run before every commit
 cargo build --release --all-features          # Full build
 cargo test --release -p rusty_box --lib --features std   # lib tests (fast loop)
 cargo run --release --example dlxlinux --features std            # DLX headless
@@ -41,7 +41,7 @@ cargo run --release --example rusty_box_egui --features "std,gui-egui"  # GUI
 cd examples/rusty_box_web && trunk serve      # WASM dev server
 cargo check --no-default-features -p rusty_box  # no_std + no_alloc build
 cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi  # UEFI app
-cargo test --release -p rusty_box --test compile_fail --features std  # doctrine fixture registry (not in ci; TRYBUILD=overwrite regenerates goldens)
+cargo test --release -p rusty_box --test compile_fail --features std  # doctrine fixture registry (a ci step; TRYBUILD=overwrite regenerates goldens)
 ```
 
 ## Observing the egui GUI (agents: use this, not desktop screenshots)
