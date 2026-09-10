@@ -16,7 +16,7 @@ use crate::shell::theme::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::ShellStateBadge;
 #[cfg(not(target_arch = "wasm32"))]
-use egui::{Color32, RichText, Stroke};
+use egui::{Color32, RichText, Stroke, WidgetInfo, WidgetType};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VmLibraryEntry {
@@ -83,7 +83,9 @@ enum RowMark {
 /// accent bar on the left edge over a card fill — marks the one `Destination`
 /// row; an `Expanded` row is told apart by its text alone, and any row without
 /// the fill tints on hover. The row is the whole click target, so a name and
-/// its indent never disagree about what was hit.
+/// its indent never disagree about what was hit, and it is one accessibility
+/// node: a selectable named by its full label, selected only when it is the
+/// `Destination`.
 #[cfg(not(target_arch = "wasm32"))]
 fn tree_row(
     ui: &mut egui::Ui,
@@ -94,6 +96,17 @@ fn tree_row(
 ) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), egui::Sense::click());
+    // Assistive technology hears exactly one selected row, the same one the
+    // accent bar marks: the `Expanded` VM is the parent of the selection, not
+    // the selection.
+    let is_destination = match mark {
+        RowMark::Destination => true,
+        RowMark::Expanded | RowMark::Plain => false,
+    };
+    let enabled = ui.is_enabled();
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::SelectableLabel, enabled, is_destination, label)
+    });
     match mark {
         RowMark::Destination => {
             ui.painter().rect_filled(rect, 6.0, BG_CARD);

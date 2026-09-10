@@ -8,7 +8,7 @@ use crate::shell::theme::{
     shell_card_frame, BG_BASE, BG_CARD, BG_PANEL, SPACE_GROUP, STROKE_HAIRLINE, TEXT_BODY,
     TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TITLE,
 };
-use egui::{Color32, RichText, Stroke};
+use egui::{Color32, RichText, Stroke, WidgetInfo, WidgetType};
 
 /// Every pane opens with exactly this: the pane's name over one line saying
 /// what it does, then the gap that separates a header from its content.
@@ -25,19 +25,26 @@ pub(crate) const FIELD_LABEL_WIDTH: f32 = 112.0;
 
 /// One labelled control on a pane's grid. The label column is reserved with
 /// `allocate_exact_size`, which advances the row by exactly the width asked
-/// for, and the label is painted into that rect; an empty label therefore
-/// holds its column as fully as a long one, and the caller's widgets begin on
-/// the same x in every row.
+/// for, and the label is painted into that rect and registered as the
+/// column's accessible name; an empty label therefore holds its column as
+/// fully as a long one, names nothing, and the caller's widgets begin on the
+/// same x in every row.
 pub(crate) fn field_row<R>(
     ui: &mut egui::Ui,
     label: &str,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
     ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(
+        let (rect, response) = ui.allocate_exact_size(
             egui::vec2(FIELD_LABEL_WIDTH, ui.spacing().interact_size.y),
             egui::Sense::hover(),
         );
+        // A nameless label is noise to a screen reader, so an empty caption
+        // registers no node at all.
+        if !label.is_empty() {
+            let enabled = ui.is_enabled();
+            response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, enabled, label));
+        }
         ui.painter().text(
             rect.left_center(),
             egui::Align2::LEFT_CENTER,
@@ -52,11 +59,16 @@ pub(crate) fn field_row<R>(
 
 /// A row in a flat selectable list, wearing the shell's one selection idiom.
 /// The selected fill is `BG_CARD`, one step above the `BG_PANEL` surface a
-/// list of these rows sits on.
+/// list of these rows sits on. The row is one accessibility node, a
+/// selectable named by its label and selected exactly when it is drawn so.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn hardware_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::SelectableLabel, enabled, selected, label)
+    });
     if selected {
         ui.painter().rect_filled(rect, 6.0, BG_CARD);
         ui.painter().rect_filled(
