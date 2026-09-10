@@ -11,8 +11,10 @@ use crate::shell::theme::{
 };
 use egui::{Color32, RichText, Stroke, WidgetInfo, WidgetType};
 
-/// Every pane opens with exactly this: the pane's name over one line saying
-/// what it does, then the gap that separates a header from its content.
+/// The header a settings pane opens with: the pane's name over one line
+/// saying what it does, then the gap that separates a header from its
+/// content. Summary opens with its header card and Console with the embedded
+/// view, so neither uses it.
 pub(crate) fn page_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     ui.label(RichText::new(title).size(TEXT_TITLE).strong().color(TEXT_PRIMARY));
     ui.label(RichText::new(subtitle).size(TEXT_CAPTION).color(TEXT_MUTED));
