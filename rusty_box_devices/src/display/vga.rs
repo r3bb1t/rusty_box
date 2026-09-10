@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! VGA Display Controller
 //!
 //! Implements VGA text mode (80x25) and graphics mode memory access.
@@ -64,10 +63,8 @@ pub struct VgaTextModeInfo {
     pub actl_palette: [u8; 16],
 }
 
-/// VGA text mode memory base address
-const VGA_TEXT_MEM_BASE: BxPhyAddress = 0xB8000;
-const VGA_TEXT_MEM_SIZE: usize = 0x8000; // 32KB
-const VGA_TEXT_MEM_BASE_MONO: BxPhyAddress = 0xB0000;
+/// VGA text memory size: 32KB.
+const VGA_TEXT_MEM_SIZE: usize = 0x8000;
 
 /// VGA planar memory size: 256KB (0x40000), matching Bochs vgacore.cc
 /// Layout: memory[offset * 4 + plane], where plane = 0..3
@@ -173,10 +170,18 @@ const VBE_DISPI_INDEX_DDC: u16 = 0xB;
 const VBE_DISPI_ID0: u16 = 0xB0C0;
 const VBE_DISPI_ID5: u16 = 0xB0C5;
 
+#[cfg_attr(
+    not(feature = "std"),
+    allow(dead_code, reason = "read by the snapshot validator, which needs std")
+)]
 const VBE_DISPI_DISABLED: u16 = 0x00;
 const VBE_DISPI_ENABLED: u16 = 0x01;
 const VBE_DISPI_GETCAPS: u16 = 0x02;
 const VBE_DISPI_8BIT_DAC: u16 = 0x20;
+/// Bochs defines this bit (vga.h `VBE_DISPI_LFB_ENABLED`) and never reads it:
+/// the linear framebuffer decodes whether or not a guest sets it. Tests set it
+/// the way a guest's mode set does.
+#[cfg(all(test, feature = "alloc"))]
 const VBE_DISPI_LFB_ENABLED: u16 = 0x40;
 const VBE_DISPI_NOCLEARMEM: u16 = 0x80;
 
@@ -198,6 +203,7 @@ const VGA_X_TILESIZE: u32 = 16;
 const VGA_Y_TILESIZE: u32 = 24;
 /// One tile of RGBA pixels. A frame pushes tiles one at a time through a buffer
 /// of this size, so no part of the graphics path allocates.
+#[cfg(feature = "alloc")]
 const TILE_RGBA_BYTES: usize = (VGA_X_TILESIZE * VGA_Y_TILESIZE * 4) as usize;
 
 /// QEMU-compatible MMIO BAR2 size (4KB)
@@ -212,7 +218,6 @@ const CRTC_HORIZ_TOTAL: usize = 0x00;
 const CRTC_HORIZ_DISPLAY_END: usize = 0x01;
 const CRTC_START_HORIZ_BLANK: usize = 0x02;
 const CRTC_END_HORIZ_BLANK: usize = 0x03;
-const CRTC_START_HORIZ_RETRACE: usize = 0x04;
 const CRTC_END_HORIZ_RETRACE: usize = 0x05;
 const CRTC_VERT_TOTAL: usize = 0x06;
 const CRTC_OVERFLOW: usize = 0x07;
@@ -229,8 +234,9 @@ const CRTC_VERT_RETRACE_END: usize = 0x11;
 const CRTC_VERT_DISPLAY_END: usize = 0x12;
 const CRTC_OFFSET: usize = 0x13;
 const CRTC_UNDERLINE_LOC: usize = 0x14;
+/// No device path reads vertical blanking; tests program it as a mode set does.
+#[cfg(all(test, feature = "alloc"))]
 const CRTC_VERT_BLANK_START: usize = 0x15;
-const CRTC_VERT_BLANK_END: usize = 0x16;
 const CRTC_MODE_CONTROL: usize = 0x17;
 const CRTC_LINE_COMPARE: usize = 0x18;
 
@@ -253,10 +259,6 @@ const SEQ_REG_MEMORY_MODE: usize = 4;
 const SEQ_CLOCKING_8DOT_CHAR: u8 = 0x01;
 const SEQ_CLOCKING_DOTCLOCKDIV2: u8 = 0x08;
 
-// Map mask bits (sequencer reg 2)
-const SEQ_MAP_MASK_PLANES: u8 = 0x0F;
-const SEQ_MAP_MASK_TEXT_PLANES: u8 = 0x03;
-
 // ---- Graphics controller register indices ----
 const GFX_REG_SET_RESET: usize = 0;
 const GFX_REG_ENABLE_SET_RESET: usize = 1;
@@ -275,9 +277,9 @@ const GFX_MISC_MEMORY_MAP_MASK: u8 = 0x03;
 
 // ---- Attribute controller register indices ----
 const ATTR_REG_MODE_CONTROL: usize = 0x10;
-const ATTR_REG_OVERSCAN_COLOR: usize = 0x11;
 const ATTR_REG_COLOR_PLANE_EN: usize = 0x12;
 const ATTR_REG_HORIZ_PIXEL_PAN: usize = 0x13;
+#[cfg(feature = "alloc")]
 const ATTR_REG_COLOR_SELECT: usize = 0x14;
 
 // Attribute mode control bits (reg 0x10)
@@ -312,35 +314,11 @@ impl VgaMemoryMapping {
             _ => unreachable!("VGA memory mapping val & 0x03 cannot exceed 3"),
         }
     }
-
-    /// Returns the base address of the VGA memory window for this mapping mode.
-    fn window_base(self) -> BxPhyAddress {
-        match self {
-            Self::MonoText32k => VGA_WINDOW_MONO_BASE,
-            Self::ColorText32k => VGA_WINDOW_COLOR_BASE,
-            Self::Vga64k | Self::Ega128k => VGA_WINDOW_GRAPHICS_BASE,
-        }
-    }
-
-    /// Returns true if the given address falls within the VGA memory window for this mapping mode.
-    fn contains_addr(self, addr: BxPhyAddress) -> bool {
-        match self {
-            Self::MonoText32k => (VGA_WINDOW_MONO_BASE..=VGA_WINDOW_MONO_END).contains(&addr),
-            Self::ColorText32k => (VGA_WINDOW_COLOR_BASE..=VGA_WINDOW_COLOR_END).contains(&addr),
-            Self::Vga64k => (VGA_WINDOW_GRAPHICS_BASE..=VGA_WINDOW_VGA64K_END).contains(&addr),
-            Self::Ega128k => (VGA_WINDOW_GRAPHICS_BASE..=VGA_WINDOW_GRAPHICS_END).contains(&addr),
-        }
-    }
 }
 
 // ---- VGA memory window addresses ----
-const VGA_WINDOW_MONO_BASE: BxPhyAddress = 0xB0000;
-const VGA_WINDOW_MONO_END: BxPhyAddress = 0xB7FFF;
-const VGA_WINDOW_COLOR_BASE: BxPhyAddress = 0xB8000;
-const VGA_WINDOW_COLOR_END: BxPhyAddress = 0xBFFFF;
 const VGA_WINDOW_GRAPHICS_BASE: BxPhyAddress = 0xA0000;
 const VGA_WINDOW_GRAPHICS_END: BxPhyAddress = 0xBFFFF;
-const VGA_WINDOW_VGA64K_END: BxPhyAddress = 0xAFFFF;
 
 /// The physical ranges this adapter answers.
 ///
@@ -407,7 +385,6 @@ const ATTR_INDEX_MASK: u8 = 0x1F;
 
 /// Text mode dimensions
 const TEXT_COLS: usize = 80;
-const TEXT_ROWS: usize = 25;
 const BYTES_PER_CHAR: usize = 2;
 const BYTES_PER_ROW: usize = TEXT_COLS * BYTES_PER_CHAR;
 
@@ -1103,7 +1080,12 @@ pub struct VgaCore {
     ext_read_offset: u32,
     /// Active VGA memory mask (0x3ffff in legacy VGA, VBE memory size - 1 in VBE).
     vga_mem_mask: u32,
-    /// Bochs extension start address added to CRTC start address.
+    /// Bochs extension start address added to CRTC start address
+    /// (`s.ext_start_addr`, vgacore.h).
+    #[cfg_attr(
+        not(feature = "alloc"),
+        allow(dead_code, reason = "read by the graphics renderer, which needs an allocator")
+    )]
     ext_start_addr: u32,
     /// Bochs extension vertical double-size flag.
     ext_y_dblsize: bool,
@@ -2131,32 +2113,6 @@ impl VgaCore {
         }
     }
 
-    #[cfg(feature = "alloc")]
-    /// Read from text mode memory
-    pub(crate) fn read_memory(&self, addr: BxPhyAddress, len: usize) -> Vec<u8> {
-        // Debug helper: expose the backing text memory (no window gating).
-        // The actual emulated mapping behavior is enforced by mem_{read,write}_handler.
-        let offset = (addr as usize) & (VGA_TEXT_MEM_SIZE - 1);
-        let end = (offset + len).min(self.text_memory.len());
-        if offset < self.text_memory.len() && end > offset {
-            let mut out = vec![0u8; len];
-            out[..(end - offset)].copy_from_slice(&self.text_memory[offset..end]);
-            out
-        } else {
-            vec![0; len]
-        }
-    }
-
-    /// Write to text mode memory
-    pub(crate) fn write_memory(&mut self, addr: BxPhyAddress, data: &[u8]) {
-        // Debug helper: write into backing text memory (no window gating).
-        let offset = (addr as usize) & (VGA_TEXT_MEM_SIZE - 1);
-        let end = (offset + data.len()).min(self.text_memory.len());
-        if offset < self.text_memory.len() && end > offset {
-            self.text_memory[offset..end].copy_from_slice(&data[..(end - offset)]);
-        }
-    }
-
     /// Whether the adapter is presenting a character grid rather than pixels.
     ///
     /// Bochs vgacore.cc `update()` decides on `graphics_alpha` alone. The
@@ -2265,26 +2221,6 @@ impl VgaCore {
     }
 
     #[cfg(feature = "alloc")]
-    /// Get text mode screen contents as a string
-    pub(crate) fn get_text_screen(&self) -> String {
-        let Some(geometry) = self.text_geometry() else {
-            return String::new();
-        };
-        let mut result = String::new();
-        for row in 0..geometry.rows {
-            let start = result.len();
-            for col in 0..geometry.cols {
-                result.push(self.text_char_at(&geometry, row, col));
-            }
-            // Trim trailing spaces
-            let trim_len = result[start..].trim_end_matches(' ').len();
-            result.truncate(start + trim_len);
-            result.push('\n');
-        }
-        result
-    }
-
-    #[cfg(feature = "alloc")]
     /// Scan all 32KB of VGA text memory and return summary: CRTC start address,
     /// graphics mode flag, and any non-space printable chars found anywhere.
     pub(crate) fn scan_all_text_memory(&self) -> String {
@@ -2344,29 +2280,9 @@ impl VgaCore {
         rows
     }
 
-    /// Get text mode memory buffer (for GUI updates)
-    /// Get cursor position (row, col) for text mode
-    pub(crate) fn get_cursor_position(&self) -> (u32, u32) {
-        (self.cursor_pos.0 as u32, self.cursor_pos.1 as u32)
-    }
-
-    pub(crate) fn get_text_memory(&self) -> &[u8] {
-        &self.text_memory
-    }
-
     /// Check if text memory has changed (dirty)
     pub(crate) fn is_text_dirty(&self) -> bool {
         self.text_dirty
-    }
-
-    /// Clear the text dirty flag (call after updating GUI)
-    pub(crate) fn clear_text_dirty(&mut self) {
-        self.text_dirty = false;
-    }
-
-    /// Force text dirty flag (for initial display)
-    pub(crate) fn force_text_dirty(&mut self) {
-        self.text_dirty = true;
     }
 
     /// Force initial update (for first GUI render)
@@ -2432,6 +2348,7 @@ impl VgaCore {
         (width, height)
     }
 
+    #[cfg(feature = "alloc")]
     fn legacy_line_offset(&self) -> u32 {
         let mut line_offset = (self.crtc_regs[0x13] as u32) << 1;
         if (self.crtc_regs[0x14] & 0x40) != 0 {
@@ -2442,6 +2359,7 @@ impl VgaCore {
         line_offset
     }
 
+    #[cfg(feature = "alloc")]
     fn dac_index_to_rgba(&self, index: u8) -> [u8; 4] {
         let color = self.pel_data[(index & self.pel_mask) as usize];
         let shift = self.dac_shift;
@@ -2453,6 +2371,7 @@ impl VgaCore {
         ]
     }
 
+    #[cfg(feature = "alloc")]
     fn get_vga_pixel(
         &self,
         x: u16,
@@ -2750,31 +2669,6 @@ impl VgaCore {
             || screen_off
     }
 
-    /// Drain the DAC entries whose colour changed, as `(index, r, g, b)` with
-    /// each component shifted to host width by `dac_shift`, as Bochs's
-    /// `palette_change_common` calls are.
-    pub(crate) fn take_dac_palette_changes(&mut self) -> impl Iterator<Item = (u8, u8, u8, u8)> + '_ {
-        let any = core::mem::take(&mut self.dac_any_dirty);
-        (0..PEL_COLOR_COUNT).filter_map(move |i| {
-            if !any || !core::mem::take(&mut self.dac_dirty[i]) {
-                return None;
-            }
-            let entry = self.pel_data[i];
-            Some((
-                i as u8,
-                entry[0] << self.dac_shift,
-                entry[1] << self.dac_shift,
-                entry[2] << self.dac_shift,
-            ))
-        })
-    }
-
-    /// Take a pending `clear_screen()` owed to the GUI (Bochs calls
-    /// `bx_gui->clear_screen()` directly from `skip_update`).
-    pub(crate) fn take_pending_clear_screen(&mut self) -> bool {
-        core::mem::take(&mut self.pending_clear_screen)
-    }
-
     /// Re-extract both character generators from plane 2 of planar memory.
     ///
     /// Bochs `bx_vgacore_c::update_charmap()` (vgacore.cc): glyph bytes live in
@@ -2797,12 +2691,6 @@ impl VgaCore {
         } else {
             self.charmap[1] = self.charmap[0];
         }
-    }
-
-    /// One of the two extracted character generators (0 or 1), as raw VGA glyph
-    /// bitmaps: 32 bytes per glyph, each byte MSB-first (bit 7 = leftmost pixel).
-    pub(crate) fn charmap(&self, map: usize) -> &[u8; CHARMAP_SIZE] {
-        &self.charmap[map & 1]
     }
 
     /// Draw one frame into `sink` — Bochs `bx_vgacore_c::update()`.
@@ -4077,6 +3965,7 @@ fn validate_vga_snapshot_bar_base(base: u32, span: u32) -> SnapResult<()> {
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
+    #[cfg(feature = "std")]
     use rusty_box_core::snap::SnapError;
     use crate::api::WindowOffset;
     use crate::display::sink::Redraw;
@@ -4268,8 +4157,6 @@ mod tests {
     use crate::pci::PciDevice;
     #[cfg(feature = "std")]
     use rusty_box_core::snap::SnapshotSection;
-    #[cfg(feature = "std")]
-
 
     /// Program one DISPI register the way a guest does — through the port hook
     /// the card claims, not by poking its state.
@@ -5219,10 +5106,10 @@ mod tests {
             "a dirty character generator reaches the display, both maps"
         );
 
-        assert_eq!(vga.core.charmap(0)[0], 0xA5, "plane-2 byte 0");
-        assert_eq!(vga.core.charmap(0)[1], 0x3C, "plane-2 byte 1 (stride 4)");
+        assert_eq!(vga.core.charmap[0][0], 0xA5, "plane-2 byte 0");
+        assert_eq!(vga.core.charmap[0][1], 0x3C, "plane-2 byte 1 (stride 4)");
         assert_eq!(
-            vga.core.charmap(1)[0],
+            vga.core.charmap[1][0],
             0xA5,
             "equal addresses must publish the same glyphs to both maps"
         );
@@ -5233,8 +5120,8 @@ mod tests {
         assert_eq!(vga.core.charmap_address1, 0x0000);
         assert_eq!(vga.core.charmap_address2, 0x4000);
         vga.core.update_charmap();
-        assert_eq!(vga.core.charmap(0)[0], 0xA5, "map 0 unchanged");
-        assert_eq!(vga.core.charmap(1)[0], 0x5A, "map 1 now reads the 0x4000 glyphs");
+        assert_eq!(vga.core.charmap[0][0], 0xA5, "map 0 unchanged");
+        assert_eq!(vga.core.charmap[1][0], 0x5A, "map 1 now reads the 0x4000 glyphs");
 
         // A sequencer reset (reset1 falling edge) clears the selection.
         vga.core.write_port(VGA_SEQ_INDEX, 0, 1);
@@ -5478,7 +5365,7 @@ mod tests {
         write_vbe(&mut restored, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
         read_vram(&mut restored, VgaWindow::Legacy, 0x24, &mut value);
         assert_eq!(value, [0xA1], "planar memory must survive restore");
-        assert_eq!(restored.core.get_text_memory()[0x42], b'V');
+        assert_eq!(restored.core.text_memory[0x42], b'V');
     }
 
     #[cfg(feature = "std")]
