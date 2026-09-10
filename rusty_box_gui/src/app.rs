@@ -1389,20 +1389,20 @@ impl NativeShellApp {
                     for (index, device) in self.settings.boot_order.iter().enumerate() {
                         field_row(ui, &format!("{}. {device}", index + 1), |ui| {
                             if ui
-                                .add_enabled(index > 0, egui::Button::new("▲"))
+                                .add_enabled(index > 0, egui::Button::new("⏶"))
                                 .on_hover_text("Move earlier")
                                 .clicked()
                             {
                                 move_up = Some(index);
                             }
                             if ui
-                                .add_enabled(index + 1 < len, egui::Button::new("▼"))
+                                .add_enabled(index + 1 < len, egui::Button::new("⏷"))
                                 .on_hover_text("Move later")
                                 .clicked()
                             {
                                 move_down = Some(index);
                             }
-                            if ui.button("✕").on_hover_text("Remove").clicked() {
+                            if ui.button("×").on_hover_text("Remove").clicked() {
                                 remove = Some(index);
                             }
                         });
@@ -3010,7 +3010,7 @@ impl WebShellApp {
                     if ui.button("▣ Hardware").clicked() {
                         self.chrome.go_to(ShellPage::Hardware);
                     }
-                    if ui.button("＋ New Image").clicked() {
+                    if ui.button("+ New Image").clicked() {
                         self.chrome.go_to(ShellPage::Images);
                     }
                     ui.checkbox(&mut self.chrome.show_library, "Library");
@@ -3044,7 +3044,7 @@ impl WebShellApp {
                         .hint_text("Type here to search"),
                 );
                 ui.add_space(8.0);
-                ui.label(RichText::new("▾ My Computer").color(TEXT_MUTED));
+                ui.label(RichText::new("⏷ My Computer").color(TEXT_MUTED));
                 let visible = self.chrome.visible_vm_indices();
                 for index in visible {
                     let clicked = {

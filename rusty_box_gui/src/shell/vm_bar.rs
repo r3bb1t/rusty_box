@@ -6,7 +6,7 @@
 //! the machine's state alone; the three controls that act on the guest's
 //! console (Ctrl+Alt+Del, mouse capture, the serial pane) appear only while
 //! the console page is shown — in the bar while it has room for them, inside
-//! the `⋯` overflow when it does not. The `⋯` at the far right always holds
+//! the `…` overflow when it does not. The `…` at the far right always holds
 //! the two verbs that belong to the application rather than to the VM.
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -34,9 +34,10 @@ pub(crate) struct VmBarState<'a> {
 }
 
 /// The verbs' captions, named once because the bar measures each caption
-/// before it draws the button that carries it.
+/// before it draws the button that carries it. Every glyph among them is one
+/// egui's default fonts hold; `shell::tests` checks each against the font.
 #[cfg(not(target_arch = "wasm32"))]
-const OVERFLOW: &str = "⋯";
+const OVERFLOW: &str = "…";
 #[cfg(not(target_arch = "wasm32"))]
 const RESTART: &str = "↻ Restart";
 #[cfg(not(target_arch = "wasm32"))]
@@ -58,7 +59,7 @@ const HIDE_SERIAL: &str = "Hide serial";
 #[cfg(not(target_arch = "wasm32"))]
 const SEPARATOR_SPACING: f32 = 6.0;
 
-/// The width the verbs that are always in the bar take together: the `⋯`
+/// The width the verbs that are always in the bar take together: the `…`
 /// overflow and the three power verbs, with the gaps between them.
 #[cfg(not(target_arch = "wasm32"))]
 fn power_verbs_width(ui: &egui::Ui) -> f32 {
@@ -164,7 +165,7 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // The console's controls sit in the bar only while the whole
-                    // right-hand group fits; otherwise they move into `⋯`.
+                    // right-hand group fits; otherwise they move into `…`.
                     let folded = state.on_console
                         && ui.available_width() < verbs_width + console_controls_width(ui);
                     ui.menu_button(OVERFLOW, |ui| {
