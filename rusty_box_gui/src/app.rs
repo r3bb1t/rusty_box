@@ -29,7 +29,8 @@ use crate::shell::widgets::disabled_tile;
 use crate::shell::widgets::hairline_below;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::{
-    action_tile_enabled, hairline_above, hardware_row, home_fact, status_text, ShellStateBadge,
+    action_tile_enabled, hairline_above, home_fact, selection_row, status_text, RowMark,
+    ShellStateBadge, ROOT_INDENT,
 };
 use crate::shell::widgets::{
     action_tile, field_row, metadata_text, page_header, primary_button, status_dot,
@@ -1158,13 +1159,19 @@ impl NativeShellApp {
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             // The list is a navigator: it sits on the panel
-                            // surface `hardware_row` paints its selection over.
+                            // surface `selection_row` paints its selection over.
                             shell_card_frame().fill(BG_PANEL).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.set_min_height(card_content_height);
                                 for device in HardwareDevice::ALL {
-                                    let selected = self.chrome.selected_hardware == device;
-                                    if hardware_row(ui, device.label(), selected).clicked() {
+                                    let mark = if self.chrome.selected_hardware == device {
+                                        RowMark::Destination
+                                    } else {
+                                        RowMark::Plain
+                                    };
+                                    if selection_row(ui, device.label(), ROOT_INDENT, mark, None)
+                                        .clicked()
+                                    {
                                         self.chrome.selected_hardware = device;
                                     }
                                 }

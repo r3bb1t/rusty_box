@@ -1,22 +1,20 @@
-//! The desktop's navigation, and the row it is built from.
+//! The desktop's navigation.
 //!
 //! `VmLibraryEntry` is what a VM profile summarises as — the strings a row
 //! shows and a search matches against — and both shells hold their library as
 //! a list of them. `draw_sidebar` is the desktop's only navigation: every
-//! profile as a row, the selected one open to its pages. It draws from
-//! borrowed data and reports the click; the app decides what the click means.
+//! profile as a `selection_row`, the selected one open to its pages. It draws
+//! from borrowed data and reports the click; the app decides what the click
+//! means.
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::{Destination, ShellPage, SidebarAction};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::theme::{
-    ACCENT_CYAN, BG_CARD, BG_PANEL, SPACE_ITEM, STROKE_HAIRLINE, TEXT_BODY, TEXT_CAPTION,
-    TEXT_MUTED, TEXT_PRIMARY,
-};
+use crate::shell::theme::{BG_PANEL, SPACE_ITEM, STROKE_HAIRLINE, TEXT_BODY, TEXT_CAPTION, TEXT_MUTED};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::widgets::ShellStateBadge;
+use crate::shell::widgets::{selection_row, RowMark, ShellStateBadge, CHILD_INDENT, ROOT_INDENT};
 #[cfg(not(target_arch = "wasm32"))]
-use egui::{Color32, RichText, Stroke, WidgetInfo, WidgetType};
+use egui::{RichText, Stroke};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VmLibraryEntry {
@@ -58,94 +56,6 @@ impl VmLibraryEntry {
 pub(crate) const SIDEBAR_DEFAULT_WIDTH: f32 = 200.0;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 170.0;
-
-#[cfg(not(target_arch = "wasm32"))]
-const ROW_HEIGHT: f32 = 24.0;
-#[cfg(not(target_arch = "wasm32"))]
-const CHILD_INDENT: f32 = 22.0;
-/// How far in from the row's right edge a trailing state dot is centred.
-#[cfg(not(target_arch = "wasm32"))]
-const DOT_INSET: f32 = 10.0;
-
-/// How a tree row is marked. Exactly one row in the tree is `Destination`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(not(target_arch = "wasm32"))]
-enum RowMark {
-    /// The row the shell is showing: the accent bar over a card fill.
-    Destination,
-    /// The VM whose pages are listed: brighter than its siblings, unmarked.
-    Expanded,
-    /// Everything else.
-    Plain,
-}
-
-/// One row of the tree. The shell's single selection idiom — a two-point
-/// accent bar on the left edge over a card fill — marks the one `Destination`
-/// row; an `Expanded` row is told apart by its text alone, and any row without
-/// the fill tints on hover. The row is the whole click target, so a name and
-/// its indent never disagree about what was hit, and it is one accessibility
-/// node: a selectable named by its full label, selected only when it is the
-/// `Destination`.
-#[cfg(not(target_arch = "wasm32"))]
-fn tree_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    indent: f32,
-    mark: RowMark,
-    trailing_dot: Option<Color32>,
-) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), egui::Sense::click());
-    // Assistive technology hears exactly one selected row, the same one the
-    // accent bar marks: the `Expanded` VM is the parent of the selection, not
-    // the selection.
-    let is_destination = match mark {
-        RowMark::Destination => true,
-        RowMark::Expanded | RowMark::Plain => false,
-    };
-    let enabled = ui.is_enabled();
-    response.widget_info(|| {
-        WidgetInfo::selected(WidgetType::SelectableLabel, enabled, is_destination, label)
-    });
-    match mark {
-        RowMark::Destination => {
-            ui.painter().rect_filled(rect, 6.0, BG_CARD);
-            ui.painter().rect_filled(
-                egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
-                0.0,
-                ACCENT_CYAN,
-            );
-        }
-        RowMark::Expanded | RowMark::Plain => {
-            if response.hovered() {
-                ui.painter().rect_filled(rect, 6.0, BG_CARD.gamma_multiply(0.5));
-            }
-        }
-    }
-    let text_color = match mark {
-        RowMark::Destination | RowMark::Expanded => TEXT_PRIMARY,
-        RowMark::Plain => TEXT_MUTED,
-    };
-    // The label is cut at the row's edge — short of the dot when there is
-    // one — so a long name never runs under the dot or past the panel.
-    let label_right = match trailing_dot {
-        Some(_) => rect.right() - 2.0 * DOT_INSET,
-        None => rect.right() - SPACE_ITEM,
-    };
-    let label_clip = egui::Rect::from_min_max(rect.min, egui::pos2(label_right, rect.max.y));
-    ui.painter().with_clip_rect(label_clip).text(
-        rect.left_center() + egui::vec2(indent, 0.0),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::proportional(TEXT_BODY),
-        text_color,
-    );
-    if let Some(color) = trailing_dot {
-        ui.painter()
-            .circle_filled(rect.right_center() - egui::vec2(DOT_INSET, 0.0), 3.5, color);
-    }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
 
 /// The desktop's only navigation: every VM profile, with the selected one
 /// expanded into its pages. Draws from borrowed data and reports what was
@@ -212,7 +122,7 @@ pub(crate) fn draw_sidebar(
                 } else {
                     RowMark::Plain
                 };
-                if tree_row(ui, &entries[index].name, 8.0, vm_mark, dot).clicked() {
+                if selection_row(ui, &entries[index].name, ROOT_INDENT, vm_mark, dot).clicked() {
                     action = Some(SidebarAction::Select(destination.select_vm(index)));
                 }
                 if !is_selected_vm {
@@ -224,7 +134,7 @@ pub(crate) fn draw_sidebar(
                     } else {
                         RowMark::Plain
                     };
-                    if tree_row(ui, page.label(), CHILD_INDENT, page_mark, None).clicked() {
+                    if selection_row(ui, page.label(), CHILD_INDENT, page_mark, None).clicked() {
                         action = Some(SidebarAction::Select(destination.select_page(page)));
                     }
                 }

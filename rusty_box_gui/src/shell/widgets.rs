@@ -1,7 +1,10 @@
-//! The pieces a pane is built from: the header every page opens with, the
-//! labelled row its controls sit on, the status dot and badge, the hairlines
-//! that join stacked panels, and the action tiles.
+//! The pieces a pane is built from: the header a settings pane opens with,
+//! the labelled row its controls sit on, the selection row the sidebar tree
+//! and the Hardware device list share, the status dot and badge, the
+//! hairlines that join stacked panels, and the action tiles.
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::theme::SPACE_ITEM;
 use crate::shell::theme::{
     shell_card_frame, ACCENT_CYAN, BG_BASE, BG_CARD, BG_PANEL, SPACE_GROUP, STROKE_HAIRLINE,
     TEXT_BODY, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TITLE,
@@ -55,35 +58,100 @@ pub(crate) fn field_row<R>(
     .inner
 }
 
-/// A row in a flat selectable list, wearing the shell's one selection idiom.
-/// The selected fill is `BG_CARD`, one step above the `BG_PANEL` surface a
-/// list of these rows sits on. The row is one accessibility node, a
-/// selectable named by its label and selected exactly when it is drawn so.
+/// The height of every row in a selectable list.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn hardware_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+const ROW_HEIGHT: f32 = 24.0;
+/// How far in from the row's left edge a top-level label starts: a VM in the
+/// tree, or a device in the Hardware list.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const ROOT_INDENT: f32 = 8.0;
+/// How far in the label of a row nested under another starts: a page under
+/// its VM.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const CHILD_INDENT: f32 = 22.0;
+/// How far in from the row's right edge a trailing state dot is centred.
+#[cfg(not(target_arch = "wasm32"))]
+const DOT_INSET: f32 = 10.0;
+
+/// How a selection row is marked. Exactly one row in a list is `Destination`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum RowMark {
+    /// The row the shell is showing: the accent bar over a card fill.
+    Destination,
+    /// The VM whose pages are listed: brighter than its siblings, unmarked.
+    Expanded,
+    /// Everything else.
+    Plain,
+}
+
+/// One row of a selectable list — the sidebar tree and the Hardware device
+/// list are both built from it — wearing the shell's single selection idiom:
+/// a two-point accent bar on the left edge over a `BG_CARD` fill, one step
+/// above the `BG_PANEL` surface a list of these rows sits on, marks the one
+/// `Destination` row; an `Expanded` row is told apart by its text alone, and
+/// any row without the fill tints on hover. The row is the whole click
+/// target, so a name and its indent never disagree about what was hit, and it
+/// is one accessibility node: a selectable named by its full label, selected
+/// only when it is the `Destination`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn selection_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    indent: f32,
+    mark: RowMark,
+    trailing_dot: Option<Color32>,
+) -> egui::Response {
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), egui::Sense::click());
+    // Assistive technology hears exactly one selected row, the same one the
+    // accent bar marks: the `Expanded` VM is the parent of the selection, not
+    // the selection.
+    let is_destination = match mark {
+        RowMark::Destination => true,
+        RowMark::Expanded | RowMark::Plain => false,
+    };
     let enabled = ui.is_enabled();
     response.widget_info(|| {
-        WidgetInfo::selected(WidgetType::SelectableLabel, enabled, selected, label)
+        WidgetInfo::selected(WidgetType::SelectableLabel, enabled, is_destination, label)
     });
-    if selected {
-        ui.painter().rect_filled(rect, 6.0, BG_CARD);
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
-            0.0,
-            ACCENT_CYAN,
-        );
-    } else if response.hovered() {
-        ui.painter().rect_filled(rect, 6.0, BG_CARD.gamma_multiply(0.5));
+    match mark {
+        RowMark::Destination => {
+            ui.painter().rect_filled(rect, 6.0, BG_CARD);
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
+                0.0,
+                ACCENT_CYAN,
+            );
+        }
+        RowMark::Expanded | RowMark::Plain => {
+            if response.hovered() {
+                ui.painter().rect_filled(rect, 6.0, BG_CARD.gamma_multiply(0.5));
+            }
+        }
     }
-    ui.painter().text(
-        rect.left_center() + egui::vec2(8.0, 0.0),
+    let text_color = match mark {
+        RowMark::Destination | RowMark::Expanded => TEXT_PRIMARY,
+        RowMark::Plain => TEXT_MUTED,
+    };
+    // The label is cut at the row's edge — short of the dot when there is
+    // one — so a long name never runs under the dot or past the panel.
+    let label_right = match trailing_dot {
+        Some(_) => rect.right() - 2.0 * DOT_INSET,
+        None => rect.right() - SPACE_ITEM,
+    };
+    let label_clip = egui::Rect::from_min_max(rect.min, egui::pos2(label_right, rect.max.y));
+    ui.painter().with_clip_rect(label_clip).text(
+        rect.left_center() + egui::vec2(indent, 0.0),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(TEXT_BODY),
-        if selected { TEXT_PRIMARY } else { TEXT_MUTED },
+        text_color,
     );
+    if let Some(color) = trailing_dot {
+        ui.painter()
+            .circle_filled(rect.right_center() - egui::vec2(DOT_INSET, 0.0), 3.5, color);
+    }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
