@@ -219,10 +219,13 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
 /// emulator/mod.rs fails the build if a field ever takes that away (R6).
 const UNSAFE_IMPL_SEND_BASELINE: usize = 0;
 
-/// Files carrying a crate-inner `#![allow(… dead_code …)]`, which switches the
-/// lint off for the whole file — and, in a `mod.rs`, for every module beneath
-/// it. Ratcheted for the same reason as unsafe: not because the items it hides
-/// are wrong, but because while it is on, nothing tells you a NEW one appeared.
+/// Files, per crate, carrying a crate-inner `allow` or `expect` that switches
+/// `dead_code` off for the whole file — and, in a `mod.rs`, for every module
+/// beneath it. The lint counts when it is named directly or through a group
+/// that holds it (`unused`, `warnings`), however many lines the attribute
+/// spans. Ratcheted for the same reason as unsafe: not because the items it
+/// hides are wrong, but because while it is on, nothing tells you a NEW one
+/// appeared. A scanned crate with no entry is held at zero.
 ///
 /// Measured with `RUSTFLAGS="--force-warn dead_code"`, these hide ~2470 items.
 /// Most are Bochs-parity constants and helpers ported ahead of their callers —
@@ -235,7 +238,15 @@ const UNSAFE_IMPL_SEND_BASELINE: usize = 0;
 // Between them they hid a callerless `Tlb::pinned_alloc_offset` left over from
 // the deleted pin sidecar, a 4 KiB never-read `apic_scratch` buffer, and a
 // forwarder with no callers.
-const BLANKET_DEAD_CODE_BASELINE: usize = 70;
+const BLANKET_DEAD_CODE_BASELINES: &[(&str, usize)] = &[
+    ("rusty_box/src", 68),
+    // `decoder/tables.rs` names `dead_code`; the three opcode maps (`opmap.rs`,
+    // `opmap_0f38.rs`, `opmap_0f3a.rs`) switch it off through `unused`.
+    ("rusty_box_decoder/src", 4),
+    // `display/geforce.rs`, the NV card ported ahead of the machine that will
+    // host it and kept deliberately.
+    ("rusty_box_devices/src", 1),
+];
 
 /// `.unwrap()` / `.expect(…)` outside test code, across every library crate.
 /// Zero, and it is to stay zero: a library that panics on a condition it could
@@ -283,13 +294,41 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
         }
         n
     }
-    /// Whether `line` is a crate-inner attribute switching `dead_code` off for
-    /// a whole file. Matches the `#![allow(…)]` form only: a targeted
-    /// `#[allow(dead_code)]` on one item is the shape this ratchet is pushing
-    /// the tree towards, so it must not be counted.
-    fn is_blanket_dead_code_allow(line: &str) -> bool {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("#![allow") && trimmed.contains("dead_code")
+    /// Whether a file carries a crate-inner attribute switching `dead_code` off
+    /// for all of it: an `allow` or `expect` naming the lint, or a group that
+    /// holds it (`unused`, `warnings`). An inner attribute runs to its closing
+    /// bracket, however many lines that takes. A targeted `#[allow(dead_code)]`
+    /// on one item is the shape this ratchet is pushing the tree towards, so it
+    /// is not counted.
+    fn hides_dead_code(text: &str) -> bool {
+        let mut lines = text.lines();
+        while let Some(line) = lines.next() {
+            if !line.trim_start().starts_with("#![") {
+                continue;
+            }
+            let mut attr = String::new();
+            let mut depth: i32 = 0;
+            let mut current = Some(line);
+            while let Some(part) = current {
+                let code = part.split("//").next().unwrap_or("");
+                depth += code.matches('[').count() as i32 - code.matches(']').count() as i32;
+                attr.push_str(code);
+                attr.push('\n');
+                if depth <= 0 {
+                    break;
+                }
+                current = lines.next();
+            }
+            let switches_lints_off =
+                word_count(&attr, "allow") + word_count(&attr, "expect") > 0;
+            let covers_dead_code = ["dead_code", "unused", "warnings"]
+                .iter()
+                .any(|lint| word_count(&attr, lint) > 0);
+            if switches_lints_off && covers_dead_code {
+                return true;
+            }
+        }
+        false
     }
 
     /// Whether a file is entirely test code, by the naming this tree uses for
@@ -429,7 +468,7 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
                 // One per FILE, not per line: a file may carry several inner
                 // attributes, and what is being counted is files whose dead
                 // code is invisible.
-                if text.lines().any(is_blanket_dead_code_allow) {
+                if hides_dead_code(&text) {
                     *blanket_dead_code += 1;
                 }
                 for line in text.lines() {
@@ -451,7 +490,6 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
     }
 
     let mut total_impl_send = 0usize;
-    let mut total_blanket_dead_code = 0usize;
     let mut total_panics = 0usize;
     for (rel, baseline) in UNSAFE_TOKEN_BASELINES {
         let mut tokens = 0usize;
@@ -477,7 +515,24 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
         total_panics += panics;
         if *rel == "rusty_box/src" {
             total_impl_send = impl_send;
-            total_blanket_dead_code = blanket_dead_code;
+        }
+        let dead_code_baseline = BLANKET_DEAD_CODE_BASELINES
+            .iter()
+            .find(|(dir, _)| dir == rel)
+            .map_or(0, |(_, baseline)| *baseline);
+        if blanket_dead_code > dead_code_baseline {
+            return Err(format!(
+                "doctrine ratchets: {rel} has {blanket_dead_code} files whose inner \
+                 `allow`/`expect` covers `dead_code`, baseline is {dead_code_baseline} — a new \
+                 one hides every unused item in its file (and, from a mod.rs, in every module \
+                 below it). Put the allow on the item that needs it and say why."
+            ));
+        }
+        if blanket_dead_code < dead_code_baseline {
+            println!(
+                "    {rel}: {blanket_dead_code} blanket dead_code allows (< baseline \
+                 {dead_code_baseline} — tighten BLANKET_DEAD_CODE_BASELINES in this commit)"
+            );
         }
         if tokens > *baseline {
             return Err(format!(
@@ -499,22 +554,6 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
              {UNSAFE_IMPL_SEND_BASELINE} (R6: Send derives, never promised)"
         ));
     }
-    if total_blanket_dead_code > BLANKET_DEAD_CODE_BASELINE {
-        return Err(format!(
-            "doctrine ratchets: {total_blanket_dead_code} files carry a blanket \
-             `#![allow(… dead_code …)]`, baseline is {BLANKET_DEAD_CODE_BASELINE} — a new one \
-             hides every unused item in its file (and, from a mod.rs, in every module below it). \
-             Put the allow on the item that needs it and say why."
-        ));
-    }
-    if total_blanket_dead_code < BLANKET_DEAD_CODE_BASELINE {
-        println!(
-            "    rusty_box/src: {total_blanket_dead_code} blanket dead_code allows \
-             (< baseline {BLANKET_DEAD_CODE_BASELINE} — tighten BLANKET_DEAD_CODE_BASELINE \
-             in this commit)"
-        );
-    }
-
     println!("    production `.unwrap()`/`.expect(…)`: {total_panics}");
     println!(
         "<== doctrine ratchets ok ({:.1}s)",
