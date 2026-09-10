@@ -29,6 +29,8 @@
 //! over the sink — and must stay that way (R8). In-tree cards are selected by
 //! type, so a defaulted hook that falls through monomorphises to nothing.
 
+use rusty_box_core::time::VmClock;
+
 use crate::api::{Declared, WindowDecls, WindowOffset};
 use crate::display::sink::{DisplaySink, Refreshed};
 use crate::display::vga::{VgaCore, VgaWindow};
@@ -205,11 +207,17 @@ pub struct PortCtx<'a> {
     core: &'a mut VgaCore,
     port: u16,
     len: u8,
+    clock: VmClock,
 }
 
 impl<'a> PortCtx<'a> {
-    pub(crate) fn new(core: &'a mut VgaCore, port: u16, len: u8) -> Self {
-        Self { core, port, len }
+    pub(crate) fn new(core: &'a mut VgaCore, port: u16, len: u8, clock: VmClock) -> Self {
+        Self {
+            core,
+            port,
+            len,
+            clock,
+        }
     }
 
     pub fn port(&self) -> u16 {
@@ -219,6 +227,14 @@ impl<'a> PortCtx<'a> {
     /// Access width in bytes, as the guest issued it.
     pub fn width(&self) -> u8 {
         self.len
+    }
+
+    /// The machine's clock at the access. A card that answers part of an
+    /// access and forwards the rest to the core hands the core this reading,
+    /// because the core's answer depends on it: Bochs vgacore.cc `read`
+    /// derives the 0x3DA retrace bits from the time of the read.
+    pub fn clock(&self) -> VmClock {
+        self.clock
     }
 
     pub fn core(&mut self) -> &mut VgaCore {
@@ -735,7 +751,7 @@ impl<E: VgaExtension> crate::api::PioDevice for VgaCard<E> {
         len: crate::api::IoLen,
         ctx: &mut crate::api::DeviceCtx<'_>,
     ) -> u32 {
-        let mut offered = PortCtx::new(&mut self.core, port, len.bytes());
+        let mut offered = PortCtx::new(&mut self.core, port, len.bytes(), ctx.clock);
         if let Some(value) = self.ext.vga_pio_read(&mut offered) {
             return value;
         }
@@ -749,7 +765,7 @@ impl<E: VgaExtension> crate::api::PioDevice for VgaCard<E> {
         len: crate::api::IoLen,
         ctx: &mut crate::api::DeviceCtx<'_>,
     ) {
-        let mut offered = PortCtx::new(&mut self.core, port, len.bytes());
+        let mut offered = PortCtx::new(&mut self.core, port, len.bytes(), ctx.clock);
         if self.ext.vga_pio_write(&mut offered, value) == Written::Done {
             return;
         }

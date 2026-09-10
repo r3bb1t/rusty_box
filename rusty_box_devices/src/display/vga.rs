@@ -4161,13 +4161,17 @@ mod tests {
     /// Program one DISPI register the way a guest does — through the port hook
     /// the card claims, not by poking its state.
     fn write_vbe(vga: &mut VgaCard<StdVga>, index: u16, value: u16) {
-        use crate::display::card::{PortCtx, VgaExtension};
+        use crate::display::card::{PortCtx, VgaExtension, Written};
         for (port, value) in [
             (VBE_DISPI_IOPORT_INDEX, u32::from(index)),
             (VBE_DISPI_IOPORT_DATA, u32::from(value)),
         ] {
-            let mut cx = PortCtx::new(&mut vga.core, port, 2);
-            vga.ext.vga_pio_write(&mut cx, value);
+            let mut cx = PortCtx::new(&mut vga.core, port, 2, clock_at(0));
+            assert_eq!(
+                vga.ext.vga_pio_write(&mut cx, value),
+                Written::Done,
+                "a VBE port is the extension's"
+            );
         }
     }
 
@@ -4901,7 +4905,7 @@ mod tests {
         assert_eq!(&sink.tile_at(0, 0)[0..4], &[0x33, 0x22, 0x11, 0xff]);
     }
 
-    // ---- Finding #5: write to 0x3CC (Misc Output *read* port) is ignored ----
+    // ---- A write to 0x3CC (Misc Output *read* port) is ignored ----
     // Bochs vgacore.cc write: `case 0x03cc: /* Graphics 1 Position (EGA) */ // ignore`.
     // The real Misc Output write port is 0x3C2.
     #[test]
@@ -4930,7 +4934,7 @@ mod tests {
         assert_eq!(vga.read_port(VGA_MISC_OUTPUT, 1, clock_at(0)), 0xAB);
     }
 
-    // ---- Finding #6a: Sequencer index is stored unmasked; out-of-range DATA
+    // ---- Sequencer index is stored unmasked; out-of-range DATA
     // writes are no-ops (Bochs vgacore.cc write: `default:` case does nothing) ----
     #[test]
     fn sequencer_out_of_range_index_data_write_is_noop() {
@@ -4942,18 +4946,18 @@ mod tests {
         vga.write_port(VGA_SEQ_DATA, 0x00, 1);
 
         // Index 8 is out of range (valid: 0..=4); the write must be dropped,
-        // not aliased onto index 0 (sequencer reset), which would have reset
-        // the sequencer and cleared char map state.
+        // not aliased onto index 0 (sequencer reset), which would reset the
+        // sequencer and clear char map state.
         assert_eq!(vga.seq_regs, [0x11, 0x22, 0x33, 0x44, 0x55]);
     }
 
-    // ---- Finding #6b: CRTC index 0x22 read-back returns the graphics latch,
-    // not an aliased register (Bochs vgacore.cc read: `case 0x22`) ----
+    // ---- CRTC index 0x22 read-back returns the graphics latch, not an
+    // aliased register (Bochs vgacore.cc read: `CRTC.address == 0x22`) ----
     #[test]
     fn crtc_index_0x22_reads_back_graphics_latch() {
         let mut vga = VgaCore::new();
         // Give CR2 (start horizontal blank) a sentinel value distinct from the
-        // latch. With the old `& 0x1F` masking, index 0x22 aliased onto CR2.
+        // latch. An index masked to 5 bits would alias 0x22 onto CR2.
         vga.crtc_regs[CRTC_START_HORIZ_BLANK] = 0xAB;
         vga.latch = [0x11, 0x22, 0x33, 0x44];
         vga.graphics_regs[GFX_REG_READ_MAP_SELECT] = 2;
@@ -4971,7 +4975,7 @@ mod tests {
         );
     }
 
-    // ---- Finding #6c: Graphics Controller index is stored unmasked; out-of-range
+    // ---- Graphics Controller index is stored unmasked; out-of-range
     // DATA writes are no-ops (Bochs vgacore.cc write: `default:` case does nothing) ----
     #[test]
     fn graphics_out_of_range_index_data_write_is_noop() {
@@ -5192,7 +5196,7 @@ mod tests {
         assert_eq!(vga.read_port(VGA_MISC_OUTPUT_WRITE, 1, clock_at(0)), 0x00, "0x3C2 read = 0");
     }
 
-    // ---- Finding #7: CR11 bit 7 write-protects CRTC registers 0-7 ----
+    // ---- CR11 bit 7 write-protects CRTC registers 0-7 ----
     // Bochs vgacore.cc write: when `CRTC.reg[0x11] & 0x80` is set, writes to
     // CRTC indices 0x00-0x06 are dropped and a write to 0x07 updates only bit 4.
     #[test]

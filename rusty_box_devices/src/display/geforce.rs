@@ -1,5 +1,4 @@
 #![allow(
-    dead_code,
     clippy::needless_range_loop,
     clippy::too_many_arguments,
     clippy::comparison_chain,
@@ -14,17 +13,72 @@ use rusty_box_core::FloatExt;
 use alloc::vec;
 use alloc::{boxed::Box, vec::Vec};
 
+use crate::api::WindowOffset;
+use crate::display::card::{MemCtx, PortCtx, ResetCtx, VgaExtension, Written};
+use crate::display::ddc::BxDdcC;
+use crate::display::vga::VgaWindow;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
+/// The last CRTC index the standard VGA core owns; the NV extension
+/// registers sit above it — Bochs geforce.h `VGA_CRTC_MAX`.
 const VGA_CRTC_MAX: usize = 0x18;
 const GEFORCE_CRTC_MAX: usize = 0xF0;
 const GEFORCE_CHANNEL_COUNT: usize = 32;
 const GEFORCE_SUBCHANNEL_COUNT: usize = 8;
 const GEFORCE_CACHE1_SIZE: usize = 64;
+/// Size of the BAR0 register window — Bochs geforce.cc `GEFORCE_PNPMMIO_SIZE`.
 const GEFORCE_PNPMMIO_SIZE: u32 = 0x0100_0000;
 const BX_ROP_PATTERN: u8 = 0x01;
+
+// The ports Bochs geforce.cc `svga_read`/`svga_write` answer before the
+// standard VGA does.
+const PORT_CRTC_INDEX_MONO: u16 = 0x03B4;
+const PORT_CRTC_DATA_MONO: u16 = 0x03B5;
+const PORT_INPUT_STATUS_0: u16 = 0x03C2;
+const PORT_VGA_ENABLE: u16 = 0x03C3;
+const PORT_RMA_LOW: u16 = 0x03D0;
+const PORT_RMA_HIGH: u16 = 0x03D2;
+const PORT_CRTC_INDEX: u16 = 0x03D4;
+const PORT_CRTC_DATA: u16 = 0x03D5;
+
+/// CRTC indices whose write changes the extended mode — Bochs geforce.cc
+/// `svga_write` sets `svga_needs_update_mode` for exactly these.
+const CRTC_MODE_UPDATE_INDICES: [u8; 14] = [
+    0x01, 0x07, 0x09, 0x0c, 0x0d, 0x12, 0x13, 0x15, 0x19, 0x25, 0x28, 0x2D, 0x41, 0x42,
+];
+
+/// Where a Real Mode Access data transfer lands. Bochs geforce.cc
+/// `svga_read`/`svga_write` take bit 31 of `rma_addr` to choose VRAM over the
+/// register file, and bound each by its own size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RmaTarget {
+    /// An offset into the BAR0 register file, below `GEFORCE_PNPMMIO_SIZE`.
+    Register(u32),
+    /// An offset into video memory, below `memsize`.
+    Vram(u32),
+}
+
+/// The register a BAR0 access lands on — Bochs geforce.cc
+/// `geforce_mem_read_handler` takes the address modulo the window.
+fn bar0_offset(at: WindowOffset) -> u32 {
+    (at.get() & u64::from(GEFORCE_PNPMMIO_SIZE - 1)) as u32
+}
+
+/// Copy an access's bytes into the caller's buffer, as far as both reach.
+fn fill_access(data: &mut [u8], bytes: &[u8]) {
+    for (slot, byte) in data.iter_mut().zip(bytes) {
+        *slot = *byte;
+    }
+}
+
+/// The first `N` bytes of a write, little-endian; a byte the caller did not
+/// supply reads as zero.
+fn access_bytes<const N: usize>(data: &[u8]) -> [u8; N] {
+    core::array::from_fn(|index| data.get(index).copied().unwrap_or(0))
+}
 
 fn align_up(x: u32, a: u32) -> u32 {
     (x + a - 1) & !(a - 1)
@@ -940,6 +994,10 @@ fn rop_src_or_notdst(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _p
 }
 
 /// Ternary ROP: applies pattern-based operation
+#[allow(
+    dead_code,
+    reason = "Bochs bitblt.h `bx_ternary_rop`, reached from `pixel_operation`, which is ported ahead of its caller"
+)]
 fn bx_ternary_rop(rop: u8, dst: &mut [u8], src: &[u8], pat: &[u8], cb: u32) {
     for i in 0..cb as usize {
         let mut result = 0u8;
@@ -962,14 +1020,15 @@ fn uint32_as_float(val: u32) -> f32 {
     f32::from_bits(val)
 }
 
-fn float_as_uint32(val: f32) -> u32 {
-    val.to_bits()
-}
-
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `alpha_wrap`, reached from `pixel_operation`, which is ported ahead of its caller"
+)]
 fn alpha_wrap(value: i32) -> u8 {
     (-(value >> 8) ^ value) as u8
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `color_565_to_888`, ported ahead of its caller")]
 fn color_565_to_888(value: u16) -> u32 {
     let r = ((value >> 11) & 0x1F) as u32;
     let g = ((value >> 5) & 0x3F) as u32;
@@ -980,6 +1039,7 @@ fn color_565_to_888(value: u16) -> u32 {
     (r8 << 16) | (g8 << 8) | b8
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `color_888_to_565`, ported ahead of its caller")]
 fn color_888_to_565(value: u32) -> u16 {
     let r = ((value >> 19) & 0x1F) as u16;
     let g = ((value >> 10) & 0x3F) as u16;
@@ -987,18 +1047,25 @@ fn color_888_to_565(value: u32) -> u16 {
     (r << 11) | (g << 5) | b
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `dot3`, ported ahead of its caller")]
 fn dot3(x: &[f32; 3], y: &[f32; 3]) -> f32 {
     x[0] * y[0] + x[1] * y[1] + x[2] * y[2]
 }
 
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `dot3` applied to a row of a `float[4]` table, ported ahead of its caller"
+)]
 fn dot3_slice(x: &[f32], y: &[f32]) -> f32 {
     x[0] * y[0] + x[1] * y[1] + x[2] * y[2]
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `dot4`, ported ahead of its caller")]
 fn dot4(x: &[f32], y: &[f32]) -> f32 {
     x[0] * y[0] + x[1] * y[1] + x[2] * y[2] + x[3] * y[3]
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `length`, ported ahead of its caller")]
 fn vec3_length(v: &[f32; 3]) -> f32 {
     // Named through the trait so every build takes the same path: a test
     // build links std, whose inherent `f32::sqrt` would otherwise win the
@@ -1006,6 +1073,10 @@ fn vec3_length(v: &[f32; 3]) -> f32 {
     FloatExt::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
 }
 
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `normalize(float v[3])`, ported ahead of its caller"
+)]
 fn vec3_normalize(v: &mut [f32; 3]) -> f32 {
     let l = vec3_length(v);
     let s = 1.0 / l;
@@ -1015,6 +1086,10 @@ fn vec3_normalize(v: &mut [f32; 3]) -> f32 {
     l
 }
 
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `normalize(float in[3], float out[3])`, ported ahead of its caller"
+)]
 fn vec3_normalize_into(input: &[f32; 3], out: &mut [f32; 3]) {
     let s = 1.0 / vec3_length(input);
     out[0] = input[0] * s;
@@ -1022,11 +1097,13 @@ fn vec3_normalize_into(input: &[f32; 3], out: &mut [f32; 3]) {
     out[2] = input[2] * s;
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `edge_function`, ported ahead of its caller")]
 fn edge_function(v0: &[f32; 4], v1: &[f32; 4], v2: &[f32]) -> f64 {
     ((v1[0] - v0[0]) as f64) * ((v2[1] - v0[1]) as f64)
         - ((v1[1] - v0[1]) as f64) * ((v2[0] - v0[0]) as f64)
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `compare`, ported ahead of its caller")]
 fn compare(func: u32, val1: u32, val2: u32) -> bool {
     match func {
         1 | 0x200 => false,        // NEVER
@@ -1041,6 +1118,7 @@ fn compare(func: u32, val1: u32, val2: u32) -> bool {
     }
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `blend_factor`, ported ahead of its caller")]
 fn blend_factor(
     factor: u16,
     src_rgb: f32,
@@ -1070,6 +1148,7 @@ fn blend_factor(
     }
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `blend_equation`, ported ahead of its caller")]
 fn blend_equation(equation: u16, src: f32, src_factor: f32, dst: f32, dst_factor: f32) -> f32 {
     match equation {
         0x0002 | 0x800a => src * src_factor - dst * dst_factor, // SUBTRACT
@@ -1080,6 +1159,7 @@ fn blend_equation(equation: u16, src: f32, src_factor: f32, dst: f32, dst_factor
     }
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `swizzle`, ported ahead of its caller")]
 fn swizzle_addr(x: u32, y: u32, width: u32, height: u32) -> u32 {
     let mut xleft = true;
     let mut yleft = height != 1;
@@ -1111,6 +1191,7 @@ fn swizzle_addr(x: u32, y: u32, width: u32, height: u32) -> u32 {
     r
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `unpack_attribute`, ported ahead of its caller")]
 fn unpack_attribute(value: u32, d3d: bool, comp: &mut [f32; 4]) {
     if d3d {
         comp[0] = ((value >> 16) & 0xff) as f32 / 255.0;
@@ -1125,6 +1206,7 @@ fn unpack_attribute(value: u32, d3d: bool, comp: &mut [f32; 4]) {
 }
 
 /// Register combiner variable extraction
+#[allow(dead_code, reason = "Bochs geforce.cc `rc_get_var`, ported ahead of its caller")]
 fn rc_get_var(cw: u32, shift: u32, regs: &[[f32; 4]; 16], civ: u32) -> f32 {
     let x = cw >> shift;
     let reg = (x & 0xf) as usize;
@@ -1145,6 +1227,10 @@ fn rc_get_var(cw: u32, shift: u32, regs: &[[f32; 4]; 16], civ: u32) -> f32 {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `texture_process_format`, ported ahead of its caller"
+)]
 fn texture_process_format(tex: &mut GfTexture) {
     tex.linear = false;
     tex.unnormalized = false;
@@ -1182,6 +1268,7 @@ fn texture_process_format(tex: &mut GfTexture) {
     }
 }
 
+#[allow(dead_code, reason = "Bochs geforce.cc `texture_update_size`, ported ahead of its caller")]
 fn texture_update_size(tex: &mut GfTexture, cls: u32) {
     if tex.linear || cls >= 0x4097 {
         tex.size[0] = tex.image_rect >> 16;
@@ -1351,6 +1438,10 @@ pub struct BxGeForceC {
     // Hardware cursor
     pub hw_cursor: HwCursor,
 
+    /// The monitor's DDC channel, bit-banged through CRTC 0x3F and read back
+    /// through 0x3E — Bochs geforce.h `ddc`.
+    ddc: BxDdcC,
+
     // PCI configuration space (256 bytes)
     pub pci_conf: [u8; 256],
 
@@ -1513,6 +1604,7 @@ impl BxGeForceC {
                 size: 32,
                 ..HwCursor::default()
             },
+            ddc: BxDdcC::new(),
             pci_conf: [0u8; 256],
             pci_rom: Vec::new(),
             time_nsec: 0,
@@ -1573,7 +1665,9 @@ impl BxGeForceC {
         handlers[0xfa] = rop_src_or_dst;
     }
 
-    /// Reset all GPU state
+    /// Reset the NV chip — Bochs geforce.cc `bx_geforce_c::reset` after its
+    /// `bx_vgacore_c::reset` half: `svga_init_members`, `ddc.init()`, and PCI
+    /// config 0x50 cleared to disable ROM shadowing.
     pub fn reset(&mut self) {
         self.crtc = CrtcRegs::default();
         self.mc_soft_intr = false;
@@ -1671,66 +1765,77 @@ impl BxGeForceC {
         self.disp_offset = 0;
         self.disp_end_offset = 0;
         self.memory.fill(0);
+        self.straps0_primary = self.straps0_primary_original;
+
+        self.ddc = BxDdcC::new();
+        self.pci_conf[0x50] = 0x00;
     }
 
     // -----------------------------------------------------------------------
     // VRAM access
     // -----------------------------------------------------------------------
 
+    /// `N` bytes of video memory from `address`, in memory order.
+    ///
+    /// A byte past the end of VRAM reads as zero. Bochs geforce.cc
+    /// `vram_read8`..`vram_read64` index `s.memory` unbounded, and a guest
+    /// reaches the last bytes of VRAM with a multi-byte access that straddles
+    /// the end — the RMA window checks only the first byte against `memsize`.
+    fn vram_load<const N: usize>(&self, address: u32) -> [u8; N] {
+        let start = address as usize;
+        core::array::from_fn(|index| {
+            start
+                .checked_add(index)
+                .and_then(|at| self.memory.get(at))
+                .copied()
+                .unwrap_or(0)
+        })
+    }
+
+    /// Store `bytes` into video memory from `address`, dropping any byte past
+    /// the end of VRAM — the write half of [`Self::vram_load`].
+    fn vram_store(&mut self, address: u32, bytes: &[u8]) {
+        let start = address as usize;
+        for (index, &byte) in bytes.iter().enumerate() {
+            if let Some(slot) = start
+                .checked_add(index)
+                .and_then(|at| self.memory.get_mut(at))
+            {
+                *slot = byte;
+            }
+        }
+    }
+
     pub fn vram_read8(&self, address: u32) -> u8 {
-        self.memory[address as usize]
+        u8::from_le_bytes(self.vram_load(address))
     }
 
     pub fn vram_read16(&self, address: u32) -> u16 {
-        let a = address as usize;
-        u16::from_le_bytes([self.memory[a], self.memory[a + 1]])
+        u16::from_le_bytes(self.vram_load(address))
     }
 
     pub fn vram_read32(&self, address: u32) -> u32 {
-        let a = address as usize;
-        u32::from_le_bytes([
-            self.memory[a],
-            self.memory[a + 1],
-            self.memory[a + 2],
-            self.memory[a + 3],
-        ])
+        u32::from_le_bytes(self.vram_load(address))
     }
 
     pub fn vram_read64(&self, address: u32) -> u64 {
-        let a = address as usize;
-        u64::from_le_bytes([
-            self.memory[a],
-            self.memory[a + 1],
-            self.memory[a + 2],
-            self.memory[a + 3],
-            self.memory[a + 4],
-            self.memory[a + 5],
-            self.memory[a + 6],
-            self.memory[a + 7],
-        ])
+        u64::from_le_bytes(self.vram_load(address))
     }
 
     pub fn vram_write8(&mut self, address: u32, value: u8) {
-        self.memory[address as usize] = value;
+        self.vram_store(address, &[value]);
     }
 
     pub fn vram_write16(&mut self, address: u32, value: u16) {
-        let a = address as usize;
-        let bytes = value.to_le_bytes();
-        self.memory[a] = bytes[0];
-        self.memory[a + 1] = bytes[1];
+        self.vram_store(address, &value.to_le_bytes());
     }
 
     pub fn vram_write32(&mut self, address: u32, value: u32) {
-        let a = address as usize;
-        let bytes = value.to_le_bytes();
-        self.memory[a..a + 4].copy_from_slice(&bytes);
+        self.vram_store(address, &value.to_le_bytes());
     }
 
     pub fn vram_write64(&mut self, address: u32, value: u64) {
-        let a = address as usize;
-        let bytes = value.to_le_bytes();
-        self.memory[a..a + 8].copy_from_slice(&bytes);
+        self.vram_store(address, &value.to_le_bytes());
     }
 
     // -----------------------------------------------------------------------
@@ -2018,6 +2123,10 @@ impl BxGeForceC {
     // Pixel operations
     // -----------------------------------------------------------------------
 
+    #[allow(
+        dead_code,
+        reason = "Bochs geforce.cc `bx_geforce_c::get_pixel`, ported ahead of its caller"
+    )]
     fn get_pixel(&self, obj: u32, ofs: u32, x: u32, cb: u32) -> u32 {
         match cb {
             1 => self.dma_read8(obj, ofs + x) as u32,
@@ -2026,6 +2135,10 @@ impl BxGeForceC {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "Bochs geforce.cc `bx_geforce_c::put_pixel`, ported ahead of its caller"
+    )]
     fn put_pixel(
         &mut self,
         ch_s2d_img_dst: u32,
@@ -2049,6 +2162,10 @@ impl BxGeForceC {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "Bochs geforce.cc `bx_geforce_c::put_pixel_swzs`, ported ahead of its caller"
+    )]
     fn put_pixel_swzs(
         &mut self,
         ch_swzs_img_obj: u32,
@@ -2063,6 +2180,10 @@ impl BxGeForceC {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "Bochs geforce.cc `bx_geforce_c::pixel_operation`, ported ahead of its caller"
+    )]
     fn pixel_operation(
         &self,
         ch: &GfChannel,
@@ -2162,13 +2283,15 @@ impl BxGeForceC {
             0x1100 => self.bus_intr,
             0x1140 => self.bus_intr_en,
             a if a >= 0x1800 && a < 0x1900 => {
+                // PCI config space mirrored into BAR0, as Bochs geforce.cc
+                // `register_read32` assembles it from `pci_conf[offset + 0..3]`.
+                // A dword read at 0x18FD..0x18FF straddles the end of the
+                // 256-byte config space; the bytes past it read as zero,
+                // matching `register_write32`, which drops them.
                 let o = (a - 0x1800) as usize;
-                u32::from_le_bytes([
-                    self.pci_conf[o],
-                    self.pci_conf[o + 1],
-                    self.pci_conf[o + 2],
-                    self.pci_conf[o + 3],
-                ])
+                u32::from_le_bytes(core::array::from_fn(|index| {
+                    self.pci_conf.get(o + index).copied().unwrap_or(0)
+                }))
             }
             0x2100 => self.fifo_intr,
             0x2140 => self.fifo_intr_en,
@@ -3731,34 +3854,320 @@ impl BxGeForceC {
     }
 
     // -----------------------------------------------------------------------
-    // MMIO read/write entry points
+    // SVGA ports (Bochs geforce.cc svga_read / svga_write)
     // -----------------------------------------------------------------------
 
-    /// Handle MMIO read at the given offset within BAR0.
-    pub fn mmio_read(&self, offset: u32, len: u32) -> u32 {
-        match len {
-            1 => self.register_read8(offset) as u32,
-            2 => self.register_read32(offset) & 0xFFFF,
-            4 => self.register_read32(offset),
-            _ => {
-                tracing::error!("MMIO read len {}", len);
+    /// Bochs geforce.cc `bx_geforce_c::svga_read`. `None` is its closing
+    /// `VGA_READ(address, io_len)`: the core serves the access at the width
+    /// the guest issued.
+    fn svga_read(&mut self, cx: &mut PortCtx<'_>) -> Option<u32> {
+        let port = cx.port();
+        let io_len = cx.width();
+
+        if port == PORT_VGA_ENABLE && io_len == 2 {
+            let clock = cx.clock();
+            let low = cx.core().read_port(PORT_VGA_ENABLE, 1, clock);
+            let high = cx.core().read_port(PORT_VGA_ENABLE + 1, 1, clock);
+            return Some(low | (high << 8));
+        }
+
+        if port == PORT_RMA_LOW || port == PORT_RMA_HIGH {
+            return Some(self.rma_read(port, io_len));
+        }
+
+        if io_len == 2 && (port & 1) == 0 {
+            let low = self.svga_read_byte(cx, port);
+            let high = self.svga_read_byte(cx, port + 1);
+            return Some(low | (high << 8));
+        }
+
+        if io_len != 1 {
+            tracing::error!("SVGA read: io_len != 1 (port {port:#06x}, io_len {io_len})");
+        }
+        self.svga_read_own(port).map(u32::from)
+    }
+
+    /// One byte of a word access split at an even port — Bochs
+    /// `SVGA_READ(address, 1)`: the card's answer where it has one, the
+    /// core's byte otherwise.
+    fn svga_read_byte(&self, cx: &mut PortCtx<'_>, port: u16) -> u32 {
+        match self.svga_read_own(port) {
+            Some(value) => u32::from(value),
+            None => {
+                let clock = cx.clock();
+                cx.core().read_port(port, 1, clock)
+            }
+        }
+    }
+
+    /// The byte ports `svga_read`'s switch answers from the card.
+    fn svga_read_own(&self, port: u16) -> Option<u8> {
+        match port {
+            PORT_CRTC_INDEX_MONO | PORT_CRTC_INDEX => Some(self.crtc.index),
+            PORT_CRTC_DATA_MONO | PORT_CRTC_DATA
+                if usize::from(self.crtc.index) > VGA_CRTC_MAX =>
+            {
+                Some(self.svga_read_crtc(self.crtc.index))
+            }
+            PORT_INPUT_STATUS_0 => {
+                tracing::debug!("Input Status 0 read");
+                // Monitor presence detection (DAC sensing).
+                Some(0x10)
+            }
+            _ => None,
+        }
+    }
+
+    /// Bochs geforce.cc `bx_geforce_c::svga_write`.
+    fn svga_write(&mut self, cx: &mut PortCtx<'_>, value: u32) -> Written {
+        let port = cx.port();
+        let io_len = cx.width();
+
+        if port == PORT_RMA_LOW || port == PORT_RMA_HIGH {
+            self.rma_write(port, value, io_len);
+            return Written::Done;
+        }
+
+        if io_len == 2 && (port & 1) == 0 {
+            self.svga_write_byte(cx, port, value & 0xff);
+            self.svga_write_byte(cx, port + 1, value >> 8);
+            return Written::Done;
+        }
+
+        if io_len != 1 {
+            tracing::error!("SVGA write: io_len != 1 (port {port:#06x}, io_len {io_len})");
+        }
+        self.svga_write_own(port, value)
+    }
+
+    /// One byte of a word access split at an even port — Bochs
+    /// `SVGA_WRITE(address, value, 1)`, whose fall-through is the core's
+    /// byte write.
+    fn svga_write_byte(&mut self, cx: &mut PortCtx<'_>, port: u16, value: u32) {
+        if self.svga_write_own(port, value) == Written::FallThrough {
+            cx.core().write_port(port, value, 1);
+        }
+    }
+
+    /// The byte ports `svga_write`'s switch handles.
+    ///
+    /// The card holds the full CRTC index, so an index above the core's range
+    /// reaches the NV registers even though the core keeps only its low bits.
+    /// An index write, and a data write at or below `VGA_CRTC_MAX`, also fall
+    /// through so the core's own copy stays in step.
+    fn svga_write_own(&mut self, port: u16, value: u32) -> Written {
+        match port {
+            PORT_CRTC_INDEX_MONO | PORT_CRTC_INDEX => {
+                self.crtc.index = value as u8;
+                Written::FallThrough
+            }
+            PORT_CRTC_DATA_MONO | PORT_CRTC_DATA => {
+                let index = self.crtc.index;
+                if CRTC_MODE_UPDATE_INDICES.contains(&index) {
+                    self.svga_needs_update_mode = true;
+                }
+                if usize::from(index) <= VGA_CRTC_MAX {
+                    self.crtc.reg[usize::from(index)] = value as u8;
+                    Written::FallThrough
+                } else {
+                    self.svga_write_crtc(index, value as u8);
+                    Written::Done
+                }
+            }
+            _ => Written::FallThrough,
+        }
+    }
+
+    /// Bochs geforce.cc `bx_geforce_c::svga_read_crtc`.
+    fn svga_read_crtc(&self, index: u8) -> u8 {
+        // `reg` holds indices 0..=GEFORCE_CRTC_MAX, so `get` is Bochs's bound.
+        match self.crtc.reg.get(usize::from(index)) {
+            Some(&value) => {
+                tracing::debug!("crtc: index {index:#04x} read {value:#04x}");
+                value
+            }
+            None => {
+                tracing::error!("crtc: unknown index {index:#04x} read");
+                0xff
+            }
+        }
+    }
+
+    /// Bochs geforce.cc `bx_geforce_c::svga_write_crtc`: the NV extension
+    /// registers above the standard VGA's 0x18.
+    fn svga_write_crtc(&mut self, index: u8, value: u8) {
+        let slot = usize::from(index);
+        if index != 0x40 || self.crtc.reg.get(slot) != Some(&value) {
+            tracing::debug!("crtc: index {index:#04x} write {value:#04x}");
+        }
+
+        let mut update_cursor_addr = false;
+        match index {
+            0x1c => {
+                // Windows 95 hangs after a reboot unless the rising edge of
+                // bit 7 clears the CRTC interrupt enable.
+                if (self.crtc.reg[0x1c] & 0x80) == 0 && (value & 0x80) != 0 {
+                    self.crtc_intr_en = 0;
+                    self.update_irq_level();
+                }
+            }
+            0x1d | 0x1e => self.bank_base[slot - 0x1d] = u32::from(value) * 0x8000,
+            0x2f..=0x31 => update_cursor_addr = true,
+            0x37 | 0x3f | 0x51 => {
+                let scl = (value & 0x20) != 0;
+                let sda = (value & 0x10) != 0;
+                if index == 0x3f {
+                    self.ddc.write(scl, sda);
+                    self.crtc.reg[0x3e] = self.ddc.read() & 0x0c;
+                } else {
+                    self.crtc.reg[slot - 1] = (u8::from(sda) << 3) | (u8::from(scl) << 2);
+                }
+            }
+            // Paired with 0x57, this windows 16 bytes of head-specific state.
+            // Writes are dropped, so reads return zero until something visible
+            // depends on it.
+            0x58 => return,
+            _ => {}
+        }
+
+        match self.crtc.reg.get_mut(slot) {
+            Some(reg) => *reg = value,
+            None => tracing::error!("crtc: unknown index {index:#04x} write"),
+        }
+
+        if update_cursor_addr {
+            self.hw_cursor.enabled = (self.crtc.reg[0x31] & 0x01) != 0
+                || (self.crtc_cursor_config & 0x0000_0001) != 0;
+            self.hw_cursor.vram = (self.crtc.reg[0x30] & 0x80) != 0
+                || (self.crtc_cursor_config & 0x0000_0100) != 0
+                || self.card_type >= 0x40;
+            let offset = ((u32::from(self.crtc.reg[0x31]) >> 2) << 11)
+                | (u32::from(self.crtc.reg[0x30] & 0x7f) << 17)
+                | (u32::from(self.crtc.reg[0x2f]) << 24);
+            self.hw_cursor.offset = offset.wrapping_add(self.crtc_cursor_offset);
+        }
+    }
+
+    /// Where `address` lands for an RMA data transfer, or `None` when it is
+    /// past the end of its target.
+    fn rma_target(&self, address: u32) -> Option<RmaTarget> {
+        if (address & 0x8000_0000) != 0 {
+            let offset = address & !0x8000_0000;
+            (offset < self.memsize).then_some(RmaTarget::Vram(offset))
+        } else {
+            (address < GEFORCE_PNPMMIO_SIZE).then_some(RmaTarget::Register(address))
+        }
+    }
+
+    fn rma_load(&self, target: RmaTarget) -> u32 {
+        match target {
+            RmaTarget::Register(offset) => self.register_read32(offset),
+            RmaTarget::Vram(offset) => self.vram_read32(offset),
+        }
+    }
+
+    fn rma_store(&mut self, target: RmaTarget, value: u32) {
+        match target {
+            RmaTarget::Register(offset) => self.register_write32(offset, value),
+            RmaTarget::Vram(offset) => self.vram_write32(offset, value),
+        }
+    }
+
+    /// The Real Mode Access window at 0x3D0/0x3D2 — the read half of Bochs
+    /// geforce.cc `svga_read`'s `RMA_ACCESS` case. CRTC 0x38 bit 0 opens the
+    /// window and bits 7:1 select what it reads: 1 the address, 2 the data.
+    fn rma_read(&self, port: u16, io_len: u8) -> u32 {
+        if io_len == 1 {
+            tracing::error!("port 0x3d0 access with io_len = 1");
+            return 0;
+        }
+        let crtc38 = self.crtc.reg[0x38];
+        if (crtc38 & 1) == 0 {
+            tracing::error!("port 0x3d0 access is disabled");
+            return 0;
+        }
+        match crtc38 >> 1 {
+            1 => {
+                if port == PORT_RMA_LOW {
+                    self.rma_addr
+                } else {
+                    self.rma_addr >> 16
+                }
+            }
+            2 => match self.rma_target(self.rma_addr) {
+                Some(target) => {
+                    let value = self.rma_load(target);
+                    tracing::debug!("rma: read from {:#010x} value {value:#010x}", self.rma_addr);
+                    if port == PORT_RMA_LOW {
+                        value
+                    } else {
+                        value >> 16
+                    }
+                }
+                None => {
+                    tracing::error!("rma: oob read from {:#010x} ignored", self.rma_addr);
+                    0xFFFF_FFFF
+                }
+            },
+            3 => {
+                tracing::error!("rma: read index 3");
+                0
+            }
+            rma_index => {
+                tracing::error!("rma: read unknown index {rma_index}");
                 0
             }
         }
     }
 
-    /// Handle MMIO write at the given offset within BAR0.
-    pub fn mmio_write(&mut self, offset: u32, value: u32, len: u32) {
-        match len {
-            1 => self.register_write8(offset, value as u8),
-            4 => self.register_write32(offset, value),
-            8 => {
-                // 64-bit write split into two 32-bit writes
-                self.register_write32(offset, value);
+    /// The write half of [`Self::rma_read`]: index 1 sets the address, index 3
+    /// writes the data. A 16-bit write replaces the half the port names.
+    fn rma_write(&mut self, port: u16, value: u32, io_len: u8) {
+        if io_len == 1 {
+            tracing::debug!("port 0x3d0 access with io_len = 1");
+            return;
+        }
+        let crtc38 = self.crtc.reg[0x38];
+        if (crtc38 & 1) == 0 {
+            tracing::error!("port 0x3d0 access is disabled");
+            return;
+        }
+        match crtc38 >> 1 {
+            1 => {
+                if port == PORT_RMA_LOW {
+                    if io_len == 2 {
+                        self.rma_addr = (self.rma_addr & 0xFFFF_0000) | value;
+                    } else {
+                        self.rma_addr = value;
+                    }
+                } else {
+                    self.rma_addr = (self.rma_addr & 0x0000_FFFF) | (value << 16);
+                }
             }
-            _ => {
-                tracing::error!("MMIO write len {}", len);
+            2 => tracing::error!("rma: write index 2"),
+            3 => {
+                // The data transfer is dword-aligned — Bochs's fix for the
+                // 6800 GT BIOS.
+                match self.rma_target(self.rma_addr & !3) {
+                    Some(target) => {
+                        let merged = if port == PORT_RMA_LOW {
+                            if io_len == 2 {
+                                (self.rma_load(target) & 0xFFFF_0000) | value
+                            } else {
+                                value
+                            }
+                        } else {
+                            (self.rma_load(target) & 0x0000_FFFF) | (value << 16)
+                        };
+                        self.rma_store(target, merged);
+                        tracing::debug!("rma: write to {:#010x} value {merged:#010x}", self.rma_addr);
+                    }
+                    None => {
+                        tracing::error!("rma: oob write to {:#010x} ignored", self.rma_addr);
+                    }
+                }
             }
+            rma_index => tracing::error!("rma: write unknown index {rma_index}"),
         }
     }
 
@@ -3819,14 +4228,16 @@ impl BxGeForceC {
 /// moved out of the core: a card that never had DISPI registers should not
 /// carry them.
 ///
-/// The NV scanout is deliberately not wired — as it is today, and as the
-/// display-seam design records. `vga_refresh` therefore falls through while the
-/// chip is in a legacy mode, which is exactly what `bx_geforce_c::update()`
-/// does when its CRTC says the extended scanout is off: it calls
-/// `bx_vgacore_c::update()`. Wiring the NV path is its own work; this proves
-/// the seam carries a second card whose state and windows are nothing like the
-/// first one's.
-impl crate::display::card::VgaExtension for BxGeForceC {
+/// The NV scanout is deliberately not wired, so `vga_refresh` always falls
+/// through to the core's legacy render — also when a guest has set CRTC 0x28
+/// and turned the extended scanout on. That matches Bochs geforce.cc
+/// `bx_geforce_c::update()` only while CRTC 0x28 is 0 below bit 7 (bit 7 marks
+/// slaved mode and is masked off), where upstream too calls
+/// `bx_vgacore_c::update()`; otherwise upstream draws the NV framebuffer and
+/// this card still draws the legacy planes. Wiring the NV path
+/// is its own work; this proves the seam carries a second card whose state and
+/// windows are nothing like the first one's.
+impl VgaExtension for BxGeForceC {
     /// What the CORE must allocate, which is not the same as what the card has.
     ///
     /// The core renders only the legacy modes for this card — the NV scanout is
@@ -3847,69 +4258,527 @@ impl crate::display::card::VgaExtension for BxGeForceC {
 
     /// Video memory reads land in the NV framebuffer, which the chip addresses
     /// linearly rather than through the planar core.
-    fn vga_mem_read(&mut self, cx: &mut crate::display::card::MemCtx<'_>) -> Option<u8> {
+    fn vga_mem_read(&mut self, cx: &mut MemCtx<'_>) -> Option<u8> {
         match cx.window() {
             // The legacy aperture stays the core's: a GeForce in a text mode is
             // a standard VGA, latches and plane masks included.
-            crate::display::vga::VgaWindow::Legacy => None,
-            crate::display::vga::VgaWindow::Lfb => {
+            VgaWindow::Legacy => None,
+            VgaWindow::Lfb => {
                 let at = cx.offset().get() as u32 & self.memsize_mask;
                 Some(self.vram_read8(at))
             }
-            crate::display::vga::VgaWindow::Registers => None,
+            VgaWindow::Registers => None,
         }
     }
 
-    fn vga_mem_write(
-        &mut self,
-        cx: &mut crate::display::card::MemCtx<'_>,
-        value: u8,
-    ) -> crate::display::card::Written {
+    fn vga_mem_write(&mut self, cx: &mut MemCtx<'_>, value: u8) -> Written {
         match cx.window() {
-            crate::display::vga::VgaWindow::Lfb => {
+            VgaWindow::Lfb => {
                 let at = cx.offset().get() as u32 & self.memsize_mask;
                 self.vram_write8(at, value);
-                crate::display::card::Written::Done
+                Written::Done
             }
-            _ => crate::display::card::Written::FallThrough,
+            _ => Written::FallThrough,
         }
     }
 
-    /// The NV register file, which is width-aware and 32-bit throughout — the
-    /// reason register windows are offered whole rather than a byte at a time.
-    fn vga_regs_read(
-        &mut self,
-        cx: &mut crate::display::card::MemCtx<'_>,
-        len: u32,
-        data: &mut [u8],
-    ) -> crate::display::card::Written {
-        if cx.window() != crate::display::vga::VgaWindow::Registers || len != 4 {
-            return crate::display::card::Written::FallThrough;
+    /// BAR0, the NV register file — Bochs geforce.cc
+    /// `geforce_mem_read_handler`. The offset is taken modulo the window, and
+    /// a read is 1, 2 or 4 bytes wide, a 2-byte read being the low half of the
+    /// 32-bit register. Registers format to the access width, which is why the
+    /// window is offered whole rather than a byte at a time.
+    fn vga_regs_read(&mut self, cx: &mut MemCtx<'_>, len: u32, data: &mut [u8]) -> Written {
+        if cx.window() != VgaWindow::Registers {
+            return Written::FallThrough;
         }
-        let value = self.register_read32(cx.offset().get() as u32);
-        data[..4].copy_from_slice(&value.to_le_bytes());
-        crate::display::card::Written::Done
+        let offset = bar0_offset(cx.offset());
+        match len {
+            1 => fill_access(data, &[self.register_read8(offset)]),
+            2 => fill_access(data, &(self.register_read32(offset) as u16).to_le_bytes()),
+            4 => fill_access(data, &self.register_read32(offset).to_le_bytes()),
+            _ => tracing::error!("MMIO read len {len}"),
+        }
+        Written::Done
     }
 
-    fn vga_regs_write(
-        &mut self,
-        cx: &mut crate::display::card::MemCtx<'_>,
-        len: u32,
-        data: &[u8],
-    ) -> crate::display::card::Written {
-        if cx.window() != crate::display::vga::VgaWindow::Registers || len != 4 {
-            return crate::display::card::Written::FallThrough;
+    /// The write half of [`Self::vga_regs_read`] — Bochs geforce.cc
+    /// `geforce_mem_write_handler`: 1, 4 or 8 bytes, an 8-byte write being two
+    /// register writes, the low dword first.
+    fn vga_regs_write(&mut self, cx: &mut MemCtx<'_>, len: u32, data: &[u8]) -> Written {
+        if cx.window() != VgaWindow::Registers {
+            return Written::FallThrough;
         }
-        let mut bytes = [0u8; 4];
-        bytes.copy_from_slice(&data[..4]);
-        self.register_write32(cx.offset().get() as u32, u32::from_le_bytes(bytes));
-        crate::display::card::Written::Done
+        let offset = bar0_offset(cx.offset());
+        match len {
+            1 => self.register_write8(offset, u8::from_le_bytes(access_bytes(data))),
+            4 => self.register_write32(offset, u32::from_le_bytes(access_bytes(data))),
+            8 => {
+                let value = u64::from_le_bytes(access_bytes(data));
+                self.register_write32(offset, value as u32);
+                self.register_write32(offset + 4, (value >> 32) as u32);
+            }
+            _ => tracing::error!("MMIO write len {len}"),
+        }
+        Written::Done
+    }
+
+    /// The NV CRTC registers, the RMA window and Input Status 0 — Bochs
+    /// geforce.cc `svga_read`, which `init_vga_extension` installs over the
+    /// standard VGA's port handlers.
+    fn vga_pio_read(&mut self, cx: &mut PortCtx<'_>) -> Option<u32> {
+        self.svga_read(cx)
+    }
+
+    /// Bochs geforce.cc `svga_write`.
+    fn vga_pio_write(&mut self, cx: &mut PortCtx<'_>, value: u32) -> Written {
+        self.svga_write(cx, value)
     }
 
     /// Bochs `bx_geforce_c::reset` resets the NV chip; the core has already
     /// reset itself by the time this runs.
-    fn vga_reset(&mut self, cx: &mut crate::display::card::ResetCtx<'_>) {
-        let _ = cx;
+    fn vga_reset(&mut self, _cx: &mut ResetCtx<'_>) {
         self.reset();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{
+        DeviceCtx, IoLen, IrqLine, IrqSink, MmioDevice, PioDevice, TimerKey, TimerService,
+    };
+    use crate::display::card::VgaCard;
+    use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
+
+    const CLOCK: VmClock = VmClock::new(VmInstant::ZERO, ClockHz::BOCHS_DEFAULT);
+
+    /// The interrupt and timer capabilities an access is handed. The NV
+    /// chip's interrupt line reaches no controller, so nothing here is read.
+    struct Unwired;
+
+    impl IrqSink for Unwired {
+        fn set_level(&mut self, _line: IrqLine, _level: bool) {}
+        fn level(&self, _line: IrqLine) -> bool {
+            false
+        }
+    }
+
+    impl TimerService for Unwired {
+        fn arm_oneshot_usec(&mut self, _key: TimerKey, _delay_usec: u64) {}
+        fn arm_periodic_usec(&mut self, _key: TimerKey, _period_usec: u64) {}
+        fn arm_oneshot_ticks(&mut self, _key: TimerKey, _delay_ticks: u64) {}
+        fn cancel(&mut self, _key: TimerKey) {}
+    }
+
+    /// A GeForce3 driven the way a guest drives one: through its ports and its
+    /// BAR0 window.
+    struct Guest {
+        card: VgaCard<BxGeForceC>,
+        irq: Unwired,
+        timers: Unwired,
+    }
+
+    impl Guest {
+        fn new() -> Self {
+            Self {
+                card: VgaCard::with_extension(BxGeForceC::new(GeForceModel::GeForce3)),
+                irq: Unwired,
+                timers: Unwired,
+            }
+        }
+
+        fn port_in(&mut self, port: u16, len: IoLen) -> u32 {
+            let mut ctx = DeviceCtx {
+                clock: CLOCK,
+                irq: &mut self.irq,
+                timers: &mut self.timers,
+            };
+            PioDevice::pio_read(&mut self.card, port, len, &mut ctx)
+        }
+
+        fn port_out(&mut self, port: u16, value: u32, len: IoLen) {
+            let mut ctx = DeviceCtx {
+                clock: CLOCK,
+                irq: &mut self.irq,
+                timers: &mut self.timers,
+            };
+            PioDevice::pio_write(&mut self.card, port, value, len, &mut ctx);
+        }
+
+        fn crtc_write(&mut self, index: u8, value: u8) {
+            self.port_out(PORT_CRTC_INDEX, u32::from(index), IoLen::Byte);
+            self.port_out(PORT_CRTC_DATA, u32::from(value), IoLen::Byte);
+        }
+
+        fn crtc_read(&mut self, index: u8) -> u32 {
+            self.port_out(PORT_CRTC_INDEX, u32::from(index), IoLen::Byte);
+            self.port_in(PORT_CRTC_DATA, IoLen::Byte)
+        }
+
+        fn bar0_read(&mut self, offset: u32, len: u32) -> u64 {
+            let mut data = [0u8; 8];
+            let mut ctx = DeviceCtx {
+                clock: CLOCK,
+                irq: &mut self.irq,
+                timers: &mut self.timers,
+            };
+            MmioDevice::mmio_read(
+                &mut self.card,
+                VgaWindow::Registers.id(),
+                WindowOffset(u64::from(offset)),
+                len,
+                &mut data[..len as usize],
+                &mut ctx,
+            );
+            u64::from_le_bytes(data)
+        }
+
+        fn bar0_write(&mut self, offset: u32, value: u64, len: u32) {
+            let data = value.to_le_bytes();
+            let mut ctx = DeviceCtx {
+                clock: CLOCK,
+                irq: &mut self.irq,
+                timers: &mut self.timers,
+            };
+            MmioDevice::mmio_write(
+                &mut self.card,
+                VgaWindow::Registers.id(),
+                WindowOffset(u64::from(offset)),
+                len,
+                &data[..len as usize],
+                &mut ctx,
+            );
+        }
+
+        /// Open the RMA window at `rma_index` — CRTC 0x38, bit 0 the enable.
+        fn rma_select(&mut self, rma_index: u8) {
+            self.crtc_write(0x38, (rma_index << 1) | 1);
+        }
+
+        /// Drive the DDC clock and data lines through CRTC 0x3F.
+        fn ddc_drive(&mut self, scl: bool, sda: bool) {
+            self.crtc_write(0x3F, (u8::from(scl) << 5) | (u8::from(sda) << 4));
+        }
+
+        /// The data line as the monitor holds it, sampled through CRTC 0x3E.
+        fn ddc_monitor_sda(&mut self) -> bool {
+            (self.crtc_read(0x3E) & 0x08) != 0
+        }
+
+        /// Clock one host bit out: data while the clock is low, then a pulse.
+        fn ddc_send_bit(&mut self, bit: bool) {
+            self.ddc_drive(false, bit);
+            self.ddc_drive(true, bit);
+            self.ddc_drive(false, bit);
+        }
+
+        /// START, then the monitor's address 0x50 with the read bit — which
+        /// leaves the monitor holding data low for its acknowledge.
+        fn ddc_address_monitor_for_read(&mut self) {
+            self.ddc_drive(true, true);
+            self.ddc_drive(true, false);
+            self.ddc_drive(false, false);
+            for shift in (0..7).rev() {
+                self.ddc_send_bit(((0x50 >> shift) & 1) != 0);
+            }
+            self.ddc_send_bit(true);
+        }
+
+        fn ddc_receive_byte(&mut self) -> u8 {
+            let mut byte = 0u8;
+            for _ in 0..8 {
+                self.ddc_drive(true, true);
+                byte = (byte << 1) | u8::from(self.ddc_monitor_sda());
+                self.ddc_drive(false, true);
+            }
+            byte
+        }
+    }
+
+    /// An index past the standard VGA's belongs to the card alone. The core
+    /// keeps six index bits, so index 0x41 reaching it would land on CRTC 0x01,
+    /// the horizontal display end of the mode on screen.
+    #[test]
+    fn an_extended_crtc_write_reaches_the_card_and_not_the_core() {
+        let mut guest = Guest::new();
+        guest.crtc_write(0x01, 0x4F);
+
+        guest.crtc_write(0x41, 0x5A);
+
+        assert_eq!(guest.crtc_read(0x41), 0x5A, "the card stores and answers index 0x41");
+        assert_eq!(guest.crtc_read(0x01), 0x4F, "and the core's CRTC 0x01 is untouched");
+    }
+
+    /// At or below 0x18 the card keeps a copy and the core still performs the
+    /// write — Bochs `svga_write` stores `crtc.reg` and then calls `VGA_WRITE`.
+    #[test]
+    fn a_standard_crtc_write_reaches_both_the_card_and_the_core() {
+        let mut guest = Guest::new();
+
+        guest.crtc_write(0x13, 0x28);
+
+        assert_eq!(guest.crtc_read(0x13), 0x28, "the core answers the read");
+        assert_eq!(
+            guest.card.ext.crtc.reg[0x13], 0x28,
+            "the card's copy, which its extended modes are computed from"
+        );
+        assert!(guest.card.ext.svga_needs_update_mode, "CRTC 0x13 is a mode register");
+    }
+
+    #[test]
+    fn the_crtc_index_reads_back_in_full() {
+        let mut guest = Guest::new();
+
+        guest.port_out(PORT_CRTC_INDEX, 0x41, IoLen::Byte);
+
+        assert_eq!(guest.port_in(PORT_CRTC_INDEX, IoLen::Byte), 0x41);
+        assert_eq!(
+            guest.port_in(PORT_CRTC_INDEX_MONO, IoLen::Byte),
+            0x41,
+            "the mono index port answers from the same register"
+        );
+    }
+
+    /// Bochs answers Input Status 0 with the DAC-sensing bit set: a monitor is
+    /// present.
+    #[test]
+    fn input_status_0_reports_a_monitor() {
+        let mut guest = Guest::new();
+        assert_eq!(guest.port_in(PORT_INPUT_STATUS_0, IoLen::Byte), 0x10);
+    }
+
+    /// A word at the index port carries the index in its low byte and the
+    /// register in its high byte, and the card resolves both halves.
+    #[test]
+    fn a_word_crtc_access_splits_into_index_and_data() {
+        let mut guest = Guest::new();
+        guest.crtc_write(0x01, 0x4F);
+
+        guest.port_out(PORT_CRTC_INDEX, 0x5A41, IoLen::Word);
+
+        assert_eq!(guest.port_in(PORT_CRTC_INDEX, IoLen::Word), 0x5A41);
+        assert_eq!(
+            guest.crtc_read(0x01),
+            0x4F,
+            "the data byte went to the card's 0x41, not to CRTC 0x01"
+        );
+    }
+
+    /// The RMA window is how an NV video BIOS reaches BAR0 and VRAM through
+    /// I/O ports: CRTC 0x38 selects the address or the data, and 0x3D0/0x3D2
+    /// carry it.
+    #[test]
+    fn rma_reaches_the_register_file_and_vram() {
+        let mut guest = Guest::new();
+
+        // PFIFO RAMHT, through the register file.
+        guest.rma_select(1);
+        guest.port_out(PORT_RMA_LOW, 0x0000_2210, IoLen::Dword);
+        assert_eq!(guest.port_in(PORT_RMA_LOW, IoLen::Dword), 0x0000_2210);
+        guest.rma_select(3);
+        guest.port_out(PORT_RMA_LOW, 0xCAFE_BABE, IoLen::Dword);
+        assert_eq!(guest.bar0_read(0x2210, 4), 0xCAFE_BABE, "the register BAR0 shows");
+
+        // A word at 0x3D2 replaces the high half only.
+        guest.port_out(PORT_RMA_HIGH, 0x1234, IoLen::Word);
+        guest.rma_select(2);
+        assert_eq!(guest.port_in(PORT_RMA_LOW, IoLen::Dword), 0x1234_BABE);
+        assert_eq!(guest.port_in(PORT_RMA_HIGH, IoLen::Word), 0x1234);
+
+        // Address bit 31 selects VRAM; each address half is set by its port.
+        guest.rma_select(1);
+        guest.port_out(PORT_RMA_LOW, 0x1000, IoLen::Word);
+        guest.port_out(PORT_RMA_HIGH, 0x8000, IoLen::Word);
+        guest.rma_select(3);
+        guest.port_out(PORT_RMA_LOW, 0x0102_0304, IoLen::Dword);
+        guest.rma_select(2);
+        assert_eq!(guest.port_in(PORT_RMA_LOW, IoLen::Dword), 0x0102_0304);
+        assert_eq!(guest.card.ext.vram_read32(0x1000), 0x0102_0304, "and it is VRAM");
+    }
+
+    #[test]
+    fn rma_is_closed_until_crtc_0x38_opens_it() {
+        let mut guest = Guest::new();
+
+        guest.port_out(PORT_RMA_LOW, 0x0000_2210, IoLen::Dword);
+        assert_eq!(guest.port_in(PORT_RMA_LOW, IoLen::Dword), 0, "a closed window reads zero");
+
+        guest.rma_select(1);
+        assert_eq!(
+            guest.port_in(PORT_RMA_LOW, IoLen::Dword),
+            0,
+            "the address written while it was closed was dropped"
+        );
+        assert_eq!(guest.port_in(PORT_RMA_LOW, IoLen::Byte), 0, "a byte access reads zero");
+    }
+
+    /// The window bounds a transfer by its first byte only, so a read at the
+    /// last two bytes of VRAM straddles the end. The bytes that exist come
+    /// back and the access completes.
+    #[test]
+    fn an_rma_read_straddling_the_end_of_vram_returns_the_bytes_that_exist() {
+        let mut guest = Guest::new();
+        let last_dword = guest.card.ext.memsize - 4;
+        guest.rma_select(1);
+        guest.port_out(PORT_RMA_LOW, 0x8000_0000 | last_dword, IoLen::Dword);
+        guest.rma_select(3);
+        guest.port_out(PORT_RMA_LOW, 0x4433_2211, IoLen::Dword);
+
+        guest.rma_select(1);
+        guest.port_out(PORT_RMA_LOW, 0x8000_0000 | (last_dword + 2), IoLen::Dword);
+        guest.rma_select(2);
+
+        assert_eq!(guest.port_in(PORT_RMA_LOW, IoLen::Dword), 0x0000_4433);
+    }
+
+    #[test]
+    fn bar0_reads_are_one_two_or_four_bytes_wide() {
+        let mut guest = Guest::new();
+        guest.bar0_write(0x2210, 0x1234_5678, 4);
+
+        assert_eq!(guest.bar0_read(0x2210, 1), 0x78);
+        assert_eq!(guest.bar0_read(0x2210, 2), 0x5678, "the low half of the register");
+        assert_eq!(guest.bar0_read(0x2210, 4), 0x1234_5678);
+    }
+
+    #[test]
+    fn an_eight_byte_bar0_write_stores_both_dwords() {
+        let mut guest = Guest::new();
+
+        guest.bar0_write(0x2210, 0x1111_2222_3333_4444, 8);
+
+        assert_eq!(guest.bar0_read(0x2210, 4), 0x3333_4444, "PFIFO RAMHT takes the low dword");
+        assert_eq!(guest.bar0_read(0x2214, 4), 0x1111_2222, "PFIFO RAMFC the high one");
+
+        guest.bar0_write(0x2210, 0xAB, 1);
+        assert_eq!(guest.bar0_read(0x2210, 4), 0x3333_44AB, "a byte write replaces one byte");
+    }
+
+    /// A dword read at 0x18FE straddles the end of the 256-byte PCI config
+    /// space mirrored in BAR0.
+    #[test]
+    fn a_dword_read_at_the_end_of_pci_config_space_completes() {
+        let mut guest = Guest::new();
+        guest.bar0_write(0x18FC, 0x4433_2211, 4);
+
+        assert_eq!(guest.bar0_read(0x18FE, 4), 0x0000_4433);
+    }
+
+    /// The NV BIOS reads the monitor's EDID by bit-banging I2C through CRTC
+    /// 0x3F and sampling the lines back through 0x3E.
+    #[test]
+    fn the_edid_reads_through_crtc_0x3f_and_0x3e() {
+        let mut guest = Guest::new();
+
+        guest.ddc_drive(true, true);
+        assert_eq!(guest.crtc_read(0x3E), 0x0C, "clock and data both high at rest");
+
+        guest.ddc_address_monitor_for_read();
+        guest.ddc_drive(false, true);
+        guest.ddc_drive(true, true);
+        assert!(!guest.ddc_monitor_sda(), "the monitor acknowledges address 0x50");
+        guest.ddc_drive(false, true);
+
+        assert_eq!(guest.ddc_receive_byte(), 0x00, "EDID header byte 0");
+        guest.ddc_send_bit(false);
+        guest.ddc_drive(false, true);
+        assert_eq!(guest.ddc_receive_byte(), 0xFF, "EDID header byte 1");
+    }
+
+    /// CRTC 0x37 and 0x51 report the lines they are given in the register
+    /// one below: data in bit 3, clock in bit 2.
+    #[test]
+    fn crtc_0x37_and_0x51_report_their_lines_one_index_below() {
+        let mut guest = Guest::new();
+
+        guest.crtc_write(0x37, 0x20);
+        assert_eq!(guest.crtc_read(0x36), 0x04, "clock high, data low");
+
+        guest.crtc_write(0x51, 0x10);
+        assert_eq!(guest.crtc_read(0x50), 0x08, "clock low, data high");
+    }
+
+    #[test]
+    fn crtc_0x1c_bit_7_rising_clears_the_crtc_interrupt_enable() {
+        let mut guest = Guest::new();
+        guest.bar0_write(0x60_0140, 1, 4);
+
+        guest.crtc_write(0x1C, 0x80);
+
+        assert_eq!(guest.bar0_read(0x60_0140, 4), 0, "PCRTC_INTR_EN cleared on the edge");
+        assert_eq!(guest.crtc_read(0x1C), 0x80);
+
+        guest.bar0_write(0x60_0140, 1, 4);
+        guest.crtc_write(0x1C, 0x80);
+        assert_eq!(guest.bar0_read(0x60_0140, 4), 1, "bit 7 already set is no edge");
+    }
+
+    /// CRTC 0x2F-0x31 place the hardware cursor image and enable it — the
+    /// state the NV scanout draws the cursor from.
+    #[test]
+    fn crtc_0x2f_to_0x31_place_and_enable_the_hardware_cursor() {
+        let mut guest = Guest::new();
+        guest.crtc_write(0x30, 0x81);
+        guest.crtc_write(0x2F, 0x02);
+        assert!(!guest.card.ext.hw_cursor.enabled);
+
+        guest.crtc_write(0x31, 0x05);
+
+        let cursor = &guest.card.ext.hw_cursor;
+        assert!(cursor.enabled, "CRTC 0x31 bit 0");
+        assert!(cursor.vram, "CRTC 0x30 bit 7");
+        assert_eq!(cursor.offset, (0x02 << 24) | (0x01 << 17) | (0x01 << 11));
+    }
+
+    #[test]
+    fn crtc_0x1d_and_0x1e_select_32k_banks() {
+        let mut guest = Guest::new();
+
+        guest.crtc_write(0x1D, 3);
+        guest.crtc_write(0x1E, 1);
+
+        assert_eq!(guest.card.ext.bank_base, [3 * 0x8000, 0x8000]);
+    }
+
+    #[test]
+    fn crtc_0x58_drops_writes_that_its_pair_register_keeps() {
+        let mut guest = Guest::new();
+
+        guest.crtc_write(0x57, 0x12);
+        guest.crtc_write(0x58, 0x34);
+
+        assert_eq!(guest.crtc_read(0x57), 0x12);
+        assert_eq!(guest.crtc_read(0x58), 0x00);
+    }
+
+    #[test]
+    fn a_crtc_index_past_the_register_file_reads_all_ones() {
+        let mut guest = Guest::new();
+
+        guest.crtc_write(0xF5, 0x12);
+
+        assert_eq!(guest.crtc_read(0xF5), 0xFF);
+        assert_eq!(guest.crtc_read(0xF0), 0x00, "0xF0 is the last register in the file");
+    }
+
+    /// Bochs `bx_geforce_c::reset` restores the power-on straps, clears the
+    /// ROM-shadow enable in PCI config 0x50, and restarts the DDC channel.
+    #[test]
+    fn reset_restores_the_straps_the_rom_shadow_enable_and_the_ddc_channel() {
+        let mut guest = Guest::new();
+        let power_on_straps = guest.bar0_read(0x10_1000, 4);
+        guest.bar0_write(0x10_1000, 0x8000_0001, 4);
+        guest.bar0_write(0x1850, 0x01, 1);
+        assert_eq!(guest.bar0_read(0x10_1000, 4), 0x8000_0001);
+        assert_eq!(guest.bar0_read(0x1850, 1), 0x01);
+        guest.ddc_address_monitor_for_read();
+
+        guest.card.reset();
+
+        assert_eq!(guest.bar0_read(0x10_1000, 4), power_on_straps);
+        assert_eq!(guest.bar0_read(0x1850, 1), 0x00);
+        // A monitor still in its acknowledge would hold data low here.
+        guest.ddc_drive(true, true);
+        assert_eq!(guest.crtc_read(0x3E), 0x0C, "the channel is back at rest");
     }
 }
