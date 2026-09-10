@@ -13,13 +13,15 @@ pub(crate) const STROKE_HAIRLINE: Color32 = Color32::from_rgb(0x26, 0x34, 0x43);
 /// A control's own box — a checkbox's square, a radio's disc, a slider's
 /// handle — at rest, while the pointer is over it, and while it is pressed or
 /// focused. The three rise in that order, so interaction reads as the control
-/// lifting off its surface, and `CONTROL_FILL_REST` is lighter than every
-/// surface a control sits on — `BG_BASE`, `BG_PANEL`, `BG_CARD` and `BG_WELL`
-/// — so a resting box is visible wherever it lands. The tests below hold both
-/// orderings.
-pub(crate) const CONTROL_FILL_REST: Color32 = Color32::from_rgb(0x26, 0x34, 0x43);
-pub(crate) const CONTROL_FILL_HOVERED: Color32 = Color32::from_rgb(0x2E, 0x3F, 0x51);
-pub(crate) const CONTROL_FILL_ACTIVE: Color32 = Color32::from_rgb(0x36, 0x49, 0x5D);
+/// lifting off its surface. `CONTROL_FILL_REST` clears WCAG 1.4.11's 3:1
+/// non-text contrast against `BG_CARD`, the lightest surface a control sits
+/// on, and so against `BG_PANEL`, `BG_BASE` and `BG_WELL` too; and every fill
+/// keeps 3:1 under the check mark drawn on it in that state's `fg_stroke` —
+/// `TEXT_PRIMARY` at rest, white while hovered and while pressed — which caps
+/// the ramp from above. The tests below hold the ordering and both contrasts.
+pub(crate) const CONTROL_FILL_REST: Color32 = Color32::from_rgb(0x60, 0x72, 0x8A);
+pub(crate) const CONTROL_FILL_HOVERED: Color32 = Color32::from_rgb(0x6E, 0x80, 0x92);
+pub(crate) const CONTROL_FILL_ACTIVE: Color32 = Color32::from_rgb(0x7A, 0x8C, 0xA0);
 pub(crate) const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xE8, 0xEE, 0xF5);
 pub(crate) const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x98, 0xA8);
 pub(crate) const ACCENT_CYAN: Color32 = Color32::from_rgb(0x46, 0xD9, 0xC7);
@@ -62,12 +64,15 @@ pub(crate) fn configure_shell_style(ctx: &egui::Context) {
         // `bg_fill` is a control's own box, not its surface: the checkbox
         // square, the radio disc, the slider rail and handle, and a solid
         // scroll bar's handle over its `BG_WELL` track. Each of the three
-        // interactive fills is lighter than every surface a control sits on —
-        // the page (`BG_BASE`), a panel (`BG_PANEL`), a card (`BG_CARD`) and
-        // the input well (`BG_WELL`) — so a resting box is visible wherever it
-        // lands, and the ramp rises rest → hover → press. `bg_stroke` keeps
-        // egui's default because it frames every button, and buttons fill with
-        // `weak_bg_fill`, which this ramp does not touch.
+        // interactive fills clears 3:1 against every surface a control sits on
+        // — the page (`BG_BASE`), a panel (`BG_PANEL`), a card (`BG_CARD`) and
+        // the input well (`BG_WELL`) — so a resting box reads as a control
+        // wherever it lands; the ramp rises rest → hover → press; and each fill
+        // stays dark enough for the check mark in that state's `fg_stroke` —
+        // set below for rest and hover, egui's default white when pressed — to
+        // keep 3:1 over it. `bg_stroke` keeps egui's default because it frames
+        // every button, and buttons fill with `weak_bg_fill`, which this ramp
+        // does not touch.
         style.visuals.widgets.inactive.bg_fill = CONTROL_FILL_REST;
         style.visuals.widgets.hovered.bg_fill = CONTROL_FILL_HOVERED;
         style.visuals.widgets.active.bg_fill = CONTROL_FILL_ACTIVE;
@@ -89,8 +94,8 @@ pub(crate) fn shell_card_frame() -> egui::Frame {
 #[cfg(test)]
 mod tests {
     use super::{
-        BG_BASE, BG_CARD, BG_PANEL, BG_WELL, CONTROL_FILL_ACTIVE, CONTROL_FILL_HOVERED,
-        CONTROL_FILL_REST,
+        configure_shell_style, BG_BASE, BG_CARD, BG_PANEL, BG_WELL, CONTROL_FILL_ACTIVE,
+        CONTROL_FILL_HOVERED, CONTROL_FILL_REST,
     };
     use egui::Color32;
 
@@ -108,6 +113,56 @@ mod tests {
         }
         let [r, g, b, _] = color.to_array();
         0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    }
+
+    /// WCAG contrast ratio of two opaque colours, from 1.0 for a colour against
+    /// itself to 21.0 for black against white.
+    fn contrast_ratio(a: Color32, b: Color32) -> f64 {
+        let a = relative_luminance(a);
+        let b = relative_luminance(b);
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// WCAG 1.4.11's floor for a control's boundary and its state indicator.
+    const NON_TEXT_CONTRAST: f64 = 3.0;
+
+    /// The interactive widget visuals exactly as the shell configures them,
+    /// so the assertions read the fills and strokes a control is drawn with,
+    /// not the constants they are meant to be wired to.
+    fn configured_widgets() -> egui::style::Widgets {
+        let ctx = egui::Context::default();
+        configure_shell_style(&ctx);
+        ctx.style_of(egui::Theme::Dark).visuals.widgets.clone()
+    }
+
+    #[test]
+    fn a_resting_control_box_clears_non_text_contrast_against_a_card() {
+        let box_fill = configured_widgets().inactive.bg_fill;
+        let ratio = contrast_ratio(box_fill, BG_CARD);
+        assert!(
+            ratio >= NON_TEXT_CONTRAST,
+            "a resting box ({box_fill:?}) against BG_CARD ({BG_CARD:?}) is {ratio:.3}:1; \
+             WCAG 1.4.11 asks {NON_TEXT_CONTRAST}:1"
+        );
+    }
+
+    #[test]
+    fn a_check_mark_clears_non_text_contrast_against_its_box_in_every_state() {
+        let widgets = configured_widgets();
+        for (state, visuals) in [
+            ("resting", &widgets.inactive),
+            ("hovered", &widgets.hovered),
+            ("pressed", &widgets.active),
+        ] {
+            let mark = visuals.fg_stroke.color;
+            let box_fill = visuals.bg_fill;
+            let ratio = contrast_ratio(mark, box_fill);
+            assert!(
+                ratio >= NON_TEXT_CONTRAST,
+                "the {state} check mark ({mark:?}) against its box ({box_fill:?}) is {ratio:.3}:1; \
+                 WCAG 1.4.11 asks {NON_TEXT_CONTRAST}:1"
+            );
+        }
     }
 
     #[test]
