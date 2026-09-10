@@ -159,9 +159,10 @@ deleted with the bar rather than repaired.
 Four rules, and a module that owns them.
 
 **`page_header(ui, title, subtitle)`** — a 16 px title over an 11 px muted
-subtitle, then 12 px of space. Every pane opens with exactly this. It replaces
-the Images hero card, Hardware's `Hardware Summary  |  Memory` pipe, and
-`hardware_intro`.
+subtitle, then 12 px of space. Every settings pane — Hardware and Images —
+opens with exactly this; Summary opens with its header card and Console with
+the embedded view, so neither uses it. It replaces the Images hero card,
+Hardware's `Hardware Summary  |  Memory` pipe, and `hardware_intro`.
 
 **A card fills its column, and the column is set by the layout.** No pane sets
 a card's width with `set_min_width`. That call is the actual cause of the
@@ -169,8 +170,8 @@ floating cards and the ragged right edge the audit measured: a card sized from
 the inside cannot know the column it sits in. Cards are allocated an explicit
 width by their parent and then take `ui.available_width()`.
 
-**`field_row(ui, label, add_contents)`** — the label occupies a fixed 104 px
-column, so every input in a pane starts on the same x. It replaces every
+**`field_row(ui, label, add_contents)`** — the label occupies a fixed 112 px
+column (`FIELD_LABEL_WIDTH`), so every input in a pane starts on the same x. It replaces every
 ad-hoc `ui.horizontal(|ui| { ui.label(..); ui.add(..) })` in Hardware and
 Images, which is where the 303-vs-297 px misalignment came from.
 
@@ -284,8 +285,8 @@ and the two new chrome surfaces get their own module:
 | file | responsibility |
 |---|---|
 | `rusty_box_gui/src/shell/mod.rs` | declares the module, re-exports its items |
-| `rusty_box_gui/src/shell/theme.rs` | palette, type and spacing scale, `configure_shell_style`, `shell_card_frame` |
-| `rusty_box_gui/src/shell/widgets.rs` | `page_header`, `field_row`, `action_tile*`, `status_dot`, `status_text`, `hairline_*`, `home_fact`, `metadata_text` |
+| `rusty_box_gui/src/shell/theme.rs` | palette, including `BG_WELL` and the control-fill ramp `CONTROL_FILL_REST` / `CONTROL_FILL_HOVERED` / `CONTROL_FILL_ACTIVE`; type and spacing scale; `configure_shell_style`, `shell_card_frame` |
+| `rusty_box_gui/src/shell/widgets.rs` | `page_header`, `field_row`, `selection_row` and `RowMark`, `action_tile*`, `primary_button`, `status_dot`, `status_text`, `hairline_*`, `home_fact`, `metadata_text`, `text_width` / `button_width`, `path_field_width` and `BROWSE` |
 | `rusty_box_gui/src/shell/destination.rs` | `ShellPage`, `Destination`, `SidebarAction`, `VmBarAction`, and their tests |
 | `rusty_box_gui/src/shell/sidebar.rs` | `VmLibraryEntry`, `draw_sidebar` |
 | `rusty_box_gui/src/shell/vm_bar.rs` | `draw_vm_bar` |
