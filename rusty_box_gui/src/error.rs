@@ -12,12 +12,6 @@ pub enum RunError {
         source: toml::de::Error,
     },
 
-    #[error("failed to write config {}: {source}", path.display())]
-    ConfigWrite { path: PathBuf, source: io::Error },
-
-    #[error("failed to serialize config: {source}")]
-    ConfigSerialize { source: toml::ser::Error },
-
     #[error("BIOS path is required; pass --bios PATH or set rom.bios in TOML")]
     MissingBios,
 

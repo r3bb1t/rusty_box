@@ -4,7 +4,7 @@ use rusty_box::cpu::decoder::features::X86Feature;
 use rusty_box::params::{BxParamError, BxParams};
 use rusty_box::CpuidFreq;
 use std::{
-    env, fs, io,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -220,10 +220,6 @@ pub struct ResolvedConfig {
     pub disk: Option<ResolvedDisk>,
     pub cdrom: Option<ResolvedCdrom>,
     pub log_level: LogLevel,
-    /// Where "Save to config" persists these settings. `None` when resolved
-    /// without a file context (tests, `resolve_config`); the native launcher
-    /// fills it in `load_config`.
-    pub config_path: Option<PathBuf>,
     /// Optional pre-boot VBE mode (width, height, bpp) applied to the VGA
     /// controller before reset. `None` leaves the built-in defaults.
     pub vga_mode: Option<VgaMode>,
@@ -262,45 +258,53 @@ pub struct ResolvedCdrom {
     pub drive: usize,
 }
 
+/// The launch configuration: the file `--config` names, if any, with the
+/// command line's flags over it. Nothing the command line does not name is
+/// read. A `rusty_box.toml` in the working directory or its parent would let
+/// anyone who can drop a file there decide what the launcher boots and which
+/// file a disk creation overwrites (CWE-427), so neither is consulted.
 pub fn load_config(args: &Args) -> Result<ResolvedConfig, RunError> {
-    let cwd = env::current_dir().ok();
-    let (file, config_dir, config_path) = if args.no_config {
-        // No file was loaded, but "Save to config" should still have a target.
-        let save_path = cwd.as_deref().map(|cwd| cwd.join(DEFAULT_CONFIG_FILE));
-        (FileConfig::default(), None, save_path)
-    } else if let Some(path) = &args.config {
-        (
-            load_toml_file(path)?,
-            path.parent().map(Path::to_path_buf),
-            Some(path.clone()),
-        )
-    } else if let Some(default_path) = cwd.as_deref().and_then(find_default_config_file) {
-        let config_dir = default_path.parent().map(Path::to_path_buf);
-        (
-            load_toml_file(&default_path)?,
-            config_dir,
-            Some(default_path),
-        )
-    } else {
-        let save_path = cwd.as_deref().map(|cwd| cwd.join(DEFAULT_CONFIG_FILE));
-        (FileConfig::default(), None, save_path)
-    };
-
-    resolve_config_with_base(file, args, config_dir.as_deref(), config_path)
-}
-
-fn find_default_config_file(start_dir: &Path) -> Option<PathBuf> {
-    let local = start_dir.join(DEFAULT_CONFIG_FILE);
-    if local.exists() {
-        return Some(local);
+    match &args.config {
+        Some(path) => {
+            let file = load_toml_file(path)?;
+            resolve_config_with_base(file, args, path.parent())
+        }
+        None => resolve_config_with_base(FileConfig::default(), args, None),
     }
-
-    let parent = start_dir.parent()?.join(DEFAULT_CONFIG_FILE);
-    parent.exists().then_some(parent)
 }
 
 pub fn resolve_config(file: FileConfig, args: &Args) -> Result<ResolvedConfig, RunError> {
-    resolve_config_with_base(file, args, None, None)
+    resolve_config_with_base(file, args, None)
+}
+
+/// A configuration with nothing chosen yet: no firmware, no media, and every
+/// setting at the value `resolve_config` gives a missing key. The shell shows
+/// it as "New VM" when it has no other VM to show.
+pub fn blank_config() -> ResolvedConfig {
+    ResolvedConfig {
+        engine: Engine::default(),
+        cpu_capabilities: CpuCapabilities::default(),
+        memory_mib: 32,
+        host_memory_mib: 32,
+        memory_block_kib: 128,
+        ips: 4_000_000,
+        pci: true,
+        sync_slowdown: false,
+        sync_realtime: false,
+        smp_quantum: 16,
+        cpuid_freq: CpuidFreq::None,
+        max_instructions: u64::MAX,
+        cpu_params: BxParams::default(),
+        display: default_display_backend(),
+        bios: PathBuf::new(),
+        vga_bios: None,
+        boot_order: Vec::new(),
+        disk: None,
+        cdrom: None,
+        log_level: LogLevel::Warn,
+        vga_mode: None,
+        pci_vga: false,
+    }
 }
 
 /// Resolves a file the shell keeps itself — a VM library file, or the VM a
@@ -309,14 +313,13 @@ pub fn resolve_config(file: FileConfig, args: &Args) -> Result<ResolvedConfig, R
 /// in.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn resolve_config_in(file: FileConfig, dir: &Path) -> Result<ResolvedConfig, RunError> {
-    resolve_config_with_base(file, &Args::default(), Some(dir), None)
+    resolve_config_with_base(file, &Args::default(), Some(dir))
 }
 
 fn resolve_config_with_base(
     file: FileConfig,
     args: &Args,
     config_dir: Option<&Path>,
-    config_path: Option<PathBuf>,
 ) -> Result<ResolvedConfig, RunError> {
     let engine = args.engine.or(file.emulator.engine).unwrap_or_default();
     let cpu_capabilities = args
@@ -457,7 +460,6 @@ fn resolve_config_with_base(
         disk,
         cdrom,
         log_level,
-        config_path,
         vga_mode,
         pci_vga,
     })
@@ -593,17 +595,6 @@ impl ResolvedConfig {
             cdrom,
             logging,
         }
-    }
-
-    /// Persist these settings to `path` as pretty TOML.
-    pub fn save_to_toml(&self, path: &Path) -> Result<(), RunError> {
-        let file = self.to_file_config();
-        let text = toml::to_string_pretty(&file)
-            .map_err(|source| RunError::ConfigSerialize { source })?;
-        fs::write(path, text).map_err(|source| RunError::ConfigWrite {
-            path: path.to_owned(),
-            source,
-        })
     }
 }
 
@@ -1048,19 +1039,44 @@ mod tests {
     }
 
     #[test]
-    fn finds_parent_default_config_when_run_from_crate_dir() {
-        let parent = unique_temp_dir("rusty-box-gui-parent-config");
-        let child = parent.join("rusty_box_gui");
-        fs::create_dir_all(&child).unwrap();
-        let config_path = parent.join(DEFAULT_CONFIG_FILE);
-        fs::write(&config_path, "[rom]\nbios = \"bios.bin\"\n").unwrap();
+    fn a_vm_table_names_the_vm() {
+        let file = config("[vm]\nname = \"Alpine\"\n[rom]\nbios = \"bios.bin\"\n");
+        assert_eq!(file.vm.name.as_deref(), Some("Alpine"));
+    }
 
-        let found = find_default_config_file(&child);
+    #[test]
+    fn a_file_without_a_vm_table_still_parses() {
+        let file = config("[rom]\nbios = \"bios.bin\"\n");
+        assert_eq!(file.vm.name, None);
+    }
 
-        assert_eq!(found, Some(config_path.clone()));
-        remove_test_file(&config_path);
-        remove_test_dir(&child);
-        remove_test_dir(&parent);
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_saved_file_carries_no_vm_name_of_its_own() {
+        let file = config("[rom]\nbios = \"bios.bin\"\n");
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+        assert_eq!(resolved.to_file_config().vm.name, None);
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_blank_config_is_what_an_empty_bios_path_resolves_to() {
+        let file = FileConfig {
+            rom: RomToml {
+                bios: Some(PathBuf::new()),
+                vga_bios: None,
+            },
+            ..FileConfig::default()
+        };
+        assert_eq!(resolve_config(file, &args(["rusty_box_gui"])).unwrap(), blank_config());
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn without_config_the_command_line_alone_describes_the_machine() {
+        let resolved = load_config(&args(["rusty_box_gui", "--bios", "b.bin"])).unwrap();
+        assert_eq!(resolved.bios, PathBuf::from("b.bin"));
+        assert_eq!(resolved.memory_mib, 32);
     }
 
     #[test]

@@ -1747,51 +1747,12 @@ impl NativeShellApp {
             }
         }
 
-        ui.add_space(SPACE_GROUP);
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add(primary_button("Save settings to config file"))
-                .clicked()
-            {
-                self.save_settings_to_config_file();
-            }
-            if let Some(path) = &self.config.config_path {
-                ui.label(metadata_text("Config", &path.display().to_string()));
-            }
-        });
-
         if !editable {
             ui.add_space(SPACE_ITEM);
             ui.label(RichText::new("Power off before changing VM hardware.").color(ACCENT_AMBER));
         }
     }
 
-    /// Persist the current profile's settings to its TOML config file so they
-    /// survive across launches.
-    fn save_settings_to_config_file(&mut self) {
-        if let Err(message) = self.apply_pending_settings() {
-            self.shell_notice = Some(ShellNotice::error(message));
-            return;
-        }
-        let Some(path) = self.config.config_path.clone() else {
-            self.shell_notice = Some(ShellNotice::error(
-                "No config file path is known for this session; cannot save.".to_owned(),
-            ));
-            return;
-        };
-        match self.config.save_to_toml(&path) {
-            Ok(()) => {
-                self.shell_notice = Some(ShellNotice::info(format!(
-                    "Saved settings to {}.",
-                    path.display()
-                )));
-            }
-            Err(error) => {
-                self.shell_notice = Some(ShellNotice::error(error.to_string()));
-            }
-        }
-    }
     fn draw_images_page(&mut self, ui: &mut egui::Ui) {
         self.draw_shell_notice(ui);
         if let Some(created) = self.disk_creator.ui_page(ui) {
@@ -3985,7 +3946,6 @@ mod tests {
             }),
             cpu_params: BxParams::default(),
             log_level: crate::args::LogLevel::Warn,
-            config_path: None,
             vga_mode: None,
             pci_vga: false,
         }

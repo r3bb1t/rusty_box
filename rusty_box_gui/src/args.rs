@@ -122,6 +122,77 @@ pub struct Args {
     pub log_level: Option<LogLevel>,
 }
 
+impl Args {
+    /// Whether this command line describes a machine to launch: a config file,
+    /// or any flag that sets the machine's firmware, media, memory, processors
+    /// or timing. Without one, the egui shell opens on its VM library alone.
+    /// `--display`, `--log-level`, `--engine`, `--cpu-capabilities` and
+    /// `--no-config` say how to run, not what, so they do not count. The
+    /// destructuring is exhaustive, so a new flag must be sorted into one
+    /// group or the other.
+    pub fn names_a_machine(&self) -> bool {
+        let Args {
+            config,
+            no_config: _,
+            bios,
+            vga_bios,
+            display: _,
+            engine: _,
+            cpu_capabilities: _,
+            boot,
+            disk,
+            disk_chs,
+            create_disk,
+            create_disk_size,
+            overwrite_created_disk,
+            cdrom,
+            memory_mib,
+            host_memory_mib,
+            memory_block_kib,
+            ips,
+            max_instructions,
+            smp_quantum,
+            cpuid_freq,
+            sync_realtime,
+            cpus,
+            cpu_sockets,
+            cpu_cores,
+            cpu_threads,
+            pci,
+            no_pci,
+            sync_slowdown,
+            no_sync_slowdown,
+            log_level: _,
+        } = self;
+        config.is_some()
+            || bios.is_some()
+            || vga_bios.is_some()
+            || !boot.is_empty()
+            || disk.is_some()
+            || disk_chs.is_some()
+            || create_disk.is_some()
+            || create_disk_size.is_some()
+            || *overwrite_created_disk
+            || cdrom.is_some()
+            || memory_mib.is_some()
+            || host_memory_mib.is_some()
+            || memory_block_kib.is_some()
+            || ips.is_some()
+            || max_instructions.is_some()
+            || smp_quantum.is_some()
+            || cpuid_freq.is_some()
+            || *sync_realtime
+            || cpus.is_some()
+            || cpu_sockets.is_some()
+            || cpu_cores.is_some()
+            || cpu_threads.is_some()
+            || *pci
+            || *no_pci
+            || *sync_slowdown
+            || *no_sync_slowdown
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DisplayBackend {
@@ -265,5 +336,16 @@ mod tests {
         let error = "306:0:17".parse::<DiskGeometry>().unwrap_err();
 
         assert_eq!(error, "disk CHS values must be non-zero");
+    }
+
+    #[test]
+    fn only_a_config_or_a_machine_flag_names_a_machine() {
+        let parse = |line: &[&str]| Args::parse_from(line);
+        assert!(!parse(&["rusty_box_gui"]).names_a_machine());
+        assert!(!parse(&["rusty_box_gui", "--display", "headless", "--log-level", "info"]).names_a_machine());
+        assert!(!parse(&["rusty_box_gui", "--no-config", "--engine", "whp"]).names_a_machine());
+        assert!(parse(&["rusty_box_gui", "--config", "vm.toml"]).names_a_machine());
+        assert!(parse(&["rusty_box_gui", "--cdrom", "a.iso"]).names_a_machine());
+        assert!(parse(&["rusty_box_gui", "--memory-mib", "64"]).names_a_machine());
     }
 }

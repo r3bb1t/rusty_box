@@ -863,7 +863,6 @@ mod tests {
             disk: None::<ResolvedDisk>,
             cdrom: None::<ResolvedCdrom>,
             log_level: LogLevel::Warn,
-            config_path: None,
             vga_mode: None,
             pci_vga: false,
         })
@@ -930,7 +929,6 @@ mod tests {
             }),
             cdrom: None::<ResolvedCdrom>,
             log_level: LogLevel::Warn,
-            config_path: None,
             vga_mode: None,
             pci_vga: false,
         }
@@ -1120,7 +1118,6 @@ mod tests {
                 disk: None::<ResolvedDisk>,
                 cdrom: None::<ResolvedCdrom>,
                 log_level: LogLevel::Warn,
-                config_path: None,
                 vga_mode: None,
                 pci_vga: false,
             }))

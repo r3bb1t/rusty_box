@@ -91,8 +91,7 @@ fn run(app: AndroidApp) -> Result<RunSummary, RunError> {
 /// The machine a phone powers on: what `rusty_box.toml` in the app's storage
 /// says, over defaults that need nothing outside the APK — the Bochs ROMs it
 /// carries, a phone-sized memory, and in a build with `embedded-alpine` the
-/// Alpine ISO as a CD booted first. "Save settings to config file" writes that
-/// same file, so a saved choice wins at the next launch.
+/// Alpine ISO as a CD booted first.
 fn phone_config(storage: &Path) -> Result<ResolvedConfig, RunError> {
     let config_path = storage.join(DEFAULT_CONFIG_FILE);
     let mut file = if config_path.exists() {
@@ -133,9 +132,7 @@ fn phone_config(storage: &Path) -> Result<ResolvedConfig, RunError> {
         }
     }
 
-    let mut config = resolve_config(file, &Args::default())?;
-    config.config_path = Some(config_path);
-    Ok(config)
+    resolve_config(file, &Args::default())
 }
 
 fn stage(kind: &'static str, dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, RunError> {
