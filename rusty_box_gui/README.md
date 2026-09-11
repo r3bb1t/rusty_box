@@ -71,7 +71,7 @@ The pages:
   | CD/DVD | Enable, ISO path (with a file browser), ATA channel and drive, "Boot CD/DVD first" |
   | Display | BIOS and VGA BIOS paths, log level, a pre-boot display resolution, and "Register VGA on PCI" (experimental: exposes the adapter as PCI 1234:1111 for Linux `bochs-drm`) |
 
-  `Save settings to config file` writes the selected profile to the TOML file that was loaded. If no file was loaded, including under `--no-config`, it writes `rusty_box.toml` in the current directory. It rewrites the whole file, so comments in it are lost. It writes the CPU topology as `cpu_sockets` / `cpu_cores` / `cpu_threads` rather than `cpus`. It omits `sync_realtime`, `smp_quantum`, `max_instructions`, `cpuid_freq` and `pci_vga` when they are at their defaults. The engine and CPU-capability choices have no TOML keys, so they are not saved.
+  `Save settings to config file` writes the selected profile to the TOML file that was loaded. If no file was loaded, including under `--no-config`, it writes `rusty_box.toml` in the current directory. It rewrites the whole file, so comments in it are lost. It writes the CPU topology as `cpu_sockets` / `cpu_cores` / `cpu_threads` rather than `cpus`. It omits `engine`, `cpu_capabilities`, `sync_realtime`, `smp_quantum`, `max_instructions`, `cpuid_freq` and `pci_vga` when they are at their defaults.
 - **Images** creates disk images (see [Disk images](#disk-images)).
 
 ## Execution engines
@@ -89,7 +89,7 @@ A machine on the hypervisor differs from an interpreter machine in these ways:
 
 The WHP path is compiled only on Windows, with `hv-whp`, and without `guest-trace`. In any other build, `--engine whp` is refused before any file is read or created, with `this build has no hypervisor engine, so --engine whp cannot run`; the error names `--engine interpreter` as the alternative.
 
-The engine is chosen per run. It has no TOML key and is not saved.
+In TOML the engine is `emulator.engine`; `--engine` on the command line overrides it, and with neither the interpreter runs.
 
 ## CPU capabilities
 
@@ -98,7 +98,7 @@ The engine is chosen per run. It has no TOML key and is not saved.
 - **`preset`** (the default) is this port's own processor model, whole. It is the same on every host, so a run is reproducible.
 - **`host-shared`** narrows that model to what the host can also carry. It drops AVX-512 unless the host's `CPUID.(EAX=0DH,ECX=0)` reports the opmask and both ZMM state components. It drops AVX unless the host reports YMM state. It always drops `MONITOR`/`MWAIT`, which a hypervisor partition does not offer.
 
-This is a CLI-only setting, with no TOML key. The WHP engine forces `host-shared`.
+In TOML this is `emulator.cpu_capabilities`; `--cpu-capabilities` overrides it, and with neither the guest gets `preset`. The WHP engine forces `host-shared`.
 
 ## Disk images
 
@@ -257,6 +257,9 @@ Every key, with its default and matching flag:
 
 | Key | Meaning | Default | CLI flag |
 | --- | --- | --- | --- |
+| `vm.name` | The name the shell shows for the VM; without it, the file's own name | unset | none |
+| `emulator.engine` | Execution engine: `"interpreter"` or `"whp"` (see [Execution engines](#execution-engines)) | `"interpreter"` | `--engine` |
+| `emulator.cpu_capabilities` | Processor offered to the guest: `"preset"` or `"host-shared"` (see [CPU capabilities](#cpu-capabilities)) | `"preset"` | `--cpu-capabilities` |
 | `emulator.memory_mib` | Guest memory, MiB | `32` | `--memory-mib` |
 | `emulator.host_memory_mib` | Host RAM backing guest memory, MiB; a larger guest gets an overflow file for the rest | `memory_mib` | `--host-memory-mib` |
 | `emulator.memory_block_kib` | Memory allocation block size, KiB | `128` | `--memory-block-kib` |
@@ -298,8 +301,6 @@ Release builds compile out `debug` and `trace` output: the workspace builds `tra
 | --- | --- |
 | `-f`, `--config PATH` | Load this TOML file (conflicts with `--no-config`) |
 | `--no-config` | Load no TOML file |
-| `--engine interpreter\|whp` | Execution engine (default `interpreter`) |
-| `--cpu-capabilities preset\|host-shared` | Processor offered to the guest (default `preset`) |
 
 All other flags mirror a TOML key in the table above. Some rules for combining them:
 

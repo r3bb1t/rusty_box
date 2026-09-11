@@ -71,9 +71,8 @@ pub enum RunError {
         source: io::Error,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[error(transparent)]
-    Library(#[from] crate::library::LibraryError),
+    Library(#[from] LibraryError),
 
     #[error("VGA BIOS size must be a non-zero multiple of 512 bytes: {} has {len} bytes", path.display())]
     InvalidVgaBiosSize { path: PathBuf, len: usize },
@@ -159,4 +158,39 @@ pub enum RunError {
 
     #[error(transparent)]
     Emulator(#[from] rusty_box::Error),
+}
+
+/// What the VM library (`crate::library`) fails at. Defined here, with no
+/// `#[cfg]`, so that `RunError::Library` exists in every build: a public
+/// error has the same variants in every configuration (safety doctrine R0,
+/// shape stability across features), even though the module producing this
+/// one is native-only.
+#[derive(Debug, thiserror::Error)]
+pub enum LibraryError {
+    #[error("failed to create the VM library folder {}: {source}", path.display())]
+    CreateDir { path: PathBuf, source: io::Error },
+
+    #[error("failed to read the VM library {}: {source}", path.display())]
+    Read { path: PathBuf, source: io::Error },
+
+    #[error("failed to write {}: {source}", path.display())]
+    Write { path: PathBuf, source: io::Error },
+
+    #[error("failed to delete {}: {source}", path.display())]
+    Delete { path: PathBuf, source: io::Error },
+
+    #[error("{} is not a file of the VM library in {}", path.display(), dir.display())]
+    OutsideLibrary { path: PathBuf, dir: PathBuf },
+
+    #[error("{text:?} is not a VM file stem: one file name, no folder, not starting with a dot")]
+    InvalidStem { text: String },
+
+    #[error("failed to make {} absolute: {source}", path.display())]
+    AbsolutePath { path: PathBuf, source: io::Error },
+
+    #[error("failed to serialize VM {name}: {source}")]
+    Serialize {
+        name: String,
+        source: toml::ser::Error,
+    },
 }

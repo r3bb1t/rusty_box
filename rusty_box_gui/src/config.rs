@@ -13,6 +13,7 @@ pub const DEFAULT_CONFIG_FILE: &str = "rusty_box.toml";
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileConfig {
+    #[serde(skip_serializing_if = "VmToml::is_empty")]
     pub vm: VmToml,
     pub emulator: EmulatorToml,
     pub display: DisplayToml,
@@ -33,9 +34,25 @@ pub struct VmToml {
     pub name: Option<String>,
 }
 
+impl VmToml {
+    /// Whether the table says nothing, in which case the file carries no
+    /// `[vm]` header at all: a bare header would be an unknown table to a
+    /// reader without this key.
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EmulatorToml {
+    /// Which engine retires the guest's instructions: `"interpreter"` or
+    /// `"whp"`. `--engine` overrides it; absent everywhere, the interpreter.
+    pub engine: Option<Engine>,
+    /// Which processor the machine offers its guest: `"preset"` or
+    /// `"host-shared"`. `--cpu-capabilities` overrides it; absent everywhere,
+    /// the preset.
+    pub cpu_capabilities: Option<CpuCapabilities>,
     pub memory_mib: Option<u32>,
     pub host_memory_mib: Option<u32>,
     pub memory_block_kib: Option<u32>,
@@ -301,6 +318,12 @@ fn resolve_config_with_base(
     config_dir: Option<&Path>,
     config_path: Option<PathBuf>,
 ) -> Result<ResolvedConfig, RunError> {
+    let engine = args.engine.or(file.emulator.engine).unwrap_or_default();
+    let cpu_capabilities = args
+        .cpu_capabilities
+        .or(file.emulator.cpu_capabilities)
+        .unwrap_or_default();
+
     let memory_mib = args.memory_mib.or(file.emulator.memory_mib).unwrap_or(32);
     ensure_nonzero("memory_mib", memory_mib)?;
 
@@ -414,8 +437,8 @@ fn resolve_config_with_base(
     validate_boot_order(&boot_order, disk.is_some(), cdrom.is_some())?;
 
     Ok(ResolvedConfig {
-        engine: args.engine,
-        cpu_capabilities: args.cpu_capabilities,
+        engine,
+        cpu_capabilities,
         memory_mib,
         host_memory_mib,
         memory_block_kib,
@@ -491,6 +514,11 @@ impl ResolvedConfig {
     pub fn to_file_config(&self) -> FileConfig {
         let topology = self.cpu_params.cpu_topology();
         let emulator = EmulatorToml {
+            // Only persist a non-default engine and processor so existing
+            // configs stay stable.
+            engine: (self.engine != Engine::default()).then_some(self.engine),
+            cpu_capabilities: (self.cpu_capabilities != CpuCapabilities::default())
+                .then_some(self.cpu_capabilities),
             memory_mib: Some(self.memory_mib),
             host_memory_mib: Some(self.host_memory_mib),
             memory_block_kib: Some(self.memory_block_kib),
@@ -604,8 +632,11 @@ pub fn load_toml_file(path: &Path) -> Result<FileConfig, RunError> {
     })
 }
 
+/// `path` based on the config file's directory when it is relative. An empty
+/// path names no file, so there is nothing to base: it stays empty rather
+/// than becoming the directory itself.
 fn resolve_toml_path(config_dir: Option<&Path>, path: PathBuf) -> PathBuf {
-    if path.is_relative() {
+    if path.is_relative() && !path.as_os_str().is_empty() {
         config_dir.map_or(path.clone(), |dir| dir.join(path))
     } else {
         path
@@ -1087,6 +1118,73 @@ path = "boot.iso"
         assert_eq!(
             resolved.to_file_config().emulator.cpuid_freq.as_deref(),
             Some("ips")
+        );
+    }
+
+    const WHP_FILE: &str = r#"
+[emulator]
+engine = "whp"
+cpu_capabilities = "host-shared"
+
+[rom]
+bios = "bios.bin"
+
+[cdrom]
+path = "boot.iso"
+"#;
+
+    #[test]
+    fn cli_engine_and_capabilities_beat_the_file_s() {
+        let resolved = resolve_config(
+            config(WHP_FILE),
+            &args([
+                "rusty_box_gui",
+                "--engine",
+                "interpreter",
+                "--cpu-capabilities",
+                "preset",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.engine, Engine::Interpreter);
+        assert_eq!(resolved.cpu_capabilities, CpuCapabilities::Preset);
+    }
+
+    #[test]
+    fn the_file_s_engine_and_capabilities_hold_when_the_command_line_names_none() {
+        let resolved = resolve_config(config(WHP_FILE), &args(["rusty_box_gui"])).unwrap();
+
+        assert_eq!(resolved.engine, Engine::Whp);
+        assert_eq!(resolved.cpu_capabilities, CpuCapabilities::HostShared);
+    }
+
+    #[test]
+    fn engine_and_capabilities_default_when_nothing_names_them() {
+        let resolved = resolve_config(
+            config("[rom]\nbios = \"bios.bin\"\n\n[cdrom]\npath = \"boot.iso\"\n"),
+            &args(["rusty_box_gui"]),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.engine, Engine::Interpreter);
+        assert_eq!(resolved.cpu_capabilities, CpuCapabilities::Preset);
+        // At their defaults, neither is written back.
+        let emulator = resolved.to_file_config().emulator;
+        assert_eq!(emulator.engine, None);
+        assert_eq!(emulator.cpu_capabilities, None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_empty_bios_path_stays_empty_wherever_the_file_lives() {
+        let file = config("[rom]\nbios = \"\"\n\n[cdrom]\npath = \"boot.iso\"\n");
+        let resolved = resolve_config_in(file, Path::new("library")).unwrap();
+
+        assert_eq!(resolved.bios, PathBuf::new());
+        assert_eq!(
+            resolved.cdrom.map(|cdrom| cdrom.path),
+            Some(Path::new("library").join("boot.iso"))
         );
     }
 
@@ -1634,6 +1732,8 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         let file = config(
             r#"
 [emulator]
+engine = "whp"
+cpu_capabilities = "host-shared"
 memory_mib = 512
 host_memory_mib = 512
 memory_block_kib = 128
@@ -1680,6 +1780,10 @@ level = "info"
         let round_tripped = resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap();
 
         assert_eq!(resolved, round_tripped);
+        assert!(serialized.contains("engine = \"whp\""));
+        assert!(serialized.contains("cpu_capabilities = \"host-shared\""));
+        // A file with nothing to say about the VM carries no `[vm]` table.
+        assert!(!serialized.contains("[vm]"));
     }
 
     #[test]

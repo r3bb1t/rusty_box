@@ -8,43 +8,51 @@
 //! climb out of the folder or land on a Windows device name.
 
 use crate::config::{load_toml_file, resolve_config_in, ResolvedConfig, DEFAULT_CONFIG_FILE};
+pub use crate::error::LibraryError;
 use crate::error::RunError;
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-/// The longest file stem `safe_stem` returns, in bytes. A uniqueness suffix
-/// (`-2`, `-3`, …) may follow it.
+/// The longest file stem the library writes, in bytes, a uniqueness suffix
+/// (`-2`, `-3`, …) included.
 const MAX_STEM_LEN: usize = 64;
-/// The file recording which VM the shell showed last. Its leading dot keeps
-/// it out of the VM listing.
+/// The file recording which VM the shell showed last. Its name has no `.toml`
+/// extension, so the listing never takes it for a VM.
 const LAST_SELECTED_FILE: &str = ".last";
+/// The extension of every VM file, matched exactly: the library writes no
+/// other spelling, so a `.TOML` file is not one of its own.
+const VM_EXTENSION: &str = "toml";
 /// The name a VM gets when the file describing it names none.
 pub const DEFAULT_VM_NAME: &str = "Rusty Box";
 
-#[derive(Debug, thiserror::Error)]
-pub enum LibraryError {
-    #[error("failed to read the VM library {}: {source}", path.display())]
-    Read { path: PathBuf, source: io::Error },
-    #[error("failed to write {}: {source}", path.display())]
-    Write { path: PathBuf, source: io::Error },
-    #[error("failed to delete {}: {source}", path.display())]
-    Delete { path: PathBuf, source: io::Error },
-    #[error("{} is not a file of the VM library in {}", path.display(), dir.display())]
-    OutsideLibrary { path: PathBuf, dir: PathBuf },
-    #[error("failed to serialize VM {name}: {source}")]
-    Serialize {
-        name: String,
-        source: toml::ser::Error,
-    },
-}
-
 /// A VM file's stem: its file name in the library folder, without `.toml`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// Every stem is one plain file name that does not start with a dot, so
+/// joining it to the folder never leaves the folder and never names one of
+/// the library's own dot files. [`VmStem::parse`] is the only way to make one:
+/// the listing, the last-selected record and the stems the library coins all
+/// pass through it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VmStem(String);
 
 impl VmStem {
+    /// The stem `text` spells, when `text` is exactly its own file name —
+    /// `Path::file_name` returns all of it, so it holds no folder, no `..`,
+    /// no root and no drive — and does not start with a dot.
+    pub fn parse(text: &str) -> Result<Self, LibraryError> {
+        let is_own_file_name = Path::new(text).file_name() == Some(OsStr::new(text));
+        if is_own_file_name && !text.starts_with('.') {
+            Ok(Self(text.to_owned()))
+        } else {
+            Err(LibraryError::InvalidStem {
+                text: text.to_owned(),
+            })
+        }
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -69,7 +77,7 @@ pub struct BrokenVmFile {
 /// What the library folder holds.
 #[derive(Clone, Debug, Default)]
 pub struct LibraryContents {
-    /// The VMs that load, in file-name order.
+    /// The VMs that load, ordered by stem.
     pub vms: Vec<LibraryVm>,
     pub broken: Vec<BrokenVmFile>,
 }
@@ -89,7 +97,7 @@ pub struct VmLibrary {
 impl VmLibrary {
     /// Opens the library kept in `dir`, creating the folder when it is missing.
     pub fn open(dir: PathBuf) -> Result<Self, LibraryError> {
-        fs::create_dir_all(&dir).map_err(|source| LibraryError::Write {
+        fs::create_dir_all(&dir).map_err(|source| LibraryError::CreateDir {
             path: dir.clone(),
             source,
         })?;
@@ -102,21 +110,21 @@ impl VmLibrary {
 
     /// The file `stem` names.
     pub fn path_of(&self, stem: &VmStem) -> PathBuf {
-        self.dir.join(format!("{}.toml", stem.0))
+        self.dir.join(format!("{}.{VM_EXTENSION}", stem.0))
     }
 
-    /// Every `*.toml` file directly in the folder, in file-name order. A file
-    /// whose name starts with a dot belongs to the library itself.
+    /// Every `*.toml` file directly in the folder, ordered by stem. A file
+    /// whose stem is not one — not UTF-8, or starting with a dot — is listed
+    /// as broken, like one whose contents do not load.
     pub fn load(&self) -> Result<LibraryContents, LibraryError> {
         let mut contents = LibraryContents::default();
         let mut files = Vec::new();
-        for path in self.toml_files()? {
-            match path.file_stem().and_then(|stem| stem.to_str()) {
-                Some(stem) if stem.starts_with('.') => {}
-                Some(stem) => files.push((stem.to_owned(), path)),
-                None => contents.broken.push(BrokenVmFile {
-                    error: "the file name is not valid UTF-8".to_owned(),
+        for path in self.vm_files()? {
+            match stem_of(&path) {
+                Ok(stem) => files.push((stem, path)),
+                Err(error) => contents.broken.push(BrokenVmFile {
                     path,
+                    error: error.to_string(),
                 }),
             }
         }
@@ -124,8 +132,8 @@ impl VmLibrary {
         for (stem, path) in files {
             match read_vm(&self.dir, &path) {
                 Ok(described) => contents.vms.push(LibraryVm {
-                    name: described.name.unwrap_or_else(|| stem.clone()),
-                    stem: VmStem(stem),
+                    name: described.name.unwrap_or_else(|| stem.0.clone()),
+                    stem,
                     config: described.config,
                 }),
                 Err(error) => contents.broken.push(BrokenVmFile {
@@ -144,17 +152,23 @@ impl VmLibrary {
         Ok(stem)
     }
 
-    /// Rewrites the file of `stem` to describe `name` and `config`.
+    /// Rewrites the file of `stem` to describe `config` under `name`, trimmed;
+    /// a name that is blank after trimming is stored as none, so the VM shows
+    /// under its stem. Relative paths in `config` are made absolute against
+    /// the working directory first — the base the running machine opened them
+    /// against — so the file stands on its own wherever it is read.
     pub fn save(
         &self,
         stem: &VmStem,
         name: &str,
         config: &ResolvedConfig,
     ) -> Result<(), LibraryError> {
-        let mut file = config.to_file_config();
-        file.vm.name = Some(name.to_owned());
+        let name = name.trim();
+        let mut file = with_absolute_paths(config)?.to_file_config();
+        file.vm.name = (!name.is_empty()).then(|| name.to_owned());
+        let shown = if name.is_empty() { stem.as_str() } else { name };
         let text = toml::to_string_pretty(&file).map_err(|source| LibraryError::Serialize {
-            name: name.to_owned(),
+            name: shown.to_owned(),
             source,
         })?;
         write_atomically(&self.path_of(stem), text.as_bytes())
@@ -178,15 +192,17 @@ impl VmLibrary {
     }
 
     /// The VM the shell showed last, when its file is still in the library.
-    /// A record that is missing or unreadable is no record.
+    /// A record that is missing, unreadable or not a stem is no record.
     pub fn last_selected(&self) -> Option<VmStem> {
         let recorded = match fs::read_to_string(self.dir.join(LAST_SELECTED_FILE)) {
             Ok(recorded) => recorded,
             Err(_) => return None,
         };
-        let stem = VmStem(recorded.trim().to_owned());
-        let well_formed = safe_stem(stem.as_str()) == stem.0;
-        (well_formed && self.path_of(&stem).is_file()).then_some(stem)
+        let stem = match VmStem::parse(recorded.trim()) {
+            Ok(stem) => stem,
+            Err(_) => return None,
+        };
+        self.path_of(&stem).is_file().then_some(stem)
     }
 
     /// Records `stem` as the VM the shell shows at its next launch.
@@ -210,8 +226,8 @@ impl VmLibrary {
         Ok(Some(self.create(name, &described.config)?))
     }
 
-    /// The regular `*.toml` files directly in the folder.
-    fn toml_files(&self) -> Result<Vec<PathBuf>, LibraryError> {
+    /// The regular files directly in the folder.
+    fn files(&self) -> Result<Vec<PathBuf>, LibraryError> {
         let read_error = |source: io::Error| LibraryError::Read {
             path: self.dir.clone(),
             source,
@@ -219,33 +235,45 @@ impl VmLibrary {
         let mut files = Vec::new();
         for entry in fs::read_dir(&self.dir).map_err(read_error)? {
             let path = entry.map_err(read_error)?.path();
-            let is_toml = path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"));
-            if is_toml && path.is_file() {
+            if path.is_file() {
                 files.push(path);
             }
         }
         Ok(files)
     }
 
-    /// A stem for `name` no file in the folder has, compared without case
-    /// because Windows and macOS folders ignore case.
+    /// The `*.toml` files directly in the folder, the extension spelled
+    /// exactly.
+    fn vm_files(&self) -> Result<Vec<PathBuf>, LibraryError> {
+        let mut files = self.files()?;
+        files.retain(|path| path.extension() == Some(OsStr::new(VM_EXTENSION)));
+        Ok(files)
+    }
+
+    /// A stem for `name` that no file in the folder has. Taken stems are
+    /// compared without case, and under any spelling of the extension,
+    /// because Windows and macOS folders ignore case. A suffix `-2`, `-3`, …
+    /// makes the stem unique, and the base is cut so the whole stays within
+    /// `MAX_STEM_LEN`.
     fn unused_stem(&self, name: &str) -> Result<VmStem, LibraryError> {
         let taken: HashSet<String> = self
-            .toml_files()?
+            .files()?
             .iter()
-            .filter_map(|path| path.file_stem().and_then(|stem| stem.to_str()))
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case(VM_EXTENSION))
+            })
+            .filter_map(|path| path.file_stem().and_then(OsStr::to_str))
             .map(str::to_ascii_lowercase)
             .collect();
         let base = safe_stem(name);
         let mut candidate = base.clone();
         let mut suffix: u64 = 2;
         while taken.contains(&candidate) {
-            candidate = format!("{base}-{suffix}");
+            candidate = suffixed(&base, suffix);
             suffix += 1;
         }
-        Ok(VmStem(candidate))
+        VmStem::parse(&candidate)
     }
 }
 
@@ -263,6 +291,49 @@ fn read_vm(dir: &Path, path: &Path) -> Result<DescribedVm, RunError> {
     let name = file.vm.name.clone().filter(|name| !name.trim().is_empty());
     let config = resolve_config_in(file, dir)?;
     Ok(DescribedVm { name, config })
+}
+
+/// The stem of the VM file at `path`. A file name that is not UTF-8 is not a
+/// stem: a lossy rendering of it would name a different file.
+fn stem_of(path: &Path) -> Result<VmStem, LibraryError> {
+    let stem = path.file_stem().unwrap_or(OsStr::new(""));
+    match stem.to_str() {
+        Some(text) => VmStem::parse(text),
+        None => Err(LibraryError::InvalidStem {
+            text: stem.to_string_lossy().into_owned(),
+        }),
+    }
+}
+
+/// `config` with every relative path made absolute against the working
+/// directory. An empty path names no file and stays empty; an absolute one is
+/// kept as it is.
+fn with_absolute_paths(config: &ResolvedConfig) -> Result<ResolvedConfig, LibraryError> {
+    let mut anchored = config.clone();
+    anchored.bios = absolute_path(&config.bios)?;
+    if let Some(vga_bios) = &mut anchored.vga_bios {
+        *vga_bios = absolute_path(vga_bios)?;
+    }
+    if let Some(disk) = &mut anchored.disk {
+        disk.path = absolute_path(&disk.path)?;
+        if let Some(creation) = &mut disk.creation {
+            creation.path = absolute_path(&creation.path)?;
+        }
+    }
+    if let Some(cdrom) = &mut anchored.cdrom {
+        cdrom.path = absolute_path(&cdrom.path)?;
+    }
+    Ok(anchored)
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, LibraryError> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Ok(path.to_owned());
+    }
+    std::path::absolute(path).map_err(|source| LibraryError::AbsolutePath {
+        path: path.to_owned(),
+        source,
+    })
 }
 
 /// The file stem the library gives a VM called `name`: its ASCII letters and
@@ -299,6 +370,19 @@ pub fn safe_stem(name: &str) -> String {
     stem
 }
 
+/// `base-suffix`, with `base` — a `safe_stem` result, so ASCII — cut so the
+/// whole stays within `MAX_STEM_LEN` and does not end in a double dash.
+fn suffixed(base: &str, suffix: u64) -> String {
+    let suffix = format!("-{suffix}");
+    let mut stem = base.to_owned();
+    stem.truncate(MAX_STEM_LEN - suffix.len());
+    while stem.ends_with('-') {
+        stem.pop();
+    }
+    stem.push_str(&suffix);
+    stem
+}
+
 /// Whether Windows reserves `stem` for a device (`con`, `prn`, `aux`, `nul`,
 /// `com0`–`com9`, `lpt0`–`lpt9`): a file of that name opens the device.
 fn is_windows_device_name(stem: &str) -> bool {
@@ -311,23 +395,40 @@ fn is_windows_device_name(stem: &str) -> bool {
     })
 }
 
-/// Writes `bytes` to a sibling of `path` and renames it into place, so `path`
-/// is never a partial copy.
+/// Writes `bytes` to `<path>.partial`, flushes it to the disk and renames it
+/// over `path`, so `path` is either what it was or the whole of `bytes`, never
+/// part of them. A partial file whose write or rename failed is removed
+/// again, and the failure that stopped the write is what the caller gets.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), LibraryError> {
-    let mut partial_name = path
-        .file_name()
-        .map(|name| name.to_os_string())
-        .unwrap_or_default();
-    partial_name.push(".partial");
-    let partial = path.with_file_name(partial_name);
-    fs::write(&partial, bytes).map_err(|source| LibraryError::Write {
-        path: partial.clone(),
-        source,
-    })?;
-    fs::rename(&partial, path).map_err(|source| LibraryError::Write {
-        path: path.to_owned(),
-        source,
-    })
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = PathBuf::from(partial);
+    let written = write_synced(&partial, bytes)
+        .map_err(|source| LibraryError::Write {
+            path: partial.clone(),
+            source,
+        })
+        .and_then(|()| {
+            fs::rename(&partial, path).map_err(|source| LibraryError::Write {
+                path: path.to_owned(),
+                source,
+            })
+        });
+    if written.is_err() {
+        match remove_if_present(&partial) {
+            Ok(()) => {}
+            Err(error) => tracing::warn!(%error, "the partial file of a failed write stays behind"),
+        }
+    }
+    written
+}
+
+/// Creates `path` holding `bytes` and waits until they are on the disk, so a
+/// rename that follows never installs an empty file.
+fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 fn remove_if_present(path: &Path) -> Result<(), LibraryError> {
@@ -371,7 +472,10 @@ fn absolute_dir(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{FileConfig, RomToml};
+    use crate::config::{CdromToml, CpuCapabilities, Engine, FileConfig, RomToml};
+
+    /// A file that resolves in every build: a BIOS and a CD to boot from.
+    const SAMPLE_TOML: &str = "[rom]\nbios = \"bios.bin\"\n\n[cdrom]\npath = \"boot.iso\"\n";
 
     fn scratch_dir(tag: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -390,16 +494,21 @@ mod tests {
         fs::remove_dir_all(dir).expect("remove scratch dir");
     }
 
-    /// A configuration that resolves: a BIOS path is all a shell VM needs.
+    /// `SAMPLE_TOML` as a configuration, resolved with `dir` as its folder.
     fn sample_config(dir: &Path) -> ResolvedConfig {
         let file = FileConfig {
             rom: RomToml {
                 bios: Some(PathBuf::from("bios.bin")),
                 vga_bios: None,
             },
+            cdrom: Some(CdromToml {
+                path: Some(PathBuf::from("boot.iso")),
+                channel: None,
+                drive: None,
+            }),
             ..FileConfig::default()
         };
-        resolve_config_in(file, dir).expect("a BIOS path is all a config needs")
+        resolve_config_in(file, dir).expect("a BIOS and a CD are all a config needs")
     }
 
     fn toml_names(dir: &Path) -> Vec<String> {
@@ -409,6 +518,10 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    fn stem(text: &str) -> VmStem {
+        VmStem::parse(text).expect("a stem")
     }
 
     #[test]
@@ -448,10 +561,30 @@ mod tests {
     }
 
     #[test]
+    fn a_stem_is_exactly_one_plain_file_name() {
+        for accepted in ["alpine", "ALPINE", "DOS Lab", "alpine-2", "a.b"] {
+            assert_eq!(stem(accepted).as_str(), accepted);
+        }
+        for refused in ["", ".", "..", "../escape", "a/b", "/a", ".hidden", "a/"] {
+            assert!(
+                matches!(VmStem::parse(refused), Err(LibraryError::InvalidStem { .. })),
+                "{refused:?} was accepted"
+            );
+        }
+        if cfg!(windows) {
+            for refused in ["a\\b", "C:a", "\\a"] {
+                assert!(VmStem::parse(refused).is_err(), "{refused:?} was accepted");
+            }
+        }
+    }
+
+    #[test]
     fn a_created_vm_is_there_at_the_next_load() {
         let dir = scratch_dir("create");
         let library = VmLibrary::open(dir.clone()).expect("open");
-        let config = sample_config(&dir);
+        let mut config = sample_config(&dir);
+        config.engine = Engine::Whp;
+        config.cpu_capabilities = CpuCapabilities::HostShared;
 
         let stem = library.create("Alpine", &config).expect("create");
         let contents = library.load().expect("load");
@@ -459,6 +592,7 @@ mod tests {
         assert_eq!(stem.as_str(), "alpine");
         assert_eq!(contents.vms.len(), 1);
         assert_eq!(contents.vms[0].name, "Alpine");
+        assert_eq!(contents.vms[0].config.engine, Engine::Whp);
         assert_eq!(contents.vms[0].config, config);
         assert!(contents.broken.is_empty());
         remove_dir(&dir);
@@ -468,7 +602,7 @@ mod tests {
     fn a_second_vm_of_the_same_name_gets_its_own_file() {
         let dir = scratch_dir("unique");
         let library = VmLibrary::open(dir.clone()).expect("open");
-        fs::write(dir.join("ALPINE.toml"), "[rom]\nbios = \"bios.bin\"\n").expect("write");
+        fs::write(dir.join("ALPINE.toml"), SAMPLE_TOML).expect("write");
         let config = sample_config(&dir);
 
         let first = library.create("alpine", &config).expect("first");
@@ -480,7 +614,25 @@ mod tests {
     }
 
     #[test]
-    fn load_orders_by_file_name_and_skips_the_library_s_own_files() {
+    fn a_name_as_long_as_a_stem_created_twice_still_fits() {
+        let dir = scratch_dir("long");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        let config = sample_config(&dir);
+        let name = "a".repeat(MAX_STEM_LEN);
+
+        let first = library.create(&name, &config).expect("first");
+        let second = library.create(&name, &config).expect("second");
+        library.remember_selected(&second).expect("remember");
+
+        assert_eq!(first.as_str().len(), MAX_STEM_LEN);
+        assert_eq!(second.as_str().len(), MAX_STEM_LEN);
+        assert!(second.as_str().ends_with("-2"));
+        assert_eq!(library.last_selected(), Some(second));
+        remove_dir(&dir);
+    }
+
+    #[test]
+    fn load_orders_by_stem_and_lists_only_toml_files() {
         let dir = scratch_dir("order");
         let library = VmLibrary::open(dir.clone()).expect("open");
         let config = sample_config(&dir);
@@ -489,6 +641,7 @@ mod tests {
         library.remember_selected(&b).expect("remember");
         fs::write(dir.join("x.toml.partial"), "junk").expect("partial");
         fs::write(dir.join("notes.txt"), "junk").expect("notes");
+        fs::write(dir.join("shout.TOML"), SAMPLE_TOML).expect("upper-case extension");
 
         let contents = library.load().expect("load");
 
@@ -514,15 +667,47 @@ mod tests {
     }
 
     #[test]
+    fn a_dot_file_with_the_extension_is_reported_not_dropped() {
+        let dir = scratch_dir("dotfile");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        fs::write(dir.join(".hidden.toml"), SAMPLE_TOML).expect("write");
+
+        let contents = library.load().expect("load");
+
+        assert!(contents.vms.is_empty());
+        assert_eq!(contents.broken.len(), 1);
+        assert_eq!(contents.broken[0].path, dir.join(".hidden.toml"));
+        assert!(contents.broken[0].error.contains("not a VM file stem"));
+        remove_dir(&dir);
+    }
+
+    #[test]
     fn a_file_without_a_vm_table_is_shown_under_its_file_name() {
         let dir = scratch_dir("unnamed");
         let library = VmLibrary::open(dir.clone()).expect("open");
-        fs::write(dir.join("dos-lab.toml"), "[rom]\nbios = \"bios.bin\"\n").expect("write");
+        fs::write(dir.join("dos-lab.toml"), SAMPLE_TOML).expect("write");
 
         let contents = library.load().expect("load");
 
         assert_eq!(contents.vms[0].name, "dos-lab");
         assert_eq!(contents.vms[0].config.bios, dir.join("bios.bin"));
+        remove_dir(&dir);
+    }
+
+    #[test]
+    fn hand_placed_stems_survive_the_last_selected_record() {
+        let dir = scratch_dir("hand-placed");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        fs::write(dir.join("ALPINE.toml"), SAMPLE_TOML).expect("write");
+        fs::write(dir.join("DOS Lab.toml"), SAMPLE_TOML).expect("write");
+
+        let contents = library.load().expect("load");
+
+        assert_eq!(contents.vms.len(), 2);
+        for vm in &contents.vms {
+            library.remember_selected(&vm.stem).expect("remember");
+            assert_eq!(library.last_selected(), Some(vm.stem.clone()));
+        }
         remove_dir(&dir);
     }
 
@@ -539,6 +724,25 @@ mod tests {
         assert_eq!(toml_names(&dir), ["alpine.toml"]);
         assert_eq!(contents.vms[0].stem, stem);
         assert_eq!(contents.vms[0].name, "Alpine edge");
+        remove_dir(&dir);
+    }
+
+    #[test]
+    fn a_name_is_trimmed_and_a_blank_one_shows_the_stem() {
+        let dir = scratch_dir("trim");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        let config = sample_config(&dir);
+
+        let blank = library.create("   ", &config).expect("blank");
+        let padded = library.create(" Alpine ", &config).expect("padded");
+        let contents = library.load().expect("load");
+
+        assert_eq!(blank.as_str(), "vm");
+        assert_eq!(padded.as_str(), "alpine");
+        let names: Vec<&str> = contents.vms.iter().map(|vm| vm.name.as_str()).collect();
+        assert_eq!(names, ["Alpine", "vm"]);
+        let blank_file = fs::read_to_string(library.path_of(&blank)).expect("read");
+        assert!(!blank_file.contains("[vm]"));
         remove_dir(&dir);
     }
 
@@ -573,7 +777,8 @@ mod tests {
 
     #[test]
     fn the_last_selected_vm_is_remembered_while_its_file_exists() {
-        let dir = scratch_dir("last");
+        let root = scratch_dir("last");
+        let dir = root.join("vms");
         let library = VmLibrary::open(dir.clone()).expect("open");
         let stem = library.create("Alpine", &sample_config(&dir)).expect("create");
 
@@ -583,9 +788,11 @@ mod tests {
         library.delete(&stem).expect("delete");
         assert_eq!(library.last_selected(), None);
 
+        // A file the record could reach only by leaving the folder.
+        fs::write(root.join("escape.toml"), SAMPLE_TOML).expect("write");
         fs::write(dir.join(LAST_SELECTED_FILE), "../escape").expect("write");
         assert_eq!(library.last_selected(), None);
-        remove_dir(&dir);
+        remove_dir(&root);
     }
 
     #[test]
@@ -600,6 +807,58 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_save_leaves_no_partial_file_behind() {
+        let dir = scratch_dir("failed-save");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        let stem = stem("alpine");
+        fs::create_dir(library.path_of(&stem)).expect("a folder in the file's way");
+
+        let failed = library.save(&stem, "Alpine", &sample_config(&dir));
+
+        assert!(matches!(failed, Err(LibraryError::Write { .. })));
+        assert_eq!(toml_names(&dir), ["alpine.toml"]);
+        remove_dir(&dir);
+    }
+
+    #[test]
+    fn open_reports_a_folder_it_cannot_create() {
+        let dir = scratch_dir("cannot-create");
+        let file = dir.join("file");
+        fs::write(&file, "not a folder").expect("write");
+
+        let refused = VmLibrary::open(file.join("vms"));
+
+        assert!(matches!(refused, Err(LibraryError::CreateDir { .. })));
+        remove_dir(&dir);
+    }
+
+    #[test]
+    fn relative_paths_are_saved_absolute_against_the_working_directory() {
+        let dir = scratch_dir("relative");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        let mut config = sample_config(&dir);
+        config.bios = PathBuf::from("roms/bios.bin");
+        config.vga_bios = Some(PathBuf::from("roms/vgabios.bin"));
+        config.cdrom = config.cdrom.map(|cdrom| crate::config::ResolvedCdrom {
+            path: PathBuf::from("boot.iso"),
+            ..cdrom
+        });
+
+        library.create("Alpine", &config).expect("create");
+        let contents = library.load().expect("load");
+
+        let cwd = std::env::current_dir().expect("working directory");
+        let saved = &contents.vms[0].config;
+        assert_eq!(saved.bios, cwd.join("roms/bios.bin"));
+        assert_eq!(saved.vga_bios, Some(cwd.join("roms/vgabios.bin")));
+        assert_eq!(
+            saved.cdrom.as_ref().map(|cdrom| cdrom.path.as_path()),
+            Some(cwd.join("boot.iso").as_path())
+        );
+        remove_dir(&dir);
+    }
+
+    #[test]
     fn the_bundled_vm_resolves_its_paths_beside_the_executable() {
         let library_dir = scratch_dir("bundled-library");
         let exe_dir = scratch_dir("bundled-exe");
@@ -607,7 +866,7 @@ mod tests {
         assert_eq!(library.import_bundled_vm(&exe_dir).expect("nothing to import"), None);
         fs::write(
             exe_dir.join(DEFAULT_CONFIG_FILE),
-            "[rom]\nbios = \"roms/BIOS-bochs-latest\"\n",
+            "[rom]\nbios = \"roms/BIOS-bochs-latest\"\n\n[cdrom]\npath = \"boot.iso\"\n",
         )
         .expect("write");
 

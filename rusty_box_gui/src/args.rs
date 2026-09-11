@@ -31,21 +31,23 @@ pub struct Args {
     #[arg(long = "display", value_enum)]
     pub display: Option<DisplayBackend>,
 
-    /// Which engine retires the guest's instructions.
+    /// Which engine retires the guest's instructions. When neither this flag
+    /// nor the file's `emulator.engine` names one, the interpreter.
     ///
     /// `whp` needs a Windows build with `hv-whp` and without `guest-trace`, and
     /// a host with the platform enabled; it is refused rather than silently
     /// downgraded when any of these is missing.
-    #[arg(long = "engine", value_enum, default_value_t = crate::config::Engine::Interpreter)]
-    pub engine: crate::config::Engine,
+    #[arg(long = "engine", value_enum)]
+    pub engine: Option<crate::config::Engine>,
 
-    /// Which processor the machine offers its guest.
+    /// Which processor the machine offers its guest. When neither this flag
+    /// nor the file's `emulator.cpu_capabilities` names one, `preset`.
     ///
     /// `preset` is this port's own model, the same on every host. `host-shared`
     /// narrows it to what this host can also carry, which a machine that may
     /// run on the hypervisor needs.
-    #[arg(long = "cpu-capabilities", value_enum, default_value_t = crate::config::CpuCapabilities::Preset)]
-    pub cpu_capabilities: crate::config::CpuCapabilities,
+    #[arg(long = "cpu-capabilities", value_enum)]
+    pub cpu_capabilities: Option<crate::config::CpuCapabilities>,
 
     #[arg(long = "boot", value_delimiter = ',', num_args = 1..=3, value_enum)]
     pub boot: Vec<BootDevice>,
