@@ -61,6 +61,16 @@ pub enum RunError {
     #[error("{kind} file is empty: {}", path.display())]
     EmptyFile { kind: &'static str, path: PathBuf },
 
+    #[error("the platform gave the app no storage directory for its ROMs and settings")]
+    NoAppStorage,
+
+    #[error("failed to place the carried {kind} at {}: {source}", path.display())]
+    StageFile {
+        kind: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+
     #[error("VGA BIOS size must be a non-zero multiple of 512 bytes: {} has {len} bytes", path.display())]
     InvalidVgaBiosSize { path: PathBuf, len: usize },
 

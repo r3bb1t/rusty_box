@@ -3712,19 +3712,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusty_box_android"
-version = "0.0.3"
-dependencies = [
- "android_logger",
- "eframe",
- "jni",
- "log",
- "rusty_box",
- "rusty_box_gui",
- "winit",
-]
-
-[[package]]
 name = "rusty_box_bximage"
 version = "0.0.3"
 dependencies = [
@@ -3759,9 +3746,11 @@ dependencies = [
 name = "rusty_box_gui"
 version = "0.0.3"
 dependencies = [
+ "android_logger",
  "clap",
  "eframe",
  "egui",
+ "jni",
  "js-sys",
  "log",
  "rfd",
@@ -3777,6 +3766,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+ "winit",
 ]
 
 [[package]]

@@ -85,6 +85,33 @@ pub enum NativeEmulatorCommand {
     Start(crate::config::ResolvedConfig),
 }
 
+/// A path field the shell fills from a file chooser.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BrowseTarget {
+    /// The hard disk image attached at the next power-on.
+    HardDisk,
+    /// The CD/DVD image attached at the next power-on.
+    Cdrom,
+    /// The system BIOS ROM.
+    Bios,
+    /// The VGA BIOS ROM.
+    VgaBios,
+    /// Where the Images page creates its next image.
+    NewImage,
+}
+
+/// A Browse press the Android host answers with a file browser of its own.
+#[cfg(target_os = "android")]
+pub(crate) struct BrowseRequest {
+    pub(crate) target: BrowseTarget,
+    /// What the field holds now, so the browser can open beside it.
+    pub(crate) current: PathBuf,
+    /// The name offered for a file still to be created; `None` when an
+    /// existing file is chosen.
+    pub(crate) save_name: Option<&'static str>,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ShellNoticeKind {
@@ -129,21 +156,11 @@ fn pick_native_file() -> Option<PathBuf> {
     rfd::FileDialog::new().pick_file()
 }
 
-#[cfg(all(not(target_arch = "wasm32"), target_os = "android"))]
-fn pick_native_file() -> Option<PathBuf> {
-    None
-}
-
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 fn save_native_file(default_name: &'static str) -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_file_name(default_name)
         .save_file()
-}
-
-#[cfg(all(not(target_arch = "wasm32"), target_os = "android"))]
-fn save_native_file(_default_name: &'static str) -> Option<PathBuf> {
-    None
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -158,6 +175,9 @@ pub struct NativeShellApp {
     command_tx: Sender<NativeEmulatorCommand>,
     shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
     shell_notice: Option<ShellNotice>,
+    /// A Browse press the Android host has yet to answer.
+    #[cfg(target_os = "android")]
+    browse_request: Option<BrowseTarget>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -584,6 +604,10 @@ struct DiskCreatorPanel {
     #[cfg(not(target_arch = "wasm32"))]
     overwrite: bool,
     status: Option<CreatorStatus>,
+    /// The page's Browse was pressed; the shell answers it, since only the
+    /// shell can reach the platform's file chooser.
+    #[cfg(not(target_arch = "wasm32"))]
+    browse_requested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -602,6 +626,8 @@ impl Default for DiskCreatorPanel {
             #[cfg(not(target_arch = "wasm32"))]
             overwrite: false,
             status: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            browse_requested: false,
         }
     }
 }
@@ -782,6 +808,8 @@ impl NativeShellApp {
             command_tx,
             shared,
             shell_notice: None,
+            #[cfg(target_os = "android")]
+            browse_request: None,
         }
     }
 
@@ -1467,11 +1495,7 @@ impl NativeShellApp {
                             )
                             .changed();
                         if ui.button(BROWSE).clicked() {
-                            if let Some(path) = pick_native_file() {
-                                self.settings.disk_path = path.display().to_string();
-                                self.settings.disk_enabled = true;
-                                changed = true;
-                            }
+                            changed |= self.browse(BrowseTarget::HardDisk);
                         }
                     });
                     field_row(ui, "ATA channel", |ui| {
@@ -1562,11 +1586,7 @@ impl NativeShellApp {
                             )
                             .changed();
                         if ui.button(BROWSE).clicked() {
-                            if let Some(path) = pick_native_file() {
-                                self.settings.cdrom_path = path.display().to_string();
-                                self.settings.cdrom_enabled = true;
-                                changed = true;
-                            }
+                            changed |= self.browse(BrowseTarget::Cdrom);
                         }
                     });
                     field_row(ui, "ATA channel", |ui| {
@@ -1625,10 +1645,7 @@ impl NativeShellApp {
                             )
                             .changed();
                         if ui.button(BROWSE).clicked() {
-                            if let Some(path) = pick_native_file() {
-                                self.settings.bios_path = path.display().to_string();
-                                changed = true;
-                            }
+                            changed |= self.browse(BrowseTarget::Bios);
                         }
                     });
                     field_row(ui, "VGA BIOS path", |ui| {
@@ -1639,10 +1656,7 @@ impl NativeShellApp {
                             )
                             .changed();
                         if ui.button(BROWSE).clicked() {
-                            if let Some(path) = pick_native_file() {
-                                self.settings.vga_bios_path = path.display().to_string();
-                                changed = true;
-                            }
+                            changed |= self.browse(BrowseTarget::VgaBios);
                         }
                     });
                     field_row(ui, "Log level", |ui| {
@@ -1782,6 +1796,13 @@ impl NativeShellApp {
         self.draw_shell_notice(ui);
         if let Some(created) = self.disk_creator.ui_page(ui) {
             self.handle_created_image(created);
+        }
+        if std::mem::take(&mut self.disk_creator.browse_requested)
+            && self.browse(BrowseTarget::NewImage)
+        {
+            if let Err(message) = self.apply_pending_settings() {
+                self.shell_notice = Some(ShellNotice::error(message));
+            }
         }
     }
 
@@ -2110,6 +2131,94 @@ impl NativeShellApp {
             display.reset_requested = true;
         }
     }
+
+    /// Offers a file for the field `target` names and puts the choice there.
+    /// Returns whether the VM's settings changed, for the caller to apply with
+    /// its other edits. The host's dialog answers before this returns.
+    #[cfg(not(target_os = "android"))]
+    fn browse(&mut self, target: BrowseTarget) -> bool {
+        let chosen = match target {
+            BrowseTarget::NewImage => save_native_file(self.disk_creator.default_image_filename()),
+            BrowseTarget::HardDisk
+            | BrowseTarget::Cdrom
+            | BrowseTarget::Bios
+            | BrowseTarget::VgaBios => pick_native_file(),
+        };
+        chosen.is_some_and(|path| self.set_browsed_path(target, path))
+    }
+
+    /// Records a Browse press for the Android host, which answers it in a
+    /// later frame with a file browser drawn over the shell and hands the
+    /// choice back through [`Self::apply_browsed_path`]. Nothing changes yet.
+    #[cfg(target_os = "android")]
+    fn browse(&mut self, target: BrowseTarget) -> bool {
+        self.browse_request = Some(target);
+        false
+    }
+
+    /// Puts a chosen `path` into the field `target` names. Returns whether the
+    /// VM's settings changed: an attached disk, CD or ROM does; the path of an
+    /// image still to be created does not.
+    fn set_browsed_path(&mut self, target: BrowseTarget, path: PathBuf) -> bool {
+        let text = path.display().to_string();
+        match target {
+            BrowseTarget::HardDisk => {
+                self.settings.disk_path = text;
+                self.settings.disk_enabled = true;
+                true
+            }
+            BrowseTarget::Cdrom => {
+                self.settings.cdrom_path = text;
+                self.settings.cdrom_enabled = true;
+                true
+            }
+            BrowseTarget::Bios => {
+                self.settings.bios_path = text;
+                true
+            }
+            BrowseTarget::VgaBios => {
+                self.settings.vga_bios_path = text;
+                true
+            }
+            BrowseTarget::NewImage => {
+                self.disk_creator.path = text;
+                false
+            }
+        }
+    }
+
+    /// The Browse press waiting for the Android host, if any, with the path
+    /// its field holds now.
+    #[cfg(target_os = "android")]
+    pub(crate) fn take_browse_request(&mut self) -> Option<BrowseRequest> {
+        let target = self.browse_request.take()?;
+        let (current, save_name) = match target {
+            BrowseTarget::HardDisk => (&self.settings.disk_path, None),
+            BrowseTarget::Cdrom => (&self.settings.cdrom_path, None),
+            BrowseTarget::Bios => (&self.settings.bios_path, None),
+            BrowseTarget::VgaBios => (&self.settings.vga_bios_path, None),
+            BrowseTarget::NewImage => (
+                &self.disk_creator.path,
+                Some(self.disk_creator.default_image_filename()),
+            ),
+        };
+        Some(BrowseRequest {
+            target,
+            current: PathBuf::from(current.trim()),
+            save_name,
+        })
+    }
+
+    /// Takes the Android host's answer to a Browse press and applies the VM's
+    /// settings as an edit on the page would.
+    #[cfg(target_os = "android")]
+    pub(crate) fn apply_browsed_path(&mut self, target: BrowseTarget, path: PathBuf) {
+        if self.set_browsed_path(target, path) {
+            if let Err(message) = self.apply_pending_settings() {
+                self.shell_notice = Some(ShellNotice::error(message));
+            }
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2162,7 +2271,7 @@ impl DiskCreatorPanel {
                                     .desired_width(path_field_width(ui)),
                             );
                             if ui.button(BROWSE).clicked() {
-                                self.choose_native_image_path();
+                                self.browse_requested = true;
                             }
                         });
 
@@ -2242,13 +2351,6 @@ impl DiskCreatorPanel {
         match self.kind {
             CreatorKind::HardDisk => "c.img",
             CreatorKind::Floppy => "floppy.img",
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn choose_native_image_path(&mut self) {
-        if let Some(path) = save_native_file(self.default_image_filename()) {
-            self.path = path.display().to_string();
         }
     }
 

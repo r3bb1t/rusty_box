@@ -106,7 +106,7 @@ It passes only if the run exits successfully and its stdout contains `*** LOGIN 
 
 - It compiles the `rusty_box_gui` tests but does not run them. Run them with `cargo test --release -p rusty_box_gui`.
 - No step runs the tests of `rusty_box_bximage` or of `xtask`. Both are compiled: `rusty_box_bximage` as a dependency of the GUI steps, and `xtask` by the `cargo xtask` alias that runs the gate.
-- No step builds `examples/rusty_box_web`, `examples/no_alloc_smoke` or `rusty_box_android`.
+- No step builds `examples/rusty_box_web`, `examples/no_alloc_smoke` or the Android APK. The GUI steps compile the APK's library, the `rusty_box_gui_android` example, only for the host, where it is empty.
 
 ## `cargo xtask perf-baseline`
 
@@ -120,7 +120,7 @@ Use it for interleaved A/B runs: alternate the baseline and candidate binaries f
 
 ## Android commands
 
-The `android` subcommand builds and deploys the `rusty_box_android` crate. That crate is slated for removal; when it goes, this subcommand and this section go with it.
+The `android` subcommand builds and deploys the Android APK: the `rusty_box_gui_android` example of `rusty_box_gui`, a NativeActivity library that runs the GUI shell on a phone (`rusty_box_gui/src/android.rs`).
 
 ```bash
 cargo xtask android build
@@ -130,13 +130,13 @@ cargo xtask android screenshot rustybox_android.png
 
 ### `cargo xtask android build`
 
-This prepares the local Android toolchain and builds `target/release/apk/RustyBoxAndroid.apk`, in this order:
+This prepares the local Android toolchain and builds `target/release/apk/examples/RustyBoxAndroid.apk`, in this order:
 
 1. **Android SDK**, skipped with `--skip-sdk`. Finds the SDK under `--sdk`, `ANDROID_HOME`, `ANDROID_SDK_ROOT` or `~/Android/Sdk`, in that order. Downloads the command-line tools if they are missing. Accepts the SDK licenses. Installs `platform-tools`, `platforms;android-34`, `build-tools;35.0.0` and `ndk;29.0.14206865` when missing.
-2. **Alpine ISO.** Copies the ISO into the gitignored asset path `rusty_box_android/assets/alpine.iso`. The source is `--iso PATH`, which fails if the path does not exist. Without `--iso`, it uses `~/Downloads/alpine-virt-3.23.3-x86_64.iso`, then `examples/rusty_box_uefi/alpine.iso`, and otherwise keeps an existing asset.
+2. **Alpine ISO.** Copies the ISO into the gitignored asset path `rusty_box_gui/assets/alpine.iso`. The source is `--iso PATH`, which fails if the path does not exist. Without `--iso`, it uses `~/Downloads/alpine-virt-3.23.3-x86_64.iso`, then `examples/rusty_box_uefi/alpine.iso`, and otherwise keeps an existing asset.
 3. **Rust tools.** Runs `rustup target add aarch64-linux-android`. Installs `cargo-apk` if `cargo apk --version` fails.
 4. **Signing keystore.** If `CARGO_APK_RELEASE_KEYSTORE` and a non-empty `CARGO_APK_RELEASE_KEYSTORE_PASSWORD` are set, they are used. Otherwise it uses `~/.android/rusty_box_android_xtask_debug.keystore`, generating it with `keytool` (from `JAVA_HOME/bin` when present) if it does not exist. That local dev keystore uses the standard non-secret Android password `android`; do not use it for production signing.
-5. **Build.** Runs `cargo apk build -p rusty_box_android --lib --release --features embedded-alpine`.
+5. **Build.** Runs `cargo apk build -p rusty_box_gui --example rusty_box_gui_android --release --features embedded-alpine`.
 
 ### `cargo xtask android run`
 
@@ -155,7 +155,7 @@ Captures the connected device's screen through `adb_client`. If `PATH` is omitte
 ### Options
 
 - `--sdk PATH` sets the Android SDK root for this run.
-- `--iso PATH` copies a specific Alpine ISO into `rusty_box_android/assets/alpine.iso` before building.
+- `--iso PATH` copies a specific Alpine ISO into `rusty_box_gui/assets/alpine.iso` before building.
 - `--skip-sdk` skips SDK package installation and license acceptance. Use it when the SDK is already prepared.
 - `--screenshot PATH` (`run` only) captures the screen after launch.
 

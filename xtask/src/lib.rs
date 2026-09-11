@@ -127,6 +127,7 @@ impl AndroidContext {
             .join("target")
             .join("release")
             .join("apk")
+            .join("examples")
             .join(APK_NAME)
     }
 
@@ -205,8 +206,9 @@ pub fn cargo_apk_build_args() -> Vec<&'static str> {
         "apk",
         "build",
         "-p",
-        "rusty_box_android",
-        "--lib",
+        "rusty_box_gui",
+        "--example",
+        "rusty_box_gui_android",
         "--release",
         "--features",
         "embedded-alpine",
@@ -480,7 +482,7 @@ fn copy_alpine_iso(context: &AndroidContext, explicit_iso: Option<&Path>) -> Res
     step("Copying Alpine ISO asset");
     let destination = context
         .repo
-        .join("rusty_box_android")
+        .join("rusty_box_gui")
         .join("assets")
         .join("alpine.iso");
     let source = match explicit_iso {
@@ -972,8 +974,9 @@ mod tests {
                 "apk",
                 "build",
                 "-p",
-                "rusty_box_android",
-                "--lib",
+                "rusty_box_gui",
+                "--example",
+                "rusty_box_gui_android",
                 "--release",
                 "--features",
                 "embedded-alpine",
@@ -1007,7 +1010,7 @@ mod tests {
             .join("rusty_box_uefi")
             .join("alpine.iso");
         let destination = repo
-            .join("rusty_box_android")
+            .join("rusty_box_gui")
             .join("assets")
             .join("alpine.iso");
         fs::create_dir_all(fallback.parent().expect("fallback parent"))

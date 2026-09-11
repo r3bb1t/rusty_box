@@ -451,8 +451,66 @@ fn cpu_params_for_engine(config: &ResolvedConfig) -> BxParams {
     config.cpu_capabilities.narrow(config.cpu_params.clone())
 }
 
-#[cfg(feature = "gui-egui")]
+/// The desktop shell: a window of its own over the emulator thread.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
 fn run_egui(config: ResolvedConfig) -> Result<RunSummary, RunError> {
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1180.0, 760.0])
+            .with_min_inner_size([960.0, 600.0])
+            .with_drag_and_drop(true)
+            .with_title("Rusty Box Workstation"),
+        ..Default::default()
+    };
+    run_egui_shell(config, native_options, crate::app::NativeShellApp::new)
+}
+
+/// On Android the shell needs the activity, which only `android_main` holds,
+/// so the egui backend starts from [`crate::android::main`] and never here.
+#[cfg(all(feature = "gui-egui", target_os = "android"))]
+fn run_egui(_config: ResolvedConfig) -> Result<RunSummary, RunError> {
+    Err(RunError::Gui {
+        message: "on Android the egui shell starts from the NativeActivity entry point, \
+                  rusty_box_gui::android::main"
+            .to_owned(),
+    })
+}
+
+/// The shell a phone shows for `app`, the activity NativeActivity handed this
+/// process.
+#[cfg(all(feature = "gui-egui", target_os = "android"))]
+pub(crate) fn run_android_shell(
+    config: ResolvedConfig,
+    app: crate::android::AndroidApp,
+) -> Result<RunSummary, RunError> {
+    let native_options = eframe::NativeOptions {
+        android_app: Some(app.clone()),
+        ..Default::default()
+    };
+    run_egui_shell(config, native_options, move |cc, shared, command_tx, config| {
+        crate::android::AndroidShellApp::new(cc, shared, command_tx, config, app)
+    })
+}
+
+/// Runs an egui shell over the emulator thread. `make_app` builds the
+/// window's app from the display the two threads share and the channel the
+/// shell starts machines through.
+#[cfg(feature = "gui-egui")]
+fn run_egui_shell<A, F>(
+    config: ResolvedConfig,
+    native_options: eframe::NativeOptions,
+    make_app: F,
+) -> Result<RunSummary, RunError>
+where
+    A: eframe::App + 'static,
+    F: FnOnce(
+            &eframe::CreationContext<'_>,
+            Arc<Mutex<SharedDisplay>>,
+            mpsc::Sender<crate::app::NativeEmulatorCommand>,
+            ResolvedConfig,
+        ) -> A
+        + 'static,
+{
     let shared = Arc::new(Mutex::new(SharedDisplay::new()));
     let (command_tx, command_rx) = mpsc::channel();
     let shared_for_emu = Arc::clone(&shared);
@@ -462,26 +520,11 @@ fn run_egui(config: ResolvedConfig) -> Result<RunSummary, RunError> {
         .spawn(move || run_egui_emulator_loop(command_rx, shared_for_emu))
         .map_err(|source| RunError::ThreadStart { source })?;
 
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([960.0, 600.0])
-            .with_drag_and_drop(true)
-            .with_title("Rusty Box Workstation"),
-        ..Default::default()
-    };
     let shared_for_gui = Arc::clone(&shared);
     let gui_result = eframe::run_native(
         "Rusty Box Workstation",
         native_options,
-        Box::new(move |cc| {
-            Ok(Box::new(crate::app::NativeShellApp::new(
-                cc,
-                shared_for_gui,
-                command_tx,
-                config,
-            )))
-        }),
+        Box::new(move |cc| Ok(Box::new(make_app(cc, shared_for_gui, command_tx, config)))),
     );
 
     signal_egui_stop(&shared);

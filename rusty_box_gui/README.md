@@ -151,6 +151,19 @@ What provisioning does depends on `overwrite`:
 
 The disk geometry comes from `rusty_box_bximage`: 16 heads, 63 sectors per track.
 
+## Android
+
+The same shell runs on an Android phone as an APK. `cargo xtask android build` builds it, and `cargo xtask android run` installs and launches it on a phone attached over USB debugging (see [xtask/README.md](../xtask/README.md#android-commands)).
+
+The APK's native library is this crate's `rusty_box_gui_android` example. NativeActivity calls its `android_main`, which hands the activity to `rusty_box_gui::android::main`. From there the phone runs the desktop shell, with the same pages, emulator thread and power-on path, and these differences:
+
+- **Files it carries.** The Bochs BIOS and VGA BIOS are compiled into the APK and written to the app's private storage at launch. A build with the `embedded-alpine` feature, which is what the xtask builds, carries `assets/alpine.iso` the same way and boots it from CD at the first power-on.
+- **Configuration.** The shell reads and saves `rusty_box.toml` in the app's private storage. A saved setting wins over the defaults: 256 MiB of guest memory and 300,000,000 instructions per second.
+- **Browse.** Every Browse button opens a file browser drawn in the shell. It starts beside the path its field holds, or in the shared Download folder, and a CD/DVD browse lists `.iso` files. On Android 11 and later, reaching all of shared storage needs "All files access": while the app lacks it, the browser opens the app's "All files access" page when it opens, lists what it can, and reads the grant again when you come back. Android 6 to 10 asks for READ and WRITE_EXTERNAL_STORAGE instead. Android 10 itself confines the browser to what scoped storage shows, because cargo-apk cannot declare `requestLegacyExternalStorage`.
+- **Keys.** A Keys button at the bottom right opens a pad that types text into the guest and sends Esc, Tab, Enter, Backspace, the arrows, Ctrl+C and Ctrl+Alt+Del.
+- **Layout.** A page strip replaces the sidebar, the shell stays inside the area the system bars leave free, and number fields step with − and + buttons.
+- **Engine.** The interpreter only; the hypervisor engine is Windows-only.
+
 ## Browser
 
 Prerequisites:
@@ -330,6 +343,7 @@ Validation rules:
 | `hv-whp` | yes | The Windows Hypervisor Platform engine. Its dependency is declared only for Windows targets, so on other targets the feature adds nothing. |
 | `guest-trace` | no | Diagnostic build that records guest process starts and exits, stderr writes, mounts, signals and CPU exceptions to `guest_trace.log` (override the path with `RUSTY_BOX_GUEST_TRACE_LOG`). Single-CPU configurations only; it slows emulation and compiles out the WHP path. |
 | `windows-gui-subsystem` | no | On Windows, builds the binary without a console window. `.github/workflows/gui-artifacts.yml` uses it when it builds the GUI artifacts. |
+| `embedded-alpine` | no | Android only: compiles `assets/alpine.iso` into the APK as the CD a phone boots at its first power-on. `cargo xtask android build` copies the ISO there and turns the feature on. |
 
 ## Public API
 

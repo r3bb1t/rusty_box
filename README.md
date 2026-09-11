@@ -69,7 +69,7 @@ cargo xtask android run
 cargo xtask android screenshot rustybox_android.png
 ```
 
-`cargo xtask android` installs the Android SDK components, Rust target, and `cargo-apk` as needed; copies `~/Downloads/alpine-virt-3.23.3-x86_64.iso` to the ignored `rusty_box_android/assets/alpine.iso`; signs with a generated local dev keystore under your home directory; and uses `adb_client` for install, launch, and screenshots. The first Android crate embeds Alpine with `include_bytes!` for simplicity, does not commit the ISO or signing material, and shows emulated Linux serial logs in the `Linux Serial Log (ttyS0)` panel.
+The APK runs the same `rusty_box_gui` shell as the desktop, laid out for a phone. Its Browse buttons open an on-device file browser, a Keys pad sends the keys a soft keyboard lacks, and the Bochs ROMs and an Alpine ISO travel inside the APK. `cargo xtask android` installs the Android SDK components, the Rust target and `cargo-apk` as needed; copies the ISO (`--iso PATH`, or `~/Downloads/alpine-virt-3.23.3-x86_64.iso`) to the ignored `rusty_box_gui/assets/alpine.iso`; signs with a generated local dev keystore under your home directory; and uses `adb_client` for install, launch and screenshots. See [xtask/README.md](xtask/README.md#android-commands).
 
 ## Execution engines
 
@@ -192,9 +192,8 @@ rusty_box/
 +-- rusty_box_whp_sys/         # Windows Hypervisor Platform FFI leaf (every hypervisor call is confined to its windows.rs)
 +-- rusty_box_whp/             # Safe wrapper over the WHP leaf
 +-- rusty_box_whp_engine/      # Runs a rusty_box machine's guest on WHP
-+-- rusty_box_gui/             # Desktop and browser VM shell (egui): CLI/TOML config, interpreter or WHP engine, disk image creation
++-- rusty_box_gui/             # Desktop, Android and browser VM shell (egui): CLI/TOML config, interpreter or WHP engine, disk image creation
 +-- rusty_box_bximage/         # bximage-compatible disk image creation
-+-- rusty_box_android/         # Android NativeActivity APK frontend
 +-- xtask/                     # Local CI gate (cargo xtask ci) and automation
 +-- examples/rusty_box_web/    # Standalone WASM web demo
 +-- examples/rusty_box_uefi/   # UEFI application (no allocator)

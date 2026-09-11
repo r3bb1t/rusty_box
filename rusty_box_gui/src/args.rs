@@ -2,7 +2,9 @@ use clap::{ArgAction, Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf, str::FromStr};
 
-#[derive(Debug, Clone, Parser)]
+/// The launcher's command line. `Args::default()` is the command line with no
+/// flags: every default below is the one clap gives an absent flag.
+#[derive(Debug, Clone, Default, Parser)]
 #[command(
     name = "rusty_box_gui",
     version,
