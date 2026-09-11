@@ -10,6 +10,21 @@ use std::{
 
 pub const DEFAULT_CONFIG_FILE: &str = "rusty_box.toml";
 
+// The value a setting takes when neither the command line nor the file sets
+// it. `resolve_config_with_base` and `blank_config` both read these, so a
+// "New VM" is what a file with no keys resolves to.
+const DEFAULT_MEMORY_MIB: u32 = 32;
+const DEFAULT_MEMORY_BLOCK_KIB: u32 = 128;
+const DEFAULT_IPS: u32 = 4_000_000;
+const DEFAULT_PCI: bool = true;
+const DEFAULT_SYNC_SLOWDOWN: bool = false;
+const DEFAULT_SYNC_REALTIME: bool = false;
+const DEFAULT_SMP_QUANTUM: u32 = 16;
+const DEFAULT_CPUID_FREQ: CpuidFreq = CpuidFreq::None;
+const DEFAULT_MAX_INSTRUCTIONS: u64 = u64::MAX;
+const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Warn;
+const DEFAULT_PCI_VGA: bool = false;
+
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileConfig {
@@ -284,16 +299,16 @@ pub fn blank_config() -> ResolvedConfig {
     ResolvedConfig {
         engine: Engine::default(),
         cpu_capabilities: CpuCapabilities::default(),
-        memory_mib: 32,
-        host_memory_mib: 32,
-        memory_block_kib: 128,
-        ips: 4_000_000,
-        pci: true,
-        sync_slowdown: false,
-        sync_realtime: false,
-        smp_quantum: 16,
-        cpuid_freq: CpuidFreq::None,
-        max_instructions: u64::MAX,
+        memory_mib: DEFAULT_MEMORY_MIB,
+        host_memory_mib: DEFAULT_MEMORY_MIB,
+        memory_block_kib: DEFAULT_MEMORY_BLOCK_KIB,
+        ips: DEFAULT_IPS,
+        pci: DEFAULT_PCI,
+        sync_slowdown: DEFAULT_SYNC_SLOWDOWN,
+        sync_realtime: DEFAULT_SYNC_REALTIME,
+        smp_quantum: DEFAULT_SMP_QUANTUM,
+        cpuid_freq: DEFAULT_CPUID_FREQ,
+        max_instructions: DEFAULT_MAX_INSTRUCTIONS,
         cpu_params: BxParams::default(),
         display: default_display_backend(),
         bios: PathBuf::new(),
@@ -301,9 +316,9 @@ pub fn blank_config() -> ResolvedConfig {
         boot_order: Vec::new(),
         disk: None,
         cdrom: None,
-        log_level: LogLevel::Warn,
+        log_level: DEFAULT_LOG_LEVEL,
         vga_mode: None,
-        pci_vga: false,
+        pci_vga: DEFAULT_PCI_VGA,
     }
 }
 
@@ -327,7 +342,10 @@ fn resolve_config_with_base(
         .or(file.emulator.cpu_capabilities)
         .unwrap_or_default();
 
-    let memory_mib = args.memory_mib.or(file.emulator.memory_mib).unwrap_or(32);
+    let memory_mib = args
+        .memory_mib
+        .or(file.emulator.memory_mib)
+        .unwrap_or(DEFAULT_MEMORY_MIB);
     ensure_nonzero("memory_mib", memory_mib)?;
 
     let host_memory_mib = args
@@ -339,10 +357,10 @@ fn resolve_config_with_base(
     let memory_block_kib = args
         .memory_block_kib
         .or(file.emulator.memory_block_kib)
-        .unwrap_or(128);
+        .unwrap_or(DEFAULT_MEMORY_BLOCK_KIB);
     ensure_nonzero("memory_block_kib", memory_block_kib)?;
 
-    let ips = args.ips.or(file.emulator.ips).unwrap_or(4_000_000);
+    let ips = args.ips.or(file.emulator.ips).unwrap_or(DEFAULT_IPS);
     ensure_nonzero("ips", ips)?;
 
     let pci = if args.pci {
@@ -350,31 +368,31 @@ fn resolve_config_with_base(
     } else if args.no_pci {
         false
     } else {
-        file.emulator.pci.unwrap_or(true)
+        file.emulator.pci.unwrap_or(DEFAULT_PCI)
     };
     let sync_slowdown = if args.sync_slowdown {
         true
     } else if args.no_sync_slowdown {
         false
     } else {
-        file.emulator.sync_slowdown.unwrap_or(false)
+        file.emulator.sync_slowdown.unwrap_or(DEFAULT_SYNC_SLOWDOWN)
     };
     let max_instructions = args
         .max_instructions
         .or(file.emulator.max_instructions)
-        .unwrap_or(u64::MAX);
+        .unwrap_or(DEFAULT_MAX_INSTRUCTIONS);
     // Bochs `clock: sync=realtime`; default none (see EmulatorToml docs).
     let sync_realtime = if args.sync_realtime {
         true
     } else {
-        file.emulator.sync_realtime.unwrap_or(false)
+        file.emulator.sync_realtime.unwrap_or(DEFAULT_SYNC_REALTIME)
     };
     // Bochs `cpu: quantum=N` (config.cc BXPN_SMP_QUANTUM): range 1-32
     // (config.h BX_SMP_QUANTUM_MIN/MAX), default 16.
     let smp_quantum = args
         .smp_quantum
         .or(file.emulator.smp_quantum)
-        .unwrap_or(16);
+        .unwrap_or(DEFAULT_SMP_QUANTUM);
     if !(1..=32).contains(&smp_quantum) {
         return Err(RunError::InvalidSmpQuantum { value: smp_quantum });
     }
@@ -385,7 +403,8 @@ fn resolve_config_with_base(
         .as_deref()
         .or(file.emulator.cpuid_freq.as_deref())
     {
-        None | Some("none") => CpuidFreq::None,
+        None => DEFAULT_CPUID_FREQ,
+        Some("none") => CpuidFreq::None,
         Some("hardware") => CpuidFreq::Hardware,
         Some("ips") => CpuidFreq::Ips,
         Some(other) => {
@@ -403,7 +422,7 @@ fn resolve_config_with_base(
     let log_level = args
         .log_level
         .or(file.logging.level)
-        .unwrap_or(LogLevel::Warn);
+        .unwrap_or(DEFAULT_LOG_LEVEL);
     let bios = match args.bios.clone() {
         Some(path) => path,
         None => file
@@ -432,7 +451,7 @@ fn resolve_config_with_base(
         _ => None,
     };
 
-    let pci_vga = file.display.pci_vga.unwrap_or(false);
+    let pci_vga = file.display.pci_vga.unwrap_or(DEFAULT_PCI_VGA);
 
     let disk = resolve_disk(&file, args, config_dir)?;
     let cdrom = resolve_cdrom(&file, args, config_dir);
@@ -509,10 +528,10 @@ pub(crate) fn topology_error_message(error: BxParamError) -> String {
 }
 
 impl ResolvedConfig {
-    /// Reconstruct a serializable [`FileConfig`] snapshot of these settings so the
-    /// GUI can persist edits back to `rusty_box.toml`. Paths are emitted verbatim
-    /// (already resolved to absolute form during loading), so a subsequent load
-    /// resolves to an equal configuration.
+    /// A serializable [`FileConfig`] snapshot of these settings, as the VM
+    /// library writes it. Paths are emitted as they are; `VmLibrary::save`
+    /// makes relative ones absolute first, so reading its file back resolves
+    /// to an equal configuration.
     pub fn to_file_config(&self) -> FileConfig {
         let topology = self.cpu_params.cpu_topology();
         let emulator = EmulatorToml {
@@ -534,8 +553,9 @@ impl ResolvedConfig {
             // Only persist a non-default value so existing configs stay stable.
             sync_realtime: self.sync_realtime.then_some(true),
             // Only persist a non-default quantum so existing configs stay stable.
-            smp_quantum: (self.smp_quantum != 16).then_some(self.smp_quantum),
-            max_instructions: (self.max_instructions != u64::MAX).then_some(self.max_instructions),
+            smp_quantum: (self.smp_quantum != DEFAULT_SMP_QUANTUM).then_some(self.smp_quantum),
+            max_instructions: (self.max_instructions != DEFAULT_MAX_INSTRUCTIONS)
+                .then_some(self.max_instructions),
             // Only persist a non-default mode so existing configs stay stable.
             cpuid_freq: match self.cpuid_freq {
                 CpuidFreq::None => None,
@@ -1078,7 +1098,6 @@ mod tests {
         assert_eq!(resolved.bios, PathBuf::from("b.bin"));
         assert_eq!(resolved.memory_mib, 32);
     }
-
     #[test]
     fn cli_overrides_toml_without_losing_other_toml_values() {
         let file = config(

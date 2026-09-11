@@ -21,12 +21,12 @@ The shell borrows VMware's layout for familiarity. It is not VMware, and Rusty B
 cargo run --release -p rusty_box_gui
 ```
 
-With neither `--config` nor `--no-config`, the launcher loads `rusty_box.toml` from the current directory, or failing that from its parent directory. So running from `rusty_box_gui/` finds the file at the repository root.
+The launcher reads a TOML file only when `--config` names one. A `rusty_box.toml` in the current directory or its parent is not read, so a file dropped there cannot change what boots.
 
-The file is gitignored and not shipped. Write one from the [example](#configuration-file), or pass `--bios`: a BIOS path is always required. Without one the launcher exits with `BIOS path is required; pass --bios PATH or set rom.bios in TOML`.
+`rusty_box.toml` is gitignored and not shipped. Write one from the [example](#configuration-file), or pass `--bios`: a BIOS path is always required. Without one the launcher exits with `BIOS path is required; pass --bios PATH or set rom.bios in TOML`.
 
 - `--config PATH` (or `-f PATH`) loads a specific file.
-- `--no-config` skips TOML entirely.
+- `--no-config` is accepted for compatibility and changes nothing.
 
 Everything can also be given as flags:
 
@@ -71,7 +71,7 @@ The pages:
   | CD/DVD | Enable, ISO path (with a file browser), ATA channel and drive, "Boot CD/DVD first" |
   | Display | BIOS and VGA BIOS paths, log level, a pre-boot display resolution, and "Register VGA on PCI" (experimental: exposes the adapter as PCI 1234:1111 for Linux `bochs-drm`) |
 
-  `Save settings to config file` writes the selected profile to the TOML file that was loaded. If no file was loaded, including under `--no-config`, it writes `rusty_box.toml` in the current directory. It rewrites the whole file, so comments in it are lost. It writes the CPU topology as `cpu_sockets` / `cpu_cores` / `cpu_threads` rather than `cpus`. It omits `engine`, `cpu_capabilities`, `sync_realtime`, `smp_quantum`, `max_instructions`, `cpuid_freq` and `pci_vga` when they are at their defaults.
+  The shell has no button that writes the loaded config file back; to keep a setting, put it in the file you pass with `--config`. When the shell writes a configuration of its own, it rewrites the whole file, so comments in it are lost. It writes the CPU topology as `cpu_sockets` / `cpu_cores` / `cpu_threads` rather than `cpus`. It omits `engine`, `cpu_capabilities`, `sync_realtime`, `smp_quantum`, `max_instructions`, `cpuid_freq` and `pci_vga` when they are at their defaults.
 - **Images** creates disk images (see [Disk images](#disk-images)).
 
 ## Execution engines
@@ -158,7 +158,7 @@ The same shell runs on an Android phone as an APK. `cargo xtask android build` b
 The APK's native library is this crate's `rusty_box_gui_android` example. NativeActivity calls its `android_main`, which hands the activity to `rusty_box_gui::android::main`. From there the phone runs the desktop shell, with the same pages, emulator thread and power-on path, and these differences:
 
 - **Files it carries.** The Bochs BIOS and VGA BIOS are compiled into the APK and written to the app's private storage at launch. A build with the `embedded-alpine` feature, which is what the xtask builds, carries `assets/alpine.iso` the same way and boots it from CD at the first power-on.
-- **Configuration.** The shell reads and saves `rusty_box.toml` in the app's private storage. A saved setting wins over the defaults: 256 MiB of guest memory and 300,000,000 instructions per second.
+- **Configuration.** The shell reads `rusty_box.toml` in the app's private storage when one is there. A setting in it wins over the defaults: 256 MiB of guest memory and 300,000,000 instructions per second.
 - **Browse.** Every Browse button opens a file browser drawn in the shell. It starts beside the path its field holds, or in the shared Download folder, and a CD/DVD browse lists `.iso` files. On Android 11 and later, reaching all of shared storage needs "All files access": while the app lacks it, the browser opens the app's "All files access" page when it opens, lists what it can, and reads the grant again when you come back. Android 6 to 10 asks for READ and WRITE_EXTERNAL_STORAGE instead. Android 10 itself confines the browser to what scoped storage shows, because cargo-apk cannot declare `requestLegacyExternalStorage`.
 - **Keys.** A Keys button at the bottom right opens a pad that types text into the guest and sends Esc, Tab, Enter, Backspace, the arrows, Ctrl+C and Ctrl+Alt+Del.
 - **Layout.** A page strip replaces the sidebar, the shell stays inside the area the system bars leave free, and number fields step with − and + buttons.

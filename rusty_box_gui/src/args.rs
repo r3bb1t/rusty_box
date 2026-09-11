@@ -19,6 +19,8 @@ pub struct Args {
     )]
     pub config: Option<PathBuf>,
 
+    /// Accepted for compatibility and changes nothing: no config file is
+    /// read unless `--config` names one.
     #[arg(long = "no-config", action = ArgAction::SetTrue)]
     pub no_config: bool,
 
@@ -340,7 +342,7 @@ mod tests {
 
     #[test]
     fn only_a_config_or_a_machine_flag_names_a_machine() {
-        let parse = |line: &[&str]| Args::parse_from(line);
+        let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
         assert!(!parse(&["rusty_box_gui"]).names_a_machine());
         assert!(!parse(&["rusty_box_gui", "--display", "headless", "--log-level", "info"]).names_a_machine());
         assert!(!parse(&["rusty_box_gui", "--no-config", "--engine", "whp"]).names_a_machine());

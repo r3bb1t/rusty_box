@@ -114,3 +114,68 @@ fn parses_egui_display_backend_when_feature_enabled() {
 fn rejects_egui_display_backend_without_feature() {
     assert!(Args::try_parse_from(["rusty_box_gui", "--display", "egui"]).is_err());
 }
+
+/// A scratch folder with a planted `rusty_box.toml` and an empty `child`
+/// folder under it, removed when the test ends.
+struct PlantedConfig {
+    root: std::path::PathBuf,
+}
+
+impl PlantedConfig {
+    fn new(tag: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after the Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rusty-box-gui-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("child")).expect("create the scratch folders");
+        std::fs::write(
+            root.join("rusty_box.toml"),
+            "[rom]\nbios = \"planted.bin\"\n\n[cdrom]\npath = \"planted.iso\"\n",
+        )
+        .expect("plant rusty_box.toml");
+        Self { root }
+    }
+}
+
+impl Drop for PlantedConfig {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.root) {
+            eprintln!("could not remove {}: {error}", self.root.display());
+        }
+    }
+}
+
+/// Runs the launcher from `dir` with no config file named, and returns what
+/// it printed on stderr. A planted file that were read would name a BIOS the
+/// launcher then fails to read; unread, the command line names no BIOS.
+fn launch_from(dir: &std::path::Path) -> String {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rusty_box_gui"))
+        .args(["--display", "headless"])
+        .current_dir(dir)
+        .output()
+        .expect("run rusty_box_gui");
+    assert!(!output.status.success(), "the launcher started without a BIOS");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn a_rusty_box_toml_in_the_working_directory_is_not_read() {
+    let planted = PlantedConfig::new("cwd-config");
+
+    let stderr = launch_from(&planted.root);
+
+    assert!(stderr.contains("BIOS path is required"), "stderr: {stderr}");
+}
+
+#[test]
+fn a_rusty_box_toml_in_the_parent_directory_is_not_read() {
+    let planted = PlantedConfig::new("parent-config");
+
+    let stderr = launch_from(&planted.root.join("child"));
+
+    assert!(stderr.contains("BIOS path is required"), "stderr: {stderr}");
+}

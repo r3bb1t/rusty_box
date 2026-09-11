@@ -60,17 +60,16 @@ so building for the browser needs the clone in place.
 From the repository root:
 
 ```bash
-cargo run --release -p rusty_box_gui
+cargo run --release -p rusty_box_gui -- --config rusty_box.toml
 ```
 
-The launcher looks for its config file in this order:
+The launcher reads a config file only when you name it with `--config <path>`
+(or `-f <path>`). A `rusty_box.toml` in the current directory or its parent is
+not read, so a file someone drops there cannot change what boots.
+`--no-config` is accepted and changes nothing.
 
-- `--config <path>` (or `-f <path>`) if you passed it;
-- otherwise `rusty_box.toml` in the current directory;
-- otherwise `rusty_box.toml` in the parent directory.
-
-`--no-config` skips the file entirely. `rusty_box.toml` is gitignored and does
-not ship with the repository, so create one. Here is a minimal config that
+`rusty_box.toml` is gitignored and does not ship with the repository, so
+create one. Here is a minimal config that
 boots an installer ISO and installs to a fresh 12 GiB disk:
 
 ```toml
@@ -187,15 +186,11 @@ The Hardware page lists six devices. Selecting one opens its settings:
 Settings can be edited only while the VM is powered off, and they take effect
 at the next power-on.
 
-At the bottom of every pane, **Save settings to config file** writes the
-selected profile's settings to the config file. That is the file the launcher
-loaded, or `rusty_box.toml` in the current directory if it loaded none. The
-file is written fresh each time, so **hand-written comments in it are lost**.
-If you maintain a commented config, edit it by hand and treat Save as a tool
-for throwaway setups.
+The shell does not write the file passed with `--config` back. To keep a
+setting across launches, put it in that file by hand.
 
-The config file has no key for the engine (see [Engines](#engines)), so
-choosing an engine here is not saved.
+The config file's `emulator.engine` key chooses the engine (see
+[Engines](#engines)); `--engine` on the command line overrides it.
 
 ### Images page
 
@@ -248,7 +243,7 @@ corresponds to.
 
 `max_instructions` needs care. A value in the file or on the command line is
 taken literally, so `0` runs nothing at all. Only the GUI's *Max instructions*
-field reads 0 as "unlimited". "Save settings to config file" writes the key
+field reads 0 as "unlimited". A configuration the shell writes carries the key
 only when a limit is set.
 
 ### `[display]`
@@ -342,7 +337,8 @@ Debug-level logging needs a debug build, which is far slower, so prefer
 
 The guest's instructions can be run by one of two engines. The choice is made
 with `--engine` on the command line or the **Engine** field on the Hardware
-page's Processors pane. The config file has no key for it.
+page's Processors pane. In the config file it is `emulator.engine`, which
+`--engine` overrides.
 
 - **`interpreter`** (the default) is this port's own CPU. It runs everywhere.
 - **`whp`** runs the guest on the Windows Hypervisor Platform. It needs three
