@@ -44,6 +44,10 @@ pub struct RunSummary {
 
 pub fn run(args: Args) -> Result<RunSummary, RunError> {
     let config = crate::config::load_config(&args)?;
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    if config.display == DisplayBackend::Egui {
+        return run_shell(Some(LaunchVm::from_args(&args, config)));
+    }
     run_resolved(config)
 }
 
@@ -51,7 +55,12 @@ pub fn run_resolved(config: ResolvedConfig) -> Result<RunSummary, RunError> {
     match config.display {
         DisplayBackend::Headless => run_with_gui(config, NoGui::new(), None, true),
         DisplayBackend::Terminal => run_with_gui(config, TermGui::new(), None, true),
-        #[cfg(feature = "gui-egui")]
+        #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+        DisplayBackend::Egui => run_shell(Some(LaunchVm {
+            name: "Command line".to_owned(),
+            config,
+        })),
+        #[cfg(all(feature = "gui-egui", target_os = "android"))]
         DisplayBackend::Egui => run_egui(config),
     }
 }
@@ -131,16 +140,23 @@ where
 {
     init_tracing(config.log_level);
 
-    // A build without the hypervisor path cannot honour `--engine whp`. It
-    // refuses before reading or creating anything, for the reason a host
-    // without the platform is refused below: a run that silently went to the
-    // interpreter under the hypervisor's name is a measurement nobody can
-    // trust.
+    // A build without the hypervisor path cannot honour the `whp` engine,
+    // wherever it was chosen — `--engine`, a VM file's `emulator.engine`, or
+    // the shell's Engine setting. It refuses before reading or creating
+    // anything, for the reason a host without the platform is refused below:
+    // a run that silently went to the interpreter under the hypervisor's name
+    // is a measurement nobody can trust.
     #[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
     if config.engine == Engine::Whp {
         return Err(RunError::NoHypervisorEngine);
     }
 
+    // A blank BIOS path names no file: the blank "New VM" powered on as it
+    // is. It is refused as the missing setting it is, before a read that
+    // could only report an empty path.
+    if config.bios.as_os_str().is_empty() {
+        return Err(RunError::MissingBios);
+    }
     let bios_data = read_required_file("BIOS", &config.bios)?;
     let vga_data = match &config.vga_bios {
         Some(path) => Some(read_vga_bios_file(path)?),
@@ -451,9 +467,100 @@ fn cpu_params_for_engine(config: &ResolvedConfig) -> BxParams {
     config.cpu_capabilities.narrow(config.cpu_params.clone())
 }
 
+/// What the egui shell opens on: the VM library, and the machine the command
+/// line described when it described one.
+#[cfg(feature = "gui-egui")]
+pub struct ShellStart {
+    pub library: crate::library::VmLibrary,
+    /// Shown first in the VM list as a temporary VM, selected, and written to
+    /// the library only when the user keeps it.
+    pub launch: Option<LaunchVm>,
+}
+
+/// The machine the command line described, as the shell lists it.
+#[cfg(feature = "gui-egui")]
+pub struct LaunchVm {
+    pub name: String,
+    pub config: ResolvedConfig,
+}
+
+#[cfg(feature = "gui-egui")]
+impl LaunchVm {
+    /// Named after the `--config` file it came from, or "Command line" when
+    /// flags alone described it.
+    pub fn from_args(args: &Args, config: ResolvedConfig) -> Self {
+        let name = args
+            .config
+            .as_deref()
+            .and_then(|path| path.file_stem())
+            .and_then(|stem| stem.to_str())
+            .map_or_else(|| "Command line".to_owned(), str::to_owned);
+        Self { name, config }
+    }
+}
+
+/// Opens the desktop shell on the per-user VM library, with `launch` — what
+/// the command line described, if anything — first in the list.
+///
+/// Only a library folder that cannot be created refuses the launch: with no
+/// folder there is nothing to show. A library that cannot be read opens as
+/// empty, with the error as a notice in the window, and a bundled VM that
+/// cannot be imported is logged and left out.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+pub fn run_shell(launch: Option<LaunchVm>) -> Result<RunSummary, RunError> {
+    let dir = crate::library::default_library_dir().ok_or(RunError::NoAppStorage)?;
+    let library = crate::library::VmLibrary::open(dir)?;
+    match library.load() {
+        Ok(contents) if contents.is_empty() => import_bundled_vm(&library),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                "the VM library could not be read, so no bundled VM is imported: {error}"
+            );
+        }
+    }
+    run_egui(ShellStart { library, launch })
+}
+
+/// A first run's empty library gets the VM a `rusty_box.toml` beside the
+/// executable describes, and the shell opens on it. An executable whose
+/// folder cannot be found has nothing bundled to import.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn import_bundled_vm(library: &crate::library::VmLibrary) {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            tracing::warn!("cannot locate the executable, so no bundled VM is imported: {error}");
+            return;
+        }
+    };
+    let Some(exe_dir) = exe.parent() else {
+        return;
+    };
+    import_bundled_vm_from(library, exe_dir);
+}
+
+/// Imports the VM `exe_dir`'s `rusty_box.toml` describes and records it as
+/// the VM the shell shows next. Nothing here refuses the launch: a file that
+/// does not load, or a library that cannot take it, is logged and the shell
+/// opens on the library as it stands.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn import_bundled_vm_from(library: &crate::library::VmLibrary, exe_dir: &Path) {
+    let imported = library.import_bundled_vm(exe_dir).and_then(|stem| match stem {
+        Some(stem) => library.remember_selected(&stem).map_err(RunError::from),
+        None => Ok(()),
+    });
+    if let Err(error) = imported {
+        tracing::warn!(
+            "the VM bundled in {} is not imported: {error}",
+            exe_dir.display()
+        );
+    }
+}
+
 /// The desktop shell: a window of its own over the emulator thread.
 #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
-fn run_egui(config: ResolvedConfig) -> Result<RunSummary, RunError> {
+fn run_egui(start: ShellStart) -> Result<RunSummary, RunError> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 760.0])
@@ -462,7 +569,7 @@ fn run_egui(config: ResolvedConfig) -> Result<RunSummary, RunError> {
             .with_title("Rusty Box Workstation"),
         ..Default::default()
     };
-    run_egui_shell(config, native_options, crate::app::NativeShellApp::new)
+    run_egui_shell(start, native_options, crate::app::NativeShellApp::new)
 }
 
 /// On Android the shell needs the activity, which only `android_main` holds,
@@ -480,24 +587,24 @@ fn run_egui(_config: ResolvedConfig) -> Result<RunSummary, RunError> {
 /// process.
 #[cfg(all(feature = "gui-egui", target_os = "android"))]
 pub(crate) fn run_android_shell(
-    config: ResolvedConfig,
+    start: ShellStart,
     app: crate::android::AndroidApp,
 ) -> Result<RunSummary, RunError> {
     let native_options = eframe::NativeOptions {
         android_app: Some(app.clone()),
         ..Default::default()
     };
-    run_egui_shell(config, native_options, move |cc, shared, command_tx, config| {
-        crate::android::AndroidShellApp::new(cc, shared, command_tx, config, app)
+    run_egui_shell(start, native_options, move |cc, shared, command_tx, start| {
+        crate::android::AndroidShellApp::new(cc, shared, command_tx, start, app)
     })
 }
 
 /// Runs an egui shell over the emulator thread. `make_app` builds the
-/// window's app from the display the two threads share and the channel the
-/// shell starts machines through.
+/// window's app from the display the two threads share, the channel the
+/// shell starts machines through, and the VM list the shell opens on.
 #[cfg(feature = "gui-egui")]
 fn run_egui_shell<A, F>(
-    config: ResolvedConfig,
+    start: ShellStart,
     native_options: eframe::NativeOptions,
     make_app: F,
 ) -> Result<RunSummary, RunError>
@@ -507,7 +614,7 @@ where
             &eframe::CreationContext<'_>,
             Arc<Mutex<SharedDisplay>>,
             mpsc::Sender<crate::app::NativeEmulatorCommand>,
-            ResolvedConfig,
+            ShellStart,
         ) -> A
         + 'static,
 {
@@ -524,7 +631,7 @@ where
     let gui_result = eframe::run_native(
         "Rusty Box Workstation",
         native_options,
-        Box::new(move |cc| Ok(Box::new(make_app(cc, shared_for_gui, command_tx, config)))),
+        Box::new(move |cc| Ok(Box::new(make_app(cc, shared_for_gui, command_tx, start)))),
     );
 
     signal_egui_stop(&shared);
@@ -990,7 +1097,7 @@ mod tests {
         remove_test_file(&disk);
     }
 
-    /// `--engine whp` in a build that carries no hypervisor path is refused,
+    /// The `whp` engine in a build that carries no hypervisor path is refused,
     /// and refused before the startup disk the configuration names is created.
     #[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
     #[test]
@@ -1013,6 +1120,120 @@ mod tests {
             "expected the WHP engine to be refused, got {result:?}"
         );
         assert!(!disk_exists, "a refused run created its startup disk");
+    }
+
+    /// The blank "New VM" powered on as it is: refused as the missing setting
+    /// it is, not as a failed read of an empty path.
+    #[test]
+    fn a_blank_bios_path_is_a_missing_bios_not_a_failed_read() {
+        let mut config = crate::config::blank_config();
+        config.display = DisplayBackend::Headless;
+
+        let error = run_resolved(config).unwrap_err();
+
+        assert!(
+            matches!(error, RunError::MissingBios),
+            "expected MissingBios, got {error:?}"
+        );
+    }
+
+    /// A scratch folder, removed when the test ends.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    struct ScratchDir {
+        path: PathBuf,
+    }
+
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    impl ScratchDir {
+        fn new(name: &str) -> Self {
+            let path = unique_temp_path(name).with_extension("");
+            fs::create_dir_all(&path).expect("create scratch dir");
+            Self { path }
+        }
+    }
+
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.path) {
+                eprintln!("could not remove {}: {error}", self.path.display());
+            }
+        }
+    }
+
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn the_bundled_vm_is_imported_and_is_the_vm_shown_next() {
+        let library_dir = ScratchDir::new("rusty-box-gui-bundled-library");
+        let exe_dir = ScratchDir::new("rusty-box-gui-bundled-exe");
+        let library = crate::library::VmLibrary::open(library_dir.path.clone()).expect("open");
+        fs::write(
+            exe_dir.path.join(crate::config::DEFAULT_CONFIG_FILE),
+            "[rom]\nbios = \"bios.bin\"\n\n[cdrom]\npath = \"boot.iso\"\n",
+        )
+        .expect("write the bundled file");
+
+        import_bundled_vm_from(&library, &exe_dir.path);
+
+        let contents = library.load().expect("load");
+        assert_eq!(contents.vms.len(), 1);
+        assert_eq!(contents.vms[0].name, crate::library::DEFAULT_VM_NAME);
+        assert_eq!(library.last_selected(), Some(contents.vms[0].stem.clone()));
+    }
+
+    /// One bad bundled file does not stop the shell from opening: the
+    /// library stays empty and the launch goes on.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_bundled_file_that_does_not_load_leaves_the_library_empty() {
+        let library_dir = ScratchDir::new("rusty-box-gui-bad-bundled-library");
+        let exe_dir = ScratchDir::new("rusty-box-gui-bad-bundled-exe");
+        let library = crate::library::VmLibrary::open(library_dir.path.clone()).expect("open");
+        fs::write(
+            exe_dir.path.join(crate::config::DEFAULT_CONFIG_FILE),
+            "memory_mib = [",
+        )
+        .expect("write the bundled file");
+
+        import_bundled_vm_from(&library, &exe_dir.path);
+
+        assert!(library.load().expect("load").is_empty());
+        assert_eq!(library.last_selected(), None);
+    }
+
+    /// The launch VM is listed under its file's name, and under "Command
+    /// line" when flags alone described it.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn the_launch_vm_is_named_after_its_config_file() {
+        let from_file = Args {
+            config: Some(PathBuf::from("machines").join("Alpine edge.toml")),
+            ..Args::default()
+        };
+        let from_flags = Args {
+            cdrom: Some(PathBuf::from("boot.iso")),
+            ..Args::default()
+        };
+
+        let config = disk_creation_config(PathBuf::from("disk.img"), false);
+        assert_eq!(
+            LaunchVm::from_args(&from_file, config.clone()).name,
+            "Alpine edge"
+        );
+        assert_eq!(LaunchVm::from_args(&from_flags, config).name, "Command line");
+    }
+
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_folder_with_nothing_bundled_imports_nothing() {
+        let library_dir = ScratchDir::new("rusty-box-gui-unbundled-library");
+        let exe_dir = ScratchDir::new("rusty-box-gui-unbundled-exe");
+        let library = crate::library::VmLibrary::open(library_dir.path.clone()).expect("open");
+
+        import_bundled_vm_from(&library, &exe_dir.path);
+
+        assert!(library.load().expect("load").is_empty());
+        assert_eq!(library.last_selected(), None);
     }
 
     #[test]

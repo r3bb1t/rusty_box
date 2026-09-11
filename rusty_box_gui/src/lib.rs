@@ -38,3 +38,7 @@ pub use config::{FileConfig, ResolvedConfig};
 pub use error::RunError;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runner::{run, run_resolved, RunSummary};
+#[cfg(all(feature = "gui-egui", not(target_arch = "wasm32")))]
+pub use runner::{LaunchVm, ShellStart};
+#[cfg(all(feature = "gui-egui", not(target_arch = "wasm32"), not(target_os = "android")))]
+pub use runner::run_shell;

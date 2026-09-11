@@ -85,7 +85,14 @@ pub fn main(app: AndroidApp) {
 fn run(app: AndroidApp) -> Result<RunSummary, RunError> {
     let storage = app.internal_data_path().ok_or(RunError::NoAppStorage)?;
     let config = phone_config(&storage)?;
-    crate::runner::run_android_shell(config, app)
+    let start = crate::runner::ShellStart {
+        library: crate::library::VmLibrary::open(storage.join("vms"))?,
+        launch: Some(crate::runner::LaunchVm {
+            name: crate::library::DEFAULT_VM_NAME.to_owned(),
+            config,
+        }),
+    };
+    crate::runner::run_android_shell(start, app)
 }
 
 /// The machine a phone powers on: what `rusty_box.toml` in the app's storage
@@ -158,10 +165,10 @@ impl AndroidShellApp {
         cc: &eframe::CreationContext<'_>,
         shared: Arc<Mutex<SharedDisplay>>,
         command_tx: Sender<NativeEmulatorCommand>,
-        config: ResolvedConfig,
+        start: crate::runner::ShellStart,
         app: AndroidApp,
     ) -> Self {
-        let shell = NativeShellApp::new(cc, Arc::clone(&shared), command_tx, config);
+        let shell = NativeShellApp::new(cc, Arc::clone(&shared), command_tx, start);
         Self {
             shell,
             shared,

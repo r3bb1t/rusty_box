@@ -175,6 +175,12 @@ pub struct NativeShellApp {
     command_tx: Sender<NativeEmulatorCommand>,
     shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
     shell_notice: Option<ShellNotice>,
+    /// The folder every library VM's edits are written to.
+    #[allow(dead_code)]
+    library: crate::library::VmLibrary,
+    /// Library files that do not load, listed under "Could not load".
+    #[allow(dead_code)]
+    broken_files: Vec<crate::library::BrokenVmFile>,
     /// A Browse press the Android host has yet to answer.
     #[cfg(target_os = "android")]
     browse_request: Option<BrowseTarget>,
@@ -431,29 +437,49 @@ impl NativeVmSettings {
     }
 }
 
+/// Where a VM in the list came from, and so where its edits go.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VmOrigin {
+    /// A library file; every applied edit is written back to it.
+    Library(crate::library::VmStem),
+    /// In memory only — the command line's machine, or the blank "New VM" —
+    /// until the user keeps it in the library.
+    Launch,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeVmProfile {
     name: String,
     config: crate::config::ResolvedConfig,
     settings: NativeVmSettings,
+    origin: VmOrigin,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeVmProfile {
-    fn from_config(name: impl Into<String>, config: crate::config::ResolvedConfig) -> Self {
+    fn from_config(
+        name: impl Into<String>,
+        config: crate::config::ResolvedConfig,
+        origin: VmOrigin,
+    ) -> Self {
         let settings = NativeVmSettings::from_config(&config);
         Self {
             name: name.into(),
             config,
             settings,
+            origin,
         }
     }
 
-    fn duplicate(&self, name: impl Into<String>) -> Self {
-        let mut copy = self.clone();
-        copy.name = name.into();
-        copy
+    /// A copy of this VM under `name`, kept where `origin` says.
+    fn duplicate(&self, name: impl Into<String>, origin: VmOrigin) -> Self {
+        Self {
+            name: name.into(),
+            origin,
+            ..self.clone()
+        }
     }
 
     fn apply_settings(&mut self) -> Result<(), String> {
@@ -466,13 +492,78 @@ impl NativeVmProfile {
 
     fn library_entry(&self) -> VmLibraryEntry {
         let info = self.vm_info();
-        VmLibraryEntry::new(
+        let entry = VmLibraryEntry::new(
             &info.name,
             &info.boot,
             format!("{} MB", info.memory_mib),
             format_path_for_summary(info.disk.as_deref()),
             format_path_for_summary(info.cdrom.as_deref()),
-        )
+        );
+        match self.origin {
+            VmOrigin::Library(_) => entry,
+            VmOrigin::Launch => entry.unsaved(),
+        }
+    }
+}
+
+/// The VM list the shell opens with.
+#[cfg(not(target_arch = "wasm32"))]
+struct OpeningList {
+    /// Never empty.
+    profiles: Vec<NativeVmProfile>,
+    broken: Vec<crate::library::BrokenVmFile>,
+    selected: usize,
+    notice: Option<ShellNotice>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OpeningList {
+    /// The launch VM first, as a temporary VM, then the library's VMs in the
+    /// library's order. The launch VM is selected when there is one, otherwise
+    /// the VM shown last. With neither a launch VM nor a library VM, a blank
+    /// temporary "New VM", so the shell always has a VM to show. A library
+    /// that cannot be read opens as empty, with the error as a notice.
+    fn from_start(start: &crate::runner::ShellStart) -> Self {
+        let (contents, notice) = match start.library.load() {
+            Ok(contents) => (contents, None),
+            Err(error) => (
+                crate::library::LibraryContents::default(),
+                Some(ShellNotice::error(error.to_string())),
+            ),
+        };
+        let mut profiles = Vec::new();
+        if let Some(launch) = &start.launch {
+            profiles.push(NativeVmProfile::from_config(
+                launch.name.clone(),
+                launch.config.clone(),
+                VmOrigin::Launch,
+            ));
+        }
+        let last = start.library.last_selected();
+        let mut selected = 0;
+        for vm in contents.vms {
+            if start.launch.is_none() && last.as_ref() == Some(&vm.stem) {
+                selected = profiles.len();
+            }
+            profiles.push(NativeVmProfile::from_config(
+                vm.name,
+                vm.config,
+                VmOrigin::Library(vm.stem),
+            ));
+        }
+        if profiles.is_empty() {
+            profiles.push(NativeVmProfile::from_config(
+                "New VM",
+                crate::config::blank_config(),
+                VmOrigin::Launch,
+            ));
+        }
+        Self {
+            profiles,
+            broken: contents.broken,
+            selected,
+            notice,
+        }
     }
 }
 
@@ -775,21 +866,9 @@ impl NativeShellApp {
         cc: &eframe::CreationContext<'_>,
         shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
         command_tx: Sender<NativeEmulatorCommand>,
-        config: crate::config::ResolvedConfig,
+        start: crate::runner::ShellStart,
     ) -> Self {
         configure_shell_style(&cc.egui_ctx);
-        let profile = NativeVmProfile::from_config("Rusty Box", config);
-        let vm_info = profile.vm_info();
-        let settings = profile.settings.clone();
-        let config = profile.config.clone();
-        let chrome = ShellChrome::with_library(vec![profile.library_entry()]);
-        #[cfg(target_os = "android")]
-        let chrome = {
-            let mut chrome = chrome;
-            chrome.show_library = false;
-            chrome.show_serial = false;
-            chrome
-        };
         let emulator = rusty_box::gui::RustyBoxApp::new(cc, Arc::clone(&shared));
         #[cfg(target_os = "android")]
         let emulator = {
@@ -797,17 +876,48 @@ impl NativeShellApp {
             emulator.set_fit_to_available(true);
             emulator
         };
+        Self::with_emulator(emulator, shared, command_tx, start)
+    }
+
+    /// The shell around `emulator`, opened on `start`'s VM list. `new` builds
+    /// the emulator view from the window; tests build it without one.
+    fn with_emulator(
+        emulator: rusty_box::gui::RustyBoxApp,
+        shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
+        command_tx: Sender<NativeEmulatorCommand>,
+        start: crate::runner::ShellStart,
+    ) -> Self {
+        let opening = OpeningList::from_start(&start);
+        let shown = &opening.profiles[opening.selected];
+        let config = shown.config.clone();
+        let settings = shown.settings.clone();
+        let vm_info = shown.vm_info();
+        let mut chrome = ShellChrome::with_library(
+            opening
+                .profiles
+                .iter()
+                .map(NativeVmProfile::library_entry)
+                .collect(),
+        );
+        chrome.destination = chrome.destination.select_vm(opening.selected);
+        #[cfg(target_os = "android")]
+        {
+            chrome.show_library = false;
+            chrome.show_serial = false;
+        }
         Self {
             emulator,
             chrome,
             disk_creator: DiskCreatorPanel::default(),
-            profiles: vec![profile],
+            profiles: opening.profiles,
             config,
             settings,
             vm_info,
             command_tx,
             shared,
-            shell_notice: None,
+            shell_notice: opening.notice,
+            library: start.library,
+            broken_files: opening.broken,
             #[cfg(target_os = "android")]
             browse_request: None,
         }
@@ -1898,7 +2008,7 @@ impl NativeShellApp {
         }
         let base = self.chrome.selected_vm().min(self.profiles.len() - 1);
         let name = format!("{} Copy {}", self.profiles[base].name, self.profiles.len());
-        let profile = self.profiles[base].duplicate(name);
+        let profile = self.profiles[base].duplicate(name, VmOrigin::Launch);
         self.profiles.push(profile);
         self.chrome.vm_library.push(
             self.profiles
@@ -3951,8 +4061,66 @@ mod tests {
         }
     }
 
+    /// A scratch library folder, removed when the test ends.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct ScratchLibrary {
+        dir: std::path::PathBuf,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl ScratchLibrary {
+        fn new() -> Self {
+            let dir = unique_temp_path("rusty-box-gui-library").with_extension("");
+            fs::create_dir_all(&dir).expect("create scratch library");
+            Self { dir }
+        }
+
+        fn library(&self) -> crate::library::VmLibrary {
+            crate::library::VmLibrary::open(self.dir.clone()).expect("open scratch library")
+        }
+
+        fn toml_files(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(&self.dir)
+                .expect("list scratch library")
+                .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".toml"))
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Drop for ScratchLibrary {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.dir) {
+                eprintln!("could not remove {}: {error}", self.dir.display());
+            }
+        }
+    }
+
+    /// A shell opened the way the command line opens it: `test_resolved_config()`
+    /// as the temporary launch VM over an empty scratch library.
     #[cfg(not(target_arch = "wasm32"))]
     fn native_test_app() -> (
+        NativeShellApp,
+        std::sync::mpsc::Receiver<NativeEmulatorCommand>,
+        ScratchLibrary,
+    ) {
+        let scratch = ScratchLibrary::new();
+        let launch = crate::runner::LaunchVm {
+            name: "Rusty Box".to_owned(),
+            config: test_resolved_config(),
+        };
+        let (app, command_rx) = native_test_app_over(&scratch, Some(launch));
+        (app, command_rx, scratch)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_test_app_over(
+        scratch: &ScratchLibrary,
+        launch: Option<crate::runner::LaunchVm>,
+    ) -> (
         NativeShellApp,
         std::sync::mpsc::Receiver<NativeEmulatorCommand>,
     ) {
@@ -3960,27 +4128,110 @@ mod tests {
             rusty_box::gui::shared_display::SharedDisplay::new(),
         ));
         let (command_tx, command_rx) = std::sync::mpsc::channel();
-        let profile = NativeVmProfile::from_config("Rusty Box", test_resolved_config());
-        let vm_info = profile.vm_info();
-        let settings = profile.settings.clone();
-        let config = profile.config.clone();
-        let chrome = ShellChrome::with_library(vec![profile.library_entry()]);
-
+        let emulator = rusty_box::gui::RustyBoxApp::new_embedded(Arc::clone(&shared));
+        let start = crate::runner::ShellStart {
+            library: scratch.library(),
+            launch,
+        };
         (
-            NativeShellApp {
-                emulator: rusty_box::gui::RustyBoxApp::new_embedded(Arc::clone(&shared)),
-                chrome,
-                disk_creator: DiskCreatorPanel::default(),
-                profiles: vec![profile],
-                config,
-                settings,
-                vm_info,
-                command_tx,
-                shared,
-                shell_notice: None,
-            },
+            NativeShellApp::with_emulator(emulator, shared, command_tx, start),
             command_rx,
         )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_launch_vm_comes_first_selected_and_unsaved() {
+        let scratch = ScratchLibrary::new();
+        scratch.library().create("Win 7", &test_resolved_config()).expect("seed");
+        let launch = crate::runner::LaunchVm {
+            name: "Command line".to_owned(),
+            config: test_resolved_config(),
+        };
+
+        let (app, _command_rx) = native_test_app_over(&scratch, Some(launch));
+
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(app.chrome.selected_vm(), 0);
+        assert_eq!(app.profiles[0].origin, VmOrigin::Launch);
+        assert_eq!(app.chrome.vm_library[0].source, crate::shell::sidebar::EntrySource::Unsaved);
+        assert_eq!(app.chrome.vm_library[1].name, "Win 7");
+        assert_eq!(app.chrome.vm_library[1].source, crate::shell::sidebar::EntrySource::Saved);
+        // Opening the shell writes nothing: the launch VM stays in memory.
+        assert_eq!(scratch.toml_files(), ["win-7.toml"]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn without_a_launch_vm_the_shell_opens_on_the_vm_shown_last() {
+        let scratch = ScratchLibrary::new();
+        let library = scratch.library();
+        library.create("Alpha", &test_resolved_config()).expect("alpha");
+        let beta = library.create("Beta", &test_resolved_config()).expect("beta");
+        library.remember_selected(&beta).expect("remember");
+
+        let (app, _command_rx) = native_test_app_over(&scratch, None);
+
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(app.chrome.selected_vm(), 1);
+        assert_eq!(app.vm_info.name, "Beta");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn with_nothing_to_show_the_shell_opens_on_a_blank_new_vm() {
+        let scratch = ScratchLibrary::new();
+
+        let (app, _command_rx) = native_test_app_over(&scratch, None);
+
+        assert_eq!(app.profiles.len(), 1);
+        assert_eq!(app.profiles[0].name, "New VM");
+        assert_eq!(app.profiles[0].origin, VmOrigin::Launch);
+        assert_eq!(app.config, crate::config::blank_config());
+        // The blank VM is in memory only; the library is as empty as it was.
+        assert_eq!(scratch.toml_files(), Vec::<String>::new());
+    }
+
+    /// A library folder that cannot be read does not refuse the shell: it
+    /// opens on the blank VM, with the error where the user can see it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_library_that_cannot_be_read_opens_on_a_blank_vm_with_a_notice() {
+        let scratch = ScratchLibrary::new();
+        let library = scratch.library();
+        fs::remove_dir_all(&scratch.dir).expect("remove the folder under the library");
+        let start = crate::runner::ShellStart {
+            library,
+            launch: None,
+        };
+
+        let opening = OpeningList::from_start(&start);
+
+        assert_eq!(opening.profiles.len(), 1);
+        assert_eq!(opening.profiles[0].name, "New VM");
+        assert!(opening.broken.is_empty());
+        assert!(
+            matches!(
+                &opening.notice,
+                Some(notice) if notice.kind == ShellNoticeKind::Error
+                    && notice.message.contains("failed to read the VM library")
+            ),
+            "notice: {:?}",
+            opening.notice
+        );
+        fs::create_dir_all(&scratch.dir).expect("restore the folder for the scratch cleanup");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_library_file_that_does_not_load_is_listed_as_broken() {
+        let scratch = ScratchLibrary::new();
+        fs::write(scratch.dir.join("bad.toml"), "memory_mib = [").expect("write");
+
+        let (app, _command_rx) = native_test_app_over(&scratch, None);
+
+        assert_eq!(app.broken_files.len(), 1);
+        assert_eq!(app.broken_files[0].path, scratch.dir.join("bad.toml"));
     }
 
     #[test]
@@ -4440,7 +4691,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_start_vm_sends_selected_config_when_stopped() {
-        let (mut app, command_rx) = native_test_app();
+        let (mut app, command_rx, _library) = native_test_app();
         app.settings.memory_mib = 640;
         app.settings.ips = 123_000_000;
         app.settings.cdrom_path = "install.iso".to_owned();
@@ -4461,7 +4712,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_start_vm_ignores_duplicate_start_while_pending() {
-        let (mut app, command_rx) = native_test_app();
+        let (mut app, command_rx, _library) = native_test_app();
 
         app.start_vm();
         app.start_vm();
@@ -4478,7 +4729,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_start_vm_reports_disconnected_worker_on_shell() {
-        let (mut app, command_rx) = native_test_app();
+        let (mut app, command_rx, _library) = native_test_app();
         drop(command_rx);
         app.disk_creator.status = Some(CreatorStatus::Success("existing status".to_owned()));
 
@@ -4500,7 +4751,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_runtime_error_becomes_shell_notice() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
         app.shared.lock().unwrap().runtime_error =
             Some("Emulator startup failed: BIOS missing".to_owned());
 
@@ -4516,7 +4767,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_power_controls_do_not_request_stop_when_stopped() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
 
         app.request_power_off();
         app.request_reset();
@@ -4533,10 +4784,10 @@ mod tests {
     #[test]
     fn native_profile_duplicate_keeps_independent_settings() {
         let config = test_resolved_config();
-        let mut profile = NativeVmProfile::from_config("Base", config);
+        let mut profile = NativeVmProfile::from_config("Base", config, VmOrigin::Launch);
         profile.settings.memory_mib = 384;
 
-        let mut copy = profile.duplicate("Second VM");
+        let mut copy = profile.duplicate("Second VM", VmOrigin::Launch);
         copy.settings.memory_mib = 768;
 
         assert_eq!(profile.name, "Base");
@@ -4548,7 +4799,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_profile_duplicate_select_delete_rename_refreshes_metadata() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
         app.profiles[0].name = "Base VM".to_owned();
         app.settings.memory_mib = 512;
         app.apply_pending_settings().unwrap();
@@ -4574,7 +4825,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_profile_delete_requires_stopped_multiple_profiles() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
 
         app.delete_selected_profile();
 
@@ -4600,7 +4851,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_profile_selection_refuses_while_running() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
         app.duplicate_selected_profile();
         assert_eq!(app.chrome.selected_vm(), 1);
         app.shared.lock().unwrap().emu_running = true;
@@ -4619,7 +4870,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn created_image_hard_disk_attaches_to_stopped_profile() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
         let disk = unique_temp_path("rusty-box-gui-created-attach");
         write_test_disk(&disk);
 
@@ -4646,7 +4897,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn created_image_hard_disk_warns_while_running() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
         let original_disk_path = app.settings.disk_path.clone();
         app.shared.lock().unwrap().emu_running = true;
 
@@ -4667,7 +4918,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn created_image_floppy_reports_unwired_notice() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
 
         app.handle_created_image(CreatedImage {
             path: std::path::PathBuf::from("floppy.img"),

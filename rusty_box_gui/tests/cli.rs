@@ -179,3 +179,22 @@ fn a_rusty_box_toml_in_the_parent_directory_is_not_read() {
 
     assert!(stderr.contains("BIOS path is required"), "stderr: {stderr}");
 }
+
+/// A run flag with no machine to apply it to is refused before the shell
+/// opens, naming the flag, rather than dropped on the way to the library.
+#[cfg(feature = "gui-egui")]
+#[test]
+fn a_run_flag_without_a_machine_is_refused_before_the_shell_opens() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rusty_box_gui"))
+        .args(["--engine", "whp", "--log-level", "debug"])
+        .output()
+        .expect("run rusty_box_gui");
+
+    assert!(!output.status.success(), "the launcher opened with a machine-less run flag");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`--engine`, `--log-level` without a machine"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("--config FILE"), "stderr: {stderr}");
+}

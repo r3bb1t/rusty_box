@@ -129,7 +129,9 @@ impl Args {
     /// or any flag that sets the machine's firmware, media, memory, processors
     /// or timing. Without one, the egui shell opens on its VM library alone.
     /// `--display`, `--log-level`, `--engine`, `--cpu-capabilities` and
-    /// `--no-config` say how to run, not what, so they do not count. The
+    /// `--no-config` say how to run, not what, so they do not count; a command
+    /// line that sets one of the three run flags [`Self::run_flags`] lists
+    /// without naming a machine is refused, not opened on the library. The
     /// destructuring is exhaustive, so a new flag must be sorted into one
     /// group or the other.
     pub fn names_a_machine(&self) -> bool {
@@ -192,6 +194,61 @@ impl Args {
             || *no_pci
             || *sync_slowdown
             || *no_sync_slowdown
+    }
+
+    /// The run flags this command line sets, as spelled on it: `--engine`,
+    /// `--cpu-capabilities` and `--log-level`, in that order. Each is one VM's
+    /// own setting, so a command line that sets one but names no machine is
+    /// refused with this list rather than opened on the library with the
+    /// flag dropped. `--display` and `--no-config` are not run flags:
+    /// `--display egui` alone opens the library. The destructuring is
+    /// exhaustive, so a new flag must be sorted here as well as in
+    /// [`Self::names_a_machine`].
+    pub fn run_flags(&self) -> Vec<&'static str> {
+        let Args {
+            config: _,
+            no_config: _,
+            bios: _,
+            vga_bios: _,
+            display: _,
+            engine,
+            cpu_capabilities,
+            boot: _,
+            disk: _,
+            disk_chs: _,
+            create_disk: _,
+            create_disk_size: _,
+            overwrite_created_disk: _,
+            cdrom: _,
+            memory_mib: _,
+            host_memory_mib: _,
+            memory_block_kib: _,
+            ips: _,
+            max_instructions: _,
+            smp_quantum: _,
+            cpuid_freq: _,
+            sync_realtime: _,
+            cpus: _,
+            cpu_sockets: _,
+            cpu_cores: _,
+            cpu_threads: _,
+            pci: _,
+            no_pci: _,
+            sync_slowdown: _,
+            no_sync_slowdown: _,
+            log_level,
+        } = self;
+        let mut flags = Vec::with_capacity(3);
+        if engine.is_some() {
+            flags.push("--engine");
+        }
+        if cpu_capabilities.is_some() {
+            flags.push("--cpu-capabilities");
+        }
+        if log_level.is_some() {
+            flags.push("--log-level");
+        }
+        flags
     }
 }
 
@@ -349,5 +406,52 @@ mod tests {
         assert!(parse(&["rusty_box_gui", "--config", "vm.toml"]).names_a_machine());
         assert!(parse(&["rusty_box_gui", "--cdrom", "a.iso"]).names_a_machine());
         assert!(parse(&["rusty_box_gui", "--memory-mib", "64"]).names_a_machine());
+    }
+
+    #[test]
+    fn the_run_flags_a_command_line_sets_are_listed_as_spelled() {
+        let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
+        let none: Vec<&'static str> = Vec::new();
+        assert_eq!(parse(&["rusty_box_gui"]).run_flags(), none);
+        assert_eq!(
+            parse(&["rusty_box_gui", "--engine", "interpreter"]).run_flags(),
+            ["--engine"]
+        );
+        assert_eq!(
+            parse(&["rusty_box_gui", "--cpu-capabilities", "host-shared"]).run_flags(),
+            ["--cpu-capabilities"]
+        );
+        assert_eq!(
+            parse(&["rusty_box_gui", "--log-level", "debug"]).run_flags(),
+            ["--log-level"]
+        );
+        assert_eq!(
+            parse(&[
+                "rusty_box_gui",
+                "--log-level",
+                "info",
+                "--cpu-capabilities",
+                "preset",
+                "--engine",
+                "whp",
+            ])
+            .run_flags(),
+            ["--engine", "--cpu-capabilities", "--log-level"]
+        );
+    }
+
+    /// `--display` and `--no-config` say nothing about how a machine runs:
+    /// either alone still opens the library.
+    #[test]
+    fn display_and_no_config_are_not_run_flags() {
+        let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
+        let none: Vec<&'static str> = Vec::new();
+        assert_eq!(parse(&["rusty_box_gui", "--no-config"]).run_flags(), none);
+        assert_eq!(
+            parse(&["rusty_box_gui", "--display", "headless"]).run_flags(),
+            none
+        );
+        #[cfg(feature = "gui-egui")]
+        assert_eq!(parse(&["rusty_box_gui", "--display", "egui"]).run_flags(), none);
     }
 }

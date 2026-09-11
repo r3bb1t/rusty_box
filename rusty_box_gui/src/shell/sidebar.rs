@@ -16,6 +16,17 @@ use crate::shell::widgets::{selection_row, RowMark, ShellStateBadge, CHILD_INDEN
 #[cfg(not(target_arch = "wasm32"))]
 use egui::{RichText, Stroke};
 
+/// Whether a VM in the list is a file in the library or only in memory. The
+/// browser shell has no library, so its one entry carries no source.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntrySource {
+    /// A library file; the row is the VM's name.
+    Saved,
+    /// Only in memory — the command line's temporary VM; the row says so.
+    Unsaved,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VmLibraryEntry {
     pub(crate) name: String,
@@ -23,6 +34,8 @@ pub(crate) struct VmLibraryEntry {
     pub(crate) memory: String,
     pub(crate) disk: String,
     pub(crate) cdrom: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) source: EntrySource,
 }
 
 impl VmLibraryEntry {
@@ -39,6 +52,26 @@ impl VmLibraryEntry {
             memory: memory.into(),
             disk: disk.into(),
             cdrom: cdrom.into(),
+            #[cfg(not(target_arch = "wasm32"))]
+            source: EntrySource::Saved,
+        }
+    }
+
+    /// The same entry, marked as a VM that is not in the library.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn unsaved(self) -> Self {
+        Self {
+            source: EntrySource::Unsaved,
+            ..self
+        }
+    }
+
+    /// The text of the entry's row.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn row_label(&self) -> String {
+        match self.source {
+            EntrySource::Saved => self.name.clone(),
+            EntrySource::Unsaved => format!("{} (unsaved)", self.name),
         }
     }
 
@@ -122,7 +155,9 @@ pub(crate) fn draw_sidebar(
                 } else {
                     RowMark::Plain
                 };
-                if selection_row(ui, &entries[index].name, ROOT_INDENT, vm_mark, dot).clicked() {
+                if selection_row(ui, &entries[index].row_label(), ROOT_INDENT, vm_mark, dot)
+                    .clicked()
+                {
                     action = Some(SidebarAction::Select(destination.select_vm(index)));
                 }
                 if !is_selected_vm {

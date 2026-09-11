@@ -13,14 +13,35 @@ fn main() -> ExitCode {
     const EMULATOR_STACK_SIZE: usize = 1500 * 1024 * 1024;
 
     let args = rusty_box_gui::Args::parse();
+
+    // A command line that names no machine opens the egui shell on its VM
+    // library alone. A run flag on such a command line is refused rather than
+    // dropped: the engine, the processor and the log level are each VM's own
+    // setting, and there is no VM here for the flag to apply to.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    if !args.names_a_machine()
+        && args
+            .display
+            .is_none_or(|display| display == rusty_box_gui::DisplayBackend::Egui)
+    {
+        let flags = args.run_flags();
+        if !flags.is_empty() {
+            return print_result(Err(rusty_box_gui::RunError::RunFlagsNeedAMachine {
+                flags,
+            }));
+        }
+        return print_result(rusty_box_gui::run_shell(None));
+    }
+
     let config = match rusty_box_gui::config::load_config(&args) {
         Ok(config) => config,
         Err(error) => return print_result(Err(error)),
     };
 
-    #[cfg(feature = "gui-egui")]
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
     if config.display == rusty_box_gui::DisplayBackend::Egui {
-        return print_result(rusty_box_gui::run_resolved(config));
+        let launch = rusty_box_gui::LaunchVm::from_args(&args, config);
+        return print_result(rusty_box_gui::run_shell(Some(launch)));
     }
 
     let thread = match std::thread::Builder::new()
