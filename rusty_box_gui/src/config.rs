@@ -13,6 +13,7 @@ pub const DEFAULT_CONFIG_FILE: &str = "rusty_box.toml";
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileConfig {
+    pub vm: VmToml,
     pub emulator: EmulatorToml,
     pub display: DisplayToml,
     pub rom: RomToml,
@@ -20,6 +21,16 @@ pub struct FileConfig {
     pub disk: Option<DiskToml>,
     pub cdrom: Option<CdromToml>,
     pub logging: LoggingToml,
+}
+
+/// The `[vm]` table: what a VM library file says about the VM itself rather
+/// than its hardware.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VmToml {
+    /// The name the shell shows. A library file without one is shown under
+    /// its file name.
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -273,6 +284,15 @@ fn find_default_config_file(start_dir: &Path) -> Option<PathBuf> {
 
 pub fn resolve_config(file: FileConfig, args: &Args) -> Result<ResolvedConfig, RunError> {
     resolve_config_with_base(file, args, None, None)
+}
+
+/// Resolves a file the shell keeps itself — a VM library file, or the VM a
+/// first run imports from beside the executable — with no command line over
+/// it. Relative paths in it resolve against `dir`, the folder the file lives
+/// in.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn resolve_config_in(file: FileConfig, dir: &Path) -> Result<ResolvedConfig, RunError> {
+    resolve_config_with_base(file, &Args::default(), Some(dir), None)
 }
 
 fn resolve_config_with_base(
@@ -536,6 +556,7 @@ impl ResolvedConfig {
             level: Some(self.log_level),
         };
         FileConfig {
+            vm: VmToml::default(),
             emulator,
             display,
             rom,

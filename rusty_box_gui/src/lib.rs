@@ -25,6 +25,8 @@ pub mod args;
 pub(crate) mod shell;
 pub mod config;
 mod disk_images;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod library;
 pub mod error;
 #[cfg(all(feature = "guest-trace", not(target_arch = "wasm32")))]
 pub mod guest_trace;

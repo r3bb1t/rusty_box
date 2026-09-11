@@ -71,6 +71,10 @@ pub enum RunError {
         source: io::Error,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(transparent)]
+    Library(#[from] crate::library::LibraryError),
+
     #[error("VGA BIOS size must be a non-zero multiple of 512 bytes: {} has {len} bytes", path.display())]
     InvalidVgaBiosSize { path: PathBuf, len: usize },
 
