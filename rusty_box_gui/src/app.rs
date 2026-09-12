@@ -112,8 +112,10 @@ pub(crate) struct BrowseRequest {
     pub(crate) save_name: Option<&'static str>,
 }
 
+/// Ordered by gravity: an `Error` outranks a `Warning`, which outranks
+/// `Info`. `NativeShellApp::notify` keeps the gravest of one frame.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ShellNoticeKind {
     Info,
     Warning,
@@ -181,6 +183,9 @@ pub struct NativeShellApp {
     broken_files: Vec<crate::library::BrokenVmFile>,
     /// A destructive step the user has yet to confirm or cancel.
     pending_confirm: Option<PendingConfirm>,
+    /// The gravest notice raised in this frame, which a lesser one may not
+    /// replace; see `notify`.
+    gravest_raised: Option<ShellNoticeKind>,
     /// A Browse press the Android host has yet to answer.
     #[cfg(target_os = "android")]
     browse_request: Option<BrowseTarget>,
@@ -448,15 +453,54 @@ enum VmOrigin {
     Launch,
 }
 
-/// Whether a library VM's file holds every edit applied to the VM.
+/// Whether a library VM's file holds the VM as it is.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveState {
-    /// The file has every applied edit. A VM without a file is always
-    /// `Saved`: it has nothing to write, and only a library VM is ever marked.
+    /// The file holds the VM as it is. A VM without a file is always `Saved`:
+    /// it has nothing to write, and only a library VM is ever marked.
     Saved,
-    /// An applied edit is not in the file yet; the next flush writes it.
+    /// An applied edit is not in the file yet; the next flush, from an idle
+    /// frame or from an action, writes it.
     Unsaved,
+    /// The last write failed. Only an action's flush — a selection, `+`,
+    /// Keep, power-on, exit — tries again, or the next applied edit, which
+    /// marks the VM `Unsaved`; an idle frame does not, so a lasting fault is
+    /// not retried on every frame.
+    WriteFailed,
+}
+
+/// Which of the VMs whose files are behind a flush writes.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlushScope {
+    /// `Unsaved` VMs only: an idle frame's flush.
+    Unsaved,
+    /// `Unsaved` and `WriteFailed` VMs: an action's flush, where a failed
+    /// write is tried again.
+    UnsavedAndFailed,
+}
+
+/// What a library VM's file holds, as last read from or written to it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VmFileContents {
+    name: String,
+    config: crate::config::ResolvedConfig,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl VmFileContents {
+    fn of(name: &str, config: &crate::config::ResolvedConfig) -> Self {
+        Self {
+            name: name.to_owned(),
+            config: config.clone(),
+        }
+    }
+
+    fn holds(&self, name: &str, config: &crate::config::ResolvedConfig) -> bool {
+        self.name == name && &self.config == config
+    }
 }
 
 /// A destructive step waiting for the user to confirm it in a dialog.
@@ -491,37 +535,63 @@ struct NativeVmProfile {
     config: crate::config::ResolvedConfig,
     settings: NativeVmSettings,
     origin: VmOrigin,
+    /// What the VM's file holds, as last read from or written to it; `None`
+    /// for a VM with no file. `save_state` is `Saved` exactly when this holds
+    /// `name` and `config`, which `apply_pending_settings` and the flush keep
+    /// true.
+    file: Option<VmFileContents>,
     save_state: SaveState,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeVmProfile {
-    /// The VM `config` describes, as its file (if it has one) describes it.
+    /// The VM `config` describes under `name`. A library VM's file holds
+    /// what was read from it: `config` under `name`.
     fn from_config(
         name: impl Into<String>,
         config: crate::config::ResolvedConfig,
         origin: VmOrigin,
     ) -> Self {
+        let name = name.into();
         let settings = NativeVmSettings::from_config(&config);
+        let file = match origin {
+            VmOrigin::Library(_) => Some(VmFileContents::of(&name, &config)),
+            VmOrigin::Launch => None,
+        };
         Self {
-            name: name.into(),
+            name,
             config,
             settings,
             origin,
+            file,
             save_state: SaveState::Saved,
         }
     }
 
-    /// A copy of this VM under `name`, kept where `origin` says. The copy
-    /// counts as saved: `add_vm_copying_selected` writes its file from this
-    /// VM's config before making it.
+    /// A copy of this VM under `name`, kept where `origin` says. A library
+    /// copy's file holds this VM's config under that name:
+    /// `add_vm_copying_selected` writes it before making the copy.
     fn duplicate(&self, name: impl Into<String>, origin: VmOrigin) -> Self {
+        let name = name.into();
+        let file = match origin {
+            VmOrigin::Library(_) => Some(VmFileContents::of(&name, &self.config)),
+            VmOrigin::Launch => None,
+        };
         Self {
-            name: name.into(),
+            name,
             origin,
+            file,
             save_state: SaveState::Saved,
             ..self.clone()
         }
+    }
+
+    /// Whether the VM's file, as last known, holds the VM as it is now. A VM
+    /// with no file holds nothing.
+    fn file_is_current(&self) -> bool {
+        self.file
+            .as_ref()
+            .is_some_and(|file| file.holds(&self.name, &self.config))
     }
 
     fn apply_settings(&mut self) -> Result<(), String> {
@@ -963,6 +1033,7 @@ impl NativeShellApp {
             library: start.library,
             broken_files: opening.broken,
             pending_confirm: None,
+            gravest_raised: None,
             #[cfg(target_os = "android")]
             browse_request: None,
         }
@@ -1002,6 +1073,25 @@ impl NativeShellApp {
         ui.add_space(SPACE_GROUP);
     }
 
+    /// Shows `notice`, unless a graver one was raised earlier in the same
+    /// frame. One frame runs one user action, so within an action the user
+    /// sees the worst that happened: a lesser notice never replaces it.
+    fn notify(&mut self, notice: ShellNotice) {
+        if self
+            .gravest_raised
+            .is_some_and(|raised| raised > notice.kind)
+        {
+            return;
+        }
+        self.gravest_raised = Some(notice.kind);
+        self.shell_notice = Some(notice);
+    }
+
+    /// Starts a frame: the last frame's notices no longer outrank new ones.
+    fn begin_frame(&mut self) {
+        self.gravest_raised = None;
+    }
+
     fn take_runtime_error_notice(&mut self) {
         let runtime_error = self
             .shared
@@ -1010,7 +1100,7 @@ impl NativeShellApp {
             .and_then(|mut display| display.runtime_error.take());
 
         if let Some(message) = runtime_error {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
         }
     }
 
@@ -1298,7 +1388,7 @@ impl NativeShellApp {
             }
             if name_changed {
                 if let Err(message) = self.apply_pending_settings() {
-                    self.shell_notice = Some(ShellNotice::error(message));
+                    self.notify(ShellNotice::error(message));
                 }
             }
             ui.add_space(SPACE_ITEM);
@@ -1939,7 +2029,7 @@ impl NativeShellApp {
 
         if changed {
             if let Err(message) = self.apply_pending_settings() {
-                self.shell_notice = Some(ShellNotice::error(message));
+                self.notify(ShellNotice::error(message));
             }
         }
 
@@ -1972,7 +2062,7 @@ impl NativeShellApp {
             && self.browse(BrowseTarget::NewImage)
         {
             if let Err(message) = self.apply_pending_settings() {
-                self.shell_notice = Some(ShellNotice::error(message));
+                self.notify(ShellNotice::error(message));
             }
         }
     }
@@ -1982,7 +2072,7 @@ impl NativeShellApp {
             CreatedImageKind::HardDisk => {
                 let status = self.runtime_status();
                 if status.running || status.start_pending {
-                    self.shell_notice = Some(ShellNotice::warning(
+                    self.notify(ShellNotice::warning(
                         "Disk image created. Stop the VM before attaching it.",
                     ));
                     return;
@@ -1990,7 +2080,7 @@ impl NativeShellApp {
                 self.attach_created_image_to_selected_profile(created.path);
             }
             CreatedImageKind::Floppy => {
-                self.shell_notice = Some(ShellNotice::info(
+                self.notify(ShellNotice::info(
                     "Floppy image created. Floppy drive emulation is not wired yet.",
                 ));
             }
@@ -2003,13 +2093,13 @@ impl NativeShellApp {
         self.settings.disk_creation = None;
         match self.apply_pending_settings() {
             Ok(()) => {
-                self.shell_notice = Some(ShellNotice::info(format!(
+                self.notify(ShellNotice::info(format!(
                     "Attached created disk image to {}.",
                     self.vm_info.name
                 )));
             }
             Err(message) => {
-                self.shell_notice = Some(ShellNotice::error(message));
+                self.notify(ShellNotice::error(message));
             }
         }
     }
@@ -2042,7 +2132,10 @@ impl NativeShellApp {
     }
 
     /// Applies the edited settings to the selected VM in memory and marks a
-    /// library VM as unsaved. Its file is written by the next flush, not
+    /// library VM `Unsaved` when its name or config differs from what its
+    /// file holds, `Saved` when not — so an apply that changes nothing, a
+    /// selection or a power-on, does not rewrite the file over an edit made
+    /// to it outside the shell. The file is written by the next flush, not
     /// here, so a field edited keystroke by keystroke is written once it is
     /// left rather than on every change.
     fn apply_pending_settings(&mut self) -> Result<(), String> {
@@ -2051,7 +2144,11 @@ impl NativeShellApp {
             profile.config.clone_from(&self.config);
             profile.settings.clone_from(&self.settings);
             if let VmOrigin::Library(_) = profile.origin {
-                profile.save_state = SaveState::Unsaved;
+                profile.save_state = if profile.file_is_current() {
+                    SaveState::Saved
+                } else {
+                    SaveState::Unsaved
+                };
             }
             self.refresh_selected_profile_metadata()?;
             self.config
@@ -2062,32 +2159,55 @@ impl NativeShellApp {
         Ok(())
     }
 
-    /// Writes every library VM whose file is behind its applied edits. A VM
-    /// whose write fails stays unsaved, so the next flush tries it again, and
-    /// the failure is shown as an error.
-    fn flush_unsaved(&mut self) {
+    /// Writes the library VMs `scope` names among those whose files are
+    /// behind. A write that succeeds makes the file what the VM is; one that
+    /// fails leaves the VM `WriteFailed`, is logged, and is shown as an error
+    /// by this attempt alone.
+    fn flush(&mut self, scope: FlushScope) {
         for index in 0..self.profiles.len() {
             let profile = &self.profiles[index];
             let VmOrigin::Library(stem) = &profile.origin else {
                 continue;
             };
-            if profile.save_state == SaveState::Saved {
+            let due = match (profile.save_state, scope) {
+                (SaveState::Saved, _) | (SaveState::WriteFailed, FlushScope::Unsaved) => false,
+                (SaveState::Unsaved, _) | (SaveState::WriteFailed, FlushScope::UnsavedAndFailed) => {
+                    true
+                }
+            };
+            if !due {
                 continue;
             }
             match self.library.save(stem, &profile.name, &profile.config) {
-                Ok(()) => self.profiles[index].save_state = SaveState::Saved,
-                Err(error) => self.shell_notice = Some(ShellNotice::error(error.to_string())),
+                Ok(()) => {
+                    let profile = &mut self.profiles[index];
+                    profile.file = Some(VmFileContents::of(&profile.name, &profile.config));
+                    profile.save_state = SaveState::Saved;
+                }
+                Err(error) => {
+                    tracing::error!(vm = stem.as_str(), %error, "the VM's file was not written");
+                    self.profiles[index].save_state = SaveState::WriteFailed;
+                    self.notify(ShellNotice::error(error.to_string()));
+                }
             }
         }
     }
 
-    /// Flushes at the end of a frame in which no widget holds keyboard focus
-    /// and none is being clicked or dragged, so an edit is written once the
-    /// field it is typed in is left or the drag ends, not on every change.
+    /// An action's flush: writes every VM whose file is behind, one whose
+    /// last write failed included.
+    fn flush_unsaved(&mut self) {
+        self.flush(FlushScope::UnsavedAndFailed);
+    }
+
+    /// The end of a frame's flush. Writes the `Unsaved` VMs, and only while
+    /// no widget holds keyboard focus (`Memory::focused`) and no widget is
+    /// being dragged (`Context::dragged_id`), so an edit is written once the
+    /// field it is typed in is left or the drag ends, not on every change. A
+    /// VM whose write failed is left for an action to try again.
     fn flush_unsaved_when_idle(&mut self, ctx: &egui::Context) {
         let editing = ctx.memory(|memory| memory.focused().is_some()) || ctx.dragged_id().is_some();
         if !editing {
-            self.flush_unsaved();
+            self.flush(FlushScope::Unsaved);
         }
     }
 
@@ -2118,13 +2238,13 @@ impl NativeShellApp {
         }
         let status = self.runtime_status();
         if status.running || status.start_pending {
-            self.shell_notice = Some(ShellNotice::warning(
+            self.notify(ShellNotice::warning(
                 "Stop the running VM before selecting another profile.",
             ));
             return;
         }
         if let Err(message) = self.apply_pending_settings() {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
             return;
         }
         self.flush_unsaved();
@@ -2136,7 +2256,7 @@ impl NativeShellApp {
             self.remember(&stem);
         }
         if let Err(message) = self.refresh_selected_profile_metadata() {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
         }
     }
 
@@ -2146,13 +2266,13 @@ impl NativeShellApp {
     fn add_vm_copying_selected(&mut self) {
         let status = self.runtime_status();
         if status.running || status.start_pending {
-            self.shell_notice = Some(ShellNotice::warning(
+            self.notify(ShellNotice::warning(
                 "Stop the running VM before adding a VM.",
             ));
             return;
         }
         if let Err(message) = self.apply_pending_settings() {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
             return;
         }
         self.flush_unsaved();
@@ -2161,7 +2281,7 @@ impl NativeShellApp {
         let stem = match self.library.create(&name, &self.profiles[base].config) {
             Ok(stem) => stem,
             Err(error) => {
-                self.shell_notice = Some(ShellNotice::error(error.to_string()));
+                self.notify(ShellNotice::error(error.to_string()));
                 return;
             }
         };
@@ -2176,7 +2296,7 @@ impl NativeShellApp {
     /// A `remember` warning outranks the saved notice, so it is set last.
     fn keep_selected_in_library(&mut self) {
         if let Err(message) = self.apply_pending_settings() {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
             return;
         }
         self.flush_unsaved();
@@ -2189,15 +2309,18 @@ impl NativeShellApp {
         }
         match self.library.create(&profile.name, &profile.config) {
             Ok(stem) => {
-                self.profiles[index].origin = VmOrigin::Library(stem.clone());
+                let profile = &mut self.profiles[index];
+                profile.origin = VmOrigin::Library(stem.clone());
+                profile.file = Some(VmFileContents::of(&profile.name, &profile.config));
+                profile.save_state = SaveState::Saved;
                 self.chrome.vm_library[index] = self.profiles[index].library_entry();
-                self.shell_notice = Some(ShellNotice::info(format!(
+                self.notify(ShellNotice::info(format!(
                     "Saved {} to the VM library.",
                     self.profiles[index].name
                 )));
                 self.remember(&stem);
             }
-            Err(error) => self.shell_notice = Some(ShellNotice::error(error.to_string())),
+            Err(error) => self.notify(ShellNotice::error(error.to_string())),
         }
     }
 
@@ -2209,20 +2332,20 @@ impl NativeShellApp {
     fn delete_selected_profile(&mut self) {
         let status = self.runtime_status();
         if status.running || status.start_pending {
-            self.shell_notice = Some(ShellNotice::warning(
+            self.notify(ShellNotice::warning(
                 "Stop the running VM before deleting it.",
             ));
             return;
         }
         if self.profiles.len() == 1 {
-            self.shell_notice = Some(ShellNotice::warning("At least one VM is required."));
+            self.notify(ShellNotice::warning("At least one VM is required."));
             return;
         }
 
         let removed = self.chrome.selected_vm().min(self.profiles.len() - 1);
         if let VmOrigin::Library(stem) = &self.profiles[removed].origin {
             if let Err(error) = self.library.delete(stem) {
-                self.shell_notice = Some(ShellNotice::error(error.to_string()));
+                self.notify(ShellNotice::error(error.to_string()));
                 return;
             }
         }
@@ -2241,7 +2364,7 @@ impl NativeShellApp {
             self.remember(&stem);
         }
         if let Err(message) = self.refresh_selected_profile_metadata() {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
         }
     }
 
@@ -2268,7 +2391,7 @@ impl NativeShellApp {
                 if self.is_selected(index, &origin) {
                     self.delete_selected_profile();
                 } else {
-                    self.shell_notice = Some(ShellNotice::warning(
+                    self.notify(ShellNotice::warning(
                         "Another VM was selected while the delete waited; nothing was deleted.",
                     ));
                 }
@@ -2357,7 +2480,7 @@ impl NativeShellApp {
     fn delete_broken_file(&mut self, path: &Path) {
         match self.library.delete_file(path) {
             Ok(()) => self.broken_files.retain(|file| file.path != path),
-            Err(error) => self.shell_notice = Some(ShellNotice::error(error.to_string())),
+            Err(error) => self.notify(ShellNotice::error(error.to_string())),
         }
     }
 
@@ -2365,7 +2488,7 @@ impl NativeShellApp {
     /// that, so it is reported as a warning.
     fn remember(&mut self, stem: &crate::library::VmStem) {
         if let Err(error) = self.library.remember_selected(stem) {
-            self.shell_notice = Some(ShellNotice::warning(error.to_string()));
+            self.notify(ShellNotice::warning(error.to_string()));
         }
     }
 
@@ -2380,7 +2503,7 @@ impl NativeShellApp {
         }
 
         if let Err(message) = self.apply_pending_settings() {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
             return;
         }
         self.flush_unsaved();
@@ -2398,7 +2521,7 @@ impl NativeShellApp {
                 if let Ok(mut display) = self.shared.lock() {
                     display.start_pending = false;
                 }
-                self.shell_notice = Some(ShellNotice::error(
+                self.notify(ShellNotice::error(
                     "Emulator worker is not available. Restart the application.",
                 ));
             }
@@ -2603,7 +2726,7 @@ impl NativeShellApp {
     pub(crate) fn apply_browsed_path(&mut self, target: BrowseTarget, path: PathBuf) {
         if self.set_browsed_path(target, path) {
             if let Err(message) = self.apply_pending_settings() {
-                self.shell_notice = Some(ShellNotice::error(message));
+                self.notify(ShellNotice::error(message));
             }
         }
     }
@@ -2637,6 +2760,7 @@ impl NativeShellApp {
 #[cfg(not(target_arch = "wasm32"))]
 impl eframe::App for NativeShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.begin_frame();
         self.handle_native_dropped_files(ui.ctx());
         self.draw_pending_confirm(ui.ctx());
         self.draw_shell(ui, frame);
@@ -4342,12 +4466,20 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// A path no other test of this process has: the clock alone is not
+    /// enough, since two tests can start within one of its ticks.
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after Unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("{name}-{}-{nanos}.img", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "{name}-{}-{nanos}-{sequence}.img",
+            std::process::id()
+        ))
     }
 
     fn remove_test_file(path: &std::path::Path) {
@@ -4797,7 +4929,7 @@ mod tests {
 
         app.flush_unsaved();
 
-        assert_eq!(app.profiles[0].save_state, SaveState::Unsaved);
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
         assert!(
             matches!(&app.shell_notice, Some(notice) if notice.kind == ShellNoticeKind::Error),
             "notice: {:?}",
@@ -4809,6 +4941,203 @@ mod tests {
 
         assert_eq!(app.profiles[0].save_state, SaveState::Saved);
         assert_eq!(scratch.library().load().expect("reload").vms[0].config.memory_mib, 512);
+    }
+
+    /// The memory the seeded VM's file holds, reloaded from the folder.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn memory_in_file(scratch: &ScratchLibrary) -> u32 {
+        scratch.library().load().expect("reload").vms[0].config.memory_mib
+    }
+
+    /// Runs `body` inside one egui pass with nothing drawn, the way the
+    /// frame-end flush runs inside `ui`. Nothing is drawn, so the pass paints
+    /// nothing; that is all its output is checked for.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn in_a_pass(ctx: &egui::Context, body: impl FnOnce(&egui::Context)) {
+        ctx.begin_pass(egui::RawInput::default());
+        body(ctx);
+        let output = ctx.end_pass();
+        assert!(output.shapes.is_empty(), "a pass with nothing drawn paints nothing");
+    }
+
+    /// Every entry of the scratch folder by name, dot files included.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn all_entries(scratch: &ScratchLibrary) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(&scratch.dir)
+            .expect("list scratch library")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_failed_write_waits_for_the_next_action() {
+        let (mut app, command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let file = scratch.dir.join("alpine.toml");
+        fs::remove_file(&file).expect("remove");
+        fs::create_dir(&file).expect("a folder in the file's way");
+        app.flush_unsaved();
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
+        assert!(
+            matches!(&app.shell_notice, Some(notice) if notice.kind == ShellNoticeKind::Error),
+            "notice: {:?}",
+            app.shell_notice
+        );
+
+        // Closed by the user; an idle frame neither tries again nor reopens it.
+        app.shell_notice = None;
+        let ctx = egui::Context::default();
+        in_a_pass(&ctx, |ctx| app.flush_unsaved_when_idle(ctx));
+
+        assert_eq!(app.shell_notice, None);
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
+        assert_eq!(all_entries(&scratch), ["alpine.toml"]);
+
+        // An action tries again: still blocked, so the error is raised once more.
+        app.select_profile(0);
+
+        assert!(
+            matches!(&app.shell_notice, Some(notice) if notice.kind == ShellNoticeKind::Error),
+            "notice: {:?}",
+            app.shell_notice
+        );
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
+
+        // The way cleared, the next action writes it.
+        fs::remove_dir(&file).expect("clear the way");
+        app.start_vm();
+
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+        assert_eq!(memory_in_file(&scratch), 512);
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(NativeEmulatorCommand::Start(config)) if config.memory_mib == 512
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_unchanged_vm_is_not_rewritten_by_a_selection_or_a_power_on() {
+        let (mut app, command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+        let file = scratch.dir.join("alpine.toml");
+        let hand_edited = format!(
+            "{}\n# edited outside the shell\n",
+            fs::read_to_string(&file).expect("read")
+        );
+        fs::write(&file, &hand_edited).expect("write");
+
+        app.select_profile(0);
+        app.start_vm();
+
+        assert_eq!(fs::read_to_string(&file).expect("read"), hand_edited);
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(NativeEmulatorCommand::Start(_))
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_idle_flush_waits_for_focus_and_drags_to_end() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let ctx = egui::Context::default();
+        let field = egui::Id::new("field");
+
+        in_a_pass(&ctx, |ctx| {
+            ctx.memory_mut(|memory| memory.request_focus(field));
+            app.flush_unsaved_when_idle(ctx);
+        });
+        assert_eq!(memory_in_file(&scratch), 256);
+
+        in_a_pass(&ctx, |ctx| {
+            ctx.memory_mut(|memory| memory.surrender_focus(field));
+            ctx.set_dragged_id(field);
+            app.flush_unsaved_when_idle(ctx);
+        });
+        assert_eq!(memory_in_file(&scratch), 256);
+
+        in_a_pass(&ctx, |ctx| {
+            ctx.stop_dragging();
+            app.flush_unsaved_when_idle(ctx);
+        });
+        assert_eq!(memory_in_file(&scratch), 512);
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_writes_the_vm_first() {
+        let (mut app, command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+
+        app.start_vm();
+
+        assert_eq!(memory_in_file(&scratch), 512);
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(NativeEmulatorCommand::Start(config)) if config.memory_mib == 512
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn closing_the_window_writes_the_unsaved_vm() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+
+        eframe::App::on_exit(&mut app, None);
+
+        assert_eq!(memory_in_file(&scratch), 512);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_deleted_vm_leaves_no_unsaved_edit_behind() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        assert_eq!(app.profiles[1].save_state, SaveState::Unsaved);
+
+        app.request_delete_selected();
+        app.confirm_pending();
+        app.flush_unsaved();
+
+        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_flush_error_outranks_the_remember_warning_of_the_same_selection() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let copy_file = scratch.dir.join("alpine-copy.toml");
+        fs::remove_file(&copy_file).expect("remove");
+        fs::create_dir(&copy_file).expect("a folder in the file's way");
+        let record = scratch.dir.join(".last");
+        fs::remove_file(&record).expect("remove the record");
+        fs::create_dir(&record).expect("a folder where the record goes");
+
+        app.select_profile(0);
+
+        assert_eq!(app.chrome.selected_vm(), 0);
+        assert_eq!(app.profiles[1].save_state, SaveState::WriteFailed);
+        assert!(
+            matches!(&app.shell_notice, Some(notice) if notice.kind == ShellNoticeKind::Error),
+            "notice: {:?}",
+            app.shell_notice
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
