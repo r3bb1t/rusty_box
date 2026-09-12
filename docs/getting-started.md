@@ -74,7 +74,9 @@ temporary VM, marked "(unsaved)", and **Keep in library** on its Summary page
 adds it to the library for good. A `rusty_box.toml` in the current or parent
 directory is not read, so a file someone drops there cannot change what
 boots; `--no-config` is accepted and changes nothing. Here is a minimal
-config that boots an installer ISO and installs to a fresh 12 GiB disk:
+config that boots an installer ISO and installs to a fresh 12 GiB disk; save
+it as `rusty_box.toml`, which is gitignored and does not ship with the
+repository:
 
 ```toml
 [emulator]
@@ -165,16 +167,17 @@ The Summary page shows:
 - the state badge and the engine;
 - the VM's name, which you can edit in place;
 - its memory, processors, boot order, CD/DVD and disk;
-- a caption on where the VM is kept: *Saved automatically to <path>*,
-  *Saving to <path> when the edit ends*, or *Not saved: the last write to
-  <path> failed. It is tried again at the next change, selection or
-  power-on.* A temporary VM's reads *Temporary VM. Not saved until it is
-  kept in the library.*
+- a caption on where the VM is kept: `Saved automatically to <path>`,
+  `Saving to <path> when the edit ends`, or
+  `Not saved: the last write to <path> failed. It is tried again at the next change, selection or power-on.`
+  A temporary VM's caption reads
+  `Temporary VM. Not saved until it is kept in the library.`
 
 A library VM has a **Delete VM** button; a temporary VM has **Keep in
-library** and **Discard**. Deleting asks for confirmation and removes the
-VM's file; the disk images it uses are kept. Delete and Discard work only
-while the VM is stopped, and only when another VM remains. Three tiles lead
+library** and **Discard**. `Delete VM` and `Discard` ask first
+(`Delete <name>?` / `Discard <name>?`) and work only while the VM is stopped
+and another VM remains; deleting removes the VM's file, and the disk images
+it uses are kept. Three tiles lead
 elsewhere: **Power On VM**, **Create Disk Image** (goes to the Images page)
 and **Hardware Settings** (goes to the Hardware page).
 
@@ -222,7 +225,7 @@ The Images page creates blank images with the `rusty_box_bximage` backend:
 You give a path, choose whether to overwrite an existing file, and press
 **Create image**.
 
-A new hard disk is attached to the selected profile at once, unless the VM is
+A new hard disk is attached to the selected VM at once, unless the VM is
 running, in which case you are asked to stop it first. The floppy drive is not
 wired up yet, so a created floppy image is only written to disk.
 
@@ -246,8 +249,8 @@ corresponds to.
 ### `[vm]`
 
 `name` is what the shell shows for the VM. A library file without one is
-shown under its file name. The shell writes the key when you rename a VM on
-its Summary page.
+shown under its file name. The shell writes the key whenever it saves the
+VM, and leaves it out when the name is blank.
 
 ### `[emulator]`
 
@@ -322,9 +325,10 @@ size = "12G"         # default 20G
 overwrite = false    # default false
 ```
 
-This creates the image at the VM's first power-on of a session in the shell,
-and at every launch of a `terminal` or `headless` run. It cannot be combined
-with `[disk] path` or `chs`. Two things people trip over:
+This creates the image at the first power-on of a VM that uses the path, once
+per session, in the shell, and at every launch of a `terminal` or `headless`
+run. It cannot be combined with `[disk] path` or `chs`. Two things people
+trip over:
 
 - **Creation can take a while.** The image is a flat file extended to its
   full size. On a filesystem that leaves the gap unallocated (ext4, APFS) this
@@ -334,10 +338,10 @@ with `[disk] path` or `chs`. Two things people trip over:
 - **`overwrite = false` keeps your data.** With the default `false`, an
   existing valid image is reused, never recreated, so your installed OS
   survives relaunches. Set `overwrite = true` only when you deliberately want a
-  factory-reset disk on every launch. In the shell, that reset happens once
-  per session, at the VM's first power-on, and the power-on that would erase
-  an existing file asks first (*Overwrite <path>?*, with the button
-  **Overwrite and power on**).
+  factory-reset disk on every launch. In the shell, that reset happens at the
+  first power-on of a VM that uses the path, once per session, and the
+  power-on that would erase an existing file asks first (`Overwrite <path>?`,
+  with the button `Overwrite and power on`).
 
 ### `[cdrom]`
 
