@@ -665,15 +665,29 @@ fn run_egui(_config: ResolvedConfig) -> Result<RunSummary, RunError> {
     })
 }
 
+/// The file eframe's storage is opened on, in the app's storage. Nothing is
+/// ever put in the storage, so the file is never written: the storage exists
+/// so that eframe calls `App::save` when the activity's window is taken away
+/// (`Event::Suspended`, from `surfaceDestroyed`), the last call the shell
+/// gets before Android may kill the process, and the shell writes the edits
+/// still in memory then. Without a storage eframe makes no such call, and
+/// without a path of its own it would look for a per-user folder, which
+/// Android has none of.
+#[cfg(all(feature = "gui-egui", target_os = "android"))]
+const EFRAME_STATE_FILE: &str = "eframe.ron";
+
 /// The shell a phone shows for `app`, the activity NativeActivity handed this
-/// process.
+/// process; `storage` is the app's private storage.
 #[cfg(all(feature = "gui-egui", target_os = "android"))]
 pub(crate) fn run_android_shell(
     start: ShellStart,
     app: crate::android::AndroidApp,
+    storage: &Path,
 ) -> Result<RunSummary, RunError> {
     let native_options = eframe::NativeOptions {
         android_app: Some(app.clone()),
+        persistence_path: Some(storage.join(EFRAME_STATE_FILE)),
+        persist_window: false,
         ..Default::default()
     };
     run_egui_shell(start, native_options, move |cc, shared, command_tx, start| {

@@ -67,9 +67,13 @@ rfd = "0.17.2"
 
 # The Android front end (src/android.rs): NativeActivity through winit — the
 # version eframe drives, named for its `AndroidApp` — logcat, and JNI for the
-# storage permission the file browser needs.
+# storage permission the file browser needs. `persistence` is the hook for
+# the app going to the background: with a storage to save to, eframe calls
+# `App::save` when the activity's window is taken away, and the shell writes
+# its edits then (src/runner.rs, `run_android_shell`). Nothing is stored
+# through it.
 [target.'cfg(target_os = "android")'.dependencies]
-eframe = { workspace = true, optional = true, features = ["android-native-activity"] }
+eframe = { workspace = true, optional = true, features = ["android-native-activity", "persistence"] }
 winit = "0.30.13"
 android_logger = "0.15"
 log = "0.4"

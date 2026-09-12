@@ -153,6 +153,18 @@ impl ShellNotice {
     }
 }
 
+/// Whether a phone draws a notice of `kind`: the ones that report something
+/// that did not happen, in full or in part — a save that did not reach its
+/// file, a launch whose first VM was not finished, a power-on that stopped.
+/// A phone has no room for the ones that report something that did.
+#[cfg(not(target_arch = "wasm32"))]
+fn phone_shows_notice(kind: ShellNoticeKind) -> bool {
+    match kind {
+        ShellNoticeKind::Info => false,
+        ShellNoticeKind::Warning | ShellNoticeKind::Error => true,
+    }
+}
+
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 fn pick_native_file() -> Option<PathBuf> {
     rfd::FileDialog::new().pick_file()
@@ -1066,13 +1078,12 @@ impl NativeShellApp {
     }
 
     fn draw_shell_notice(&mut self, ui: &mut egui::Ui) {
-        if cfg!(target_os = "android") {
-            return;
-        }
-
         let Some(notice) = self.shell_notice.clone() else {
             return;
         };
+        if cfg!(target_os = "android") && !phone_shows_notice(notice.kind) {
+            return;
+        }
         let (label, color) = match notice.kind {
             ShellNoticeKind::Info => ("Info", ACCENT_CYAN),
             ShellNoticeKind::Warning => ("Warning", ACCENT_AMBER),
@@ -2251,6 +2262,25 @@ impl NativeShellApp {
         }
     }
 
+    /// The flush for the frame on which the window went behind another
+    /// (`Event::WindowFocused(false)`) — on a phone, the activity leaving the
+    /// foreground, after which the process can be killed with no further
+    /// frame. An action's flush: an edit in a field that still has focus is
+    /// written without waiting for the field to be left, and a write that
+    /// failed is tried again. It runs on that frame alone, so a window that
+    /// stays unfocused does not retry a lasting fault every frame.
+    fn flush_when_window_focus_is_lost(&mut self, ctx: &egui::Context) {
+        let lost = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::WindowFocused(false)))
+        });
+        if lost {
+            self.flush_unsaved();
+        }
+    }
+
     fn refresh_selected_profile_metadata(&mut self) -> Result<(), String> {
         let index = self.chrome.selected_vm();
         if index >= self.profiles.len() {
@@ -2848,7 +2878,31 @@ impl eframe::App for NativeShellApp {
         self.handle_native_dropped_files(ui.ctx());
         self.draw_pending_confirm(ui.ctx());
         self.draw_shell(ui, frame);
+        self.flush_when_window_focus_is_lost(ui.ctx());
         self.flush_unsaved_when_idle(ui.ctx());
+    }
+
+    /// eframe's save, made when the window is taken away from the app — on
+    /// Android `Event::Suspended`, from the activity's `surfaceDestroyed`,
+    /// the last call before the process can be killed — and at exit, and
+    /// only when eframe has a storage to save to: the Android runner opens
+    /// one so that the call is made (`runner::run_android_shell`). Every edit
+    /// still only in memory is written. Nothing is put in the storage: the VM
+    /// files are the shell's store.
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.flush_unsaved();
+    }
+
+    /// No periodic save: an edit is written when it ends, not on a timer that
+    /// would catch a field mid-edit.
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::MAX
+    }
+
+    /// egui's memory — window positions, what is open — is not kept between
+    /// runs.
+    fn persist_egui_memory(&self) -> bool {
+        false
     }
 
     /// The window is closing: every edit still only in memory is written.
@@ -5038,10 +5092,50 @@ mod tests {
     /// nothing; that is all its output is checked for.
     #[cfg(not(target_arch = "wasm32"))]
     fn in_a_pass(ctx: &egui::Context, body: impl FnOnce(&egui::Context)) {
-        ctx.begin_pass(egui::RawInput::default());
+        in_a_pass_with(ctx, egui::RawInput::default(), body);
+    }
+
+    /// `in_a_pass` over the frame's `input`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn in_a_pass_with(
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        body: impl FnOnce(&egui::Context),
+    ) {
+        ctx.begin_pass(input);
         body(ctx);
         let output = ctx.end_pass();
         assert!(output.shapes.is_empty(), "a pass with nothing drawn paints nothing");
+    }
+
+    /// The frame on which the window went behind another, as egui-winit
+    /// reports it: on Android, the activity leaving the foreground.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn window_focus_lost() -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::WindowFocused(false)],
+            focused: false,
+            ..egui::RawInput::default()
+        }
+    }
+
+    /// eframe's storage as the shell sees it: nothing is ever put in it, so
+    /// it keeps nothing. `save` is the shell's hook for the activity's window
+    /// being taken away, not a store.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct NoStore;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl eframe::Storage for NoStore {
+        fn get_string(&self, _key: &str) -> Option<String> {
+            None
+        }
+
+        fn set_string(&mut self, _key: &str, _value: String) {}
+
+        fn remove_string(&mut self, _key: &str) {}
+
+        fn flush(&mut self) {}
     }
 
     /// Every entry of the scratch folder by name, dot files included.
@@ -5234,6 +5328,129 @@ mod tests {
         });
         assert_eq!(memory_in_file(&scratch), 512);
         assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+    }
+
+    /// An edit in a field that still has focus reaches its file on the frame
+    /// the window goes behind another — on a phone, the activity leaving the
+    /// foreground — without waiting for the field to be left; a window that
+    /// keeps focus waits as before.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_edit_still_being_typed_is_written_when_the_window_loses_focus() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let ctx = egui::Context::default();
+        let field = egui::Id::new("field");
+
+        in_a_pass(&ctx, |ctx| {
+            ctx.memory_mut(|memory| memory.request_focus(field));
+            app.flush_when_window_focus_is_lost(ctx);
+            app.flush_unsaved_when_idle(ctx);
+        });
+        assert_eq!(memory_in_file(&scratch), 256);
+        assert_eq!(app.profiles[0].save_state, SaveState::Unsaved);
+
+        in_a_pass_with(&ctx, window_focus_lost(), |ctx| {
+            ctx.memory_mut(|memory| memory.request_focus(field));
+            app.flush_when_window_focus_is_lost(ctx);
+        });
+        assert_eq!(memory_in_file(&scratch), 512);
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+    }
+
+    /// A write that failed is tried again by the loss of focus, as by any
+    /// action, and by nothing while the window stays unfocused.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn losing_focus_retries_a_failed_write_once() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let file = scratch.dir.join("alpine.toml");
+        fs::remove_file(&file).expect("remove");
+        fs::create_dir(&file).expect("a folder in the file's way");
+        app.flush_unsaved();
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
+        app.shell_notice = None;
+        let ctx = egui::Context::default();
+
+        // Unfocused frames after the loss neither try again nor say anything.
+        in_a_pass_with(
+            &ctx,
+            egui::RawInput {
+                focused: false,
+                ..egui::RawInput::default()
+            },
+            |ctx| app.flush_when_window_focus_is_lost(ctx),
+        );
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
+        assert_eq!(app.shell_notice, None);
+
+        // The way cleared, the next loss of focus writes it.
+        fs::remove_dir(&file).expect("clear the way");
+        in_a_pass_with(&ctx, window_focus_lost(), |ctx| {
+            app.flush_when_window_focus_is_lost(ctx);
+        });
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+        assert_eq!(memory_in_file(&scratch), 512);
+    }
+
+    /// eframe calls `save` when the activity's window is taken away, which
+    /// on a phone is the last chance before the process can be killed: the
+    /// edits still in memory reach their files then, and nothing else is
+    /// persisted — no egui memory, and no periodic save that would write a
+    /// field mid-edit.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_activity_whose_window_is_taken_away_writes_its_edits() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        assert_eq!(memory_in_file(&scratch), 256);
+
+        eframe::App::save(&mut app, &mut NoStore);
+
+        assert_eq!(memory_in_file(&scratch), 512);
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+        assert!(!eframe::App::persist_egui_memory(&app));
+        assert_eq!(
+            eframe::App::auto_save_interval(&app),
+            std::time::Duration::MAX
+        );
+    }
+
+    /// A phone draws the notices that report something that did not happen —
+    /// a launch whose seed was not finished, a save that did not reach its
+    /// file — and not the ones that report something that did.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_phone_shows_what_did_not_happen_and_not_what_did() {
+        let scratch = ScratchLibrary::new();
+        let (app, _command_rx) = native_test_app_over(
+            &scratch,
+            None,
+            Some("The settings saved in /data/rusty_box.toml were not imported: bad file.".to_owned()),
+        );
+        let start = app.shell_notice.clone().expect("the start's notice");
+        assert!(phone_shows_notice(start.kind), "hidden on a phone: {start:?}");
+
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let file = scratch.dir.join("alpine.toml");
+        fs::remove_file(&file).expect("remove");
+        fs::create_dir(&file).expect("a folder in the file's way");
+        app.flush_unsaved();
+        let failed = app.shell_notice.clone().expect("the failed write's notice");
+        assert_eq!(failed.kind, ShellNoticeKind::Error);
+        assert!(phone_shows_notice(failed.kind), "hidden on a phone: {failed:?}");
+
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        app.keep_selected_in_library();
+        let kept = app.shell_notice.clone().expect("the kept VM's notice");
+        assert_eq!(kept.kind, ShellNoticeKind::Info);
+        assert!(!phone_shows_notice(kept.kind), "shown on a phone: {kept:?}");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

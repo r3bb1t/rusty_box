@@ -3,19 +3,19 @@
 //! NativeActivity loads the `rusty_box_gui_android` example's library and
 //! calls its `android_main`, which passes the activity to [`main`]. From there
 //! a phone runs the desktop shell — the same `NativeShellApp`, emulator thread
-//! and machine start — over a configuration whose files are the ones the APK
-//! carries. What a desktop gets from its host and a phone lacks is supplied
-//! here: a file browser for the shell's Browse buttons, the storage permission
-//! that browser needs, a key pad for a device without a keyboard, and the
-//! safe area that keeps the shell clear of the system bars.
+//! and machine start — over a VM library in the app's storage, seeded from
+//! the files the APK carries. What a desktop gets from its host and a phone
+//! lacks is supplied here: a file browser for the shell's Browse buttons, the
+//! storage permission that browser needs, a key pad for a device without a
+//! keyboard, and the safe area that keeps the shell clear of the system bars.
 
 use crate::android_support::{
-    content_rect_in_points, list_directory, stage_file, DirectoryEntry, EntryKind, FileFilter,
-    PixelRect,
+    content_rect_in_points, list_directory, needs_first_vm, seed_first_vm, stage_file,
+    CarriedMachine, DirectoryEntry, EntryKind, FileFilter, PixelRect,
 };
 use crate::app::{BrowseRequest, BrowseTarget, NativeEmulatorCommand, NativeShellApp};
-use crate::config::{load_toml_file, resolve_config, FileConfig, ResolvedConfig, DEFAULT_CONFIG_FILE};
-use crate::{Args, DisplayBackend, RunError, RunSummary};
+use crate::library::VmLibrary;
+use crate::{RunError, RunSummary};
 use egui::RichText;
 use rusty_box::gui::shared_display::SharedDisplay;
 use rusty_box::gui::{char_to_bx_key_sequence, HostInputEvent, HostInputSink};
@@ -32,11 +32,10 @@ const VGA_BIOS_DATA: &[u8] =
 #[cfg(feature = "embedded-alpine")]
 const ALPINE_ISO: &[u8] = include_bytes!("../assets/alpine.iso");
 
-/// Guest memory until a saved configuration says otherwise, MiB. A phone
-/// shares its RAM with everything else it runs.
+/// Guest memory of a VM made from the carried files, and of imported settings
+/// that name none, MiB. A phone shares its RAM with everything else it runs.
 const DEFAULT_MEMORY_MIB: u32 = 256;
-/// The instruction rate the machine's timers assume until a saved
-/// configuration says otherwise.
+/// The instruction rate the timers of such a VM assume.
 const DEFAULT_IPS: u32 = 300_000_000;
 
 /// `Build.VERSION_CODES.R`: from Android 11 shared storage is opened by the
@@ -84,63 +83,62 @@ pub fn main(app: AndroidApp) {
 
 fn run(app: AndroidApp) -> Result<RunSummary, RunError> {
     let storage = app.internal_data_path().ok_or(RunError::NoAppStorage)?;
-    let config = phone_config(&storage)?;
+    let PhoneLibrary { library, notice } = phone_library(&storage)?;
     let start = crate::runner::ShellStart {
-        library: crate::library::VmLibrary::open(storage.join("vms"))?,
-        launch: Some(crate::runner::LaunchVm {
-            name: crate::library::DEFAULT_VM_NAME.to_owned(),
-            config,
-        }),
-        notice: None,
+        library,
+        launch: None,
+        notice,
     };
-    crate::runner::run_android_shell(start, app)
+    crate::runner::run_android_shell(start, app, &storage)
 }
 
-/// The machine a phone powers on: what `rusty_box.toml` in the app's storage
-/// says, over defaults that need nothing outside the APK — the Bochs ROMs it
-/// carries, a phone-sized memory, and in a build with `embedded-alpine` the
-/// Alpine ISO as a CD booted first.
-fn phone_config(storage: &Path) -> Result<ResolvedConfig, RunError> {
-    let config_path = storage.join(DEFAULT_CONFIG_FILE);
-    let mut file = if config_path.exists() {
-        load_toml_file(&config_path)?
-    } else {
-        FileConfig::default()
-    };
+/// What a phone opens the shell on.
+struct PhoneLibrary {
+    library: VmLibrary,
+    /// What the launch could not do in full, for the shell to show first.
+    notice: Option<String>,
+}
 
-    // Staged every launch, so an updated APK replaces ROMs a saved
-    // configuration still points at.
+/// The phone's VM library, in the app's storage. The ROMs the APK carries are
+/// placed beside it on every launch, so an updated APK replaces ones a VM file
+/// still points at. An empty library — a first launch — is given one VM: the
+/// settings a build before the library saved in `rusty_box.toml` there, or,
+/// with no such file, a VM made from the carried files, with the Alpine ISO
+/// as its CD in a build with `embedded-alpine`. Only a library folder that
+/// cannot be created and a carried file that cannot be placed refuse the
+/// launch: with either there is nothing to show. Whatever else could not be
+/// done comes back as the notice, and the shell opens and says so.
+fn phone_library(storage: &Path) -> Result<PhoneLibrary, RunError> {
+    let library = VmLibrary::open(storage.join("vms"))?;
     let carried = storage.join("carried");
     let bios = stage("BIOS", &carried, "BIOS-bochs-latest", BIOS_DATA)?;
     let vga_bios = stage("VGA BIOS", &carried, "VGABIOS-lgpl-latest.bin", VGA_BIOS_DATA)?;
-    if file.rom.bios.is_none() {
-        file.rom.bios = Some(bios);
-    }
-    if file.rom.vga_bios.is_none() {
-        file.rom.vga_bios = Some(vga_bios);
-    }
-    if file.emulator.memory_mib.is_none() {
-        file.emulator.memory_mib = Some(DEFAULT_MEMORY_MIB);
-    }
-    if file.emulator.ips.is_none() {
-        file.emulator.ips = Some(DEFAULT_IPS);
-    }
-    file.display.backend = Some(DisplayBackend::Egui);
-
-    #[cfg(feature = "embedded-alpine")]
-    if file.cdrom.is_none() {
-        let iso = stage("Alpine ISO", &carried, "alpine.iso", ALPINE_ISO)?;
-        file.cdrom = Some(crate::config::CdromToml {
-            path: Some(iso),
-            channel: None,
-            drive: None,
+    if !needs_first_vm(&library) {
+        return Ok(PhoneLibrary {
+            library,
+            notice: None,
         });
-        if file.boot.order.is_empty() {
-            file.boot.order = vec![crate::BootDevice::Cdrom];
-        }
     }
-
-    resolve_config(file, &Args::default())
+    #[cfg(feature = "embedded-alpine")]
+    let machine = CarriedMachine {
+        name: "Alpine",
+        bios,
+        vga_bios,
+        cdrom: Some(stage("Alpine ISO", &carried, "alpine.iso", ALPINE_ISO)?),
+        memory_mib: DEFAULT_MEMORY_MIB,
+        ips: DEFAULT_IPS,
+    };
+    #[cfg(not(feature = "embedded-alpine"))]
+    let machine = CarriedMachine {
+        name: crate::library::DEFAULT_VM_NAME,
+        bios,
+        vga_bios,
+        cdrom: None,
+        memory_mib: DEFAULT_MEMORY_MIB,
+        ips: DEFAULT_IPS,
+    };
+    let notice = seed_first_vm(&library, storage, &machine);
+    Ok(PhoneLibrary { library, notice })
 }
 
 fn stage(kind: &'static str, dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, RunError> {
@@ -287,6 +285,21 @@ impl eframe::App for AndroidShellApp {
             }
         }
         self.draw_keypad(&ctx, safe_rect);
+    }
+
+    /// The activity's window is being taken away — the app went to the
+    /// background, the last call before Android may kill the process — or
+    /// the shell is closing: the shell writes every edit still in memory.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::App::save(&mut self.shell, storage);
+    }
+
+    fn auto_save_interval(&self) -> std::time::Duration {
+        eframe::App::auto_save_interval(&self.shell)
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        eframe::App::persist_egui_memory(&self.shell)
     }
 
     /// The activity is closing: the shell writes every edit still in memory.
