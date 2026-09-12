@@ -39,8 +39,9 @@ pub enum RunError {
     /// on the library with them dropped.
     #[error(
         "{} without a machine: this command line sets how a machine runs but names none. Pass \
-         --config FILE or --bios/--cdrom/--disk…, or set it per VM in the shell (Hardware › \
-         Processors › Engine, Hardware › Display › Log level)",
+         --config FILE or --bios/--cdrom/--disk…, or set it per VM (in the shell: Hardware › \
+         Processors › Engine, Hardware › Display › Log level; in the VM file: `emulator.engine`, \
+         `emulator.cpu_capabilities`, `logging.level`)",
         quoted_flags(flags)
     )]
     RunFlagsNeedAMachine { flags: Vec<&'static str> },
@@ -275,6 +276,8 @@ mod tests {
         assert!(text.contains("--config FILE"), "{text:?} does not say how to name a machine");
         assert!(text.contains("Hardware › Processors › Engine"));
         assert!(text.contains("Hardware › Display › Log level"));
+        // The shell has no processor-capabilities control; the VM file does.
+        assert!(text.contains("emulator.cpu_capabilities"), "{text:?}");
     }
 
     #[test]

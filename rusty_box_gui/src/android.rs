@@ -91,6 +91,7 @@ fn run(app: AndroidApp) -> Result<RunSummary, RunError> {
             name: crate::library::DEFAULT_VM_NAME.to_owned(),
             config,
         }),
+        notice: None,
     };
     crate::runner::run_android_shell(start, app)
 }

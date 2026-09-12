@@ -475,6 +475,10 @@ pub struct ShellStart {
     /// Shown first in the VM list as a temporary VM, selected, and written to
     /// the library only when the user keeps it.
     pub launch: Option<LaunchVm>,
+    /// The message the shell shows when it opens, telling the user what the
+    /// start could not do — a bundled VM it could not import, say. `None`
+    /// when the start did everything it set out to.
+    pub notice: Option<String>,
 }
 
 /// The machine the command line described, as the shell lists it.
@@ -505,56 +509,84 @@ impl LaunchVm {
 /// Only a library folder that cannot be created refuses the launch: with no
 /// folder there is nothing to show. A library that cannot be read opens as
 /// empty, with the error as a notice in the window, and a bundled VM that
-/// cannot be imported is logged and left out.
+/// cannot be imported is left out, with the reason as the shell's opening
+/// notice: no subscriber is installed this early, so a log line alone would
+/// reach nobody.
 #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
 pub fn run_shell(launch: Option<LaunchVm>) -> Result<RunSummary, RunError> {
     let dir = crate::library::default_library_dir().ok_or(RunError::NoAppStorage)?;
     let library = crate::library::VmLibrary::open(dir)?;
-    match library.load() {
-        Ok(contents) if contents.is_empty() => import_bundled_vm(&library),
-        Ok(_) => {}
+    let notice = match library.is_empty() {
+        Ok(true) => import_bundled_vm(&library),
+        Ok(false) => None,
+        // The shell reads the library itself and shows this error as its
+        // notice, so the import is skipped and nothing is said twice.
         Err(error) => {
             tracing::warn!(
                 "the VM library could not be read, so no bundled VM is imported: {error}"
             );
+            None
         }
-    }
-    run_egui(ShellStart { library, launch })
+    };
+    run_egui(ShellStart {
+        library,
+        launch,
+        notice,
+    })
 }
 
 /// A first run's empty library gets the VM a `rusty_box.toml` beside the
-/// executable describes, and the shell opens on it. An executable whose
+/// executable describes, and the shell opens on it. Returns the message the
+/// shell shows when that could not be done in full; an executable whose
 /// folder cannot be found has nothing bundled to import.
 #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
-fn import_bundled_vm(library: &crate::library::VmLibrary) {
+fn import_bundled_vm(library: &crate::library::VmLibrary) -> Option<String> {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(error) => {
-            tracing::warn!("cannot locate the executable, so no bundled VM is imported: {error}");
-            return;
+            let message = format!(
+                "The executable could not be located, so no bundled VM was imported: {error}"
+            );
+            tracing::warn!("{message}");
+            return Some(message);
         }
     };
-    let Some(exe_dir) = exe.parent() else {
-        return;
-    };
-    import_bundled_vm_from(library, exe_dir);
+    let exe_dir = exe.parent()?;
+    import_bundled_vm_from(library, exe_dir)
 }
 
 /// Imports the VM `exe_dir`'s `rusty_box.toml` describes and records it as
-/// the VM the shell shows next. Nothing here refuses the launch: a file that
-/// does not load, or a library that cannot take it, is logged and the shell
-/// opens on the library as it stands.
+/// the VM the shell shows next. Nothing here refuses the launch: the message
+/// returned says what could not be done — the file did not load or the
+/// library could not take it, or it was imported but the record of it could
+/// not be written, so the next launch will not open on it — and the shell
+/// opens on the library as it stands. `None` when there was nothing to
+/// import or everything was done.
 #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
-fn import_bundled_vm_from(library: &crate::library::VmLibrary, exe_dir: &Path) {
-    let imported = library.import_bundled_vm(exe_dir).and_then(|stem| match stem {
-        Some(stem) => library.remember_selected(&stem).map_err(RunError::from),
-        None => Ok(()),
-    });
-    if let Err(error) = imported {
-        tracing::warn!(
-            "the VM bundled in {} is not imported: {error}",
-            exe_dir.display()
-        );
+fn import_bundled_vm_from(library: &crate::library::VmLibrary, exe_dir: &Path) -> Option<String> {
+    let stem = match library.import_bundled_vm(exe_dir) {
+        Ok(Some(stem)) => stem,
+        Ok(None) => return None,
+        Err(error) => {
+            let message = format!(
+                "The VM bundled in {} was not imported: {error}",
+                exe_dir.display()
+            );
+            tracing::warn!("{message}");
+            return Some(message);
+        }
+    };
+    match library.remember_selected(&stem) {
+        Ok(()) => None,
+        Err(error) => {
+            let message = format!(
+                "The VM bundled in {} was imported, but the next launch will not open on it: \
+                 {error}",
+                exe_dir.display()
+            );
+            tracing::warn!("{message}");
+            Some(message)
+        }
     }
 }
 
@@ -1173,12 +1205,38 @@ mod tests {
         )
         .expect("write the bundled file");
 
-        import_bundled_vm_from(&library, &exe_dir.path);
+        let message = import_bundled_vm_from(&library, &exe_dir.path);
 
+        assert_eq!(message, None);
         let contents = library.load().expect("load");
         assert_eq!(contents.vms.len(), 1);
         assert_eq!(contents.vms[0].name, crate::library::DEFAULT_VM_NAME);
         assert_eq!(library.last_selected(), Some(contents.vms[0].stem.clone()));
+    }
+
+    /// A VM that was imported while only the record of it could not be
+    /// written is in the library, and the message says which half failed.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_bundled_vm_whose_record_cannot_be_written_is_imported_and_says_so() {
+        let library_dir = ScratchDir::new("rusty-box-gui-unrecorded-library");
+        let exe_dir = ScratchDir::new("rusty-box-gui-unrecorded-exe");
+        let library = crate::library::VmLibrary::open(library_dir.path.clone()).expect("open");
+        fs::write(
+            exe_dir.path.join(crate::config::DEFAULT_CONFIG_FILE),
+            "[rom]\nbios = \"bios.bin\"\n\n[cdrom]\npath = \"boot.iso\"\n",
+        )
+        .expect("write the bundled file");
+        // A folder where the record file goes: the rename over it fails.
+        fs::create_dir(library_dir.path.join(".last")).expect("block the record");
+
+        let message = import_bundled_vm_from(&library, &exe_dir.path).expect("a message");
+
+        assert!(message.contains("was imported, but"), "{message:?}");
+        assert!(message.contains("will not open on it"), "{message:?}");
+        assert!(message.contains(&exe_dir.path.display().to_string()), "{message:?}");
+        assert_eq!(library.load().expect("load").vms.len(), 1);
+        assert_eq!(library.last_selected(), None);
     }
 
     /// One bad bundled file does not stop the shell from opening: the
@@ -1195,8 +1253,10 @@ mod tests {
         )
         .expect("write the bundled file");
 
-        import_bundled_vm_from(&library, &exe_dir.path);
+        let message = import_bundled_vm_from(&library, &exe_dir.path).expect("a message");
 
+        assert!(message.contains("was not imported"), "{message:?}");
+        assert!(message.contains(&exe_dir.path.display().to_string()), "{message:?}");
         assert!(library.load().expect("load").is_empty());
         assert_eq!(library.last_selected(), None);
     }
@@ -1230,8 +1290,9 @@ mod tests {
         let exe_dir = ScratchDir::new("rusty-box-gui-unbundled-exe");
         let library = crate::library::VmLibrary::open(library_dir.path.clone()).expect("open");
 
-        import_bundled_vm_from(&library, &exe_dir.path);
+        let message = import_bundled_vm_from(&library, &exe_dir.path);
 
+        assert_eq!(message, None);
         assert!(library.load().expect("load").is_empty());
         assert_eq!(library.last_selected(), None);
     }

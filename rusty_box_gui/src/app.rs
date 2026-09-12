@@ -521,11 +521,13 @@ impl OpeningList {
     /// The launch VM first, as a temporary VM, then the library's VMs in the
     /// library's order. The launch VM is selected when there is one, otherwise
     /// the VM shown last. With neither a launch VM nor a library VM, a blank
-    /// temporary "New VM", so the shell always has a VM to show. A library
-    /// that cannot be read opens as empty, with the error as a notice.
+    /// temporary "New VM", so the shell always has a VM to show. A message
+    /// the start carries is shown as a warning; a library that cannot be read
+    /// opens as empty, with that error as the notice instead, it being the
+    /// more serious of the two.
     fn from_start(start: &crate::runner::ShellStart) -> Self {
         let (contents, notice) = match start.library.load() {
-            Ok(contents) => (contents, None),
+            Ok(contents) => (contents, start.notice.clone().map(ShellNotice::warning)),
             Err(error) => (
                 crate::library::LibraryContents::default(),
                 Some(ShellNotice::error(error.to_string())),
@@ -4132,11 +4134,39 @@ mod tests {
         let start = crate::runner::ShellStart {
             library: scratch.library(),
             launch,
+            notice: None,
         };
         (
             NativeShellApp::with_emulator(emulator, shared, command_tx, start),
             command_rx,
         )
+    }
+
+    /// What the start could not do is the first thing the shell shows.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_start_notice_opens_the_shell_with_that_warning() {
+        let scratch = ScratchLibrary::new();
+        let shared = Arc::new(Mutex::new(
+            rusty_box::gui::shared_display::SharedDisplay::new(),
+        ));
+        let (command_tx, _command_rx) = std::sync::mpsc::channel();
+        let emulator = rusty_box::gui::RustyBoxApp::new_embedded(Arc::clone(&shared));
+        let start = crate::runner::ShellStart {
+            library: scratch.library(),
+            launch: None,
+            notice: Some("The VM bundled in C:\\app was not imported: bad file".to_owned()),
+        };
+
+        let app = NativeShellApp::with_emulator(emulator, shared, command_tx, start);
+
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::warning(
+                "The VM bundled in C:\\app was not imported: bad file"
+            ))
+        );
+        assert_eq!(app.profiles[0].name, "New VM");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -4193,7 +4223,8 @@ mod tests {
     }
 
     /// A library folder that cannot be read does not refuse the shell: it
-    /// opens on the blank VM, with the error where the user can see it.
+    /// opens on the blank VM, with the error where the user can see it, ahead
+    /// of any message the start carried.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_library_that_cannot_be_read_opens_on_a_blank_vm_with_a_notice() {
@@ -4203,6 +4234,7 @@ mod tests {
         let start = crate::runner::ShellStart {
             library,
             launch: None,
+            notice: Some("a bundled VM was not imported".to_owned()),
         };
 
         let opening = OpeningList::from_start(&start);

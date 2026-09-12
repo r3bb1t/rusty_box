@@ -113,6 +113,13 @@ impl VmLibrary {
         self.dir.join(format!("{}.{VM_EXTENSION}", stem.0))
     }
 
+    /// Whether the folder holds no `*.toml` file at all, broken ones
+    /// included — what [`LibraryContents::is_empty`] answers after a load,
+    /// found without parsing any file.
+    pub fn is_empty(&self) -> Result<bool, LibraryError> {
+        Ok(self.vm_files()?.is_empty())
+    }
+
     /// Every `*.toml` file directly in the folder, ordered by stem. A file
     /// whose stem is not one — not UTF-8, or starting with a dot — is listed
     /// as broken, like one whose contents do not load.
@@ -648,6 +655,21 @@ mod tests {
         let names: Vec<&str> = contents.vms.iter().map(|vm| vm.name.as_str()).collect();
         assert_eq!(names, ["a", "b"]);
         assert!(contents.broken.is_empty());
+        remove_dir(&dir);
+    }
+
+    #[test]
+    fn is_empty_is_true_only_while_the_folder_holds_no_toml_file() {
+        let dir = scratch_dir("is-empty");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        assert!(library.is_empty().expect("empty folder"));
+
+        fs::write(dir.join("bad.toml"), "memory_mib = [").expect("write");
+        assert!(!library.is_empty().expect("broken file"));
+
+        fs::remove_file(dir.join("bad.toml")).expect("remove");
+        library.create("Alpine", &sample_config(&dir)).expect("create");
+        assert!(!library.is_empty().expect("valid VM"));
         remove_dir(&dir);
     }
 
