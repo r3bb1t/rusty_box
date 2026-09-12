@@ -87,7 +87,7 @@ impl VmLibraryEntry {
         match self.source {
             EntrySource::Saved => self.name.clone(),
             EntrySource::Unsaved => format!("{} (unsaved)", self.name),
-            EntrySource::WriteFailed => format!("{} (not saved)", self.name),
+            EntrySource::WriteFailed => format!("{} (save failed)", self.name),
         }
     }
 

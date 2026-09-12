@@ -129,6 +129,9 @@ fn prepare_configured_media_files(
     Ok(())
 }
 
+/// Prepares `config` and runs it on `gui` in one step, provisioning its
+/// startup disk when `create_startup_disks`: the headless and terminal runs,
+/// which provision the disk at every run.
 fn run_with_gui<G>(
     config: ResolvedConfig,
     gui: G,
@@ -138,14 +141,36 @@ fn run_with_gui<G>(
 where
     G: BxGui + 'static,
 {
+    let prepared = prepare_run(config, create_startup_disks)?;
+    run_prepared(prepared, gui, stop_flag)
+}
+
+/// A run's inputs, read and checked, with its startup disk provisioned.
+/// Everything a configuration is refused for before its disk is touched is
+/// refused before one of these exists.
+struct PreparedRun {
+    config: ResolvedConfig,
+    bios_data: Vec<u8>,
+    vga_data: Option<Vec<u8>>,
+    slots: MediaSlots,
+}
+
+/// Reads and checks `config`'s files and, when `create_startup_disks`,
+/// provisions its startup disk — last, so a configuration refused here for
+/// an engine this build lacks, a blank or unreadable BIOS or a media slot
+/// that does not resolve has erased nothing.
+fn prepare_run(
+    config: ResolvedConfig,
+    create_startup_disks: bool,
+) -> Result<PreparedRun, RunError> {
     init_tracing(config.log_level);
 
     // A build without the hypervisor path cannot honour the `whp` engine,
     // wherever it was chosen — `--engine`, a VM file's `emulator.engine`, or
     // the shell's Engine setting. It refuses before reading or creating
-    // anything, for the reason a host without the platform is refused below:
-    // a run that silently went to the interpreter under the hypervisor's name
-    // is a measurement nobody can trust.
+    // anything, for the reason a host without the platform is refused in
+    // `run_prepared`: a run that silently went to the interpreter under the
+    // hypervisor's name is a measurement nobody can trust.
     #[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
     if config.engine == Engine::Whp {
         return Err(RunError::NoHypervisorEngine);
@@ -164,6 +189,31 @@ where
     };
     let slots = resolve_media_slots(&config)?;
     prepare_configured_media_files(&config, create_startup_disks)?;
+
+    Ok(PreparedRun {
+        config,
+        bios_data,
+        vga_data,
+        slots,
+    })
+}
+
+/// Builds the machine `prepared` describes and runs it on `gui` until it
+/// stops or `stop_flag` is raised.
+fn run_prepared<G>(
+    prepared: PreparedRun,
+    gui: G,
+    stop_flag: Option<Arc<AtomicBool>>,
+) -> Result<RunSummary, RunError>
+where
+    G: BxGui + 'static,
+{
+    let PreparedRun {
+        config,
+        bios_data,
+        vga_data,
+        slots,
+    } = prepared;
 
     let emulator_config = EmulatorConfig {
         // The GUI exposes both sizes, so a configuration that asks for a
@@ -676,20 +726,33 @@ where
     emulator_result
 }
 
+/// The file `config`'s startup-disk creation provisions, when it has one.
+#[cfg(feature = "gui-egui")]
+fn startup_disk_creation_path(config: &ResolvedConfig) -> Option<&Path> {
+    Some(config.disk.as_ref()?.creation.as_ref()?.path.as_path())
+}
+
 #[cfg(feature = "gui-egui")]
 fn run_egui_emulator_loop(
     command_rx: mpsc::Receiver<crate::app::NativeEmulatorCommand>,
     shared: Arc<Mutex<SharedDisplay>>,
 ) -> Result<RunSummary, RunError> {
     let mut instructions_executed = Some(0u64);
-    let mut create_startup_disks = true;
+    // The startup disks provisioned this session, by creation path. Each is
+    // provisioned at its VM's first power-on and at no later one, so a file
+    // the user agreed to have erased is erased once; the shell keeps the
+    // same set of agreed paths.
+    let mut provisioned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     while let Ok(command) = command_rx.recv() {
         match command {
             crate::app::NativeEmulatorCommand::Start(config) => loop {
                 let stop_flag = prepare_egui_run(&shared);
+                let creation_path = startup_disk_creation_path(&config);
+                let create_startup_disks =
+                    creation_path.is_some_and(|path| !provisioned.contains(path));
                 // Warn in the window that a (possibly slow) disk allocation is
-                // about to happen, before run_with_gui blocks on it. Reusing an
+                // about to happen, before the run blocks on it. Reusing an
                 // existing image returns None here (instant, no warning).
                 if create_startup_disks {
                     if let Some(status) = startup_disk_action(&config) {
@@ -699,19 +762,21 @@ fn run_egui_emulator_loop(
                     }
                 }
                 let bridge = BridgeGui::new(Arc::clone(&shared));
-                let summary = match run_with_gui(
-                    config.clone(),
-                    bridge,
-                    Some(stop_flag),
-                    create_startup_disks,
-                ) {
+                let run = prepare_run(config.clone(), create_startup_disks).and_then(|prepared| {
+                    // The disk is provisioned once `prepare_run` returns, and
+                    // the run after it can still fail, so the path is
+                    // recorded here and not after the run: a later power-on
+                    // must not erase the file a second time.
+                    provisioned.extend(creation_path.map(Path::to_path_buf));
+                    run_prepared(prepared, bridge, Some(stop_flag))
+                });
+                let summary = match run {
                     Ok(summary) => summary,
                     Err(error) => {
                         record_egui_error(&shared, &error);
                         break;
                     }
                 };
-                create_startup_disks = false;
                 // A total is a total only while every run counted. One run on
                 // the hypervisor makes the sum a guess, and a guess is not
                 // reported as a count.
@@ -1416,6 +1481,151 @@ mod tests {
             .runtime_error
             .as_deref()
             .is_some_and(|message| message.contains("Emulator startup failed")));
+    }
+
+    /// A BIOS the loop's machine builds with: one byte at a fresh path.
+    #[cfg(feature = "gui-egui")]
+    fn loop_bios() -> PathBuf {
+        let bios = unique_temp_path("rusty-box-gui-loop-bios");
+        fs::write(&bios, [0xEA]).unwrap();
+        bios
+    }
+
+    /// A VM the loop runs to the end: its BIOS is the one byte at `bios`
+    /// and, `max_instructions` being 0, its run retires nothing.
+    #[cfg(feature = "gui-egui")]
+    fn runnable_config(disk: PathBuf, overwrite: bool, bios: &Path) -> ResolvedConfig {
+        let mut config = disk_creation_config(disk, overwrite);
+        config.display = DisplayBackend::Egui;
+        config.bios = bios.to_path_buf();
+        config
+    }
+
+    /// Runs the loop over `configs`, one Start each, until the channel
+    /// closes, and returns the loop's result with what the display holds.
+    #[cfg(feature = "gui-egui")]
+    fn run_loop_over(configs: Vec<ResolvedConfig>) -> (Result<RunSummary, RunError>, Option<String>) {
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (command_tx, command_rx) = mpsc::channel();
+        for config in configs {
+            command_tx
+                .send(crate::app::NativeEmulatorCommand::Start(config))
+                .unwrap();
+        }
+        drop(command_tx);
+
+        let result = run_egui_emulator_loop(command_rx, Arc::clone(&shared));
+
+        let runtime_error = shared.lock().unwrap().runtime_error.clone();
+        (result, runtime_error)
+    }
+
+    /// Polls `holds` every ten milliseconds until it does, or fails the test
+    /// after thirty seconds.
+    #[cfg(feature = "gui-egui")]
+    fn wait_until(mut holds: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !holds() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the condition did not hold within 30 s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Each VM's startup disk is created at its first power-on of the
+    /// session, not only the disk of the VM that was powered on first.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn the_loop_creates_each_vms_startup_disk_at_its_first_start() {
+        let bios = loop_bios();
+        let first = unique_temp_path("rusty-box-gui-loop-first-disk");
+        let second = unique_temp_path("rusty-box-gui-loop-second-disk");
+
+        let (result, runtime_error) = run_loop_over(vec![
+            runnable_config(first.clone(), false, &bios),
+            runnable_config(second.clone(), false, &bios),
+        ]);
+
+        let first_len = fs::metadata(&first).map(|metadata| metadata.len());
+        let second_len = fs::metadata(&second).map(|metadata| metadata.len());
+        remove_test_file(&first);
+        remove_test_file(&second);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(runtime_error, None);
+        assert_eq!(first_len.unwrap(), 10_321_920);
+        assert_eq!(second_len.unwrap(), 10_321_920);
+    }
+
+    /// A second VM's `overwrite` disk is recreated at its first power-on:
+    /// the erase the shell asked the user about happens.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn the_loop_recreates_a_second_vms_overwrite_disk_at_its_first_start() {
+        let bios = loop_bios();
+        let first = unique_temp_path("rusty-box-gui-loop-first-disk");
+        let second = unique_temp_path("rusty-box-gui-loop-second-overwrite-disk");
+        fs::write(&second, [0u8; 1024]).unwrap();
+
+        let (result, runtime_error) = run_loop_over(vec![
+            runnable_config(first.clone(), false, &bios),
+            runnable_config(second.clone(), true, &bios),
+        ]);
+
+        let second_len = fs::metadata(&second).map(|metadata| metadata.len());
+        remove_test_file(&first);
+        remove_test_file(&second);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(runtime_error, None);
+        assert_eq!(second_len.unwrap(), 10_321_920);
+    }
+
+    /// A startup disk is provisioned once per session however often its VM
+    /// is powered on: a second Start leaves what the first run left on it.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn the_loop_provisions_a_startup_disk_once_however_often_its_vm_starts() {
+        let bios = loop_bios();
+        let disk = unique_temp_path("rusty-box-gui-loop-same-disk");
+        let config = runnable_config(disk.clone(), true, &bios);
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (command_tx, command_rx) = mpsc::channel();
+        let loop_shared = Arc::clone(&shared);
+        let emulator = std::thread::Builder::new()
+            .name("rusty_box_gui_test_emulator".to_owned())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || run_egui_emulator_loop(command_rx, loop_shared))
+            .expect("spawn the loop");
+
+        command_tx
+            .send(crate::app::NativeEmulatorCommand::Start(config.clone()))
+            .unwrap();
+        // The first run is over once the disk it created exists and the
+        // machine no longer runs; the loop then waits for the next command.
+        wait_until(|| disk.exists() && !shared.lock().unwrap().emu_running);
+        // What a guest would have left on the disk.
+        let mut contents = fs::read(&disk).unwrap();
+        contents[0] = 0xAB;
+        fs::write(&disk, &contents).unwrap();
+
+        command_tx
+            .send(crate::app::NativeEmulatorCommand::Start(config))
+            .unwrap();
+        drop(command_tx);
+        let result = emulator.join().expect("the loop thread");
+
+        let runtime_error = shared.lock().unwrap().runtime_error.clone();
+        let after = fs::read(&disk);
+        remove_test_file(&disk);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(runtime_error, None);
+        let after = after.unwrap();
+        assert_eq!(after.len(), 10_321_920);
+        assert_eq!(after[0], 0xAB);
     }
 
     #[test]

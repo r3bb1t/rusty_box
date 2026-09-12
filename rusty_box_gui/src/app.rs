@@ -184,8 +184,9 @@ pub struct NativeShellApp {
     /// A destructive step the user has yet to confirm or cancel.
     pending_confirm: Option<PendingConfirm>,
     /// Files the user agreed this session to let a startup-disk creation
-    /// erase. The runner recreates an `overwrite` disk once per session, so
-    /// one answer per file covers the session.
+    /// erase. The runner provisions each creation path at most once per
+    /// session, at its VM's first power-on, so one answer per file covers
+    /// the session.
     overwrite_confirmed: std::collections::HashSet<PathBuf>,
     /// The gravest notice raised in this frame, which a lesser one may not
     /// replace; see `notify`.
@@ -522,8 +523,15 @@ enum PendingConfirm {
     },
     /// Deleting a library file that does not load.
     DeleteBroken(PathBuf),
-    /// Powering on a VM whose startup-disk creation erases this existing file.
-    OverwriteDisk(PathBuf),
+    /// Powering on the VM at `index` with `origin`, whose startup-disk
+    /// creation erases the existing file `path`. `index` and `origin`
+    /// identify it, so a confirm that finds another VM selected starts
+    /// nothing.
+    OverwriteDisk {
+        index: usize,
+        origin: VmOrigin,
+        path: PathBuf,
+    },
 }
 
 /// What a confirmation dialog says.
@@ -2414,9 +2422,10 @@ impl NativeShellApp {
         });
     }
 
-    /// Runs the step waiting for confirmation, if any. A delete whose VM is
-    /// no longer the selected one deletes nothing and says so. An agreed
-    /// overwrite is kept for the session, and the power-on it stopped runs.
+    /// Runs the step waiting for confirmation, if any. A delete or an
+    /// overwrite whose VM is no longer the selected one does nothing and
+    /// says so. An agreed overwrite is kept for the session, and the
+    /// power-on it stopped runs.
     fn confirm_pending(&mut self) {
         match self.pending_confirm.take() {
             None => {}
@@ -2430,9 +2439,19 @@ impl NativeShellApp {
                 }
             }
             Some(PendingConfirm::DeleteBroken(path)) => self.delete_broken_file(&path),
-            Some(PendingConfirm::OverwriteDisk(path)) => {
-                self.overwrite_confirmed.extend([path]);
-                self.start_vm();
+            Some(PendingConfirm::OverwriteDisk {
+                index,
+                origin,
+                path,
+            }) => {
+                if self.is_selected(index, &origin) {
+                    self.overwrite_confirmed.extend([path]);
+                    self.start_vm();
+                } else {
+                    self.notify(ShellNotice::warning(
+                        "Another VM was selected while the power-on waited; nothing was started.",
+                    ));
+                }
             }
         }
     }
@@ -2484,7 +2503,7 @@ impl NativeShellApp {
                     .to_owned(),
                 verb: "Delete",
             },
-            PendingConfirm::OverwriteDisk(path) => ConfirmWording {
+            PendingConfirm::OverwriteDisk { path, .. } => ConfirmWording {
                 title: format!("Overwrite {}?", path.display()),
                 body: "This VM's startup disk is set to be recreated, which erases the existing file."
                     .to_owned(),
@@ -2564,7 +2583,12 @@ impl NativeShellApp {
         }
         self.flush_unsaved();
         if let Some(path) = self.unconfirmed_overwrite() {
-            self.pending_confirm = Some(PendingConfirm::OverwriteDisk(path));
+            let index = self.chrome.selected_vm();
+            self.pending_confirm = Some(PendingConfirm::OverwriteDisk {
+                index,
+                origin: self.profiles[index].origin.clone(),
+                path,
+            });
             return;
         }
         if let Ok(mut display) = self.shared.lock() {
@@ -5120,7 +5144,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_vm_whose_write_failed_is_marked_not_saved_in_the_sidebar() {
+    fn a_vm_whose_write_failed_is_marked_save_failed_in_the_sidebar() {
         let (mut app, _command_rx, scratch) = library_app();
         app.add_vm_copying_selected();
         app.settings.memory_mib = 512;
@@ -5137,7 +5161,7 @@ mod tests {
             app.chrome.vm_library[1].source,
             crate::shell::sidebar::EntrySource::WriteFailed
         );
-        assert_eq!(app.chrome.vm_library[1].row_label(), "Alpine copy (not saved)");
+        assert_eq!(app.chrome.vm_library[1].row_label(), "Alpine copy (save failed)");
 
         fs::remove_dir(&copy_file).expect("clear the way");
         app.flush_unsaved();
@@ -5381,7 +5405,11 @@ mod tests {
         assert_eq!(broken.verb, "Delete");
 
         let disk = scratch.dir.join("disk.img");
-        let overwrite = app.confirm_wording(&PendingConfirm::OverwriteDisk(disk.clone()));
+        let overwrite = app.confirm_wording(&PendingConfirm::OverwriteDisk {
+            index: 0,
+            origin: VmOrigin::Launch,
+            path: disk.clone(),
+        });
         assert_eq!(overwrite.title, format!("Overwrite {}?", disk.display()));
         assert_eq!(
             overwrite.body,
@@ -5428,7 +5456,14 @@ mod tests {
 
         app.start_vm();
 
-        assert_eq!(app.pending_confirm, Some(PendingConfirm::OverwriteDisk(disk.clone())));
+        assert_eq!(
+            app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk {
+                index: 0,
+                origin: VmOrigin::Launch,
+                path: disk.clone(),
+            })
+        );
         assert!(command_rx.try_recv().is_err());
 
         app.confirm_pending();
@@ -5468,7 +5503,14 @@ mod tests {
 
         app.start_vm();
 
-        assert_eq!(app.pending_confirm, Some(PendingConfirm::OverwriteDisk(disk.clone())));
+        assert_eq!(
+            app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk {
+                index: 0,
+                origin: VmOrigin::Launch,
+                path: disk.clone(),
+            })
+        );
 
         app.confirm_pending();
 
@@ -5481,6 +5523,49 @@ mod tests {
 
         assert_eq!(app.pending_confirm, None);
         assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+        remove_test_file(&disk);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_overwrite_confirmed_for_another_vm_starts_nothing() {
+        let scratch = ScratchLibrary::new();
+        scratch.library().create("Alpine", &test_resolved_config()).expect("seed");
+        let disk = unique_temp_path("rusty-box-gui-overwrite-other");
+        write_test_disk(&disk);
+        let (mut app, command_rx) =
+            native_test_app_over(&scratch, Some(overwriting_launch(&disk)), None);
+        app.start_vm();
+        assert!(matches!(
+            app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk { index: 0, .. })
+        ));
+
+        app.select_profile(1);
+        app.confirm_pending();
+
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::warning(
+                "Another VM was selected while the power-on waited; nothing was started."
+            ))
+        );
+        assert!(command_rx.try_recv().is_err());
+        assert!(!app.overwrite_confirmed.contains(&disk));
+
+        // Back on the overwriting VM, the question is asked again: nothing
+        // was recorded for it.
+        app.select_profile(0);
+        app.start_vm();
+
+        assert_eq!(
+            app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk {
+                index: 0,
+                origin: VmOrigin::Launch,
+                path: disk.clone(),
+            })
+        );
         remove_test_file(&disk);
     }
 
