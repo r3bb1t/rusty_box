@@ -116,6 +116,25 @@ impl VmLibrary {
         self.dir.join(format!("{}.{VM_EXTENSION}", stem.0))
     }
 
+    /// The stem of the file `path` names, when it is one of this library's
+    /// VM files: a regular file directly in the folder, its extension spelled
+    /// `toml` exactly, its stem one. Both sides are compared canonical
+    /// (`fs::canonicalize`), so a spelling that differs in case, an 8.3 short
+    /// name or a link through another folder still names the file, and the
+    /// stem returned is the file's own spelling, the one the listing shows.
+    /// `None` for any other path, and for one that cannot be resolved.
+    pub fn stem_of_file(&self, path: &Path) -> Option<VmStem> {
+        let file = fs::canonicalize(path).ok()?;
+        let dir = fs::canonicalize(&self.dir).ok()?;
+        let in_folder = file.is_file()
+            && file.parent() == Some(dir.as_path())
+            && file.extension() == Some(OsStr::new(VM_EXTENSION));
+        if !in_folder {
+            return None;
+        }
+        stem_of(&file).ok()
+    }
+
     /// Whether the folder holds no `*.toml` file at all, broken ones
     /// included — what [`LibraryContents::is_empty`] answers after a load,
     /// found without parsing any file.
@@ -627,6 +646,35 @@ mod tests {
         assert_eq!(contents.vms[0].config, config);
         assert!(contents.broken.is_empty());
         remove_dir(&dir);
+    }
+
+    /// A path names a library VM when it resolves to one of the folder's own
+    /// VM files, however it is spelled; any other file names none.
+    #[test]
+    fn a_library_file_is_known_by_its_stem_however_its_path_is_spelled() {
+        let dir = scratch_dir("stem-of-file");
+        let elsewhere = scratch_dir("stem-of-file-elsewhere");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        let stem = library.create("Alpine", &sample_config(&dir)).expect("create");
+        fs::write(elsewhere.join("alpine.toml"), SAMPLE_TOML).expect("write");
+        fs::write(dir.join("notes.txt"), "notes").expect("write");
+        fs::create_dir(dir.join("folder.toml")).expect("a folder named like a VM file");
+        let roundabout = dir
+            .join("..")
+            .join(dir.file_name().expect("the scratch folder has a name"))
+            .join("alpine.toml");
+
+        assert_eq!(library.stem_of_file(&library.path_of(&stem)), Some(stem.clone()));
+        assert_eq!(library.stem_of_file(&roundabout), Some(stem.clone()));
+        if cfg!(windows) {
+            assert_eq!(library.stem_of_file(&dir.join("ALPINE.TOML")), Some(stem.clone()));
+        }
+        assert_eq!(library.stem_of_file(&elsewhere.join("alpine.toml")), None);
+        assert_eq!(library.stem_of_file(&dir.join("notes.txt")), None);
+        assert_eq!(library.stem_of_file(&dir.join("folder.toml")), None);
+        assert_eq!(library.stem_of_file(&dir.join("missing.toml")), None);
+        remove_dir(&dir);
+        remove_dir(&elsewhere);
     }
 
     #[test]

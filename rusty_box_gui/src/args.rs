@@ -250,6 +250,21 @@ impl Args {
         }
         flags
     }
+
+    /// Whether `--config` is all this command line says about the machine:
+    /// it names a file, and without it the command line would name no
+    /// machine ([`Self::names_a_machine`]) and set no run flag
+    /// ([`Self::run_flags`]). Such a command line asks for the file exactly
+    /// as it is, so a file already in the VM library opens as that library
+    /// VM. With anything else set, the machine is the file changed by the
+    /// flags, which only a temporary VM can carry without writing them back.
+    pub fn names_only_a_config_file(&self) -> bool {
+        let rest = Args {
+            config: None,
+            ..self.clone()
+        };
+        self.config.is_some() && !rest.names_a_machine() && rest.run_flags().is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize)]
@@ -406,6 +421,26 @@ mod tests {
         assert!(parse(&["rusty_box_gui", "--config", "vm.toml"]).names_a_machine());
         assert!(parse(&["rusty_box_gui", "--cdrom", "a.iso"]).names_a_machine());
         assert!(parse(&["rusty_box_gui", "--memory-mib", "64"]).names_a_machine());
+    }
+
+    /// A config file alone asks for that file as it is; any machine flag or
+    /// run flag beside it changes the machine the file describes.
+    #[test]
+    fn only_a_config_file_with_nothing_beside_it_names_only_a_config_file() {
+        let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
+        assert!(parse(&["rusty_box_gui", "--config", "vm.toml"]).names_only_a_config_file());
+        assert!(parse(&["rusty_box_gui", "-f", "vm.toml", "--display", "headless"])
+            .names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui"]).names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui", "--cdrom", "a.iso"]).names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--memory-mib", "64"])
+            .names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--cdrom", "a.iso"])
+            .names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--engine", "interpreter"])
+            .names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--log-level", "info"])
+            .names_only_a_config_file());
     }
 
     #[test]

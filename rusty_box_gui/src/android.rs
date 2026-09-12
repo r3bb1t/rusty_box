@@ -88,7 +88,7 @@ fn run(app: AndroidApp) -> Result<RunSummary, RunError> {
     let PhoneLibrary { library, notice } = phone_library(&storage)?;
     let start = crate::runner::ShellStart {
         library,
-        launch: None,
+        opening: crate::runner::ShellOpening::LastShown,
         notice,
     };
     crate::runner::run_android_shell(start, app, &storage)

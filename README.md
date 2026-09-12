@@ -50,7 +50,7 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=3500000000 cargo run --release --example a
 cargo xtask ci
 ```
 
-The GUI starts powered off; press **Power on** in the VM bar. It opens on a library of VMs saved in your user profile, lists every one at each launch, and saves each edit when it ends. `--config PATH` opens a file as a temporary VM you can keep in the library; nothing is read from the current directory, and `--no-config` changes nothing. A machine needs a BIOS path, from `--bios`, `rom.bios` in its file, or the shell's Hardware › Display pane. [docs/getting-started.md](docs/getting-started.md) walks through the config file and the settings whose meaning is not obvious; [rusty_box_gui/README.md](rusty_box_gui/README.md) covers the shell itself.
+The GUI starts powered off; press **Power on** in the VM bar. It opens on a library of VMs saved in your user profile, lists every one at each launch, and saves each edit when it ends. `--config PATH` opens a file as a temporary VM you can keep in the library, or, for a file already in the library and nothing else on the command line, as that library VM; nothing is read from the current directory, and `--no-config` changes nothing. A machine needs a BIOS path, from `--bios`, `rom.bios` in its file, or the shell's Hardware › Display pane. [docs/getting-started.md](docs/getting-started.md) walks through the config file and the settings whose meaning is not obvious; [rusty_box_gui/README.md](rusty_box_gui/README.md) covers the shell itself.
 
 The repository's `.cargo/config.toml` sets `MAX_INSTRUCTIONS=20000000000` for every cargo command, so the DLX and Alpine examples, which read it, stop after 20 billion instructions unless you override it.
 

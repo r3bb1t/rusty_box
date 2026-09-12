@@ -75,7 +75,10 @@ Windows; see [rusty_box_gui/README.md](../rusty_box_gui/README.md#desktop)
 for the other platforms) and lists every VM in it at every launch. To start
 from a file, pass it with `--config <path>` (or `-f <path>`): it opens as a
 temporary VM, marked "(unsaved)", and **Keep in library** on its Summary page
-adds it to the library for good. A `rusty_box.toml` in the current or parent
+adds it to the library for good. A file that is already in the library opens
+as that library VM instead, when nothing else on the command line changes it
+(with `--memory-mib 64` beside it, say, it is a temporary VM again, so the
+override never reaches the file). A `rusty_box.toml` in the current or parent
 directory is not read, so a file someone drops there cannot change what
 boots; `--no-config` is accepted and changes nothing. Here is a minimal
 config that boots an installer ISO and installs to a fresh 12 GiB disk; save

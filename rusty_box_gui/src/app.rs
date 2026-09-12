@@ -706,8 +706,9 @@ struct OpeningList {
 #[cfg(not(target_arch = "wasm32"))]
 impl OpeningList {
     /// The launch VM first, as a temporary VM, then the library's VMs in the
-    /// library's order. The launch VM is selected when there is one, otherwise
-    /// the VM shown last. With neither a launch VM nor a library VM, a blank
+    /// library's order. Selected is the launch VM when there is one, the
+    /// library VM the start names when it names one, and otherwise the VM
+    /// shown last. With neither a launch VM nor a library VM, a blank
     /// temporary "New VM", so the shell always has a VM to show. A message
     /// the start carries is shown as a warning; a library that cannot be read
     /// opens as empty, with that error as the notice instead, it being the
@@ -721,17 +722,21 @@ impl OpeningList {
             ),
         };
         let mut profiles = Vec::new();
-        if let Some(launch) = &start.launch {
-            profiles.push(NativeVmProfile::from_config(
-                launch.name.clone(),
-                launch.config.clone(),
-                VmOrigin::Launch,
-            ));
-        }
-        let last = start.library.last_selected();
+        let wanted = match &start.opening {
+            crate::runner::ShellOpening::Launch(launch) => {
+                profiles.push(NativeVmProfile::from_config(
+                    launch.name.clone(),
+                    launch.config.clone(),
+                    VmOrigin::Launch,
+                ));
+                None
+            }
+            crate::runner::ShellOpening::LibraryVm(stem) => Some(stem.clone()),
+            crate::runner::ShellOpening::LastShown => start.library.last_selected(),
+        };
         let mut selected = 0;
         for vm in contents.vms {
-            if start.launch.is_none() && last.as_ref() == Some(&vm.stem) {
+            if wanted.as_ref() == Some(&vm.stem) {
                 selected = profiles.len();
             }
             profiles.push(NativeVmProfile::from_config(
@@ -4776,6 +4781,7 @@ mod tests {
         let launch = crate::runner::LaunchVm {
             name: "Rusty Box".to_owned(),
             config: test_resolved_config(),
+            source: crate::runner::LaunchSource::Flags,
         };
         let (app, command_rx) = native_test_app_over(&scratch, Some(launch), None);
         (app, command_rx, scratch)
@@ -4799,7 +4805,10 @@ mod tests {
         let emulator = rusty_box::gui::RustyBoxApp::new_embedded(Arc::clone(&shared));
         let start = crate::runner::ShellStart {
             library: scratch.library(),
-            launch,
+            opening: launch.map_or(
+                crate::runner::ShellOpening::LastShown,
+                crate::runner::ShellOpening::Launch,
+            ),
             notice,
         };
         (
@@ -4851,6 +4860,7 @@ mod tests {
         let launch = crate::runner::LaunchVm {
             name: "Command line".to_owned(),
             config: test_resolved_config(),
+            source: crate::runner::LaunchSource::Flags,
         };
 
         let (app, _command_rx) = native_test_app_over(&scratch, Some(launch), None);
@@ -4863,6 +4873,34 @@ mod tests {
         assert_eq!(app.chrome.vm_library[1].source, crate::shell::sidebar::EntrySource::Saved);
         // Opening the shell writes nothing: the launch VM stays in memory.
         assert_eq!(scratch.toml_files(), ["win-7.toml"]);
+    }
+
+    /// The library VM the command line named by its file is the one shown,
+    /// over the VM shown last, and no temporary VM is listed beside it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_library_vm_named_on_the_command_line_is_selected_with_no_temporary_vm() {
+        let scratch = ScratchLibrary::new();
+        let library = scratch.library();
+        let alpha = library.create("Alpha", &test_resolved_config()).expect("alpha");
+        let beta = library.create("Beta", &test_resolved_config()).expect("beta");
+        library.remember_selected(&alpha).expect("remember");
+        let start = crate::runner::ShellStart {
+            library,
+            opening: crate::runner::ShellOpening::LibraryVm(beta.clone()),
+            notice: None,
+        };
+
+        let opening = OpeningList::from_start(&start);
+
+        assert_eq!(opening.profiles.len(), 2);
+        assert!(opening
+            .profiles
+            .iter()
+            .all(|profile| matches!(profile.origin, VmOrigin::Library(_))));
+        assert_eq!(opening.profiles[opening.selected].origin, VmOrigin::Library(beta));
+        assert_eq!(opening.profiles[opening.selected].name, "Beta");
+        assert_eq!(scratch.toml_files(), ["alpha.toml", "beta.toml"]);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -4907,7 +4945,7 @@ mod tests {
         fs::remove_dir_all(&scratch.dir).expect("remove the folder under the library");
         let start = crate::runner::ShellStart {
             library,
-            launch: None,
+            opening: crate::runner::ShellOpening::LastShown,
             notice: Some("a bundled VM was not imported".to_owned()),
         };
 
@@ -5870,6 +5908,7 @@ mod tests {
         crate::runner::LaunchVm {
             name: "Overwriting".to_owned(),
             config,
+            source: crate::runner::LaunchSource::Flags,
         }
     }
 

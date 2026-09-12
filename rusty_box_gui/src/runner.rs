@@ -59,6 +59,7 @@ pub fn run_resolved(config: ResolvedConfig) -> Result<RunSummary, RunError> {
         DisplayBackend::Egui => run_shell(Some(LaunchVm {
             name: "Command line".to_owned(),
             config,
+            source: LaunchSource::Flags,
         })),
         #[cfg(all(feature = "gui-egui", target_os = "android"))]
         DisplayBackend::Egui => run_egui(config),
@@ -517,25 +518,52 @@ fn cpu_params_for_engine(config: &ResolvedConfig) -> BxParams {
     config.cpu_capabilities.narrow(config.cpu_params.clone())
 }
 
-/// What the egui shell opens on: the VM library, and the machine the command
-/// line described when it described one.
+/// What the egui shell opens on: the VM library, the VM it shows first, and
+/// the notice it opens with.
 #[cfg(feature = "gui-egui")]
 pub struct ShellStart {
     pub library: crate::library::VmLibrary,
-    /// Shown first in the VM list as a temporary VM, selected, and written to
-    /// the library only when the user keeps it.
-    pub launch: Option<LaunchVm>,
+    pub opening: ShellOpening,
     /// The message the shell shows when it opens, telling the user what the
     /// start could not do — a bundled VM it could not import, say. `None`
     /// when the start did everything it set out to.
     pub notice: Option<String>,
 }
 
+/// The VM the shell shows first.
+#[cfg(feature = "gui-egui")]
+#[derive(Debug)]
+pub enum ShellOpening {
+    /// The library VM the shell showed last, or a blank temporary "New VM"
+    /// when the library holds none.
+    LastShown,
+    /// This library VM, selected: the one whose file the command line named
+    /// on its own.
+    LibraryVm(crate::library::VmStem),
+    /// The machine the command line described, shown first in the VM list
+    /// as a temporary VM, selected, and written to the library only when the
+    /// user keeps it.
+    Launch(LaunchVm),
+}
+
 /// The machine the command line described, as the shell lists it.
 #[cfg(feature = "gui-egui")]
+#[derive(Debug)]
 pub struct LaunchVm {
     pub name: String,
     pub config: ResolvedConfig,
+    pub source: LaunchSource,
+}
+
+/// Where the command line's machine came from.
+#[cfg(feature = "gui-egui")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchSource {
+    /// Exactly the file `--config` named: nothing else on the command line
+    /// changes the machine it describes ([`Args::names_only_a_config_file`]).
+    ConfigFile(PathBuf),
+    /// Flags, alone or over a `--config` file.
+    Flags,
 }
 
 #[cfg(feature = "gui-egui")]
@@ -549,12 +577,22 @@ impl LaunchVm {
             .and_then(|path| path.file_stem())
             .and_then(|stem| stem.to_str())
             .map_or_else(|| "Command line".to_owned(), str::to_owned);
-        Self { name, config }
+        let source = match &args.config {
+            Some(path) if args.names_only_a_config_file() => {
+                LaunchSource::ConfigFile(path.clone())
+            }
+            Some(_) | None => LaunchSource::Flags,
+        };
+        Self {
+            name,
+            config,
+            source,
+        }
     }
 }
 
 /// Opens the desktop shell on the per-user VM library, with `launch` — what
-/// the command line described, if anything — first in the list.
+/// the command line described, if anything — as [`shell_start`] places it.
 ///
 /// Only a library folder that cannot be created refuses the launch: with no
 /// folder there is nothing to show. A library that cannot be read opens as
@@ -566,23 +604,86 @@ impl LaunchVm {
 pub fn run_shell(launch: Option<LaunchVm>) -> Result<RunSummary, RunError> {
     let dir = crate::library::default_library_dir().ok_or(RunError::NoAppStorage)?;
     let library = crate::library::VmLibrary::open(dir)?;
-    let notice = match library.is_empty() {
-        Ok(true) => import_bundled_vm(&library),
+    run_egui(shell_start(library, launch))
+}
+
+/// What the shell opens on over `library` for `launch`, and the notice it
+/// opens with: for the library VM the command line named, why the next
+/// launch will not open on it; for any other opening, what a first run's
+/// import could not do.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn shell_start(library: crate::library::VmLibrary, launch: Option<LaunchVm>) -> ShellStart {
+    let opening = shell_opening(&library, launch);
+    let notice = match &opening {
+        ShellOpening::LibraryVm(stem) => remember_named_vm(&library, stem),
+        ShellOpening::LastShown | ShellOpening::Launch(_) => first_run_notice(&library),
+    };
+    ShellStart {
+        library,
+        opening,
+        notice,
+    }
+}
+
+/// The rule for a `--config` file that is already in the library: when the
+/// command line named that file and nothing else that changes the machine
+/// (`LaunchSource::ConfigFile`), and the file is one of `library`'s own VM
+/// files (`VmLibrary::stem_of_file`), the shell opens on that library VM
+/// rather than on a temporary copy of it. Anything else the command line
+/// described stays a temporary VM, the only shape that can carry an
+/// override such as `--memory-mib 64` without writing it back to the file.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn shell_opening(library: &crate::library::VmLibrary, launch: Option<LaunchVm>) -> ShellOpening {
+    let Some(launch) = launch else {
+        return ShellOpening::LastShown;
+    };
+    let stem = match &launch.source {
+        LaunchSource::ConfigFile(path) => library.stem_of_file(path),
+        LaunchSource::Flags => None,
+    };
+    match stem {
+        Some(stem) => ShellOpening::LibraryVm(stem),
+        None => ShellOpening::Launch(launch),
+    }
+}
+
+/// Records `stem`, the library VM the command line named, as the VM the
+/// next launch shows. The shell selects it either way, so a record that
+/// cannot be written costs only the next launch, and the message says so.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn remember_named_vm(
+    library: &crate::library::VmLibrary,
+    stem: &crate::library::VmStem,
+) -> Option<String> {
+    match library.remember_selected(stem) {
+        Ok(()) => None,
+        Err(error) => {
+            let message = format!(
+                "{} is shown, but the next launch will not open on it: {error}",
+                library.path_of(stem).display()
+            );
+            tracing::warn!("{message}");
+            Some(message)
+        }
+    }
+}
+
+/// A first run's empty library gets the bundled VM ([`import_bundled_vm`]);
+/// returns what that could not do. A library that cannot be read is not
+/// imported into: the shell reads the library itself and shows that error as
+/// its notice, so nothing is said twice.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn first_run_notice(library: &crate::library::VmLibrary) -> Option<String> {
+    match library.is_empty() {
+        Ok(true) => import_bundled_vm(library),
         Ok(false) => None,
-        // The shell reads the library itself and shows this error as its
-        // notice, so the import is skipped and nothing is said twice.
         Err(error) => {
             tracing::warn!(
                 "the VM library could not be read, so no bundled VM is imported: {error}"
             );
             None
         }
-    };
-    run_egui(ShellStart {
-        library,
-        launch,
-        notice,
-    })
+    }
 }
 
 /// A first run's empty library gets the VM a `rusty_box.toml` beside the
@@ -1368,6 +1469,137 @@ mod tests {
             "Alpine edge"
         );
         assert_eq!(LaunchVm::from_args(&from_flags, config).name, "Command line");
+    }
+
+    /// The launch VM the command line `line` describes, resolved the way
+    /// `main` resolves it.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    fn launch_from_command_line(line: &[&str]) -> LaunchVm {
+        use clap::Parser;
+        let args = Args::try_parse_from(line).expect("the command line parses");
+        let config = crate::config::load_config(&args).expect("the command line resolves");
+        LaunchVm::from_args(&args, config)
+    }
+
+    /// A library in `dir` holding one VM, "Alpine", for a command line to
+    /// name by its file.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    fn alpine_library(dir: &ScratchDir) -> crate::library::VmLibrary {
+        let library = crate::library::VmLibrary::open(dir.path.clone()).expect("open");
+        let mut config = disk_creation_config(PathBuf::from("disk.img"), false);
+        config.display = DisplayBackend::Egui;
+        library.create("Alpine", &config).expect("create");
+        library
+    }
+
+    /// `--config` naming a file of the library, and nothing else: the shell
+    /// opens on that library VM, remembered for the next launch, and there
+    /// is no temporary VM to open.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_library_file_named_alone_opens_as_that_library_vm() {
+        let dir = ScratchDir::new("rusty-box-gui-named-library");
+        let library = alpine_library(&dir);
+        let stem = crate::library::VmStem::parse("alpine").expect("a stem");
+        let file = library.path_of(&stem);
+        let launch = launch_from_command_line(&[
+            "rusty_box_gui",
+            "--config",
+            file.to_str().expect("a UTF-8 scratch path"),
+        ]);
+        assert_eq!(launch.source, LaunchSource::ConfigFile(file.clone()));
+
+        let start = shell_start(library.clone(), Some(launch));
+
+        assert!(
+            matches!(&start.opening, ShellOpening::LibraryVm(named) if named == &stem),
+            "opening: {:?}",
+            start.opening
+        );
+        assert_eq!(start.notice, None);
+        assert_eq!(library.last_selected(), Some(stem.clone()));
+
+        // A spelling that differs in case names the same file on Windows.
+        if cfg!(windows) {
+            let shouted = dir.path.join("ALPINE.TOML");
+            let launch = launch_from_command_line(&[
+                "rusty_box_gui",
+                "--config",
+                shouted.to_str().expect("a UTF-8 scratch path"),
+            ]);
+            let start = shell_start(library.clone(), Some(launch));
+            assert!(
+                matches!(&start.opening, ShellOpening::LibraryVm(named) if named == &stem),
+                "opening: {:?}",
+                start.opening
+            );
+        }
+    }
+
+    /// The same library file with an override beside it is a temporary VM:
+    /// only a temporary VM carries the override without writing it back.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_library_file_with_an_override_opens_as_a_temporary_vm() {
+        let dir = ScratchDir::new("rusty-box-gui-overridden-library");
+        let library = alpine_library(&dir);
+        let file = dir.path.join("alpine.toml");
+        let file_arg = file.to_str().expect("a UTF-8 scratch path");
+        let before = fs::read_to_string(&file).expect("read");
+
+        let with_memory =
+            launch_from_command_line(&["rusty_box_gui", "--config", file_arg, "--memory-mib", "64"]);
+        let start = shell_start(library.clone(), Some(with_memory));
+        assert!(
+            matches!(&start.opening, ShellOpening::Launch(vm)
+                if vm.config.memory_mib == 64 && vm.source == LaunchSource::Flags),
+            "opening: {:?}",
+            start.opening
+        );
+
+        let with_engine = launch_from_command_line(&[
+            "rusty_box_gui",
+            "--config",
+            file_arg,
+            "--engine",
+            "interpreter",
+        ]);
+        let start = shell_start(library.clone(), Some(with_engine));
+        assert!(
+            matches!(&start.opening, ShellOpening::Launch(_)),
+            "opening: {:?}",
+            start.opening
+        );
+
+        assert_eq!(library.last_selected(), None);
+        assert_eq!(fs::read_to_string(&file).expect("read"), before);
+    }
+
+    /// A file outside the library is a temporary VM, even one that is a copy
+    /// of a library file under the same name.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_config_file_elsewhere_opens_as_a_temporary_vm() {
+        let dir = ScratchDir::new("rusty-box-gui-library-beside-elsewhere");
+        let elsewhere = ScratchDir::new("rusty-box-gui-elsewhere");
+        let library = alpine_library(&dir);
+        let copy = elsewhere.path.join("alpine.toml");
+        fs::copy(dir.path.join("alpine.toml"), &copy).expect("copy the file out");
+
+        let launch = launch_from_command_line(&[
+            "rusty_box_gui",
+            "--config",
+            copy.to_str().expect("a UTF-8 scratch path"),
+        ]);
+        let start = shell_start(library.clone(), Some(launch));
+
+        assert!(
+            matches!(&start.opening, ShellOpening::Launch(vm)
+                if vm.name == "alpine" && vm.source == LaunchSource::ConfigFile(copy.clone())),
+            "opening: {:?}",
+            start.opening
+        );
+        assert_eq!(library.last_selected(), None);
     }
 
     #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
