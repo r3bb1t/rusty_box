@@ -98,6 +98,17 @@ path = "examples/android.rs"
 crate-type = ["cdylib"]
 required-features = ["gui-egui"]
 
+# The workspace's `deny(unsafe_code)`, so every `unsafe` in this crate is a
+# hard error except in `src/android.rs`, which lifts it with an
+# `#![expect(unsafe_code, …)]` naming who owns the invariants: the Java VM and
+# the NativeActivity that android-activity hands the process, reached through
+# JNI. The APK example's `android_main` lifts it for its one unmangled symbol.
+# An `expect` warns when it goes unfulfilled, so the day either stops needing
+# unsafe the lint says so — R1's ratchet, written as a lint; the count itself
+# is held in `xtask/src/ci.rs`.
+[lints]
+workspace = true
+
 [package.metadata.android]
 package = "com.rustybox.android"
 apk_name = "RustyBoxAndroid"

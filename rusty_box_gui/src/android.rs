@@ -8,6 +8,10 @@
 //! lacks is supplied here: a file browser for the shell's Browse buttons, the
 //! storage permission that browser needs, a key pad for a device without a
 //! keyboard, and the safe area that keeps the shell clear of the system bars.
+#![expect(
+    unsafe_code,
+    reason = "JNI: the Java VM and NativeActivity handles android-activity hands this process"
+)]
 
 use crate::android_support::{
     content_rect_in_points, list_directory, needs_first_vm, seed_first_vm, stage_file,
@@ -590,17 +594,7 @@ fn downloads_dir() -> PathBuf {
 /// and later the "All files access" grant, before that both READ and
 /// WRITE_EXTERNAL_STORAGE. A failed check counts as missing access.
 fn storage_access(app: &AndroidApp) -> StorageAccess {
-    // SAFETY: android-activity hands out the process's Java VM, which lives as
-    // long as the process does.
-    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
-    let granted = vm.attach_current_thread(|env| -> jni::errors::Result<bool> {
-        let granted = storage_access_granted(env, app);
-        if granted.is_err() {
-            env.exception_clear();
-        }
-        granted
-    });
-    match granted {
+    match with_activity(app, storage_access_granted) {
         Ok(true) => StorageAccess::Granted,
         Ok(false) => StorageAccess::Missing,
         Err(error) => {
@@ -610,7 +604,40 @@ fn storage_access(app: &AndroidApp) -> StorageAccess {
     }
 }
 
-fn storage_access_granted(env: &mut jni::Env<'_>, app: &AndroidApp) -> jni::errors::Result<bool> {
+/// Runs `body` on this thread attached to the process's Java VM, with the
+/// NativeActivity's Java object: the one door every Java call here goes
+/// through. A failure leaves no Java exception pending for the next call on
+/// the thread; it is cleared before the error is returned.
+fn with_activity<T, F>(app: &AndroidApp, body: F) -> jni::errors::Result<T>
+where
+    F: FnOnce(&mut jni::Env<'_>, &jni::objects::JObject<'_>) -> jni::errors::Result<T>,
+{
+    // SAFETY: android-activity hands out the process's Java VM, which lives as
+    // long as the process does.
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| -> jni::errors::Result<T> {
+        let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+        // SAFETY: `activity_as_ptr` is a global reference to the
+        // NativeActivity's Java object, which android-activity holds for as
+        // long as `app` lives.
+        let activity = unsafe {
+            env.as_cast_raw::<jni::objects::Global<jni::objects::JObject>>(&raw_activity)
+        };
+        let result = match activity {
+            Ok(activity) => body(env, activity.as_ref()),
+            Err(error) => Err(error),
+        };
+        if result.is_err() {
+            env.exception_clear();
+        }
+        result
+    })
+}
+
+fn storage_access_granted(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<bool> {
     if sdk_level(env)? >= ANDROID_11 {
         let environment = env.find_class(jni::jni_str!("android/os/Environment"))?;
         return env
@@ -622,17 +649,11 @@ fn storage_access_granted(env: &mut jni::Env<'_>, app: &AndroidApp) -> jni::erro
             )?
             .z();
     }
-    let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
-    // SAFETY: `activity_as_ptr` is a global reference to the NativeActivity's
-    // Java object, which android-activity holds for as long as `app` lives.
-    let activity = unsafe {
-        env.as_cast_raw::<jni::objects::Global<jni::objects::JObject>>(&raw_activity)?
-    };
     for name in [READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE] {
         let permission = env.new_string(name)?;
         let state = env
             .call_method(
-                activity.as_ref(),
+                activity,
                 jni::jni_str!("checkSelfPermission"),
                 jni::jni_sig!("(Ljava/lang/String;)I"),
                 &[jni::objects::JValue::Object(&permission)],
@@ -651,28 +672,15 @@ fn storage_access_granted(env: &mut jni::Env<'_>, app: &AndroidApp) -> jni::erro
 /// The answer arrives after the user returns, and the browser reads it again
 /// when the app regains focus.
 fn request_storage_access(app: &AndroidApp) {
-    // SAFETY: android-activity hands out the process's Java VM, which lives as
-    // long as the process does.
-    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
-    let requested = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
-        let requested = ask_for_storage_access(env, app);
-        if requested.is_err() {
-            env.exception_clear();
-        }
-        requested
-    });
-    if let Err(error) = requested {
+    if let Err(error) = with_activity(app, ask_for_storage_access) {
         log::warn!("could not ask for storage access: {error}");
     }
 }
 
-fn ask_for_storage_access(env: &mut jni::Env<'_>, app: &AndroidApp) -> jni::errors::Result<()> {
-    let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
-    // SAFETY: `activity_as_ptr` is a global reference to the NativeActivity's
-    // Java object, which android-activity holds for as long as `app` lives.
-    let activity = unsafe {
-        env.as_cast_raw::<jni::objects::Global<jni::objects::JObject>>(&raw_activity)?
-    };
+fn ask_for_storage_access(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<()> {
     if sdk_level(env)? >= ANDROID_11 {
         let intent_class = env.find_class(jni::jni_str!("android/content/Intent"))?;
         let package = env

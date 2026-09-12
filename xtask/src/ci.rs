@@ -230,6 +230,19 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // owns both the allocation and the engine. A rise means a second place
     // making that claim, which is exactly what must not happen.
     ("rusty_box_whp_engine/src", 1),
+    // The GUI's Android front end reaches the platform through JNI. TWO
+    // blocks, both in `with_activity` in `android.rs`, the one helper every
+    // Java call goes through: attaching this thread to the Java VM
+    // android-activity hands the process, and borrowing the NativeActivity's
+    // Java object it holds. `android.rs` is the only file that lifts the
+    // workspace's `deny(unsafe_code)`, with an `#![expect]` naming who owns
+    // those invariants. The scan covers `src` only, so the APK example's
+    // `#[unsafe(no_mangle)]` on `android_main` (`examples/android.rs`), which
+    // carries a targeted `#[expect]` of its own, is outside this count. A rise
+    // means a Java call that went around the helper, or unsafe that escaped
+    // `android.rs`. The crate is host FFI outside a named leaf; see the R1
+    // registry in docs/safety-doctrine.md.
+    ("rusty_box_gui/src", 2),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. Zero, permanently: thread
 /// safety is derived from ownership, and `Emulator`'s `const` assertion in
@@ -262,10 +275,11 @@ const BLANKET_DEAD_CODE_BASELINES: &[(&str, usize)] = &[
 ];
 
 /// `.unwrap()` / `.expect(…)` outside test code, in each crate
-/// `UNSAFE_TOKEN_BASELINES` names: rusty_box, the decoder, core, devices and
-/// the three WHP crates.
-/// Zero, and it is to stay zero: a library that panics on a condition it could
-/// have returned is a library its caller cannot contain.
+/// `UNSAFE_TOKEN_BASELINES` names: rusty_box, the decoder, core, devices, the
+/// three WHP crates and the GUI. Zero for every crate but those
+/// `PRODUCTION_PANIC_EXCEPTIONS` names, and it is to stay zero: a library that
+/// panics on a condition it could have returned is a library its caller
+/// cannot contain.
 ///
 /// The rule is about WHERE, not about the call. Inside `#[cfg(test)]`, a
 /// fixture that cannot be built should fail loudly and immediately — so the
@@ -280,6 +294,24 @@ const BLANKET_DEAD_CODE_BASELINES: &[(&str, usize)] = &[
 /// index that would have panicked first. Five in `cpu/svm.rs` stood in for a
 /// CPU model's SVM capability, which CPUID already answers.
 const PRODUCTION_PANIC_BASELINE: usize = 0;
+
+/// The scanned crates held at a production `.unwrap()`/`.expect(…)` count
+/// above `PRODUCTION_PANIC_BASELINE`, each under a comment saying where the
+/// calls are. A count may only decrease, like every other ratchet here.
+const PRODUCTION_PANIC_EXCEPTIONS: &[(&str, usize)] = &[
+    // The GUI is scanned for its `unsafe`, and so for this too. NINE as the
+    // scan counts them. Eight are production calls, all in the browser front
+    // end: five in the wasm `main` in `main.rs`, which has no caller to hand
+    // a missing window, document or canvas to, and three in the browser shell
+    // in `app.rs` (the web machine's CPU topology, its startup stage, its
+    // display texture). The ninth is test code the scan misreads: the font
+    // check in `shell/mod.rs`'s test module holds the char literals `'{'`,
+    // `'}'` and `'"'`, which this line-based scan takes for braces and for
+    // the start of a string, so it closes that test region early and counts
+    // the `.expect(` at the module's end. Held here so the number cannot
+    // grow.
+    ("rusty_box_gui/src", 9),
+];
 
 /// Count occurrences of a bare `unsafe` token per crate, comment lines
 /// stripped, against the ratchet baselines.
@@ -518,14 +550,24 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
             &mut blanket_dead_code,
             &mut panics,
         )?;
-        if panics > PRODUCTION_PANIC_BASELINE {
+        let panic_baseline = PRODUCTION_PANIC_EXCEPTIONS
+            .iter()
+            .find(|(dir, _)| dir == rel)
+            .map_or(PRODUCTION_PANIC_BASELINE, |(_, baseline)| *baseline);
+        if panics > panic_baseline {
             return Err(format!(
                 "doctrine ratchets: {rel} has {panics} `.unwrap()`/`.expect(…)` outside test \
-                 code, baseline is {PRODUCTION_PANIC_BASELINE}. A library crate returns its \
+                 code, baseline is {panic_baseline}. A library crate returns its \
                  failures; it does not abort its caller's process. If the value truly cannot \
                  be absent, say so in a type — the 52 removed to reach this baseline were all \
                  claims some nearby code had already proved."
             ));
+        }
+        if panics < panic_baseline {
+            println!(
+                "    {rel}: {panics} production `.unwrap()`/`.expect(…)` (< baseline \
+                 {panic_baseline} — tighten PRODUCTION_PANIC_EXCEPTIONS in this commit)"
+            );
         }
         total_panics += panics;
         if *rel == "rusty_box/src" {

@@ -250,6 +250,12 @@ not stored closures.
 - no-alloc `Emulator` is `!Send` — documented caller-outlives contract (R6).
 - `rusty_box_whp_sys` — the host-FFI leaf, permanently outside R1's `forbid` end state; the
   section below is its registration.
+- `rusty_box_gui/src/android.rs` — the Android front end's JNI calls on the Java VM and the
+  NativeActivity that android-activity hands the process. It is host FFI in a crate that is
+  not a named leaf: the crate inherits the workspace's `deny(unsafe_code)`, this one file lifts
+  it with an `#![expect]` naming the invariant owner, every Java call goes through its single
+  helper `with_activity`, and `xtask/src/ci.rs` holds the crate's count under its own baseline.
+  Moving the calls into a leaf crate of their own is the open alternative.
 
 ## The registered R1 exception: the host-FFI leaf
 

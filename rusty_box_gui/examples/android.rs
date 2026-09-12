@@ -7,6 +7,10 @@
 // NativeActivity glue calls it by this unmangled name, with the signature
 // below, once per process.
 #[cfg(target_os = "android")]
+#[expect(
+    unsafe_code,
+    reason = "the NativeActivity glue finds `android_main` by its unmangled name"
+)]
 #[unsafe(no_mangle)]
 fn android_main(app: rusty_box_gui::android::AndroidApp) {
     rusty_box_gui::android::main(app);
