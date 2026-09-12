@@ -7,6 +7,22 @@ use std::{io, path::PathBuf};
 const ENGINE_CHOSEN_BY: &str = "chosen by `--engine`, a VM file's `emulator.engine`, or the \
                                 shell's Hardware › Processors › Engine";
 
+/// Where the desktop keeps its VM library, and the environment it is found
+/// from (`library::default_library_dir`): a variable counts only when it is
+/// an absolute path.
+#[cfg(windows)]
+const LIBRARY_FOLDER_FROM: &str = "it is kept in `%APPDATA%\\rusty_box\\vms`, and the `APPDATA` \
+                                   environment variable is unset or not an absolute path";
+#[cfg(target_os = "macos")]
+const LIBRARY_FOLDER_FROM: &str = "it is kept in `~/Library/Application Support/rusty_box/vms`, \
+                                   and the `HOME` environment variable is unset or not an \
+                                   absolute path";
+#[cfg(all(not(windows), not(target_os = "macos")))]
+const LIBRARY_FOLDER_FROM: &str = "it is kept in `$XDG_DATA_HOME/rusty_box/vms`, or in \
+                                   `$HOME/.local/share/rusty_box/vms` when `XDG_DATA_HOME` is \
+                                   unset or not an absolute path, and `HOME` is unset or not an \
+                                   absolute path too";
+
 /// `flags`, each in backticks, joined with ", ".
 fn quoted_flags(flags: &[&str]) -> String {
     flags
@@ -88,6 +104,11 @@ pub enum RunError {
 
     #[error("the platform gave the app no storage directory for its ROMs and settings")]
     NoAppStorage,
+
+    /// The desktop shell found no folder for its VM library: the environment
+    /// the folder is found from names none (`library::default_library_dir`).
+    #[error("found no folder for the VM library: {}", LIBRARY_FOLDER_FROM)]
+    NoLibraryFolder,
 
     #[error("failed to place the carried {kind} at {}: {source}", path.display())]
     StageFile {
@@ -286,5 +307,26 @@ mod tests {
 
         assert!(text.starts_with("BIOS path is required"), "{text:?}");
         assert!(text.contains("Hardware › Display"), "{text:?}");
+    }
+
+    /// The desktop's refusal names the environment its library folder is
+    /// found from, and is not the phone's message about app storage.
+    #[test]
+    fn a_missing_library_folder_names_the_environment_it_is_found_from() {
+        let text = RunError::NoLibraryFolder.to_string();
+
+        assert!(text.starts_with("found no folder for the VM library"), "{text:?}");
+        let variables: &[&str] = if cfg!(windows) {
+            &["`APPDATA`"]
+        } else if cfg!(target_os = "macos") {
+            &["`HOME`"]
+        } else {
+            &["`XDG_DATA_HOME`", "`HOME`"]
+        };
+        for variable in variables {
+            assert!(text.contains(variable), "{text:?} does not name {variable}");
+        }
+        assert!(text.contains("not an absolute path"), "{text:?}");
+        assert!(!text.contains("ROMs and settings"), "{text:?}");
     }
 }

@@ -114,18 +114,27 @@ pub(crate) fn startup_disk_action(config: &ResolvedConfig) -> Option<String> {
     }
 }
 
+/// Checks the media files `config` names and, when `create_startup_disks`,
+/// provisions its startup disk. Every file this call does not create — the
+/// CD-ROM, and a disk that is not created here — is checked first, so a
+/// power-on refused for a missing one leaves an `overwrite` disk as it was.
 fn prepare_configured_media_files(
     config: &ResolvedConfig,
     create_startup_disks: bool,
 ) -> Result<(), RunError> {
+    let creates_disk =
+        create_startup_disks && config.disk.as_ref().is_some_and(|disk| disk.creation.is_some());
+    if let Some(cdrom) = &config.cdrom {
+        verify_media_file("CD-ROM", &cdrom.path)?;
+    }
+    if let (Some(disk), false) = (&config.disk, creates_disk) {
+        verify_media_file("disk", &disk.path)?;
+    }
     if create_startup_disks {
         create_configured_disk_images(config)?;
     }
-    if let Some(disk) = &config.disk {
+    if let (Some(disk), true) = (&config.disk, creates_disk) {
         verify_media_file("disk", &disk.path)?;
-    }
-    if let Some(cdrom) = &config.cdrom {
-        verify_media_file("CD-ROM", &cdrom.path)?;
     }
     Ok(())
 }
@@ -594,15 +603,15 @@ impl LaunchVm {
 /// Opens the desktop shell on the per-user VM library, with `launch` — what
 /// the command line described, if anything — as [`shell_start`] places it.
 ///
-/// Only a library folder that cannot be created refuses the launch: with no
-/// folder there is nothing to show. A library that cannot be read opens as
-/// empty, with the error as a notice in the window, and a bundled VM that
-/// cannot be imported is left out, with the reason as the shell's opening
-/// notice: no subscriber is installed this early, so a log line alone would
-/// reach nobody.
+/// Only a library folder that cannot be found or created refuses the
+/// launch: with no folder there is nothing to show. A library that cannot be
+/// read opens as empty, with the error as a notice in the window, and a
+/// bundled VM that cannot be imported is left out, with the reason as the
+/// shell's opening notice: no subscriber is installed this early, so a log
+/// line alone would reach nobody.
 #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
 pub fn run_shell(launch: Option<LaunchVm>) -> Result<RunSummary, RunError> {
-    let dir = crate::library::default_library_dir().ok_or(RunError::NoAppStorage)?;
+    let dir = crate::library::default_library_dir().ok_or(RunError::NoLibraryFolder)?;
     let library = crate::library::VmLibrary::open(dir)?;
     run_egui(shell_start(library, launch))
 }
@@ -931,7 +940,11 @@ fn prepare_egui_run(shared: &Arc<Mutex<SharedDisplay>>) -> Arc<AtomicBool> {
         display.reset_requested = false;
         display.runtime_error = None;
         display.startup_status = None;
+        // Input queued while the machine was off belongs to no run: serial
+        // text typed, or keys tapped on the phone's key pad, are not replayed
+        // into the next boot.
         drop(display.drain_serial_input());
+        display.pending_keys.clear();
         Arc::clone(&display.stop_flag)
     } else {
         Arc::new(AtomicBool::new(false))
@@ -1668,6 +1681,50 @@ mod tests {
             shared.lock().unwrap().drain_serial_input(),
             Vec::<u8>::new()
         );
+    }
+
+    /// Keys tapped on the phone's key pad while the machine is off are not
+    /// replayed into the next boot.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn prepare_egui_run_drops_keys_queued_while_stopped() {
+        use rusty_box::gui::{HostInputEvent, HostInputSink};
+        use rusty_box::iodev::scancodes::BxKey;
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        assert!(shared
+            .lock()
+            .unwrap()
+            .push(HostInputEvent::Key(BxKey::Enter, true)));
+        assert_eq!(shared.lock().unwrap().pending_keys.len(), 1);
+
+        drop(prepare_egui_run(&shared));
+
+        assert!(shared.lock().unwrap().pending_keys.is_empty());
+    }
+
+    /// A power-on refused for a missing CD-ROM leaves an `overwrite` disk as
+    /// it was: the CD-ROM is checked before the disk is recreated.
+    #[test]
+    fn a_missing_cdrom_is_refused_before_an_overwrite_disk_is_recreated() {
+        let disk = unique_temp_path("rusty-box-gui-kept-overwrite-disk");
+        let missing_cdrom = unique_temp_path("rusty-box-gui-missing-cdrom");
+        fs::write(&disk, [0xABu8; 1024]).unwrap();
+        let mut config = disk_creation_config(disk.clone(), true);
+        config.cdrom = Some(ResolvedCdrom {
+            path: missing_cdrom.clone(),
+            channel: 1,
+            drive: 0,
+        });
+
+        let error = prepare_configured_media_files(&config, true).unwrap_err();
+
+        let after = fs::read(&disk);
+        remove_test_file(&disk);
+        assert!(
+            matches!(&error, RunError::FileRead { kind: "CD-ROM", path, .. } if path == &missing_cdrom),
+            "{error:?}"
+        );
+        assert_eq!(after.unwrap(), vec![0xABu8; 1024]);
     }
 
     #[cfg(feature = "gui-egui")]

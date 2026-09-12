@@ -256,19 +256,23 @@ impl VmLibrary {
         Ok(Some(self.create(name, &described.config)?))
     }
 
-    /// The regular files directly in the folder.
-    fn files(&self) -> Result<Vec<PathBuf>, LibraryError> {
+    /// Every entry directly in the folder, whatever it is.
+    fn entries(&self) -> Result<Vec<PathBuf>, LibraryError> {
         let read_error = |source: io::Error| LibraryError::Read {
             path: self.dir.clone(),
             source,
         };
-        let mut files = Vec::new();
+        let mut entries = Vec::new();
         for entry in fs::read_dir(&self.dir).map_err(read_error)? {
-            let path = entry.map_err(read_error)?.path();
-            if path.is_file() {
-                files.push(path);
-            }
+            entries.push(entry.map_err(read_error)?.path());
         }
+        Ok(entries)
+    }
+
+    /// The regular files directly in the folder.
+    fn files(&self) -> Result<Vec<PathBuf>, LibraryError> {
+        let mut files = self.entries()?;
+        files.retain(|path| path.is_file());
         Ok(files)
     }
 
@@ -280,14 +284,16 @@ impl VmLibrary {
         Ok(files)
     }
 
-    /// A stem for `name` that no file in the folder has. Taken stems are
+    /// A stem for `name` that no entry in the folder has: a folder, or
+    /// anything else, named `<stem>.toml` takes the stem as a file does,
+    /// since the VM's file could not be written over it. Taken stems are
     /// compared without case, and under any spelling of the extension,
     /// because Windows and macOS folders ignore case. A suffix `-2`, `-3`, …
     /// makes the stem unique, and the base is cut so the whole stays within
     /// `MAX_STEM_LEN`.
     fn unused_stem(&self, name: &str) -> Result<VmStem, LibraryError> {
         let taken: HashSet<String> = self
-            .files()?
+            .entries()?
             .iter()
             .filter(|path| {
                 path.extension()
@@ -689,6 +695,21 @@ mod tests {
 
         assert_eq!(first.as_str(), "alpine-2");
         assert_eq!(second.as_str(), "alpine-3");
+        remove_dir(&dir);
+    }
+
+    /// A folder named like a VM file takes its stem as a file does: the VM's
+    /// file could not be written over it, so the new VM gets the next stem.
+    #[test]
+    fn a_folder_named_like_a_vm_file_takes_its_stem() {
+        let dir = scratch_dir("folder-stem");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        fs::create_dir(dir.join("alpine.toml")).expect("a folder named like a VM file");
+
+        let stem = library.create("Alpine", &sample_config(&dir)).expect("create");
+
+        assert_eq!(stem.as_str(), "alpine-2");
+        assert!(dir.join("alpine-2.toml").is_file());
         remove_dir(&dir);
     }
 

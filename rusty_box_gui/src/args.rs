@@ -4,7 +4,7 @@ use std::{fmt, path::PathBuf, str::FromStr};
 
 /// The launcher's command line. `Args::default()` is the command line with no
 /// flags: every default below is the one clap gives an absent flag.
-#[derive(Debug, Clone, Default, Parser)]
+#[derive(Debug, Clone, Default, PartialEq, Parser)]
 #[command(
     name = "rusty_box_gui",
     version,
@@ -410,6 +410,18 @@ mod tests {
         let error = "306:0:17".parse::<DiskGeometry>().unwrap_err();
 
         assert_eq!(error, "disk CHS values must be non-zero");
+    }
+
+    /// `Args::default()` stands for the command line with no flags wherever
+    /// the shell resolves a file of its own (`config::resolve_config_in`),
+    /// so it must be exactly what clap makes of an empty command line; a flag
+    /// given a `default_value_t` would part the two.
+    #[test]
+    fn the_default_args_are_the_empty_command_line() {
+        assert_eq!(
+            Args::default(),
+            Args::try_parse_from(["rusty_box_gui"]).expect("the command line parses")
+        );
     }
 
     #[test]

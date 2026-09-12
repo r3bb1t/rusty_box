@@ -259,7 +259,9 @@ impl eframe::App for AndroidShellApp {
         safe_ui.set_clip_rect(safe_rect);
         eframe::App::ui(&mut self.shell, &mut safe_ui, frame);
 
-        if let Some(request) = self.shell.take_browse_request() {
+        // A Browse pressed while a browser is open is dropped: the open
+        // browser, and whatever was typed in it, stays.
+        if let (Some(request), None) = (self.shell.take_browse_request(), &self.browser) {
             self.browser = Some(FileBrowser::open(request, &self.app));
         }
         if let Some(browser) = &mut self.browser {
@@ -375,8 +377,10 @@ struct FileBrowser {
 
 impl FileBrowser {
     /// Opens beside the path the field holds, or in the shared Download folder
-    /// when that names no directory, and asks for storage access if the app
-    /// lacks it.
+    /// when that names no directory. Storage access is asked for once, here,
+    /// when the app lacks it and that folder is outside the app's own
+    /// storage, which it reads with no grant; later, only the "Grant access"
+    /// button asks.
     fn open(request: BrowseRequest, app: &AndroidApp) -> Self {
         let filter = match request.target {
             BrowseTarget::Cdrom => FileFilter::Extension("iso"),
@@ -400,8 +404,14 @@ impl FileBrowser {
                 .unwrap_or(offered)
                 .to_owned()
         });
+        let own_storage: Vec<PathBuf> = [app.internal_data_path(), app.external_data_path()]
+            .into_iter()
+            .flatten()
+            .collect();
         let access = storage_access(app);
-        if access == StorageAccess::Missing {
+        if access == StorageAccess::Missing
+            && crate::android_support::needs_storage_access(&dir, &own_storage)
+        {
             request_storage_access(app);
         }
         let listing = Listing::of(&dir, filter);
@@ -521,20 +531,33 @@ impl FileBrowser {
                 ui.separator();
                 match &mut self.file_name {
                     Some(file_name) => {
+                        // "Save here" means the folder shown: it takes a
+                        // name that is one file name and nothing that would
+                        // put the file somewhere else.
                         ui.horizontal(|ui| {
                             ui.label("Name");
                             ui.add(egui::TextEdit::singleline(file_name).desired_width(240.0));
-                            let name = file_name.trim();
+                            let name = crate::android_support::own_file_name(file_name);
                             if ui
-                                .add_enabled(!name.is_empty(), egui::Button::new("Save here"))
+                                .add_enabled(name.is_some(), egui::Button::new("Save here"))
                                 .clicked()
                             {
-                                outcome = BrowserOutcome::Chosen {
-                                    target: self.target,
-                                    path: self.dir.join(name),
-                                };
+                                if let Some(name) = name {
+                                    outcome = BrowserOutcome::Chosen {
+                                        target: self.target,
+                                        path: self.dir.join(name),
+                                    };
+                                }
                             }
                         });
+                        let typed_a_path = !file_name.trim().is_empty()
+                            && crate::android_support::own_file_name(file_name).is_none();
+                        if typed_a_path {
+                            ui.label(
+                                RichText::new("Enter a file name, not a path")
+                                    .color(crate::shell::theme::ACCENT_AMBER),
+                            );
+                        }
                     }
                     None => {
                         let mut use_typed = false;

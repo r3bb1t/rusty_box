@@ -491,6 +491,19 @@ enum SaveState {
     WriteFailed,
 }
 
+/// What brought a VM's name or config to where it is, for
+/// `NativeVmProfile::mark_against_file`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigChange {
+    /// An edit the user applied. A VM whose last write failed is `Unsaved`
+    /// again, so the next flush tries its file once more.
+    Edit,
+    /// The shell reading the VM's settings into its config, as a selection
+    /// does. A write that failed stays failed, for an action to try again.
+    Reading,
+}
+
 /// Which of the VMs whose files are behind a flush writes.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -666,8 +679,40 @@ impl NativeVmProfile {
             .is_some_and(|file| file.holds(&self.name, &self.config))
     }
 
+    /// Applies the VM's settings to its config, or leaves the config as it
+    /// was when they do not apply. A file that held the VM before holds it
+    /// after: the settings are applied to the config the file gave, so what
+    /// they change is how the shell reads that file — a boot order put in
+    /// the shell's own form, say — not what the VM is, and nothing is
+    /// written for it.
     fn apply_settings(&mut self) -> Result<(), String> {
-        self.settings.apply_to_config(&mut self.config)
+        let mut config = self.config.clone();
+        self.settings.apply_to_config(&mut config)?;
+        let file_was_current = self.file_is_current();
+        self.config = config;
+        if file_was_current {
+            self.file = Some(VmFileContents::of(&self.name, &self.config));
+        }
+        Ok(())
+    }
+
+    /// Marks a library VM after `change`: `Saved` when its file holds it as
+    /// it is, and otherwise `Unsaved` — except that a reading leaves a failed
+    /// write failed, since only an action or an applied edit tries it again.
+    /// A VM with no file has nothing to mark. Every site that changes a VM's
+    /// name or config keeps the `save_state` invariant through this one
+    /// match.
+    fn mark_against_file(&mut self, change: ConfigChange) {
+        if let VmOrigin::Library(_) = self.origin {
+            self.save_state = match (self.file_is_current(), change, self.save_state) {
+                (true, _, _) => SaveState::Saved,
+                (false, ConfigChange::Edit, _) => SaveState::Unsaved,
+                (false, ConfigChange::Reading, SaveState::WriteFailed) => SaveState::WriteFailed,
+                (false, ConfigChange::Reading, SaveState::Saved | SaveState::Unsaved) => {
+                    SaveState::Unsaved
+                }
+            };
+        }
     }
 
     fn vm_info(&self) -> NativeVmInfo {
@@ -1288,10 +1333,10 @@ impl NativeShellApp {
                     self.chrome.go_to(destination.page());
                 } else {
                     self.select_profile(destination.vm());
-                    #[cfg(target_os = "android")]
-                    {
-                        self.chrome.show_library = false;
-                    }
+                }
+                #[cfg(target_os = "android")]
+                {
+                    self.chrome.show_library = false;
                 }
             }
         }
@@ -2237,13 +2282,7 @@ impl NativeShellApp {
         if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm()) {
             profile.config.clone_from(&self.config);
             profile.settings.clone_from(&self.settings);
-            if let VmOrigin::Library(_) = profile.origin {
-                profile.save_state = if profile.file_is_current() {
-                    SaveState::Saved
-                } else {
-                    SaveState::Unsaved
-                };
-            }
+            profile.mark_against_file(ConfigChange::Edit);
             self.refresh_selected_profile_metadata()?;
             self.config
                 .clone_from(&self.profiles[self.chrome.selected_vm()].config);
@@ -2332,12 +2371,17 @@ impl NativeShellApp {
         }
     }
 
+    /// Applies the selected VM's settings to it, marks it against its file,
+    /// and makes its sidebar row and the VM information shown say what the
+    /// VM is — whether or not the settings apply: a failed apply leaves the
+    /// VM as it was, and the row and the information show it as it is.
     fn refresh_selected_profile_metadata(&mut self) -> Result<(), String> {
         let index = self.chrome.selected_vm();
-        if index >= self.profiles.len() {
+        let Some(profile) = self.profiles.get_mut(index) else {
             return Ok(());
-        }
-        self.profiles[index].apply_settings()?;
+        };
+        let applied = profile.apply_settings();
+        profile.mark_against_file(ConfigChange::Reading);
         if index < self.chrome.vm_library.len() {
             self.chrome.vm_library[index] = self.profiles[index].library_entry();
         } else {
@@ -2348,7 +2392,7 @@ impl NativeShellApp {
                 .collect();
         }
         self.vm_info = self.profiles[index].vm_info();
-        Ok(())
+        applied
     }
 
     /// Shows the VM at `index`. The VM being left is applied and written
@@ -2360,7 +2404,7 @@ impl NativeShellApp {
         let status = self.runtime_status();
         if status.running || status.start_pending {
             self.notify(ShellNotice::warning(
-                "Stop the running VM before selecting another profile.",
+                "Stop the running VM before selecting another VM.",
             ));
             return;
         }
@@ -6753,9 +6797,55 @@ mod tests {
         assert_eq!(
             app.shell_notice,
             Some(ShellNotice::warning(
-                "Stop the running VM before selecting another profile."
+                "Stop the running VM before selecting another VM."
             ))
         );
+    }
+
+    /// A library VM whose file the shell reads into its own form — the boot
+    /// order with the attached disk appended — is not rewritten for that by
+    /// a selection: selecting it, away and back leaves its file as written.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn selecting_away_and_back_does_not_rewrite_a_vm_the_shell_normalises() {
+        let scratch = ScratchLibrary::new();
+        scratch
+            .library()
+            .create("Alpine", &test_resolved_config())
+            .expect("seed");
+        let file = scratch.dir.join("both.toml");
+        let written = "[vm]\nname = \"Both\"\n\n[display]\nbackend = \"egui\"\n\n[rom]\n\
+                       bios = \"bios.bin\"\n\n[boot]\norder = [\"cdrom\"]\n\n[disk]\n\
+                       path = \"disk.img\"\n\
+                       chs = { cylinders = 16, heads = 16, sectors_per_track = 63 }\n\n\
+                       [cdrom]\npath = \"boot.iso\"\n";
+        fs::write(&file, written).expect("write the VM file by hand");
+        let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+        let both = app
+            .profiles
+            .iter()
+            .position(|profile| profile.name == "Both")
+            .expect("the hand-written VM is listed");
+        let alpine = app
+            .profiles
+            .iter()
+            .position(|profile| profile.name == "Alpine")
+            .expect("the seeded VM is listed");
+
+        app.select_profile(both);
+
+        assert_eq!(
+            app.profiles[both].config.boot_order,
+            vec![crate::args::BootDevice::Cdrom, crate::args::BootDevice::Disk]
+        );
+        assert_eq!(app.profiles[both].save_state, SaveState::Saved);
+
+        app.select_profile(alpine);
+        app.select_profile(both);
+
+        assert_eq!(fs::read_to_string(&file).expect("read"), written);
+        assert_eq!(app.profiles[both].save_state, SaveState::Saved);
+        assert_eq!(app.shell_notice, None);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

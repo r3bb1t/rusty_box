@@ -158,7 +158,7 @@ pub(crate) fn draw_sidebar(
 
             if entries.is_empty() {
                 ui.label(
-                    RichText::new("No VM profiles")
+                    RichText::new("No VMs")
                         .size(TEXT_BODY)
                         .color(TEXT_MUTED),
                 );

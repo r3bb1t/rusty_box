@@ -75,6 +75,22 @@ pub(crate) fn list_directory(dir: &Path, filter: FileFilter) -> io::Result<Vec<D
     Ok(entries)
 }
 
+/// The name `typed` gives a file still to be created, when it is one:
+/// trimmed, it is exactly its own file name — `Path::file_name` returns all
+/// of it — so it is not empty and holds no folder, no `..`, no root and no
+/// drive. "Save here" then puts the file in the folder the browser shows and
+/// nowhere else.
+pub(crate) fn own_file_name(typed: &str) -> Option<&str> {
+    let name = typed.trim();
+    (Path::new(name).file_name() == Some(std::ffi::OsStr::new(name))).then_some(name)
+}
+
+/// Whether listing `dir` needs shared-storage access: it lies outside every
+/// folder in `own`, the app's own storage, which the app reads with no grant.
+pub(crate) fn needs_storage_access(dir: &Path, own: &[PathBuf]) -> bool {
+    !own.iter().any(|own| dir.starts_with(own))
+}
+
 /// A rectangle in the platform's physical pixels, as Android reports a
 /// window's content rect: `right` and `bottom` lie just outside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -376,6 +392,56 @@ mod tests {
         assert_eq!(content_rect_in_points(viewport, f32::NAN, usable), None);
     }
 
+    /// "Save here" takes a name for the file in the folder shown, and
+    /// nothing that would put it anywhere else.
+    #[test]
+    fn save_here_takes_a_file_name_and_refuses_a_path() {
+        assert_eq!(own_file_name("disk.img"), Some("disk.img"));
+        assert_eq!(own_file_name("  alpine disk.img "), Some("alpine disk.img"));
+        for refused in [
+            "",
+            "   ",
+            ".",
+            "..",
+            "../disk.img",
+            "sub/disk.img",
+            "/sdcard/disk.img",
+            "disk.img/",
+        ] {
+            assert_eq!(own_file_name(refused), None, "{refused:?} was accepted");
+        }
+    }
+
+    /// The app's own folders are read with no grant; only a folder outside
+    /// them asks for shared-storage access. The comparison is by component,
+    /// so a sibling that merely shares a prefix is outside.
+    #[test]
+    fn only_a_folder_outside_the_apps_own_storage_needs_storage_access() {
+        let own = [
+            PathBuf::from("/data/user/0/com.rustybox.android/files"),
+            PathBuf::from("/storage/emulated/0/Android/data/com.rustybox.android/files"),
+        ];
+
+        assert!(!needs_storage_access(
+            Path::new("/data/user/0/com.rustybox.android/files/carried"),
+            &own
+        ));
+        assert!(!needs_storage_access(
+            Path::new("/data/user/0/com.rustybox.android/files"),
+            &own
+        ));
+        assert!(!needs_storage_access(
+            Path::new("/storage/emulated/0/Android/data/com.rustybox.android/files/isos"),
+            &own
+        ));
+        assert!(needs_storage_access(Path::new("/storage/emulated/0/Download"), &own));
+        assert!(needs_storage_access(
+            Path::new("/data/user/0/com.rustybox.android/filesystem"),
+            &own
+        ));
+        assert!(needs_storage_access(Path::new("/storage/emulated/0/Download"), &[]));
+    }
+
     #[test]
     fn staging_writes_once_and_replaces_different_bytes_of_the_same_length() {
         let root = scratch_dir("stage");
@@ -531,7 +597,13 @@ mod tests {
     fn a_first_vm_that_cannot_be_made_is_reported() {
         let storage = scratch_dir("seed_no_vm");
         let library = phone_library(&storage);
-        fs::create_dir(library.dir().join("rusty-box.toml")).expect("a folder in the file's way");
+        // A folder where the new file is first written, so the write fails.
+        fs::create_dir(
+            library
+                .dir()
+                .join(format!("rusty-box.toml.{}.partial", std::process::id())),
+        )
+        .expect("a folder in the partial file's way");
 
         let notice = seed_first_vm(&library, &storage, &carried_machine(&storage))
             .expect("what could not be done");

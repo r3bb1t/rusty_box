@@ -551,24 +551,22 @@ impl ResolvedConfig {
             pci: Some(self.pci),
             sync_slowdown: Some(self.sync_slowdown),
             // Only persist a non-default value so existing configs stay stable.
-            sync_realtime: self.sync_realtime.then_some(true),
+            sync_realtime: (self.sync_realtime != DEFAULT_SYNC_REALTIME)
+                .then_some(self.sync_realtime),
             // Only persist a non-default quantum so existing configs stay stable.
             smp_quantum: (self.smp_quantum != DEFAULT_SMP_QUANTUM).then_some(self.smp_quantum),
             max_instructions: (self.max_instructions != DEFAULT_MAX_INSTRUCTIONS)
                 .then_some(self.max_instructions),
             // Only persist a non-default mode so existing configs stay stable.
-            cpuid_freq: match self.cpuid_freq {
-                CpuidFreq::None => None,
-                CpuidFreq::Hardware => Some("hardware".to_string()),
-                CpuidFreq::Ips => Some("ips".to_string()),
-            },
+            cpuid_freq: (self.cpuid_freq != DEFAULT_CPUID_FREQ)
+                .then(|| cpuid_freq_toml(self.cpuid_freq).to_owned()),
         };
         let display = DisplayToml {
             backend: Some(self.display),
             width: self.vga_mode.map(|mode| mode.width),
             height: self.vga_mode.map(|mode| mode.height),
             bpp: self.vga_mode.map(|mode| mode.bpp),
-            pci_vga: self.pci_vga.then_some(true),
+            pci_vga: (self.pci_vga != DEFAULT_PCI_VGA).then_some(self.pci_vga),
         };
         let rom = RomToml {
             bios: Some(self.bios.clone()),
@@ -621,6 +619,16 @@ impl ResolvedConfig {
 /// Render an [`ImageSize`](rusty_box_bximage::ImageSize) back into a TOML size
 /// string that `ImageSize::parse` reads to the identical value. Disk-creation
 /// sizes always come from `parse`/`gib`/`mib`, so they are whole MiB multiples.
+/// The spelling `emulator.cpuid_freq` gives `mode` (Bochs `cpu:
+/// cpuid_freq=`), the one `resolve_config` reads back.
+fn cpuid_freq_toml(mode: CpuidFreq) -> &'static str {
+    match mode {
+        CpuidFreq::None => "none",
+        CpuidFreq::Hardware => "hardware",
+        CpuidFreq::Ips => "ips",
+    }
+}
+
 fn image_size_to_toml(size: rusty_box_bximage::ImageSize) -> String {
     const MIB: u64 = 1024 * 1024;
     const GIB: u64 = 1024 * MIB;
@@ -1847,5 +1855,83 @@ overwrite = false
             .and_then(|disk| disk.creation.as_ref())
             .expect("created disk should survive the round trip");
         assert_eq!(creation.size, rusty_box_bximage::ImageSize::gib(12));
+    }
+
+    /// A file the shell keeps resolves the same under `Args::default()` as
+    /// under an empty command line, which `resolve_config_in` relies on.
+    #[test]
+    fn a_shell_file_resolves_the_same_under_the_default_args_as_under_no_flags() {
+        let empty = Args::try_parse_from(["rusty_box_gui"]).expect("the command line parses");
+
+        assert_eq!(
+            resolve_config(config(WHP_FILE), &Args::default()).unwrap(),
+            resolve_config(config(WHP_FILE), &empty).unwrap()
+        );
+    }
+
+    /// Every setting away from its default survives a save and a load: a
+    /// field `to_file_config` drops, or writes in a form `resolve_config`
+    /// reads differently, fails here. The literal names every field, so a
+    /// field added later must be given a value here too.
+    #[test]
+    fn save_round_trip_keeps_every_setting_away_from_its_default() {
+        let size = ImageSize::gib(2);
+        let geometry = rusty_box_bximage::calculate_hard_disk_geometry(
+            size,
+            rusty_box_bximage::SectorSize::Bytes512,
+        )
+        .unwrap();
+        let resolved = ResolvedConfig {
+            engine: Engine::Whp,
+            cpu_capabilities: CpuCapabilities::HostShared,
+            memory_mib: 512,
+            host_memory_mib: 256,
+            memory_block_kib: 256,
+            ips: 100_000_000,
+            pci: !DEFAULT_PCI,
+            sync_slowdown: !DEFAULT_SYNC_SLOWDOWN,
+            sync_realtime: !DEFAULT_SYNC_REALTIME,
+            smp_quantum: 8,
+            cpuid_freq: CpuidFreq::Hardware,
+            max_instructions: 15_000_000_000,
+            cpu_params: BxParams::default().with_topology(2, 2, 1).unwrap(),
+            display: DisplayBackend::Headless,
+            bios: PathBuf::from("roms/bios.bin"),
+            vga_bios: Some(PathBuf::from("roms/vgabios.bin")),
+            boot_order: vec![BootDevice::Cdrom, BootDevice::Disk],
+            disk: Some(ResolvedDisk {
+                path: PathBuf::from("c.img"),
+                geometry: DiskGeometry {
+                    cylinders: geometry.cylinders as u32,
+                    heads: geometry.heads as u8,
+                    sectors_per_track: geometry.sectors_per_track as u8,
+                },
+                channel: 0,
+                drive: 1,
+                creation: Some(ResolvedDiskCreation {
+                    path: PathBuf::from("c.img"),
+                    size,
+                    overwrite: true,
+                }),
+            }),
+            cdrom: Some(ResolvedCdrom {
+                path: PathBuf::from("boot.iso"),
+                channel: 1,
+                drive: 1,
+            }),
+            log_level: LogLevel::Debug,
+            vga_mode: Some(VgaMode {
+                width: 1280,
+                height: 1024,
+                bpp: 16,
+            }),
+            pci_vga: !DEFAULT_PCI_VGA,
+        };
+
+        let serialized = toml::to_string_pretty(&resolved.to_file_config()).unwrap();
+        let reparsed: FileConfig = toml::from_str(&serialized).unwrap();
+        let round_tripped = resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap();
+
+        assert_eq!(round_tripped, resolved, "{serialized}");
     }
 }

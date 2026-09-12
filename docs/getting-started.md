@@ -72,7 +72,9 @@ cargo run --release -p rusty_box_gui -- --config rusty_box.toml
 
 The shell keeps its VMs in a library folder (`%APPDATA%\rusty_box\vms` on
 Windows; see [rusty_box_gui/README.md](../rusty_box_gui/README.md#desktop)
-for the other platforms) and lists every VM in it at every launch. To start
+for the other platforms) and lists every VM in it at every launch. When
+`APPDATA` is unset, or not an absolute path, there is no such folder, and the
+launch is refused with a message saying which variable it looked at. To start
 from a file, pass it with `--config <path>` (or `-f <path>`): it opens as a
 temporary VM, marked "(unsaved)", and **Keep in library** on its Summary page
 adds it to the library for good. A file that is already in the library opens
