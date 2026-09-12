@@ -43,10 +43,14 @@ repository. Any other copy of the two files works just as well.
 `[rom]` section of the config file, or on the shell's Hardware › Display
 pane:
 
-- A system BIOS is required. Without one, a machine cannot run: the launch,
-  or the power-on in the shell, fails with `BIOS path is required; pass
-  --bios PATH, set rom.bios in the VM file, or set the BIOS path under
-  Hardware › Display`.
+- A system BIOS is required. Without one, a machine cannot run: a launch
+  fails with `BIOS path is required; pass --bios PATH, set rom.bios in the
+  VM file, or set the BIOS path under Hardware › Display`. In the shell, a
+  VM with no BIOS path, or with no hard disk or CD/DVD attached, can still
+  be edited and kept in the library; its power-on is refused with a notice
+  naming what is missing, such as `Set a BIOS path under Hardware › Display
+  before powering on.` or `Attach a hard disk or CD/DVD before powering
+  on.`
 - The VGA BIOS is optional as far as the launcher is concerned, but if you
   leave it out the machine is built with no VGA BIOS ROM. A VGA BIOS file
   must be a non-zero multiple of 512 bytes.

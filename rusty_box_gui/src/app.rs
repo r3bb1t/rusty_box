@@ -364,9 +364,10 @@ impl NativeVmSettings {
         };
         config.log_level = self.log_level;
 
-        let bios_path = trimmed_optional_path(&self.bios_path)
-            .ok_or_else(|| "BIOS path is required".to_owned())?;
-        config.bios = bios_path;
+        // A blank BIOS path applies as none, as the blank "New VM" has it:
+        // the VM can be edited and kept without one, and `start_vm` refuses
+        // to power it on until it has one.
+        config.bios = trimmed_optional_path(&self.bios_path).unwrap_or_default();
         config.vga_bios = trimmed_optional_path(&self.vga_bios_path);
 
         if self.disk_enabled {
@@ -425,11 +426,15 @@ impl NativeVmSettings {
         config.vga_mode = self.vga_mode;
         config.pci_vga = self.pci_vga;
 
-        config.boot_order = self.boot_order_for_attached_media()?;
+        config.boot_order = self.boot_order_for_attached_media();
         Ok(())
     }
 
-    fn boot_order_for_attached_media(&self) -> Result<Vec<crate::args::BootDevice>, String> {
+    /// The chosen boot order over the attached media. Empty when nothing is
+    /// attached, as the resolver has it for the egui shell
+    /// (`config::allow_empty_boot_order`): the VM can be edited and kept, and
+    /// `start_vm` refuses to power it on until a medium is attached.
+    fn boot_order_for_attached_media(&self) -> Vec<crate::args::BootDevice> {
         let mut order = Vec::with_capacity(2);
         // Keep the user's chosen order, dropping unattached or duplicate devices.
         for device in &self.boot_order {
@@ -447,11 +452,7 @@ impl NativeVmSettings {
                 order.push(device);
             }
         }
-        if order.is_empty() {
-            Err("At least one bootable hard disk or CD/DVD must be attached".to_owned())
-        } else {
-            Ok(order)
-        }
+        order
     }
 
     fn is_boot_device_attached(&self, device: crate::args::BootDevice) -> bool {
@@ -547,6 +548,48 @@ enum PendingConfirm {
         origin: VmOrigin,
         path: PathBuf,
     },
+}
+
+/// What a VM lacks to be powered on. A VM without a BIOS path or a medium to
+/// boot from is still one the shell edits and keeps — the blank "New VM", a
+/// phone's first VM, a bundled VM that names only its ROMs — so completeness
+/// is checked here, at power-on, and nowhere earlier.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerOnGap {
+    Bios,
+    Media,
+    BiosAndMedia,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PowerOnGap {
+    /// What `config` lacks to be powered on; `None` when it has a BIOS path
+    /// and a hard disk or CD/DVD attached.
+    fn of(config: &crate::config::ResolvedConfig) -> Option<Self> {
+        let no_bios = config.bios.as_os_str().is_empty();
+        let no_media = config.disk.is_none() && config.cdrom.is_none();
+        match (no_bios, no_media) {
+            (false, false) => None,
+            (true, false) => Some(Self::Bios),
+            (false, true) => Some(Self::Media),
+            (true, true) => Some(Self::BiosAndMedia),
+        }
+    }
+
+    /// The notice that refuses the power-on, naming where each missing
+    /// setting is made; the BIOS half points where `RunError::MissingBios`
+    /// does.
+    fn notice(self) -> &'static str {
+        match self {
+            Self::Bios => "Set a BIOS path under Hardware › Display before powering on.",
+            Self::Media => "Attach a hard disk or CD/DVD before powering on.",
+            Self::BiosAndMedia => {
+                "Set a BIOS path under Hardware › Display and attach a hard disk or CD/DVD \
+                 before powering on."
+            }
+        }
+    }
 }
 
 /// What a confirmation dialog says.
@@ -2605,9 +2648,10 @@ impl NativeShellApp {
     }
 
     /// Powers on the selected VM: its edits are applied and written first,
-    /// then a startup-disk creation that would erase an existing file is put
-    /// to the user before anything starts, so a power-on that stops at that
-    /// question has still written the VM.
+    /// then a VM that lacks a BIOS path or a medium to boot from is refused
+    /// with a notice naming what is missing, and a startup-disk creation that
+    /// would erase an existing file is put to the user before anything
+    /// starts, so a power-on that stops at either has still written the VM.
     fn start_vm(&mut self) {
         let snapshot = self.runtime_status();
         if snapshot.running {
@@ -2623,6 +2667,10 @@ impl NativeShellApp {
             return;
         }
         self.flush_unsaved();
+        if let Some(gap) = PowerOnGap::of(&self.config) {
+            self.notify(ShellNotice::warning(gap.notice()));
+            return;
+        }
         if let Some(path) = self.unconfirmed_overwrite() {
             let index = self.chrome.selected_vm();
             self.pending_confirm = Some(PendingConfirm::OverwriteDisk {
@@ -5540,10 +5588,11 @@ mod tests {
     fn a_vm_whose_settings_no_longer_apply_is_still_deleted() {
         let (mut app, _command_rx, scratch) = library_app();
         app.add_vm_copying_selected();
-        app.settings.bios_path.clear();
+        app.settings.disk_enabled = true;
+        app.settings.disk_path.clear();
         assert_eq!(
             app.apply_pending_settings(),
-            Err("BIOS path is required".to_owned())
+            Err("Hard disk path is required when hard disk is enabled".to_owned())
         );
 
         app.request_delete_selected();
@@ -5556,6 +5605,155 @@ mod tests {
             "notice: {:?}",
             app.shell_notice
         );
+    }
+
+    /// A VM the way a phone's first VM is made, or a bundled VM that names
+    /// only its ROMs: a BIOS, no hard disk, no CD, and so no boot order.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn media_less_config() -> crate::config::ResolvedConfig {
+        let mut config = test_resolved_config();
+        config.cdrom = None;
+        config.boot_order = Vec::new();
+        config
+    }
+
+    /// The blank "New VM" has no BIOS path and no media. Typing a BIOS path
+    /// applies, and Keep puts the VM in the library with it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_blank_new_vm_takes_a_bios_path_and_is_kept_in_the_library() {
+        let scratch = ScratchLibrary::new();
+        let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+        assert_eq!(app.profiles[0].name, "New VM");
+
+        app.settings.bios_path = "roms/bios.bin".to_owned();
+        assert_eq!(app.apply_pending_settings(), Ok(()));
+        app.keep_selected_in_library();
+
+        assert_eq!(scratch.toml_files(), ["new-vm.toml"]);
+        assert!(matches!(app.profiles[0].origin, VmOrigin::Library(_)));
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::info("Saved New VM to the VM library."))
+        );
+        let kept = scratch.library().load().expect("reload");
+        assert_eq!(kept.vms[0].name, "New VM");
+        assert!(kept.vms[0].config.bios.ends_with("roms/bios.bin"));
+        assert!(kept.vms[0].config.boot_order.is_empty());
+    }
+
+    /// A library VM with no medium to boot from is renamed like any other:
+    /// the rename marks it `Unsaved`, and the flush writes it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_vm_with_no_media_is_renamed_and_its_file_written() {
+        let scratch = ScratchLibrary::new();
+        scratch
+            .library()
+            .create("Rusty Box", &media_less_config())
+            .expect("seed");
+        let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+
+        app.profiles[0].name = "Phone".to_owned();
+        assert_eq!(app.apply_pending_settings(), Ok(()));
+
+        assert_eq!(app.profiles[0].save_state, SaveState::Unsaved);
+        app.flush_unsaved();
+
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+        assert_eq!(scratch.toml_files(), ["rusty-box.toml"]);
+        assert_eq!(scratch.library().load().expect("reload").vms[0].name, "Phone");
+    }
+
+    /// A VM with nothing to boot from is refused at power-on, with the
+    /// notice naming what to attach, and no machine is started.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_with_no_media_is_refused_and_names_what_is_missing() {
+        let scratch = ScratchLibrary::new();
+        scratch
+            .library()
+            .create("Rusty Box", &media_less_config())
+            .expect("seed");
+        let (mut app, command_rx) = native_test_app_over(&scratch, None, None);
+
+        app.start_vm();
+
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::warning(
+                "Attach a hard disk or CD/DVD before powering on."
+            ))
+        );
+        assert!(command_rx.try_recv().is_err());
+        assert!(!app.shared.lock().unwrap().start_pending);
+    }
+
+    /// The blank "New VM" lacks both, and its refusal names both, pointing
+    /// at the BIOS setting where `RunError::MissingBios` does.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_of_the_blank_new_vm_names_the_bios_and_the_media() {
+        let scratch = ScratchLibrary::new();
+        let (mut app, command_rx) = native_test_app_over(&scratch, None, None);
+
+        app.start_vm();
+
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::warning(
+                "Set a BIOS path under Hardware › Display and attach a hard disk or CD/DVD \
+                 before powering on."
+            ))
+        );
+        assert!(command_rx.try_recv().is_err());
+
+        app.settings.cdrom_enabled = true;
+        app.settings.cdrom_path = "boot.iso".to_owned();
+        app.start_vm();
+
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::warning(
+                "Set a BIOS path under Hardware › Display before powering on."
+            ))
+        );
+        assert!(command_rx.try_recv().is_err());
+        assert!(crate::error::RunError::MissingBios
+            .to_string()
+            .contains("under Hardware › Display"));
+    }
+
+    /// A library VM with no media is selected like any other, and selecting
+    /// away from it works.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_vm_with_no_media_can_be_selected_and_left() {
+        let scratch = ScratchLibrary::new();
+        let library = scratch.library();
+        library.create("Alpine", &test_resolved_config()).expect("seed");
+        library.create("Bare", &media_less_config()).expect("seed");
+        let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+        let bare = app
+            .profiles
+            .iter()
+            .position(|profile| profile.name == "Bare")
+            .expect("the media-less VM is listed");
+        let alpine = app
+            .profiles
+            .iter()
+            .position(|profile| profile.name == "Alpine")
+            .expect("the seeded VM is listed");
+
+        app.select_profile(bare);
+        assert_eq!(app.chrome.selected_vm(), bare);
+        assert_eq!(app.vm_info.name, "Bare");
+
+        app.select_profile(alpine);
+
+        assert_eq!(app.chrome.selected_vm(), alpine);
+        assert_eq!(app.vm_info.name, "Alpine");
+        assert_eq!(app.shell_notice, None);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -6297,14 +6495,13 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn native_vm_settings_require_bios_and_clamp_numbers() {
+    fn native_vm_settings_apply_a_blank_bios_as_none_and_clamp_numbers() {
         let mut config = test_resolved_config();
         let mut settings = NativeVmSettings::from_config(&config);
-        settings.bios_path.clear();
-        assert_eq!(
-            settings.apply_to_config(&mut config),
-            Err("BIOS path is required".to_owned())
-        );
+        settings.bios_path = "   ".to_owned();
+        assert_eq!(settings.apply_to_config(&mut config), Ok(()));
+        assert_eq!(config.bios, std::path::PathBuf::new());
+        assert_eq!(PowerOnGap::of(&config), Some(PowerOnGap::Bios));
 
         settings.bios_path = "bios.bin".to_owned();
         settings.memory_mib = 0;
@@ -6321,6 +6518,23 @@ mod tests {
         assert_eq!(config.ips, 1);
         assert_eq!(config.max_instructions, u64::MAX);
         assert!(config.vga_bios.is_none());
+    }
+
+    /// With nothing attached the boot order applies empty, as the resolver
+    /// leaves it for the egui shell, and the power-on is what refuses.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_vm_settings_apply_no_media_as_an_empty_boot_order() {
+        let mut config = test_resolved_config();
+        let mut settings = NativeVmSettings::from_config(&config);
+        settings.cdrom_enabled = false;
+        settings.disk_enabled = false;
+
+        assert_eq!(settings.apply_to_config(&mut config), Ok(()));
+
+        assert!(config.boot_order.is_empty());
+        assert_eq!(config.cdrom, None);
+        assert_eq!(PowerOnGap::of(&config), Some(PowerOnGap::Media));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
