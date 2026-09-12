@@ -74,6 +74,10 @@
 # Generated browser/native artifacts
 /rusty_box_gui/dist/
 
+# Staged Android assets. Nothing in the tree writes here; a checkout may
+# still hold a 66 MB ISO from an earlier `cargo xtask android build`.
+/rusty_box_gui/assets/
+
 # Local disk/image scratch files
 /NONE
 

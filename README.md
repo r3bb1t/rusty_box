@@ -50,7 +50,7 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=3500000000 cargo run --release --example a
 cargo xtask ci
 ```
 
-The GUI starts powered off; press **Power on** in the VM bar. It reads a config file only when `--config PATH` names one, and needs a BIOS path from either `--bios` or `rom.bios` in that file. Nothing is picked up from the current directory or its parent. `--no-config` is accepted and changes nothing. [docs/getting-started.md](docs/getting-started.md) walks through the config file and the settings whose meaning is not obvious; [rusty_box_gui/README.md](rusty_box_gui/README.md) covers the shell itself.
+The GUI starts powered off; press **Power on** in the VM bar. It opens on a library of VMs saved in your user profile, lists every one at each launch, and saves each edit when it ends. `--config PATH` opens a file as a temporary VM you can keep in the library; nothing is read from the current directory, and `--no-config` changes nothing. A machine needs a BIOS path, from `--bios`, `rom.bios` in its file, or the shell's Hardware › Display pane. [docs/getting-started.md](docs/getting-started.md) walks through the config file and the settings whose meaning is not obvious; [rusty_box_gui/README.md](rusty_box_gui/README.md) covers the shell itself.
 
 The repository's `.cargo/config.toml` sets `MAX_INSTRUCTIONS=20000000000` for every cargo command, so the DLX and Alpine examples, which read it, stop after 20 billion instructions unless you override it.
 
@@ -69,7 +69,7 @@ cargo xtask android run
 cargo xtask android screenshot rustybox_android.png
 ```
 
-The APK runs the same `rusty_box_gui` shell as the desktop, laid out for a phone. Its Browse buttons open an on-device file browser, a Keys pad sends the keys a soft keyboard lacks, and the Bochs ROMs travel inside the APK; the ISO a VM boots is chosen on the phone, under Hardware › CD/DVD. `cargo xtask android` installs the Android SDK components, the Rust target and `cargo-apk` as needed; signs with a generated local dev keystore under your home directory; and uses `adb_client` for install, launch and screenshots. See [xtask/README.md](xtask/README.md#android-commands).
+The APK runs the same `rusty_box_gui` shell as the desktop, laid out for a phone. Its VMs live in a library in the app's storage, its Browse buttons open an on-device file browser, a Keys pad sends the keys a soft keyboard lacks, and the Bochs ROMs travel inside the APK; the ISO a VM boots is chosen on the phone, under Hardware › CD/DVD. `cargo xtask android` installs the Android SDK components, the Rust target and `cargo-apk` as needed; signs with a generated local dev keystore under your home directory; and uses `adb_client` for install, launch and screenshots. See [xtask/README.md](xtask/README.md#android-commands).
 
 ## Execution engines
 

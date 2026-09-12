@@ -21,12 +21,17 @@ The shell borrows VMware's layout for familiarity. It is not VMware, and Rusty B
 cargo run --release -p rusty_box_gui
 ```
 
-The launcher reads a TOML file only when `--config` names one. A `rusty_box.toml` in the current directory or its parent is not read, so a file dropped there cannot change what boots.
+The shell opens on its **VM library**: every VM is one TOML file in a per-user folder — `%APPDATA%\rusty_box\vms` on Windows, `~/Library/Application Support/rusty_box/vms` on macOS, `$XDG_DATA_HOME/rusty_box/vms` (by default `~/.local/share/rusty_box/vms`) elsewhere — and every file there is listed at every launch, ordered by file name. The shell reopens on the VM it showed last. An edit is saved to the VM's file when it ends — when the field it is typed in loses focus or the drag ends — and at once when you switch VMs, add a VM, keep one, power on, or the window goes behind another or closes.
 
-`rusty_box.toml` is gitignored and not shipped. Write one from the [example](#configuration-file), or pass `--bios`: a BIOS path is always required. Without one the launcher exits with `BIOS path is required; pass --bios PATH or set rom.bios in TOML`.
+Nothing else is read unless the command line names it. A `rusty_box.toml` in the working directory or its parent is **not** picked up: a file dropped there could decide what the launcher boots and which file a disk creation overwrites.
 
-- `--config PATH` (or `-f PATH`) loads a specific file.
-- `--no-config` is accepted for compatibility and changes nothing.
+- `--config PATH` (or `-f PATH`) loads that file. Together with any other flag that describes a machine (`--bios`, `--cdrom`, `--memory-mib`, …), it becomes a **temporary VM** at the top of the list, marked "(unsaved)" and selected, named after the file's stem, or "Command line" when flags alone described it. Its edits are not saved anywhere until **Keep in library** on its Summary page adds it to the library.
+- `--no-config` is accepted for existing scripts; nothing is loaded implicitly, so it changes nothing.
+- `--engine`, `--cpu-capabilities` and `--log-level` are each one VM's own setting, so alone, with no machine to apply to, they are refused (see [Command-line flags](#command-line-flags)). `--display egui` alone opens the library.
+- On a first run, with an empty library, a `rusty_box.toml` beside the executable is imported as the first VM, with its paths resolved against the executable's folder. The GUI Artifacts downloads ship one that points at their bundled ROMs. When that file cannot be imported, the shell opens with a warning saying so (`The VM bundled in <folder> was not imported: <error>`); when the library folder cannot be read, it opens on a blank VM with that error as a notice (`failed to read the VM library <folder>: <error>`).
+- With nothing to show, the shell opens on a blank temporary **New VM**; set its BIOS path under Hardware › Display. A machine always needs a BIOS: powering one on without it fails with `BIOS path is required; pass --bios PATH, set rom.bios in the VM file, or set the BIOS path under Hardware › Display`, and a `terminal` or `headless` run exits with the same message.
+- VM file names are the VM's name reduced to lower-case ASCII letters, digits and `-` (`Alpine Linux 3.24` → `alpine-linux-3-24.toml`), at most 64 characters, never a Windows device name, and made unique with `-2`, `-3`, … when the name is taken. Renaming a VM keeps its file.
+- A file in the folder that does not load is listed under **Could not load** in the sidebar, with its error as a tooltip and a Delete button, which asks for confirmation.
 
 Everything can also be given as flags:
 
@@ -47,7 +52,7 @@ cargo run --release -p rusty_box_gui -- `
 
 The egui shell runs `eframe` on the main thread and the emulator on a worker thread with a 1500 MiB stack. The window has four parts:
 
-- **Sidebar tree.** Every VM profile is a row, and the selected one opens to its four pages: **Summary**, **Console**, **Hardware** and **Images**. The `+` button duplicates the selected profile, and a "Search VMs" field filters the list. Profiles last for the session. The first one, "Rusty Box", is built from the resolved configuration.
+- **Sidebar tree.** Every VM is a row, and the selected one opens to its four pages: **Summary**, **Console**, **Hardware** and **Images**. The `+` button adds a new VM to the library, copied from the selected one, and a "Search VMs" field filters the list. The command line's temporary VM is marked "(unsaved)", and a library VM whose last save failed "(save failed)". Library files that do not load are listed under **Could not load**.
 - **VM bar** above the page. It carries the selected VM's name, its state, and the verbs that change the state:
   - `▶ Power on` is enabled while the VM is stopped. `■ Power off` and `↻ Restart` are enabled only while it runs.
   - On the Console page only, the bar adds `Ctrl+Alt+Del`, `Capture mouse` / `Release mouse` and `Show serial` / `Hide serial`. When the window is too narrow, these fold into the `…` menu.
@@ -58,7 +63,7 @@ The egui shell runs `eframe` on the main thread and the emulator on a worker thr
 
 The pages:
 
-- **Summary** shows the state and engine and the profile's name, which you can edit here. It lists the memory, processors, boot order, CD/DVD and disk. Its tiles are `Power On VM`, `Create Disk Image` and `Hardware Settings`. `Delete Profile` is enabled only while the VM is stopped and at least one other profile remains.
+- **Summary** shows the state and engine and the VM's name, which you can edit here. It lists the memory, processors, boot order, CD/DVD and disk. Its tiles are `Power On VM`, `Create Disk Image` and `Hardware Settings`. A library VM has `Delete VM`; the temporary VM has `Keep in library` and `Discard`. Deleting asks for confirmation ("Delete <name>?") and removes the VM's file; the disk images it uses are kept. Either is enabled only while the VM is stopped and another VM remains. A caption says where the VM is kept: "Saved automatically to <path>", "Saving to <path> when the edit ends", or "Not saved: the last write to <path> failed. It is tried again at the next change, selection or power-on."; for the temporary VM it reads "Temporary VM. Not saved until it is kept in the library."
 - **Console** shows the guest's display, or "This VM is powered off". The serial pane shows the serial log, has an input line (`Send`, or Enter, works only while the VM runs), and a `Copy Log` button.
 - **Hardware** edits the selected profile. Changes can be made only while the VM is powered off, and apply at the next power-on:
 
@@ -71,7 +76,7 @@ The pages:
   | CD/DVD | Enable, ISO path (with a file browser), ATA channel and drive, "Boot CD/DVD first" |
   | Display | BIOS and VGA BIOS paths, log level, a pre-boot display resolution, and "Register VGA on PCI" (experimental: exposes the adapter as PCI 1234:1111 for Linux `bochs-drm`) |
 
-  The shell has no button that writes the loaded config file back; to keep a setting, put it in the file you pass with `--config`. When the shell writes a configuration of its own, it rewrites the whole file, so comments in it are lost. It writes the CPU topology as `cpu_sockets` / `cpu_cores` / `cpu_threads` rather than `cpus`. It omits `engine`, `cpu_capabilities`, `sync_realtime`, `smp_quantum`, `max_instructions`, `cpuid_freq` and `pci_vga` when they are at their defaults.
+  An edit to a library VM is written to its file when the edit ends — when the field loses focus or the drag ends — and at once when you switch VMs, add a VM, keep one, power on, or the window goes behind another or closes. The Hardware page shows the file's path; for the temporary VM it reads "Not saved. Keep this VM in the library from its Summary page." A write that fails is shown as an error and marks the VM "(save failed)" in the sidebar; it is tried again at the next change, selection or power-on. The file is rewritten whole each time, so hand-written comments in it are lost. The CPU topology is written as `cpu_sockets` / `cpu_cores` / `cpu_threads` rather than `cpus`; `engine`, `cpu_capabilities`, `sync_realtime`, `smp_quantum`, `max_instructions`, `cpuid_freq` and `pci_vga` are written only when they differ from their defaults; relative paths are written absolute.
 - **Images** creates disk images (see [Disk images](#disk-images)).
 
 ## Execution engines
@@ -79,15 +84,15 @@ The pages:
 `--engine interpreter|whp` selects what runs the guest's instructions. In the shell, the same choice is Hardware › Processors › Engine.
 
 - **`interpreter`** (the default) is this port's own CPU. It runs everywhere.
-- **`whp`** runs the guest on the Windows Hypervisor Platform. It needs a Windows build with the `hv-whp` feature, which is on by default, and a host with the platform enabled. If the platform is absent, the run is refused with `this host has no Windows Hypervisor Platform, so --engine whp cannot run`, and the error names the fix: `dism /Online /Enable-Feature /FeatureName:HypervisorPlatform`. The shell lists the "Windows Hypervisor" engine only in the builds that carry it: Windows, with `hv-whp`, without `guest-trace`.
+- **`whp`** runs the guest on the Windows Hypervisor Platform. It needs a Windows build with the `hv-whp` feature, which is on by default, and a host with the platform enabled. If the platform is absent, the run is refused with ``this host has no Windows Hypervisor Platform, so the `whp` engine (chosen by `--engine`, a VM file's `emulator.engine`, or the shell's Hardware › Processors › Engine) cannot run. Enable it with: dism /Online /Enable-Feature /FeatureName:HypervisorPlatform``. The shell lists the "Windows Hypervisor" engine only in the builds that carry it: Windows, with `hv-whp`, without `guest-trace`.
 
 A machine on the hypervisor differs from an interpreter machine in these ways:
 
-- Nothing counts the guest's instructions. So any `--max-instructions` / `max_instructions` limit is refused, not approximated. The status strip shows no instruction rate, and a headless run ends with `rusty_box_gui: the guest ran on the hypervisor, which does not count instructions`.
+- Nothing counts the guest's instructions. So any `--max-instructions` / `max_instructions` limit is refused, not approximated: ``max_instructions = <N> cannot be honoured by the `whp` engine (chosen by `--engine`, a VM file's `emulator.engine`, or the shell's Hardware › Processors › Engine): a processor on the hypervisor retires instructions the host does not count, so the limit would end the run at a guess. Remove the limit or choose `interpreter` there``. The status strip shows no instruction rate, and a headless run ends with `rusty_box_gui: the guest ran on the hypervisor, which does not count instructions`.
 - CPU capabilities are always `host-shared`, whatever `--cpu-capabilities` says (see the next section).
 - Device timers run on host time instead of the instruction count.
 
-The WHP path is compiled only on Windows, with `hv-whp`, and without `guest-trace`. In any other build, `--engine whp` is refused before any file is read or created, with `this build has no hypervisor engine, so --engine whp cannot run`; the error names `--engine interpreter` as the alternative.
+The WHP path is compiled only on Windows, with `hv-whp`, and without `guest-trace`. In any other build, the `whp` engine is refused before any file is read or created, with ``this build has no hypervisor engine, so the `whp` engine (chosen by `--engine`, a VM file's `emulator.engine`, or the shell's Hardware › Processors › Engine) cannot run. The engine is built only for Windows, with the `hv-whp` feature and without `guest-trace`. Choose `interpreter` there, or run a build that carries the engine``.
 
 In TOML the engine is `emulator.engine`; `--engine` on the command line overrides it, and with neither the interpreter runs.
 
@@ -147,7 +152,9 @@ overwrite = false
 What provisioning does depends on `overwrite`:
 
 - **Without `overwrite`** (the default), provisioning is idempotent. If no file is at the path, a raw flat disk with 512-byte sectors is created there, 20G if no size is given. An existing file that is non-empty and a multiple of 512 bytes is reused untouched. Anything else fails startup.
-- **With `overwrite`** (`--overwrite-created-disk` or `disk.create.overwrite = true`), the file is recreated empty at every launch, whatever it holds. In the egui shell that happens at the session's first power-on, and again at the next power-on if that run ended in an error.
+- **With `overwrite`** (`--overwrite-created-disk` or `disk.create.overwrite = true`), the file is recreated empty, whatever it holds.
+
+When provisioning happens depends on the display. A `terminal` or `headless` run provisions at every launch. In the egui shell, each startup-disk path is provisioned once per session, at the first power-on of a VM that uses it, and not again at later power-ons or restarts in that session; a power-on whose disk creation fails leaves the path for the next power-on to try. An `overwrite` creation whose file already exists asks before the power-on that would erase it — "Overwrite <path>?", "This VM's startup disk is set to be recreated, which erases the existing file." — with the button "Overwrite and power on"; each file is asked about once per session.
 
 The disk geometry comes from `rusty_box_bximage`: 16 heads, 63 sectors per track.
 
@@ -158,7 +165,7 @@ The same shell runs on an Android phone as an APK. `cargo xtask android build` b
 The APK's native library is this crate's `rusty_box_gui_android` example. NativeActivity calls its `android_main`, which hands the activity to `rusty_box_gui::android::main`. From there the phone runs the desktop shell, with the same pages, emulator thread and power-on path, and these differences:
 
 - **Files it carries.** The Bochs BIOS and VGA BIOS are compiled into the APK and written to the app's private storage at launch. No disk image or ISO travels with it.
-- **Configuration.** VMs live in a library in the app's private storage, one TOML file each, saved when an edit ends and when the app goes to the background. The first launch creates one VM from the carried ROMs, with 256 MiB of guest memory, 300,000,000 instructions per second and no CD; choose its ISO under Hardware › CD/DVD. The ☰ button opens the VM list; picking a VM closes it.
+- **Configuration.** VMs live in a library in the app's private storage, one TOML file each, saved when an edit ends and when the app goes to the background. A first launch, with an empty library, makes one VM: from a `rusty_box.toml` in the app's storage when one is there, the carried ROMs, 256 MiB of guest memory and 300,000,000 instructions per second filling in whatever the file leaves out; otherwise from the carried ROMs alone, called "Rusty Box", with those defaults and no CD. Choose its ISO under Hardware › CD/DVD. What a launch could not do — the file did not import, so the VM was made from the ROMs instead; no VM could be made; the VM was made but not recorded as the one to open on — is shown as a notice when the shell opens. The ☰ button opens the VM list; picking a VM closes it.
 - **Browse.** Every Browse button opens a file browser drawn in the shell. It starts beside the path its field holds, or in the shared Download folder, and a CD/DVD browse lists `.iso` files. On Android 11 and later, reaching all of shared storage needs "All files access": while the app lacks it, the browser opens the app's "All files access" page when it opens, lists what it can, and reads the grant again when you come back. Android 6 to 10 asks for READ and WRITE_EXTERNAL_STORAGE instead. Android 10 itself confines the browser to what scoped storage shows, because cargo-apk cannot declare `requestLegacyExternalStorage`.
 - **Keys.** A Keys button at the bottom right opens a pad that types text into the guest and sends Esc, Tab, Enter, Backspace, the arrows, Ctrl+C and Ctrl+Alt+Del.
 - **Layout.** A page strip replaces the sidebar, the shell stays inside the area the system bars leave free, and number fields step with − and + buttons.
@@ -299,8 +306,8 @@ Release builds compile out `debug` and `trace` output: the workspace builds `tra
 
 | Flag | Meaning |
 | --- | --- |
-| `-f`, `--config PATH` | Load this TOML file (conflicts with `--no-config`) |
-| `--no-config` | Load no TOML file |
+| `-f`, `--config PATH` | Load this TOML file as a temporary VM (conflicts with `--no-config`) |
+| `--no-config` | Accepted for compatibility; nothing is loaded implicitly |
 
 All other flags mirror a TOML key in the table above. Some rules for combining them:
 
@@ -311,6 +318,8 @@ All other flags mirror a TOML key in the table above. Some rules for combining t
 - `--pci` conflicts with `--no-pci`, and `--sync-slowdown` with `--no-sync-slowdown`.
 - `--sync-realtime` can only turn realtime sync on.
 - `--display egui` exists only in builds with the `gui-egui` feature.
+
+`--engine`, `--cpu-capabilities` and `--log-level` are each one VM's own setting, so they need a machine to apply to. On a command line that names none — no `--config` and no flag that describes a machine — they are refused rather than dropped, with the flags it set named: `` `--engine`, `--log-level` without a machine: this command line sets how a machine runs but names none. Pass --config FILE or --bios/--cdrom/--disk…, or set it per VM (in the shell: Hardware › Processors › Engine, Hardware › Display › Log level; in the VM file: `emulator.engine`, `emulator.cpu_capabilities`, `logging.level`) ``. `--display egui` alone, like an empty command line, opens the library.
 
 ## Resolution and validation
 
@@ -357,9 +366,9 @@ Validation rules:
 - `ResolvedConfig`
 - `RunError`
 
-On native targets it also re-exports `run`, `run_resolved` and `RunSummary`.
+On native targets it also re-exports `run`, `run_resolved` and `RunSummary`; with `gui-egui`, `LaunchVm` and `ShellStart` as well, and on the desktop `run_shell`.
 
-The `args`, `config` and `error` modules are public, as are `runner` (native only) and `app` (with `gui-egui`). `config::Engine` and `config::CpuCapabilities` are reachable through `config`. Browser targets start the shell through `app::WebShellApp`.
+The `args`, `config` and `error` modules are public, as are `library` and `runner` (native only) and `app` (with `gui-egui`). `config::Engine` and `config::CpuCapabilities` are reachable through `config`; `library::VmLibrary`, `library::VmStem` and `LibraryError` (in `error`, re-exported by `library`) through `library`. Browser targets start the shell through `app::WebShellApp`.
 
 ## Automation
 

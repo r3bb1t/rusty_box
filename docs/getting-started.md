@@ -39,11 +39,14 @@ is in `.gitignore`, so the clone never shows up as a change to this
 repository. Any other copy of the two files works just as well.
 
 **The launcher does not search for them.** You name them yourself, with
-`--bios` / `--vga-bios` on the command line or with `bios` / `vga_bios` in the
-`[rom]` section of the config file:
+`--bios` / `--vga-bios` on the command line, with `bios` / `vga_bios` in the
+`[rom]` section of the config file, or on the shell's Hardware › Display
+pane:
 
-- A system BIOS is required. Without one, the launch fails with
-  `BIOS path is required; pass --bios PATH or set rom.bios in TOML`.
+- A system BIOS is required. Without one, a machine cannot run: the launch,
+  or the power-on in the shell, fails with `BIOS path is required; pass
+  --bios PATH, set rom.bios in the VM file, or set the BIOS path under
+  Hardware › Display`.
 - The VGA BIOS is optional as far as the launcher is concerned, but if you
   leave it out the machine is built with no VGA BIOS ROM. A VGA BIOS file
   must be a non-zero multiple of 512 bytes.
@@ -63,14 +66,15 @@ From the repository root:
 cargo run --release -p rusty_box_gui -- --config rusty_box.toml
 ```
 
-The launcher reads a config file only when you name it with `--config <path>`
-(or `-f <path>`). A `rusty_box.toml` in the current directory or its parent is
-not read, so a file someone drops there cannot change what boots.
-`--no-config` is accepted and changes nothing.
-
-`rusty_box.toml` is gitignored and does not ship with the repository, so
-create one. Here is a minimal config that
-boots an installer ISO and installs to a fresh 12 GiB disk:
+The shell keeps its VMs in a library folder (`%APPDATA%\rusty_box\vms` on
+Windows; see [rusty_box_gui/README.md](../rusty_box_gui/README.md#desktop)
+for the other platforms) and lists every VM in it at every launch. To start
+from a file, pass it with `--config <path>` (or `-f <path>`): it opens as a
+temporary VM, marked "(unsaved)", and **Keep in library** on its Summary page
+adds it to the library for good. A `rusty_box.toml` in the current or parent
+directory is not read, so a file someone drops there cannot change what
+boots; `--no-config` is accepted and changes nothing. Here is a minimal
+config that boots an installer ISO and installs to a fresh 12 GiB disk:
 
 ```toml
 [emulator]
@@ -115,16 +119,19 @@ The desktop shell has four parts:
 
 ### Sidebar tree
 
-The sidebar, headed *My computer*, lists the VM profiles and has a search box
-that filters them. The selected profile opens into its four pages:
+The sidebar, headed *My computer*, lists the VMs in the library and has a
+search box that filters them. The selected VM opens into its four pages:
 **Summary**, **Console**, **Hardware** and **Images**. Clicking a page moves
-to it. Clicking another profile switches to that profile and lands on its
-Summary page, but only once the running VM has been stopped.
+to it. Clicking another VM switches to it and lands on its Summary page, but
+only once the running VM has been stopped; the VM being left is saved first.
 
-A profile is a complete launch configuration. The first profile, named
-*Rusty Box*, is built from the loaded config. The sidebar's `+` button
-duplicates the selected profile. The **☰** button at the left of the VM bar
-shows or hides the sidebar.
+Every VM is a complete launch configuration, kept in its own file in the
+library. The VM the command line described, if any, comes first, marked
+"(unsaved)"; a library VM whose last save failed is marked "(save failed)".
+The sidebar's `+` button adds a new VM to the library, copied from the
+selected one. Library files that do not load are listed under **Could not
+load**, each with its error as a tooltip and a Delete button. The **☰**
+button at the left of the VM bar shows or hides the sidebar.
 
 ### VM bar
 
@@ -156,13 +163,20 @@ When the bar is too narrow for all three, they move into the **…** menu.
 The Summary page shows:
 
 - the state badge and the engine;
-- the profile's name, which you can edit in place;
-- its memory, processors, boot order, CD/DVD and disk.
+- the VM's name, which you can edit in place;
+- its memory, processors, boot order, CD/DVD and disk;
+- a caption on where the VM is kept: *Saved automatically to <path>*,
+  *Saving to <path> when the edit ends*, or *Not saved: the last write to
+  <path> failed. It is tried again at the next change, selection or
+  power-on.* A temporary VM's reads *Temporary VM. Not saved until it is
+  kept in the library.*
 
-Its **Delete Profile** button works only while the VM is stopped, and only
-when another profile remains. Three tiles lead elsewhere: **Power On VM**,
-**Create Disk Image** (goes to the Images page) and **Hardware Settings**
-(goes to the Hardware page).
+A library VM has a **Delete VM** button; a temporary VM has **Keep in
+library** and **Discard**. Deleting asks for confirmation and removes the
+VM's file; the disk images it uses are kept. Delete and Discard work only
+while the VM is stopped, and only when another VM remains. Three tiles lead
+elsewhere: **Power On VM**, **Create Disk Image** (goes to the Images page)
+and **Hardware Settings** (goes to the Hardware page).
 
 ### Console page
 
@@ -186,8 +200,13 @@ The Hardware page lists six devices. Selecting one opens its settings:
 Settings can be edited only while the VM is powered off, and they take effect
 at the next power-on.
 
-The shell does not write the file passed with `--config` back. To keep a
-setting across launches, put it in that file by hand.
+An edit is saved to the VM's library file when it ends — when the field
+loses focus or the drag ends — and at once when you switch VMs, add a VM,
+keep one, power on, or the window goes behind another or closes. The file is
+rewritten each time, so **hand-written comments in it are lost**. A temporary
+VM (one started with `--config` or flags) is saved only once you keep it in
+the library; until then the page reads *Not saved. Keep this VM in the
+library from its Summary page.*
 
 The config file's `emulator.engine` key chooses the engine (see
 [Engines](#engines)); `--engine` on the command line overrides it.
@@ -224,10 +243,18 @@ Every section and key is optional, except that a system BIOS must come from
 instead of being silently ignored. A command-line flag overrides the key it
 corresponds to.
 
+### `[vm]`
+
+`name` is what the shell shows for the VM. A library file without one is
+shown under its file name. The shell writes the key when you rename a VM on
+its Summary page.
+
 ### `[emulator]`
 
 | Key | Default | Meaning |
 |-----|---------|---------|
+| `engine` | `"interpreter"` | Which engine runs the guest: `"interpreter"` or `"whp"`. See [Engines](#engines). |
+| `cpu_capabilities` | `"preset"` | Which processor the guest is offered: `"preset"` or `"host-shared"`. See [CPU capabilities](#cpu-capabilities). |
 | `memory_mib` | `32` | Guest RAM in MiB. An installer (squashfs unpack plus apt) has comfortable headroom at 2048; 1024 runs a live or installer session but is tight for the install phase itself. |
 | `host_memory_mib` | `memory_mib` | Host memory backing guest RAM. A value below `memory_mib` keeps only that much resident; the rest lives in an overflow file and is swapped in on demand, which is slower (Bochs `memory: host=`). |
 | `memory_block_kib` | `128` | Memory block granularity. |
@@ -295,8 +322,9 @@ size = "12G"         # default 20G
 overwrite = false    # default false
 ```
 
-This creates the image on first launch. It cannot be combined with
-`[disk] path` or `chs`. Two things people trip over:
+This creates the image at the VM's first power-on of a session in the shell,
+and at every launch of a `terminal` or `headless` run. It cannot be combined
+with `[disk] path` or `chs`. Two things people trip over:
 
 - **Creation can take a while.** The image is a flat file extended to its
   full size. On a filesystem that leaves the gap unallocated (ext4, APFS) this
@@ -306,7 +334,10 @@ This creates the image on first launch. It cannot be combined with
 - **`overwrite = false` keeps your data.** With the default `false`, an
   existing valid image is reused, never recreated, so your installed OS
   survives relaunches. Set `overwrite = true` only when you deliberately want a
-  factory-reset disk on every launch.
+  factory-reset disk on every launch. In the shell, that reset happens once
+  per session, at the VM's first power-on, and the power-on that would erase
+  an existing file asks first (*Overwrite <path>?*, with the button
+  **Overwrite and power on**).
 
 ### `[cdrom]`
 
@@ -348,10 +379,16 @@ page's Processors pane. In the config file it is `emulator.engine`, which
   and without the diagnostic `guest-trace` feature carries the engine. When
   either of the first two is missing, the launch is refused rather than
   quietly run on the interpreter:
-  - a build without the engine says so, and names `--engine interpreter` as
-    the alternative;
-  - a host without the platform gets an error naming the command that
-    enables it: `dism /Online /Enable-Feature /FeatureName:HypervisorPlatform`.
+  - a build without the engine: ``this build has no hypervisor engine, so the
+    `whp` engine (chosen by `--engine`, a VM file's `emulator.engine`, or the
+    shell's Hardware › Processors › Engine) cannot run. The engine is built
+    only for Windows, with the `hv-whp` feature and without `guest-trace`.
+    Choose `interpreter` there, or run a build that carries the engine``;
+  - a host without the platform: ``this host has no Windows Hypervisor
+    Platform, so the `whp` engine (chosen by `--engine`, a VM file's
+    `emulator.engine`, or the shell's Hardware › Processors › Engine) cannot
+    run. Enable it with: dism /Online /Enable-Feature
+    /FeatureName:HypervisorPlatform``.
 
 On the hypervisor, some things behave differently:
 
@@ -370,7 +407,8 @@ On the hypervisor, some things behave differently:
 
 ### CPU capabilities
 
-`--cpu-capabilities` chooses which processor the machine offers its guest:
+`--cpu-capabilities` chooses which processor the machine offers its guest. In
+the config file it is `emulator.cpu_capabilities`, which the flag overrides:
 
 - **`preset`** (the default) is this port's own CPU model, the same on every
   host. That is what makes a run reproducible.
@@ -492,13 +530,19 @@ Set `overwrite = true` for one launch to replace it, then set it back to
 `false` (while it is on, the file is recreated empty at every launch), or
 delete or move it, or point `path` elsewhere.
 
-**`--engine whp` is refused.** One of three things:
+**The `whp` engine is refused.** One of three things, each named by its
+message (the first two are quoted under [Engines](#engines)):
 
 - the launcher was built without the engine (any non-Windows host, a build
   without `hv-whp`, or a `guest-trace` build);
 - the Windows Hypervisor Platform is not enabled (the error names the `dism`
   command that enables it);
-- the config sets `max_instructions`, which the hypervisor cannot honour.
+- the VM sets `max_instructions`, which the hypervisor cannot honour:
+  ``max_instructions = <N> cannot be honoured by the `whp` engine (chosen by
+  `--engine`, a VM file's `emulator.engine`, or the shell's Hardware ›
+  Processors › Engine): a processor on the hypervisor retires instructions
+  the host does not count, so the limit would end the run at a guess. Remove
+  the limit or choose `interpreter` there``.
 
 **Rebuild fails with "access denied" on the executable** (Windows). A running
 VM has the `.exe` locked. Power off and close the launcher before running
@@ -519,8 +563,8 @@ cargo run --release -p rusty_box_gui -- \
 # Terminal-mode boot of a different ISO
 cargo run --release -p rusty_box_gui -- --cdrom other.iso --display terminal
 
-# Ignore the config file entirely
-cargo run --release -p rusty_box_gui -- --no-config \
+# Flags alone, no file: a temporary VM, kept only if you keep it
+cargo run --release -p rusty_box_gui -- \
   --bios cpp_orig/bochs/bochs/bios/BIOS-bochs-latest \
   --vga-bios cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin \
   --cdrom my-installer.iso --memory-mib 2048
@@ -528,13 +572,13 @@ cargo run --release -p rusty_box_gui -- --no-config \
 
 | Flag | Config key | Meaning |
 |---|---|---|
-| `-f`, `--config <TOML>` | — | Config file to load (conflicts with `--no-config`) |
-| `--no-config` | — | Load no config file |
+| `-f`, `--config <TOML>` | — | Config file to open as a temporary VM (conflicts with `--no-config`) |
+| `--no-config` | — | Accepted for compatibility; nothing is loaded implicitly |
 | `--bios <PATH>` | `rom.bios` | System BIOS ROM |
 | `--vga-bios <PATH>` | `rom.vga_bios` | VGA BIOS ROM |
 | `--display <terminal\|headless\|egui>` | `display.backend` | Display backend |
-| `--engine <interpreter\|whp>` | — | Which engine runs the guest (default `interpreter`) |
-| `--cpu-capabilities <preset\|host-shared>` | — | Which processor the guest is offered (default `preset`) |
+| `--engine <interpreter\|whp>` | `emulator.engine` | Which engine runs the guest (default `interpreter`); needs a machine, see below |
+| `--cpu-capabilities <preset\|host-shared>` | `emulator.cpu_capabilities` | Which processor the guest is offered (default `preset`); needs a machine, see below |
 | `--boot <disk,cdrom>` | `boot.order` | Boot order: `disk`, `cdrom`, or both, comma-separated, each at most once |
 | `--disk <PATH>` | `disk.path` | Attach an existing disk image |
 | `--disk-chs <C:H:S>` | `disk.chs` | Override the disk geometry (`,` also accepted as separator) |
@@ -554,4 +598,15 @@ cargo run --release -p rusty_box_gui -- --no-config \
 | `--cpu-sockets <N>` / `--cpu-cores <N>` / `--cpu-threads <N>` | `emulator.cpu_sockets` / `cpu_cores` / `cpu_threads` | Explicit topology |
 | `--pci` / `--no-pci` | `emulator.pci` | PCI bus on or off |
 | `--sync-slowdown` / `--no-sync-slowdown` | `emulator.sync_slowdown` | Pin guest time to real time |
-| `--log-level <trace\|debug\|info\|warn\|error>` | `logging.level` | Log level |
+| `--log-level <trace\|debug\|info\|warn\|error>` | `logging.level` | Log level; needs a machine, see below |
+
+`--engine`, `--cpu-capabilities` and `--log-level` are each one VM's own
+setting, so they need a machine to apply to. On a command line that names
+none — no `--config` and no flag describing one — they are refused rather
+than dropped, and the message names the flags it found: `` `--engine`,
+`--log-level` without a machine: this command line sets how a machine runs
+but names none. Pass --config FILE or --bios/--cdrom/--disk…, or set it per
+VM (in the shell: Hardware › Processors › Engine, Hardware › Display › Log
+level; in the VM file: `emulator.engine`, `emulator.cpu_capabilities`,
+`logging.level`) ``. `--display egui` alone, like no flags at all, opens the
+library.
