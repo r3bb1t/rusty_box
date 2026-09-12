@@ -176,11 +176,11 @@ pub struct NativeShellApp {
     shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
     shell_notice: Option<ShellNotice>,
     /// The folder every library VM's edits are written to.
-    #[allow(dead_code)]
     library: crate::library::VmLibrary,
     /// Library files that do not load, listed under "Could not load".
-    #[allow(dead_code)]
     broken_files: Vec<crate::library::BrokenVmFile>,
+    /// A destructive step the user has yet to confirm or cancel.
+    pending_confirm: Option<PendingConfirm>,
     /// A Browse press the Android host has yet to answer.
     #[cfg(target_os = "android")]
     browse_request: Option<BrowseTarget>,
@@ -446,6 +446,24 @@ enum VmOrigin {
     /// In memory only — the command line's machine, or the blank "New VM" —
     /// until the user keeps it in the library.
     Launch,
+}
+
+/// A destructive step waiting for the user to confirm it in a dialog.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingConfirm {
+    /// Deleting the selected VM; a library VM's file goes with it.
+    DeleteSelected,
+    /// Deleting a library file that does not load.
+    DeleteBroken(PathBuf),
+}
+
+/// What a confirmation dialog says.
+#[cfg(not(target_arch = "wasm32"))]
+struct ConfirmWording {
+    title: String,
+    body: String,
+    verb: &'static str,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -920,6 +938,7 @@ impl NativeShellApp {
             shell_notice: opening.notice,
             library: start.library,
             broken_files: opening.broken,
+            pending_confirm: None,
             #[cfg(target_os = "android")]
             browse_request: None,
         }
@@ -1035,6 +1054,9 @@ impl NativeShellApp {
     /// Draws the tree and acts on its click. A page of the VM already shown is
     /// a move; a different VM is a profile switch, which goes through
     /// `select_profile` so that profile's config and settings are loaded too.
+    /// Deleting a file that does not load waits for confirmation like every
+    /// other delete. On Android the tree is a drawer over the page, so a pick
+    /// in it closes it as well.
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
         let badge = shell_state_badge(&self.runtime_status(), self.has_error_notice());
         let visible = self.chrome.visible_vm_indices();
@@ -1045,15 +1067,31 @@ impl NativeShellApp {
             self.chrome.destination,
             &mut self.chrome.library_filter,
             badge,
+            &self.broken_files,
         );
         match action {
             None => {}
-            Some(SidebarAction::DuplicateSelected) => self.duplicate_selected_profile(),
+            Some(SidebarAction::NewVm) => {
+                self.add_vm_copying_selected();
+                #[cfg(target_os = "android")]
+                {
+                    self.chrome.show_library = false;
+                }
+            }
+            Some(SidebarAction::DeleteBroken(index)) => {
+                if let Some(file) = self.broken_files.get(index) {
+                    self.pending_confirm = Some(PendingConfirm::DeleteBroken(file.path.clone()));
+                }
+            }
             Some(SidebarAction::Select(destination)) => {
                 if destination.vm() == self.chrome.destination.vm() {
                     self.chrome.go_to(destination.page());
                 } else {
                     self.select_profile(destination.vm());
+                    #[cfg(target_os = "android")]
+                    {
+                        self.chrome.show_library = false;
+                    }
                 }
             }
         }
@@ -1204,9 +1242,9 @@ impl NativeShellApp {
 
     /// The selected VM as the Summary page's headline: its state badge and
     /// engine, its editable name, the facts the tree already summarises about
-    /// it, and the one profile verb that has no other home — delete. Power
-    /// belongs to the VM bar and duplication to the sidebar's `+`, so neither
-    /// is repeated here.
+    /// it, and the profile verbs that have no other home — "Keep in library"
+    /// for the temporary VM, and delete or discard. Power belongs to the VM
+    /// bar and duplication to the sidebar's `+`, so neither is repeated here.
     fn draw_home_header(&mut self, ui: &mut egui::Ui) {
         let status = self.runtime_status();
         let badge = shell_state_badge(&status, self.has_error_notice());
@@ -1246,21 +1284,37 @@ impl NativeShellApp {
                 });
             }
             ui.add_space(SPACE_ITEM);
-            let delete_enabled =
-                !status.running && !status.start_pending && self.profiles.len() > 1;
-            if ui
-                .add_enabled(delete_enabled, egui::Button::new("Delete Profile"))
-                .clicked()
-            {
-                self.delete_selected_profile();
-            }
-            ui.label(
-                RichText::new(
-                    "Profiles are independent launch configurations. Power on starts only the selected VM.",
-                )
-                .size(TEXT_CAPTION)
-                .color(TEXT_MUTED),
-            );
+            let stopped = !status.running && !status.start_pending;
+            let origin = self.profiles[self.chrome.selected_vm()].origin.clone();
+            ui.horizontal_wrapped(|ui| {
+                if origin == VmOrigin::Launch
+                    && ui
+                        .add(primary_button("Keep in library"))
+                        .on_hover_text("Save this VM to the library so it is listed at every launch")
+                        .clicked()
+                {
+                    self.keep_selected_in_library();
+                }
+                let verb = match origin {
+                    VmOrigin::Library(_) => "Delete VM",
+                    VmOrigin::Launch => "Discard",
+                };
+                if ui
+                    .add_enabled(stopped && self.profiles.len() > 1, egui::Button::new(verb))
+                    .clicked()
+                {
+                    self.request_delete_selected();
+                }
+            });
+            let caption = match &origin {
+                VmOrigin::Library(stem) => {
+                    format!("Saved automatically to {}", self.library.path_of(stem).display())
+                }
+                VmOrigin::Launch => {
+                    "Temporary VM. Not saved until it is kept in the library.".to_owned()
+                }
+            };
+            ui.label(RichText::new(caption).size(TEXT_CAPTION).color(TEXT_MUTED));
         });
     }
 
@@ -1859,6 +1913,20 @@ impl NativeShellApp {
             }
         }
 
+        ui.horizontal_wrapped(|ui| {
+            match &self.profiles[self.chrome.selected_vm()].origin {
+                VmOrigin::Library(stem) => {
+                    ui.label(metadata_text("File", &self.library.path_of(stem).display().to_string()));
+                }
+                VmOrigin::Launch => {
+                    ui.label(
+                        RichText::new("Not saved. Keep this VM in the library from its Summary page.")
+                            .color(TEXT_MUTED),
+                    );
+                }
+            }
+        });
+
         if !editable {
             ui.add_space(SPACE_ITEM);
             ui.label(RichText::new("Power off before changing VM hardware.").color(ACCENT_AMBER));
@@ -1951,10 +2019,26 @@ impl NativeShellApp {
             self.refresh_selected_profile_metadata()?;
             self.config
                 .clone_from(&self.profiles[self.chrome.selected_vm()].config);
+            self.persist_selected()?;
         } else {
             self.vm_info = NativeVmInfo::from_config(&self.config);
         }
         Ok(())
+    }
+
+    /// Writes the selected VM to its library file. A VM that is not in the
+    /// library has no file, so nothing is written for it.
+    fn persist_selected(&self) -> Result<(), String> {
+        let Some(profile) = self.profiles.get(self.chrome.selected_vm()) else {
+            return Ok(());
+        };
+        match &profile.origin {
+            VmOrigin::Launch => Ok(()),
+            VmOrigin::Library(stem) => self
+                .library
+                .save(stem, &profile.name, &profile.config)
+                .map_err(|error| error.to_string()),
+        }
     }
 
     fn refresh_selected_profile_metadata(&mut self) -> Result<(), String> {
@@ -1995,42 +2079,74 @@ impl NativeShellApp {
         let profile = &self.profiles[index];
         self.config = profile.config.clone();
         self.settings = profile.settings.clone();
+        if let VmOrigin::Library(stem) = self.profiles[index].origin.clone() {
+            self.remember(&stem);
+        }
         if let Err(message) = self.refresh_selected_profile_metadata() {
             self.shell_notice = Some(ShellNotice::error(message));
         }
     }
 
-    fn duplicate_selected_profile(&mut self) {
-        if self.profiles.is_empty() {
-            return;
-        }
+    /// Adds a library VM copied from the selected one and selects it. Its file
+    /// is written at once, so it is there at the next launch.
+    fn add_vm_copying_selected(&mut self) {
         if let Err(message) = self.apply_pending_settings() {
             self.shell_notice = Some(ShellNotice::error(message));
             return;
         }
         let base = self.chrome.selected_vm().min(self.profiles.len() - 1);
-        let name = format!("{} Copy {}", self.profiles[base].name, self.profiles.len());
-        let profile = self.profiles[base].duplicate(name, VmOrigin::Launch);
+        let name = format!("{} copy", self.profiles[base].name);
+        let stem = match self.library.create(&name, &self.profiles[base].config) {
+            Ok(stem) => stem,
+            Err(error) => {
+                self.shell_notice = Some(ShellNotice::error(error.to_string()));
+                return;
+            }
+        };
+        let profile = self.profiles[base].duplicate(name, VmOrigin::Library(stem));
+        self.chrome.vm_library.push(profile.library_entry());
         self.profiles.push(profile);
-        self.chrome.vm_library.push(
-            self.profiles
-                .last()
-                .expect("profile was just pushed")
-                .library_entry(),
-        );
         self.select_profile(self.profiles.len() - 1);
+    }
+
+    /// Adds the temporary launch VM to the library. From then on it is an
+    /// ordinary library VM: its edits are saved and the next launch lists it.
+    fn keep_selected_in_library(&mut self) {
+        if let Err(message) = self.apply_pending_settings() {
+            self.shell_notice = Some(ShellNotice::error(message));
+            return;
+        }
+        let index = self.chrome.selected_vm();
+        let Some(profile) = self.profiles.get(index) else {
+            return;
+        };
+        if profile.origin != VmOrigin::Launch {
+            return;
+        }
+        match self.library.create(&profile.name, &profile.config) {
+            Ok(stem) => {
+                self.remember(&stem);
+                self.profiles[index].origin = VmOrigin::Library(stem);
+                self.chrome.vm_library[index] = self.profiles[index].library_entry();
+                self.shell_notice = Some(ShellNotice::info(format!(
+                    "Saved {} to the VM library.",
+                    self.profiles[index].name
+                )));
+            }
+            Err(error) => self.shell_notice = Some(ShellNotice::error(error.to_string())),
+        }
     }
 
     fn delete_selected_profile(&mut self) {
         let status = self.runtime_status();
         if status.running || status.start_pending {
             self.shell_notice = Some(ShellNotice::warning(
-                "Stop the running VM before deleting profiles.",
+                "Stop the running VM before deleting it.",
             ));
             return;
         }
         if self.profiles.len() == 1 {
-            self.shell_notice = Some(ShellNotice::warning("At least one VM profile is required."));
+            self.shell_notice = Some(ShellNotice::warning("At least one VM is required."));
             return;
         }
         if let Err(message) = self.apply_pending_settings() {
@@ -2039,6 +2155,12 @@ impl NativeShellApp {
         }
 
         let removed = self.chrome.selected_vm().min(self.profiles.len() - 1);
+        if let VmOrigin::Library(stem) = &self.profiles[removed].origin {
+            if let Err(error) = self.library.delete(stem) {
+                self.shell_notice = Some(ShellNotice::error(error.to_string()));
+                return;
+            }
+        }
         self.profiles.remove(removed);
         if removed < self.chrome.vm_library.len() {
             self.chrome.vm_library.remove(removed);
@@ -2052,6 +2174,103 @@ impl NativeShellApp {
         self.settings = profile.settings.clone();
         if let Err(message) = self.refresh_selected_profile_metadata() {
             self.shell_notice = Some(ShellNotice::error(message));
+        }
+        if let VmOrigin::Library(stem) = self.profiles[self.chrome.selected_vm()].origin.clone() {
+            self.remember(&stem);
+        }
+    }
+
+    /// Asks the user to confirm deleting the selected VM.
+    fn request_delete_selected(&mut self) {
+        self.pending_confirm = Some(PendingConfirm::DeleteSelected);
+    }
+
+    /// Runs the step waiting for confirmation, if any.
+    fn confirm_pending(&mut self) {
+        match self.pending_confirm.take() {
+            None => {}
+            Some(PendingConfirm::DeleteSelected) => self.delete_selected_profile(),
+            Some(PendingConfirm::DeleteBroken(path)) => self.delete_broken_file(&path),
+        }
+    }
+
+    /// Drops the step waiting for confirmation.
+    fn cancel_pending(&mut self) {
+        self.pending_confirm = None;
+    }
+
+    fn confirm_wording(&self, pending: &PendingConfirm) -> ConfirmWording {
+        match pending {
+            PendingConfirm::DeleteSelected => {
+                let profile = &self.profiles[self.chrome.selected_vm()];
+                match &profile.origin {
+                    VmOrigin::Library(stem) => ConfirmWording {
+                        title: format!("Delete {}?", profile.name),
+                        body: format!(
+                            "Its file {} is removed from the VM library. Disk images it uses are kept.",
+                            self.library.path_of(stem).display()
+                        ),
+                        verb: "Delete",
+                    },
+                    VmOrigin::Launch => ConfirmWording {
+                        title: format!("Discard {}?", profile.name),
+                        body: "This VM is not in the library, so nothing is left of it.".to_owned(),
+                        verb: "Discard",
+                    },
+                }
+            }
+            PendingConfirm::DeleteBroken(path) => ConfirmWording {
+                title: format!(
+                    "Delete {}?",
+                    path.file_name()
+                        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+                ),
+                body: "The file could not be loaded as a VM. It is removed from the VM library."
+                    .to_owned(),
+                verb: "Delete",
+            },
+        }
+    }
+
+    /// The dialog for the step waiting for confirmation. Its verb runs the
+    /// step; Cancel, Escape or a click outside drops it.
+    fn draw_pending_confirm(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_confirm.clone() else {
+            return;
+        };
+        let wording = self.confirm_wording(&pending);
+        let mut confirmed = false;
+        let mut cancelled = false;
+        let modal = egui::Modal::new(egui::Id::new("shell_confirm")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label(RichText::new(wording.title).strong().color(TEXT_PRIMARY));
+            ui.add_space(SPACE_ITEM);
+            ui.label(RichText::new(wording.body).color(TEXT_MUTED));
+            ui.add_space(SPACE_GROUP);
+            ui.horizontal(|ui| {
+                confirmed = ui.add(primary_button(wording.verb)).clicked();
+                cancelled = ui.button("Cancel").clicked();
+            });
+        });
+        if confirmed {
+            self.confirm_pending();
+        } else if cancelled || modal.should_close() {
+            self.cancel_pending();
+        }
+    }
+
+    fn delete_broken_file(&mut self, path: &Path) {
+        match self.library.delete_file(path) {
+            Ok(()) => self.broken_files.retain(|file| file.path != path),
+            Err(error) => self.shell_notice = Some(ShellNotice::error(error.to_string())),
+        }
+    }
+
+    /// Records `stem` as the VM the next launch shows. Failing costs only
+    /// that, so it is reported as a warning.
+    fn remember(&mut self, stem: &crate::library::VmStem) {
+        if let Err(error) = self.library.remember_selected(stem) {
+            self.shell_notice = Some(ShellNotice::warning(error.to_string()));
         }
     }
 
@@ -2298,6 +2517,7 @@ impl NativeShellApp {
 impl eframe::App for NativeShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.handle_native_dropped_files(ui.ctx());
+        self.draw_pending_confirm(ui.ctx());
         #[cfg(target_os = "android")]
         if self.chrome.page() == ShellPage::Console {
             self.draw_android_console_header(ui);
@@ -4114,14 +4334,17 @@ mod tests {
             name: "Rusty Box".to_owned(),
             config: test_resolved_config(),
         };
-        let (app, command_rx) = native_test_app_over(&scratch, Some(launch));
+        let (app, command_rx) = native_test_app_over(&scratch, Some(launch), None);
         (app, command_rx, scratch)
     }
 
+    /// A shell opened over `scratch`, on the library it holds: `launch` as
+    /// the temporary VM when there is one, and `notice` as the start's message.
     #[cfg(not(target_arch = "wasm32"))]
     fn native_test_app_over(
         scratch: &ScratchLibrary,
         launch: Option<crate::runner::LaunchVm>,
+        notice: Option<String>,
     ) -> (
         NativeShellApp,
         std::sync::mpsc::Receiver<NativeEmulatorCommand>,
@@ -4134,7 +4357,7 @@ mod tests {
         let start = crate::runner::ShellStart {
             library: scratch.library(),
             launch,
-            notice: None,
+            notice,
         };
         (
             NativeShellApp::with_emulator(emulator, shared, command_tx, start),
@@ -4142,23 +4365,31 @@ mod tests {
         )
     }
 
+    /// A shell opened over a scratch library holding one VM, "Alpine", and
+    /// no launch VM, so the library VM is the one selected.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn library_app() -> (
+        NativeShellApp,
+        std::sync::mpsc::Receiver<NativeEmulatorCommand>,
+        ScratchLibrary,
+    ) {
+        let scratch = ScratchLibrary::new();
+        scratch.library().create("Alpine", &test_resolved_config()).expect("seed");
+        let (app, command_rx) = native_test_app_over(&scratch, None, None);
+        (app, command_rx, scratch)
+    }
+
     /// What the start could not do is the first thing the shell shows.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_start_notice_opens_the_shell_with_that_warning() {
         let scratch = ScratchLibrary::new();
-        let shared = Arc::new(Mutex::new(
-            rusty_box::gui::shared_display::SharedDisplay::new(),
-        ));
-        let (command_tx, _command_rx) = std::sync::mpsc::channel();
-        let emulator = rusty_box::gui::RustyBoxApp::new_embedded(Arc::clone(&shared));
-        let start = crate::runner::ShellStart {
-            library: scratch.library(),
-            launch: None,
-            notice: Some("The VM bundled in C:\\app was not imported: bad file".to_owned()),
-        };
 
-        let app = NativeShellApp::with_emulator(emulator, shared, command_tx, start);
+        let (app, _command_rx) = native_test_app_over(
+            &scratch,
+            None,
+            Some("The VM bundled in C:\\app was not imported: bad file".to_owned()),
+        );
 
         assert_eq!(
             app.shell_notice,
@@ -4179,7 +4410,7 @@ mod tests {
             config: test_resolved_config(),
         };
 
-        let (app, _command_rx) = native_test_app_over(&scratch, Some(launch));
+        let (app, _command_rx) = native_test_app_over(&scratch, Some(launch), None);
 
         assert_eq!(app.profiles.len(), 2);
         assert_eq!(app.chrome.selected_vm(), 0);
@@ -4200,7 +4431,7 @@ mod tests {
         let beta = library.create("Beta", &test_resolved_config()).expect("beta");
         library.remember_selected(&beta).expect("remember");
 
-        let (app, _command_rx) = native_test_app_over(&scratch, None);
+        let (app, _command_rx) = native_test_app_over(&scratch, None, None);
 
         assert_eq!(app.profiles.len(), 2);
         assert_eq!(app.chrome.selected_vm(), 1);
@@ -4212,7 +4443,7 @@ mod tests {
     fn with_nothing_to_show_the_shell_opens_on_a_blank_new_vm() {
         let scratch = ScratchLibrary::new();
 
-        let (app, _command_rx) = native_test_app_over(&scratch, None);
+        let (app, _command_rx) = native_test_app_over(&scratch, None, None);
 
         assert_eq!(app.profiles.len(), 1);
         assert_eq!(app.profiles[0].name, "New VM");
@@ -4260,10 +4491,143 @@ mod tests {
         let scratch = ScratchLibrary::new();
         fs::write(scratch.dir.join("bad.toml"), "memory_mib = [").expect("write");
 
-        let (app, _command_rx) = native_test_app_over(&scratch, None);
+        let (app, _command_rx) = native_test_app_over(&scratch, None, None);
 
         assert_eq!(app.broken_files.len(), 1);
         assert_eq!(app.broken_files[0].path, scratch.dir.join("bad.toml"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_applied_edit_is_written_to_the_vm_file() {
+        let (mut app, _command_rx, scratch) = library_app();
+
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+
+        let reloaded = scratch.library().load().expect("reload");
+        assert_eq!(reloaded.vms[0].config.memory_mib, 512);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_renamed_vm_keeps_its_file() {
+        let (mut app, _command_rx, scratch) = library_app();
+
+        app.profiles[0].name = "Alpine edge".to_owned();
+        app.apply_pending_settings().unwrap();
+
+        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
+        assert_eq!(scratch.library().load().expect("reload").vms[0].name, "Alpine edge");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn edits_to_the_launch_vm_write_nothing() {
+        let (mut app, _command_rx, scratch) = native_test_app();
+
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+
+        assert!(scratch.toml_files().is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keeping_the_launch_vm_puts_it_in_the_library() {
+        let (mut app, _command_rx, scratch) = native_test_app();
+
+        app.keep_selected_in_library();
+
+        assert_eq!(scratch.toml_files(), ["rusty-box.toml"]);
+        assert!(matches!(app.profiles[0].origin, VmOrigin::Library(_)));
+        assert_eq!(app.chrome.vm_library[0].source, crate::shell::sidebar::EntrySource::Saved);
+        app.settings.memory_mib = 768;
+        app.apply_pending_settings().unwrap();
+        assert_eq!(scratch.library().load().expect("reload").vms[0].config.memory_mib, 768);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_new_vm_is_a_library_copy_of_the_selected_one() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 384;
+        app.apply_pending_settings().unwrap();
+
+        app.add_vm_copying_selected();
+
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(app.chrome.selected_vm(), 1);
+        assert_eq!(app.vm_info.name, "Alpine copy");
+        assert_eq!(scratch.toml_files(), ["alpine-copy.toml", "alpine.toml"]);
+        let reloaded = scratch.library().load().expect("reload");
+        assert!(reloaded.vms.iter().all(|vm| vm.config.memory_mib == 384));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deleting_a_vm_asks_first_and_then_removes_its_file() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+
+        app.request_delete_selected();
+        assert_eq!(app.pending_confirm, Some(PendingConfirm::DeleteSelected));
+        assert_eq!(scratch.toml_files().len(), 2);
+
+        app.confirm_pending();
+
+        assert_eq!(app.pending_confirm, None);
+        assert_eq!(app.profiles.len(), 1);
+        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_cancelled_delete_keeps_the_vm() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+
+        app.request_delete_selected();
+        app.cancel_pending();
+
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(scratch.toml_files().len(), 2);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn selecting_a_vm_remembers_it_for_the_next_launch() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+
+        app.select_profile(0);
+
+        let reloaded = scratch.library().load().expect("reload");
+        let alpine = reloaded
+            .vms
+            .iter()
+            .find(|vm| vm.name == "Alpine")
+            .expect("the seeded VM")
+            .stem
+            .clone();
+        assert_eq!(alpine.as_str(), "alpine");
+        assert_eq!(scratch.library().last_selected(), Some(alpine));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_broken_file_is_deleted_only_after_confirmation() {
+        let scratch = ScratchLibrary::new();
+        let bad = scratch.dir.join("bad.toml");
+        fs::write(&bad, "memory_mib = [").expect("write");
+        let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+
+        app.pending_confirm = Some(PendingConfirm::DeleteBroken(bad.clone()));
+        assert!(bad.exists());
+        app.confirm_pending();
+
+        assert!(!bad.exists());
+        assert!(app.broken_files.is_empty());
     }
 
     #[test]
@@ -4836,7 +5200,7 @@ mod tests {
         app.settings.memory_mib = 512;
         app.apply_pending_settings().unwrap();
 
-        app.duplicate_selected_profile();
+        app.add_vm_copying_selected();
 
         assert_eq!(app.profiles.len(), 2);
         assert_eq!(app.chrome.selected_vm(), 1);
@@ -4846,7 +5210,8 @@ mod tests {
         assert_eq!(app.vm_info.name, "Copy VM");
         assert_eq!(app.chrome.vm_library[1].name, "Copy VM");
 
-        app.delete_selected_profile();
+        app.request_delete_selected();
+        app.confirm_pending();
 
         assert_eq!(app.profiles.len(), 1);
         assert_eq!(app.chrome.selected_vm(), 0);
@@ -4859,23 +5224,25 @@ mod tests {
     fn native_profile_delete_requires_stopped_multiple_profiles() {
         let (mut app, _command_rx, _library) = native_test_app();
 
-        app.delete_selected_profile();
+        app.request_delete_selected();
+        app.confirm_pending();
 
         assert_eq!(app.profiles.len(), 1);
         assert_eq!(
             app.shell_notice,
-            Some(ShellNotice::warning("At least one VM profile is required."))
+            Some(ShellNotice::warning("At least one VM is required."))
         );
 
-        app.duplicate_selected_profile();
+        app.add_vm_copying_selected();
         app.shared.lock().unwrap().emu_running = true;
-        app.delete_selected_profile();
+        app.request_delete_selected();
+        app.confirm_pending();
 
         assert_eq!(app.profiles.len(), 2);
         assert_eq!(
             app.shell_notice,
             Some(ShellNotice::warning(
-                "Stop the running VM before deleting profiles."
+                "Stop the running VM before deleting it."
             ))
         );
     }
@@ -4884,7 +5251,7 @@ mod tests {
     #[test]
     fn native_profile_selection_refuses_while_running() {
         let (mut app, _command_rx, _library) = native_test_app();
-        app.duplicate_selected_profile();
+        app.add_vm_copying_selected();
         assert_eq!(app.chrome.selected_vm(), 1);
         app.shared.lock().unwrap().emu_running = true;
 

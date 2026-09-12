@@ -210,7 +210,7 @@ pub enum LibraryError {
     #[error("{} is not a file of the VM library in {}", path.display(), dir.display())]
     OutsideLibrary { path: PathBuf, dir: PathBuf },
 
-    #[error("{text:?} is not a VM file stem: one file name, no folder, not starting with a dot")]
+    #[error("{text:?} is not a VM file stem: one file name, no folder, not starting with a dot, no whitespace at either end")]
     InvalidStem { text: String },
 
     #[error("failed to make {} absolute: {source}", path.display())]

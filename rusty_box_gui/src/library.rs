@@ -10,6 +10,7 @@
 use crate::config::{load_toml_file, resolve_config_in, ResolvedConfig, DEFAULT_CONFIG_FILE};
 pub use crate::error::LibraryError;
 use crate::error::RunError;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
@@ -41,10 +42,12 @@ pub struct VmStem(String);
 impl VmStem {
     /// The stem `text` spells, when `text` is exactly its own file name —
     /// `Path::file_name` returns all of it, so it holds no folder, no `..`,
-    /// no root and no drive — and does not start with a dot.
+    /// no root and no drive — does not start with a dot, and is its own
+    /// trim: the last-selected record is read trimmed, so a stem with
+    /// whitespace at either end could never be recalled.
     pub fn parse(text: &str) -> Result<Self, LibraryError> {
         let is_own_file_name = Path::new(text).file_name() == Some(OsStr::new(text));
-        if is_own_file_name && !text.starts_with('.') {
+        if is_own_file_name && !text.starts_with('.') && text.trim() == text {
             Ok(Self(text.to_owned()))
         } else {
             Err(LibraryError::InvalidStem {
@@ -77,7 +80,7 @@ pub struct BrokenVmFile {
 /// What the library folder holds.
 #[derive(Clone, Debug, Default)]
 pub struct LibraryContents {
-    /// The VMs that load, ordered by stem.
+    /// The VMs that load, ordered by stem without case.
     pub vms: Vec<LibraryVm>,
     pub broken: Vec<BrokenVmFile>,
 }
@@ -120,9 +123,10 @@ impl VmLibrary {
         Ok(self.vm_files()?.is_empty())
     }
 
-    /// Every `*.toml` file directly in the folder, ordered by stem. A file
-    /// whose stem is not one — not UTF-8, or starting with a dot — is listed
-    /// as broken, like one whose contents do not load.
+    /// Every `*.toml` file directly in the folder, ordered by stem without
+    /// case (see [`library_order`]). A file whose stem is not one — not
+    /// UTF-8, starting with a dot, or with whitespace at either end — is
+    /// listed as broken, like one whose contents do not load.
     pub fn load(&self) -> Result<LibraryContents, LibraryError> {
         let mut contents = LibraryContents::default();
         let mut files = Vec::new();
@@ -135,7 +139,7 @@ impl VmLibrary {
                 }),
             }
         }
-        files.sort();
+        files.sort_by(|a, b| library_order(&a.0, &b.0));
         for (stem, path) in files {
             match read_vm(&self.dir, &path) {
                 Ok(described) => contents.vms.push(LibraryVm {
@@ -300,6 +304,15 @@ fn read_vm(dir: &Path, path: &Path) -> Result<DescribedVm, RunError> {
     Ok(DescribedVm { name, config })
 }
 
+/// The order the listing shows stems in: without case, so `Beta` follows
+/// `alpha`; two stems equal without case keep their byte order, so the order
+/// is total.
+fn library_order(a: &VmStem, b: &VmStem) -> Ordering {
+    a.0.to_lowercase()
+        .cmp(&b.0.to_lowercase())
+        .then_with(|| a.cmp(b))
+}
+
 /// The stem of the VM file at `path`. A file name that is not UTF-8 is not a
 /// stem: a lossy rendering of it would name a different file.
 fn stem_of(path: &Path) -> Result<VmStem, LibraryError> {
@@ -402,14 +415,22 @@ fn is_windows_device_name(stem: &str) -> bool {
     })
 }
 
-/// Writes `bytes` to `<path>.partial`, flushes it to the disk and renames it
-/// over `path`, so `path` is either what it was or the whole of `bytes`, never
-/// part of them. A partial file whose write or rename failed is removed
-/// again, and the failure that stopped the write is what the caller gets.
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), LibraryError> {
+/// The file a write to `path` from this process goes to first:
+/// `<path>.<pid>.partial`. Each process has its own, so two processes saving
+/// the same file never share a partial, and the last complete save wins.
+fn partial_path(path: &Path) -> PathBuf {
     let mut partial = path.as_os_str().to_owned();
-    partial.push(".partial");
-    let partial = PathBuf::from(partial);
+    partial.push(format!(".{}.partial", std::process::id()));
+    PathBuf::from(partial)
+}
+
+/// Writes `bytes` to this process's partial file beside `path` (see
+/// [`partial_path`]), flushes it to the disk and renames it over `path`, so
+/// `path` is either what it was or the whole of `bytes`, never part of them.
+/// A partial file whose write or rename failed is removed again, and the
+/// failure that stopped the write is what the caller gets.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), LibraryError> {
+    let partial = partial_path(path);
     let written = write_synced(&partial, bytes)
         .map_err(|source| LibraryError::Write {
             path: partial.clone(),
@@ -572,7 +593,10 @@ mod tests {
         for accepted in ["alpine", "ALPINE", "DOS Lab", "alpine-2", "a.b"] {
             assert_eq!(stem(accepted).as_str(), accepted);
         }
-        for refused in ["", ".", "..", "../escape", "a/b", "/a", ".hidden", "a/"] {
+        for refused in [
+            "", ".", "..", "../escape", "a/b", "/a", ".hidden", "a/", " alpine", "alpine ",
+            "\talpine", "alpine\n",
+        ] {
             assert!(
                 matches!(VmStem::parse(refused), Err(LibraryError::InvalidStem { .. })),
                 "{refused:?} was accepted"
@@ -658,6 +682,34 @@ mod tests {
         remove_dir(&dir);
     }
 
+    /// Byte order puts every upper-case stem before every lower-case one;
+    /// the listing orders them as a reader does.
+    #[test]
+    fn load_orders_stems_without_case() {
+        let dir = scratch_dir("case-order");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        fs::write(dir.join("Zeta.toml"), SAMPLE_TOML).expect("write");
+        fs::write(dir.join("MID.toml"), SAMPLE_TOML).expect("write");
+        library.create("alpha", &sample_config(&dir)).expect("alpha");
+
+        let contents = library.load().expect("load");
+
+        let stems: Vec<&str> = contents.vms.iter().map(|vm| vm.stem.as_str()).collect();
+        assert_eq!(stems, ["alpha", "MID", "Zeta"]);
+        remove_dir(&dir);
+    }
+
+    /// Two stems equal without case — possible only on a case-sensitive
+    /// file system — keep their byte order, so the listing's order is total.
+    #[test]
+    fn library_order_breaks_a_case_tie_by_byte_order() {
+        use std::cmp::Ordering;
+        assert_eq!(library_order(&stem("alpha"), &stem("Beta")), Ordering::Less);
+        assert_eq!(library_order(&stem("Alpine"), &stem("alpine")), Ordering::Less);
+        assert_eq!(library_order(&stem("alpine"), &stem("Alpine")), Ordering::Greater);
+        assert_eq!(library_order(&stem("alpine"), &stem("alpine")), Ordering::Equal);
+    }
+
     #[test]
     fn is_empty_is_true_only_while_the_folder_holds_no_toml_file() {
         let dir = scratch_dir("is-empty");
@@ -699,6 +751,24 @@ mod tests {
         assert!(contents.vms.is_empty());
         assert_eq!(contents.broken.len(), 1);
         assert_eq!(contents.broken[0].path, dir.join(".hidden.toml"));
+        assert!(contents.broken[0].error.contains("not a VM file stem"));
+        remove_dir(&dir);
+    }
+
+    /// A stem with a space at either end could not be recalled from the
+    /// last-selected record, which is read trimmed, so such a file is not a
+    /// VM: it is listed as broken, where the user can see and delete it.
+    #[test]
+    fn a_hand_placed_file_with_an_edge_space_is_listed_as_broken() {
+        let dir = scratch_dir("edge-space");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        fs::write(dir.join(" alpine.toml"), SAMPLE_TOML).expect("write");
+
+        let contents = library.load().expect("load");
+
+        assert!(contents.vms.is_empty());
+        assert_eq!(contents.broken.len(), 1);
+        assert_eq!(contents.broken[0].path, dir.join(" alpine.toml"));
         assert!(contents.broken[0].error.contains("not a VM file stem"));
         remove_dir(&dir);
     }
@@ -826,6 +896,45 @@ mod tests {
 
         assert_eq!(toml_names(&dir), [".last", "alpine.toml"]);
         remove_dir(&dir);
+    }
+
+    /// Each process writes its own partial file, so one left by another
+    /// process — still writing, or crashed — is neither overwritten nor
+    /// removed by a save here.
+    #[test]
+    fn a_partial_of_another_process_is_left_alone() {
+        let dir = scratch_dir("foreign-partial");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        let stem = stem("alpine");
+        let other_pid = std::process::id().wrapping_add(1);
+        let foreign = dir.join(format!("alpine.toml.{other_pid}.partial"));
+        fs::write(&foreign, "half-written by another process").expect("write");
+
+        library.save(&stem, "Alpine", &sample_config(&dir)).expect("save");
+
+        assert_eq!(
+            fs::read_to_string(&foreign).expect("the other process's partial"),
+            "half-written by another process"
+        );
+        assert_eq!(
+            toml_names(&dir),
+            ["alpine.toml".to_owned(), format!("alpine.toml.{other_pid}.partial")]
+        );
+        assert_eq!(library.load().expect("load").vms[0].name, "Alpine");
+        remove_dir(&dir);
+    }
+
+    #[test]
+    fn a_partial_file_is_named_after_its_process() {
+        let expected = format!("alpine.toml.{}.partial", std::process::id());
+        assert_eq!(
+            partial_path(Path::new("alpine.toml")),
+            PathBuf::from(expected.clone())
+        );
+        assert_eq!(
+            partial_path(&Path::new("vms").join("alpine.toml")),
+            Path::new("vms").join(expected)
+        );
     }
 
     #[test]

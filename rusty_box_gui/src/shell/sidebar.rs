@@ -10,7 +10,10 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::{Destination, ShellPage, SidebarAction};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::theme::{BG_PANEL, SPACE_ITEM, STROKE_HAIRLINE, TEXT_BODY, TEXT_CAPTION, TEXT_MUTED};
+use crate::shell::theme::{
+    ACCENT_AMBER, BG_PANEL, SPACE_GROUP, SPACE_ITEM, STROKE_HAIRLINE, TEXT_BODY, TEXT_CAPTION,
+    TEXT_MUTED,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::{selection_row, RowMark, ShellStateBadge, CHILD_INDENT, ROOT_INDENT};
 #[cfg(not(target_arch = "wasm32"))]
@@ -91,7 +94,8 @@ pub(crate) const SIDEBAR_DEFAULT_WIDTH: f32 = 200.0;
 pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 170.0;
 
 /// The desktop's only navigation: every VM profile, with the selected one
-/// expanded into its pages. Draws from borrowed data and reports what was
+/// expanded into its pages, and under them the library files that do not
+/// load, each with its Delete. Draws from borrowed data and reports what was
 /// clicked; the caller owns the consequences.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn draw_sidebar(
@@ -101,6 +105,7 @@ pub(crate) fn draw_sidebar(
     destination: Destination,
     filter: &mut String,
     badge: ShellStateBadge,
+    broken: &[crate::library::BrokenVmFile],
 ) -> Option<SidebarAction> {
     let mut action = None;
     egui::Panel::left("vm_sidebar")
@@ -123,10 +128,10 @@ pub(crate) fn draw_sidebar(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .small_button("+")
-                        .on_hover_text("Duplicate this VM profile")
+                        .on_hover_text("New VM (a copy of the selected one)")
                         .clicked()
                     {
-                        action = Some(SidebarAction::DuplicateSelected);
+                        action = Some(SidebarAction::NewVm);
                     }
                 });
             });
@@ -172,6 +177,28 @@ pub(crate) fn draw_sidebar(
                     if selection_row(ui, page.label(), CHILD_INDENT, page_mark, None).clicked() {
                         action = Some(SidebarAction::Select(destination.select_page(page)));
                     }
+                }
+            }
+
+            if !broken.is_empty() {
+                ui.add_space(SPACE_GROUP);
+                ui.label(
+                    RichText::new("Could not load")
+                        .size(TEXT_CAPTION)
+                        .color(TEXT_MUTED),
+                );
+                for (index, file) in broken.iter().enumerate() {
+                    let name = file
+                        .path
+                        .file_name()
+                        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(name).color(ACCENT_AMBER))
+                            .on_hover_text(&file.error);
+                        if ui.small_button("Delete").clicked() {
+                            action = Some(SidebarAction::DeleteBroken(index));
+                        }
+                    });
                 }
             }
         });

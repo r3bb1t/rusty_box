@@ -86,7 +86,10 @@ impl Default for Destination {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarAction {
     Select(Destination),
-    DuplicateSelected,
+    /// Add a VM to the library, copied from the selected one.
+    NewVm,
+    /// Delete the library file at this index of the "Could not load" group.
+    DeleteBroken(usize),
 }
 
 /// What a click in the VM bar asked for.
