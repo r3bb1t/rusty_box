@@ -28,7 +28,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rusty Box is a Rust port of the Bochs x86 emulator -- a complete CPU/system emulator targeting 32/64-bit x86 architecture. The original C++ Bochs source is in `cpp_orig/bochs/` for reference.
 
-**Status:** DLX Linux boots to interactive bash shell. Alpine Linux fully boots. UEFI example completes BIOS POST and reaches boot sector.
+**Status:** DLX Linux boots to an interactive bash shell; the `cargo xtask ci` boot gate reaches its login prompt on every run. Alpine Linux 3.24.1 boots to a working root shell on the interpreter and on the WHP engine, which reaches `login:` 2.40× sooner (27.1 s vs 65.0 s, i5-12450H, 2026-09-12); DLX does not reach `login:` on WHP today. Ubuntu Server 26.04 live-server boots to its installer; the Windows 10 22H2 installer starts and Windows 7 SP1 reaches Setup, both on the interpreter. `rusty_box_gui` is the front end: a VMware-style VM-library shell on desktop, Android and in the browser. The UEFI example completes BIOS POST and reaches the boot sector.
 
 ## Build Commands
 

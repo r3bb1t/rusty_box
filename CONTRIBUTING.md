@@ -16,11 +16,11 @@ The repository's `.cargo/config.toml` sets two environment variables for every c
 
 Run it before every commit, and commit only the tree it saw. It runs, in order:
 
-1. **Doctrine ratchets.** They scan seven crates: `rusty_box`, the decoder, `rusty_box_core`, `rusty_box_devices` and the three WHP crates. In each, the `unsafe` token count may only go down (a commit that removes unsafe tightens its baseline in `xtask/src/ci.rs` in the same commit), the number of files with a blanket `dead_code` allow may only go down, and there is no `.unwrap()` / `.expect(…)` outside test code. `rusty_box` has no `unsafe impl Send/Sync`.
-2. **The test and check matrix.** It tests `rusty_box_core` and `rusty_box_devices` (including their no_std + no_alloc builds), the WHP crates (their hardware tests skip without a hypervisor), the decoder and the `rusty_box` library. It checks `rusty_box` as no_std with and without alloc, for `x86_64-unknown-none`, and for `wasm32-unknown-unknown` with alloc, and builds the UEFI application. It runs the public-API examples, the doc examples and the doctrine compile-fail fixtures, checks the GUI for wasm and with its tests, and does an all-features check. Last comes a debug-assertions check, the only step that compiles `#[cfg(debug_assertions)]` code. The gate does not run the tests of `rusty_box_bximage` or `rusty_box_gui`; run them with `cargo test --release -p <crate>`.
+1. **Doctrine ratchets.** They scan eight source trees: `rusty_box`, the decoder, `rusty_box_core`, `rusty_box_devices`, the three WHP crates and `rusty_box_gui`. In each, the `unsafe` token count may only go down (a commit that removes unsafe tightens its baseline in `xtask/src/ci.rs` in the same commit), the number of files with a blanket `dead_code` allow may only go down, and there is no `.unwrap()` / `.expect(…)` outside test code: all eight, the GUI included, are held at zero production panics. `rusty_box` has no `unsafe impl Send/Sync`.
+2. **The test and check matrix.** It tests `rusty_box_core` and `rusty_box_devices` (including their no_std + no_alloc builds) and checks both for `x86_64-unknown-none`. It tests the WHP crates (their hardware tests skip without a hypervisor), checks the WHP probe examples, and compiles the WHP engine's harnesses with its tests. It tests the decoder and the `rusty_box` library. It checks `rusty_box` as no_std with and without alloc, for `x86_64-unknown-none`, and for `wasm32-unknown-unknown` with alloc, and builds the UEFI application. It runs the public-API examples, the doc examples and the doctrine compile-fail fixtures, checks the GUI for wasm and with its tests, and does an all-features check. Last comes a debug-assertions check, the only step that compiles `#[cfg(debug_assertions)]` code. The gate does not run the tests of `rusty_box_bximage` or `rusty_box_gui`; run them with `cargo test --release -p <crate>`.
 3. **The DLX boot gate.** It runs `dlxlinux` headlessly and requires the login prompt within 450 million instructions. This step takes several minutes.
 
-`--skip-boot` drops the boot gate; `--full` adds the full `rusty_box` integration test suite and the GUI release build.
+That is 27 steps: the ratchets, 25 matrix steps and the boot gate. [xtask/README.md](xtask/README.md) lists each one. `--skip-boot` drops the boot gate; `--full` adds the full `rusty_box` integration test suite and the GUI release build.
 
 ## Fast loop
 
@@ -50,8 +50,10 @@ The WHP crates (`rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine`) bu
 DLX runs a 32-bit kernel. A change that touches long-mode paths also needs an Alpine x86_64 boot:
 
 ```bash
-RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=3500000000 cargo run --release --example alpine_direct --features std
+ALPINE_ISO=alpine-virt-3.24.1-x86_64.iso RUSTY_BOX_HEADLESS=1 cargo run --release --example alpine_direct --features std
 ```
+
+Put the ISO in the repository root. `alpine_direct` defaults to `alpine-virt-3.23.3-x86_64.iso`, so `ALPINE_ISO` names the 3.24.1 ISO that the other harnesses and `scripts/boot_gate.sh` use. The run prints the guest's serial console and a progress line every 50 million instructions. It does not stop at `login:`: it runs until its instruction budget is spent, which is 20 billion under cargo (`MAX_INSTRUCTIONS` in `.cargo/config.toml`).
 
 ## Rules
 
