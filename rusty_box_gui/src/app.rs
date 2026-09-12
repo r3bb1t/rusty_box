@@ -3270,7 +3270,8 @@ enum WebRuntimeState {
 enum WebConsoleSurface {
     Error,
     Starting,
-    Display,
+    /// The guest's display, drawn from this texture.
+    Display(egui::TextureId),
     Launcher,
     WaitingForDisplay,
 }
@@ -3336,11 +3337,20 @@ const WEB_FRAME_TIME_BUDGET_MS: u64 = 6;
 #[cfg(any(test, target_arch = "wasm32"))]
 const WEB_STARTUP_STEPS_PER_FRAME: usize = 1;
 
+/// What one startup frame does: paint its stage's notice and leave the next
+/// stage for the next frame, or build the machine, which ends the startup.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn web_next_startup_stage(stage: WebStartupStage) -> Option<WebStartupStage> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebStartupStep {
+    NextFrame(WebStartupStage),
+    Build,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_startup_step(stage: WebStartupStage) -> WebStartupStep {
     match stage {
-        WebStartupStage::Announce => Some(WebStartupStage::BuildMachine),
-        WebStartupStage::BuildMachine => None,
+        WebStartupStage::Announce => WebStartupStep::NextFrame(WebStartupStage::BuildMachine),
+        WebStartupStage::BuildMachine => WebStartupStep::Build,
     }
 }
 
@@ -3401,15 +3411,15 @@ fn web_runtime_state(
 fn web_console_surface(
     has_error: bool,
     startup_pending: bool,
-    has_texture: bool,
+    texture: Option<egui::TextureId>,
     launcher: bool,
 ) -> WebConsoleSurface {
     if has_error {
         WebConsoleSurface::Error
     } else if startup_pending {
         WebConsoleSurface::Starting
-    } else if has_texture {
-        WebConsoleSurface::Display
+    } else if let Some(texture) = texture {
+        WebConsoleSurface::Display(texture)
     } else if launcher {
         WebConsoleSurface::Launcher
     } else {
@@ -3432,18 +3442,16 @@ fn web_should_continue_emulator_frame(frame_executed: u64, elapsed: core::time::
 fn web_uploaded_media_config(
     memory_mib: usize,
     cpu_count: u32,
-) -> rusty_box::emulator::EmulatorConfig {
+) -> Result<rusty_box::emulator::EmulatorConfig, rusty_box::params::BxParamError> {
     let ram_size = memory_mib * 1024 * 1024;
-    rusty_box::emulator::EmulatorConfig {
+    Ok(rusty_box::emulator::EmulatorConfig {
         memory: rusty_box::emulator::MemorySize::bytes(ram_size),
         memory_block_size: 128 * 1024,
         ips: rusty_box::emulator::Ips::new(300_000_000),
         pci_enabled: true,
-        cpu_params: BxParams::default()
-            .with_topology(cpu_count, 1, 1)
-            .expect("web CPU count is range-checked by the launcher"),
+        cpu_params: BxParams::default().with_topology(cpu_count, 1, 1)?,
         ..Default::default()
-    }
+    })
 }
 #[cfg(target_arch = "wasm32")]
 const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
@@ -3539,9 +3547,12 @@ impl WebShellApp {
             return Ok(None);
         };
 
-        match startup.stage {
-            WebStartupStage::Announce => {}
-            WebStartupStage::BuildMachine => {
+        match web_startup_step(startup.stage) {
+            WebStartupStep::NextFrame(next) => {
+                startup.stage = next;
+                Ok(None)
+            }
+            WebStartupStep::Build => {
                 let iso_data = startup.iso_data.take().ok_or_else(|| {
                     "uploaded boot media was not available during startup".to_owned()
                 })?;
@@ -3550,25 +3561,21 @@ impl WebShellApp {
                 if remainder != 0 {
                     vga_data.resize(vga_data.len() + (512 - remainder), 0);
                 }
+                let cpu_count = startup.cpu_count;
+                let config = web_uploaded_media_config(startup.memory_mib, cpu_count)
+                    .map_err(|error| format!("Invalid CPU count {cpu_count}: {error:?}"))?;
                 use rusty_box::emulator::{AtaSlot, BootDevice, BootOrder, MachineBuilder};
-                let mut emu = MachineBuilder::new(web_uploaded_media_config(
-                    startup.memory_mib,
-                    startup.cpu_count,
-                ))
-                .bios(BIOS_DATA)
-                .vga_bios(&vga_data)
-                .boot_order(BootOrder::just(BootDevice::Cdrom))
-                .cdrom_bytes(AtaSlot::SECONDARY_MASTER, iso_data)
-                .build()
-                .map_err(|error| format!("{error:?}"))?;
+                let mut emu = MachineBuilder::new(config)
+                    .bios(BIOS_DATA)
+                    .vga_bios(&vga_data)
+                    .boot_order(BootOrder::just(BootDevice::Cdrom))
+                    .cdrom_bytes(AtaSlot::SECONDARY_MASTER, iso_data)
+                    .build()
+                    .map_err(|error| format!("{error:?}"))?;
                 emu.display().force_update();
-                return Ok(Some(emu));
+                Ok(Some(emu))
             }
         }
-
-        startup.stage = web_next_startup_stage(startup.stage)
-            .expect("startup stage should advance until the machine is built");
-        Ok(None)
     }
 
     fn web_has_vm(&self) -> bool {
@@ -4056,7 +4063,7 @@ impl WebShellApp {
         match web_console_surface(
             self.init_error.is_some(),
             self.startup.is_some(),
-            self.texture.is_some(),
+            self.texture.as_ref().map(egui::TextureHandle::id),
             self.boot_mode == WebBootMode::Launcher,
         ) {
             WebConsoleSurface::Error => {
@@ -4096,11 +4103,7 @@ impl WebShellApp {
                     });
                 });
             }
-            WebConsoleSurface::Display => {
-                let texture = self
-                    .texture
-                    .as_ref()
-                    .expect("display surface requires a texture");
+            WebConsoleSurface::Display(texture) => {
                 let available = ui.available_size();
                 let tex_w = (self.display.fb_width.max(1)) as f32;
                 let tex_h = self.display.fb_height.max(1) as f32;
@@ -4118,7 +4121,7 @@ impl WebShellApp {
                 };
                 let mut image_rect = None;
                 ui.centered_and_justified(|ui| {
-                    let response = ui.image(egui::load::SizedTexture::new(texture.id(), size));
+                    let response = ui.image(egui::load::SizedTexture::new(texture, size));
                     image_rect = Some(response.rect);
                 });
                 if let Some(rect) = image_rect {
@@ -6238,9 +6241,25 @@ mod tests {
         assert!(!web_cpu_count_is_supported(
             BX_MAX_SMP_THREADS_SUPPORTED + 1
         ));
-        assert_eq!(web_uploaded_media_config(128, 8).cpu_params.cpu_count(), 8);
+        assert_eq!(
+            web_uploaded_media_config(128, 8).map(|config| config.cpu_params.cpu_count()),
+            Ok(8)
+        );
         assert!(web_can_edit_cpu_count(false));
         assert!(!web_can_edit_cpu_count(true));
+    }
+
+    #[test]
+    fn a_web_cpu_count_the_machine_cannot_take_is_an_error() {
+        assert_eq!(
+            web_uploaded_media_config(128, BX_MAX_SMP_THREADS_SUPPORTED + 1)
+                .map(|config| config.cpu_params.cpu_count()),
+            Err(rusty_box::params::BxParamError::TooManyLogicalProcessors {
+                count: BX_MAX_SMP_THREADS_SUPPORTED + 1,
+                max: BX_MAX_SMP_THREADS_SUPPORTED,
+            })
+        );
+        assert!(web_uploaded_media_config(128, 0).is_err());
     }
 
     #[test]
@@ -6280,10 +6299,10 @@ mod tests {
         // The notice is painted on its own frame, so the browser is never
         // asked to render it and run the blocking build in the same one.
         assert_eq!(
-            web_next_startup_stage(WebStartupStage::Announce),
-            Some(WebStartupStage::BuildMachine)
+            web_startup_step(WebStartupStage::Announce),
+            WebStartupStep::NextFrame(WebStartupStage::BuildMachine)
         );
-        assert_eq!(web_next_startup_stage(WebStartupStage::BuildMachine), None);
+        assert_eq!(web_startup_step(WebStartupStage::BuildMachine), WebStartupStep::Build);
         assert_eq!(
             web_startup_stage_label(WebStartupStage::Announce),
             "Allocating guest memory"
@@ -6293,8 +6312,21 @@ mod tests {
     #[test]
     fn web_console_prefers_startup_message_over_stale_texture() {
         assert_eq!(
-            web_console_surface(false, true, true, false),
+            web_console_surface(false, true, Some(egui::TextureId::Managed(1)), false),
             WebConsoleSurface::Starting
+        );
+    }
+
+    #[test]
+    fn web_console_draws_the_texture_it_holds() {
+        let texture = egui::TextureId::Managed(7);
+        assert_eq!(
+            web_console_surface(false, false, Some(texture), false),
+            WebConsoleSurface::Display(texture)
+        );
+        assert_eq!(
+            web_console_surface(false, false, None, false),
+            WebConsoleSurface::WaitingForDisplay
         );
     }
 

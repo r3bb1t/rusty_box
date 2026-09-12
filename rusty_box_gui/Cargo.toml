@@ -87,7 +87,7 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 log = "0.4"
 web-time = "1"
-web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement", "HtmlInputElement", "HtmlAnchorElement", "Element", "Event", "FileReader", "FileList", "File", "Blob", "Url"] }
+web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement", "HtmlElement", "HtmlInputElement", "HtmlAnchorElement", "Element", "Node", "Event", "FileReader", "FileList", "File", "Blob", "Url", "console"] }
 
 # The APK's native library. NativeActivity loads it and calls its
 # `android_main`; `cargo xtask android build` packages it with cargo-apk, which

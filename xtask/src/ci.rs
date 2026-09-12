@@ -276,10 +276,9 @@ const BLANKET_DEAD_CODE_BASELINES: &[(&str, usize)] = &[
 
 /// `.unwrap()` / `.expect(…)` outside test code, in each crate
 /// `UNSAFE_TOKEN_BASELINES` names: rusty_box, the decoder, core, devices, the
-/// three WHP crates and the GUI. Zero for every crate but those
-/// `PRODUCTION_PANIC_EXCEPTIONS` names, and it is to stay zero: a library that
-/// panics on a condition it could have returned is a library its caller
-/// cannot contain.
+/// three WHP crates and the GUI.
+/// Zero, and it is to stay zero: a library that panics on a condition it could
+/// have returned is a library its caller cannot contain.
 ///
 /// The rule is about WHERE, not about the call. Inside `#[cfg(test)]`, a
 /// fixture that cannot be built should fail loudly and immediately — so the
@@ -295,23 +294,134 @@ const BLANKET_DEAD_CODE_BASELINES: &[(&str, usize)] = &[
 /// CPU model's SVM capability, which CPUID already answers.
 const PRODUCTION_PANIC_BASELINE: usize = 0;
 
-/// The scanned crates held at a production `.unwrap()`/`.expect(…)` count
-/// above `PRODUCTION_PANIC_BASELINE`, each under a comment saying where the
-/// calls are. A count may only decrease, like every other ratchet here.
-const PRODUCTION_PANIC_EXCEPTIONS: &[(&str, usize)] = &[
-    // The GUI is scanned for its `unsafe`, and so for this too. NINE as the
-    // scan counts them. Eight are production calls, all in the browser front
-    // end: five in the wasm `main` in `main.rs`, which has no caller to hand
-    // a missing window, document or canvas to, and three in the browser shell
-    // in `app.rs` (the web machine's CPU topology, its startup stage, its
-    // display texture). The ninth is test code the scan misreads: the font
-    // check in `shell/mod.rs`'s test module holds the char literals `'{'`,
-    // `'}'` and `'"'`, which this line-based scan takes for braces and for
-    // the start of a string, so it closes that test region early and counts
-    // the `.expect(` at the module's end. Held here so the number cannot
-    // grow.
-    ("rusty_box_gui/src", 9),
-];
+/// Whether `line` is a `#[cfg(test)]` / `#[cfg(all(test, …))]` attribute.
+fn is_cfg_test_attr(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("#[cfg(test)") || trimmed.starts_with("#[cfg(all(test")
+}
+
+/// A line with its string and character literals blanked out, so brace
+/// counting is not thrown off by a `{` inside either, and a `'"'` does not
+/// open a string. Handles `\"` escapes in a string and escaped character
+/// literals (`'\''`, `'\\'`, `'\u{7D}'`). A `'` that opens no character
+/// literal opens a lifetime or a label (`'a`, `'static`) and is kept. A raw
+/// string carrying an unbalanced brace would still fool it, and there are
+/// none.
+fn without_literals(code: &str) -> String {
+    let chars: Vec<char> = code.chars().collect();
+    let mut out = String::with_capacity(code.len());
+    let mut in_string = false;
+    let mut at = 0;
+    while at < chars.len() {
+        let ch = chars[at];
+        // How many characters from `at` belong to a literal.
+        let blanked = match (in_string, ch) {
+            (true, '\\') => 2,
+            (true, '"') => {
+                in_string = false;
+                1
+            }
+            (true, _) => 1,
+            (false, '"') => {
+                in_string = true;
+                1
+            }
+            (false, '\'') => char_literal_len(&chars[at..]).unwrap_or(0),
+            (false, _) => 0,
+        };
+        if blanked == 0 {
+            out.push(ch);
+            at += 1;
+        } else {
+            let end = (at + blanked).min(chars.len());
+            for _ in at..end {
+                out.push(' ');
+            }
+            at = end;
+        }
+    }
+    out
+}
+
+/// The length in characters of the character literal `rest` opens with, or
+/// `None` when its leading `'` opens a lifetime or a label instead. An
+/// escaped literal runs past its backslash and the escaped character to the
+/// next `'`, which covers `'\''`, `'\\'`, `'\n'`, `'\x7F'` and `'\u{7D}'`.
+fn char_literal_len(rest: &[char]) -> Option<usize> {
+    match rest {
+        ['\'', '\\', _, tail @ ..] => tail
+            .iter()
+            .position(|c| *c == '\'')
+            .map(|close| 3 + close + 1),
+        ['\'', _, '\'', ..] => Some(3),
+        _ => None,
+    }
+}
+
+/// `.unwrap()` / `.expect(` in the production part of one file.
+///
+/// Test code is skipped wherever it is, not merely from a file's first
+/// `#[cfg(test)]` onwards. That distinction is the whole difficulty: the
+/// gate sits on an inline `mod tests {` in most files, but on a plain
+/// `mod tests;` DECLARATION in `memory/mod.rs`, and on a bare struct
+/// forty lines further down the same file. Stopping at the first one seen
+/// skips the rest of the file and reports a tree that is clean because it
+/// was not looked at.
+///
+/// So a `#[cfg(test)]` starts a skipped region only when the item it gates
+/// opens a block, and that region ends when the braces close it. A gated
+/// declaration or statement — anything ending in `;` — skips nothing.
+///
+/// Doc comments are skipped throughout: `///` examples are compiled and
+/// run as tests, and `unwrap` is how an example says "assume this worked".
+fn production_panics(text: &str) -> usize {
+    let mut n = 0;
+    let mut depth: i32 = 0;
+    // Depth the innermost `#[cfg(test)]` item was opened at, if any.
+    let mut test_region: Option<i32> = None;
+    // A `#[cfg(test)]` has been seen and its item not yet identified.
+    let mut pending_gate = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let is_doc_or_comment = trimmed.starts_with("//");
+        let code = if is_doc_or_comment {
+            String::new()
+        } else {
+            without_literals(line.split("//").next().unwrap_or(""))
+        };
+        let opens = code.matches('{').count() as i32;
+        let closes = code.matches('}').count() as i32;
+
+        if !is_doc_or_comment && is_cfg_test_attr(line) {
+            pending_gate = true;
+        } else if pending_gate && !code.trim().is_empty() && !trimmed.starts_with("#[") {
+            if opens > closes {
+                // The gated item opens a block: skip until it closes.
+                test_region = test_region.or(Some(depth));
+                pending_gate = false;
+            } else if code.trim_end().ends_with(';') {
+                // A declaration or statement — `mod tests;`, a `use`. It
+                // gates one line and nothing follows it into a block.
+                pending_gate = false;
+            }
+            // Otherwise the item's signature is still open across lines
+            // (a multi-line `fn` header); keep looking for its brace.
+        }
+
+        if test_region.is_none() && !is_doc_or_comment {
+            n += code.matches(".unwrap()").count() + code.matches(".expect(").count();
+        }
+
+        depth += opens - closes;
+        if let Some(started_at) = test_region {
+            if depth <= started_at {
+                test_region = None;
+            }
+        }
+    }
+    n
+}
 
 /// Count occurrences of a bare `unsafe` token per crate, comment lines
 /// stripped, against the ratchet baselines.
@@ -387,109 +497,6 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
             .is_some_and(|stem| stem == "tests" || stem.ends_with("_tests"))
     }
 
-    /// Whether `line` is a `#[cfg(test)]` / `#[cfg(all(test, …))]` attribute.
-    fn is_cfg_test_attr(line: &str) -> bool {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("#[cfg(test)") || trimmed.starts_with("#[cfg(all(test")
-    }
-
-    /// A line with string literals blanked out, so brace counting is not
-    /// thrown off by a `{` inside one. Handles `\"` escapes; a raw string
-    /// carrying an unbalanced brace would still fool it, and there are none.
-    fn without_strings(code: &str) -> String {
-        let mut out = String::with_capacity(code.len());
-        let mut in_string = false;
-        let mut escaped = false;
-        for ch in code.chars() {
-            match (in_string, escaped, ch) {
-                (false, _, '"') => {
-                    in_string = true;
-                    out.push(' ');
-                }
-                (false, _, c) => out.push(c),
-                (true, true, _) => {
-                    escaped = false;
-                    out.push(' ');
-                }
-                (true, false, '\\') => {
-                    escaped = true;
-                    out.push(' ');
-                }
-                (true, false, '"') => {
-                    in_string = false;
-                    out.push(' ');
-                }
-                (true, false, _) => out.push(' '),
-            }
-        }
-        out
-    }
-
-    /// `.unwrap()` / `.expect(` in the production part of one file.
-    ///
-    /// Test code is skipped wherever it is, not merely from a file's first
-    /// `#[cfg(test)]` onwards. That distinction is the whole difficulty: the
-    /// gate sits on an inline `mod tests {` in most files, but on a plain
-    /// `mod tests;` DECLARATION in `memory/mod.rs`, and on a bare struct
-    /// forty lines further down the same file. Stopping at the first one seen
-    /// skips the rest of the file and reports a tree that is clean because it
-    /// was not looked at.
-    ///
-    /// So a `#[cfg(test)]` starts a skipped region only when the item it gates
-    /// opens a block, and that region ends when the braces close it. A gated
-    /// declaration or statement — anything ending in `;` — skips nothing.
-    ///
-    /// Doc comments are skipped throughout: `///` examples are compiled and
-    /// run as tests, and `unwrap` is how an example says "assume this worked".
-    fn production_panics(text: &str) -> usize {
-        let mut n = 0;
-        let mut depth: i32 = 0;
-        // Depth the innermost `#[cfg(test)]` item was opened at, if any.
-        let mut test_region: Option<i32> = None;
-        // A `#[cfg(test)]` has been seen and its item not yet identified.
-        let mut pending_gate = false;
-
-        for line in text.lines() {
-            let trimmed = line.trim_start();
-            let is_doc_or_comment = trimmed.starts_with("//");
-            let code = if is_doc_or_comment {
-                String::new()
-            } else {
-                without_strings(line.split("//").next().unwrap_or(""))
-            };
-            let opens = code.matches('{').count() as i32;
-            let closes = code.matches('}').count() as i32;
-
-            if !is_doc_or_comment && is_cfg_test_attr(line) {
-                pending_gate = true;
-            } else if pending_gate && !code.trim().is_empty() && !trimmed.starts_with("#[") {
-                if opens > closes {
-                    // The gated item opens a block: skip until it closes.
-                    test_region = test_region.or(Some(depth));
-                    pending_gate = false;
-                } else if code.trim_end().ends_with(';') {
-                    // A declaration or statement — `mod tests;`, a `use`. It
-                    // gates one line and nothing follows it into a block.
-                    pending_gate = false;
-                }
-                // Otherwise the item's signature is still open across lines
-                // (a multi-line `fn` header); keep looking for its brace.
-            }
-
-            if test_region.is_none() && !is_doc_or_comment {
-                n += code.matches(".unwrap()").count() + code.matches(".expect(").count();
-            }
-
-            depth += opens - closes;
-            if let Some(started_at) = test_region {
-                if depth <= started_at {
-                    test_region = None;
-                }
-            }
-        }
-        n
-    }
-
     fn scan_dir(
         dir: &std::path::Path,
         unsafe_tokens: &mut usize,
@@ -550,24 +557,14 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
             &mut blanket_dead_code,
             &mut panics,
         )?;
-        let panic_baseline = PRODUCTION_PANIC_EXCEPTIONS
-            .iter()
-            .find(|(dir, _)| dir == rel)
-            .map_or(PRODUCTION_PANIC_BASELINE, |(_, baseline)| *baseline);
-        if panics > panic_baseline {
+        if panics > PRODUCTION_PANIC_BASELINE {
             return Err(format!(
                 "doctrine ratchets: {rel} has {panics} `.unwrap()`/`.expect(…)` outside test \
-                 code, baseline is {panic_baseline}. A library crate returns its \
+                 code, baseline is {PRODUCTION_PANIC_BASELINE}. A library crate returns its \
                  failures; it does not abort its caller's process. If the value truly cannot \
                  be absent, say so in a type — the 52 removed to reach this baseline were all \
                  claims some nearby code had already proved."
             ));
-        }
-        if panics < panic_baseline {
-            println!(
-                "    {rel}: {panics} production `.unwrap()`/`.expect(…)` (< baseline \
-                 {panic_baseline} — tighten PRODUCTION_PANIC_EXCEPTIONS in this commit)"
-            );
         }
         total_panics += panics;
         if *rel == "rusty_box/src" {
@@ -1135,5 +1132,60 @@ mod tests {
     #[test]
     fn parse_ci_rejects_unknown() {
         assert!(parse_ci_args(&["--bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn a_character_literal_is_neither_a_brace_nor_a_string() {
+        let code =
+            without_literals(r#"if c == '{' || c == '}' || c == '"' { found.expect("x") }"#);
+        assert_eq!(code.matches('{').count(), 1);
+        assert_eq!(code.matches('}').count(), 1);
+        assert!(code.contains("found.expect("));
+    }
+
+    #[test]
+    fn an_escaped_character_literal_runs_to_its_closing_quote() {
+        let code = without_literals(
+            r#"match c { '\'' => 1, '\\' => 2, '\u{7D}' => 3, b'{' => 4, _ => v.unwrap() }"#,
+        );
+        assert_eq!(code.matches('{').count(), 1);
+        assert_eq!(code.matches('}').count(), 1);
+        assert!(code.contains("v.unwrap()"));
+    }
+
+    #[test]
+    fn a_lifetime_or_a_label_is_kept() {
+        let line = "fn first<'a>(s: &'a [u8], l: &'static str) -> &'a u8 { 'outer: loop { break 'outer; } }";
+        assert_eq!(without_literals(line), line);
+    }
+
+    #[test]
+    fn a_test_module_holding_brace_and_quote_literals_stays_test_code() {
+        let source = r##"
+fn production(value: Option<u8>) -> u8 {
+    value.expect("counted")
+}
+
+fn first<'a>(bytes: &'a [u8]) -> &'a u8 {
+    bytes.first().unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    fn closes(c: char) -> bool {
+        c == '}'
+    }
+
+    fn quotes(c: char) -> bool {
+        c == '"' || c == '\'' || c == '\\'
+    }
+
+    #[test]
+    fn a_test() {
+        Some(1).expect("not counted");
+    }
+}
+"##;
+        assert_eq!(production_panics(source), 2);
     }
 }

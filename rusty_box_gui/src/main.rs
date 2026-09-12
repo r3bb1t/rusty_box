@@ -87,29 +87,69 @@ fn print_result(result: Result<rusty_box_gui::RunSummary, rusty_box_gui::RunErro
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
-    use eframe::wasm_bindgen::JsCast as _;
-
-    eframe::WebLogger::init(log::LevelFilter::Debug).ok();
+    if let Err(error) = eframe::WebLogger::init(log::LevelFilter::Debug) {
+        web_sys::console::warn_1(
+            &format!("rusty_box_gui: the log does not reach this console: {error}").into(),
+        );
+    }
     let web_options = eframe::WebOptions::default();
 
     wasm_bindgen_futures::spawn_local(async {
-        let document = web_sys::window()
-            .expect("No window")
-            .document()
-            .expect("No document");
-        let canvas = document
-            .get_element_by_id("the_canvas_id")
-            .expect("Failed to find #the_canvas_id canvas element")
-            .dyn_into::<web_sys::HtmlCanvasElement>()
-            .expect("Element is not a canvas");
-
-        eframe::WebRunner::new()
-            .start(
-                canvas,
-                web_options,
-                Box::new(|cc| Ok(Box::new(rusty_box_gui::app::WebShellApp::new(cc)))),
-            )
-            .await
-            .expect("Failed to start eframe");
+        if let Err(failure) = start_web_shell(web_options).await {
+            report_web_start_failure(&failure);
+        }
     });
+}
+
+/// Starts the browser shell on the page's `#the_canvas_id` canvas, or says
+/// why it could not.
+#[cfg(target_arch = "wasm32")]
+async fn start_web_shell(web_options: eframe::WebOptions) -> Result<(), String> {
+    use eframe::wasm_bindgen::JsCast as _;
+
+    let document = web_sys::window()
+        .ok_or("the page has no window")?
+        .document()
+        .ok_or("the window has no document")?;
+    let canvas = document
+        .get_element_by_id("the_canvas_id")
+        .ok_or("the page has no #the_canvas_id element")?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|_| "#the_canvas_id is not a canvas")?;
+
+    eframe::WebRunner::new()
+        .start(
+            canvas,
+            web_options,
+            Box::new(|cc| Ok(Box::new(rusty_box_gui::app::WebShellApp::new(cc)))),
+        )
+        .await
+        .map_err(|error| format!("eframe did not start: {error:?}"))
+}
+
+/// Puts a start-up failure where the person at the page can find it. A
+/// browser `main` has no caller to return it to, so it goes to the browser
+/// console, and replaces the page's content when there is a document to
+/// write it into.
+#[cfg(target_arch = "wasm32")]
+fn report_web_start_failure(failure: &str) {
+    let message = format!("rusty_box_gui could not start: {failure}");
+    web_sys::console::error_1(&message.as_str().into());
+    let Some(body) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.body())
+    else {
+        return;
+    };
+    // The page paints a dark ground, so the notice names its own colour.
+    if let Err(error) = body.set_attribute(
+        "style",
+        "color: #E6EDF3; font: 14px monospace; padding: 1em; white-space: pre-wrap",
+    ) {
+        web_sys::console::error_2(
+            &"rusty_box_gui: the failure notice could not be styled:".into(),
+            &error,
+        );
+    }
+    body.set_text_content(Some(&message));
 }
