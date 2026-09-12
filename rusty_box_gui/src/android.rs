@@ -288,6 +288,11 @@ impl eframe::App for AndroidShellApp {
         }
         self.draw_keypad(&ctx, safe_rect);
     }
+
+    /// The activity is closing: the shell writes every edit still in memory.
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        eframe::App::on_exit(&mut self.shell, gl);
+    }
 }
 
 /// Typed text waiting to be sent from the key pad.
