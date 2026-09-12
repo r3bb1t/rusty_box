@@ -232,6 +232,16 @@ not stored closures.
   Because implementations live outside this crate, the trait gains only
   defaulted methods — a new required method would break every one of them.
 
+**Foreign trait signatures — the shape is the foreign crate's, not chosen here:**
+
+- `&mut dyn eframe::Storage` in `eframe::App::save`, implemented by `NativeShellApp`
+  (`rusty_box_gui/src/app.rs`) and `AndroidShellApp` (`rusty_box_gui/src/android.rs`). The
+  trait declares the parameter erased; the override is what makes eframe's suspend call on
+  Android — the last call before the process can be killed — write the VM library.
+- `Closure<dyn FnMut(web_sys::Event)>` in `rusty_box_gui/src/app.rs`, the browser shell's
+  file-input change handler (`WebFilePicker`): `wasm_bindgen::closure::Closure` names its
+  callback by a `dyn` trait object.
+
 **Not erasure, but exempted from R0 by name:**
 
 - `ExecCtx::slice_parts` — internal 6-tuple destructure (R0 scope note).
@@ -240,6 +250,12 @@ not stored closures.
 - no-alloc `Emulator` is `!Send` — documented caller-outlives contract (R6).
 - `rusty_box_whp_sys` — the host-FFI leaf, permanently outside R1's `forbid` end state; the
   section below is its registration.
+- `rusty_box_gui/src/android.rs` — the Android front end's JNI calls on the Java VM and the
+  NativeActivity that android-activity hands the process. It is host FFI in a crate that is
+  not a named leaf: the crate inherits the workspace's `deny(unsafe_code)`, this one file lifts
+  it with an `#![expect]` naming the invariant owner, every Java call goes through its single
+  helper `with_activity`, and `xtask/src/ci.rs` holds the crate's count under its own baseline.
+  Moving the calls into a leaf crate of their own is the open alternative.
 
 ## The registered R1 exception: the host-FFI leaf
 

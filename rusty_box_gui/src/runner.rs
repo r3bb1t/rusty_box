@@ -44,6 +44,10 @@ pub struct RunSummary {
 
 pub fn run(args: Args) -> Result<RunSummary, RunError> {
     let config = crate::config::load_config(&args)?;
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    if config.display == DisplayBackend::Egui {
+        return run_shell(Some(LaunchVm::from_args(&args, config)));
+    }
     run_resolved(config)
 }
 
@@ -51,7 +55,13 @@ pub fn run_resolved(config: ResolvedConfig) -> Result<RunSummary, RunError> {
     match config.display {
         DisplayBackend::Headless => run_with_gui(config, NoGui::new(), None, true),
         DisplayBackend::Terminal => run_with_gui(config, TermGui::new(), None, true),
-        #[cfg(feature = "gui-egui")]
+        #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+        DisplayBackend::Egui => run_shell(Some(LaunchVm {
+            name: "Command line".to_owned(),
+            config,
+            source: LaunchSource::Flags,
+        })),
+        #[cfg(all(feature = "gui-egui", target_os = "android"))]
         DisplayBackend::Egui => run_egui(config),
     }
 }
@@ -104,22 +114,34 @@ pub(crate) fn startup_disk_action(config: &ResolvedConfig) -> Option<String> {
     }
 }
 
+/// Checks the media files `config` names and, when `create_startup_disks`,
+/// provisions its startup disk. Every file this call does not create — the
+/// CD-ROM, and a disk that is not created here — is checked first, so a
+/// power-on refused for a missing one leaves an `overwrite` disk as it was.
 fn prepare_configured_media_files(
     config: &ResolvedConfig,
     create_startup_disks: bool,
 ) -> Result<(), RunError> {
+    let creates_disk =
+        create_startup_disks && config.disk.as_ref().is_some_and(|disk| disk.creation.is_some());
+    if let Some(cdrom) = &config.cdrom {
+        verify_media_file("CD-ROM", &cdrom.path)?;
+    }
+    if let (Some(disk), false) = (&config.disk, creates_disk) {
+        verify_media_file("disk", &disk.path)?;
+    }
     if create_startup_disks {
         create_configured_disk_images(config)?;
     }
-    if let Some(disk) = &config.disk {
+    if let (Some(disk), true) = (&config.disk, creates_disk) {
         verify_media_file("disk", &disk.path)?;
-    }
-    if let Some(cdrom) = &config.cdrom {
-        verify_media_file("CD-ROM", &cdrom.path)?;
     }
     Ok(())
 }
 
+/// Prepares `config` and runs it on `gui` in one step, provisioning its
+/// startup disk when `create_startup_disks`: the headless and terminal runs,
+/// which provision the disk at every run.
 fn run_with_gui<G>(
     config: ResolvedConfig,
     gui: G,
@@ -129,18 +151,47 @@ fn run_with_gui<G>(
 where
     G: BxGui + 'static,
 {
+    let prepared = prepare_run(config, create_startup_disks)?;
+    run_prepared(prepared, gui, stop_flag)
+}
+
+/// A run's inputs, read and checked, with its startup disk provisioned.
+/// Everything a configuration is refused for before its disk is touched is
+/// refused before one of these exists.
+struct PreparedRun {
+    config: ResolvedConfig,
+    bios_data: Vec<u8>,
+    vga_data: Option<Vec<u8>>,
+    slots: MediaSlots,
+}
+
+/// Reads and checks `config`'s files and, when `create_startup_disks`,
+/// provisions its startup disk — last, so a configuration refused here for
+/// an engine this build lacks, a blank or unreadable BIOS or a media slot
+/// that does not resolve has erased nothing.
+fn prepare_run(
+    config: ResolvedConfig,
+    create_startup_disks: bool,
+) -> Result<PreparedRun, RunError> {
     init_tracing(config.log_level);
 
-    // A build without the hypervisor path cannot honour `--engine whp`. It
-    // refuses before reading or creating anything, for the reason a host
-    // without the platform is refused below: a run that silently went to the
-    // interpreter under the hypervisor's name is a measurement nobody can
-    // trust.
+    // A build without the hypervisor path cannot honour the `whp` engine,
+    // wherever it was chosen — `--engine`, a VM file's `emulator.engine`, or
+    // the shell's Engine setting. It refuses before reading or creating
+    // anything, for the reason a host without the platform is refused in
+    // `run_prepared`: a run that silently went to the interpreter under the
+    // hypervisor's name is a measurement nobody can trust.
     #[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
     if config.engine == Engine::Whp {
         return Err(RunError::NoHypervisorEngine);
     }
 
+    // A blank BIOS path names no file: the blank "New VM" powered on as it
+    // is. It is refused as the missing setting it is, before a read that
+    // could only report an empty path.
+    if config.bios.as_os_str().is_empty() {
+        return Err(RunError::MissingBios);
+    }
     let bios_data = read_required_file("BIOS", &config.bios)?;
     let vga_data = match &config.vga_bios {
         Some(path) => Some(read_vga_bios_file(path)?),
@@ -148,6 +199,31 @@ where
     };
     let slots = resolve_media_slots(&config)?;
     prepare_configured_media_files(&config, create_startup_disks)?;
+
+    Ok(PreparedRun {
+        config,
+        bios_data,
+        vga_data,
+        slots,
+    })
+}
+
+/// Builds the machine `prepared` describes and runs it on `gui` until it
+/// stops or `stop_flag` is raised.
+fn run_prepared<G>(
+    prepared: PreparedRun,
+    gui: G,
+    stop_flag: Option<Arc<AtomicBool>>,
+) -> Result<RunSummary, RunError>
+where
+    G: BxGui + 'static,
+{
+    let PreparedRun {
+        config,
+        bios_data,
+        vga_data,
+        slots,
+    } = prepared;
 
     let emulator_config = EmulatorConfig {
         // The GUI exposes both sizes, so a configuration that asks for a
@@ -451,8 +527,303 @@ fn cpu_params_for_engine(config: &ResolvedConfig) -> BxParams {
     config.cpu_capabilities.narrow(config.cpu_params.clone())
 }
 
+/// What the egui shell opens on: the VM library, the VM it shows first, and
+/// the notice it opens with.
 #[cfg(feature = "gui-egui")]
-fn run_egui(config: ResolvedConfig) -> Result<RunSummary, RunError> {
+pub struct ShellStart {
+    pub library: crate::library::VmLibrary,
+    pub opening: ShellOpening,
+    /// The message the shell shows when it opens, telling the user what the
+    /// start could not do — a bundled VM it could not import, say. `None`
+    /// when the start did everything it set out to.
+    pub notice: Option<String>,
+}
+
+/// The VM the shell shows first.
+#[cfg(feature = "gui-egui")]
+#[derive(Debug)]
+pub enum ShellOpening {
+    /// The library VM the shell showed last, or a blank temporary "New VM"
+    /// when the library holds none.
+    LastShown,
+    /// This library VM, selected: the one whose file the command line named
+    /// on its own.
+    LibraryVm(crate::library::VmStem),
+    /// The machine the command line described, shown first in the VM list
+    /// as a temporary VM, selected, and written to the library only when the
+    /// user keeps it.
+    Launch(LaunchVm),
+}
+
+/// The machine the command line described, as the shell lists it.
+#[cfg(feature = "gui-egui")]
+#[derive(Debug)]
+pub struct LaunchVm {
+    pub name: String,
+    pub config: ResolvedConfig,
+    pub source: LaunchSource,
+}
+
+/// Where the command line's machine came from.
+#[cfg(feature = "gui-egui")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchSource {
+    /// Exactly the file `--config` named: nothing else on the command line
+    /// changes the machine it describes ([`Args::names_only_a_config_file`]).
+    ConfigFile(PathBuf),
+    /// Flags, alone or over a `--config` file.
+    Flags,
+}
+
+#[cfg(feature = "gui-egui")]
+impl LaunchVm {
+    /// Named after the `--config` file it came from, or "Command line" when
+    /// flags alone described it.
+    pub fn from_args(args: &Args, config: ResolvedConfig) -> Self {
+        let name = args
+            .config
+            .as_deref()
+            .and_then(|path| path.file_stem())
+            .and_then(|stem| stem.to_str())
+            .map_or_else(|| "Command line".to_owned(), str::to_owned);
+        let source = match &args.config {
+            Some(path) if args.names_only_a_config_file() => {
+                LaunchSource::ConfigFile(path.clone())
+            }
+            Some(_) | None => LaunchSource::Flags,
+        };
+        Self {
+            name,
+            config,
+            source,
+        }
+    }
+}
+
+/// Opens the desktop shell on the per-user VM library, with `launch` — what
+/// the command line described, if anything — as [`shell_start`] places it.
+///
+/// Only a library folder that cannot be found or created refuses the
+/// launch: with no folder there is nothing to show. A library that cannot be
+/// read opens as empty, with the error as a notice in the window, and a
+/// bundled VM that cannot be imported is left out, with the reason as the
+/// shell's opening notice: no subscriber is installed this early, so a log
+/// line alone would reach nobody.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+pub fn run_shell(launch: Option<LaunchVm>) -> Result<RunSummary, RunError> {
+    let dir = crate::library::default_library_dir().ok_or(RunError::NoLibraryFolder)?;
+    let library = crate::library::VmLibrary::open(dir)?;
+    run_egui(shell_start(library, launch))
+}
+
+/// What the shell opens on over `library` for `launch`, and the notice it
+/// opens with: for the library VM the command line named, why the next
+/// launch will not open on it; for any other opening, what a first run's
+/// import could not do.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn shell_start(library: crate::library::VmLibrary, launch: Option<LaunchVm>) -> ShellStart {
+    let opening = shell_opening(&library, launch);
+    let notice = match &opening {
+        ShellOpening::LibraryVm(stem) => remember_named_vm(&library, stem),
+        ShellOpening::LastShown | ShellOpening::Launch(_) => first_run_notice(&library),
+    };
+    ShellStart {
+        library,
+        opening,
+        notice,
+    }
+}
+
+/// The rule for a `--config` file that is already in the library: when the
+/// command line named that file and nothing else that changes the machine
+/// (`LaunchSource::ConfigFile`), and the file is one of `library`'s own VM
+/// files (`VmLibrary::stem_of_file`), the shell opens on that library VM
+/// rather than on a temporary copy of it. Anything else the command line
+/// described stays a temporary VM, the only shape that can carry an
+/// override such as `--memory-mib 64` without writing it back to the file.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn shell_opening(library: &crate::library::VmLibrary, launch: Option<LaunchVm>) -> ShellOpening {
+    let Some(launch) = launch else {
+        return ShellOpening::LastShown;
+    };
+    let stem = match &launch.source {
+        LaunchSource::ConfigFile(path) => library.stem_of_file(path),
+        LaunchSource::Flags => None,
+    };
+    match stem {
+        Some(stem) => ShellOpening::LibraryVm(stem),
+        None => ShellOpening::Launch(launch),
+    }
+}
+
+/// Records `stem`, the library VM the command line named, as the VM the
+/// next launch shows. The shell selects it either way, so a record that
+/// cannot be written costs only the next launch, and the message says so.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn remember_named_vm(
+    library: &crate::library::VmLibrary,
+    stem: &crate::library::VmStem,
+) -> Option<String> {
+    match library.remember_selected(stem) {
+        Ok(()) => None,
+        Err(error) => {
+            let message = format!(
+                "{} is shown, but the next launch will not open on it: {error}",
+                library.path_of(stem).display()
+            );
+            tracing::warn!("{message}");
+            Some(message)
+        }
+    }
+}
+
+/// A first run's empty library gets the bundled VM ([`import_bundled_vm`]);
+/// returns what that could not do. A library that cannot be read is not
+/// imported into: the shell reads the library itself and shows that error as
+/// its notice, so nothing is said twice.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn first_run_notice(library: &crate::library::VmLibrary) -> Option<String> {
+    match library.is_empty() {
+        Ok(true) => import_bundled_vm(library),
+        Ok(false) => None,
+        Err(error) => {
+            tracing::warn!(
+                "the VM library could not be read, so no bundled VM is imported: {error}"
+            );
+            None
+        }
+    }
+}
+
+/// A first run's empty library gets the VM a `rusty_box.toml` beside the
+/// executable describes, and the shell opens on it. Returns the message the
+/// shell shows when that could not be done in full; an executable whose
+/// folder cannot be found has nothing bundled to import.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn import_bundled_vm(library: &crate::library::VmLibrary) -> Option<String> {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            let message = format!(
+                "The executable could not be located, so no bundled VM was imported: {error}"
+            );
+            tracing::warn!("{message}");
+            return Some(message);
+        }
+    };
+    let exe_dir = exe.parent()?;
+    import_bundled_vm_from(library, exe_dir)
+}
+
+/// Imports the VM `exe_dir`'s `rusty_box.toml` describes and records it as
+/// the VM the shell shows next. Nothing here refuses the launch: the message
+/// returned says what could not be done — the file did not load or the
+/// library could not take it, or it was imported but the record of it could
+/// not be written, so the next launch will not open on it — and the shell
+/// opens on the library as it stands. `None` when there was nothing to
+/// import or everything was done.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn import_bundled_vm_from(library: &crate::library::VmLibrary, exe_dir: &Path) -> Option<String> {
+    let stem = match library.import_bundled_vm(exe_dir) {
+        Ok(Some(stem)) => stem,
+        Ok(None) => return None,
+        Err(error) => {
+            let message = format!(
+                "The VM bundled in {} was not imported: {error}",
+                exe_dir.display()
+            );
+            tracing::warn!("{message}");
+            return Some(message);
+        }
+    };
+    match library.remember_selected(&stem) {
+        Ok(()) => None,
+        Err(error) => {
+            let message = format!(
+                "The VM bundled in {} was imported, but the next launch will not open on it: \
+                 {error}",
+                exe_dir.display()
+            );
+            tracing::warn!("{message}");
+            Some(message)
+        }
+    }
+}
+
+/// The desktop shell: a window of its own over the emulator thread.
+#[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+fn run_egui(start: ShellStart) -> Result<RunSummary, RunError> {
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1180.0, 760.0])
+            .with_min_inner_size([960.0, 600.0])
+            .with_drag_and_drop(true)
+            .with_title("Rusty Box Workstation"),
+        ..Default::default()
+    };
+    run_egui_shell(start, native_options, crate::app::NativeShellApp::new)
+}
+
+/// On Android the shell needs the activity, which only `android_main` holds,
+/// so the egui backend starts from [`crate::android::main`] and never here.
+#[cfg(all(feature = "gui-egui", target_os = "android"))]
+fn run_egui(_config: ResolvedConfig) -> Result<RunSummary, RunError> {
+    Err(RunError::Gui {
+        message: "on Android the egui shell starts from the NativeActivity entry point, \
+                  rusty_box_gui::android::main"
+            .to_owned(),
+    })
+}
+
+/// The file eframe's storage is opened on, in the app's storage. Nothing is
+/// ever put in the storage, so the file is never written: the storage exists
+/// so that eframe calls `App::save` when the activity's window is taken away
+/// (`Event::Suspended`, from `surfaceDestroyed`), the last call the shell
+/// gets before Android may kill the process, and the shell writes the edits
+/// still in memory then. Without a storage eframe makes no such call, and
+/// without a path of its own it would look for a per-user folder, which
+/// Android has none of.
+#[cfg(all(feature = "gui-egui", target_os = "android"))]
+const EFRAME_STATE_FILE: &str = "eframe.ron";
+
+/// The shell a phone shows for `app`, the activity NativeActivity handed this
+/// process; `storage` is the app's private storage.
+#[cfg(all(feature = "gui-egui", target_os = "android"))]
+pub(crate) fn run_android_shell(
+    start: ShellStart,
+    app: crate::android::AndroidApp,
+    storage: &Path,
+) -> Result<RunSummary, RunError> {
+    let native_options = eframe::NativeOptions {
+        android_app: Some(app.clone()),
+        persistence_path: Some(storage.join(EFRAME_STATE_FILE)),
+        persist_window: false,
+        ..Default::default()
+    };
+    run_egui_shell(start, native_options, move |cc, shared, command_tx, start| {
+        crate::android::AndroidShellApp::new(cc, shared, command_tx, start, app)
+    })
+}
+
+/// Runs an egui shell over the emulator thread. `make_app` builds the
+/// window's app from the display the two threads share, the channel the
+/// shell starts machines through, and the VM list the shell opens on.
+#[cfg(feature = "gui-egui")]
+fn run_egui_shell<A, F>(
+    start: ShellStart,
+    native_options: eframe::NativeOptions,
+    make_app: F,
+) -> Result<RunSummary, RunError>
+where
+    A: eframe::App + 'static,
+    F: FnOnce(
+            &eframe::CreationContext<'_>,
+            Arc<Mutex<SharedDisplay>>,
+            mpsc::Sender<crate::app::NativeEmulatorCommand>,
+            ShellStart,
+        ) -> A
+        + 'static,
+{
     let shared = Arc::new(Mutex::new(SharedDisplay::new()));
     let (command_tx, command_rx) = mpsc::channel();
     let shared_for_emu = Arc::clone(&shared);
@@ -462,26 +833,11 @@ fn run_egui(config: ResolvedConfig) -> Result<RunSummary, RunError> {
         .spawn(move || run_egui_emulator_loop(command_rx, shared_for_emu))
         .map_err(|source| RunError::ThreadStart { source })?;
 
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([960.0, 600.0])
-            .with_drag_and_drop(true)
-            .with_title("Rusty Box Workstation"),
-        ..Default::default()
-    };
     let shared_for_gui = Arc::clone(&shared);
     let gui_result = eframe::run_native(
         "Rusty Box Workstation",
         native_options,
-        Box::new(move |cc| {
-            Ok(Box::new(crate::app::NativeShellApp::new(
-                cc,
-                shared_for_gui,
-                command_tx,
-                config,
-            )))
-        }),
+        Box::new(move |cc| Ok(Box::new(make_app(cc, shared_for_gui, command_tx, start)))),
     );
 
     signal_egui_stop(&shared);
@@ -494,20 +850,37 @@ fn run_egui(config: ResolvedConfig) -> Result<RunSummary, RunError> {
     emulator_result
 }
 
+/// `config`'s startup-disk creation, when it has one.
+#[cfg(feature = "gui-egui")]
+fn startup_disk_creation(config: &ResolvedConfig) -> Option<&crate::config::ResolvedDiskCreation> {
+    config.disk.as_ref()?.creation.as_ref()
+}
+
 #[cfg(feature = "gui-egui")]
 fn run_egui_emulator_loop(
     command_rx: mpsc::Receiver<crate::app::NativeEmulatorCommand>,
     shared: Arc<Mutex<SharedDisplay>>,
 ) -> Result<RunSummary, RunError> {
     let mut instructions_executed = Some(0u64);
-    let mut create_startup_disks = true;
+    // The overwrite creations provisioned this session, by path. An overwrite
+    // creation erases its file at the first power-on of the session that
+    // uses the path and at no later one, so a file the user agreed to have
+    // erased is erased once; the shell asks about each such file once per
+    // session by the same rule (`NativeShellApp::overwrite_confirmed`). A
+    // plain creation is provisioned at every power-on and never recorded
+    // here: it only creates a missing file and reuses a valid one
+    // (`disk_images::provision_startup_disk`), so it erases nothing.
+    let mut provisioned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     while let Ok(command) = command_rx.recv() {
         match command {
             crate::app::NativeEmulatorCommand::Start(config) => loop {
                 let stop_flag = prepare_egui_run(&shared);
+                let creation = startup_disk_creation(&config);
+                let create_startup_disks = creation
+                    .is_some_and(|creation| !creation.overwrite || !provisioned.contains(&creation.path));
                 // Warn in the window that a (possibly slow) disk allocation is
-                // about to happen, before run_with_gui blocks on it. Reusing an
+                // about to happen, before the run blocks on it. Reusing an
                 // existing image returns None here (instant, no warning).
                 if create_startup_disks {
                     if let Some(status) = startup_disk_action(&config) {
@@ -517,19 +890,25 @@ fn run_egui_emulator_loop(
                     }
                 }
                 let bridge = BridgeGui::new(Arc::clone(&shared));
-                let summary = match run_with_gui(
-                    config.clone(),
-                    bridge,
-                    Some(stop_flag),
-                    create_startup_disks,
-                ) {
+                let run = prepare_run(config.clone(), create_startup_disks).and_then(|prepared| {
+                    // The disk is provisioned once `prepare_run` returns, and
+                    // the run after it can still fail, so an overwrite path is
+                    // recorded here and not after the run: a later power-on
+                    // must not erase the file a second time.
+                    provisioned.extend(
+                        creation
+                            .filter(|creation| creation.overwrite)
+                            .map(|creation| creation.path.clone()),
+                    );
+                    run_prepared(prepared, bridge, Some(stop_flag))
+                });
+                let summary = match run {
                     Ok(summary) => summary,
                     Err(error) => {
                         record_egui_error(&shared, &error);
                         break;
                     }
                 };
-                create_startup_disks = false;
                 // A total is a total only while every run counted. One run on
                 // the hypervisor makes the sum a guess, and a guess is not
                 // reported as a count.
@@ -561,7 +940,11 @@ fn prepare_egui_run(shared: &Arc<Mutex<SharedDisplay>>) -> Arc<AtomicBool> {
         display.reset_requested = false;
         display.runtime_error = None;
         display.startup_status = None;
+        // Input queued while the machine was off belongs to no run: serial
+        // text typed, or keys tapped on the phone's key pad, are not replayed
+        // into the next boot.
         drop(display.drain_serial_input());
+        display.pending_keys.clear();
         Arc::clone(&display.stop_flag)
     } else {
         Arc::new(AtomicBool::new(false))
@@ -820,7 +1203,6 @@ mod tests {
             disk: None::<ResolvedDisk>,
             cdrom: None::<ResolvedCdrom>,
             log_level: LogLevel::Warn,
-            config_path: None,
             vga_mode: None,
             pci_vga: false,
         })
@@ -887,7 +1269,6 @@ mod tests {
             }),
             cdrom: None::<ResolvedCdrom>,
             log_level: LogLevel::Warn,
-            config_path: None,
             vga_mode: None,
             pci_vga: false,
         }
@@ -949,7 +1330,7 @@ mod tests {
         remove_test_file(&disk);
     }
 
-    /// `--engine whp` in a build that carries no hypervisor path is refused,
+    /// The `whp` engine in a build that carries no hypervisor path is refused,
     /// and refused before the startup disk the configuration names is created.
     #[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
     #[test]
@@ -972,6 +1353,280 @@ mod tests {
             "expected the WHP engine to be refused, got {result:?}"
         );
         assert!(!disk_exists, "a refused run created its startup disk");
+    }
+
+    /// The blank "New VM" powered on as it is: refused as the missing setting
+    /// it is, not as a failed read of an empty path.
+    #[test]
+    fn a_blank_bios_path_is_a_missing_bios_not_a_failed_read() {
+        let mut config = crate::config::blank_config();
+        config.display = DisplayBackend::Headless;
+
+        let error = run_resolved(config).unwrap_err();
+
+        assert!(
+            matches!(error, RunError::MissingBios),
+            "expected MissingBios, got {error:?}"
+        );
+    }
+
+    /// A scratch folder, removed when the test ends.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    struct ScratchDir {
+        path: PathBuf,
+    }
+
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    impl ScratchDir {
+        fn new(name: &str) -> Self {
+            let path = unique_temp_path(name).with_extension("");
+            fs::create_dir_all(&path).expect("create scratch dir");
+            Self { path }
+        }
+    }
+
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.path) {
+                eprintln!("could not remove {}: {error}", self.path.display());
+            }
+        }
+    }
+
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn the_bundled_vm_is_imported_and_is_the_vm_shown_next() {
+        let library_dir = ScratchDir::new("rusty-box-gui-bundled-library");
+        let exe_dir = ScratchDir::new("rusty-box-gui-bundled-exe");
+        let library = crate::library::VmLibrary::open(library_dir.path.clone()).expect("open");
+        fs::write(
+            exe_dir.path.join(crate::config::DEFAULT_CONFIG_FILE),
+            "[rom]\nbios = \"bios.bin\"\n\n[cdrom]\npath = \"boot.iso\"\n",
+        )
+        .expect("write the bundled file");
+
+        let message = import_bundled_vm_from(&library, &exe_dir.path);
+
+        assert_eq!(message, None);
+        let contents = library.load().expect("load");
+        assert_eq!(contents.vms.len(), 1);
+        assert_eq!(contents.vms[0].name, crate::library::DEFAULT_VM_NAME);
+        assert_eq!(library.last_selected(), Some(contents.vms[0].stem.clone()));
+    }
+
+    /// A VM that was imported while only the record of it could not be
+    /// written is in the library, and the message says which half failed.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_bundled_vm_whose_record_cannot_be_written_is_imported_and_says_so() {
+        let library_dir = ScratchDir::new("rusty-box-gui-unrecorded-library");
+        let exe_dir = ScratchDir::new("rusty-box-gui-unrecorded-exe");
+        let library = crate::library::VmLibrary::open(library_dir.path.clone()).expect("open");
+        fs::write(
+            exe_dir.path.join(crate::config::DEFAULT_CONFIG_FILE),
+            "[rom]\nbios = \"bios.bin\"\n\n[cdrom]\npath = \"boot.iso\"\n",
+        )
+        .expect("write the bundled file");
+        // A folder where the record file goes: the rename over it fails.
+        fs::create_dir(library_dir.path.join(".last")).expect("block the record");
+
+        let message = import_bundled_vm_from(&library, &exe_dir.path).expect("a message");
+
+        assert!(message.contains("was imported, but"), "{message:?}");
+        assert!(message.contains("will not open on it"), "{message:?}");
+        assert!(message.contains(&exe_dir.path.display().to_string()), "{message:?}");
+        assert_eq!(library.load().expect("load").vms.len(), 1);
+        assert_eq!(library.last_selected(), None);
+    }
+
+    /// One bad bundled file does not stop the shell from opening: the
+    /// library stays empty and the launch goes on.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_bundled_file_that_does_not_load_leaves_the_library_empty() {
+        let library_dir = ScratchDir::new("rusty-box-gui-bad-bundled-library");
+        let exe_dir = ScratchDir::new("rusty-box-gui-bad-bundled-exe");
+        let library = crate::library::VmLibrary::open(library_dir.path.clone()).expect("open");
+        fs::write(
+            exe_dir.path.join(crate::config::DEFAULT_CONFIG_FILE),
+            "memory_mib = [",
+        )
+        .expect("write the bundled file");
+
+        let message = import_bundled_vm_from(&library, &exe_dir.path).expect("a message");
+
+        assert!(message.contains("was not imported"), "{message:?}");
+        assert!(message.contains(&exe_dir.path.display().to_string()), "{message:?}");
+        assert!(library.load().expect("load").is_empty());
+        assert_eq!(library.last_selected(), None);
+    }
+
+    /// The launch VM is listed under its file's name, and under "Command
+    /// line" when flags alone described it.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn the_launch_vm_is_named_after_its_config_file() {
+        let from_file = Args {
+            config: Some(PathBuf::from("machines").join("Alpine edge.toml")),
+            ..Args::default()
+        };
+        let from_flags = Args {
+            cdrom: Some(PathBuf::from("boot.iso")),
+            ..Args::default()
+        };
+
+        let config = disk_creation_config(PathBuf::from("disk.img"), false);
+        assert_eq!(
+            LaunchVm::from_args(&from_file, config.clone()).name,
+            "Alpine edge"
+        );
+        assert_eq!(LaunchVm::from_args(&from_flags, config).name, "Command line");
+    }
+
+    /// The launch VM the command line `line` describes, resolved the way
+    /// `main` resolves it.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    fn launch_from_command_line(line: &[&str]) -> LaunchVm {
+        use clap::Parser;
+        let args = Args::try_parse_from(line).expect("the command line parses");
+        let config = crate::config::load_config(&args).expect("the command line resolves");
+        LaunchVm::from_args(&args, config)
+    }
+
+    /// A library in `dir` holding one VM, "Alpine", for a command line to
+    /// name by its file.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    fn alpine_library(dir: &ScratchDir) -> crate::library::VmLibrary {
+        let library = crate::library::VmLibrary::open(dir.path.clone()).expect("open");
+        let mut config = disk_creation_config(PathBuf::from("disk.img"), false);
+        config.display = DisplayBackend::Egui;
+        library.create("Alpine", &config).expect("create");
+        library
+    }
+
+    /// `--config` naming a file of the library, and nothing else: the shell
+    /// opens on that library VM, remembered for the next launch, and there
+    /// is no temporary VM to open.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_library_file_named_alone_opens_as_that_library_vm() {
+        let dir = ScratchDir::new("rusty-box-gui-named-library");
+        let library = alpine_library(&dir);
+        let stem = crate::library::VmStem::parse("alpine").expect("a stem");
+        let file = library.path_of(&stem);
+        let launch = launch_from_command_line(&[
+            "rusty_box_gui",
+            "--config",
+            file.to_str().expect("a UTF-8 scratch path"),
+        ]);
+        assert_eq!(launch.source, LaunchSource::ConfigFile(file.clone()));
+
+        let start = shell_start(library.clone(), Some(launch));
+
+        assert!(
+            matches!(&start.opening, ShellOpening::LibraryVm(named) if named == &stem),
+            "opening: {:?}",
+            start.opening
+        );
+        assert_eq!(start.notice, None);
+        assert_eq!(library.last_selected(), Some(stem.clone()));
+
+        // A spelling that differs in case names the same file on Windows.
+        if cfg!(windows) {
+            let shouted = dir.path.join("ALPINE.TOML");
+            let launch = launch_from_command_line(&[
+                "rusty_box_gui",
+                "--config",
+                shouted.to_str().expect("a UTF-8 scratch path"),
+            ]);
+            let start = shell_start(library.clone(), Some(launch));
+            assert!(
+                matches!(&start.opening, ShellOpening::LibraryVm(named) if named == &stem),
+                "opening: {:?}",
+                start.opening
+            );
+        }
+    }
+
+    /// The same library file with an override beside it is a temporary VM:
+    /// only a temporary VM carries the override without writing it back.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_library_file_with_an_override_opens_as_a_temporary_vm() {
+        let dir = ScratchDir::new("rusty-box-gui-overridden-library");
+        let library = alpine_library(&dir);
+        let file = dir.path.join("alpine.toml");
+        let file_arg = file.to_str().expect("a UTF-8 scratch path");
+        let before = fs::read_to_string(&file).expect("read");
+
+        let with_memory =
+            launch_from_command_line(&["rusty_box_gui", "--config", file_arg, "--memory-mib", "64"]);
+        let start = shell_start(library.clone(), Some(with_memory));
+        assert!(
+            matches!(&start.opening, ShellOpening::Launch(vm)
+                if vm.config.memory_mib == 64 && vm.source == LaunchSource::Flags),
+            "opening: {:?}",
+            start.opening
+        );
+
+        let with_engine = launch_from_command_line(&[
+            "rusty_box_gui",
+            "--config",
+            file_arg,
+            "--engine",
+            "interpreter",
+        ]);
+        let start = shell_start(library.clone(), Some(with_engine));
+        assert!(
+            matches!(&start.opening, ShellOpening::Launch(_)),
+            "opening: {:?}",
+            start.opening
+        );
+
+        assert_eq!(library.last_selected(), None);
+        assert_eq!(fs::read_to_string(&file).expect("read"), before);
+    }
+
+    /// A file outside the library is a temporary VM, even one that is a copy
+    /// of a library file under the same name.
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_config_file_elsewhere_opens_as_a_temporary_vm() {
+        let dir = ScratchDir::new("rusty-box-gui-library-beside-elsewhere");
+        let elsewhere = ScratchDir::new("rusty-box-gui-elsewhere");
+        let library = alpine_library(&dir);
+        let copy = elsewhere.path.join("alpine.toml");
+        fs::copy(dir.path.join("alpine.toml"), &copy).expect("copy the file out");
+
+        let launch = launch_from_command_line(&[
+            "rusty_box_gui",
+            "--config",
+            copy.to_str().expect("a UTF-8 scratch path"),
+        ]);
+        let start = shell_start(library.clone(), Some(launch));
+
+        assert!(
+            matches!(&start.opening, ShellOpening::Launch(vm)
+                if vm.name == "alpine" && vm.source == LaunchSource::ConfigFile(copy.clone())),
+            "opening: {:?}",
+            start.opening
+        );
+        assert_eq!(library.last_selected(), None);
+    }
+
+    #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
+    #[test]
+    fn a_folder_with_nothing_bundled_imports_nothing() {
+        let library_dir = ScratchDir::new("rusty-box-gui-unbundled-library");
+        let exe_dir = ScratchDir::new("rusty-box-gui-unbundled-exe");
+        let library = crate::library::VmLibrary::open(library_dir.path.clone()).expect("open");
+
+        let message = import_bundled_vm_from(&library, &exe_dir.path);
+
+        assert_eq!(message, None);
+        assert!(library.load().expect("load").is_empty());
+        assert_eq!(library.last_selected(), None);
     }
 
     #[test]
@@ -1028,6 +1683,50 @@ mod tests {
         );
     }
 
+    /// Keys tapped on the phone's key pad while the machine is off are not
+    /// replayed into the next boot.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn prepare_egui_run_drops_keys_queued_while_stopped() {
+        use rusty_box::gui::{HostInputEvent, HostInputSink};
+        use rusty_box::iodev::scancodes::BxKey;
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        assert!(shared
+            .lock()
+            .unwrap()
+            .push(HostInputEvent::Key(BxKey::Enter, true)));
+        assert_eq!(shared.lock().unwrap().pending_keys.len(), 1);
+
+        drop(prepare_egui_run(&shared));
+
+        assert!(shared.lock().unwrap().pending_keys.is_empty());
+    }
+
+    /// A power-on refused for a missing CD-ROM leaves an `overwrite` disk as
+    /// it was: the CD-ROM is checked before the disk is recreated.
+    #[test]
+    fn a_missing_cdrom_is_refused_before_an_overwrite_disk_is_recreated() {
+        let disk = unique_temp_path("rusty-box-gui-kept-overwrite-disk");
+        let missing_cdrom = unique_temp_path("rusty-box-gui-missing-cdrom");
+        fs::write(&disk, [0xABu8; 1024]).unwrap();
+        let mut config = disk_creation_config(disk.clone(), true);
+        config.cdrom = Some(ResolvedCdrom {
+            path: missing_cdrom.clone(),
+            channel: 1,
+            drive: 0,
+        });
+
+        let error = prepare_configured_media_files(&config, true).unwrap_err();
+
+        let after = fs::read(&disk);
+        remove_test_file(&disk);
+        assert!(
+            matches!(&error, RunError::FileRead { kind: "CD-ROM", path, .. } if path == &missing_cdrom),
+            "{error:?}"
+        );
+        assert_eq!(after.unwrap(), vec![0xABu8; 1024]);
+    }
+
     #[cfg(feature = "gui-egui")]
     #[test]
     fn a_failed_start_reports_no_startup_step_in_progress() {
@@ -1077,7 +1776,6 @@ mod tests {
                 disk: None::<ResolvedDisk>,
                 cdrom: None::<ResolvedCdrom>,
                 log_level: LogLevel::Warn,
-                config_path: None,
                 vga_mode: None,
                 pci_vga: false,
             }))
@@ -1094,6 +1792,241 @@ mod tests {
             .runtime_error
             .as_deref()
             .is_some_and(|message| message.contains("Emulator startup failed")));
+    }
+
+    /// A BIOS the loop's machine builds with: one byte at a fresh path.
+    #[cfg(feature = "gui-egui")]
+    fn loop_bios() -> PathBuf {
+        let bios = unique_temp_path("rusty-box-gui-loop-bios");
+        fs::write(&bios, [0xEA]).unwrap();
+        bios
+    }
+
+    /// A VM the loop runs to the end: its BIOS is the one byte at `bios`
+    /// and, `max_instructions` being 0, its run retires nothing.
+    #[cfg(feature = "gui-egui")]
+    fn runnable_config(disk: PathBuf, overwrite: bool, bios: &Path) -> ResolvedConfig {
+        let mut config = disk_creation_config(disk, overwrite);
+        config.display = DisplayBackend::Egui;
+        config.bios = bios.to_path_buf();
+        config
+    }
+
+    /// Runs the loop over `configs`, one Start each, until the channel
+    /// closes, and returns the loop's result with what the display holds.
+    #[cfg(feature = "gui-egui")]
+    fn run_loop_over(configs: Vec<ResolvedConfig>) -> (Result<RunSummary, RunError>, Option<String>) {
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (command_tx, command_rx) = mpsc::channel();
+        for config in configs {
+            command_tx
+                .send(crate::app::NativeEmulatorCommand::Start(config))
+                .unwrap();
+        }
+        drop(command_tx);
+
+        let result = run_egui_emulator_loop(command_rx, Arc::clone(&shared));
+
+        let runtime_error = shared.lock().unwrap().runtime_error.clone();
+        (result, runtime_error)
+    }
+
+    /// Polls `holds` every ten milliseconds until it does, or fails the test
+    /// after thirty seconds.
+    #[cfg(feature = "gui-egui")]
+    fn wait_until(mut holds: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !holds() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the condition did not hold within 30 s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Each VM's startup disk is created at its first power-on of the
+    /// session, not only the disk of the VM that was powered on first.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn the_loop_creates_each_vms_startup_disk_at_its_first_start() {
+        let bios = loop_bios();
+        let first = unique_temp_path("rusty-box-gui-loop-first-disk");
+        let second = unique_temp_path("rusty-box-gui-loop-second-disk");
+
+        let (result, runtime_error) = run_loop_over(vec![
+            runnable_config(first.clone(), false, &bios),
+            runnable_config(second.clone(), false, &bios),
+        ]);
+
+        let first_len = fs::metadata(&first).map(|metadata| metadata.len());
+        let second_len = fs::metadata(&second).map(|metadata| metadata.len());
+        remove_test_file(&first);
+        remove_test_file(&second);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(runtime_error, None);
+        assert_eq!(first_len.unwrap(), 10_321_920);
+        assert_eq!(second_len.unwrap(), 10_321_920);
+    }
+
+    /// A second VM's `overwrite` disk is recreated at its first power-on:
+    /// the erase the shell asked the user about happens.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn the_loop_recreates_a_second_vms_overwrite_disk_at_its_first_start() {
+        let bios = loop_bios();
+        let first = unique_temp_path("rusty-box-gui-loop-first-disk");
+        let second = unique_temp_path("rusty-box-gui-loop-second-overwrite-disk");
+        fs::write(&second, [0u8; 1024]).unwrap();
+
+        let (result, runtime_error) = run_loop_over(vec![
+            runnable_config(first.clone(), false, &bios),
+            runnable_config(second.clone(), true, &bios),
+        ]);
+
+        let second_len = fs::metadata(&second).map(|metadata| metadata.len());
+        remove_test_file(&first);
+        remove_test_file(&second);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(runtime_error, None);
+        assert_eq!(second_len.unwrap(), 10_321_920);
+    }
+
+    /// The loop on a thread of its own, as the shell runs it, fed one Start
+    /// at a time.
+    #[cfg(feature = "gui-egui")]
+    struct LoopThread {
+        commands: mpsc::Sender<crate::app::NativeEmulatorCommand>,
+        shared: Arc<Mutex<SharedDisplay>>,
+        thread: std::thread::JoinHandle<Result<RunSummary, RunError>>,
+    }
+
+    #[cfg(feature = "gui-egui")]
+    impl LoopThread {
+        fn spawn() -> Self {
+            let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+            let (commands, command_rx) = mpsc::channel();
+            let loop_shared = Arc::clone(&shared);
+            let thread = std::thread::Builder::new()
+                .name("rusty_box_gui_test_emulator".to_owned())
+                .stack_size(16 * 1024 * 1024)
+                .spawn(move || run_egui_emulator_loop(command_rx, loop_shared))
+                .expect("spawn the loop");
+            Self {
+                commands,
+                shared,
+                thread,
+            }
+        }
+
+        /// Powers `config` on and waits for its run to end: the run is over
+        /// once its startup disk `disk` exists and the machine no longer
+        /// runs, and the loop then waits for the next command.
+        fn start_and_wait(&self, config: ResolvedConfig, disk: &Path) {
+            self.commands
+                .send(crate::app::NativeEmulatorCommand::Start(config))
+                .unwrap();
+            wait_until(|| disk.exists() && !self.shared.lock().unwrap().emu_running);
+        }
+
+        /// Powers `config` on, lets the loop finish every command it was
+        /// sent, and returns its result with the error the display holds.
+        fn start_and_finish(self, config: ResolvedConfig) -> (Result<RunSummary, RunError>, Option<String>) {
+            let Self {
+                commands,
+                shared,
+                thread,
+            } = self;
+            commands
+                .send(crate::app::NativeEmulatorCommand::Start(config))
+                .unwrap();
+            drop(commands);
+            let result = thread.join().expect("the loop thread");
+            let runtime_error = shared.lock().unwrap().runtime_error.clone();
+            (result, runtime_error)
+        }
+    }
+
+    /// What a guest would have left on the disk at `path`: its first byte
+    /// set to `0xAB`.
+    #[cfg(feature = "gui-egui")]
+    fn mark_first_byte(path: &Path) {
+        let mut contents = fs::read(path).unwrap();
+        contents[0] = 0xAB;
+        fs::write(path, &contents).unwrap();
+    }
+
+    /// An overwrite disk is erased once per session however often its VM is
+    /// powered on: a second Start leaves what the first run left on it.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn the_loop_erases_an_overwrite_disk_once_however_often_its_vm_starts() {
+        let bios = loop_bios();
+        let disk = unique_temp_path("rusty-box-gui-loop-same-disk");
+        let config = runnable_config(disk.clone(), true, &bios);
+        let emulator = LoopThread::spawn();
+
+        emulator.start_and_wait(config.clone(), &disk);
+        mark_first_byte(&disk);
+        let (result, runtime_error) = emulator.start_and_finish(config);
+
+        let after = fs::read(&disk);
+        remove_test_file(&disk);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(runtime_error, None);
+        let after = after.unwrap();
+        assert_eq!(after.len(), 10_321_920);
+        assert_eq!(after[0], 0xAB);
+    }
+
+    /// A plain creation is provisioned at every Start: a disk removed after
+    /// one power-on is there again after the next, and that power-on runs.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn the_loop_provisions_a_plain_disk_at_every_start() {
+        let bios = loop_bios();
+        let disk = unique_temp_path("rusty-box-gui-loop-plain-disk");
+        let config = runnable_config(disk.clone(), false, &bios);
+        let emulator = LoopThread::spawn();
+
+        emulator.start_and_wait(config.clone(), &disk);
+        fs::remove_file(&disk).unwrap();
+        let (result, runtime_error) = emulator.start_and_finish(config);
+
+        let after_len = fs::metadata(&disk).map(|metadata| metadata.len());
+        remove_test_file(&disk);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(runtime_error, None);
+        assert_eq!(after_len.unwrap(), 10_321_920);
+    }
+
+    /// A plain power-on settles nothing for a later overwrite of the same
+    /// file: the overwrite Start that follows erases what the first run
+    /// left, as the shell's confirmation said it would.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn an_overwrite_start_after_a_plain_start_of_the_same_disk_erases_it() {
+        let bios = loop_bios();
+        let disk = unique_temp_path("rusty-box-gui-loop-plain-then-overwrite");
+        let emulator = LoopThread::spawn();
+
+        emulator.start_and_wait(runnable_config(disk.clone(), false, &bios), &disk);
+        mark_first_byte(&disk);
+        let (result, runtime_error) =
+            emulator.start_and_finish(runnable_config(disk.clone(), true, &bios));
+
+        let after = fs::read(&disk);
+        remove_test_file(&disk);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(runtime_error, None);
+        let after = after.unwrap();
+        assert_eq!(after.len(), 10_321_920);
+        assert_eq!(after[0], 0x00, "the overwrite Start left the first run's data");
     }
 
     #[test]

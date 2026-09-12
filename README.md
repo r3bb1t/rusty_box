@@ -50,7 +50,7 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=3500000000 cargo run --release --example a
 cargo xtask ci
 ```
 
-The GUI starts powered off; press **Power on** in the VM bar. It reads `rusty_box.toml` from the current directory, or failing that from its parent, and needs a BIOS path from either `--bios` or `rom.bios` in that file. `--config PATH` loads another file, `--no-config` skips it. [docs/getting-started.md](docs/getting-started.md) walks through the config file and the settings whose meaning is not obvious; [rusty_box_gui/README.md](rusty_box_gui/README.md) covers the shell itself.
+The GUI starts powered off; press **Power on** in the VM bar. It opens on a library of VMs saved in your user profile, lists every one at each launch, and saves each edit when it ends. `--config PATH` opens a file as a temporary VM you can keep in the library, or, for a file already in the library and nothing else on the command line, as that library VM; nothing is read from the current directory, and `--no-config` changes nothing. A machine needs a BIOS path, from `--bios`, `rom.bios` in its file, or the shell's Hardware › Display pane. [docs/getting-started.md](docs/getting-started.md) walks through the config file and the settings whose meaning is not obvious; [rusty_box_gui/README.md](rusty_box_gui/README.md) covers the shell itself.
 
 The repository's `.cargo/config.toml` sets `MAX_INSTRUCTIONS=20000000000` for every cargo command, so the DLX and Alpine examples, which read it, stop after 20 billion instructions unless you override it.
 
@@ -69,7 +69,7 @@ cargo xtask android run
 cargo xtask android screenshot rustybox_android.png
 ```
 
-`cargo xtask android` installs the Android SDK components, Rust target, and `cargo-apk` as needed; copies `~/Downloads/alpine-virt-3.23.3-x86_64.iso` to the ignored `rusty_box_android/assets/alpine.iso`; signs with a generated local dev keystore under your home directory; and uses `adb_client` for install, launch, and screenshots. The first Android crate embeds Alpine with `include_bytes!` for simplicity, does not commit the ISO or signing material, and shows emulated Linux serial logs in the `Linux Serial Log (ttyS0)` panel.
+The APK runs the same `rusty_box_gui` shell as the desktop, laid out for a phone. Its VMs live in a library in the app's storage, its Browse buttons open an on-device file browser, a Keys pad sends the keys a soft keyboard lacks, and the Bochs ROMs travel inside the APK; the ISO a VM boots is chosen on the phone, under Hardware › CD/DVD. `cargo xtask android` installs the Android SDK components, the Rust target and `cargo-apk` as needed; signs with a generated local dev keystore under your home directory; and uses `adb_client` for install, launch and screenshots. See [xtask/README.md](xtask/README.md#android-commands).
 
 ## Execution engines
 
@@ -192,9 +192,8 @@ rusty_box/
 +-- rusty_box_whp_sys/         # Windows Hypervisor Platform FFI leaf (every hypervisor call is confined to its windows.rs)
 +-- rusty_box_whp/             # Safe wrapper over the WHP leaf
 +-- rusty_box_whp_engine/      # Runs a rusty_box machine's guest on WHP
-+-- rusty_box_gui/             # Desktop and browser VM shell (egui): CLI/TOML config, interpreter or WHP engine, disk image creation
++-- rusty_box_gui/             # Desktop, Android and browser VM shell (egui): CLI/TOML config, interpreter or WHP engine, disk image creation
 +-- rusty_box_bximage/         # bximage-compatible disk image creation
-+-- rusty_box_android/         # Android NativeActivity APK frontend
 +-- xtask/                     # Local CI gate (cargo xtask ci) and automation
 +-- examples/rusty_box_web/    # Standalone WASM web demo
 +-- examples/rusty_box_uefi/   # UEFI application (no allocator)

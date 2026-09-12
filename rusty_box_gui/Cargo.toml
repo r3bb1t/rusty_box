@@ -47,13 +47,33 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 egui = { workspace = true, optional = true }
-eframe = { workspace = true, optional = true, features = ["default_fonts", "glow", "inspection"] }
+eframe = { workspace = true, optional = true, features = ["default_fonts", "glow"] }
+
+# The egui inspection protocol, which egui_mcp drives the shell through, rides
+# on accesskit, and eframe offers accesskit on Android only with GameActivity.
+# The APK runs under NativeActivity, so its build leaves inspection out.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { workspace = true, optional = true, features = ["inspection"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rusty_box = { path = "../rusty_box", default-features = false, features = ["std"] }
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 rfd = "0.17.2"
+
+# The Android front end (src/android.rs): NativeActivity through winit — the
+# version eframe drives, named for its `AndroidApp` — logcat, and JNI for the
+# storage permission the file browser needs. `persistence` is the hook for
+# the app going to the background: with a storage to save to, eframe calls
+# `App::save` when the activity's window is taken away, and the shell writes
+# its edits then (src/runner.rs, `run_android_shell`). Nothing is stored
+# through it.
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { workspace = true, optional = true, features = ["android-native-activity", "persistence"] }
+winit = "0.30.13"
+android_logger = "0.15"
+log = "0.4"
+jni = "0.22.4"
 
 # The hypervisor engine is a Windows leaf. Optional and target-gated so the
 # other platforms' builds never resolve it.
@@ -67,4 +87,53 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 log = "0.4"
 web-time = "1"
-web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement", "HtmlInputElement", "HtmlAnchorElement", "Element", "Event", "FileReader", "FileList", "File", "Blob", "Url"] }
+web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement", "HtmlElement", "HtmlInputElement", "HtmlAnchorElement", "Element", "Node", "Event", "FileReader", "FileList", "File", "Blob", "Url", "console"] }
+
+# The APK's native library. NativeActivity loads it and calls its
+# `android_main`; `cargo xtask android build` packages it with cargo-apk, which
+# reads the `package.metadata.android` tables below.
+[[example]]
+name = "rusty_box_gui_android"
+path = "examples/android.rs"
+crate-type = ["cdylib"]
+required-features = ["gui-egui"]
+
+# The workspace's `deny(unsafe_code)`, so every `unsafe` in this crate is a
+# hard error except in `src/android.rs`, which lifts it with an
+# `#![expect(unsafe_code, …)]` naming who owns the invariants: the Java VM and
+# the NativeActivity that android-activity hands the process, reached through
+# JNI. The APK example's `android_main` lifts it for its one unmangled symbol.
+# An `expect` warns when it goes unfulfilled, so the day either stops needing
+# unsafe the lint says so — R1's ratchet, written as a lint; the count itself
+# is held in `xtask/src/ci.rs`.
+[lints]
+workspace = true
+
+[package.metadata.android]
+package = "com.rustybox.android"
+apk_name = "RustyBoxAndroid"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 23
+target_sdk_version = 34
+
+# Shared storage, for the file browser (src/android.rs). Up to Android 10 the
+# browser asks for READ and WRITE at runtime; from Android 11 it asks for "All
+# files access" (MANAGE_EXTERNAL_STORAGE) instead, so READ and WRITE end at 29.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_EXTERNAL_STORAGE"
+max_sdk_version = 29
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WRITE_EXTERNAL_STORAGE"
+max_sdk_version = 29
+[[package.metadata.android.uses_permission]]
+name = "android.permission.MANAGE_EXTERNAL_STORAGE"
+
+[package.metadata.android.application]
+label = "Rusty Box"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar"
+
+[package.metadata.android.application.activity]
+config_changes = "orientation|keyboardHidden|screenSize|screenLayout"
+orientation = "landscape"

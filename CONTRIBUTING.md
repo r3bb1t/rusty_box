@@ -75,9 +75,8 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=3500000000 cargo run --release --example a
 | `rusty_box_whp_sys` | Windows Hypervisor Platform FFI leaf; every host call is confined to `windows.rs` |
 | `rusty_box_whp` | Safe wrapper over the WHP leaf |
 | `rusty_box_whp_engine` | Runs a `rusty_box` machine's guest on WHP |
-| `rusty_box_gui` | The VMware-style egui VM shell (desktop and wasm), with CLI/TOML config and a choice of interpreter or WHP engine |
+| `rusty_box_gui` | The VMware-style egui VM shell (desktop, Android and wasm), with CLI/TOML config and a choice of interpreter or WHP engine |
 | `rusty_box_bximage` | bximage-compatible disk image creation |
-| `rusty_box_android` | Android NativeActivity APK frontend |
 | `xtask` | The `cargo xtask ci` gate, `perf-baseline`, and Android packaging |
 | `rusty_box_web` | Standalone WASM web demo (`examples/rusty_box_web/`) |
 | `rusty_box_uefi` | UEFI application with no allocator (`examples/rusty_box_uefi/`) |

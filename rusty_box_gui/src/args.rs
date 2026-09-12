@@ -2,7 +2,9 @@ use clap::{ArgAction, Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf, str::FromStr};
 
-#[derive(Debug, Clone, Parser)]
+/// The launcher's command line. `Args::default()` is the command line with no
+/// flags: every default below is the one clap gives an absent flag.
+#[derive(Debug, Clone, Default, PartialEq, Parser)]
 #[command(
     name = "rusty_box_gui",
     version,
@@ -17,6 +19,8 @@ pub struct Args {
     )]
     pub config: Option<PathBuf>,
 
+    /// Accepted for compatibility and changes nothing: no config file is
+    /// read unless `--config` names one.
     #[arg(long = "no-config", action = ArgAction::SetTrue)]
     pub no_config: bool,
 
@@ -29,21 +33,23 @@ pub struct Args {
     #[arg(long = "display", value_enum)]
     pub display: Option<DisplayBackend>,
 
-    /// Which engine retires the guest's instructions.
+    /// Which engine retires the guest's instructions. When neither this flag
+    /// nor the file's `emulator.engine` names one, the interpreter.
     ///
     /// `whp` needs a Windows build with `hv-whp` and without `guest-trace`, and
     /// a host with the platform enabled; it is refused rather than silently
     /// downgraded when any of these is missing.
-    #[arg(long = "engine", value_enum, default_value_t = crate::config::Engine::Interpreter)]
-    pub engine: crate::config::Engine,
+    #[arg(long = "engine", value_enum)]
+    pub engine: Option<crate::config::Engine>,
 
-    /// Which processor the machine offers its guest.
+    /// Which processor the machine offers its guest. When neither this flag
+    /// nor the file's `emulator.cpu_capabilities` names one, `preset`.
     ///
     /// `preset` is this port's own model, the same on every host. `host-shared`
     /// narrows it to what this host can also carry, which a machine that may
     /// run on the hypervisor needs.
-    #[arg(long = "cpu-capabilities", value_enum, default_value_t = crate::config::CpuCapabilities::Preset)]
-    pub cpu_capabilities: crate::config::CpuCapabilities,
+    #[arg(long = "cpu-capabilities", value_enum)]
+    pub cpu_capabilities: Option<crate::config::CpuCapabilities>,
 
     #[arg(long = "boot", value_delimiter = ',', num_args = 1..=3, value_enum)]
     pub boot: Vec<BootDevice>,
@@ -116,6 +122,149 @@ pub struct Args {
 
     #[arg(long = "log-level", value_enum)]
     pub log_level: Option<LogLevel>,
+}
+
+impl Args {
+    /// Whether this command line describes a machine to launch: a config file,
+    /// or any flag that sets the machine's firmware, media, memory, processors
+    /// or timing. Without one, the egui shell opens on its VM library alone.
+    /// `--display`, `--log-level`, `--engine`, `--cpu-capabilities` and
+    /// `--no-config` say how to run, not what, so they do not count; a command
+    /// line that sets one of the three run flags [`Self::run_flags`] lists
+    /// without naming a machine is refused, not opened on the library. The
+    /// destructuring is exhaustive, so a new flag must be sorted into one
+    /// group or the other.
+    pub fn names_a_machine(&self) -> bool {
+        let Args {
+            config,
+            no_config: _,
+            bios,
+            vga_bios,
+            display: _,
+            engine: _,
+            cpu_capabilities: _,
+            boot,
+            disk,
+            disk_chs,
+            create_disk,
+            create_disk_size,
+            overwrite_created_disk,
+            cdrom,
+            memory_mib,
+            host_memory_mib,
+            memory_block_kib,
+            ips,
+            max_instructions,
+            smp_quantum,
+            cpuid_freq,
+            sync_realtime,
+            cpus,
+            cpu_sockets,
+            cpu_cores,
+            cpu_threads,
+            pci,
+            no_pci,
+            sync_slowdown,
+            no_sync_slowdown,
+            log_level: _,
+        } = self;
+        config.is_some()
+            || bios.is_some()
+            || vga_bios.is_some()
+            || !boot.is_empty()
+            || disk.is_some()
+            || disk_chs.is_some()
+            || create_disk.is_some()
+            || create_disk_size.is_some()
+            || *overwrite_created_disk
+            || cdrom.is_some()
+            || memory_mib.is_some()
+            || host_memory_mib.is_some()
+            || memory_block_kib.is_some()
+            || ips.is_some()
+            || max_instructions.is_some()
+            || smp_quantum.is_some()
+            || cpuid_freq.is_some()
+            || *sync_realtime
+            || cpus.is_some()
+            || cpu_sockets.is_some()
+            || cpu_cores.is_some()
+            || cpu_threads.is_some()
+            || *pci
+            || *no_pci
+            || *sync_slowdown
+            || *no_sync_slowdown
+    }
+
+    /// The run flags this command line sets, as spelled on it: `--engine`,
+    /// `--cpu-capabilities` and `--log-level`, in that order. Each is one VM's
+    /// own setting, so a command line that sets one but names no machine is
+    /// refused with this list rather than opened on the library with the
+    /// flag dropped. `--display` and `--no-config` are not run flags:
+    /// `--display egui` alone opens the library. The destructuring is
+    /// exhaustive, so a new flag must be sorted here as well as in
+    /// [`Self::names_a_machine`].
+    pub fn run_flags(&self) -> Vec<&'static str> {
+        let Args {
+            config: _,
+            no_config: _,
+            bios: _,
+            vga_bios: _,
+            display: _,
+            engine,
+            cpu_capabilities,
+            boot: _,
+            disk: _,
+            disk_chs: _,
+            create_disk: _,
+            create_disk_size: _,
+            overwrite_created_disk: _,
+            cdrom: _,
+            memory_mib: _,
+            host_memory_mib: _,
+            memory_block_kib: _,
+            ips: _,
+            max_instructions: _,
+            smp_quantum: _,
+            cpuid_freq: _,
+            sync_realtime: _,
+            cpus: _,
+            cpu_sockets: _,
+            cpu_cores: _,
+            cpu_threads: _,
+            pci: _,
+            no_pci: _,
+            sync_slowdown: _,
+            no_sync_slowdown: _,
+            log_level,
+        } = self;
+        let mut flags = Vec::with_capacity(3);
+        if engine.is_some() {
+            flags.push("--engine");
+        }
+        if cpu_capabilities.is_some() {
+            flags.push("--cpu-capabilities");
+        }
+        if log_level.is_some() {
+            flags.push("--log-level");
+        }
+        flags
+    }
+
+    /// Whether `--config` is all this command line says about the machine:
+    /// it names a file, and without it the command line would name no
+    /// machine ([`Self::names_a_machine`]) and set no run flag
+    /// ([`Self::run_flags`]). Such a command line asks for the file exactly
+    /// as it is, so a file already in the VM library opens as that library
+    /// VM. With anything else set, the machine is the file changed by the
+    /// flags, which only a temporary VM can carry without writing them back.
+    pub fn names_only_a_config_file(&self) -> bool {
+        let rest = Args {
+            config: None,
+            ..self.clone()
+        };
+        self.config.is_some() && !rest.names_a_machine() && rest.run_flags().is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize)]
@@ -261,5 +410,95 @@ mod tests {
         let error = "306:0:17".parse::<DiskGeometry>().unwrap_err();
 
         assert_eq!(error, "disk CHS values must be non-zero");
+    }
+
+    /// `Args::default()` stands for the command line with no flags wherever
+    /// the shell resolves a file of its own (`config::resolve_config_in`),
+    /// so it must be exactly what clap makes of an empty command line; a flag
+    /// given a `default_value_t` would part the two.
+    #[test]
+    fn the_default_args_are_the_empty_command_line() {
+        assert_eq!(
+            Args::default(),
+            Args::try_parse_from(["rusty_box_gui"]).expect("the command line parses")
+        );
+    }
+
+    #[test]
+    fn only_a_config_or_a_machine_flag_names_a_machine() {
+        let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
+        assert!(!parse(&["rusty_box_gui"]).names_a_machine());
+        assert!(!parse(&["rusty_box_gui", "--display", "headless", "--log-level", "info"]).names_a_machine());
+        assert!(!parse(&["rusty_box_gui", "--no-config", "--engine", "whp"]).names_a_machine());
+        assert!(parse(&["rusty_box_gui", "--config", "vm.toml"]).names_a_machine());
+        assert!(parse(&["rusty_box_gui", "--cdrom", "a.iso"]).names_a_machine());
+        assert!(parse(&["rusty_box_gui", "--memory-mib", "64"]).names_a_machine());
+    }
+
+    /// A config file alone asks for that file as it is; any machine flag or
+    /// run flag beside it changes the machine the file describes.
+    #[test]
+    fn only_a_config_file_with_nothing_beside_it_names_only_a_config_file() {
+        let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
+        assert!(parse(&["rusty_box_gui", "--config", "vm.toml"]).names_only_a_config_file());
+        assert!(parse(&["rusty_box_gui", "-f", "vm.toml", "--display", "headless"])
+            .names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui"]).names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui", "--cdrom", "a.iso"]).names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--memory-mib", "64"])
+            .names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--cdrom", "a.iso"])
+            .names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--engine", "interpreter"])
+            .names_only_a_config_file());
+        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--log-level", "info"])
+            .names_only_a_config_file());
+    }
+
+    #[test]
+    fn the_run_flags_a_command_line_sets_are_listed_as_spelled() {
+        let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
+        let none: Vec<&'static str> = Vec::new();
+        assert_eq!(parse(&["rusty_box_gui"]).run_flags(), none);
+        assert_eq!(
+            parse(&["rusty_box_gui", "--engine", "interpreter"]).run_flags(),
+            ["--engine"]
+        );
+        assert_eq!(
+            parse(&["rusty_box_gui", "--cpu-capabilities", "host-shared"]).run_flags(),
+            ["--cpu-capabilities"]
+        );
+        assert_eq!(
+            parse(&["rusty_box_gui", "--log-level", "debug"]).run_flags(),
+            ["--log-level"]
+        );
+        assert_eq!(
+            parse(&[
+                "rusty_box_gui",
+                "--log-level",
+                "info",
+                "--cpu-capabilities",
+                "preset",
+                "--engine",
+                "whp",
+            ])
+            .run_flags(),
+            ["--engine", "--cpu-capabilities", "--log-level"]
+        );
+    }
+
+    /// `--display` and `--no-config` say nothing about how a machine runs:
+    /// either alone still opens the library.
+    #[test]
+    fn display_and_no_config_are_not_run_flags() {
+        let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
+        let none: Vec<&'static str> = Vec::new();
+        assert_eq!(parse(&["rusty_box_gui", "--no-config"]).run_flags(), none);
+        assert_eq!(
+            parse(&["rusty_box_gui", "--display", "headless"]).run_flags(),
+            none
+        );
+        #[cfg(feature = "gui-egui")]
+        assert_eq!(parse(&["rusty_box_gui", "--display", "egui"]).run_flags(), none);
     }
 }

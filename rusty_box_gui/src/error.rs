@@ -1,6 +1,37 @@
 use crate::args::BootDevice;
 use std::{io, path::PathBuf};
 
+/// Every place an engine is chosen, named by each message that refuses one.
+/// A shell user cannot pass a flag, so a refusal naming the flag alone would
+/// send them nowhere.
+const ENGINE_CHOSEN_BY: &str = "chosen by `--engine`, a VM file's `emulator.engine`, or the \
+                                shell's Hardware › Processors › Engine";
+
+/// Where the desktop keeps its VM library, and the environment it is found
+/// from (`library::default_library_dir`): a variable counts only when it is
+/// an absolute path.
+#[cfg(windows)]
+const LIBRARY_FOLDER_FROM: &str = "it is kept in `%APPDATA%\\rusty_box\\vms`, and the `APPDATA` \
+                                   environment variable is unset or not an absolute path";
+#[cfg(target_os = "macos")]
+const LIBRARY_FOLDER_FROM: &str = "it is kept in `~/Library/Application Support/rusty_box/vms`, \
+                                   and the `HOME` environment variable is unset or not an \
+                                   absolute path";
+#[cfg(all(not(windows), not(target_os = "macos")))]
+const LIBRARY_FOLDER_FROM: &str = "it is kept in `$XDG_DATA_HOME/rusty_box/vms`, or in \
+                                   `$HOME/.local/share/rusty_box/vms` when `XDG_DATA_HOME` is \
+                                   unset or not an absolute path, and `HOME` is unset or not an \
+                                   absolute path too";
+
+/// `flags`, each in backticks, joined with ", ".
+fn quoted_flags(flags: &[&str]) -> String {
+    flags
+        .iter()
+        .map(|flag| format!("`{flag}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
     #[error("failed to read config {}: {source}", path.display())]
@@ -12,14 +43,24 @@ pub enum RunError {
         source: toml::de::Error,
     },
 
-    #[error("failed to write config {}: {source}", path.display())]
-    ConfigWrite { path: PathBuf, source: io::Error },
-
-    #[error("failed to serialize config: {source}")]
-    ConfigSerialize { source: toml::ser::Error },
-
-    #[error("BIOS path is required; pass --bios PATH or set rom.bios in TOML")]
+    #[error(
+        "BIOS path is required; pass --bios PATH, set rom.bios in the VM file, or set the BIOS \
+         path under Hardware › Display"
+    )]
     MissingBios,
+
+    /// A run flag — `--engine`, `--cpu-capabilities` or `--log-level` — on a
+    /// command line that names no machine. Each is one VM's own setting, so
+    /// the command line is refused with the flags it set rather than opened
+    /// on the library with them dropped.
+    #[error(
+        "{} without a machine: this command line sets how a machine runs but names none. Pass \
+         --config FILE or --bios/--cdrom/--disk…, or set it per VM (in the shell: Hardware › \
+         Processors › Engine, Hardware › Display › Log level; in the VM file: `emulator.engine`, \
+         `emulator.cpu_capabilities`, `logging.level`)",
+        quoted_flags(flags)
+    )]
+    RunFlagsNeedAMachine { flags: Vec<&'static str> },
 
     #[error("{field} must be greater than zero")]
     ZeroValue { field: &'static str },
@@ -60,6 +101,24 @@ pub enum RunError {
 
     #[error("{kind} file is empty: {}", path.display())]
     EmptyFile { kind: &'static str, path: PathBuf },
+
+    #[error("the platform gave the app no storage directory for its ROMs and settings")]
+    NoAppStorage,
+
+    /// The desktop shell found no folder for its VM library: the environment
+    /// the folder is found from names none (`library::default_library_dir`).
+    #[error("found no folder for the VM library: {}", LIBRARY_FOLDER_FROM)]
+    NoLibraryFolder,
+
+    #[error("failed to place the carried {kind} at {}: {source}", path.display())]
+    StageFile {
+        kind: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+
+    #[error(transparent)]
+    Library(#[from] LibraryError),
 
     #[error("VGA BIOS size must be a non-zero multiple of 512 bytes: {} has {len} bytes", path.display())]
     InvalidVgaBiosSize { path: PathBuf, len: usize },
@@ -113,26 +172,29 @@ pub enum RunError {
     Gui { message: String },
 
     #[error(
-        "this host has no Windows Hypervisor Platform, so `--engine whp` cannot run. \
-         Enable it with: dism /Online /Enable-Feature /FeatureName:HypervisorPlatform"
+        "this host has no Windows Hypervisor Platform, so the `whp` engine ({}) cannot run. \
+         Enable it with: dism /Online /Enable-Feature /FeatureName:HypervisorPlatform",
+        ENGINE_CHOSEN_BY
     )]
     NoHypervisor,
 
-    /// `--engine whp` asked of a build that carries no hypervisor path. The
+    /// The `whp` engine asked of a build that carries no hypervisor path. The
     /// path exists only on Windows, with `hv-whp` and without `guest-trace`;
     /// the gate is the one `runner.rs` compiles the engine under.
     #[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
     #[error(
-        "this build has no hypervisor engine, so `--engine whp` cannot run. The engine is built \
-         only for Windows, with the `hv-whp` feature and without `guest-trace`. Use \
-         `--engine interpreter`, or run a build that carries the engine"
+        "this build has no hypervisor engine, so the `whp` engine ({}) cannot run. The engine is \
+         built only for Windows, with the `hv-whp` feature and without `guest-trace`. Choose \
+         `interpreter` there, or run a build that carries the engine",
+        ENGINE_CHOSEN_BY
     )]
     NoHypervisorEngine,
 
     #[error(
-        "max_instructions = {max_instructions} cannot be honoured by `--engine whp`: a processor \
-         on the hypervisor retires instructions the host does not count, so the limit would end \
-         the run at a guess. Remove the limit or use `--engine interpreter`"
+        "max_instructions = {max_instructions} cannot be honoured by the `whp` engine ({}): a \
+         processor on the hypervisor retires instructions the host does not count, so the limit \
+         would end the run at a guess. Remove the limit or choose `interpreter` there",
+        ENGINE_CHOSEN_BY
     )]
     InstructionBudgetOnHypervisor { max_instructions: u64 },
 
@@ -145,4 +207,126 @@ pub enum RunError {
 
     #[error(transparent)]
     Emulator(#[from] rusty_box::Error),
+}
+
+/// What the VM library (`crate::library`) fails at. Defined here, with no
+/// `#[cfg]`, so that `RunError::Library` exists in every build: a public
+/// error has the same variants in every configuration (safety doctrine R0,
+/// shape stability across features), even though the module producing this
+/// one is native-only.
+#[derive(Debug, thiserror::Error)]
+pub enum LibraryError {
+    #[error("failed to create the VM library folder {}: {source}", path.display())]
+    CreateDir { path: PathBuf, source: io::Error },
+
+    #[error("failed to read the VM library {}: {source}", path.display())]
+    Read { path: PathBuf, source: io::Error },
+
+    #[error("failed to write {}: {source}", path.display())]
+    Write { path: PathBuf, source: io::Error },
+
+    #[error("failed to delete {}: {source}", path.display())]
+    Delete { path: PathBuf, source: io::Error },
+
+    #[error("{} is not a file of the VM library in {}", path.display(), dir.display())]
+    OutsideLibrary { path: PathBuf, dir: PathBuf },
+
+    #[error("{text:?} is not a VM file stem: one file name, no folder, not starting with a dot, no whitespace at either end")]
+    InvalidStem { text: String },
+
+    #[error("failed to make {} absolute: {source}", path.display())]
+    AbsolutePath { path: PathBuf, source: io::Error },
+
+    #[error("failed to serialize VM {name}: {source}")]
+    Serialize {
+        name: String,
+        source: toml::ser::Error,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The places an engine is chosen, every one of which a refusal names:
+    /// a shell user cannot pass a flag, so a message naming the flag alone
+    /// would send them nowhere.
+    const ENGINE_SOURCES: [&str; 3] = [
+        "--engine",
+        "emulator.engine",
+        "Hardware › Processors › Engine",
+    ];
+
+    #[test]
+    fn every_engine_refusal_names_each_place_an_engine_is_chosen() {
+        #[cfg(not(all(not(feature = "guest-trace"), feature = "hv-whp", windows)))]
+        let refusals = [
+            RunError::NoHypervisor,
+            RunError::InstructionBudgetOnHypervisor {
+                max_instructions: 1_000,
+            },
+            RunError::NoHypervisorEngine,
+        ];
+        #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+        let refusals = [
+            RunError::NoHypervisor,
+            RunError::InstructionBudgetOnHypervisor {
+                max_instructions: 1_000,
+            },
+        ];
+
+        for refusal in refusals {
+            let text = refusal.to_string();
+            for source in ENGINE_SOURCES {
+                assert!(text.contains(source), "{text:?} does not name {source}");
+            }
+            assert!(!text.contains("--engine whp"), "{text:?} names only the flag");
+        }
+    }
+
+    #[test]
+    fn a_run_flag_refusal_names_every_flag_and_where_a_machine_comes_from() {
+        let text = RunError::RunFlagsNeedAMachine {
+            flags: vec!["--engine", "--cpu-capabilities", "--log-level"],
+        }
+        .to_string();
+
+        for flag in ["`--engine`", "`--cpu-capabilities`", "`--log-level`"] {
+            assert!(text.contains(flag), "{text:?} does not name {flag}");
+        }
+        assert!(text.contains("--config FILE"), "{text:?} does not say how to name a machine");
+        assert!(text.contains("Hardware › Processors › Engine"));
+        assert!(text.contains("Hardware › Display › Log level"));
+        // The shell has no processor-capabilities control; the VM file does.
+        assert!(text.contains("emulator.cpu_capabilities"), "{text:?}");
+    }
+
+    #[test]
+    fn a_missing_bios_is_reported_by_its_first_words_and_points_at_the_shell_setting() {
+        let text = RunError::MissingBios.to_string();
+
+        assert!(text.starts_with("BIOS path is required"), "{text:?}");
+        assert!(text.contains("Hardware › Display"), "{text:?}");
+    }
+
+    /// The desktop's refusal names the environment its library folder is
+    /// found from, and is not the phone's message about app storage.
+    #[test]
+    fn a_missing_library_folder_names_the_environment_it_is_found_from() {
+        let text = RunError::NoLibraryFolder.to_string();
+
+        assert!(text.starts_with("found no folder for the VM library"), "{text:?}");
+        let variables: &[&str] = if cfg!(windows) {
+            &["`APPDATA`"]
+        } else if cfg!(target_os = "macos") {
+            &["`HOME`"]
+        } else {
+            &["`XDG_DATA_HOME`", "`HOME`"]
+        };
+        for variable in variables {
+            assert!(text.contains(variable), "{text:?} does not name {variable}");
+        }
+        assert!(text.contains("not an absolute path"), "{text:?}");
+        assert!(!text.contains("ROMs and settings"), "{text:?}");
+    }
 }
