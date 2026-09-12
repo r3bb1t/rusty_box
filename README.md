@@ -69,7 +69,7 @@ cargo xtask android run
 cargo xtask android screenshot rustybox_android.png
 ```
 
-The APK runs the same `rusty_box_gui` shell as the desktop, laid out for a phone. Its Browse buttons open an on-device file browser, a Keys pad sends the keys a soft keyboard lacks, and the Bochs ROMs and an Alpine ISO travel inside the APK. `cargo xtask android` installs the Android SDK components, the Rust target and `cargo-apk` as needed; copies the ISO (`--iso PATH`, or `~/Downloads/alpine-virt-3.23.3-x86_64.iso`) to the ignored `rusty_box_gui/assets/alpine.iso`; signs with a generated local dev keystore under your home directory; and uses `adb_client` for install, launch and screenshots. See [xtask/README.md](xtask/README.md#android-commands).
+The APK runs the same `rusty_box_gui` shell as the desktop, laid out for a phone. Its Browse buttons open an on-device file browser, a Keys pad sends the keys a soft keyboard lacks, and the Bochs ROMs travel inside the APK; the ISO a VM boots is chosen on the phone, under Hardware › CD/DVD. `cargo xtask android` installs the Android SDK components, the Rust target and `cargo-apk` as needed; signs with a generated local dev keystore under your home directory; and uses `adb_client` for install, launch and screenshots. See [xtask/README.md](xtask/README.md#android-commands).
 
 ## Execution engines
 

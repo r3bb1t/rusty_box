@@ -157,8 +157,8 @@ The same shell runs on an Android phone as an APK. `cargo xtask android build` b
 
 The APK's native library is this crate's `rusty_box_gui_android` example. NativeActivity calls its `android_main`, which hands the activity to `rusty_box_gui::android::main`. From there the phone runs the desktop shell, with the same pages, emulator thread and power-on path, and these differences:
 
-- **Files it carries.** The Bochs BIOS and VGA BIOS are compiled into the APK and written to the app's private storage at launch. A build with the `embedded-alpine` feature, which is what the xtask builds, carries `assets/alpine.iso` the same way and boots it from CD at the first power-on.
-- **Configuration.** VMs live in a library in the app's private storage, one TOML file each, saved on every edit. The first launch creates one VM from the files the APK carries: 256 MiB of guest memory, 300,000,000 instructions per second, and the Alpine CD when the APK was built with `embedded-alpine`. The ☰ button opens the VM list; picking a VM closes it.
+- **Files it carries.** The Bochs BIOS and VGA BIOS are compiled into the APK and written to the app's private storage at launch. No disk image or ISO travels with it.
+- **Configuration.** VMs live in a library in the app's private storage, one TOML file each, saved when an edit ends and when the app goes to the background. The first launch creates one VM from the carried ROMs, with 256 MiB of guest memory, 300,000,000 instructions per second and no CD; choose its ISO under Hardware › CD/DVD. The ☰ button opens the VM list; picking a VM closes it.
 - **Browse.** Every Browse button opens a file browser drawn in the shell. It starts beside the path its field holds, or in the shared Download folder, and a CD/DVD browse lists `.iso` files. On Android 11 and later, reaching all of shared storage needs "All files access": while the app lacks it, the browser opens the app's "All files access" page when it opens, lists what it can, and reads the grant again when you come back. Android 6 to 10 asks for READ and WRITE_EXTERNAL_STORAGE instead. Android 10 itself confines the browser to what scoped storage shows, because cargo-apk cannot declare `requestLegacyExternalStorage`.
 - **Keys.** A Keys button at the bottom right opens a pad that types text into the guest and sends Esc, Tab, Enter, Backspace, the arrows, Ctrl+C and Ctrl+Alt+Del.
 - **Layout.** A page strip replaces the sidebar, the shell stays inside the area the system bars leave free, and number fields step with − and + buttons.
@@ -344,7 +344,6 @@ Validation rules:
 | `hv-whp` | yes | The Windows Hypervisor Platform engine. Its dependency is declared only for Windows targets, so on other targets the feature adds nothing. |
 | `guest-trace` | no | Diagnostic build that records guest process starts and exits, stderr writes, mounts, signals and CPU exceptions to `guest_trace.log` (override the path with `RUSTY_BOX_GUEST_TRACE_LOG`). Single-CPU configurations only; it slows emulation and compiles out the WHP path. |
 | `windows-gui-subsystem` | no | On Windows, builds the binary without a console window. `.github/workflows/gui-artifacts.yml` uses it when it builds the GUI artifacts. |
-| `embedded-alpine` | no | Android only: compiles `assets/alpine.iso` into the APK as the CD a phone boots at its first power-on. `cargo xtask android build` copies the ISO there and turns the feature on. |
 
 ## Public API
 

@@ -23,7 +23,6 @@ const ANDROID_PACKAGE: &str = "com.rustybox.android";
 const LOCAL_SIGNING_PASSWORD: &str = "android";
 const ANDROID_COMPONENT: &str = "com.rustybox.android/android.app.NativeActivity";
 const APK_NAME: &str = "RustyBoxAndroid.apk";
-const ALPINE_ISO_NAME: &str = "alpine-virt-3.23.3-x86_64.iso";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostOs {
@@ -63,7 +62,6 @@ pub enum AndroidAction {
 pub struct AndroidCommand {
     pub action: AndroidAction,
     pub sdk: Option<PathBuf>,
-    pub iso: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
     pub skip_sdk: bool,
 }
@@ -210,8 +208,6 @@ pub fn cargo_apk_build_args() -> Vec<&'static str> {
         "--example",
         "rusty_box_gui_android",
         "--release",
-        "--features",
-        "embedded-alpine",
     ]
 }
 
@@ -245,7 +241,6 @@ fn parse_android_args(args: &[String]) -> Result<AndroidCommand, String> {
     };
 
     let mut sdk = None;
-    let mut iso = None;
     let mut screenshot = None;
     let mut skip_sdk = false;
     let mut index = 1;
@@ -257,13 +252,6 @@ fn parse_android_args(args: &[String]) -> Result<AndroidCommand, String> {
                     .get(index)
                     .ok_or_else(|| "--sdk requires a path".to_string())?;
                 sdk = Some(PathBuf::from(value));
-            }
-            "--iso" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| "--iso requires a path".to_string())?;
-                iso = Some(PathBuf::from(value));
             }
             "--screenshot" => {
                 index += 1;
@@ -293,7 +281,6 @@ fn parse_android_args(args: &[String]) -> Result<AndroidCommand, String> {
     Ok(AndroidCommand {
         action,
         sdk,
-        iso,
         screenshot,
         skip_sdk,
     })
@@ -335,7 +322,6 @@ fn prepare_android_build(context: &AndroidContext, command: &AndroidCommand) -> 
     if !command.skip_sdk {
         ensure_android_sdk(context)?;
     }
-    copy_alpine_iso(context, command.iso.as_deref())?;
     ensure_rust_tools(context)?;
     ensure_release_keystore(context)?;
     Ok(())
@@ -475,65 +461,6 @@ fn sdk_package_marker(context: &AndroidContext, package: &str) -> Option<PathBuf
                 .join("source.properties"),
         ),
         _ => None,
-    }
-}
-
-fn copy_alpine_iso(context: &AndroidContext, explicit_iso: Option<&Path>) -> Result<(), String> {
-    step("Copying Alpine ISO asset");
-    let destination = context
-        .repo
-        .join("rusty_box_gui")
-        .join("assets")
-        .join("alpine.iso");
-    let source = match explicit_iso {
-        Some(source) if source.exists() => Some(source.to_path_buf()),
-        Some(source) => {
-            return Err(format!(
-                "explicit Alpine ISO path does not exist: {}",
-                source.display()
-            ));
-        }
-        None => {
-            let downloads = context.home.join("Downloads").join(ALPINE_ISO_NAME);
-            if downloads.exists() {
-                Some(downloads)
-            } else {
-                let fallback = context
-                    .repo
-                    .join("examples")
-                    .join("rusty_box_uefi")
-                    .join("alpine.iso");
-                fallback.exists().then_some(fallback)
-            }
-        }
-    };
-
-    match source {
-        Some(source) => {
-            if source != destination {
-                if let Some(parent) = destination.parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|error| format!("create {}: {error}", parent.display()))?;
-                }
-                fs::copy(&source, &destination).map_err(|error| {
-                    format!(
-                        "copy Alpine ISO from {} to {}: {error}",
-                        source.display(),
-                        destination.display()
-                    )
-                })?;
-            }
-            println!("Copied {}", destination.display());
-            Ok(())
-        }
-        None if destination.exists() => {
-            println!("Using existing {}", destination.display());
-            Ok(())
-        }
-        None => Err(format!(
-            "missing Alpine ISO; pass --iso PATH or place {ALPINE_ISO_NAME} in {}",
-            context.home.join("Downloads").display()
-        )),
     }
 }
 
@@ -884,7 +811,7 @@ fn keytool_program(host: HostOs) -> PathBuf {
 
 fn usage() -> String {
     format!(
-        "Usage:\n  cargo xtask android build [--sdk PATH] [--iso PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--iso PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline"
+        "Usage:\n  cargo xtask android build [--sdk PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline"
     )
 }
 
@@ -941,7 +868,6 @@ mod tests {
             XtaskCommand::Android(AndroidCommand {
                 action: AndroidAction::Run,
                 sdk: None,
-                iso: None,
                 screenshot: Some(PathBuf::from("screen.png")),
                 skip_sdk: false,
             })
@@ -967,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn apk_build_args_are_release_embedded_alpine() {
+    fn apk_build_args_are_release_with_no_feature() {
         assert_eq!(
             cargo_apk_build_args(),
             vec![
@@ -978,8 +904,6 @@ mod tests {
                 "--example",
                 "rusty_box_gui_android",
                 "--release",
-                "--features",
-                "embedded-alpine",
             ]
         );
         assert_eq!(
@@ -992,56 +916,5 @@ mod tests {
                 "com.rustybox.android/android.app.NativeActivity",
             ]
         );
-    }
-    #[test]
-    fn copy_alpine_iso_rejects_missing_explicit_path_without_fallback() {
-        let root = std::env::temp_dir().join(format!(
-            "rusty_box_xtask_iso_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time before Unix epoch")
-                .as_nanos()
-        ));
-        let repo = root.join("repo");
-        let home = root.join("home");
-        let fallback = repo
-            .join("examples")
-            .join("rusty_box_uefi")
-            .join("alpine.iso");
-        let destination = repo
-            .join("rusty_box_gui")
-            .join("assets")
-            .join("alpine.iso");
-        fs::create_dir_all(fallback.parent().expect("fallback parent"))
-            .expect("create fallback dir");
-        fs::write(&fallback, b"fallback").expect("write fallback ISO");
-        fs::create_dir_all(destination.parent().expect("destination parent"))
-            .expect("create destination dir");
-        fs::write(&destination, b"existing").expect("write existing destination ISO");
-
-        let explicit = root.join("missing").join("explicit.iso");
-        let context = AndroidContext {
-            host: HostOs::Linux,
-            repo,
-            home,
-            sdk: root.join("sdk"),
-            ndk: root.join("ndk"),
-            path: std::ffi::OsString::new(),
-        };
-
-        let error = copy_alpine_iso(&context, Some(&explicit))
-            .expect_err("missing explicit ISO should not use fallback or destination");
-
-        assert!(
-            error.contains(&explicit.display().to_string()),
-            "error {error:?} did not mention explicit path {}",
-            explicit.display()
-        );
-        assert_eq!(
-            fs::read(&destination).expect("read destination ISO"),
-            b"existing".to_vec()
-        );
-        fs::remove_dir_all(&root).expect("clean up test directory");
     }
 }

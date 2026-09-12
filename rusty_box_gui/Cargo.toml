@@ -37,10 +37,6 @@ guest-trace = []
 # `cfg(windows)`, so enabling the feature elsewhere resolves to nothing, and
 # every use of it is additionally gated on `windows`.
 hv-whp = ["dep:rusty_box_whp_engine"]
-# Android: bake `assets/alpine.iso` into the APK as the CD a phone boots at its
-# first power-on. Off by default, so no other build needs the ISO; `cargo xtask
-# android build` copies the ISO into place and turns this on.
-embedded-alpine = []
 
 [dependencies]
 rusty_box_bximage = { path = "../rusty_box_bximage" }

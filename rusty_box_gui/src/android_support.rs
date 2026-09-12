@@ -4,10 +4,10 @@
 //! is given. The module compiles for Android, which uses it, and for the
 //! host's tests, which pin it.
 
-use crate::config::{load_toml_file, resolve_config_in, CdromToml, FileConfig, DEFAULT_CONFIG_FILE};
+use crate::config::{load_toml_file, resolve_config_in, FileConfig, DEFAULT_CONFIG_FILE};
 use crate::error::RunError;
 use crate::library::{VmLibrary, VmStem, DEFAULT_VM_NAME};
-use crate::{BootDevice, DisplayBackend};
+use crate::DisplayBackend;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -153,25 +153,19 @@ fn holds_exactly(path: &Path, bytes: &[u8]) -> io::Result<bool> {
     Ok(true)
 }
 
-/// The files the APK carries, placed in the app's storage, and what a phone
+/// The ROMs the APK carries, placed in the app's storage, and what a phone
 /// gives a VM made from them alone.
 pub(crate) struct CarriedMachine {
-    /// What a VM made from the carried files alone is called.
-    pub(crate) name: &'static str,
     pub(crate) bios: PathBuf,
     pub(crate) vga_bios: PathBuf,
-    /// The CD such a VM boots first: the Alpine ISO in a build with
-    /// `embedded-alpine`, none otherwise.
-    pub(crate) cdrom: Option<PathBuf>,
     pub(crate) memory_mib: u32,
     pub(crate) ips: u32,
 }
 
 impl CarriedMachine {
     /// `file` with the carried ROMs and the phone's sizes where it names
-    /// none, the display a phone has, and — when a CD is carried and the file
-    /// names none — that CD, booted first unless the file orders the boot
-    /// itself.
+    /// none, and the display a phone has. Its CD is the file's own or none:
+    /// the APK carries no ISO.
     fn fill(&self, mut file: FileConfig) -> FileConfig {
         if file.rom.bios.is_none() {
             file.rom.bios = Some(self.bios.clone());
@@ -186,17 +180,6 @@ impl CarriedMachine {
             file.emulator.ips = Some(self.ips);
         }
         file.display.backend = Some(DisplayBackend::Egui);
-        let carried_cd = self.cdrom.as_ref().filter(|_| file.cdrom.is_none());
-        if let Some(cdrom) = carried_cd {
-            file.cdrom = Some(CdromToml {
-                path: Some(cdrom.clone()),
-                channel: None,
-                drive: None,
-            });
-            if file.boot.order.is_empty() {
-                file.boot.order = vec![BootDevice::Cdrom];
-            }
-        }
         file
     }
 }
@@ -217,11 +200,11 @@ pub(crate) fn needs_first_vm(library: &VmLibrary) -> bool {
 /// Gives the empty library its first VM and records it as the one the shell
 /// opens on. The VM is the one the settings a build before the library saved
 /// in `rusty_box.toml` under `storage` describe, `carried` filling in what
-/// the file leaves out; with no such file, a VM made from `carried` alone.
-/// The file is left where it is: the library never reads it again. Returns
-/// what could not be done, in one
+/// the file leaves out; with no such file, a VM made from `carried` alone,
+/// called [`DEFAULT_VM_NAME`], with no CD. The file is left where it is: the
+/// library never reads it again. Returns what could not be done, in one
 /// message for the shell to show — the settings did not import, so the VM
-/// was made from the carried files instead; no VM could be made; the VM was
+/// was made from the carried ROMs instead; no VM could be made; the VM was
 /// made but the record of it was not written, so the next launch will not
 /// open on it — and `None` when everything was done.
 pub(crate) fn seed_first_vm(
@@ -240,10 +223,7 @@ pub(crate) fn seed_first_vm(
         match imported {
             Ok(stem) => Some(stem),
             Err(error) => {
-                problems.push(format!(
-                    "The settings saved in {} were not imported: {error}.",
-                    saved.display()
-                ));
+                problems.push(format!("The saved settings were not imported: {error}."));
                 None
             }
         }
@@ -254,7 +234,7 @@ pub(crate) fn seed_first_vm(
         Some(stem) => Ok(stem),
         None => add_first_vm(
             library,
-            carried.name,
+            DEFAULT_VM_NAME,
             carried.fill(FileConfig::default()),
             library.dir(),
         ),
@@ -421,14 +401,13 @@ mod tests {
         fs::remove_dir_all(&root).expect("remove scratch dir");
     }
 
-    /// What the APK carries, as placed under `storage`, with the Alpine CD.
+    /// The ROMs the APK carries, as placed under `storage`, and the phone's
+    /// sizes.
     fn carried_machine(storage: &Path) -> CarriedMachine {
         let carried = storage.join("carried");
         CarriedMachine {
-            name: "Alpine",
             bios: carried.join("BIOS-bochs-latest"),
             vga_bios: carried.join("VGABIOS-lgpl-latest.bin"),
-            cdrom: Some(carried.join("alpine.iso")),
             memory_mib: 256,
             ips: 300_000_000,
         }
@@ -476,8 +455,10 @@ mod tests {
         fs::remove_dir_all(&storage).expect("remove scratch dir");
     }
 
+    /// The APK carries no ISO: the seeded VM has no CD, and the user picks
+    /// one in the shell.
     #[test]
-    fn with_no_saved_settings_the_first_vm_is_made_from_the_carried_files() {
+    fn with_no_saved_settings_the_first_vm_is_made_from_the_carried_roms_with_no_cd() {
         let storage = scratch_dir("seed_carried");
         let library = phone_library(&storage);
         let machine = carried_machine(&storage);
@@ -488,38 +469,15 @@ mod tests {
         let contents = library.load().expect("load");
         assert_eq!(contents.vms.len(), 1);
         let vm = &contents.vms[0];
-        assert_eq!(vm.name, "Alpine");
+        assert_eq!(vm.name, DEFAULT_VM_NAME);
         assert_eq!(vm.config.memory_mib, 256);
         assert_eq!(vm.config.ips, 300_000_000);
         assert_eq!(vm.config.bios, machine.bios);
         assert_eq!(vm.config.vga_bios, Some(machine.vga_bios.clone()));
         assert_eq!(vm.config.display, DisplayBackend::Egui);
-        assert_eq!(
-            vm.config.cdrom.as_ref().map(|cdrom| cdrom.path.clone()),
-            machine.cdrom
-        );
-        assert_eq!(vm.config.boot_order, [BootDevice::Cdrom]);
+        assert_eq!(vm.config.cdrom, None);
+        assert!(vm.config.boot_order.is_empty());
         assert_eq!(library.last_selected(), Some(vm.stem.clone()));
-        fs::remove_dir_all(&storage).expect("remove scratch dir");
-    }
-
-    #[test]
-    fn a_build_without_a_cd_seeds_a_vm_of_the_default_name_with_none() {
-        let storage = scratch_dir("seed_no_cd");
-        let library = phone_library(&storage);
-        let machine = CarriedMachine {
-            name: DEFAULT_VM_NAME,
-            cdrom: None,
-            ..carried_machine(&storage)
-        };
-
-        let notice = seed_first_vm(&library, &storage, &machine);
-
-        assert_eq!(notice, None);
-        let contents = library.load().expect("load");
-        assert_eq!(contents.vms[0].name, DEFAULT_VM_NAME);
-        assert_eq!(contents.vms[0].config.cdrom, None);
-        assert!(contents.vms[0].config.boot_order.is_empty());
         fs::remove_dir_all(&storage).expect("remove scratch dir");
     }
 
@@ -545,10 +503,11 @@ mod tests {
             .expect("what could not be done");
 
         assert!(notice.contains("were not imported"), "{notice:?}");
-        assert!(notice.contains(DEFAULT_CONFIG_FILE), "{notice:?}");
+        // The error names the file; the message does not name it again.
+        assert_eq!(notice.matches(DEFAULT_CONFIG_FILE).count(), 1, "{notice:?}");
         let contents = library.load().expect("load");
         assert_eq!(contents.vms.len(), 1);
-        assert_eq!(contents.vms[0].name, "Alpine");
+        assert_eq!(contents.vms[0].name, DEFAULT_VM_NAME);
         assert_eq!(library.last_selected(), Some(contents.vms[0].stem.clone()));
         fs::remove_dir_all(&storage).expect("remove scratch dir");
     }
@@ -572,7 +531,7 @@ mod tests {
     fn a_first_vm_that_cannot_be_made_is_reported() {
         let storage = scratch_dir("seed_no_vm");
         let library = phone_library(&storage);
-        fs::create_dir(library.dir().join("alpine.toml")).expect("a folder in the file's way");
+        fs::create_dir(library.dir().join("rusty-box.toml")).expect("a folder in the file's way");
 
         let notice = seed_first_vm(&library, &storage, &carried_machine(&storage))
             .expect("what could not be done");

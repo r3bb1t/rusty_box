@@ -29,10 +29,8 @@ pub use winit::platform::android::activity::AndroidApp;
 const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
 const VGA_BIOS_DATA: &[u8] =
     include_bytes!("../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin");
-#[cfg(feature = "embedded-alpine")]
-const ALPINE_ISO: &[u8] = include_bytes!("../assets/alpine.iso");
 
-/// Guest memory of a VM made from the carried files, and of imported settings
+/// Guest memory of a VM made from the carried ROMs, and of imported settings
 /// that name none, MiB. A phone shares its RAM with everything else it runs.
 const DEFAULT_MEMORY_MIB: u32 = 256;
 /// The instruction rate the timers of such a VM assume.
@@ -103,41 +101,27 @@ struct PhoneLibrary {
 /// placed beside it on every launch, so an updated APK replaces ones a VM file
 /// still points at. An empty library — a first launch — is given one VM: the
 /// settings a build before the library saved in `rusty_box.toml` there, or,
-/// with no such file, a VM made from the carried files, with the Alpine ISO
-/// as its CD in a build with `embedded-alpine`. Only a library folder that
-/// cannot be created and a carried file that cannot be placed refuse the
-/// launch: with either there is nothing to show. Whatever else could not be
-/// done comes back as the notice, and the shell opens and says so.
+/// with no such file, a VM made from the carried ROMs with no CD, whose ISO
+/// the user picks under Hardware › CD/DVD. Only a library folder that cannot
+/// be created and a ROM that cannot be placed refuse the launch: with either
+/// there is nothing to show. Whatever else could not be done comes back as
+/// the notice, and the shell opens and says so.
 fn phone_library(storage: &Path) -> Result<PhoneLibrary, RunError> {
     let library = VmLibrary::open(storage.join("vms"))?;
     let carried = storage.join("carried");
     let bios = stage("BIOS", &carried, "BIOS-bochs-latest", BIOS_DATA)?;
     let vga_bios = stage("VGA BIOS", &carried, "VGABIOS-lgpl-latest.bin", VGA_BIOS_DATA)?;
-    if !needs_first_vm(&library) {
-        return Ok(PhoneLibrary {
-            library,
-            notice: None,
-        });
-    }
-    #[cfg(feature = "embedded-alpine")]
-    let machine = CarriedMachine {
-        name: "Alpine",
-        bios,
-        vga_bios,
-        cdrom: Some(stage("Alpine ISO", &carried, "alpine.iso", ALPINE_ISO)?),
-        memory_mib: DEFAULT_MEMORY_MIB,
-        ips: DEFAULT_IPS,
+    let notice = if needs_first_vm(&library) {
+        let machine = CarriedMachine {
+            bios,
+            vga_bios,
+            memory_mib: DEFAULT_MEMORY_MIB,
+            ips: DEFAULT_IPS,
+        };
+        seed_first_vm(&library, storage, &machine)
+    } else {
+        None
     };
-    #[cfg(not(feature = "embedded-alpine"))]
-    let machine = CarriedMachine {
-        name: crate::library::DEFAULT_VM_NAME,
-        bios,
-        vga_bios,
-        cdrom: None,
-        memory_mib: DEFAULT_MEMORY_MIB,
-        ips: DEFAULT_IPS,
-    };
-    let notice = seed_first_vm(&library, storage, &machine);
     Ok(PhoneLibrary { library, notice })
 }
 
