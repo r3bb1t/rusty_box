@@ -740,10 +740,10 @@ where
     emulator_result
 }
 
-/// The file `config`'s startup-disk creation provisions, when it has one.
+/// `config`'s startup-disk creation, when it has one.
 #[cfg(feature = "gui-egui")]
-fn startup_disk_creation_path(config: &ResolvedConfig) -> Option<&Path> {
-    Some(config.disk.as_ref()?.creation.as_ref()?.path.as_path())
+fn startup_disk_creation(config: &ResolvedConfig) -> Option<&crate::config::ResolvedDiskCreation> {
+    config.disk.as_ref()?.creation.as_ref()
 }
 
 #[cfg(feature = "gui-egui")]
@@ -752,19 +752,23 @@ fn run_egui_emulator_loop(
     shared: Arc<Mutex<SharedDisplay>>,
 ) -> Result<RunSummary, RunError> {
     let mut instructions_executed = Some(0u64);
-    // The startup disks provisioned this session, by creation path. Each is
-    // provisioned at its VM's first power-on and at no later one, so a file
-    // the user agreed to have erased is erased once; the shell keeps the
-    // same set of agreed paths.
+    // The overwrite creations provisioned this session, by path. An overwrite
+    // creation erases its file at the first power-on of the session that
+    // uses the path and at no later one, so a file the user agreed to have
+    // erased is erased once; the shell asks about each such file once per
+    // session by the same rule (`NativeShellApp::overwrite_confirmed`). A
+    // plain creation is provisioned at every power-on and never recorded
+    // here: it only creates a missing file and reuses a valid one
+    // (`disk_images::provision_startup_disk`), so it erases nothing.
     let mut provisioned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     while let Ok(command) = command_rx.recv() {
         match command {
             crate::app::NativeEmulatorCommand::Start(config) => loop {
                 let stop_flag = prepare_egui_run(&shared);
-                let creation_path = startup_disk_creation_path(&config);
-                let create_startup_disks =
-                    creation_path.is_some_and(|path| !provisioned.contains(path));
+                let creation = startup_disk_creation(&config);
+                let create_startup_disks = creation
+                    .is_some_and(|creation| !creation.overwrite || !provisioned.contains(&creation.path));
                 // Warn in the window that a (possibly slow) disk allocation is
                 // about to happen, before the run blocks on it. Reusing an
                 // existing image returns None here (instant, no warning).
@@ -778,10 +782,14 @@ fn run_egui_emulator_loop(
                 let bridge = BridgeGui::new(Arc::clone(&shared));
                 let run = prepare_run(config.clone(), create_startup_disks).and_then(|prepared| {
                     // The disk is provisioned once `prepare_run` returns, and
-                    // the run after it can still fail, so the path is
+                    // the run after it can still fail, so an overwrite path is
                     // recorded here and not after the run: a later power-on
                     // must not erase the file a second time.
-                    provisioned.extend(creation_path.map(Path::to_path_buf));
+                    provisioned.extend(
+                        creation
+                            .filter(|creation| creation.overwrite)
+                            .map(|creation| creation.path.clone()),
+                    );
                     run_prepared(prepared, bridge, Some(stop_flag))
                 });
                 let summary = match run {
@@ -1597,41 +1605,84 @@ mod tests {
         assert_eq!(second_len.unwrap(), 10_321_920);
     }
 
-    /// A startup disk is provisioned once per session however often its VM
-    /// is powered on: a second Start leaves what the first run left on it.
+    /// The loop on a thread of its own, as the shell runs it, fed one Start
+    /// at a time.
+    #[cfg(feature = "gui-egui")]
+    struct LoopThread {
+        commands: mpsc::Sender<crate::app::NativeEmulatorCommand>,
+        shared: Arc<Mutex<SharedDisplay>>,
+        thread: std::thread::JoinHandle<Result<RunSummary, RunError>>,
+    }
+
+    #[cfg(feature = "gui-egui")]
+    impl LoopThread {
+        fn spawn() -> Self {
+            let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+            let (commands, command_rx) = mpsc::channel();
+            let loop_shared = Arc::clone(&shared);
+            let thread = std::thread::Builder::new()
+                .name("rusty_box_gui_test_emulator".to_owned())
+                .stack_size(16 * 1024 * 1024)
+                .spawn(move || run_egui_emulator_loop(command_rx, loop_shared))
+                .expect("spawn the loop");
+            Self {
+                commands,
+                shared,
+                thread,
+            }
+        }
+
+        /// Powers `config` on and waits for its run to end: the run is over
+        /// once its startup disk `disk` exists and the machine no longer
+        /// runs, and the loop then waits for the next command.
+        fn start_and_wait(&self, config: ResolvedConfig, disk: &Path) {
+            self.commands
+                .send(crate::app::NativeEmulatorCommand::Start(config))
+                .unwrap();
+            wait_until(|| disk.exists() && !self.shared.lock().unwrap().emu_running);
+        }
+
+        /// Powers `config` on, lets the loop finish every command it was
+        /// sent, and returns its result with the error the display holds.
+        fn start_and_finish(self, config: ResolvedConfig) -> (Result<RunSummary, RunError>, Option<String>) {
+            let Self {
+                commands,
+                shared,
+                thread,
+            } = self;
+            commands
+                .send(crate::app::NativeEmulatorCommand::Start(config))
+                .unwrap();
+            drop(commands);
+            let result = thread.join().expect("the loop thread");
+            let runtime_error = shared.lock().unwrap().runtime_error.clone();
+            (result, runtime_error)
+        }
+    }
+
+    /// What a guest would have left on the disk at `path`: its first byte
+    /// set to `0xAB`.
+    #[cfg(feature = "gui-egui")]
+    fn mark_first_byte(path: &Path) {
+        let mut contents = fs::read(path).unwrap();
+        contents[0] = 0xAB;
+        fs::write(path, &contents).unwrap();
+    }
+
+    /// An overwrite disk is erased once per session however often its VM is
+    /// powered on: a second Start leaves what the first run left on it.
     #[cfg(feature = "gui-egui")]
     #[test]
-    fn the_loop_provisions_a_startup_disk_once_however_often_its_vm_starts() {
+    fn the_loop_erases_an_overwrite_disk_once_however_often_its_vm_starts() {
         let bios = loop_bios();
         let disk = unique_temp_path("rusty-box-gui-loop-same-disk");
         let config = runnable_config(disk.clone(), true, &bios);
-        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
-        let (command_tx, command_rx) = mpsc::channel();
-        let loop_shared = Arc::clone(&shared);
-        let emulator = std::thread::Builder::new()
-            .name("rusty_box_gui_test_emulator".to_owned())
-            .stack_size(16 * 1024 * 1024)
-            .spawn(move || run_egui_emulator_loop(command_rx, loop_shared))
-            .expect("spawn the loop");
+        let emulator = LoopThread::spawn();
 
-        command_tx
-            .send(crate::app::NativeEmulatorCommand::Start(config.clone()))
-            .unwrap();
-        // The first run is over once the disk it created exists and the
-        // machine no longer runs; the loop then waits for the next command.
-        wait_until(|| disk.exists() && !shared.lock().unwrap().emu_running);
-        // What a guest would have left on the disk.
-        let mut contents = fs::read(&disk).unwrap();
-        contents[0] = 0xAB;
-        fs::write(&disk, &contents).unwrap();
+        emulator.start_and_wait(config.clone(), &disk);
+        mark_first_byte(&disk);
+        let (result, runtime_error) = emulator.start_and_finish(config);
 
-        command_tx
-            .send(crate::app::NativeEmulatorCommand::Start(config))
-            .unwrap();
-        drop(command_tx);
-        let result = emulator.join().expect("the loop thread");
-
-        let runtime_error = shared.lock().unwrap().runtime_error.clone();
         let after = fs::read(&disk);
         remove_test_file(&disk);
         remove_test_file(&bios);
@@ -1640,6 +1691,53 @@ mod tests {
         let after = after.unwrap();
         assert_eq!(after.len(), 10_321_920);
         assert_eq!(after[0], 0xAB);
+    }
+
+    /// A plain creation is provisioned at every Start: a disk removed after
+    /// one power-on is there again after the next, and that power-on runs.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn the_loop_provisions_a_plain_disk_at_every_start() {
+        let bios = loop_bios();
+        let disk = unique_temp_path("rusty-box-gui-loop-plain-disk");
+        let config = runnable_config(disk.clone(), false, &bios);
+        let emulator = LoopThread::spawn();
+
+        emulator.start_and_wait(config.clone(), &disk);
+        fs::remove_file(&disk).unwrap();
+        let (result, runtime_error) = emulator.start_and_finish(config);
+
+        let after_len = fs::metadata(&disk).map(|metadata| metadata.len());
+        remove_test_file(&disk);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(runtime_error, None);
+        assert_eq!(after_len.unwrap(), 10_321_920);
+    }
+
+    /// A plain power-on settles nothing for a later overwrite of the same
+    /// file: the overwrite Start that follows erases what the first run
+    /// left, as the shell's confirmation said it would.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn an_overwrite_start_after_a_plain_start_of_the_same_disk_erases_it() {
+        let bios = loop_bios();
+        let disk = unique_temp_path("rusty-box-gui-loop-plain-then-overwrite");
+        let emulator = LoopThread::spawn();
+
+        emulator.start_and_wait(runnable_config(disk.clone(), false, &bios), &disk);
+        mark_first_byte(&disk);
+        let (result, runtime_error) =
+            emulator.start_and_finish(runnable_config(disk.clone(), true, &bios));
+
+        let after = fs::read(&disk);
+        remove_test_file(&disk);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(runtime_error, None);
+        let after = after.unwrap();
+        assert_eq!(after.len(), 10_321_920);
+        assert_eq!(after[0], 0x00, "the overwrite Start left the first run's data");
     }
 
     #[test]

@@ -195,10 +195,13 @@ pub struct NativeShellApp {
     broken_files: Vec<crate::library::BrokenVmFile>,
     /// A destructive step the user has yet to confirm or cancel.
     pending_confirm: Option<PendingConfirm>,
-    /// Files the user agreed this session to let a startup-disk creation
-    /// erase. The runner provisions each creation path at most once per
-    /// session, at its VM's first power-on, so one answer per file covers
-    /// the session.
+    /// The overwrite creations settled this session, by path: each file the
+    /// user agreed to let a startup-disk creation erase, and each one that
+    /// did not exist when its VM was powered on, so there was nothing to
+    /// erase and nothing to ask. The runner erases an overwrite creation's
+    /// file at the first power-on of the session that uses the path and at
+    /// no later one, and provisions a plain creation at every power-on
+    /// without erasing anything, so one answer per file covers the session.
     overwrite_confirmed: std::collections::HashSet<PathBuf>,
     /// The gravest notice raised in this frame, which a lesser one may not
     /// replace; see `notify`.
@@ -2593,6 +2596,14 @@ impl NativeShellApp {
             .then(|| creation.path.clone())
     }
 
+    /// The file this power-on's overwrite creation makes where nothing
+    /// exists yet: the runner creates it now and erases it at no later
+    /// power-on this session, so there is nothing to ask about, now or then.
+    fn overwrite_with_nothing_to_erase(&self) -> Option<PathBuf> {
+        let creation = self.config.disk.as_ref()?.creation.as_ref()?;
+        (creation.overwrite && !creation.path.exists()).then(|| creation.path.clone())
+    }
+
     /// Powers on the selected VM: its edits are applied and written first,
     /// then a startup-disk creation that would erase an existing file is put
     /// to the user before anything starts, so a power-on that stops at that
@@ -2621,6 +2632,8 @@ impl NativeShellApp {
             });
             return;
         }
+        self.overwrite_confirmed
+            .extend(self.overwrite_with_nothing_to_erase());
         if let Ok(mut display) = self.shared.lock() {
             display.start_pending = true;
         }
@@ -5701,6 +5714,60 @@ mod tests {
 
         assert_eq!(app.pending_confirm, None);
         assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+
+        // The runner created the file at that power-on, as here, and erases
+        // it at no later one this session, so the next power-on asks nothing
+        // either.
+        write_test_disk(&disk);
+        app.shared.lock().unwrap().start_pending = false;
+        app.start_vm();
+
+        assert_eq!(app.pending_confirm, None);
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+        remove_test_file(&disk);
+    }
+
+    /// A plain creation's power-on settles nothing: when the same file is
+    /// then set to be recreated, the power-on that would erase it asks.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_plain_power_on_does_not_settle_a_later_overwrite_of_the_same_file() {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-plain-then-overwrite");
+        let mut launch = overwriting_launch(&disk);
+        if let Some(creation) = launch
+            .config
+            .disk
+            .as_mut()
+            .and_then(|disk| disk.creation.as_mut())
+        {
+            creation.overwrite = false;
+        }
+        let (mut app, command_rx) = native_test_app_over(&scratch, Some(launch), None);
+
+        app.start_vm();
+
+        assert_eq!(app.pending_confirm, None);
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+        assert!(!app.overwrite_confirmed.contains(&disk));
+
+        write_test_disk(&disk);
+        app.shared.lock().unwrap().start_pending = false;
+        if let Some(creation) = app.settings.disk_creation.as_mut() {
+            creation.overwrite = true;
+        }
+        app.start_vm();
+
+        assert_eq!(
+            app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk {
+                index: 0,
+                origin: VmOrigin::Launch,
+                path: disk.clone(),
+            })
+        );
+        assert!(command_rx.try_recv().is_err());
+        remove_test_file(&disk);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -325,10 +325,9 @@ size = "12G"         # default 20G
 overwrite = false    # default false
 ```
 
-This creates the image at the first power-on of a VM that uses the path, once
-per session, in the shell, and at every launch of a `terminal` or `headless`
-run. It cannot be combined with `[disk] path` or `chs`. Two things people
-trip over:
+This creates the image when it is missing, at every power-on in the shell and
+at every launch of a `terminal` or `headless` run. It cannot be combined with
+`[disk] path` or `chs`. Two things people trip over:
 
 - **Creation can take a while.** The image is a flat file extended to its
   full size. On a filesystem that leaves the gap unallocated (ext4, APFS) this
@@ -338,8 +337,8 @@ trip over:
 - **`overwrite = false` keeps your data.** With the default `false`, an
   existing valid image is reused, never recreated, so your installed OS
   survives relaunches. Set `overwrite = true` only when you deliberately want a
-  factory-reset disk on every launch. In the shell, that reset happens at the
-  first power-on of a VM that uses the path, once per session, and the
+  factory-reset disk on every launch. In the shell, that reset happens once
+  per session, at the first power-on of a VM that uses the path, and the
   power-on that would erase an existing file asks first (`Overwrite <path>?`,
   with the button `Overwrite and power on`).
 
