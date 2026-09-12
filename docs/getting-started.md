@@ -334,8 +334,9 @@ size = "12G"         # default 20G
 overwrite = false    # default false
 ```
 
-This creates the image when it is missing, at every power-on in the shell and
-at every launch of a `terminal` or `headless` run. It cannot be combined with
+Without `overwrite`, this creates the image when it is missing, at every
+power-on in the shell and at every launch of a `terminal` or `headless` run.
+With `overwrite = true`, see the second point below. It cannot be combined with
 `[disk] path` or `chs`. Two things people trip over:
 
 - **Creation can take a while.** The image is a flat file extended to its
