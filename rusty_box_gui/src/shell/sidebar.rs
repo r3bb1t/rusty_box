@@ -19,7 +19,8 @@ use crate::shell::widgets::{selection_row, RowMark, ShellStateBadge, CHILD_INDEN
 #[cfg(not(target_arch = "wasm32"))]
 use egui::{RichText, Stroke};
 
-/// Whether a VM in the list is a file in the library or only in memory. The
+/// Whether a VM in the list is a file in the library, a library file that
+/// is behind the VM because its last write failed, or only in memory. The
 /// browser shell has no library, so its one entry carries no source.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,8 @@ pub(crate) enum EntrySource {
     Saved,
     /// Only in memory — the command line's temporary VM; the row says so.
     Unsaved,
+    /// A library file the last write to failed; the row says so.
+    WriteFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,12 +72,22 @@ impl VmLibraryEntry {
         }
     }
 
+    /// The same entry, marked as a library VM whose last write failed.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn write_failed(self) -> Self {
+        Self {
+            source: EntrySource::WriteFailed,
+            ..self
+        }
+    }
+
     /// The text of the entry's row.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn row_label(&self) -> String {
         match self.source {
             EntrySource::Saved => self.name.clone(),
             EntrySource::Unsaved => format!("{} (unsaved)", self.name),
+            EntrySource::WriteFailed => format!("{} (not saved)", self.name),
         }
     }
 

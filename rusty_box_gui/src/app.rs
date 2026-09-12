@@ -183,6 +183,10 @@ pub struct NativeShellApp {
     broken_files: Vec<crate::library::BrokenVmFile>,
     /// A destructive step the user has yet to confirm or cancel.
     pending_confirm: Option<PendingConfirm>,
+    /// Files the user agreed this session to let a startup-disk creation
+    /// erase. The runner recreates an `overwrite` disk once per session, so
+    /// one answer per file covers the session.
+    overwrite_confirmed: std::collections::HashSet<PathBuf>,
     /// The gravest notice raised in this frame, which a lesser one may not
     /// replace; see `notify`.
     gravest_raised: Option<ShellNoticeKind>,
@@ -518,6 +522,8 @@ enum PendingConfirm {
     },
     /// Deleting a library file that does not load.
     DeleteBroken(PathBuf),
+    /// Powering on a VM whose startup-disk creation erases this existing file.
+    OverwriteDisk(PathBuf),
 }
 
 /// What a confirmation dialog says.
@@ -602,6 +608,8 @@ impl NativeVmProfile {
         NativeVmInfo::from_config_named(&self.config, &self.name)
     }
 
+    /// The sidebar's row for this VM: a temporary VM is marked as unsaved,
+    /// and a library VM whose last write failed as not saved.
     fn library_entry(&self) -> VmLibraryEntry {
         let info = self.vm_info();
         let entry = VmLibraryEntry::new(
@@ -611,9 +619,10 @@ impl NativeVmProfile {
             format_path_for_summary(info.disk.as_deref()),
             format_path_for_summary(info.cdrom.as_deref()),
         );
-        match self.origin {
-            VmOrigin::Library(_) => entry,
-            VmOrigin::Launch => entry.unsaved(),
+        match (&self.origin, self.save_state) {
+            (VmOrigin::Launch, _) => entry.unsaved(),
+            (VmOrigin::Library(_), SaveState::WriteFailed) => entry.write_failed(),
+            (VmOrigin::Library(_), SaveState::Saved | SaveState::Unsaved) => entry,
         }
     }
 }
@@ -1033,6 +1042,7 @@ impl NativeShellApp {
             library: start.library,
             broken_files: opening.broken,
             pending_confirm: None,
+            overwrite_confirmed: std::collections::HashSet::new(),
             gravest_raised: None,
             #[cfg(target_os = "android")]
             browse_request: None,
@@ -1426,16 +1436,30 @@ impl NativeShellApp {
                     self.request_delete_selected();
                 }
             });
-            let caption = match &origin {
-                VmOrigin::Library(stem) => {
-                    format!("Saved automatically to {}", self.library.path_of(stem).display())
-                }
-                VmOrigin::Launch => {
-                    "Temporary VM. Not saved until it is kept in the library.".to_owned()
-                }
-            };
+            let caption = self.summary_caption();
             ui.label(RichText::new(caption).size(TEXT_CAPTION).color(TEXT_MUTED));
         });
+    }
+
+    /// The Summary page's caption on where the selected VM is kept: its
+    /// library file and whether that file holds it, or that it is temporary.
+    fn summary_caption(&self) -> String {
+        let profile = &self.profiles[self.chrome.selected_vm()];
+        match &profile.origin {
+            VmOrigin::Launch => "Temporary VM. Not saved until it is kept in the library.".to_owned(),
+            VmOrigin::Library(stem) => {
+                let path = self.library.path_of(stem);
+                match profile.save_state {
+                    SaveState::Saved => format!("Saved automatically to {}", path.display()),
+                    SaveState::Unsaved => format!("Saving to {} when the edit ends", path.display()),
+                    SaveState::WriteFailed => format!(
+                        "Not saved: the last write to {} failed. \
+                         It is tried again at the next change, selection or power-on.",
+                        path.display()
+                    ),
+                }
+            }
+        }
     }
 
     fn draw_console_page(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -2162,7 +2186,7 @@ impl NativeShellApp {
     /// Writes the library VMs `scope` names among those whose files are
     /// behind. A write that succeeds makes the file what the VM is; one that
     /// fails leaves the VM `WriteFailed`, is logged, and is shown as an error
-    /// by this attempt alone.
+    /// by this attempt alone. Either way the VM's sidebar row says which.
     fn flush(&mut self, scope: FlushScope) {
         for index in 0..self.profiles.len() {
             let profile = &self.profiles[index];
@@ -2190,6 +2214,14 @@ impl NativeShellApp {
                     self.notify(ShellNotice::error(error.to_string()));
                 }
             }
+            self.refresh_library_entry(index);
+        }
+    }
+
+    /// Makes the sidebar's row for the VM at `index` say what the VM is now.
+    fn refresh_library_entry(&mut self, index: usize) {
+        if let Some(entry) = self.chrome.vm_library.get_mut(index) {
+            *entry = self.profiles[index].library_entry();
         }
     }
 
@@ -2383,7 +2415,8 @@ impl NativeShellApp {
     }
 
     /// Runs the step waiting for confirmation, if any. A delete whose VM is
-    /// no longer the selected one deletes nothing and says so.
+    /// no longer the selected one deletes nothing and says so. An agreed
+    /// overwrite is kept for the session, and the power-on it stopped runs.
     fn confirm_pending(&mut self) {
         match self.pending_confirm.take() {
             None => {}
@@ -2397,6 +2430,10 @@ impl NativeShellApp {
                 }
             }
             Some(PendingConfirm::DeleteBroken(path)) => self.delete_broken_file(&path),
+            Some(PendingConfirm::OverwriteDisk(path)) => {
+                self.overwrite_confirmed.extend([path]);
+                self.start_vm();
+            }
         }
     }
 
@@ -2447,6 +2484,12 @@ impl NativeShellApp {
                     .to_owned(),
                 verb: "Delete",
             },
+            PendingConfirm::OverwriteDisk(path) => ConfirmWording {
+                title: format!("Overwrite {}?", path.display()),
+                body: "This VM's startup disk is set to be recreated, which erases the existing file."
+                    .to_owned(),
+                verb: "Overwrite and power on",
+            },
         }
     }
 
@@ -2492,6 +2535,19 @@ impl NativeShellApp {
         }
     }
 
+    /// The existing file this power-on's startup-disk creation would erase,
+    /// unless the user already agreed to it this session.
+    fn unconfirmed_overwrite(&self) -> Option<PathBuf> {
+        let creation = self.config.disk.as_ref()?.creation.as_ref()?;
+        let erases = creation.overwrite && creation.path.exists();
+        (erases && !self.overwrite_confirmed.contains(&creation.path))
+            .then(|| creation.path.clone())
+    }
+
+    /// Powers on the selected VM: its edits are applied and written first,
+    /// then a startup-disk creation that would erase an existing file is put
+    /// to the user before anything starts, so a power-on that stops at that
+    /// question has still written the VM.
     fn start_vm(&mut self) {
         let snapshot = self.runtime_status();
         if snapshot.running {
@@ -2507,6 +2563,10 @@ impl NativeShellApp {
             return;
         }
         self.flush_unsaved();
+        if let Some(path) = self.unconfirmed_overwrite() {
+            self.pending_confirm = Some(PendingConfirm::OverwriteDisk(path));
+            return;
+        }
         if let Ok(mut display) = self.shared.lock() {
             display.start_pending = true;
         }
@@ -5021,17 +5081,98 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn the_summary_caption_says_whether_the_vm_is_saved() {
+        let (mut app, _command_rx, scratch) = library_app();
+        let file = scratch.dir.join("alpine.toml");
+
+        assert_eq!(
+            app.summary_caption(),
+            format!("Saved automatically to {}", file.display())
+        );
+
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+
+        assert_eq!(
+            app.summary_caption(),
+            format!("Saving to {} when the edit ends", file.display())
+        );
+
+        fs::remove_file(&file).expect("remove");
+        fs::create_dir(&file).expect("a folder in the file's way");
+        app.flush_unsaved();
+
+        assert_eq!(
+            app.summary_caption(),
+            format!(
+                "Not saved: the last write to {} failed. \
+                 It is tried again at the next change, selection or power-on.",
+                file.display()
+            )
+        );
+
+        let (launch_app, _launch_rx, _launch_scratch) = native_test_app();
+        assert_eq!(
+            launch_app.summary_caption(),
+            "Temporary VM. Not saved until it is kept in the library."
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_vm_whose_write_failed_is_marked_not_saved_in_the_sidebar() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        assert_eq!(app.chrome.vm_library[1].row_label(), "Alpine copy");
+        let copy_file = scratch.dir.join("alpine-copy.toml");
+        fs::remove_file(&copy_file).expect("remove");
+        fs::create_dir(&copy_file).expect("a folder in the file's way");
+
+        app.select_profile(0);
+
+        assert_eq!(app.profiles[1].save_state, SaveState::WriteFailed);
+        assert_eq!(
+            app.chrome.vm_library[1].source,
+            crate::shell::sidebar::EntrySource::WriteFailed
+        );
+        assert_eq!(app.chrome.vm_library[1].row_label(), "Alpine copy (not saved)");
+
+        fs::remove_dir(&copy_file).expect("clear the way");
+        app.flush_unsaved();
+
+        assert_eq!(app.profiles[1].save_state, SaveState::Saved);
+        assert_eq!(app.chrome.vm_library[1].row_label(), "Alpine copy");
+    }
+
+    /// Appends a line to the file at `path`, the way a hand edit outside the
+    /// shell would, and returns what the file then holds.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hand_edit(path: &std::path::Path) -> String {
+        let hand_edited = format!(
+            "{}\n# edited outside the shell\n",
+            fs::read_to_string(path).expect("read")
+        );
+        fs::write(path, &hand_edited).expect("write");
+        hand_edited
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn an_unchanged_vm_is_not_rewritten_by_a_selection_or_a_power_on() {
         let (mut app, command_rx, scratch) = library_app();
         app.add_vm_copying_selected();
-        let file = scratch.dir.join("alpine.toml");
-        let hand_edited = format!(
-            "{}\n# edited outside the shell\n",
-            fs::read_to_string(&file).expect("read")
-        );
-        fs::write(&file, &hand_edited).expect("write");
+        let copy_file = scratch.dir.join("alpine-copy.toml");
+        let copy_hand_edited = hand_edit(&copy_file);
 
         app.select_profile(0);
+
+        assert_eq!(fs::read_to_string(&copy_file).expect("read"), copy_hand_edited);
+
+        let file = scratch.dir.join("alpine.toml");
+        let hand_edited = hand_edit(&file);
+
         app.start_vm();
 
         assert_eq!(fs::read_to_string(&file).expect("read"), hand_edited);
@@ -5238,6 +5379,109 @@ mod tests {
         let broken = app.confirm_wording(&PendingConfirm::DeleteBroken(scratch.dir.join("bad.toml")));
         assert_eq!(broken.title, "Delete bad.toml?");
         assert_eq!(broken.verb, "Delete");
+
+        let disk = scratch.dir.join("disk.img");
+        let overwrite = app.confirm_wording(&PendingConfirm::OverwriteDisk(disk.clone()));
+        assert_eq!(overwrite.title, format!("Overwrite {}?", disk.display()));
+        assert_eq!(
+            overwrite.body,
+            "This VM's startup disk is set to be recreated, which erases the existing file."
+        );
+        assert_eq!(overwrite.verb, "Overwrite and power on");
+    }
+
+    /// The command line's VM with a startup disk at `disk` that is recreated,
+    /// erasing the file, at power-on.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn overwriting_launch(disk: &std::path::Path) -> crate::runner::LaunchVm {
+        let mut config = test_resolved_config();
+        config.disk = Some(crate::config::ResolvedDisk {
+            path: disk.to_path_buf(),
+            geometry: crate::args::DiskGeometry {
+                cylinders: 16,
+                heads: 16,
+                sectors_per_track: 63,
+            },
+            channel: 0,
+            drive: 0,
+            creation: Some(crate::config::ResolvedDiskCreation {
+                path: disk.to_path_buf(),
+                size: rusty_box_bximage::ImageSize::mib(8),
+                overwrite: true,
+            }),
+        });
+        config.boot_order = vec![crate::args::BootDevice::Disk];
+        crate::runner::LaunchVm {
+            name: "Overwriting".to_owned(),
+            config,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_that_would_erase_an_existing_disk_asks_first() {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-overwrite");
+        write_test_disk(&disk);
+        let (mut app, command_rx) =
+            native_test_app_over(&scratch, Some(overwriting_launch(&disk)), None);
+
+        app.start_vm();
+
+        assert_eq!(app.pending_confirm, Some(PendingConfirm::OverwriteDisk(disk.clone())));
+        assert!(command_rx.try_recv().is_err());
+
+        app.confirm_pending();
+
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+        remove_test_file(&disk);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_disk_that_does_not_exist_yet_is_created_without_asking() {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-fresh-disk");
+        let (mut app, command_rx) =
+            native_test_app_over(&scratch, Some(overwriting_launch(&disk)), None);
+
+        app.start_vm();
+
+        assert_eq!(app.pending_confirm, None);
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_cancelled_overwrite_is_asked_again_and_an_agreed_one_is_not() {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-overwrite-again");
+        write_test_disk(&disk);
+        let (mut app, command_rx) =
+            native_test_app_over(&scratch, Some(overwriting_launch(&disk)), None);
+
+        app.start_vm();
+        app.cancel_pending();
+
+        assert_eq!(app.pending_confirm, None);
+        assert!(command_rx.try_recv().is_err());
+
+        app.start_vm();
+
+        assert_eq!(app.pending_confirm, Some(PendingConfirm::OverwriteDisk(disk.clone())));
+
+        app.confirm_pending();
+
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+
+        // Powered off again. The runner recreated the disk at the first
+        // power-on and does not again this session, so nothing is asked.
+        app.shared.lock().unwrap().start_pending = false;
+        app.start_vm();
+
+        assert_eq!(app.pending_confirm, None);
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+        remove_test_file(&disk);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
