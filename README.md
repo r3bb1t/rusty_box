@@ -80,7 +80,7 @@ Always build with `--release`. Debug builds are far too slow to boot a guest.
    cargo run --release -p rusty_box_gui
    ```
 
-3. It opens on the VM library, powered off. For a new VM, set the BIOS path under Hardware › Display, attach an ISO under Hardware › CD/DVD, and press `▶ Power on` in the VM bar.
+3. It opens on the VM library, powered off. A new VM starts at 32 MiB of memory and an IPS target of 4,000,000, and no guest in the table boots with those. For Alpine, set the BIOS and VGA BIOS paths under Hardware › Display, the memory to 256 MiB under Hardware › Memory, the IPS target to 300,000,000 under Hardware › Processors, and attach the ISO under Hardware › CD/DVD. Then press `▶ Power on` in the VM bar.
 
 The same machine can be given as flags. This one boots Alpine with the settings from the table:
 
@@ -135,7 +135,7 @@ The interpreter (`--engine interpreter`) is the default. It is this port of Boch
 
 ### Windows Hypervisor Platform
 
-The WHP engine (`--engine whp`) runs the guest's instructions on the host processor, through `WinHvPlatform`. The devices are still this port's own models, run on host time by a device thread.
+The WHP engine (`--engine whp`) runs the guest's instructions on the host processor, through `WinHvPlatform`. The devices are still this port's own models, run on host time by a device thread, except the local APIC: that is the hypervisor partition's own, in x2APIC mode (xAPIC where the host offers only that).
 
 It needs:
 
@@ -160,6 +160,7 @@ A machine on the hypervisor differs from an interpreter machine in these ways:
 - **No instruction count.** A `max_instructions` limit is refused, and the status strip has no IPS readout: it shows `--- IPS`.
 - **Device timers run on host time**, not on the instruction count.
 - **The guest is always offered `host-shared` CPU capabilities**, whatever `--cpu-capabilities` says. That is the guest's CPU model narrowed to what the host can carry: it drops AVX-512 unless the host holds its state, and always drops `MONITOR`/`MWAIT`. On the interpreter, the default `preset` offers the whole model, the same on every host. [docs/whp-guest-capabilities.md](docs/whp-guest-capabilities.md) explains why.
+- **The local APIC is the hypervisor's.** Every other device is this port's model on both engines; on WHP the local APIC is the partition's own, so the APIC timer and the APIC registers a guest programs are the hypervisor's, not this port's.
 - **One partition per process.** A process can hold only one hypervisor partition at a time.
 - **Windows desktop only.** The Android APK and the browser shell run the interpreter.
 
@@ -238,12 +239,12 @@ The browser shell:
 **Chipset and devices**
 
 - the i440FX PCI host bridge and the PIIX3 PCI-to-ISA bridge; PCI can be switched off;
-- the 8259 PIC pair and an I/O APIC, and a local APIC per processor, with x2APIC;
+- the 8259 PIC pair and an I/O APIC, and a local APIC per processor, with x2APIC (on WHP the local APIC is the hypervisor partition's own);
 - the 8254 PIT, the CMOS real-time clock, the 8237 DMA controller and the HPET;
 - PIIX3 IDE with bus-master DMA, for hard disks (32 GB and larger) and an ATAPI CD-ROM;
 - the 8042 keyboard controller, with a PS/2 keyboard and a PS/2 mouse;
 - VGA with the Bochs VBE extensions. It can also be registered on PCI as 1234:1111, for Linux `bochs-drm`; that option is experimental;
-- four 16550A UARTs, COM1 to COM4;
+- a 16550A UART on COM1 (ports `0x3F8`–`0x3FF`); there is no COM2 to COM4;
 - PIIX4 ACPI power management, with S5 soft-off and S3 suspend, and SMBus ports;
 - QEMU `fw_cfg`;
 - port 92h, the A20 gate and fast reset.
