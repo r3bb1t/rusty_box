@@ -8,7 +8,7 @@ Rusty Box is a Rust port of the [Bochs](https://bochs.sourceforge.io/) x86 emula
 |-------|-----------------|--------|--------------------|
 | DLX Linux (the Bochs `hd10meg.img`) | The login prompt, then an interactive bash shell. `cargo xtask ci` boots it to `dlx login:` on every run. | Interpreter. It does not reach `login:` on WHP today (see [Execution engines](#execution-engines)). | the `dlxlinux` example |
 | Alpine Linux 3.24.1 (`alpine-virt-3.24.1-x86_64.iso`) | `login:`, a root login and a working shell. No network: the machine has no network adapter. | Interpreter and WHP | 256 MiB, `ips` 300,000,000 |
-| Ubuntu Server 26.04 live-server (`ubuntu-26.04-live-server-amd64.iso`) | Boots to the installer. | Not recorded | 2048 MiB, one CPU, `ips` 120,000,000, `smp_quantum` 32, a 1280×720×32 display, CD only ([the VM file](#the-ubuntu-server-recipe)) |
+| Ubuntu Server 26.04 live-server (`ubuntu-26.04-live-server-amd64.iso`) | Boots to the installer: in under 5 minutes on WHP, against 20–30 minutes on the interpreter (reported by the maintainer, not timed by a harness). | WHP and interpreter | 2048 MiB, one CPU, `ips` 120,000,000, `smp_quantum` 32, a 1280×720×32 display, CD only ([the VM file](#the-ubuntu-server-recipe)) |
 | Windows 10 22H2 | The installer starts: its start screen was reached after 88.2 billion guest instructions (2026-07-14). | Interpreter | 2 GiB, `ips` 120,000,000, PCI on |
 | Windows 7 SP1 | Setup reached: the edition picker (2026-07-25). | Interpreter | 2048 MiB, `ips` 300,000,000 |
 
@@ -16,7 +16,7 @@ What is not claimed:
 
 - a finished install of Windows or Ubuntu, or an installed system booting;
 - anything past the Windows 10 installer's start screen;
-- a run of Ubuntu or any Windows on WHP;
+- a run of any Windows on WHP;
 - networking of any kind, in any guest.
 
 The table is for the desktop shell and the example harnesses. The Android shell has booted Alpine on a phone as far as the ISOLINUX `boot:` prompt (2026-09-11). The gate checks that the browser shell compiles, and no guest boot in it is recorded.
@@ -149,6 +149,7 @@ Measured at commit `4f46a11` with the `alpine_probe` harness:
 > Alpine 3.24.1 reaches `login:` in 27.1 s on WHP vs 65.0 s on the interpreter (2.40×), Intel Core i5-12450H, 2026-09-12, commit 4f46a11 (median of 3 interleaved runs per engine, `alpine_probe`, timed from power-on to `login:`).
 
 - From the boot loader (ISOLINUX) to `login:`, WHP is 2.90× faster: 22.2 s against 64.4 s.
+- Ubuntu Server 26.04 reaches its installer in under 5 minutes on WHP, against 20–30 minutes on the interpreter. That is the maintainer's report, not a harness measurement.
 - The firmware stage is slower on WHP. From power-on to the boot loader, BIOS POST takes 4.9 s there against 0.6 s on the interpreter, so the whole gain comes after the boot loader starts.
 - This is a boot-time figure, not a throughput ratio. A WHP machine's devices run on host time, so much of its 27 s is the guest's own timed waits and idle time.
 - DLX Linux does not reach `login:` on WHP today. It gets through the BIOS and LILO, and then its kernel loses disk interrupts.
