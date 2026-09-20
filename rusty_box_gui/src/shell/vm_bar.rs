@@ -9,14 +9,20 @@
 //! the `…` overflow when it does not. The `…` at the far right always holds
 //! the two verbs that belong to the application rather than to the VM.
 
+#[cfg(target_os = "android")]
+use crate::shell::destination::ShellPage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::VmBarAction;
+#[cfg(target_os = "android")]
+use crate::shell::theme::{ACCENT_CYAN, TEXT_MUTED};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::theme::{BG_PANEL, TEXT_BODY, TEXT_CAPTION, TEXT_PRIMARY};
+use crate::shell::theme::{BG_PANEL, TEXT_BODY, TEXT_PRIMARY};
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+use crate::shell::theme::TEXT_CAPTION;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::widgets::{
-    button_width, hairline_below, primary_button, text_width, ShellStateBadge,
-};
+use crate::shell::widgets::{button_width, hairline_below, primary_button};
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+use crate::shell::widgets::{text_width, ShellStateBadge};
 #[cfg(not(target_arch = "wasm32"))]
 use egui::RichText;
 
@@ -25,7 +31,13 @@ use egui::RichText;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct VmBarState<'a> {
     pub(crate) name: &'a str,
+    /// The machine's state beside its name. A phone's bar carries the page
+    /// tabs there instead, and its status strip carries the state.
+    #[cfg(not(target_os = "android"))]
     pub(crate) badge: ShellStateBadge,
+    /// The page shown, which a phone's bar marks among its page tabs.
+    #[cfg(target_os = "android")]
+    pub(crate) page: ShellPage,
     pub(crate) running: bool,
     pub(crate) start_pending: bool,
     pub(crate) on_console: bool,
@@ -59,6 +71,13 @@ const HIDE_SERIAL: &str = "Hide serial";
 #[cfg(not(target_arch = "wasm32"))]
 const SEPARATOR_SPACING: f32 = 6.0;
 
+/// The bar's height where its controls fit it, points.
+#[cfg(not(target_arch = "wasm32"))]
+const BAR_HEIGHT: f32 = 36.0;
+/// The bar's padding above and below its controls, points.
+#[cfg(not(target_arch = "wasm32"))]
+const BAR_MARGIN_Y: f32 = 4.0;
+
 /// The width the verbs that are always in the bar take together: the `…`
 /// overflow and the three power verbs, with the gaps between them.
 #[cfg(not(target_arch = "wasm32"))]
@@ -82,6 +101,46 @@ fn console_controls_width(ui: &egui::Ui) -> f32 {
         + button_width(ui, SHOW_SERIAL).max(button_width(ui, HIDE_SERIAL))
         + SEPARATOR_SPACING
         + 4.0 * gap
+}
+
+/// A phone's page tabs, in the order a desktop's tree lists the pages: the
+/// shown page carries the text weight and an accent rule, the rest sit muted.
+/// Reports the page tapped.
+#[cfg(target_os = "android")]
+fn page_tabs(ui: &mut egui::Ui, shown: ShellPage) -> Option<ShellPage> {
+    let mut tapped = None;
+    for page in ShellPage::ALL {
+        let is_shown = page == shown;
+        let text = RichText::new(page.label())
+            .size(TEXT_BODY)
+            .color(if is_shown { TEXT_PRIMARY } else { TEXT_MUTED });
+        let text = if is_shown { text.strong() } else { text };
+        let response = ui.add(egui::Button::new(text).frame_when_inactive(false));
+        if is_shown {
+            ui.painter().hline(
+                response.rect.x_range(),
+                response.rect.bottom() - 1.0,
+                egui::Stroke::new(2.0_f32, ACCENT_CYAN),
+            );
+        }
+        if response.clicked() {
+            tapped = Some(page);
+        }
+    }
+    tapped
+}
+
+/// The width the page tabs take together, each measured at its shown weight
+/// so the row does not shift as the page changes.
+#[cfg(target_os = "android")]
+fn page_tabs_width(ui: &egui::Ui) -> f32 {
+    let gap = ui.spacing().item_spacing.x;
+    ShellPage::ALL
+        .iter()
+        .map(|page| {
+            button_width(ui, RichText::new(page.label()).size(TEXT_BODY).strong()) + gap
+        })
+        .sum()
 }
 
 /// The three verbs that act on the guest's console, drawn wherever the bar
@@ -120,8 +179,11 @@ fn console_controls(ui: &mut egui::Ui, state: &VmBarState<'_>) -> Option<VmBarAc
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<VmBarAction> {
     let mut action = None;
+    // Tall enough for the controls it holds: a phone's touch targets are
+    // taller than a desktop's, and the bar grows to keep them whole.
+    let height = BAR_HEIGHT.max(ui.spacing().interact_size.y + 2.0 * BAR_MARGIN_Y);
     let bar = egui::Panel::top("vm_bar")
-        .exact_size(36.0)
+        .exact_size(height)
         .frame(
             egui::Frame::new()
                 .fill(BG_PANEL)
@@ -138,14 +200,19 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                 {
                     action = Some(VmBarAction::ToggleSidebar);
                 }
+                #[cfg(not(target_os = "android"))]
                 let badge = RichText::new(state.badge.label)
                     .size(TEXT_CAPTION)
                     .color(state.badge.color);
                 // The name is the one elastic element: it is cut to whatever is
-                // left once the badge and the power verbs have their room.
-                let badge_width = text_width(ui, badge.clone(), egui::TextStyle::Body);
+                // left once the badge (a phone's page tabs) and the power verbs
+                // have their room.
+                #[cfg(not(target_os = "android"))]
+                let beside_name = text_width(ui, badge.clone(), egui::TextStyle::Body);
+                #[cfg(target_os = "android")]
+                let beside_name = page_tabs_width(ui);
                 let name_width =
-                    (ui.available_width() - badge_width - verbs_width - 2.0 * gap).max(0.0);
+                    (ui.available_width() - beside_name - verbs_width - 2.0 * gap).max(0.0);
                 ui.allocate_ui_with_layout(
                     egui::vec2(name_width, ui.spacing().interact_size.y),
                     egui::Layout::left_to_right(egui::Align::Center),
@@ -161,7 +228,12 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                         );
                     },
                 );
+                #[cfg(not(target_os = "android"))]
                 ui.label(badge);
+                #[cfg(target_os = "android")]
+                if let Some(page) = page_tabs(ui, state.page) {
+                    action = Some(VmBarAction::GoTo(page));
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // The console's controls sit in the bar only while the whole
@@ -175,6 +247,10 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                                 ui.close();
                             }
                             ui.separator();
+                        }
+                        if ui.button("Create floppy image…").clicked() {
+                            action = Some(VmBarAction::CreateFloppy);
+                            ui.close();
                         }
                         if ui.button("About Rusty Box Workstation").clicked() {
                             action = Some(VmBarAction::ShowAbout);

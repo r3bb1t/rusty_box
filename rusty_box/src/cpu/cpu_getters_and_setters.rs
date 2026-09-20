@@ -519,15 +519,19 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // Indexed register accessors (by register number)
     // =========================================================================
 
-    /// Get 8-bit register by index (0=AL, 1=CL, 2=DL, 3=BL, 4=AH, 5=CH, 6=DH, 7=BH)
-    /// For x86-64 with REX prefix, 4-7 map to SPL, BPL, SIL, DIL instead
+    /// Get 8-bit register by index in the legacy, no-REX encoding
+    /// (0=AL, 1=CL, 2=DL, 3=BL, 4=AH, 5=CH, 6=DH, 7=BH, 8..15=R8B..R15B).
+    ///
+    /// Indices 4–7 are the high bytes of RAX/RCX/RDX/RBX. SPL, BPL, SIL and
+    /// DIL are a different encoding and live in [`Self::get_gpr8l`]. Bochs
+    /// cpu.h `BX_READ_8BIT_REG`.
     #[inline]
     pub fn get_gpr8(&self, reg: usize) -> u8 {
         if reg < 4 {
             // AL, CL, DL, BL
             self.gen_reg[reg].rl()
         } else if reg < 8 {
-            // AH, CH, DH, BH (legacy mode) or SPL, BPL, SIL, DIL (x86-64 with REX)
+            // AH, CH, DH, BH
             self.gen_reg[reg - 4].rh()
         } else {
             // R8B-R15B (x86-64)
@@ -535,7 +539,10 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
     }
 
-    /// Set 8-bit register by index
+    /// Set 8-bit register by index in the legacy, no-REX encoding.
+    ///
+    /// Indices 4–7 are the high bytes of RAX/RCX/RDX/RBX; the REX form is
+    /// [`Self::set_gpr8l`]. Bochs cpu.h `BX_WRITE_8BIT_REG`.
     #[inline]
     pub fn set_gpr8(&mut self, reg: usize, val: u8) {
         if reg < 4 {
@@ -545,6 +552,26 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         } else {
             self.gen_reg[reg].set_rl(val);
         }
+    }
+
+    /// Get the low byte of a register by index — the REX-form 8-bit encoding.
+    ///
+    /// Indices 4–7 are SPL, BPL, SIL and DIL here, never AH/CH/DH/BH: this is
+    /// bits 7:0 of `gen_reg[reg]` for every index. Bochs cpu.h
+    /// `BX_READ_8BIT_REGL`.
+    #[inline]
+    pub fn get_gpr8l(&self, reg: usize) -> u8 {
+        self.gen_reg[reg].rl()
+    }
+
+    /// Set the low byte of a register by index — the REX-form 8-bit encoding.
+    ///
+    /// Bits 63:8 of `gen_reg[reg]` are preserved, and indices 4–7 address the
+    /// low bytes of RSP/RBP/RSI/RDI rather than the legacy high bytes. Bochs
+    /// cpu.h `BX_WRITE_8BIT_REGx` with `extended` set.
+    #[inline]
+    pub fn set_gpr8l(&mut self, reg: usize, val: u8) {
+        self.gen_reg[reg].set_rl(val);
     }
 
     /// Get 16-bit register by index (0=AX, 1=CX, 2=DX, 3=BX, 4=SP, 5=BP, 6=SI, 7=DI)

@@ -65,6 +65,50 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.handle_interrupt_mask_change();
     }
 
+    /// A triple fault a backend's processor took in hardware — the way in for
+    /// an engine that runs the guest itself, where the interpreter's own
+    /// arrives through `exception`.
+    ///
+    /// Applies the machine's choice as Bochs exception.cc does
+    /// (`reset_on_triple_fault`): for [`OnTripleFault::ShutDown`] the processor
+    /// enters the shutdown state here, and for
+    /// [`OnTripleFault::ResetTheMachine`] the caller resets the machine, which
+    /// only the machine can do. Returns the choice so the caller knows which.
+    /// Such a backend runs no nested guest — this port withholds VMX and SVM
+    /// from it — so there is no VM exit to take first.
+    ///
+    /// [`OnTripleFault::ShutDown`]: crate::params::OnTripleFault::ShutDown
+    /// [`OnTripleFault::ResetTheMachine`]: crate::params::OnTripleFault::ResetTheMachine
+    pub fn take_hardware_triple_fault(&mut self) -> crate::params::OnTripleFault {
+        let action = self.on_triple_fault;
+        match action {
+            crate::params::OnTripleFault::ResetTheMachine => {
+                tracing::error!("3rd exception with no resolution — resetting the machine");
+            }
+            crate::params::OnTripleFault::ShutDown => {
+                tracing::warn!("3rd exception with no resolution — shutdown");
+                self.enter_sleep_state(super::cpu::CpuActivityState::Shutdown);
+            }
+        }
+        action
+    }
+
+    /// The tail Bochs repeats at every change of processor context — SMM
+    /// entry and RSM, SVM `VMRUN` and `#VMEXIT`, VMX VM entry and VM exit:
+    /// `handleCpuContextChange`, the monitor disarmed, and
+    /// `BX_INSTR_TLB_CNTRL(BX_INSTR_CONTEXT_SWITCH)` (smm.cc
+    /// `enter_system_management_mode`, `resume_from_system_management_mode`;
+    /// svm.cc `SvmEnterLoadCheckGuestState`, `SvmExitLoadHostState`; vmx.cc
+    /// `VMenterLoadCheckGuestState`, `VMexitLoadHostState`).
+    pub(super) fn finish_context_switch(&mut self) {
+        self.handle_cpu_context_change();
+        self.monitor.reset_monitor();
+        if self.instrumentation.active.has_tlb() {
+            self.instrumentation
+                .fire_tlb_cntrl(super::instrumentation::TlbCntrl::ContextSwitch);
+        }
+    }
+
     pub(super) fn handle_cpu_context_change(&mut self) {
         self.tlb_flush();
 
@@ -309,6 +353,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 // =========================================================================
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
+    /// Put the processor in the shutdown state — Bochs proc_ctrl.cc
+    /// `shutdown`, the one way in for a triple fault the machine does not
+    /// reset on, an `RSM` from an inconsistent state-save image, a VMX abort
+    /// and an SVM host state whose PDPTEs are invalid.
+    ///
+    /// An SVM guest that intercepts `SHUTDOWN` exits to its host instead.
+    /// Otherwise the processor sleeps with interrupts masked, so only NMI, SMI
+    /// and INIT reach it. Either way the instruction is over: this always
+    /// unwinds to the decode loop, as Bochs's `longjmp` does.
+    pub(super) fn shutdown(&mut self) -> crate::cpu::Result<()> {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_SHUTDOWN) {
+            self.svm_vmexit(super::svm::SvmVmexit::Shutdown as i32, 0, 0)?;
+        }
+        self.enter_sleep_state(super::cpu::CpuActivityState::Shutdown);
+        Err(crate::cpu::CpuError::CpuLoopRestart)
+    }
+
     /// Current system ticks — Bochs `bx_pc_system.time_ticks()`.
     ///
     /// UP observes the live pc-system clock plus the ticks this CPU generated
@@ -1933,8 +1994,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
+        // The `pre_syscall` hook fires once the instruction is known to be a
+        // system call — FRED delivers it, or `IA32_SYSENTER_CS` is usable —
+        // and before any architectural state changes, so a SYSENTER that
+        // faults on its CS never reaches it. In long mode Bochs checks
+        // `SYSENTER_EIP`/`ESP` for canonical form only after clearing VM, IF
+        // and RF, so those faults still follow the hook.
+
         // FRED event delivery for SYSENTER
         if self.cr4.fred() {
+            if self.pre_syscall_skips() {
+                return Ok(());
+            }
             self.set_fred_event_info_and_data(
                 2, // BX_EVENT_SYSENTER
                 super::exception::InterruptType::EventOther,
@@ -1951,6 +2022,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         if (self.msr.sysenter_cs_msr & 0xFFFC) == 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        if self.pre_syscall_skips() {
+            return Ok(());
         }
 
         self.invalidate_prefetch_q();
@@ -2227,6 +2301,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // Bochs: proc_ctrl.cc
     // ========================================================================
 
+    /// Fire the `pre_syscall` hook for a SYSCALL or SYSENTER about to make its
+    /// transition, and apply what the hook asked for: a stop is recorded for
+    /// the CPU loop, and `true` means the hook skipped the transition
+    /// (Unicorn-style intercept). RIP is already past the opcode — the
+    /// dispatcher advanced it before the handler ran — so a skipped system
+    /// call returns with nothing else done.
+    fn pre_syscall_skips(&mut self) -> bool {
+        let action = self.fire_pre_syscall();
+        if action.is_stop() {
+            self.instrumentation.stop_request = true;
+        }
+        action.is_skip()
+    }
+
     pub(super) fn syscall(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::eflags::EFlags;
 
@@ -2246,21 +2334,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.diag_syscall_ring_idx += 1;
             self.diag_syscall_count += 1;
         }
-        // Fire the `pre_syscall` hook BEFORE the CS/RIP transition. The hook
-        // reads registers / memory / CR3 via `HookCtx` (user state is still
-        // intact). Returns an `InstrAction` controlling whether we execute
-        // the architectural transition, skip it (Unicorn-style intercept),
-        // stop the CPU loop, or both.
-        let action = self.fire_pre_syscall();
-
-        if action.is_stop() {
-            self.instrumentation.stop_request = true;
-        }
-        if action.is_skip() {
-            // Skip the architectural CS/RIP transition. RIP has already been
-            // advanced past the SYSCALL opcode bytes by the decoder /
-            // dispatcher wrapper before this handler runs, so there's nothing
-            // to do here — just return.
+        // The `pre_syscall` hook fires before the CS/RIP transition, while the
+        // caller's registers, memory and CR3 are still intact.
+        if self.pre_syscall_skips() {
             return Ok(());
         }
         self.invalidate_prefetch_q();

@@ -267,6 +267,25 @@ pub trait SliceEngine<T: Instrumentation> {
         let _ = asserted;
         Ok(())
     }
+
+    /// The machine has just been reset, and its processors hold their reset
+    /// state.
+    ///
+    /// Called from `Emulator::reset`, the one place a reset happens (R5),
+    /// whatever asked for it: the host, the chipset (`0xCF9`, port 92h, the
+    /// 8042, ACPI) or a processor's triple fault. An engine that keeps
+    /// processors of its own in hardware must replace each with the machine's
+    /// before that processor runs another guest instruction.
+    ///
+    /// Defaulted to nothing, which is what this port's interpreter needs: the
+    /// processors the reset wrote are the ones it runs.
+    ///
+    /// # Errors
+    /// Whatever the engine's backend refused. The machine surfaces it from the
+    /// boundary rather than running a guest the reset did not reach.
+    fn machine_was_reset(&mut self) -> core::result::Result<(), EngineFault> {
+        Ok(())
+    }
 }
 
 /// This port's own interpreter.

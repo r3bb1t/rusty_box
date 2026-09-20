@@ -110,6 +110,14 @@ bitflags::bitflags! {
         const MASKED            = 0x0001_0000;
         /// Bits 17-18: timer mode (timer LVT only; 0=oneshot, 1=periodic, 2=tsc-deadline)
         const TIMER_MODE        = 0x0006_0000;
+        /// Bit 17: a timer that reaches zero reloads its initial count. Tested
+        /// alone, so mode 3 reloads too (Bochs apic.cc `periodic`,
+        /// `timervec & 0x20000`).
+        const TIMER_PERIODIC    = 0x0002_0000;
+        /// Bit 18: the timer is armed through `IA32_TSC_DEADLINE`, and the
+        /// initial and current count registers are inert. Tested alone, so
+        /// mode 3 is TSC-deadline too (Bochs apic.cc `timervec & 0x40000`).
+        const TIMER_TSC_DEADLINE = 0x0004_0000;
     }
 }
 
@@ -1029,7 +1037,7 @@ impl BxLocalApic {
             // within CPU batches (critical for kernel timer calibration loops).
             0x390 => {
                 let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
-                if timervec.timer_mode_field() == 2 {
+                if timervec.contains(LvtBits::TIMER_TSC_DEADLINE) {
                     // TSC-deadline mode: current count always reads 0
                     data = 0;
                 } else if self.timer_active && self.timer_divide_factor > 0 {
@@ -1263,10 +1271,12 @@ impl BxLocalApic {
 
         match index {
             // Full 64-bit ICR write: high dword is the x2APIC destination.
+            // x2APIC has no delivery-status bit to force idle, so both dwords
+            // are kept as written (Bochs apic.cc `write_x2apic`).
             0x300 => {
-                self.icr_lo = value_lo & !(1 << 12);
+                self.icr_lo = value_lo;
                 self.icr_hi = value_hi;
-                self.send_ipi(value_hi, self.icr_lo);
+                self.send_ipi(value_hi, value_lo);
                 true
             }
             // x2APIC self-IPI MSR.
@@ -1959,7 +1969,7 @@ impl BxLocalApic {
         }
 
         // Check timer mode (apic.cc)
-        if timervec.timer_mode_field() == 1 {
+        if timervec.contains(LvtBits::TIMER_PERIODIC) {
             // Periodic mode — reload timer values
             self.timer_current = self.timer_initial;
             self.timer_active = true;
@@ -2009,7 +2019,7 @@ impl BxLocalApic {
             self.diag_set_initial_count);
 
         // In TSC-deadline mode, writes to initial time count are ignored (apic.cc)
-        if timervec.timer_mode_field() == 2 {
+        if timervec.contains(LvtBits::TIMER_TSC_DEADLINE) {
             return;
         }
 
@@ -2053,7 +2063,7 @@ impl BxLocalApic {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
 
         // In TSC-deadline mode, current timer count always reads 0 (apic.cc)
-        if timervec.timer_mode_field() == 2 {
+        if timervec.contains(LvtBits::TIMER_TSC_DEADLINE) {
             return 0;
         }
 
@@ -2089,11 +2099,6 @@ impl BxLocalApic {
         }
     }
 
-    /// Check if the timer is in periodic mode (LVT timer bit 17 set).
-    pub(crate) fn timer_is_periodic(&self) -> bool {
-        self.lvt[LocalVectorTableEntry::Timer as usize].timer_mode_field() == 1
-    }
-
     /// Diagnostic: return timer state for HLT debugging.
     /// Returns (timer_active, timer_initial, period_ticks, timer_vector, activate_pending, deactivate_pending)
     /// Check if a specific vector has IRR or ISR bits set.
@@ -2122,8 +2127,7 @@ impl BxLocalApic {
     /// Set the TSC-Deadline timer value.
     /// Bochs: set_tsc_deadline (apic.cc)
     pub(crate) fn set_tsc_deadline(&mut self, deadline: u64, _current_ticks: u64) {
-        let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
-        if timervec.timer_mode_field() != 2 {
+        if !self.tsc_deadline_mode() {
             error!("APIC: TSC-Deadline timer is disabled");
             return;
         }
@@ -2150,11 +2154,18 @@ impl BxLocalApic {
     /// Bochs: get_tsc_deadline (apic.cc)
     #[allow(dead_code)]
     pub(crate) fn get_tsc_deadline(&self) -> u64 {
-        let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
-        if timervec.timer_mode_field() != 2 {
+        if !self.tsc_deadline_mode() {
             return 0;
         }
         self.ticks_initial
+    }
+
+    /// Whether the timer's LVT entry selects TSC-deadline mode — the one mode
+    /// in which `IA32_TSC_DEADLINE` means anything. Outside it, a write is
+    /// ignored and a read answers zero (Bochs apic.cc `set_tsc_deadline`,
+    /// `get_tsc_deadline`).
+    pub(crate) fn tsc_deadline_mode(&self) -> bool {
+        self.lvt[LocalVectorTableEntry::Timer as usize].contains(LvtBits::TIMER_TSC_DEADLINE)
     }
 
     // ─── Initialization and reset ────────────────────────────────────────
@@ -2616,8 +2627,9 @@ impl BxLocalApic {
         let error_status = reader.read_u32()?;
         let shadow_error_status = reader.read_u32()?;
         let icr_hi = reader.read_u32()?;
+        // Any ICR value is one a guest can leave: an x2APIC write keeps both
+        // dwords as written (Bochs apic.cc `write_x2apic`).
         let icr_lo = reader.read_u32()?;
-        Self::validate_snapshot_icr(icr_lo)?;
         let mut lvt = [LvtBits::empty(); LVT_ENTRY_COUNT];
         for (index, entry) in lvt.iter_mut().enumerate() {
             let raw = reader.read_u32()?;
@@ -2643,6 +2655,15 @@ impl BxLocalApic {
         }
         if reader.read_bool()? != self.tsc_deadline_supported {
             return Err(Self::snapshot_invalid("LAPIC TSC deadline capability mismatch"));
+        }
+        // Without the capability a timer write clears bit 18 (Bochs apic.cc
+        // `set_lvt_entry`), so no such machine holds it set.
+        if !self.tsc_deadline_supported
+            && lvt[LocalVectorTableEntry::Timer as usize].contains(LvtBits::TIMER_TSC_DEADLINE)
+        {
+            return Err(Self::snapshot_invalid(
+                "LAPIC timer selects TSC-deadline mode the CPU does not support",
+            ));
         }
         let timer_active = reader.read_bool()?;
         let timer_handle = Self::read_snapshot_handle(reader)?;
@@ -2709,43 +2730,43 @@ impl BxLocalApic {
                 "LAPIC timer cannot activate and deactivate simultaneously",
             ));
         }
-        let timer_mode = lvt[LocalVectorTableEntry::Timer as usize].timer_mode_field();
+        let tsc_deadline =
+            lvt[LocalVectorTableEntry::Timer as usize].contains(LvtBits::TIMER_TSC_DEADLINE);
         if let Some(request) = timer_activate_request {
             if !timer_active {
                 return Err(Self::snapshot_invalid(
                     "LAPIC activation request has no active timer",
                 ));
             }
-            match timer_mode {
-                0 | 1 => {
-                    let deadline = ticks_initial.saturating_add(
-                        u64::from(timer_initial) * u64::from(timer_divide_factor),
-                    );
-                    if timer_initial == 0
-                        || !request.update_ticks_initial
-                        || request.deadline_ticks != deadline
-                    {
-                        return Err(Self::snapshot_invalid(
-                            "LAPIC timer activation disagrees with its programming epoch",
-                        ));
-                    }
+            if request.update_ticks_initial {
+                // Armed by a count: an initial-count write, which arms only
+                // outside TSC-deadline mode and only with a nonzero count, or
+                // a periodic reload, which in mode 3 reloads whatever count
+                // the register holds (Bochs apic.cc `set_initial_timer_count`,
+                // `periodic`). Only a bit-18 change disarms, so the mode the
+                // count was armed in is the mode seen here.
+                let deadline = ticks_initial.saturating_add(
+                    u64::from(timer_initial) * u64::from(timer_divide_factor),
+                );
+                if request.deadline_ticks != deadline || (timer_initial == 0 && !tsc_deadline) {
+                    return Err(Self::snapshot_invalid(
+                        "LAPIC timer activation disagrees with its programming epoch",
+                    ));
                 }
-                2 => {
-                    if request.update_ticks_initial
-                        || request.deadline_ticks == 0
-                        || request.deadline_ticks != ticks_initial
-                    {
-                        return Err(Self::snapshot_invalid(
-                            "LAPIC TSC-deadline activation is incoherent",
-                        ));
-                    }
-                }
-                _ => unreachable!("validated LAPIC timer mode"),
+            } else if !tsc_deadline
+                || request.deadline_ticks == 0
+                || request.deadline_ticks != ticks_initial
+            {
+                // Armed through IA32_TSC_DEADLINE, which only TSC-deadline
+                // mode accepts (Bochs apic.cc `set_tsc_deadline`).
+                return Err(Self::snapshot_invalid(
+                    "LAPIC TSC-deadline activation is incoherent",
+                ));
             }
         }
-        if (timer_active && (timer_handle.is_none() || timer_initial == 0 && timer_mode != 2))
+        if (timer_active && (timer_handle.is_none() || timer_initial == 0 && !tsc_deadline))
             || mwaitx_timer_active
-            || (timer_current > timer_initial && timer_mode != 2)
+            || (timer_current > timer_initial && !tsc_deadline)
         {
             return Err(Self::snapshot_invalid("LAPIC timer state is inconsistent"));
         }
@@ -2859,21 +2880,15 @@ impl BxLocalApic {
         if combined == 7 { 1 } else { 2 << combined }
     }
 
+    /// An LVT entry holds whatever a guest write left inside the entry's
+    /// write mask — timer mode 3 and a reserved delivery mode included, as
+    /// `set_lvt_entry` stores them (Bochs apic.cc `set_lvt_entry`, `lvt_mask`)
+    /// — so only a bit outside the mask marks an image no machine produced.
     fn validate_snapshot_lvt(index: usize, raw: u32) -> SnapResult<()> {
         let mask = *LVT_MASKS.get(index)
             .ok_or_else(|| Self::snapshot_invalid("LAPIC LVT index is invalid"))?;
-        if raw & !mask != 0 || (index == LocalVectorTableEntry::Timer as usize && (raw >> 17) & 3 == 3) {
+        if raw & !mask != 0 {
             return Err(Self::snapshot_invalid("LAPIC LVT has invalid reserved state"));
-        }
-        if ((raw >> 8) & 7) == ApicDeliveryMode::Reserved as u32 {
-            return Err(Self::snapshot_invalid("LAPIC LVT delivery mode is reserved"));
-        }
-        Ok(())
-    }
-
-    fn validate_snapshot_icr(icr_lo: u32) -> SnapResult<()> {
-        if icr_lo & !0x000c_dfff != 0 || ((icr_lo >> 8) & 7) == ApicDeliveryMode::Reserved as u32 {
-            return Err(Self::snapshot_invalid("LAPIC ICR encoding is invalid"));
         }
         Ok(())
     }
@@ -3407,6 +3422,50 @@ mod tests {
         assert!(lapic.timer_deactivate_request);
     }
 
+    /// Bochs apic.cc tests the timer mode a bit at a time: bit 18 alone makes
+    /// the count registers inert and `IA32_TSC_DEADLINE` live, bit 17 alone
+    /// makes a fire reload. Mode 3 sets both, so it behaves as both.
+    #[test]
+    fn a_mode_3_timer_is_tsc_deadline_and_reloads_when_it_fires() {
+        const CURRENT_TICKS: u64 = 100;
+        const DEADLINE_TICKS: u64 = 500;
+
+        let mut lapic = make_lapic();
+        lapic.write_spurious_interrupt_register(0x1FF);
+        lapic.set_lvt_entry(0x320, 0x0006_0030);
+
+        lapic.set_initial_timer_count(7, CURRENT_TICKS);
+        assert_eq!(lapic.timer_initial, 0, "mode 3 ignores an initial-count write");
+        assert!(!lapic.timer_active);
+        assert_eq!(lapic.get_current_timer_count(CURRENT_TICKS), 0);
+
+        lapic.set_tsc_deadline(DEADLINE_TICKS, CURRENT_TICKS);
+        assert_eq!(lapic.get_tsc_deadline(), DEADLINE_TICKS);
+
+        lapic.periodic(DEADLINE_TICKS);
+        assert!(lapic.timer_active, "bit 17 reloads the timer that fired");
+        assert_eq!(
+            lapic.timer_activate_request,
+            Some(LocalApicTimerActivation::at_ticks(DEADLINE_TICKS, true))
+        );
+    }
+
+    /// An x2APIC ICR write has no delivery-status bit to force idle, so the
+    /// guest reads back both dwords as it wrote them (Bochs apic.cc
+    /// `write_x2apic`).
+    #[test]
+    fn an_x2apic_icr_write_reads_back_as_written() {
+        let mut lapic = make_lapic();
+        lapic.write_spurious_interrupt_register(0x1FF);
+        // Self shorthand, fixed delivery, vector 0x40, bit 12 set.
+        let icr = 0x0000_0000_0004_1040u64;
+
+        assert!(lapic.write_x2apic(0x300, icr, 0));
+
+        assert_eq!(lapic.icr_lo, 0x0004_1040);
+        assert!(BxLocalApic::get_vector(&lapic.irr, 0x40), "the self-IPI was sent");
+    }
+
     #[test]
     fn test_level_triggered_eoi_clears_tmr() {
         let mut lapic = make_lapic();
@@ -3587,15 +3646,63 @@ mod tests {
     }
 
     #[test]
-    fn v3_snapshot_rejects_tsc_deadline_activation_that_rebases_epoch() {
+    fn v3_snapshot_rejects_tsc_deadline_activation_away_from_its_deadline() {
         let mut source = make_lapic();
         source.lvt[LocalVectorTableEntry::Timer as usize] = LvtBits::from_raw(0x0004_0030);
         source.timer_handle = Some(1);
         source.timer_active = true;
         source.ticks_initial = 500;
-        source.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(500, true));
+        source.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(600, false));
 
         assert!(restore_v3(&source, &mut make_lapic()).is_err());
+    }
+
+    /// Only a TSC-deadline timer takes `IA32_TSC_DEADLINE`, and leaving the
+    /// mode disarms it, so no one-shot timer holds such an activation.
+    #[test]
+    fn v3_snapshot_rejects_tsc_deadline_activation_outside_tsc_deadline_mode() {
+        let mut source = make_lapic();
+        source.lvt[LocalVectorTableEntry::Timer as usize] = LvtBits::from_raw(0x0000_0030);
+        source.timer_handle = Some(1);
+        source.timer_active = true;
+        source.ticks_initial = 500;
+        source.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(500, false));
+
+        assert!(restore_v3(&source, &mut make_lapic()).is_err());
+    }
+
+    /// Without the capability a timer write clears bit 18, so an image that
+    /// holds it set was not made by this CPU.
+    #[test]
+    fn v3_snapshot_rejects_tsc_deadline_mode_without_the_capability() {
+        let mut source = make_lapic();
+        source.set_tsc_deadline_supported(false);
+        source.lvt[LocalVectorTableEntry::Timer as usize] = LvtBits::from_raw(0x0004_0030);
+        let mut target = make_lapic();
+        target.set_tsc_deadline_supported(false);
+
+        assert!(restore_v3(&source, &mut target).is_err());
+    }
+
+    /// Every register state a guest write can leave restores: a mode-3 timer
+    /// reloaded by its fire and then moved to mode 2 (only a bit-18 change
+    /// disarms), a reserved delivery mode in LINT0 and an ICR kept as written.
+    #[test]
+    fn v3_snapshot_accepts_every_register_state_a_guest_can_leave() {
+        let mut source = make_lapic();
+        // `Emulator::reset` consumes the reset's own disarm with the machine.
+        source.timer_deactivate_request = false;
+        source.write_spurious_interrupt_register(0x1FF);
+        source.timer_handle = Some(1);
+        source.set_lvt_entry(0x320, 0x0006_0030);
+        source.set_tsc_deadline(500, 100);
+        source.periodic(500);
+        source.set_lvt_entry(0x320, 0x0004_0030);
+        assert!(source.timer_activate_request.is_some(), "mode 2 kept the reload armed");
+        source.set_lvt_entry(0x350, 0x0000_0330);
+        assert!(source.write_x2apic(0x300, 0x0000_0000_0004_1040, 0));
+
+        restore_v3(&source, &mut make_lapic()).unwrap();
     }
 
     #[test]

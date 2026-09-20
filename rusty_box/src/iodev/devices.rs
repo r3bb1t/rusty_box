@@ -139,6 +139,9 @@ pub(crate) struct PioBinding<'a> {
     pub(crate) device: PioTarget<'a>,
     pub(crate) irq: &'a mut IrqFabric,
     pub(crate) handles: wiring::TimerHandles,
+    /// The clock the device's access reads — see
+    /// [`DeviceManager::access_clock_for`].
+    pub(crate) clock: wiring::AccessClock,
 }
 
 /// One memory-mapped device bound to the machine parts its context is built
@@ -147,6 +150,9 @@ pub(crate) struct MmioBinding<'a> {
     pub(crate) device: MmioTarget<'a>,
     pub(crate) irq: &'a mut IrqFabric,
     pub(crate) handles: wiring::TimerHandles,
+    /// As [`PioBinding::clock`]: the VGA's register window answers Input
+    /// Status 1 through memory as well as through port 0x3DA.
+    pub(crate) clock: wiring::AccessClock,
 }
 
 /// Port 0x92 - System Control Port
@@ -364,9 +370,18 @@ pub struct DeviceManager {
     /// QEMU fw_cfg Firmware Configuration Device
     /// Bochs: `bx_fw_cfg_c *theFwCfgDevice` (iodev/fw_cfg.h)
     pub(crate) fw_cfg: BxFwCfg,
-    /// PCI configuration address register (shadow copy for handler dispatch)
-    /// Bochs: bx_devices_c::pci_conf_addr (devices.cc)
+    /// PCI configuration-address register, port 0xCF8 — the machine's only
+    /// copy, which port 0xCFC–0xCFF dispatch reads and a snapshot carries.
+    /// Bochs: bx_devices_c::pci.confAddr (devices.cc)
     pub(crate) pci_conf_addr: u32,
+    /// The VGA's retrace clock on host time under `clock: sync=realtime`
+    /// (Bochs vgacore.cc `vsync_realtime`, reading
+    /// `bx_virt_timer.time_usec(true)`); `None` when the retrace runs on the
+    /// machine clock. Held here rather than on the card, because the card's
+    /// crate has no host to read time from: every access the VGA takes is
+    /// handed this reading as its clock ([`Self::access_clock_for`]).
+    #[cfg(feature = "std")]
+    vga_realtime: Option<super::realtime::RealtimeClock>,
     /// Work a guest I/O write asked for that needs the memory or I/O bus, so
     /// it waits for the next machine boundary. See [`PendingPlatformWork`].
     pub(crate) pending: PendingPlatformWork,
@@ -448,6 +463,15 @@ impl DeviceManager {
             || self.acpi.smi_request_pending
     }
 
+    /// Whether a reset producer has asked for a reset the machine has not
+    /// taken.
+    pub(crate) fn has_reset_request(&self) -> bool {
+        self.port92.reset_request.is_some()
+            || self.keyboard.reset_requested.is_some()
+            || self.pci2isa.reset_request.is_some()
+            || self.acpi.reset_request.is_some()
+    }
+
     /// Drain all reset producers, with hardware reset taking precedence over
     /// any software request issued in the same boundary.
     pub(crate) fn take_reset_request(&mut self) -> Option<ResetReason> {
@@ -486,6 +510,8 @@ impl DeviceManager {
             serial: BxSerialC::new(1), // COM1 only
             fw_cfg: BxFwCfg::new(),
             pci_conf_addr: 0,
+            #[cfg(feature = "std")]
+            vga_realtime: None,
             pending: PendingPlatformWork::empty(),
             bios_1meg_access_pending: None,
             cmos_reset_timer_sync: None,
@@ -598,8 +624,12 @@ impl DeviceManager {
         self.keyboard.reset();
         self.ide.drives.reset();
         self.vga.reset();
-        self.serial.reset();
+        // Nothing for the UARTs: Bochs serial.h `reset(unsigned type) {}` is
+        // empty, so a hardware reset leaves their programming, their FIFOs,
+        // the output the host has not drained and their timers as they were;
+        // the firmware reprograms them.
         self.irq.ioapic_mut().reset();
+        self.irq.reset_bsp_lint0();
         // Bochs hpet.cc reset(): comparators stop, state clears, and the
         // PIT/RTC pins re-enable (queued; the emulator drains after reset).
         self.hpet.reset();
@@ -1062,7 +1092,6 @@ impl DeviceManager {
             self.pending.remove(PendingPlatformWork::VGA_BARS);
         }
 
-        io.pci_conf_addr = self.pci_conf_addr;
         Ok(effects)
     }
 
@@ -1451,7 +1480,36 @@ impl DeviceManager {
     /// to the timer service instead — see [`wiring::TimerHandles`]. Reading
     /// them per arm rather than up front keeps the cost off the slots that do
     /// not bind, which is most accesses.
+    /// Put the VGA's retrace on host time — Bochs vgacore.cc `init` reading
+    /// `clock: sync=realtime` into `vsync_realtime`. Anchored once, at zero
+    /// as Bochs's realtime virtual clock starts; only a restore moves it.
+    #[cfg(feature = "std")]
+    pub(crate) fn enable_vga_realtime_sync(&mut self) {
+        self.vga_realtime
+            .get_or_insert_with(|| super::realtime::RealtimeClock::reading(0));
+    }
+
+    /// The VGA's host-time reading in microseconds, under `sync=realtime`.
+    #[cfg(feature = "std")]
+    pub(crate) fn vga_realtime_usec(&self) -> Option<u64> {
+        self.vga_realtime.map(|clock| clock.usec())
+    }
+
+    /// The clock an access to `slot` reads: the VGA's own host-time reading
+    /// under `sync=realtime`, and the machine's for everything else.
+    pub(crate) fn access_clock_for(&self, slot: DevSlot) -> wiring::AccessClock {
+        #[cfg(feature = "std")]
+        if slot == DevSlot::VGA {
+            if let Some(usec) = self.vga_realtime_usec() {
+                return wiring::AccessClock::HostMicros(usec);
+            }
+        }
+        let _ = slot;
+        wiring::AccessClock::Machine
+    }
+
     pub(crate) fn bind_pio(&mut self, slot: DevSlot, port: u16) -> Option<PioBinding<'_>> {
+        let clock = self.access_clock_for(slot);
         let Self {
             ref mut irq,
             ref mut pit,
@@ -1504,6 +1562,7 @@ impl DeviceManager {
             device,
             irq,
             handles,
+            clock,
         })
     }
 
@@ -1521,6 +1580,7 @@ impl DeviceManager {
     /// the 8259's ports are — an interrupt controller is not a device on the
     /// bus it implements.
     pub(crate) fn bind_mmio(&mut self, slot: DevSlot) -> Option<MmioBinding<'_>> {
+        let clock = self.access_clock_for(slot);
         let Self {
             ref mut irq,
             ref mut vga,
@@ -1537,6 +1597,7 @@ impl DeviceManager {
             device,
             irq,
             handles,
+            clock,
         })
     }
 
@@ -1723,35 +1784,6 @@ impl BxDevicesC {
         _pc_system: &mut BxPcSystemC,
     ) -> Result<()> {
         self.init(_mem)
-    }
-
-    /// Reset the I/O bus's own state (Bochs devices.cc bx_devices_c::reset).
-    ///
-    /// A hardware reset clears the PCI configuration address. The rest of
-    /// `bx_devices_c::reset` is the machine's: `Emulator::reset` disables
-    /// SMRAM (`mem->disable_smram`) and resets every device
-    /// (`bx_reset_plugins`) through `DeviceManager::reset`, which also queues
-    /// `PendingPlatformWork::SMRAM` so the reset value of the SMRAM control
-    /// register is applied before the guest resumes. Bochs's `release_keys`
-    /// (a break code for every key the host holds) and its paste buffer
-    /// (`paste.stop`) are not ported: this machine keeps no table of host-held
-    /// keys and has no paste buffer, so a key held across a hardware reset
-    /// stays down in the guest.
-    ///
-    /// # Arguments
-    /// * `reset_type` - Type of reset (Hardware or Software)
-    pub fn reset(&mut self, reset_type: ResetReason) -> Result<()> {
-        match reset_type {
-            ResetReason::Hardware => {
-                tracing::debug!("Device hardware reset");
-                // Bochs devices.cc bx_devices_c::reset: pci.confAddr = 0.
-                self.pci_conf_addr = 0;
-            }
-            ResetReason::Software => {
-                tracing::debug!("Device software reset");
-            }
-        }
-        Ok(())
     }
 
     /// Register device state for save/restore functionality
@@ -2240,7 +2272,6 @@ impl DeviceManager {
         self.pending.remove(PendingPlatformWork::VGA_BARS);
 
         self.pci_conf_addr = platform.pci_conf_addr;
-        io.pci_conf_addr = platform.pci_conf_addr;
         Ok(())
     }
 }
@@ -3330,7 +3361,7 @@ mod tests {
             io.init(&mut mem).unwrap();
             target.register_pci_handlers(&mut io);
             target.register_fw_cfg_handlers(&mut io);
-            io.pci_conf_addr = 0xA000_0000;
+            target.pci_conf_addr = 0xA000_0000;
 
             assert_eq!(io.read_handlers[PORT_92H as usize].slot, DevSlot::PORT92);
             assert_eq!(io.write_handlers[0x0CF8].slot, DevSlot::PCI);
@@ -3353,8 +3384,8 @@ mod tests {
             assert_eq!(restored.pci_conf_addr, source.pci_conf_addr);
             assert!(restored.pending.contains(PendingPlatformWork::PAM));
             assert_eq!(
-                io.pci_conf_addr, 0xA000_0000,
-                "component decode must not overwrite the live I/O dispatch latch"
+                target.pci_conf_addr, 0xA000_0000,
+                "component decode must not overwrite the live latch before the commit"
             );
 
             assert_eq!(io.read_handlers[PORT_92H as usize].slot, DevSlot::PORT92);

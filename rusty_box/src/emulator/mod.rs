@@ -58,6 +58,8 @@ pub use run::{
     BatchOutcome, EngineRefusal, Keyboard, Mouse, Power, PowerState, Progress, RunBudget,
     StopReason,
 };
+#[cfg(feature = "alloc")]
+pub use run::Typed;
 pub(crate) use run::StopCause;
 mod scheduler;
 mod timers;
@@ -530,6 +532,12 @@ pub struct Emulator<T: Instrumentation = (), E = SoftwareEngine> {
     /// GUI instance (optional, can be None for headless operation)
     #[cfg(feature = "alloc")]
     gui: Option<Box<dyn BxGui>>,
+    /// Host input the guest's own buffers had no room for, held in order
+    /// until they do — see `gui::host_input::HostInputBacklog`. Drained by
+    /// `pump_gui_input`, which is the only thing that fills it, and emptied
+    /// by a reset.
+    #[cfg(feature = "alloc")]
+    host_input: crate::gui::host_input::HostInputBacklog,
     /// Output file for the port-0xE9 debug console (std feature only). BIOS
     /// message ports 0x400-0x403/0x500-0x503 go to the log instead, exactly
     /// like Bochs biosdev.cc.
@@ -623,6 +631,8 @@ fn every_machine_field_is_accounted_for<T: Instrumentation>(machine: Emulator<T>
         snapshot_restore_failed: _,
         #[cfg(feature = "alloc")]
             gui: _,
+        #[cfg(feature = "alloc")]
+            host_input: _,
         #[cfg(feature = "std")]
             bios_output_file: _,
         exit_set: _,
@@ -641,14 +651,140 @@ fn every_machine_field_is_accounted_for<T: Instrumentation>(machine: Emulator<T>
 /// devices, and its own state — all three live at the same time. They are
 /// separate fields of one machine, which is what makes that possible, and
 /// [`Emulator::processor`] is the destructuring that says so.
+///
+/// This is also the only place outside the crate where a processor meets
+/// those parts (doctrine R3). The fields are private and every verb that runs
+/// the processor against the machine is a method here, so the CPU and the
+/// parts a verb pairs come from the one machine that built this value. The
+/// parts lent out by [`Self::io`] run nothing on their own.
 pub struct Processor<'a, T: Instrumentation, E> {
     /// The processor itself, at the index that was asked for.
-    pub cpu: &'a mut BxCpuC<T>,
+    cpu: &'a mut BxCpuC<T>,
     /// Memory, the port bus, the device models and the PC system.
-    pub io: PcIo<'a>,
+    io: PcIo<'a>,
     /// The engine, so a servicer can reach the state it keeps for this
     /// processor without going back through the machine it borrowed from.
-    pub engine: &'a mut E,
+    engine: &'a mut E,
+}
+
+impl<'a, T: Instrumentation, E> Processor<'a, T, E> {
+    /// The processor alone, for as long as the machine was lent.
+    pub fn into_cpu(self) -> &'a mut BxCpuC<T> {
+        self.cpu
+    }
+
+    /// The machine's parts alone, for as long as the machine was lent.
+    pub fn into_io(self) -> PcIo<'a> {
+        self.io
+    }
+
+    /// The processor, to read.
+    pub fn cpu(&self) -> &BxCpuC<T> {
+        self.cpu
+    }
+
+    /// The processor, to change: the registers an engine imports into it and
+    /// exports from it.
+    pub fn cpu_mut(&mut self) -> &mut BxCpuC<T> {
+        self.cpu
+    }
+
+    /// Memory, the port bus, the device models and the PC system, lent for as
+    /// long as the result lives.
+    pub fn io(&mut self) -> PcIo<'_> {
+        self.io.reborrow()
+    }
+
+    /// The engine's own state.
+    pub fn engine(&self) -> &E {
+        self.engine
+    }
+
+    /// The engine's own state, to change.
+    pub fn engine_mut(&mut self) -> &mut E {
+        self.engine
+    }
+
+    /// The processor, the machine's parts and the engine at once, for work
+    /// that needs more than one of them together. None of the three can run
+    /// the processor against the parts; that stays with the verbs here.
+    pub fn parts(&mut self) -> ProcessorParts<'_, T, E> {
+        ProcessorParts {
+            cpu: self.cpu,
+            io: self.io.reborrow(),
+            engine: self.engine,
+        }
+    }
+
+    /// Move what a device dispatch latched on the bus onto this processor:
+    /// the PIC's interrupt line, the 8237's hold request, and a request for
+    /// the machine to service its boundary.
+    pub fn sync_io_events(&mut self) {
+        self.io.sync_io_events(self.cpu);
+    }
+
+    /// Execute exactly one guest instruction, on this port's own dispatch
+    /// path, so an access serviced here is the same access the interpreter
+    /// would make.
+    ///
+    /// # Errors
+    /// Whatever the instruction raised that the processor could not take.
+    pub fn emulate_one(&mut self) -> crate::cpu::Result<()> {
+        self.io.emulate_one(self.cpu)
+    }
+
+    /// Take one interrupt-acknowledge moment — LAPIC before 8259, the same
+    /// INTA cycle the interpreter takes. `None` says nothing was deliverable.
+    pub fn pop_deliverable_vector(&mut self) -> Option<u8> {
+        self.io.pop_deliverable_vector(self.cpu)
+    }
+
+    /// Execute up to `instructions` guest instructions as one run, and return
+    /// how many retired: the loop stops early at a halt, at an event to
+    /// deliver, or wherever else a trace ends.
+    ///
+    /// # Errors
+    /// Whatever the guest raised that the processor could not take.
+    pub fn emulate_batch(&mut self, instructions: u64) -> crate::cpu::Result<u64> {
+        self.io.emulate_batch(self.cpu, instructions)
+    }
+
+    /// Finish the instruction at `RIP`, repeated items included, rather than
+    /// one item of it: up to [`PcIo::ITEM_CEILING`] items, stopping early when
+    /// the processor has an event to attend to.
+    ///
+    /// # Errors
+    /// Whatever the instruction raised that the processor could not take.
+    pub fn finish_the_instruction(&mut self) -> crate::cpu::Result<()> {
+        self.io.finish_the_instruction(self.cpu)
+    }
+
+    /// Deliver the single-step trap this processor owes, if it is awake.
+    ///
+    /// # Errors
+    /// Whatever the delivery, or the one shadowed instruction, raised that the
+    /// processor could not take.
+    pub fn deliver_the_trap_owed(&mut self) -> crate::cpu::Result<()> {
+        self.io.deliver_the_trap_owed(self.cpu)
+    }
+
+    /// Signal a system-management interrupt on this processor. Whether it is
+    /// taken is decided when the processor next runs, as Bochs `deliver_SMI`
+    /// decides it.
+    pub fn deliver_smi(&mut self) {
+        self.io.deliver_smi(self.cpu);
+    }
+}
+
+/// A [`Processor`]'s three loans held apart, as [`Processor::parts`] lends
+/// them.
+pub struct ProcessorParts<'p, T: Instrumentation, E> {
+    /// The processor.
+    pub cpu: &'p mut BxCpuC<T>,
+    /// Memory, the port bus, the device models and the PC system.
+    pub io: PcIo<'p>,
+    /// The engine's own state.
+    pub engine: &'p mut E,
 }
 
 impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
@@ -753,6 +889,19 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         &mut self.engine
     }
 
+    /// Whether something has asked for a reset the machine has not yet taken:
+    /// the chipset (`0xCF9`, port 92h, the 8042's reset pulse, ACPI S3) or a
+    /// processor's triple fault. The next boundary takes it.
+    ///
+    /// For an engine that runs a processor outside the machine's own loop: it
+    /// asks after each errand and runs the boundary there and then, so the
+    /// processor does not run past the instruction that asked — Bochs resets
+    /// inside that instruction.
+    #[must_use]
+    pub fn reset_is_pending(&self) -> bool {
+        self.device_manager.has_reset_request() || self.pc_system.has_reset_request()
+    }
+
     /// Which clock this machine's devices run on. See [`DeviceClock`].
     #[must_use]
     pub fn device_clock(&self) -> DeviceClock {
@@ -800,7 +949,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         let sci_level = self
             .device_manager
             .acpi
-            .post_restore_snapshot_v3(self.pc_system.time_ticks());
+            .post_restore_snapshot_v3(self.pc_system.clock_at(self.pc_system.time_ticks()));
         self.device_manager.serial.after_restore_snapshot_v3().restated()?;
         self.device_manager
             .vga
@@ -1061,6 +1210,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             core::ptr::addr_of_mut!((*ptr).initialized).write(false);
             core::ptr::addr_of_mut!((*ptr).snapshot_restore_failed).write(false);
             core::ptr::addr_of_mut!((*ptr).gui).write(None);
+            core::ptr::addr_of_mut!((*ptr).host_input)
+                .write(crate::gui::host_input::HostInputBacklog::default());
             #[cfg(feature = "std")]
             core::ptr::addr_of_mut!((*ptr).bios_output_file).write(None);
             core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
@@ -1286,6 +1437,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Initialize device manager (actual hardware + I/O handler registration)
         self.device_manager
             .init(&mut self.devices, &mut self.memory)?;
+        self.put_device_clocks_on_the_machine_clock();
 
         self.configure_pci_devices();
         // Initialize fw_cfg device and ACPI CPU/APIC tables.
@@ -1544,15 +1696,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // configuration address, disables SMRAM (`mem->disable_smram`),
         // resets every device plugin (`bx_reset_plugins`), sends a break code
         // for every key the host holds (`release_keys`), and stops the paste
-        // buffer (`paste.stop`). The first three are ported below.
-        // `release_keys` and the paste buffer are not: this machine keeps no
-        // table of host-held keys and has no paste buffer, so a key held
-        // across a hardware reset stays down in the guest.
+        // buffer (`paste.stop`). `release_keys` is not ported: this machine
+        // keeps no table of host-held keys, so a key held across a hardware
+        // reset stays down in the guest.
         if matches!(reset_type, ResetReason::Hardware) {
-            // Step 1: clear the PCI configuration address (`BxDevicesC::reset`).
-            self.devices.reset(reset_type)?;
-
-            // Step 2: Bochs `mem->disable_smram()`.
+            // Step 1: Bochs `mem->disable_smram()`. The PCI configuration
+            // address Bochs clears first is the device manager's and clears
+            // with its devices in step 2; no guest instruction runs between.
             self.memory.disable_smram();
 
             // Reset the machine-wide SMC write-stamp table (Bochs
@@ -1561,10 +1711,15 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             // trace can outlive its stamps).
             self.memory.smc_reset_stamps();
 
-            // Step 3: Bochs `bx_reset_plugins(type)` — every device the
-            // device manager owns.
+            // Step 2: Bochs `bx_reset_plugins(type)` — every device the
+            // device manager owns, and the PCI configuration address.
             self.device_manager.reset(reset_type)?;
             self.rearm_device_timers_after_hardware_reset();
+
+            // Step 3: Bochs `paste.stop`. Keyboard input held for room is this
+            // machine's paste buffer (divergence D14).
+            #[cfg(feature = "alloc")]
+            self.host_input.stop_keyboard_input();
         }
 
         // Reset always enables A20. Discard requests made before this reset
@@ -1590,6 +1745,14 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             self.initialized = true;
         }
         self.snapshot_restore_failed = false;
+        // An engine that holds processors in hardware is told last, when the
+        // processors it must install are the reset ones.
+        if let Err(fault) = <E as SliceEngine<T>>::machine_was_reset(&mut self.engine) {
+            match self.engine_fault {
+                None => self.engine_fault = Some(fault),
+                Some(_) => tracing::error!("and besides, the reset did not reach the engine: {fault}"),
+            }
+        }
         // A refusal recorded above is reported by the call that provoked it,
         // not left for whichever boundary runs next to attribute to itself.
         // Drained last so the reset completes first: a machine half-reset
@@ -1617,43 +1780,32 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         tracing::trace!("Timers started");
     }
 
-    /// Prepare for execution (start timers and log)
+    /// Tell the devices that keep time which clock they keep it on.
     ///
-    /// Call this before entering the CPU loop.
-    pub fn prepare_run(&mut self) {
-        tracing::trace!("Starting CPU execution at RIP={:#x}", self.cpu_ref(0).rip());
-
-        // Initialize PIT icount sync so PIT counter reads advance with CPU time.
-        // This is critical for kernel PIT-polling calibration loops (e.g., Alpine Linux).
-        let ips = self.config.ips.per_second_u64();
-        if ips > 0 {
-            // The PIT/ACPI absolute time cursor lives in the system-tick
-            // domain — the same clock the port-I/O read paths pass via
-            // `system_ticks()`. At cold boot this equals icount (both 0);
-            // after HLT fast-forwards or fast-REP surpluses only the tick
-            // clock is correct.
-            let now_ticks = self.pc_system.time_ticks();
-            self.device_manager.pit.init_icount_sync(now_ticks, ips);
-            self.device_manager.acpi.init_icount_sync(now_ticks, ips);
-            // Bochs `clock: sync=realtime` only when configured (pit.cc reads
-            // bx_virt_timer with is_realtime from the clock option); with the
-            // default sync=none the timers stay on emulated (icount) time.
-            #[cfg(feature = "std")]
-            if self.config.sync_realtime {
-                self.device_manager.pit.enable_realtime_sync();
-                self.device_manager.acpi.enable_realtime_sync();
-            }
+    /// Bochs has no step of its own for this: each device reads `clock:
+    /// sync=` in its own `init` — pit.cc and acpi.cc take `is_realtime`,
+    /// vgacore.cc `vsync_realtime`, from BXPN_CLOCK_SYNC. This is that read,
+    /// made once for the three, straight after the device models come up in
+    /// [`Self::init_cpu_and_devices`], so a machine that has devices has them
+    /// on its clock and there is no call left for a caller to forget (R5).
+    ///
+    /// Under the default `sync=none` each of the three reads the machine clock
+    /// it is handed at every access. The PIT and the VGA are told the clock's
+    /// rate here: the VGA derives Input Status 1 from the clock only once it
+    /// has been, and both check the rate when a snapshot is restored. The
+    /// ACPI PM timer needs nothing. Under `sync=realtime` the PIT and the PM
+    /// timer are anchored to host time here, once, and no reset moves either
+    /// anchor; the VGA retrace stays on the machine clock.
+    fn put_device_clocks_on_the_machine_clock(&mut self) {
+        let rate = self.pc_system.ips();
+        let now = self.pc_system.time_ticks();
+        self.device_manager.pit.init_icount_sync(now, rate);
+        self.device_manager.vga.set_icount_sync(rate);
+        #[cfg(feature = "std")]
+        if self.config.sync_realtime {
+            self.device_manager.pit.enable_realtime_sync();
+            self.device_manager.acpi.enable_realtime_sync();
         }
-
-        // Initialize VGA icount-based timing for retrace computation.
-        {
-            let ips = self.config.ips.per_second_u64();
-            self.device_manager.vga.set_icount_sync(ips);
-        }
-
-        self.smp_tick_remainder = 0;
-        self.batch_advanced_pc_system = false;
-        self.start_timers();
     }
 
     /// Get current instruction pointer

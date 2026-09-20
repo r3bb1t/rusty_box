@@ -162,11 +162,6 @@ fn boot() -> i32 {
             return 1;
         }
     };
-    // The last step of the machine's own bring-up, and it belongs to whoever
-    // is about to run it: it anchors the PIT, the ACPI timer and the VGA
-    // retrace to the machine's instruction rate, which the BIOS's calibration
-    // loops read.
-    machine.with_machine(|m| m.prepare_run());
     println!("machine assembled on the hypervisor engine; running");
 
     // A watchdog on its own thread, because the failure worth catching is the
@@ -226,8 +221,15 @@ fn boot() -> i32 {
         //
         // Read between steps, while the machine is paused: a scrape taken with
         // a processor inside the partition answers from a shadow that
-        // processor is not using.
-        let seen = screen(&mut machine);
+        // processor is not using, and the machine refuses it.
+        let seen = match screen(&mut machine) {
+            Ok(seen) => seen,
+            Err(refused) => {
+                report(reached, began, ticks, &mut machine);
+                eprintln!("the paused machine could not be read: {refused}");
+                return 1;
+            }
+        };
         if let Some(screen) = seen.clone() {
             if screen != shown {
                 for (line, was) in screen.lines().zip(shown.lines().chain(std::iter::repeat("")))
@@ -253,8 +255,8 @@ fn boot() -> i32 {
             let exits = census.exits;
             let in_run_ms = census.vcpus.first().map_or(0, |vcpu| vcpu.in_run_nanos) / 1_000_000;
             println!(
-                "       rip={:#x} in_run={in_run_ms}ms runs={} injected={} exits: port {} mem {} cpuid {} msr {} halt {} canceled {} boundary {}",
-                machine.with_machine(|m| m.rip()),
+                "       rip={} in_run={in_run_ms}ms runs={} injected={} exits: port {} mem {} cpuid {} msr {} halt {} canceled {} boundary {}",
+                rip(&mut machine),
                 census.vcpus.first().map_or(0, |vcpu| vcpu.runs),
                 census.injections.injected,
                 exits.port,
@@ -299,6 +301,12 @@ fn boot() -> i32 {
                 dump(&mut machine);
                 return 1;
             }
+            StepStop::CpuShutdown => {
+                report(reached, began, ticks, &mut machine);
+                eprintln!("the processor shut down after a triple fault");
+                dump(&mut machine);
+                return 1;
+            }
             StepStop::Faulted(fault) => {
                 report(reached, began, ticks, &mut machine);
                 eprintln!("a processor could not carry on: {fault}");
@@ -318,9 +326,23 @@ fn boot() -> i32 {
     }
 }
 
-/// The guest's text screen as it stands between two steps.
-fn screen(machine: &mut FastMachine<()>) -> Option<String> {
+/// The guest's text screen as it stands between two steps, or `None` when the
+/// display is not in a text mode.
+///
+/// # Errors
+/// Whatever the machine said about being read — it refuses a machine that is
+/// not paused.
+fn screen(machine: &mut FastMachine<()>) -> Result<Option<String>, FastMachineFault> {
     machine.with_machine(|m| m.display().text().map(|text| text.to_text()))
+}
+
+/// Where the guest's processor stands, for a line of output: the address, or
+/// why the machine would not say.
+fn rip(machine: &mut FastMachine<()>) -> String {
+    match machine.with_machine(|m| m.rip()) {
+        Ok(rip) => format!("{rip:#x}"),
+        Err(refused) => format!("(unread: {refused})"),
+    }
 }
 
 /// Say how far the guest got and, more usefully, what it was doing.
@@ -351,10 +373,11 @@ fn report(reached: usize, began: Instant, ticks: u64, machine: &mut FastMachine<
     );
     for (index, vcpu) in census.vcpus.iter().enumerate() {
         println!(
-            "  vcpu {index}: runs {} in_run {}ms exports {}",
+            "  vcpu {index}: runs {} in_run {}ms exports {} handbacks {}",
             vcpu.runs,
             vcpu.in_run_nanos / 1_000_000,
             vcpu.export_calls,
+            vcpu.handback_calls,
         );
         // The hypervisor's own account, beside this engine's, as of the last
         // time this processor came back. Printed even when there is none:
@@ -396,8 +419,8 @@ fn report(reached: usize, began: Instant, ticks: u64, machine: &mut FastMachine<
     // worth reading; vector = the 8259's base + IRQ, so IRQ 0 is 0x08 under
     // the BIOS and 0x20 once Linux remaps, and IRQ 14 is 0x76 then 0x2e.
     let acknowledged = machine.with_machine(|m| {
-        let mut processor = m.processor(0);
-        let fabric = processor.io.device_manager().irq();
+        let mut io = m.processor(0).into_io();
+        let fabric = io.device_manager().irq();
         Acknowledged {
             total: fabric.acknowledge_count(),
             per_vector: (0..=u8::MAX)
@@ -415,11 +438,16 @@ fn report(reached: usize, began: Instant, ticks: u64, machine: &mut FastMachine<
         .map(|(vector, count)| (u8::try_from(vector).unwrap_or(u8::MAX), *count))
         .collect();
     println!("  placed per vector:       {}", per_vector(&placed));
-    println!("  acknowledged per vector: {}", per_vector(&acknowledged.per_vector));
-    println!(
-        "  acknowledges {}  injected {}",
-        acknowledged.total, census.injections.injected
-    );
+    match acknowledged {
+        Ok(acknowledged) => {
+            println!("  acknowledged per vector: {}", per_vector(&acknowledged.per_vector));
+            println!(
+                "  acknowledges {}  injected {}",
+                acknowledged.total, census.injections.injected
+            );
+        }
+        Err(refused) => println!("  acknowledged per vector: (unread: {refused})"),
+    }
 }
 
 /// The fabric's side of the placement ledger, read under the machine's lock.
@@ -450,9 +478,9 @@ fn per_vector(counts: &[(u8, u32)]) -> String {
 /// somewhere this port put it".
 fn dump(machine: &mut FastMachine<()>) {
     println!();
-    println!("RIP = {:#x}", machine.with_machine(|m| m.rip()));
+    println!("RIP = {}", rip(machine));
     match screen(machine) {
-        Some(screen) => {
+        Ok(Some(screen)) => {
             println!("the guest's text screen:");
             for line in screen.lines() {
                 let line = line.trim_end();
@@ -464,12 +492,13 @@ fn dump(machine: &mut FastMachine<()>) {
                 println!("  (blank — nothing has been printed)");
             }
         }
-        None => println!("the display is not in a text mode"),
+        Ok(None) => println!("the display is not in a text mode"),
+        Err(refused) => println!("the guest's text screen: (unread: {refused})"),
     }
-    let debugcon: Vec<u8> =
-        machine.with_machine(|m| m.debug_port().take_output().collect());
-    if !debugcon.is_empty() {
-        println!("port 0xE9 said: {}", String::from_utf8_lossy(&debugcon));
+    match machine.with_machine(|m| m.debug_port().take_output().collect::<Vec<u8>>()) {
+        Ok(debugcon) if debugcon.is_empty() => {}
+        Ok(debugcon) => println!("port 0xE9 said: {}", String::from_utf8_lossy(&debugcon)),
+        Err(refused) => println!("port 0xE9: (unread: {refused})"),
     }
 }
 

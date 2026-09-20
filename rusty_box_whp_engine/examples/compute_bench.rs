@@ -270,10 +270,9 @@ fn bench() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
         assembled.reg_write(X86Reg::Rip, CODE);
-        // Loaded and pointed at the code BEFORE adoption: adoption hands the
-        // processor to a thread and exports the machine's state into the
-        // partition, and a register written after that would be written to a
-        // shadow the guest is no longer reading.
+        // Loaded and pointed at the code before adoption, which installs the
+        // machine's processor in the partition before its first entry — so
+        // the guest starts here rather than at the platform's reset vector.
         let mut machine = match FastMachine::adopt(assembled) {
             Ok(machine) => machine,
             Err(error) => {
@@ -282,7 +281,14 @@ fn bench() -> std::process::ExitCode {
             }
         };
         let took = time_until_the_port_write(&mut machine);
-        let arrived = machine.with_machine(|m| m.debug_port().take_output().count() > 0);
+        let arrived =
+            match machine.with_machine(|m| m.debug_port().take_output().count() > 0) {
+                Ok(arrived) => arrived,
+                Err(refused) => {
+                    eprintln!("the paused machine could not be read: {refused}");
+                    return std::process::ExitCode::FAILURE;
+                }
+            };
         match (took, arrived) {
             (Some(took), true) => took,
             (_, false) => {

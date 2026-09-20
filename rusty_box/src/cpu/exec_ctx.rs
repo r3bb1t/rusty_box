@@ -60,7 +60,10 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
     /// base, so a cached offset resolved against a base that was never taken
     /// is a wild pointer. Deriving them at assembly rather than storing them
     /// on the CPU is what makes a stale base unrepresentable — there is no
-    /// window in which a context holds bases from a different memory.
+    /// window in which a context holds bases from a different memory. The
+    /// offsets the CPU caches are the other half: they are checked here too,
+    /// against the allocation they were filled from, and dropped when this
+    /// memory is not it ([`BxCpuC::adopt_backing`]).
     ///
     /// The machine parts arrive as one [`PcIo`] because they are one loan: what
     /// this pairs with a processor is the same group an execution engine that
@@ -76,7 +79,11 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
             ..
         } = io;
         let (mem_host_base, mem_host_len) = memory.identity_guest_base();
-        let (mem_alloc_base, _alloc_len) = memory.allocation_span();
+        let (mem_alloc_base, alloc_len) = memory.allocation_span();
+        cpu.adopt_backing(
+            super::cpu::CacheBacking::of(mem_alloc_base, alloc_len),
+            memory.swap_epoch(),
+        );
         Self {
             cpu,
             memory,
@@ -312,6 +319,46 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// A processor's fetch window is an offset into the memory it was filled
+    /// from, and `fetch_window_bytes` resolves it against whatever memory the
+    /// context holds. Assembled with any other memory, the context must start
+    /// without it: from a larger machine, the offset indexes past a smaller
+    /// one's end. The test only assembles the second context and inspects it,
+    /// so it never reads through a stale window even when the check is missing.
+    #[test]
+    fn a_processor_assembled_with_other_memory_keeps_no_fetch_window_into_the_first() {
+        use crate::cpu::builder::BxCpuBuilder;
+        use crate::cpu::decoder::BxSegregs;
+        use crate::memory::{BxMemC, BxMemoryStubC};
+
+        const MIB: usize = 1024 * 1024;
+        let memory =
+            || BxMemC::new(BxMemoryStubC::create_and_init(MIB, MIB, 4096).unwrap(), false);
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
+        cpu.reset(crate::cpu::ResetReason::Hardware);
+        let mut first = memory();
+        let mut second = memory();
+
+        super::exec_with(&mut cpu, &mut first, |ctx| {
+            // The reset vector sits in the ROM window, which an empty stub
+            // cannot fetch from directly; code in RAM can.
+            ctx.load_seg_reg_real_mode(BxSegregs::Cs, 0);
+            ctx.set_rip(0x2000);
+            ctx.prefetch().unwrap();
+        });
+        assert!(
+            cpu.eip_fetch_window.is_some(),
+            "premise: the prefetch set a fetch window in the first memory"
+        );
+
+        super::exec_with(&mut cpu, &mut second, |ctx| {
+            assert!(
+                ctx.eip_fetch_window.is_none(),
+                "a fetch window into the first memory survived into a context over the second"
+            );
+        });
     }
 }
 

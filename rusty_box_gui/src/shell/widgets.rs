@@ -315,6 +315,9 @@ pub(crate) fn action_tile_enabled(
             .id_salt(title)
             .sense(egui::Sense::click()),
         |ui| {
+            // The whole card is the target: its text must not take the
+            // press for a selection of its own.
+            ui.style_mut().interaction.selectable_labels = false;
             let hovered = enabled && ui.response().hovered();
             let stroke_color = match (weight, enabled, hovered) {
                 (_, false, _) => STROKE_HAIRLINE,

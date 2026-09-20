@@ -573,6 +573,12 @@ pub struct BxPcSystemC {
     pub(crate) intr_cleared: bool,
     /// Request to terminate emulation
     pub(crate) kill_bochs_request: bool,
+    /// A reset a processor asked for from inside an instruction — Bochs
+    /// exception.cc calling `bx_pc_system.Reset(BX_RESET_HARDWARE)` on a
+    /// triple fault. Bochs resets there and then; this machine resets at the
+    /// boundary the processor ends its slice for, before any processor runs
+    /// another instruction.
+    reset_request: Option<ResetReason>,
     /// Buffer of timer owners whose timers fired during the last tickn/tick1.
     /// Drained by the emulator via `take_fired_timers()`.
     fired_owners: [TimerOwner; BX_MAX_TIMERS],
@@ -625,6 +631,7 @@ impl BxPcSystemC {
             intr_raised: false,
             intr_cleared: false,
             kill_bochs_request: false,
+            reset_request: None,
             fired_owners: [TimerOwner::NullTimer; BX_MAX_TIMERS],
             fired_owner_counts: [0; BX_MAX_TIMERS],
             num_fired: 0,
@@ -656,6 +663,7 @@ impl BxPcSystemC {
         self.hrq = false;
         self.hrq_pending = false;
         self.kill_bochs_request = false;
+        self.reset_request = None;
 
         // Convert IPS to millions for timing calculations
         self.ips = u64::from(ips.max(1));
@@ -708,6 +716,19 @@ impl BxPcSystemC {
     /// wanted microseconds divided for itself.
     pub(crate) fn clock_at(&self, now_ticks: u64) -> VmClock {
         VmClock::new(VmInstant::from_ticks(now_ticks), self.rate())
+    }
+
+    /// A clock at the machine's rate that reads `usec` microseconds — how a
+    /// device on host time is handed its reading in the shape every device
+    /// reads a clock in. Rounded up to the tick, so it reads back as exactly
+    /// `usec`.
+    #[cfg(feature = "std")]
+    pub(crate) fn clock_reading_micros(&self, usec: u64) -> VmClock {
+        let rate = self.rate();
+        VmClock::new(
+            VmInstant::from_ticks(rate.ticks_from_micros_ceil(usec).ticks()),
+            rate,
+        )
     }
 
 
@@ -987,6 +1008,32 @@ impl BxPcSystemC {
         self.num_fired = 0;
         self.fired_owner_counts = [0; BX_MAX_TIMERS];
         self.fired_owners = [TimerOwner::NullTimer; BX_MAX_TIMERS];
+
+        // The reset a processor asked for is this one, or one it supersedes.
+        self.reset_request = None;
+    }
+
+    /// Ask for the machine reset Bochs performs inside the instruction that
+    /// wants it (`bx_pc_system.Reset`). The processor asking ends its slice;
+    /// the machine takes the request at that boundary. A hardware request
+    /// outranks a software one already queued.
+    pub(crate) fn request_reset(&mut self, reset_type: ResetReason) {
+        self.reset_request = match (self.reset_request, reset_type) {
+            (Some(ResetReason::Hardware), _) | (_, ResetReason::Hardware) => {
+                Some(ResetReason::Hardware)
+            }
+            (_, ResetReason::Software) => Some(ResetReason::Software),
+        };
+    }
+
+    /// Whether a processor has asked for a reset the machine has not taken.
+    pub(crate) fn has_reset_request(&self) -> bool {
+        self.reset_request.is_some()
+    }
+
+    /// Take the reset a processor asked for, if any.
+    pub(crate) fn take_reset_request(&mut self) -> Option<ResetReason> {
+        self.reset_request.take()
     }
 
     /// Register state for save/restore functionality.
@@ -1446,6 +1493,7 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
             1,    // interrupt raised
             1,    // interrupt cleared
             1,    // kill request
+            1,    // processor reset request
             4,    // timer capacity
             4,    // timer high-water count
             4,    // triggered slot
@@ -1494,6 +1542,11 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
         writer.write_bool(self.intr_raised)?;
         writer.write_bool(self.intr_cleared)?;
         writer.write_bool(self.kill_bochs_request)?;
+        writer.write_u8(match self.reset_request {
+            None => 0,
+            Some(ResetReason::Software) => 1,
+            Some(ResetReason::Hardware) => 2,
+        })?;
         writer.write_u32(snapshot_usize_to_u32(BX_MAX_TIMERS)?)?;
         writer.write_u32(snapshot_usize_to_u32(self.num_timers)?)?;
         writer.write_u32(snapshot_usize_to_u32(self.triggered_timer)?)?;
@@ -1551,6 +1604,12 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
         let intr_raised = reader.read_bool()?;
         let intr_cleared = reader.read_bool()?;
         let kill_bochs_request = reader.read_bool()?;
+        let reset_request = match reader.read_u8()? {
+            0 => None,
+            1 => Some(ResetReason::Software),
+            2 => Some(ResetReason::Hardware),
+            _ => return Err(snapshot_invalid_data("processor reset request is invalid")),
+        };
 
         let saved_timer_capacity = reader.read_count(BX_MAX_TIMERS)?;
         if saved_timer_capacity != BX_MAX_TIMERS {
@@ -1613,6 +1672,7 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
         self.intr_raised = intr_raised;
         self.intr_cleared = intr_cleared;
         self.kill_bochs_request = kill_bochs_request;
+        self.reset_request = reset_request;
         self.fired_owners = fired_owners;
         self.fired_owner_counts = fired_owner_counts;
         self.num_fired = num_fired;

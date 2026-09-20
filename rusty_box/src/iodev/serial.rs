@@ -316,47 +316,6 @@ impl SerialPort {
         s.modem_status.dsr = true;
         s
     }
-
-    fn reset(&mut self) {
-        self.ls_interrupt = false;
-        self.ms_interrupt = false;
-        self.rx_interrupt = false;
-        self.tx_interrupt = false;
-        self.fifo_interrupt = false;
-        self.ls_ipending = false;
-        self.ms_ipending = false;
-        self.rx_ipending = false;
-        self.fifo_ipending = false;
-
-        self.rx_fifo.clear();
-        self.tx_fifo.clear();
-        self.tx_output.clear();
-
-        self.rxbuffer = 0;
-        self.thrbuffer = 0;
-        self.tsrbuffer = 0;
-        self.int_enable = IntEnable::default();
-        self.int_ident = IntIdent::default();
-        self.fifo_cntl = FifoControl::default();
-        self.line_cntl = LineControl::default();
-        self.modem_cntl = ModemControl::default();
-        self.line_status = LineStatus::default();
-        self.modem_status = ModemStatus::default();
-        self.scratch = 0;
-        self.divisor_lsb = 1;
-        self.divisor_msb = 0;
-        self.baudrate = 115200;
-        self.databyte_usec = 87;
-        // Timer handles persist across soft resets; timeout scheduling does not.
-        self.fifo_timeout_delay_usec = None;
-        self.fifo_timer_request_pending = true;
-        self.tx_timer_delay_usec = None;
-        self.tx_timer_request_pending = true;
-
-        // Simulate connected device
-        self.modem_status.cts = true;
-        self.modem_status.dsr = true;
-    }
 }
 
 /// Computes the timing derived from the UART's architectural divisor and line
@@ -986,14 +945,6 @@ impl BxSerialC {
         }
     }
 
-    pub fn reset(&mut self) {
-        for port in &mut self.ports {
-            port.reset();
-        }
-        self.pending_irq_raise = [false; SERIAL_PORT_COUNT];
-        self.pending_irq_lower = [false; SERIAL_PORT_COUNT];
-    }
-
     /// Drain transmitted bytes from a port (for host-side consumption)
     #[allow(dead_code)]
     pub fn drain_tx_output(&mut self, port_index: usize) -> SerialTxDrain<'_> {
@@ -1372,12 +1323,51 @@ impl BxSerialC {
         self.raise_interrupt(port_idx, IntSource::RxData);
     }
 
-    /// Feed data into a COM port's RX path (called from outside to inject serial input)
-    #[allow(dead_code)]
-    pub fn receive_byte(&mut self, port_index: usize, data: u8) {
-        if port_index < self.num_ports {
-            self.rx_fifo_enq(port_index, data);
+    /// Whether a port's receiver takes one more host byte now.
+    ///
+    /// Bochs serial.cc `rx_timer` reads from the host source only while
+    /// `(line_status.rxdata_ready == 0) || fifo_cntl.enable`. With the FIFO off
+    /// that is this gate exactly. With it on, Bochs reads regardless and
+    /// `rx_fifo_enq` drops a byte that finds the FIFO full, setting the
+    /// overrun bit; here the byte is held until there is room instead
+    /// (divergence D11). Named once so every host offer is gated the same way
+    /// (R5).
+    fn rx_has_room(&self, port_index: usize) -> bool {
+        let port = &self.ports[port_index];
+        if port.fifo_cntl.enable {
+            port.rx_fifo.len() < FIFO_SIZE
+        } else {
+            !port.line_status.rxdata_ready
         }
+    }
+
+    /// Offer one host byte to a COM port's receiver, returning whether it was
+    /// taken.
+    ///
+    /// A refusal is back-pressure, not an error: the receiver is full and the
+    /// byte must be offered again once the guest has read from it. Bochs
+    /// serial.cc `rx_timer` reads a host byte per character time, gated as
+    /// [`Self::rx_has_room`] describes; there is no host serial descriptor to
+    /// poll here, so the front end's queue is the source, the machine's input
+    /// pump is the timer, and the gate is applied at the point of offer.
+    /// Because a byte that finds the FIFO full is held rather than dropped
+    /// (divergence D11), host input never overruns the modelled UART.
+    ///
+    /// In loopback mode the byte is taken and discarded, as `rx_timer`
+    /// discards host input while `modem_cntl.local_loopback` is set: the
+    /// receiver then carries only what the guest itself transmits, and that
+    /// path still reaches `rx_fifo_enq`'s overrun as it does in Bochs.
+    #[allow(dead_code)]
+    #[must_use = "a refused byte never reached the guest and must be offered again"]
+    pub fn receive_byte(&mut self, port_index: usize, data: u8) -> bool {
+        if port_index >= self.num_ports || !self.rx_has_room(port_index) {
+            return false;
+        }
+        if self.ports[port_index].modem_cntl.local_loopback {
+            return true;
+        }
+        self.rx_fifo_enq(port_index, data);
+        true
     }
 
     // ========================================================================
@@ -2410,7 +2400,7 @@ mod tests {
     fn serial_fifo_timeout_uses_three_character_deadline() {
         let mut serial = fifo_serial_with_four_byte_trigger();
 
-        serial.receive_byte(0, 0x11);
+        assert!(serial.receive_byte(0, 0x11), "an empty FIFO has room");
 
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
         assert_eq!(serial.read(COM_BASES[0] + REG_IIR_FCR, 1) & 0x01, 0x01);
@@ -2431,10 +2421,10 @@ mod tests {
     fn serial_fifo_byte_rearms_three_character_timeout() {
         let mut serial = fifo_serial_with_four_byte_trigger();
 
-        serial.receive_byte(0, 0x11);
+        assert!(serial.receive_byte(0, 0x11), "an empty FIFO has room");
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
 
-        serial.receive_byte(0, 0x22);
+        assert!(serial.receive_byte(0, 0x22), "one byte in, fifteen to go");
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
         assert_eq!(serial.read(COM_BASES[0] + REG_IIR_FCR, 1) & 0x01, 0x01);
     }
@@ -2444,7 +2434,7 @@ mod tests {
         let mut serial = fifo_serial_with_four_byte_trigger();
 
         for byte in 0..4 {
-            serial.receive_byte(0, byte);
+            assert!(serial.receive_byte(0, byte), "byte {byte} fits in the FIFO");
         }
 
         assert_eq!(serial.fifo_timeout_delay_usec(0), None);
@@ -2459,7 +2449,7 @@ mod tests {
     fn serial_fifo_drain_cancels_timeout() {
         let mut serial = fifo_serial_with_four_byte_trigger();
 
-        serial.receive_byte(0, 0x11);
+        assert!(serial.receive_byte(0, 0x11), "an empty FIFO has room");
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
 
         assert_eq!(serial.read(COM_BASES[0] + REG_RBR_THR, 1), 0x11);
@@ -2478,13 +2468,13 @@ mod tests {
 
         // Three bytes: below the trigger — no RXDATA, timeout armed.
         for b in 0..3u8 {
-            serial.receive_byte(0, b);
+            assert!(serial.receive_byte(0, b), "byte {b} fits in the FIFO");
         }
         assert_eq!(serial.take_pending_irqs().count(), 0, "below trigger: no IRQ");
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
 
         // Fourth byte hits the trigger exactly — one RXDATA raise, timeout gone.
-        serial.receive_byte(0, 3);
+        assert!(serial.receive_byte(0, 3), "the fourth byte fits");
         let mut irqs = serial.take_pending_irqs();
         assert_eq!(irqs.next(), Some((COM_IRQS[0], true)));
         assert_eq!(irqs.next(), None);
@@ -2492,7 +2482,7 @@ mod tests {
         assert_eq!(serial.fifo_timeout_delay_usec(0), None);
 
         // Fifth byte is above the trigger — no re-raise, timeout re-armed.
-        serial.receive_byte(0, 4);
+        assert!(serial.receive_byte(0, 4), "the fifth byte fits");
         assert_eq!(
             serial.take_pending_irqs().count(),
             0,
@@ -2505,7 +2495,10 @@ mod tests {
     fn serial_non_fifo_overrun_overwrites_rbr_and_raises_rxdata() {
         // Bochs serial.cc rx_fifo_enq (non-FIFO): a byte arriving while RBR is
         // still full sets overrun_error AND falls through to overwrite RBR and
-        // raise RXDATA — the new byte is delivered, not dropped.
+        // raise RXDATA — the new byte is delivered, not dropped. Loopback and
+        // the modem-status paths still reach it that way, so it is asserted
+        // where it lives rather than through `receive_byte`, which applies
+        // rx_timer's gate and never lets a host byte overrun.
         let mut serial = BxSerialC::new(1);
         let base = COM_BASES[0];
         serial.write(base + REG_LCR, 0x03, 1); // 8-bit word
@@ -2513,19 +2506,79 @@ mod tests {
         serial.write(base + REG_IER_DLM, 0x01, 1); // enable RXDATA interrupt
         let _ = serial.take_pending_irqs().count();
 
-        serial.receive_byte(0, b'A');
+        assert!(serial.receive_byte(0, b'A'), "an empty RBR has room");
         let mut irqs = serial.take_pending_irqs();
         assert_eq!(irqs.next(), Some((COM_IRQS[0], true)));
         drop(irqs);
 
-        // Second byte without draining RBR: overrun.
-        serial.receive_byte(0, b'B');
+        // A host byte offered while RBR is still full is REFUSED, so the
+        // front end holds it instead of losing 'A' — Bochs rx_timer reads
+        // nothing from the host source in exactly this state.
+        assert!(
+            !serial.receive_byte(0, b'B'),
+            "an unread RBR must refuse the next host byte, not overwrite it"
+        );
+
+        // Second byte without draining RBR, on the path that still bursts:
+        // overrun.
+        serial.rx_fifo_enq(0, b'B');
         // A fresh RXDATA raise fired for the overwriting byte.
         assert_eq!(serial.take_pending_irqs().next(), Some((COM_IRQS[0], true)));
         // overrun_error is reported (LSR bit 1) before the read clears it.
         assert_ne!(serial.read(base + REG_LSR, 1) & 0x02, 0, "overrun_error set");
         // RBR now holds the NEW byte, not the stale 'A'.
         assert_eq!(serial.read(base + REG_RBR_THR, 1), u32::from(b'B'));
+    }
+
+    #[test]
+    fn a_full_receive_fifo_refuses_a_host_byte_rather_than_overrunning() {
+        // Bochs serial.cc rx_fifo_enq drops a byte offered to a full FIFO and
+        // sets only the overrun bit. Offering through `receive_byte` reports
+        // the refusal instead, which is what lets a front end hold the byte
+        // until the guest has read one out.
+        let mut serial = BxSerialC::new(1);
+        let base = COM_BASES[0];
+        serial.write(base + REG_LCR, 0x03, 1);
+        serial.write(base + REG_IIR_FCR, 0x01, 1); // enable the receive FIFO
+
+        for i in 0..FIFO_SIZE {
+            assert!(
+                serial.receive_byte(0, i as u8),
+                "byte {i} fits in a 16-entry FIFO"
+            );
+        }
+        assert!(
+            !serial.receive_byte(0, 0xFF),
+            "the seventeenth byte must be refused, not dropped"
+        );
+        assert_eq!(
+            serial.read(base + REG_LSR, 1) & 0x02,
+            0,
+            "a held host byte raises no overrun, where Bochs would drop it and set OE"
+        );
+
+        // One read makes room for exactly one more.
+        assert_eq!(serial.read(base + REG_RBR_THR, 1), 0);
+        assert!(serial.receive_byte(0, 0xFF), "a drained slot takes a byte");
+    }
+
+    /// Bochs serial.cc `rx_timer` reads host input in loopback mode and
+    /// discards it: the receiver belongs to the guest's own transmitter then,
+    /// and a host byte mixed into what it loops back would be a byte it never
+    /// sent.
+    #[test]
+    fn host_input_is_discarded_while_the_guest_loops_back() {
+        let mut serial = BxSerialC::new(1);
+        let base = COM_BASES[0];
+        serial.write(base + REG_LCR, 0x03, 1);
+        serial.write(base + REG_MCR, 0x10, 1); // local loopback
+
+        assert!(serial.receive_byte(0, 0x41), "the byte is taken, as Bochs reads it");
+        assert_eq!(
+            serial.read(base + REG_LSR, 1) & 0x01,
+            0,
+            "nothing reached the receiver"
+        );
     }
 
     #[test]
@@ -2566,11 +2619,11 @@ mod tests {
         serial.write(base + REG_IER_DLM, 0x0f, 1);
         assert_eq!(serial.read(base + REG_IIR_FCR, 1) & 0x0e, 0x02);
 
-        serial.receive_byte(0, 0x10);
-        serial.receive_byte(0, 0x11);
-        serial.receive_byte(0, 0x12);
+        for byte in [0x10u8, 0x11, 0x12] {
+            assert!(serial.receive_byte(0, byte), "byte {byte:#04x} fits");
+        }
         assert_eq!(serial.read(base + REG_RBR_THR, 1), 0x10);
-        serial.receive_byte(0, 0x13);
+        assert!(serial.receive_byte(0, 0x13), "a drained slot takes a byte");
 
         // THR writes still drive the TX-hold interrupt raise (first byte frees
         // the hold register) and lower (second byte finds the shift register
@@ -2604,9 +2657,15 @@ mod tests {
         serial.save(&mut saved).unwrap();
         assert_eq!(saved.len() as u64, serial.snapshot_len().unwrap());
 
-        serial.reset();
+        // Move the live port away from the saved one in every field the
+        // restore is checked on.
+        let drained: Vec<u32> = (0..3).map(|_| serial.read(base + REG_RBR_THR, 1)).collect();
+        assert_eq!(drained, vec![0x11, 0x12, 0x13]);
+        serial.write(base + REG_LCR, 0x03, 1);
+        serial.write(base + REG_IER_DLM, 0, 1);
+        serial.write(base + REG_MCR, 0, 1);
         serial.write(base + REG_SCR, 0xff, 1);
-        serial.receive_byte(0, 0xee);
+        assert!(serial.receive_byte(0, 0xee), "the drained receiver takes a byte");
 
         let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
         serial.restore(&mut reader).unwrap();
@@ -2655,13 +2714,13 @@ mod tests {
         let _ = serial.take_pending_irqs().count();
 
         // A byte arrives and raises RXDATA.
-        serial.receive_byte(0, 0xaa);
+        assert!(serial.receive_byte(0, 0xaa), "an empty RBR has room");
         assert_eq!(serial.take_pending_irqs().next(), Some((COM_IRQS[0], true)));
 
         // Guest reads it (lowers), then a new byte arrives (raises) — both before
         // the next drain. Net must be a single raise, not a raise+lower pulse.
         assert_eq!(serial.read(base + REG_RBR_THR, 1), 0xaa);
-        serial.receive_byte(0, 0xbb);
+        assert!(serial.receive_byte(0, 0xbb), "the read emptied RBR");
         assert_eq!(
             serial.take_pending_irqs().collect::<Vec<_>>(),
             vec![(COM_IRQS[0], true)]

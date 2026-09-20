@@ -417,13 +417,18 @@ It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wa
 
 ## Documentation
 
+**Using Rusty Box**
+
 - [docs/getting-started.md](docs/getting-started.md) -- using the GUI: config file, pacing, CPU topology, disks, display
 - [rusty_box_gui/README.md](rusty_box_gui/README.md) -- the shell: the VM library, pages, engines, disk images, Android, browser
+- [docs/whp-guest-capabilities.md](docs/whp-guest-capabilities.md) -- what a machine on the hypervisor may advertise to its guest
+
+**Contributing**
+
 - [CONTRIBUTING.md](CONTRIBUTING.md) -- build, test, and the rules every change follows
-- [docs/safety-doctrine.md](docs/safety-doctrine.md) -- the Safety Doctrine, rules R0-R9
+- [docs/safety-doctrine.md](docs/safety-doctrine.md) -- the Safety Doctrine: rules R0-R9 for contributors, each with a code sample
 - [docs/bochs-parity-divergences.md](docs/bochs-parity-divergences.md) -- the registry of deliberate divergences from Bochs
 - [docs/bochs-upstream-bugs.md](docs/bochs-upstream-bugs.md) -- upstream Bochs bugs this port does not reproduce
-- [docs/whp-guest-capabilities.md](docs/whp-guest-capabilities.md) -- what a machine on the hypervisor may advertise to its guest
 - Crate READMEs: [examples](rusty_box/examples/README.md), [rusty_box_web](examples/rusty_box_web/README.md), [rusty_box_uefi](examples/rusty_box_uefi/README.md), [rusty_box_bximage](rusty_box_bximage/README.md), [xtask](xtask/README.md)
 
 ## References

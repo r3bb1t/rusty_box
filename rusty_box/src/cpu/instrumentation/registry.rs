@@ -1,17 +1,17 @@
-//! The `InstrumentationRegistry` — combines a monomorphized generic tracer
-//! with Unicorn-style closure hooks.
+//! The `InstrumentationRegistry` — where a processor keeps its tracer.
 //!
-//! Lives inside `BxCpuC` when the `instrumentation` feature is enabled. The
-//! CPU hot path fires events through this registry; registration is done
-//! via `Emulator::hook_add_*`.
+//! One lives inside every [`BxCpuC`](crate::cpu::BxCpuC), holding the tracer
+//! the machine was built with, the [`HookMask`] it declared, and the stop
+//! request a hook can raise. The CPU fires events through it; nothing is
+//! registered at run time, because a tracer is the machine's type parameter.
 //!
 //! ## Hot path contract
 //!
 //! Every `fire_*` method:
-//! 1. Is `#[inline]` so that the bitmask short-circuit in `has_*()` can
-//!    be hoisted by LLVM and combined with the outer callsite guard.
-//! 2. Calls `self.tracer.method()` first (zero-cost when `T = ()`),
-//!    then walks the closure vec (when the `alloc` feature is enabled).
+//! 1. Is `#[inline]`, so the bitmask test in `has_*()` can be hoisted by LLVM
+//!    and combined with the outer callsite guard.
+//! 2. Calls the tracer directly — monomorphized, so `T = ()` compiles to
+//!    nothing at all.
 //! 3. Does not allocate.
 //!
 //! The outer callsite pattern is:
@@ -20,7 +20,10 @@
 //!     self.instrumentation.fire_before_execution(rip, instr);
 //! }
 //! ```
-
+//!
+//! The guard is not optional: `active` is what a tracer's `active_hooks()`
+//! answered, and a call site that skipped it would run the hook for a tracer
+//! that asked not to see it.
 
 use crate::cpu::decoder::Instruction;
 
@@ -30,14 +33,11 @@ use super::types::{
     MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType, TlbCntrl,
 };
 
-/// Error returned by registry mutation methods.
-
-/// Registry holding the monomorphized tracer plus per-category closure vecs.
-///
-/// Feature-gated: absent entirely when `instrumentation` is disabled.
+/// The tracer a processor carries, with the mask it declared and the stop
+/// request its hooks can raise.
 pub struct InstrumentationRegistry<T: Instrumentation = ()> {
-    /// Cheap bitmask querying whether any hook of a given category is registered.
-    /// Callers check this before invoking `fire_*` to keep the hot path empty.
+    /// The hook categories the tracer declared in `active_hooks`. Callers
+    /// check this before invoking `fire_*` to keep the hot path empty.
     pub active: HookMask,
 
     /// Cooperative stop request. When a hook sets this to `true`, the CPU
@@ -83,8 +83,7 @@ impl<T: Instrumentation + Default> Default for InstrumentationRegistry<T> {
 }
 
 impl<T: Instrumentation> InstrumentationRegistry<T> {
-    /// Create a registry with the given tracer. Zero allocations until a hook
-    /// is registered.
+    /// Hold the given tracer, and take the hook mask it declares.
     pub fn with_tracer(tracer: T) -> Self {
         let mut reg = Self {
             active: HookMask::empty(),
@@ -96,41 +95,19 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
         reg
     }
 
-    /// Recompute `active` from the tracer's active hooks and closure vec
-    /// occupancy. Call after any mutation that changes what's installed.
+    /// Re-ask the tracer which hook categories it wants. A tracer whose
+    /// `active_hooks()` answer depends on its own state must be followed by
+    /// this call, or the CPU keeps skipping a category it has started caring
+    /// about.
     pub fn refresh_active(&mut self) {
-        #[allow(unused_mut)]
-        let mut m = self.tracer.active_hooks();
-
-
-        self.active = m;
+        self.active = self.tracer.active_hooks();
     }
-
-    // ─────────────────── Hook registration (alloc only) ───────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-    /// Remove any hook by handle. Searches every category; returns
-    /// `Err(InvalidHandle)` if not found.
 
     // ─────────────────── Fire methods (hot path) ───────────────────
     //
     // Each `fire_*` is called at every matching CPU event when its HookMask
     // bit is set. The outer guard in CPU code must check the mask first —
-    // these methods assume at least one hook is interested.
-    //
-    // We call the tracer first (monomorphized, zero dispatch), then walk
-    // the closure vec (when `alloc` is enabled).
+    // these methods assume the tracer is interested.
 
     #[inline]
     pub fn fire_reset(&mut self, reset_type: ResetType) {
@@ -276,8 +253,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
         self.tracer.mem_perm_violation(ev)
     }
 
-    /// Create an empty registry with a default tracer. Zero allocations until
-    /// a hook is registered.
+    /// Hold a default-constructed tracer.
     pub fn new() -> Self {
         Self::with_tracer(T::default())
     }
@@ -287,12 +263,11 @@ impl InstrumentationRegistry<()> {
     /// A power-on registry for the no-op tracer, constructible in a const
     /// context.
     ///
-    /// Scoped to `T = ()` on purpose. Static (`.bss`) placement is the no_alloc
-    /// path, and `instrumentation` implies `alloc`, so a statically placed CPU
-    /// always carries the unit tracer — the closure vectors below do not even
-    /// exist there. Making this generic would mean requiring `const INIT: Self`
-    /// from every `Instrumentation` implementor, which a tracer holding a
-    /// `String` could not supply.
+    /// Scoped to `T = ()` on purpose. Static (`.bss`) placement is the
+    /// no_alloc path, and a statically placed CPU carries the unit tracer.
+    /// Making this generic would mean requiring `const INIT: Self` from every
+    /// `Instrumentation` implementor, which a tracer holding a `String` could
+    /// not supply.
     ///
     /// `with_tracer` cannot be const: it ends by calling `refresh_active`,
     /// which asks the tracer through a trait method. For the unit tracer that

@@ -4,13 +4,82 @@
 //! is given. The module compiles for Android, which uses it, and for the
 //! host's tests, which pin it.
 
+use crate::app::ShellStatus;
 use crate::config::{load_toml_file, resolve_config_in, FileConfig, DEFAULT_CONFIG_FILE};
 use crate::error::RunError;
 use crate::library::{VmLibrary, VmStem, DEFAULT_VM_NAME};
+use crate::shell::destination::ShellPage;
 use crate::DisplayBackend;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+
+/// What the machine is doing, as far as the phone's window cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MachineActivity {
+    Stopped,
+    /// Power-on was asked for and the machine is being built.
+    Starting,
+    Running,
+}
+
+impl MachineActivity {
+    /// What `status` says the machine is doing. A running machine is
+    /// running whatever start is still recorded for it.
+    pub(crate) fn of(status: &ShellStatus) -> Self {
+        match (status.running, status.start_pending) {
+            (true, true | false) => Self::Running,
+            (false, true) => Self::Starting,
+            (false, false) => Self::Stopped,
+        }
+    }
+
+    /// The window keeps the screen on while a machine starts or runs, so a
+    /// long boot is not cut short by the phone's sleep timeout.
+    pub(crate) fn keeps_screen_on(self) -> bool {
+        match self {
+            Self::Stopped => false,
+            Self::Starting | Self::Running => true,
+        }
+    }
+}
+
+/// Whether a notice the phone shows is waiting to be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoticeWaiting {
+    None,
+    Shown,
+}
+
+/// How the phone draws the page it is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConsoleView {
+    /// The shell's bars around the page.
+    Shell,
+    /// The guest alone on the screen, under the corner menu.
+    FullScreen,
+}
+
+/// The console is the guest alone while a machine starts or runs, unless a
+/// notice is waiting: then the shell's bars stay so it can be read.
+pub(crate) fn console_view(
+    page: ShellPage,
+    activity: MachineActivity,
+    notice: NoticeWaiting,
+) -> ConsoleView {
+    match page {
+        ShellPage::Home | ShellPage::Hardware => ConsoleView::Shell,
+        ShellPage::Console => match (activity, notice) {
+            (MachineActivity::Stopped, NoticeWaiting::None | NoticeWaiting::Shown)
+            | (MachineActivity::Starting | MachineActivity::Running, NoticeWaiting::Shown) => {
+                ConsoleView::Shell
+            }
+            (MachineActivity::Starting | MachineActivity::Running, NoticeWaiting::None) => {
+                ConsoleView::FullScreen
+            }
+        },
+    }
+}
 
 /// A browser row: a directory to open or a file to choose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -292,6 +361,60 @@ fn add_first_vm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shell's view of a machine that is `running`, and has a power-on
+    /// recorded when `start_pending`.
+    fn status(running: bool, start_pending: bool) -> ShellStatus {
+        ShellStatus {
+            running,
+            ips: 0,
+            reset_requested: false,
+            start_pending,
+        }
+    }
+
+    #[test]
+    fn the_console_goes_full_screen_only_for_a_live_machine_with_nothing_to_say() {
+        let activities = [
+            MachineActivity::Stopped,
+            MachineActivity::Starting,
+            MachineActivity::Running,
+        ];
+        for page in ShellPage::ALL {
+            for activity in activities {
+                for notice in [NoticeWaiting::None, NoticeWaiting::Shown] {
+                    let expected = if page == ShellPage::Console
+                        && activity != MachineActivity::Stopped
+                        && notice == NoticeWaiting::None
+                    {
+                        ConsoleView::FullScreen
+                    } else {
+                        ConsoleView::Shell
+                    };
+                    assert_eq!(
+                        console_view(page, activity, notice),
+                        expected,
+                        "{page:?} {activity:?} {notice:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_screen_stays_on_while_a_machine_starts_or_runs() {
+        assert!(!MachineActivity::Stopped.keeps_screen_on());
+        assert!(MachineActivity::Starting.keeps_screen_on());
+        assert!(MachineActivity::Running.keeps_screen_on());
+    }
+
+    #[test]
+    fn a_running_machine_is_running_even_while_a_start_is_recorded() {
+        assert_eq!(MachineActivity::of(&status(false, false)), MachineActivity::Stopped);
+        assert_eq!(MachineActivity::of(&status(false, true)), MachineActivity::Starting);
+        assert_eq!(MachineActivity::of(&status(true, false)), MachineActivity::Running);
+        assert_eq!(MachineActivity::of(&status(true, true)), MachineActivity::Running);
+    }
 
     fn scratch_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

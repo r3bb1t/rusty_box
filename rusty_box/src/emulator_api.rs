@@ -812,7 +812,9 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// - `timeout` wall-clock elapsed (if set, std-only)
     /// - `emu_stop`/`StopHandle::stop` was called
     /// - CPU enters HLT/MWAIT with no pending interrupts
-    /// - CPU triple-faults into shutdown
+    /// - CPU enters the shutdown state — a triple fault does, on a machine
+    ///   set up without firmware unless the configuration chose a reset
+    ///   ([`OnTripleFault`](crate::params::OnTripleFault))
     #[cfg(feature = "alloc")]
     pub fn emu_start(
         &mut self,
@@ -1013,7 +1015,16 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// Reconfigure an existing emulator for the given CPU mode, skipping BIOS.
     /// The machine must already have memory and a PC system, which is what
     /// [`Emulator::new_with_mode`] arranges.
+    ///
+    /// A machine without firmware has nothing at its reset vector, so unless
+    /// the configuration chose otherwise, a triple fault from here on shuts
+    /// the processor down rather than resetting the machine
+    /// ([`OnTripleFault`](crate::params::OnTripleFault)).
     pub fn setup_cpu_mode(&mut self, mode: CpuSetupMode) -> Result<()> {
+        let on_triple_fault = self.config().cpu_params.on_triple_fault_without_firmware();
+        for cpu_index in 0..self.cpu_count() {
+            self.cpu_mut_at(cpu_index).set_on_triple_fault(on_triple_fault);
+        }
         match mode {
             CpuSetupMode::RealMode => self.setup_real_mode(),
             CpuSetupMode::Protected16 => self.setup_protected16(),
@@ -1828,6 +1839,10 @@ mod tests {
     /// Bochs signals this through `enter_sleep_state` (proc_ctrl.cc), which
     /// raises the generic `async_event` flag so the top of `cpu_loop` observes
     /// the non-ACTIVE activity state no matter which longjmp arrived there.
+    ///
+    /// A machine set up straight into long mode has no firmware to reset
+    /// into, so with nothing chosen its triple fault shuts the processor down
+    /// rather than taking Bochs's default reset (`OnTripleFault`).
     #[test]
     fn triple_fault_during_fetch_reports_shutdown() {
         std::thread::Builder::new()

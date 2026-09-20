@@ -509,11 +509,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     // ── Generic MSR bridge ────────────────────────────────────────────
 
-    /// Read an MSR by index. For the first iteration we cover the
-    /// commonly-used set (SYSENTER, STAR/LSTAR/CSTAR/FMASK, KERNELGSBASE,
-    /// TSC_AUX, EFER, APICBASE, IA32_XSS, PAT, plus MTRRs); returns
-    /// `Err(UnimplementedInstruction)` for unknown MSRs.
-    pub(crate) fn read_msr_for_api(&self, msr: u32) -> super::Result<u64> {
+    /// Read an MSR by index, as `Emulator::msr_read` does for the boot
+    /// processor: the TSC, APIC base, platform ID, APERF/MPERF, TSC deadline,
+    /// the SYSENTER trio, STAR/LSTAR/CSTAR/FMASK, KERNEL_GS_BASE, TSC_AUX,
+    /// EFER and the FS/GS bases. `Err(UnimplementedInstruction)` for any
+    /// other.
+    ///
+    /// Public, with [`Self::write_msr_for_api`], so an engine can read and
+    /// put back the MSRs of any processor it runs — not only the one the
+    /// machine's API reaches.
+    pub fn read_msr_for_api(&self, msr: u32) -> super::Result<u64> {
         use super::msr::*;
         let apicbase = self.msr.apicbase as u64;
         let v = match msr {
@@ -541,7 +546,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     /// Write an MSR by index. Validates per-MSR rules like the in-CPU path;
     /// returns `Err(UnimplementedInstruction)` for unknown MSRs.
-    pub(crate) fn write_msr_for_api(&mut self, msr: u32, val: u64) -> super::Result<()> {
+    ///
+    /// A write the processor would take and then ignore is refused rather
+    /// than answered `Ok`, because a host cannot see "ignored" any other way:
+    /// `IA32_APERF` and `IA32_MPERF` always, and `IA32_TSC_DEADLINE` while the
+    /// local APIC's timer is not in TSC-deadline mode.
+    pub fn write_msr_for_api(&mut self, msr: u32, val: u64) -> super::Result<()> {
         use super::msr::*;
         match msr {
             BX_MSR_TSC => {
@@ -552,8 +562,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 self.msr.apicbase = val as _;
             }
             BX_MSR_PLATFORM_ID => return Err(super::CpuError::UnimplementedInstruction), // read-only
-            BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => { /* ignore write */ }
+            // Bochs msr.cc `WRMSR`: "ignore write into MSR IA32_APERF/MPERF".
+            BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => {
+                return Err(super::CpuError::UnsupportedCpuOperation {
+                    operation: "WRMSR IA32_APERF/IA32_MPERF: the processor ignores writes to them",
+                });
+            }
+            // Bochs apic.cc `set_tsc_deadline`: ignored unless the timer's LVT
+            // selects TSC-deadline mode.
             BX_MSR_TSC_DEADLINE => {
+                if !self.lapic.tsc_deadline_mode() {
+                    return Err(super::CpuError::UnsupportedCpuOperation {
+                        operation: "WRMSR IA32_TSC_DEADLINE: the local APIC timer is not in \
+                                    TSC-deadline mode, so the write would be ignored",
+                    });
+                }
                 let current_ticks = self.cpu_local_ticks();
                 self.lapic.set_tsc_deadline(val, current_ticks);
                 self.sync_lapic_events();
@@ -757,10 +780,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             X86Reg::Ch => u64::from(self.get_gpr8(5)),
             X86Reg::Dh => u64::from(self.get_gpr8(6)),
             X86Reg::Bh => u64::from(self.get_gpr8(7)),
-            X86Reg::Spl => u64::from(self.get_gpr8(4)),
-            X86Reg::Bpl => u64::from(self.get_gpr8(5)),
-            X86Reg::Sil => u64::from(self.get_gpr8(6)),
-            X86Reg::Dil => u64::from(self.get_gpr8(7)),
+            // REX-form low bytes: bits 7:0 of RSP/RBP/RSI/RDI, not the legacy
+            // high bytes. Bochs cpu.h `BX_READ_8BIT_REGL`.
+            X86Reg::Spl => u64::from(self.get_gpr8l(4)),
+            X86Reg::Bpl => u64::from(self.get_gpr8l(5)),
+            X86Reg::Sil => u64::from(self.get_gpr8l(6)),
+            X86Reg::Dil => u64::from(self.get_gpr8l(7)),
             X86Reg::R8b => u64::from(self.get_gpr8(8)),
             X86Reg::R9b => u64::from(self.get_gpr8(9)),
             X86Reg::R10b => u64::from(self.get_gpr8(10)),
@@ -964,10 +989,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             X86Reg::Ch => self.set_gpr8(5, trunc_u8(val)),
             X86Reg::Dh => self.set_gpr8(6, trunc_u8(val)),
             X86Reg::Bh => self.set_gpr8(7, trunc_u8(val)),
-            X86Reg::Spl => self.set_gpr8(4, trunc_u8(val)),
-            X86Reg::Bpl => self.set_gpr8(5, trunc_u8(val)),
-            X86Reg::Sil => self.set_gpr8(6, trunc_u8(val)),
-            X86Reg::Dil => self.set_gpr8(7, trunc_u8(val)),
+            // REX-form low bytes: bits 7:0 of RSP/RBP/RSI/RDI, with bits 63:8
+            // preserved. Bochs cpu.h `BX_WRITE_8BIT_REGx` with `extended` set.
+            X86Reg::Spl => self.set_gpr8l(4, trunc_u8(val)),
+            X86Reg::Bpl => self.set_gpr8l(5, trunc_u8(val)),
+            X86Reg::Sil => self.set_gpr8l(6, trunc_u8(val)),
+            X86Reg::Dil => self.set_gpr8l(7, trunc_u8(val)),
             X86Reg::R8b => self.set_gpr8(8, trunc_u8(val)),
             X86Reg::R9b => self.set_gpr8(9, trunc_u8(val)),
             X86Reg::R10b => self.set_gpr8(10, trunc_u8(val)),
@@ -1292,8 +1319,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 mod tests {
     use super::*;
     use crate::cpu::crregs::{BxCr0, BxCr4, BxEfer};
-    use crate::cpu::exec_ctx::TestMachine;
-    use crate::cpu::msr::BX_MSR_EFER;
+    use crate::cpu::exec_ctx::{ExecCtx, TestMachine};
+    use crate::cpu::msr::{BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_MPERF, BX_MSR_TSC_DEADLINE};
     use crate::cpu::opcodes_table::FetchModeMask;
     use crate::cpu::ResetReason;
 
@@ -1395,5 +1422,157 @@ mod tests {
         let unsupported = !u64::from(cpu.efer_suppmask) & 0xFFFF_FFFF;
         assert_ne!(unsupported, 0, "some EFER bit must be unimplemented");
         assert!(cpu.write_msr_for_api(BX_MSR_EFER, unsupported).is_err());
+    }
+
+    /// A TSC-deadline write the local APIC would ignore is refused rather than
+    /// answered `Ok`.
+    ///
+    /// The guest's own `WRMSR` is ignored while the timer's LVT is not in
+    /// TSC-deadline mode (Bochs apic.cc `set_tsc_deadline`), and it still is.
+    /// A host cannot be told "ignored" by a guest-visible effect, so it is
+    /// told by the refusal; a write the timer does take is accepted and
+    /// reads back.
+    #[test]
+    fn a_tsc_deadline_write_the_timer_would_ignore_is_refused() {
+        let mut machine = TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+        cpu.pc_system.initialize(1_000_000);
+
+        assert!(
+            cpu.write_msr_for_api(BX_MSR_TSC_DEADLINE, 1_000).is_err(),
+            "the timer is not in TSC-deadline mode at reset, so the write does nothing"
+        );
+        assert_eq!(cpu.read_msr_for_api(BX_MSR_TSC_DEADLINE).unwrap(), 0);
+
+        let ticks = cpu.system_ticks();
+        assert!(cpu.lapic.write_x2apic(0x320, 0x0004_0030, ticks), "LVT timer: TSC-deadline");
+        cpu.write_msr_for_api(BX_MSR_TSC_DEADLINE, ticks + 1_000)
+            .expect("a timer in TSC-deadline mode takes the deadline");
+        assert_eq!(cpu.read_msr_for_api(BX_MSR_TSC_DEADLINE).unwrap(), ticks + 1_000);
+    }
+
+    /// Writes to `IA32_APERF` and `IA32_MPERF` are refused rather than
+    /// answered `Ok`: the processor ignores them (Bochs msr.cc `WRMSR`,
+    /// "ignore write"), so a host that wrote one would otherwise believe a
+    /// counter it never moved.
+    #[test]
+    fn aperf_and_mperf_writes_are_refused() {
+        let mut machine = TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+
+        assert!(cpu.write_msr_for_api(BX_MSR_IA32_APERF, 5).is_err());
+        assert!(cpu.write_msr_for_api(BX_MSR_IA32_MPERF, 5).is_err());
+    }
+
+    /// `SPL`, `BPL`, `SIL` and `DIL` are the low bytes of RSP, RBP, RSI and
+    /// RDI — the REX-form 8-bit encoding, Bochs `cpu.h BX_READ_8BIT_REGL`.
+    /// `AH`, `CH`, `DH` and `BH` are bits 15:8 of RAX, RCX, RDX and RBX — the
+    /// legacy encoding, Bochs `cpu.h BX_READ_8BIT_REGH`. The two sets name
+    /// eight different bytes, so a read through one must never return the
+    /// other's, and a write through one must leave the other's untouched.
+    #[test]
+    fn the_rex_low_byte_aliases_address_rsp_rbp_rsi_rdi_not_ah_ch_dh_bh() {
+        let mut machine = TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.reset(ResetReason::Hardware);
+
+        // Distinct values whose low byte differs from every other byte, so a
+        // wrong index cannot accidentally read the right number.
+        const RSP: u64 = 0x1000_2000_3000_4041;
+        const RBP: u64 = 0x1100_2100_3100_4152;
+        const RSI: u64 = 0x1200_2200_3200_4263;
+        const RDI: u64 = 0x1300_2300_3300_4374;
+        // AH/CH/DH/BH live in bits 15:8 of these.
+        const RAX: u64 = 0x2000_3000_4000_AA01;
+        const RCX: u64 = 0x2100_3100_4100_BB02;
+        const RDX: u64 = 0x2200_3200_4200_CC03;
+        const RBX: u64 = 0x2300_3300_4300_DD04;
+
+        fn seed(cpu: &mut ExecCtx<'_, ()>) {
+            cpu.api_reg_write(X86Reg::Rsp, RSP);
+            cpu.api_reg_write(X86Reg::Rbp, RBP);
+            cpu.api_reg_write(X86Reg::Rsi, RSI);
+            cpu.api_reg_write(X86Reg::Rdi, RDI);
+            cpu.api_reg_write(X86Reg::Rax, RAX);
+            cpu.api_reg_write(X86Reg::Rcx, RCX);
+            cpu.api_reg_write(X86Reg::Rdx, RDX);
+            cpu.api_reg_write(X86Reg::Rbx, RBX);
+        }
+        seed(&mut cpu);
+
+        // ── Reads ──
+        for (alias, whole, name) in [
+            (X86Reg::Spl, RSP, "SPL"),
+            (X86Reg::Bpl, RBP, "BPL"),
+            (X86Reg::Sil, RSI, "SIL"),
+            (X86Reg::Dil, RDI, "DIL"),
+        ] {
+            assert_eq!(
+                cpu.api_reg_read(alias),
+                whole & 0xFF,
+                "{name} is the low byte of its 64-bit register"
+            );
+        }
+        for (high, whole, name) in [
+            (X86Reg::Ah, RAX, "AH"),
+            (X86Reg::Ch, RCX, "CH"),
+            (X86Reg::Dh, RDX, "DH"),
+            (X86Reg::Bh, RBX, "BH"),
+        ] {
+            assert_eq!(
+                cpu.api_reg_read(high),
+                (whole >> 8) & 0xFF,
+                "{name} is bits 15:8 of its 64-bit register"
+            );
+        }
+
+        // ── Writes through the REX aliases ──
+        for (alias, target, whole, untouched_high, name) in [
+            (X86Reg::Spl, X86Reg::Rsp, RSP, X86Reg::Ah, "SPL"),
+            (X86Reg::Bpl, X86Reg::Rbp, RBP, X86Reg::Ch, "BPL"),
+            (X86Reg::Sil, X86Reg::Rsi, RSI, X86Reg::Dh, "SIL"),
+            (X86Reg::Dil, X86Reg::Rdi, RDI, X86Reg::Bh, "DIL"),
+        ] {
+            seed(&mut cpu);
+            let before_high = cpu.api_reg_read(untouched_high);
+            cpu.api_reg_write(alias, 0x9E);
+            assert_eq!(
+                cpu.api_reg_read(target),
+                (whole & !0xFF) | 0x9E,
+                "a {name} write replaces only the low byte"
+            );
+            assert_eq!(
+                cpu.api_reg_read(untouched_high),
+                before_high,
+                "a {name} write must not disturb a legacy high byte"
+            );
+            assert_eq!(cpu.api_reg_read(alias), 0x9E, "and reads back as written");
+        }
+
+        // ── Writes through the legacy high-byte names ──
+        for (high, target, whole, name) in [
+            (X86Reg::Ah, X86Reg::Rax, RAX, "AH"),
+            (X86Reg::Ch, X86Reg::Rcx, RCX, "CH"),
+            (X86Reg::Dh, X86Reg::Rdx, RDX, "DH"),
+            (X86Reg::Bh, X86Reg::Rbx, RBX, "BH"),
+        ] {
+            seed(&mut cpu);
+            cpu.api_reg_write(high, 0x5E);
+            assert_eq!(
+                cpu.api_reg_read(target),
+                (whole & !0xFF00) | 0x5E00,
+                "a {name} write replaces only bits 15:8"
+            );
+        }
+
+        // A stack pointer is not a scratch byte: writing AH must leave it alone.
+        seed(&mut cpu);
+        cpu.api_reg_write(X86Reg::Ah, 0x5E);
+        assert_eq!(cpu.api_reg_read(X86Reg::Rsp), RSP, "AH is not SPL");
+        assert_eq!(cpu.api_reg_read(X86Reg::Rbp), RBP);
+        assert_eq!(cpu.api_reg_read(X86Reg::Rsi), RSI);
+        assert_eq!(cpu.api_reg_read(X86Reg::Rdi), RDI);
     }
 }

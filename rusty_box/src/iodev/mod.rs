@@ -96,6 +96,8 @@ pub mod pci_ide;
 pub use crate::pic;
 pub mod pit;
 pub mod ide;
+#[cfg(feature = "std")]
+pub(crate) mod realtime;
 pub mod serial;
 pub(crate) mod wiring;
 
@@ -409,8 +411,6 @@ pub struct BxDevicesC {
     write_handlers: [IoHandlerEntry; IO_PORTS],
     /// PCI enabled flag
     pci_enabled: bool,
-    /// PCI configuration address register (port 0xCF8)
-    pci_conf_addr: u32,
 
     /// Bochs port-0xE9 debug console byte stream (unmapped.cc port_e9_hack;
     /// optional in upstream, always-on here). Host code (examples/GUI) can
@@ -487,7 +487,6 @@ impl BxDevicesC {
             read_handlers,
             write_handlers,
             pci_enabled: false,
-            pci_conf_addr: 0,
             port_e9_output: RingBuffer::new(),
             port80_output: RingBuffer::new(),
             bios_message: [0; BX_BIOS_MESSAGE_SIZE],
@@ -743,11 +742,12 @@ impl BxDevicesC {
                 // converted slots — so neither path can shadow the other.
                 let mut routed = None;
                 if let Some(mut bound) = dm.bind_pio(slot, port) {
-                    routed = Some(wiring::with_device_ctx(
+                    routed = Some(wiring::with_device_ctx_on(
                         bound.irq,
                         pc_system,
                         bound.handles,
                         current_ticks,
+                        bound.clock,
                         |ctx| bound.device.pio_read(port, width, ctx),
                     ));
                 }
@@ -797,11 +797,12 @@ impl BxDevicesC {
                 // See `inp` on why the two paths cannot overlap.
                 let mut routed = false;
                 if let Some(mut bound) = dm.bind_pio(slot, port) {
-                    wiring::with_device_ctx(
+                    wiring::with_device_ctx_on(
                         bound.irq,
                         pc_system,
                         bound.handles,
                         current_ticks,
+                        bound.clock,
                         |ctx| bound.device.pio_write(port, value, width, ctx),
                     );
                     routed = true;
@@ -858,11 +859,12 @@ impl BxDevicesC {
         }
         match dm.bind_mmio(slot) {
             Some(mut bound) => {
-                wiring::with_device_ctx(
+                wiring::with_device_ctx_on(
                     bound.irq,
                     pc_system,
                     bound.handles,
                     now_ticks,
+                    bound.clock,
                     |ctx| bound.device.mmio_read(window, at, len, data, ctx),
                 );
                 true
@@ -897,11 +899,12 @@ impl BxDevicesC {
         }
         match dm.bind_mmio(slot) {
             Some(mut bound) => {
-                wiring::with_device_ctx(
+                wiring::with_device_ctx_on(
                     bound.irq,
                     pc_system,
                     bound.handles,
                     now_ticks,
+                    bound.clock,
                     |ctx| bound.device.mmio_write(window, at, len, data, ctx),
                 );
                 true
@@ -1273,19 +1276,6 @@ const PORT_E9_SNAPSHOT_CAPACITY: usize = 65_536;
 #[cfg(feature = "std")]
 const PORT80_SNAPSHOT_CAPACITY: usize = 4_096;
 
-/// PLATFORM-local continuation state decoded from [`BxDevicesC`].
-///
-/// The enclosing PLATFORM decoder cross-checks `pci_conf_addr` against the
-/// DeviceManager latch before allowing execution to resume.
-#[cfg(feature = "std")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct BxDevicesSnapshotRestore {
-    pub(crate) pci_enabled: bool,
-    pub(crate) pci_conf_addr: u32,
-    pub(crate) pic_intr_level: Option<bool>,
-    pub(crate) scheduler_boundary_requested: bool,
-}
-
 #[cfg(feature = "std")]
 fn invalid_bx_devices_snapshot(message: &'static str) -> SnapError {
     SnapError::Invalid(message)
@@ -1347,7 +1337,6 @@ impl BxDevicesC {
         self.validate_snapshot_v3_state()?;
 
         let mut len = 1u64; // PCI enabled
-        len = checked_snapshot_len_add(len, 4)?; // PCI config latch
         len = checked_snapshot_len_add(
             len,
             if self.pic_intr_level.is_some() { 2 } else { 1 },
@@ -1381,7 +1370,6 @@ impl BxDevicesC {
         self.validate_snapshot_v3_state()?;
 
         writer.write_bool(self.pci_enabled)?;
-        writer.write_u32(self.pci_conf_addr)?;
         writer.write_bool(self.pic_intr_level.is_some())?;
         if let Some(level) = self.pic_intr_level {
             writer.write_bool(level)?;
@@ -1415,7 +1403,7 @@ impl BxDevicesC {
     pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
         reader: &mut R,
-    ) -> SnapResult<BxDevicesSnapshotRestore> {
+    ) -> SnapResult<()> {
         let live_pci_enabled = self.pci_enabled;
         let pci_enabled = reader.read_bool()?;
         if pci_enabled != live_pci_enabled {
@@ -1423,7 +1411,6 @@ impl BxDevicesC {
                 "snapshot PCI enablement does not match live configuration",
             ));
         }
-        let pci_conf_addr = reader.read_u32()?;
         let pic_intr_level = if reader.read_bool()? {
             Some(reader.read_bool()?)
         } else {
@@ -1464,20 +1451,13 @@ impl BxDevicesC {
         }
 
         self.pci_enabled = pci_enabled;
-        self.pci_conf_addr = pci_conf_addr;
         self.pic_intr_level = pic_intr_level;
         self.hrq_level = hrq_level;
         self.scheduler_boundary_requested = scheduler_boundary_requested;
         self.timer_requests = TimerRequestTable {
             slots: timer_requests,
         };
-
-        Ok(BxDevicesSnapshotRestore {
-            pci_enabled,
-            pci_conf_addr,
-            pic_intr_level,
-            scheduler_boundary_requested,
-        })
+        Ok(())
     }
 
     fn validate_snapshot_v3_state(&self) -> SnapResult<()> {

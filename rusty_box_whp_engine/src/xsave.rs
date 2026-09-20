@@ -226,6 +226,20 @@ const fn full_tag(abridged: u8) -> u16 {
     full
 }
 
+/// Whether the x87 and vector file differs between `now` and `then`.
+///
+/// Every field [`XsaveArea::patch`] reads, compared as the shadow holds it
+/// rather than as the area would: a difference `patch` does not carry — a full
+/// tag word whose abridged form is unchanged — costs one write of an area the
+/// processor already holds, where comparing too narrowly would miss a write
+/// that must reach it.
+pub(crate) fn vector_file_differs(now: &VcpuArchState, then: &VcpuArchState) -> bool {
+    now.fpu != then.fpu
+        || now.vector != then.vector
+        || now.opmask != then.opmask
+        || now.mxcsr != then.mxcsr
+}
+
 /// The partition processor's extended-state area, as the platform last handed
 /// it out.
 pub(crate) struct XsaveArea {

@@ -279,21 +279,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         ] {
             self.devices.request_timer(owner, TimerRequest::Deactivate);
         }
-        // The UART owns its scheduler slots directly, so its timers are
-        // disarmed on the wheel rather than through the request table.
-        for port_index in 0..self.device_manager.serial.configured_port_count() {
-            for handle in [
-                self.device_manager.serial.fifo_timer_handle(port_index),
-                self.device_manager.serial.tx_timer_handle(port_index),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                if let Err(error) = self.pc_system.deactivate_timer(handle) {
-                    tracing::error!("serial timer {handle} failed to disarm on reset: {error:?}");
-                }
-            }
-        }
+        // The UARTs' own timers are not touched: Bochs `bx_pc_system_c::Reset`
+        // disarms no timer and `bx_serial_c::reset` is empty, so a character
+        // in flight or a FIFO timeout pending completes after the reset.
 
         self.devices.request_timer_after_usec(
             DeviceTimerOwner::Pit,
@@ -335,7 +323,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.devices.request_timer_after_usec(
             DeviceTimerOwner::AcpiPmOverflow,
             current_ticks,
-            self.device_manager.acpi.overflow_delay_usec(current_ticks),
+            self.device_manager
+                .acpi
+                .overflow_delay_usec(self.pc_system.clock_at(current_ticks)),
         );
         self.drain_device_timer_requests();
         // Bochs hpet.cc reset() queued comparator deactivations and the

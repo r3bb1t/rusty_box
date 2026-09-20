@@ -587,6 +587,11 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
 
     pub(super) ignore_bad_msrs: bool,
 
+    /// What a triple fault that reaches this processor does — Bochs
+    /// `cpu: reset_on_triple_fault`, read by exception.cc at the fault.
+    /// Written by `initialize` from the machine's parameters.
+    pub(super) on_triple_fault: crate::params::OnTripleFault,
+
     /// Cached A20 address mask (set at the top of cpu_loop from BxMemC).
     pub(super) a20_mask: u64,
 
@@ -752,8 +757,8 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
 
     pub(super) stats: BxCpuStatistics,
 
-    /// Instrumentation: monomorphized tracer + closure hooks.
-    /// With `T = ()` and no closures registered, this is 4 bytes (the bitmask).
+    /// The tracer this processor carries, monomorphized. With `T = ()` it is
+    /// the hook mask and the two stop flags, and nothing else.
     pub(crate) instrumentation: super::instrumentation::InstrumentationRegistry<T>,
 
     pub(crate) page_permissions: Option<crate::memory::permissions::PagePermissions>,
@@ -809,6 +814,11 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     /// which does not exist under partial residency, so it holds no direct
     /// mapping in exactly the regime where blocks move.
     pub(crate) fetch_epoch: u64,
+
+    /// The memory allocation every host-memory cache on this CPU was filled
+    /// from. Assembling a context compares it with the memory being paired
+    /// and drops those caches when they differ — see [`BxCpuC::adopt_backing`].
+    pub(crate) cache_backing: CacheBacking,
 
     /// Optional memory system pointer (MMIO/ROM handler access), wired during execution.
     /// SMP scheduling quantum — Bochs BXPN_SMP_QUANTUM (`cpu: quantum=N`),
@@ -1719,10 +1729,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         (self.pending_event & !self.event_mask & event_bits) != 0
     }
 
-    // ── Instrumentation helpers (no-op when `instrumentation` feature disabled) ──
+    // ── Instrumentation helpers (no-op when the tracer skips the category) ──
 
     /// Fire the `repeat_iteration` hook for string/IO REP instructions.
-    /// Invoked at each iteration; compiles to nothing without the feature.
+    /// Invoked at each iteration; costs one mask test for a tracer that
+    /// declared no execution hooks, and nothing at all for `()`.
     #[inline(always)]
     pub(crate) fn on_repeat_iteration(
         &mut self,
@@ -1794,6 +1805,53 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 rw,
             };
             self.instrumentation.fire_lin_access(&ev);
+        }
+    }
+
+    /// Fire the BOCHS `phy_access` hook for an access the processor makes to
+    /// physical memory on its own account — a VMCB or VMCS field, a permission
+    /// bitmap, an MSR list. Bochs cpu.h `BX_NOTIFY_PHY_MEMORY_ACCESS`.
+    ///
+    /// Reported as [`MemType::Uc`]: those Bochs sites name their type through
+    /// tlb.h `MEMTYPE()`, which is `BX_MEMTYPE_UC` in the default build
+    /// (`BX_SUPPORT_MEMTYPE 0`). A site where Bochs passes a type of its own —
+    /// a page walk, SMRAM — reports through [`Self::on_phy_access_as`].
+    ///
+    /// Read-only walks made on a host's behalf — `virt_to_phys`, the
+    /// diagnostic verifiers — deliberately do not come through here. They are
+    /// accesses the guest never made, and Bochs's own debugger translation
+    /// (`dbg_xlate_linear2phy`) likewise carries no instrumentation.
+    #[inline(always)]
+    pub(crate) fn on_phy_access(
+        &mut self,
+        paddr: u64,
+        data: &[u8],
+        rw: super::instrumentation::MemAccessRW,
+    ) {
+        self.on_phy_access_as(paddr, data, rw, super::instrumentation::MemType::Uc);
+    }
+
+    /// [`Self::on_phy_access`] for a site that names its memory type as Bochs
+    /// does at that site: `BX_MEMTYPE_INVALID` for a long-mode or nested walk,
+    /// `BX_MEMTYPE_UC` (the zero its `entry_memtype` starts at) for a legacy
+    /// or PAE walk, `BX_MEMTYPE_WB` for SMRAM. An EPT walk names its type
+    /// through `MEMTYPE()`, so it reports as [`Self::on_phy_access`] does.
+    #[inline(always)]
+    pub(crate) fn on_phy_access_as(
+        &mut self,
+        paddr: u64,
+        data: &[u8],
+        rw: super::instrumentation::MemAccessRW,
+        memtype: super::instrumentation::MemType,
+    ) {
+        if self.instrumentation.active.has_mem() {
+            let ev = super::instrumentation::PhyAccess {
+                phy: paddr,
+                data,
+                memtype,
+                rw,
+            };
+            self.instrumentation.fire_phy_access(&ev);
         }
     }
 
@@ -1959,48 +2017,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let (cpu, mem, _devices, _pc_system) = self.slice_parts();
             cpu.smc_apply_pending(mem, true);
         }
-    }
-
-    #[inline]
-    pub(crate) fn debug_putc(&mut self, ch: u8) {
-        let current_ticks = self.system_ticks();
-        self.devices.outp(
-            0x00E9,
-            ch as u32,
-            1,
-            current_ticks,
-            self.pc_system,
-            self.device_manager,
-            self.memory,
-        );
-        self.sync_io_events();
-    }
-
-    #[inline]
-    pub(crate) fn debug_puts(&mut self, s: &[u8]) {
-        for &b in s {
-            self.debug_putc(b);
-        }
-    }
-
-    #[inline]
-    fn debug_put_hex_u8(&mut self, v: u8) {
-        #[inline]
-        fn nybble(n: u8) -> u8 {
-            match n & 0x0f {
-                0..=9 => b'0' + (n & 0x0f),
-                10..=15 => b'a' + ((n & 0x0f) - 10),
-                _ => b'?',
-            }
-        }
-        self.debug_putc(nybble(v >> 4));
-        self.debug_putc(nybble(v));
-    }
-
-    #[inline]
-    fn debug_put_hex_u16(&mut self, v: u16) {
-        self.debug_put_hex_u8((v >> 8) as u8);
-        self.debug_put_hex_u8(v as u8);
     }
 }
 
@@ -3056,6 +3072,49 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.vmcb_host_offset = None;
         self.fetch_epoch = epoch;
     }
+
+    /// Make this CPU's host-memory caches belong to `backing`, the allocation
+    /// the context being assembled pairs it with.
+    ///
+    /// Each of those caches — both TLBs, the fetch window, the stack window,
+    /// the decoded-instruction cache and the VMCB backing — holds an offset
+    /// into the allocation it was filled from, and a context resolves it
+    /// against the memory it holds. From a larger machine the offset indexes
+    /// past a smaller one's end, so caches filled against another allocation
+    /// are dropped here, before the context exists (doctrine R5: the one place
+    /// a processor meets memory checks that they belong together). Within one
+    /// allocation the swap epoch does the same job for blocks that move.
+    #[inline]
+    pub(crate) fn adopt_backing(&mut self, backing: CacheBacking, swap_epoch: u64) {
+        if backing == self.cache_backing {
+            return;
+        }
+        self.invalidate_host_memory_mappings();
+        self.cache_backing = backing;
+        self.fetch_epoch = swap_epoch;
+    }
+}
+
+/// Which memory allocation a CPU's host-memory caches were filled from: its
+/// base address and its length.
+///
+/// All zeros is a real value — no allocation yet — because the CPU is built
+/// zeroed; a live allocation never starts at address zero.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct CacheBacking {
+    base: Option<core::num::NonZeroUsize>,
+    len: usize,
+}
+
+impl CacheBacking {
+    /// The allocation that begins at `base` and runs for `len` bytes.
+    #[inline]
+    pub(crate) fn of(base: *mut u8, len: usize) -> Self {
+        Self {
+            base: core::num::NonZeroUsize::new(base.addr()),
+            len,
+        }
+    }
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
@@ -3406,11 +3465,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             tracing::trace!("{:?}: instruction not supported - signalling #UD", opcode);
         }
 
-        // Boot diagnostic: report the first unsupported opcode via port 0xE9.
-        // If BIOS hits #UD early, it may vector to 0000:0000 and appear to “do nothing”.
+        // Boot diagnostic, host-side only: the first unsupported opcode is
+        // logged once. A BIOS that hits #UD early may vector to 0000:0000 and
+        // appear to do nothing.
         if (self.boot_debug_flags & 0x01) == 0 {
             self.boot_debug_flags |= 0x01;
-            self.debug_puts(b"[UD]\n");
+            tracing::warn!(
+                "first unsupported instruction {:?} at RIP={:#x} — #UD",
+                opcode,
+                self.prev_rip
+            );
         }
 
         // Unicorn-inspired: give hooks a chance to suppress #UD for unrecognized opcodes

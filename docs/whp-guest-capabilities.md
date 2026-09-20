@@ -1,7 +1,7 @@
 # What a machine may tell its guest it has
 
 Measured on 2026-08-31 against the Windows Hypervisor Platform engine, on a
-12th Gen Core i5-12450H. Companion to `docs/whp-platform-probe-2026-08-27.md`.
+12th Gen Core i5-12450H. Companion to `docs/internal/records/whp-platform-probe-2026-08-27.md`.
 
 ## The rule
 

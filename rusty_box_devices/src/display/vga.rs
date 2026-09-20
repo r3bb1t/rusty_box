@@ -675,27 +675,19 @@ impl crate::display::card::VgaExtension for StdVga {
         }
     }
 
-    /// Bochs `bx_vga_c::reset` runs after `bx_vgacore_c::reset`, keeping the
-    /// BARs and the committed framebuffer base: they describe where the machine
-    /// mapped the card, which a guest reset does not undo.
-    fn vga_reset(&mut self, cx: &mut crate::display::card::ResetCtx<'_>) {
-        let pci_enabled = self.pci_enabled;
-        let pci_conf = self.pci_conf;
-        let mmio_base = self.mmio_base;
-        let lfb_base = self.vbe.base_address;
-        *self = Self::new();
-        self.pci_enabled = pci_enabled;
-        if pci_enabled {
-            self.pci_conf = pci_conf;
-            self.mmio_base = mmio_base;
-            self.vbe.base_address = lfb_base;
+    /// Bochs `bx_vga_c::reset`: the PCI command and status registers go back
+    /// to their reset values, and nothing else moves — the VBE registers, the
+    /// BARs and the framebuffer base stay as they were. Its `ddc.init()`
+    /// returns at once on a DDC already initialised (ddc.cc `init_done`),
+    /// which this one is from construction.
+    fn vga_reset(&mut self, _cx: &mut crate::display::card::ResetCtx<'_>) {
+        if self.pci_enabled {
             // Bochs reset_vals: command = io+mem enable, status = devsel medium.
             self.pci_conf[0x04] = 0x03;
             self.pci_conf[0x05] = 0x00;
             self.pci_conf[0x06] = 0x00;
             self.pci_conf[0x07] = 0x02;
         }
-        self.apply_preferred_mode(cx.core());
     }
 }
 
@@ -1345,23 +1337,9 @@ impl VgaCore {
     }
 
 
-    /// Reset the standard VGA — Bochs `bx_vgacore_c::reset`, which the card's
-    /// own reset calls before doing its half.
-    pub(crate) fn reset(&mut self) {
-        // Configuration survives a reset; it describes the machine, not the
-        // adapter's programming.
-        let has_icount_sync = self.has_icount_sync;
-        let ips = self.ips;
-        let preferred_mode = self.preferred_mode;
-        *self = Self::new();
-        self.has_icount_sync = has_icount_sync;
-        self.ips = ips;
-        self.preferred_mode = preferred_mode;
-    }
-
     /// Set the pre-boot VBE mode: raise the DISPI capability ceiling so the guest
     /// may select up to this resolution, and seed the power-on dimensions.
-    /// Preserved across `reset()`. Mirrors the DISPI MAX_XRES/MAX_YRES/MAX_BPP
+    /// Mirrors the DISPI MAX_XRES/MAX_YRES/MAX_BPP
     /// capability registers Bochs exposes (vga.cc). Reallocates the dirty-tile
     /// grid when the ceiling grows.
     pub(crate) fn set_preferred_mode(&mut self, xres: u16, yres: u16, bpp: u16) {

@@ -25,6 +25,7 @@ pub mod args;
 pub(crate) mod shell;
 pub mod config;
 mod disk_images;
+mod hard_disk;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod library;
 pub mod error;

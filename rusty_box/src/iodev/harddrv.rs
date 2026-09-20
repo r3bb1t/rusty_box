@@ -894,13 +894,15 @@ impl AtaDrive {
                 Some(f) => f,
                 None => return false,
             };
-            if file.seek(SeekFrom::Start(offset)).is_err() {
+            if let Err(error) = file.seek(SeekFrom::Start(offset)) {
+                tracing::warn!("CD-ROM: seek to block {lba} failed: {error}");
                 return false;
             }
-            if file
-                .read_exact(&mut buf[payload_offset..payload_end])
-                .is_err()
-            {
+            if let Err(error) = file.read_exact(&mut buf[payload_offset..payload_end]) {
+                tracing::warn!(
+                    "CD-ROM: read of block {lba} failed: {error} ({:?})",
+                    error.kind()
+                );
                 return false;
             }
             return true;

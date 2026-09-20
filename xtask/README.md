@@ -130,12 +130,22 @@ cargo xtask android screenshot rustybox_android.png
 
 ### `cargo xtask android build`
 
-This prepares the local Android toolchain and builds `target/release/apk/examples/RustyBoxAndroid.apk`, in this order:
+This prepares the local Android toolchain and builds `target/android/apk/examples/RustyBoxAndroid.apk`, in this order:
 
 1. **Android SDK**, skipped with `--skip-sdk`. Finds the SDK under `--sdk`, `ANDROID_HOME`, `ANDROID_SDK_ROOT` or `~/Android/Sdk`, in that order. Downloads the command-line tools if they are missing. Accepts the SDK licenses. Installs `platform-tools`, `platforms;android-34`, `build-tools;35.0.0` and `ndk;29.0.14206865` when missing.
 2. **Rust tools.** Runs `rustup target add aarch64-linux-android`. Installs `cargo-apk` if `cargo apk --version` fails.
-3. **Signing keystore.** If `CARGO_APK_RELEASE_KEYSTORE` and a non-empty `CARGO_APK_RELEASE_KEYSTORE_PASSWORD` are set, they are used. Otherwise it uses `~/.android/rusty_box_android_xtask_debug.keystore`, generating it with `keytool` (from `JAVA_HOME/bin` when present) if it does not exist. That local dev keystore uses the standard non-secret Android password `android`; do not use it for production signing.
-4. **Build.** Runs `cargo apk build -p rusty_box_gui --example rusty_box_gui_android --release`. The APK carries the Bochs ROMs only; the ISO a VM boots is chosen on the phone, under Hardware › CD/DVD.
+3. **Signing keystore.** If `CARGO_APK_ANDROID_KEYSTORE` and a non-empty `CARGO_APK_ANDROID_KEYSTORE_PASSWORD` are set, they are used. Otherwise it uses `~/.android/rusty_box_android_xtask_debug.keystore`, generating it with `keytool` (from `JAVA_HOME/bin` when present) if it does not exist. That local dev keystore uses the standard non-secret Android password `android`; do not use it for production signing.
+4. **Build.** Runs `cargo apk build -p rusty_box_gui --example rusty_box_gui_android --profile android`. The APK carries the Bochs ROMs only; the ISO a VM boots is chosen on the phone, under Hardware › CD/DVD.
+
+### The APK's code generation
+
+The `android` profile in the workspace `Cargo.toml` inherits `release` and adds fat LTO with one codegen unit. The xtask also passes `-Ctarget-cpu=cortex-x3 -Ctarget-feature=-sve`, which targets the Snapdragon 8 Gen 2. All of that chip's cores share the Cortex-X3's features. SVE stays off because it executes only where the kernel enables it. The result needs an ARMv9.0-A CPU of that generation. It goes through the environment because cargo-apk sets `CARGO_ENCODED_RUSTFLAGS` itself, and that overrides any `rustflags` in `.cargo/config.toml`. Your own `RUSTFLAGS` (or `CARGO_ENCODED_RUSTFLAGS`) come after these flags, so they win:
+
+```bash
+RUSTFLAGS=-Ctarget-cpu=generic cargo xtask android build
+```
+
+This builds an APK for any 64-bit ARM phone.
 
 ### `cargo xtask android run`
 

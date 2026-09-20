@@ -59,12 +59,13 @@
 /docs/bochs-upstream-issue-tsc-cpuid.md
 # The divergence registry cites two of the WHP research reports as evidence,
 # so those stay tracked; the rest of that research set is local.
-/docs/research/whp-2026-09-03/*
-!/docs/research/whp-2026-09-03/02-qemu-whpx.md
-!/docs/research/whp-2026-09-03/05-guest-timekeeping.md
+/docs/internal/records/whp-research-2026-09-03/*
+!/docs/internal/records/whp-research-2026-09-03/02-qemu-whpx.md
+!/docs/internal/records/whp-research-2026-09-03/05-guest-timekeeping.md
 
-# Claude Code worktrees
-.claude/
+# Claude Code local state (worktrees, settings, locks). Project skills are tracked.
+.claude/*
+!.claude/skills/
 
 .omp/
 

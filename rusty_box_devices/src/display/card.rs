@@ -634,16 +634,11 @@ impl<E: VgaExtension> VgaCard<E> {
         drawn
     }
 
-    /// Reset the card — core first, exactly as a C++ destructor-ordered base
-    /// call would, then the extension over the state that leaves.
+    /// A hardware reset of the card: only what the card's own Bochs reset
+    /// does. Bochs `bx_vgacore_c::reset` is empty (vgacore.h), so the standard
+    /// VGA keeps its registers and its VRAM, and the guest's firmware
+    /// reprograms them.
     pub fn reset(&mut self) {
-        self.core.reset();
-        // The core's reset rebuilds it from scratch, including a dirty-tile grid
-        // sized for a plain VGA. The grid follows the card's largest mode, so it
-        // is re-sized here for the same reason it is sized at construction.
-        let (max_xres, max_yres) = self.ext.vga_max_resolution();
-        self.core.size_tile_grid_for(max_xres, max_yres);
-        self.core.size_vram(self.ext.vga_vram_bytes());
         self.ext.vga_reset(&mut ResetCtx::new(&mut self.core));
     }
 

@@ -423,9 +423,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// Read a u8 from the VMCB at `offset`.
+    ///
+    /// Every VMCB access that completes is reported to `phy_access`, on either
+    /// path, as Bochs svm.cc `vmcb_read8` reports it — explicitly on the
+    /// host-pointer path and through `read_physical_byte` on the other. A
+    /// routed access that fails, which Bochs's cannot, is logged instead.
     fn vmcb_read8(&mut self, offset: u32) -> u8 {
         let paddr = self.vmcbptr + offset as u64;
-        if let Some(base) = self.vmcb_host_offset {
+        let val = if let Some(base) = self.vmcb_host_offset {
             // Fast path: host pointer available
             let host = self.vmcb_host_ptr(base, offset) as *const u8;
             // SAFETY: the offset was validated by set_vmcbptr; single-threaded
@@ -433,66 +438,95 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             let policy = self.access_policy(paddr);
             let mut data = [0u8; 1];
-            if let Err(e) = self.read_physical_routed(policy, paddr, 1, &mut data) {
-                tracing::warn!("vmcb_read8({:#010x}) failed: {:?}", offset, e);
-                return 0xff;
+            match self.read_physical_routed(policy, paddr, 1, &mut data) {
+                Ok(()) => data[0],
+                Err(e) => {
+                    tracing::warn!("vmcb_read8({:#010x}) failed: {:?}", offset, e);
+                    return 0xff;
+                }
             }
-            data[0]
-        }
+        };
+        self.on_phy_access(paddr, &[val], crate::cpu::instrumentation::MemAccessRW::Read);
+        val
     }
 
-    /// Read a u16 from the VMCB at `offset`.
+    /// Read a u16 from the VMCB at `offset`, reported as [`Self::vmcb_read8`].
     fn vmcb_read16(&mut self, offset: u32) -> u16 {
         let paddr = self.vmcbptr + offset as u64;
-        if let Some(base) = self.vmcb_host_offset {
+        let val = if let Some(base) = self.vmcb_host_offset {
             let host = self.vmcb_host_ptr(base, offset) as *const [u8; 2];
             u16::from_le_bytes(unsafe { *host })
         } else {
             let policy = self.access_policy(paddr);
             let mut data = [0u8; 2];
-            if let Err(e) = self.read_physical_routed(policy, paddr, 2, &mut data) {
-                tracing::warn!("vmcb_read16({:#010x}) failed: {:?}", offset, e);
-                return 0xffff;
+            match self.read_physical_routed(policy, paddr, 2, &mut data) {
+                Ok(()) => u16::from_le_bytes(data),
+                Err(e) => {
+                    tracing::warn!("vmcb_read16({:#010x}) failed: {:?}", offset, e);
+                    return 0xffff;
+                }
             }
-            u16::from_le_bytes(data)
-        }
+        };
+        self.on_phy_access(
+            paddr,
+            &val.to_le_bytes(),
+            crate::cpu::instrumentation::MemAccessRW::Read,
+        );
+        val
     }
 
-    /// Read a u32 from the VMCB at `offset`.
+    /// Read a u32 from the VMCB at `offset`, reported as [`Self::vmcb_read8`].
     fn vmcb_read32(&mut self, offset: u32) -> u32 {
         let paddr = self.vmcbptr + offset as u64;
-        if let Some(base) = self.vmcb_host_offset {
+        let val = if let Some(base) = self.vmcb_host_offset {
             let host = self.vmcb_host_ptr(base, offset) as *const [u8; 4];
             u32::from_le_bytes(unsafe { *host })
         } else {
             let policy = self.access_policy(paddr);
             let mut data = [0u8; 4];
-            if let Err(e) = self.read_physical_routed(policy, paddr, 4, &mut data) {
-                tracing::warn!("vmcb_read32({:#010x}) failed: {:?}", offset, e);
-                return 0xffff_ffff;
+            match self.read_physical_routed(policy, paddr, 4, &mut data) {
+                Ok(()) => u32::from_le_bytes(data),
+                Err(e) => {
+                    tracing::warn!("vmcb_read32({:#010x}) failed: {:?}", offset, e);
+                    return 0xffff_ffff;
+                }
             }
-            u32::from_le_bytes(data)
-        }
+        };
+        self.on_phy_access(
+            paddr,
+            &val.to_le_bytes(),
+            crate::cpu::instrumentation::MemAccessRW::Read,
+        );
+        val
     }
 
-    /// Read a u64 from the VMCB at `offset`.
+    /// Read a u64 from the VMCB at `offset`, reported as [`Self::vmcb_read8`].
     fn vmcb_read64(&mut self, offset: u32) -> u64 {
         let paddr = self.vmcbptr + offset as u64;
-        if let Some(base) = self.vmcb_host_offset {
+        let val = if let Some(base) = self.vmcb_host_offset {
             let host = self.vmcb_host_ptr(base, offset) as *const [u8; 8];
             u64::from_le_bytes(unsafe { *host })
         } else {
             let policy = self.access_policy(paddr);
             let mut data = [0u8; 8];
-            if let Err(e) = self.read_physical_routed(policy, paddr, 8, &mut data) {
-                tracing::warn!("vmcb_read64({:#010x}) failed: {:?}", offset, e);
-                return u64::MAX;
+            match self.read_physical_routed(policy, paddr, 8, &mut data) {
+                Ok(()) => u64::from_le_bytes(data),
+                Err(e) => {
+                    tracing::warn!("vmcb_read64({:#010x}) failed: {:?}", offset, e);
+                    return u64::MAX;
+                }
             }
-            u64::from_le_bytes(data)
-        }
+        };
+        self.on_phy_access(
+            paddr,
+            &val.to_le_bytes(),
+            crate::cpu::instrumentation::MemAccessRW::Read,
+        );
+        val
     }
 
-    /// Write a u8 to the VMCB at `offset`.
+    /// Write a u8 to the VMCB at `offset`, reported to `phy_access` on either
+    /// path as Bochs svm.cc `vmcb_write8` reports it.
     fn vmcb_write8(&mut self, offset: u32, val: u8) {
         let paddr = self.vmcbptr + offset as u64;
         if let Some(base) = self.vmcb_host_offset {
@@ -504,15 +538,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             let policy = self.access_policy(paddr);
             let mut data = [val];
-            if let Err(e) = self.write_physical_routed(policy, paddr, 1, &mut data) {
-                tracing::warn!("vmcb_write8({:#010x}) failed: {:?}", offset, e);
-            }
+            let stored = self.write_physical_routed(policy, paddr, 1, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
+            if let Err(e) = stored {
+                tracing::warn!("vmcb_write8({:#010x}) failed: {:?}", offset, e);
+                return;
+            }
         }
+        self.on_phy_access(paddr, &[val], crate::cpu::instrumentation::MemAccessRW::Write);
     }
 
-    /// Write a u16 to the VMCB at `offset`.
+    /// Write a u16 to the VMCB at `offset`, reported as [`Self::vmcb_write8`].
     fn vmcb_write16(&mut self, offset: u32, val: u16) {
         let paddr = self.vmcbptr + offset as u64;
         if let Some(base) = self.vmcb_host_offset {
@@ -523,15 +560,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             let policy = self.access_policy(paddr);
             let mut data = val.to_le_bytes();
-            if let Err(e) = self.write_physical_routed(policy, paddr, 2, &mut data) {
-                tracing::warn!("vmcb_write16({:#010x}) failed: {:?}", offset, e);
-            }
+            let stored = self.write_physical_routed(policy, paddr, 2, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
+            if let Err(e) = stored {
+                tracing::warn!("vmcb_write16({:#010x}) failed: {:?}", offset, e);
+                return;
+            }
         }
+        self.on_phy_access(
+            paddr,
+            &val.to_le_bytes(),
+            crate::cpu::instrumentation::MemAccessRW::Write,
+        );
     }
 
-    /// Write a u32 to the VMCB at `offset`.
+    /// Write a u32 to the VMCB at `offset`, reported as [`Self::vmcb_write8`].
     fn vmcb_write32(&mut self, offset: u32, val: u32) {
         let paddr = self.vmcbptr + offset as u64;
         if let Some(base) = self.vmcb_host_offset {
@@ -542,15 +586,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             let policy = self.access_policy(paddr);
             let mut data = val.to_le_bytes();
-            if let Err(e) = self.write_physical_routed(policy, paddr, 4, &mut data) {
-                tracing::warn!("vmcb_write32({:#010x}) failed: {:?}", offset, e);
-            }
+            let stored = self.write_physical_routed(policy, paddr, 4, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
+            if let Err(e) = stored {
+                tracing::warn!("vmcb_write32({:#010x}) failed: {:?}", offset, e);
+                return;
+            }
         }
+        self.on_phy_access(
+            paddr,
+            &val.to_le_bytes(),
+            crate::cpu::instrumentation::MemAccessRW::Write,
+        );
     }
 
-    /// Write a u64 to the VMCB at `offset`.
+    /// Write a u64 to the VMCB at `offset`, reported as [`Self::vmcb_write8`].
     fn vmcb_write64(&mut self, offset: u32, val: u64) {
         let paddr = self.vmcbptr + offset as u64;
         if let Some(base) = self.vmcb_host_offset {
@@ -561,12 +612,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             let policy = self.access_policy(paddr);
             let mut data = val.to_le_bytes();
-            if let Err(e) = self.write_physical_routed(policy, paddr, 8, &mut data) {
-                tracing::warn!("vmcb_write64({:#010x}) failed: {:?}", offset, e);
-            }
+            let stored = self.write_physical_routed(policy, paddr, 8, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
+            if let Err(e) = stored {
+                tracing::warn!("vmcb_write64({:#010x}) failed: {:?}", offset, e);
+                return;
+            }
         }
+        self.on_phy_access(
+            paddr,
+            &val.to_le_bytes(),
+            crate::cpu::instrumentation::MemAccessRW::Write,
+        );
     }
 
     // =====================================================================
@@ -694,8 +752,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // =====================================================================
 
     /// Restore host CPU state from the VMCB host_state area.
-    /// Bochs svm.cc SvmExitLoadHostState()
-    fn svm_exit_load_host_state(&mut self) {
+    /// Bochs svm.cc SvmExitLoadHostState(). A PAE host whose PDPTEs are
+    /// invalid shuts the processor down part-way through, as Bochs's
+    /// `shutdown()` longjmps out of it, so this unwinds on that path.
+    fn svm_exit_load_host_state(&mut self) -> super::Result<()> {
         self.tsc_offset = 0;
 
         let host_state = self.vmcb.host_state.clone();
@@ -721,6 +781,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.cr3 = host_state.cr3;
         self.cr4 = host_state.cr4;
 
+        if self.cr0.pg() && self.cr4.pae() && !self.long_mode() {
+            let cr3 = self.cr3;
+            if !self.check_pdptrs(cr3)? {
+                tracing::error!("SvmExitLoadHostState(): PDPTR check failed !");
+                return self.shutdown();
+            }
+        }
+
         self.msr.pat = host_state.pat_msr;
         self.dr7.set32(0x0000_0400);
 
@@ -735,7 +803,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[BxSegregs::Cs as usize].cache.dpl = 0;
         self.sregs[BxSegregs::Ss as usize].cache.dpl = 0;
 
-        self.handle_cpu_context_change();
+        self.finish_context_switch();
+        Ok(())
     }
 
     // =====================================================================
@@ -1050,7 +1119,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.signal_event(BX_EVENT_SVM_VIRQ_PENDING);
         }
 
-        self.handle_cpu_context_change();
+        self.finish_context_switch();
 
         true
     }
@@ -1125,7 +1194,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         // Restore host state
-        self.svm_exit_load_host_state();
+        self.svm_exit_load_host_state()?;
 
         // The host always resumes running — Bochs svm.cc Svm_Vmexit. Placed
         // after the guest-state save so a #VMEXIT out of HLT still records the
@@ -1560,7 +1629,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 1];
         match self.read_physical_routed(policy, paddr, 1, &mut data) {
-            Ok(()) => data[0],
+            Ok(()) => {
+                self.on_phy_access(paddr, &data, crate::cpu::instrumentation::MemAccessRW::Read);
+                data[0]
+            }
             Err(e) => {
                 tracing::warn!(
                     "read_physical_byte({:#018x}) failed: {:?}; defaulting to 0xff",

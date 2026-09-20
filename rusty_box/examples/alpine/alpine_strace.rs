@@ -370,8 +370,9 @@ fn run_emulator(boot: &BootConfig, shared: Arc<Mutex<SharedDisplay>>) -> Result<
             }
             let mut emu = builder.build()?;
             // Pre-queue Enter at the ISOLINUX prompt to accept the ISO default.
-            emu.prepare_run();
-            let _typed = emu.keyboard().type_text("\n");
+            if !emu.keyboard().type_text("\n").is_complete() {
+                println!("  (the keystroke was refused; the prompt may still be waiting)");
+            }
             emu
         }
         BootMode::Direct => {

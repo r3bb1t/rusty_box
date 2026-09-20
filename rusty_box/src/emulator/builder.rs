@@ -427,8 +427,10 @@ impl<'r, T: Instrumentation> MachineBuilder<'r, T> {
 impl<'r, T: Instrumentation> MachineBuilder<'r, T> {
     /// Build the machine, run it through hardware initialisation, and reset it.
     ///
-    /// The result sits at its reset vector with timers armed: the next
-    /// `Emulator::step` executes the first firmware instruction.
+    /// The result sits at its reset vector with timers armed and every device
+    /// that keeps time — PIT, ACPI PM timer, VGA retrace — on the configured
+    /// clock: the next `Emulator::step` executes the first firmware
+    /// instruction, and there is no further bring-up call to make.
     ///
     /// Runs the guest on this port's own interpreter. To name a different
     /// engine, see [`MachineBuilder::build_on`] — which this is, with the
