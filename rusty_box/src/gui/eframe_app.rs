@@ -1,10 +1,12 @@
 //! eframe/egui application for the Rusty Box emulator.
 //!
 //! `RustyBoxApp` implements `eframe::App` and renders the VGA framebuffer
-//! from `SharedDisplay` as an egui texture. Keyboard events are converted
-//! to PS/2 scancodes and pushed into the shared scancode queue.
+//! from `SharedDisplay` as an egui texture. Keyboard and mouse events are
+//! translated by `host_input` into guest key and mouse events, queued on the
+//! `SharedDisplay` for the emulator thread to drain.
 
-use super::keymap::char_to_bx_key_sequence;
+use super::host_input::HeldModifiers;
+use super::touchpad::{TouchSample, TouchZone, Touchpad};
 use crate::iodev::scancodes::BxKey;
 use super::shared_display::SharedDisplay;
 
@@ -16,6 +18,18 @@ use std::sync::{
 const SERIAL_PANEL_MIN_HEIGHT: f32 = 48.0;
 const SERIAL_PANEL_DEFAULT_HEIGHT: f32 = 88.0;
 const SERIAL_PANEL_MAX_HEIGHT: f32 = 200.0;
+
+/// The startup notice: a spinner over one row of text.
+const STARTUP_SPINNER_SIZE: f32 = 28.0;
+const STARTUP_GAP: f32 = 12.0;
+const STARTUP_TEXT_SIZE: f32 = 15.0;
+
+/// What the display region shows instead of the framebuffer while the machine
+/// is off. The caller that owns the words lays them out — fonts, colours, line
+/// breaks — as one `LayoutJob`, and the view places that job as a single label
+/// centred in the region. While it is shown, `RustyBoxApp::texture` is not
+/// drawn: that texture holds the previous run's last frame.
+pub struct ConsolePlaceholder(pub egui::text::LayoutJob);
 
 /// The eframe application that displays the emulator's VGA output.
 pub struct RustyBoxApp {
@@ -34,18 +48,22 @@ pub struct RustyBoxApp {
     // before the guest produces video.
     cached_startup_status: Option<String>,
     serial_input: String,
-    fit_to_available: bool,
-    /// When true, stretch the framebuffer to a 4:3 display aspect (VGA text/low-res
-    /// modes such as 720x400 / 320x200 have non-square pixels a CRT shows as 4:3);
-    /// when false (default), draw crisp integer-square pixels.
-    pixel_aspect_correct: bool,
+    /// How the framebuffer fills the region it is drawn in.
+    display_scale: DisplayScale,
+    /// The shape of one guest pixel: square by default, or 4:3 for the VGA
+    /// text and low-resolution modes (720x400, 320x200) a CRT shows as 4:3.
+    pixel_aspect: PixelAspect,
     /// Previous PS/2 button bitmask, so a release with no motion is still reported.
     prev_mouse_buttons: u8,
-    /// Previous modifier-key state, to synthesize make/break scancodes for
-    /// Shift/Ctrl/Alt (egui reports these via `Modifiers`, not `Key` events).
-    prev_ctrl: bool,
-    prev_alt: bool,
-    prev_shift: bool,
+    /// The modifiers held at the end of the previous frame, so each Shift,
+    /// Ctrl and Alt edge is forwarded once.
+    held_modifiers: HeldModifiers,
+    /// What drives the guest's mouse: the host pointer, or touch as a trackpad.
+    pointer_mode: PointerMode,
+    /// The trackpad's cursor speed over the finger's own travel.
+    pointer_speed: f32,
+    /// The gestures in progress while touch drives the guest's mouse.
+    touchpad: Touchpad,
 }
 
 impl RustyBoxApp {
@@ -67,23 +85,39 @@ impl RustyBoxApp {
             serial_log_len: 0,
             cached_startup_status: None,
             serial_input: String::new(),
-            fit_to_available: false,
-            pixel_aspect_correct: false,
+            display_scale: DisplayScale::Crisp,
+            pixel_aspect: PixelAspect::Square,
             prev_mouse_buttons: 0,
-            prev_ctrl: false,
-            prev_alt: false,
-            prev_shift: false,
+            held_modifiers: HeldModifiers::default(),
+            pointer_mode: PointerMode::Mouse,
+            pointer_speed: 1.0,
+            touchpad: Touchpad::new(),
         }
     }
 
-    /// Use fractional scaling to fill constrained embedded surfaces.
-    pub fn set_fit_to_available(&mut self, fit_to_available: bool) {
-        self.fit_to_available = fit_to_available;
+    /// What drives the guest's mouse.
+    pub fn set_pointer_mode(&mut self, mode: PointerMode) {
+        self.pointer_mode = mode;
+    }
+
+    /// The trackpad's cursor speed: at 1.0 the cursor travels as far across
+    /// the guest's image as the finger does.
+    pub fn set_pointer_speed(&mut self, speed: f32) {
+        self.pointer_speed = speed;
+    }
+
+    /// How the framebuffer fills the region it is drawn in.
+    pub fn set_display_scale(&mut self, scale: DisplayScale) {
+        self.display_scale = scale;
     }
 
     /// Enable 4:3 pixel-aspect correction for non-square VGA modes.
     pub fn set_pixel_aspect_correct(&mut self, pixel_aspect_correct: bool) {
-        self.pixel_aspect_correct = pixel_aspect_correct;
+        self.pixel_aspect = if pixel_aspect_correct {
+            PixelAspect::Crt4x3
+        } else {
+            PixelAspect::Square
+        };
     }
 
     fn should_request_repaint(&self) -> bool {
@@ -110,79 +144,21 @@ impl RustyBoxApp {
         }
     }
 
-    /// Process keyboard input from egui and convert to PS/2 scancodes.
+    /// Forward this frame's keyboard to the guest through the shared queue.
     ///
-    /// Handles three event types:
-    /// - `Event::Text` — printable characters from the platform text input system
-    /// - `Event::Ime(ImeEvent::Commit)` — characters from IME (Windows may use this path)
-    /// - `Event::Key` — special keys (arrows, F-keys, Enter, etc.)
-    ///
-    /// Letter/number keys are handled via Text/Ime events (which include proper
-    /// OS-level shift/layout handling). The Key handler covers non-printable keys
-    /// and also serves as a fallback for letters when Text events aren't produced.
+    /// The translation is `host_input::translate_egui_keyboard`'s — the one
+    /// the browser shell also uses, with the machine itself as its sink; here
+    /// the sink is the shared display, which the emulator thread drains. The
+    /// events are consumed there, so egui does not also spend them on widget
+    /// navigation (Tab then Enter would otherwise press "Restart VM").
     fn process_input(&mut self, ctx: &egui::Context) {
-        let mut keys: Vec<(BxKey, bool)> = Vec::new();
-
-        ctx.input_mut(|i| {
-            // Pass 1: check if any Text or Ime::Commit events exist in this frame.
-            // If so, we rely on them for printable characters and skip the Key fallback
-            // (avoids double-sending since Key events fire BEFORE Text events).
-            let has_text_events = i.events.iter().any(|e| {
-                matches!(
-                    e,
-                    egui::Event::Text(_) | egui::Event::Ime(egui::ImeEvent::Commit(_))
-                )
-            });
-
-            // Pass 2: process events and CONSUME them so egui doesn't use them
-            // for widget navigation (Tab = focus change, Enter = button click).
-            // Without this, Tab+Enter accidentally triggers the Reset button.
-            i.events.retain(|event| {
-                match event {
-                    egui::Event::Text(text) => {
-                        for ch in text.chars() {
-                            keys.extend(char_to_bx_key_sequence(ch));
-                        }
-                        false
-                    }
-                    egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
-                        for ch in text.chars() {
-                            keys.extend(char_to_bx_key_sequence(ch));
-                        }
-                        false
-                    }
-                    egui::Event::Key { key, pressed, .. } => {
-                        if let Some(bx_key) = egui_key_to_bx_key(*key) {
-                            keys.push((bx_key, *pressed));
-                        } else if *pressed && !has_text_events {
-                            if let Some(ch) = egui_key_to_char(*key) {
-                                keys.extend(char_to_bx_key_sequence(ch));
-                            }
-                        }
-                        false
-                    }
-                    _ => true, // keep non-keyboard events for egui
-                }
-            });
+        let Ok(mut display) = self.shared.lock() else {
+            return;
+        };
+        let held = self.held_modifiers;
+        self.held_modifiers = ctx.input_mut(|input| {
+            super::host_input::translate_egui_keyboard(input, held, &mut *display)
         });
-
-        // Synthesize make/break scancodes for Ctrl and Alt from egui's modifier
-        // state (egui reports these via `Modifiers`, not `Key` events), so guest
-        // chords like Ctrl+C and Alt+F reach the VM. Shift is intentionally NOT
-        // forwarded here: printable characters already carry their own shift in
-        // `char_to_scancode_sequence`, and adding it again would double-shift.
-        let mods = ctx.input(|i| i.modifiers);
-        push_modifier_key(&mut keys, self.prev_ctrl, mods.ctrl, BxKey::CtrlL);
-        push_modifier_key(&mut keys, self.prev_alt, mods.alt, BxKey::AltL);
-        self.prev_ctrl = mods.ctrl;
-        self.prev_alt = mods.alt;
-        self.prev_shift = mods.shift;
-
-        if !keys.is_empty() {
-            if let Ok(mut display) = self.shared.lock() {
-                display.pending_keys.extend_from_slice(&keys);
-            }
-        }
     }
 
     /// Queue the PS/2 Set-2 sequence for Ctrl+Alt+Del. Needed because the host OS
@@ -252,6 +228,64 @@ impl RustyBoxApp {
         self.prev_mouse_buttons = new_buttons;
     }
 
+    /// Touch drives the guest's mouse as a trackpad (see [`Touchpad`]), with
+    /// the left and right buttons drawn at the bottom-right of `region`.
+    ///
+    /// A touch belongs to the trackpad when it starts inside `image_rect`
+    /// with no window or area above it, so a menu drawn over the image keeps
+    /// its own touches.
+    fn handle_touchpad(&mut self, ui: &egui::Ui, image_rect: egui::Rect, region: egui::Rect) {
+        let ctx = ui.ctx().clone();
+        let buttons = TouchButtons::in_region(region);
+        buttons.paint(&ctx, self.touchpad.held_buttons());
+        if !self.shared_emu_running() {
+            return;
+        }
+
+        let guest_pixels_per_point = self.last_width.max(1) as f32 / image_rect.width().max(1.0);
+        self.touchpad
+            .set_scale(guest_pixels_per_point * self.pointer_speed);
+        let (time, touches) = ctx.input(|input| {
+            let touches: Vec<(u64, egui::TouchPhase, egui::Pos2)> = input
+                .raw
+                .events
+                .iter()
+                .filter_map(|event| {
+                    if let egui::Event::Touch { id, phase, pos, .. } = event {
+                        Some((id.0, *phase, *pos))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            (input.time, touches)
+        });
+        let Ok(mut display) = self.shared.lock() else {
+            return;
+        };
+        for (id, phase, pos) in touches {
+            let zone = if buttons.left.contains(pos) {
+                TouchZone::LeftButton
+            } else if buttons.right.contains(pos) {
+                TouchZone::RightButton
+            } else if image_rect.contains(pos) && ctx.layer_id_at(pos).is_none() {
+                TouchZone::Pad
+            } else {
+                TouchZone::Elsewhere
+            };
+            self.touchpad.touch(
+                TouchSample {
+                    id,
+                    phase,
+                    pos,
+                    time,
+                    zone,
+                },
+                &mut *display,
+            );
+        }
+    }
+
     /// Update the egui texture from the shared framebuffer.
     fn update_texture(&mut self, ctx: &egui::Context, update_title: bool) {
         let Some((w, h, framebuffer)) = ({
@@ -314,16 +348,18 @@ impl RustyBoxApp {
             egui::ColorImage::new([w, h], padded)
         };
 
-        // Crisp integer upscale (NEAREST magnify) with smooth downscale (LINEAR
-        // minify) for the default path; fully LINEAR when we deliberately do a
-        // fractional stretch (aspect correction or an embedded fit-to-fill).
-        let options = if self.pixel_aspect_correct || self.fit_to_available {
-            egui::TextureOptions::LINEAR
-        } else {
-            egui::TextureOptions {
+        // Crisp square pixels magnify NEAREST (whole multiples stay sharp) and
+        // minify LINEAR; every other scale draws at a fractional size, which
+        // only LINEAR renders evenly.
+        let options = match (self.display_scale, self.pixel_aspect) {
+            (DisplayScale::Crisp, PixelAspect::Square) => egui::TextureOptions {
                 magnification: egui::TextureFilter::Nearest,
                 minification: egui::TextureFilter::Linear,
                 ..Default::default()
+            },
+            (DisplayScale::Crisp, PixelAspect::Crt4x3)
+            | (DisplayScale::Fit | DisplayScale::Stretch, PixelAspect::Square | PixelAspect::Crt4x3) => {
+                egui::TextureOptions::LINEAR
             }
         };
 
@@ -355,17 +391,20 @@ impl RustyBoxApp {
 impl RustyBoxApp {
     /// Render the emulator UI inside a parent egui shell without overriding the shell theme.
     pub fn ui_embedded(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.ui_embedded_with_serial(ui, frame, true);
+        self.ui_embedded_with_serial(ui, frame, true, None);
     }
 
-    /// Render the emulator UI inside a parent egui shell with serial visibility control.
+    /// Render the emulator UI inside a parent egui shell with serial visibility
+    /// control. `placeholder` is what the display region shows while the machine
+    /// is off; `None` leaves the last framebuffer on screen.
     pub fn ui_embedded_with_serial(
         &mut self,
         ui: &mut egui::Ui,
         frame: &mut eframe::Frame,
         show_serial: bool,
+        placeholder: Option<ConsolePlaceholder>,
     ) {
-        self.ui_inner(ui, frame, false, show_serial, false);
+        self.ui_inner(ui, frame, false, show_serial, false, placeholder);
     }
 
     fn ui_inner(
@@ -375,6 +414,7 @@ impl RustyBoxApp {
         apply_theme: bool,
         show_serial: bool,
         show_status_bar: bool,
+        placeholder: Option<ConsolePlaceholder>,
     ) {
         let ctx = ui.ctx().clone();
         if apply_theme {
@@ -544,62 +584,58 @@ impl RustyBoxApp {
                 });
         }
 
+        // The placeholder stands in for the framebuffer only while the machine
+        // is off: a running machine's video wins over whatever the caller passed.
+        let powered_off = placeholder.filter(|_| !self.cached_emu_running);
+
         // Main display area — deep dark background
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(0x0D, 0x0D, 0x1A)))
             .show(ui, |ui| {
+                let region = ui.max_rect();
                 let mut image_rect = None;
                 if let Some(status) = self.cached_startup_status.clone() {
                     // A startup step (e.g. allocating the disk image) is running.
                     // Show it with a spinner instead of a blank panel, so the
                     // window doesn't look frozen while the guest has no video yet.
+                    // A top-down layout stacks from the region's top edge, so the
+                    // stack is centred by the pad above it: half of what the
+                    // region has left after the spinner, the item spacing the
+                    // layout inserts below it, the gap, and one row of the text.
+                    let text_height = ui.fonts_mut(|fonts| {
+                        fonts.row_height(&egui::FontId::proportional(STARTUP_TEXT_SIZE))
+                    });
+                    let stack_height = STARTUP_SPINNER_SIZE
+                        + ui.spacing().item_spacing.y
+                        + STARTUP_GAP
+                        + text_height;
+                    let pad = ((ui.available_height() - stack_height) / 2.0).max(0.0);
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(pad);
+                        ui.add(egui::Spinner::new().size(STARTUP_SPINNER_SIZE));
+                        ui.add_space(STARTUP_GAP);
+                        ui.label(
+                            egui::RichText::new(status)
+                                .color(egui::Color32::from_rgb(0xE8, 0xEE, 0xF5))
+                                .size(STARTUP_TEXT_SIZE),
+                        );
+                    });
+                } else if let Some(ConsolePlaceholder(job)) = powered_off {
+                    // `centered_and_justified` centres exactly one widget, so the
+                    // whole block is one label over the caller's layout job.
                     ui.centered_and_justified(|ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.add(egui::Spinner::new().size(28.0));
-                            ui.add_space(12.0);
-                            ui.label(
-                                egui::RichText::new(status)
-                                    .color(egui::Color32::from_rgb(0xE8, 0xEE, 0xF5))
-                                    .size(15.0),
-                            );
-                        });
+                        ui.label(job);
                     });
                 } else if let Some(tex) = &self.texture {
                     let available = ui.available_size();
-                    let tex_w = self.last_width.max(1) as f32;
-                    let tex_h = self.last_height.max(1) as f32;
-                    // Scale in PHYSICAL pixels. egui draws in points and multiplies by
-                    // pixels_per_point, so a point-space integer scale becomes a
-                    // FRACTIONAL physical scale on HiDPI (1.25/1.5x) -> uneven NEAREST
-                    // pixels. Compute the fit in physical px and snap upscales to an
-                    // integer physical multiple, then convert the draw size back to points.
-                    let ppp = ui.ctx().pixels_per_point().max(f32::EPSILON);
-                    let avail_px_x = (available.x * ppp).max(1.0);
-                    let avail_px_y = (available.y * ppp).max(1.0);
-
-                    let (draw_w, draw_h) = if self.pixel_aspect_correct {
-                        // Present a 4:3 rectangle (VGA pixel aspect), fit to the panel.
-                        let mut w = available.x;
-                        let mut h = available.x * 3.0 / 4.0;
-                        if h > available.y {
-                            h = available.y;
-                            w = available.y * 4.0 / 3.0;
-                        }
-                        (w, h)
-                    } else {
-                        let fit = (avail_px_x / tex_w).min(avail_px_y / tex_h);
-                        if self.fit_to_available || fit < 1.0 {
-                            // Embedded fill, or guest larger than the panel: fractional
-                            // fit (LINEAR handles the non-integer scale smoothly).
-                            let s = fit.max(f32::EPSILON);
-                            (tex_w * s / ppp, tex_h * s / ppp)
-                        } else {
-                            // Crisp integer upscale: snap to an integer PHYSICAL-pixel
-                            // multiple so NEAREST magnification is even.
-                            let iscale = fit.floor().max(1.0);
-                            (tex_w * iscale / ppp, tex_h * iscale / ppp)
-                        }
-                    };
+                    let drawn = display_size(
+                        available,
+                        [self.last_width, self.last_height],
+                        ui.ctx().pixels_per_point(),
+                        self.display_scale,
+                        self.pixel_aspect,
+                    );
+                    let (draw_w, draw_h) = (drawn.x, drawn.y);
 
                     // Center the image.
                     let offset_x = ((available.x - draw_w) / 2.0).max(0.0);
@@ -623,7 +659,10 @@ impl RustyBoxApp {
                     });
                 }
                 if let Some(rect) = image_rect {
-                    self.handle_display_pointer(ui, rect);
+                    match self.pointer_mode {
+                        PointerMode::Mouse => self.handle_display_pointer(ui, rect),
+                        PointerMode::Touchpad => self.handle_touchpad(ui, rect, region),
+                    }
                 }
             });
 
@@ -635,121 +674,129 @@ impl RustyBoxApp {
     }
 }
 
+/// What drives the guest's mouse.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PointerMode {
+    /// The host's pointer, captured by a click on the image.
+    #[default]
+    Mouse,
+    /// Touch as a trackpad, with on-screen left and right buttons: the form a
+    /// phone needs, where a finger is not a mouse.
+    Touchpad,
+}
+
+/// The side of an on-screen mouse button, points: a comfortable thumb target.
+const TOUCH_BUTTON_SIZE: f32 = 44.0;
+/// The room between the buttons and the region's corner, points.
+const TOUCH_BUTTON_MARGIN: f32 = 12.0;
+/// The room between the two buttons, points.
+const TOUCH_BUTTON_GAP: f32 = 8.0;
+
+/// Where the on-screen left and right buttons sit.
+#[derive(Clone, Copy, Debug)]
+struct TouchButtons {
+    left: egui::Rect,
+    right: egui::Rect,
+}
+
+impl TouchButtons {
+    /// Side by side at the bottom-right corner of `region`.
+    fn in_region(region: egui::Rect) -> Self {
+        let size = egui::vec2(TOUCH_BUTTON_SIZE, TOUCH_BUTTON_SIZE);
+        let right = egui::Rect::from_min_size(
+            region.right_bottom() - size - egui::vec2(TOUCH_BUTTON_MARGIN, TOUCH_BUTTON_MARGIN),
+            size,
+        );
+        let left = right.translate(egui::vec2(-(TOUCH_BUTTON_SIZE + TOUCH_BUTTON_GAP), 0.0));
+        Self { left, right }
+    }
+
+    /// See-through squares over the guest, lit while held. `held` is the
+    /// PS/2 button mask the trackpad holds.
+    fn paint(&self, ctx: &egui::Context, held: u8) {
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("touch_mouse_buttons"),
+        ));
+        for (rect, label, bit) in [(self.left, "L", 0x01), (self.right, "R", 0x02)] {
+            let fill = if held & bit != 0 {
+                egui::Color32::from_rgba_unmultiplied(0x46, 0xD9, 0xC7, 150)
+            } else {
+                egui::Color32::from_black_alpha(110)
+            };
+            painter.rect_filled(rect, 8.0, fill);
+            painter.rect_stroke(
+                rect,
+                8.0,
+                egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(90)),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(18.0),
+                egui::Color32::from_white_alpha(220),
+            );
+        }
+    }
+}
+
+/// How the console's framebuffer fills the region it is given.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DisplayScale {
+    /// Whole physical-pixel multiples for crisp pixels; a fractional shrink
+    /// only when the guest is larger than the region.
+    #[default]
+    Crisp,
+    /// The largest size that keeps the guest's shape.
+    Fit,
+    /// Both axes of the region, whatever the guest's shape.
+    Stretch,
+}
+
+/// The shape of one guest pixel on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PixelAspect {
+    /// Square pixels: the framebuffer's own shape.
+    Square,
+    /// A 4:3 picture whatever the mode, as a CRT shows 720x400 and 320x200.
+    Crt4x3,
+}
+
+/// The size, in points, the framebuffer is drawn at inside `available`.
+///
+/// Scaling is worked out in physical pixels: egui multiplies points by
+/// `pixels_per_point`, so a whole multiple in points is a fractional one on a
+/// 1.25x or 1.5x display, and NEAREST magnification would draw uneven pixels.
+fn display_size(
+    available: egui::Vec2,
+    texture_px: [u32; 2],
+    pixels_per_point: f32,
+    scale: DisplayScale,
+    aspect: PixelAspect,
+) -> egui::Vec2 {
+    let four_by_three = || {
+        let height = available.y.min(available.x * 3.0 / 4.0);
+        egui::vec2(height * 4.0 / 3.0, height)
+    };
+    let ppp = pixels_per_point.max(f32::EPSILON);
+    let tex_w = texture_px[0].max(1) as f32;
+    let tex_h = texture_px[1].max(1) as f32;
+    let fit = ((available.x * ppp).max(1.0) / tex_w).min((available.y * ppp).max(1.0) / tex_h);
+    let scaled = |factor: f32| egui::vec2(tex_w * factor / ppp, tex_h * factor / ppp);
+    match (scale, aspect) {
+        (DisplayScale::Stretch, PixelAspect::Square | PixelAspect::Crt4x3) => available,
+        (DisplayScale::Fit | DisplayScale::Crisp, PixelAspect::Crt4x3) => four_by_three(),
+        (DisplayScale::Fit, PixelAspect::Square) => scaled(fit.max(f32::EPSILON)),
+        (DisplayScale::Crisp, PixelAspect::Square) if fit < 1.0 => scaled(fit.max(f32::EPSILON)),
+        (DisplayScale::Crisp, PixelAspect::Square) => scaled(fit.floor().max(1.0)),
+    }
+}
+
 impl eframe::App for RustyBoxApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.ui_inner(ui, frame, true, true, true);
-    }
-}
-
-/// Convert an egui Key to PS/2 scancode set 2 sequence.
-///
-/// Returns make codes for pressed=true, break codes (0xF0 + make) for pressed=false.
-/// Extended keys use 0xE0 prefix.
-/// Map an egui key to the guest key it represents, so the keyboard controller
-/// can render it through the guest's active scancode set.
-fn egui_key_to_bx_key(key: egui::Key) -> Option<BxKey> {
-    Some(match key {
-        egui::Key::Escape => BxKey::Esc,
-        egui::Key::F1 => BxKey::F1,
-        egui::Key::F2 => BxKey::F2,
-        egui::Key::F3 => BxKey::F3,
-        egui::Key::F4 => BxKey::F4,
-        egui::Key::F5 => BxKey::F5,
-        egui::Key::F6 => BxKey::F6,
-        egui::Key::F7 => BxKey::F7,
-        egui::Key::F8 => BxKey::F8,
-        egui::Key::F9 => BxKey::F9,
-        egui::Key::F10 => BxKey::F10,
-        egui::Key::F11 => BxKey::F11,
-        egui::Key::F12 => BxKey::F12,
-        egui::Key::Enter => BxKey::Enter,
-        egui::Key::Tab => BxKey::Tab,
-        egui::Key::Backspace => BxKey::Backspace,
-        egui::Key::ArrowUp => BxKey::Up,
-        egui::Key::ArrowDown => BxKey::Down,
-        egui::Key::ArrowLeft => BxKey::Left,
-        egui::Key::ArrowRight => BxKey::Right,
-        egui::Key::Home => BxKey::Home,
-        egui::Key::End => BxKey::End,
-        egui::Key::PageUp => BxKey::PageUp,
-        egui::Key::PageDown => BxKey::PageDown,
-        egui::Key::Delete => BxKey::Delete,
-        egui::Key::Insert => BxKey::Insert,
-        egui::Key::Space => BxKey::Space,
-        _ => return None,
-    })
-}
-
-
-/// Append a PS/2 Set-2 make (key down) or break (key up) code for a modifier key
-/// when its state changed this frame. `make` is the Set-2 make byte
-/// (e.g. `0x14` = left Ctrl, `0x11` = left Alt, `0x12` = left Shift).
-/// Emit a press or release for a modifier whose state changed. egui reports
-/// Ctrl/Alt through `Modifiers` rather than `Key` events, so their edges are
-/// synthesized here.
-fn push_modifier_key(keys: &mut Vec<(BxKey, bool)>, was_down: bool, now_down: bool, key: BxKey) {
-    if now_down && !was_down {
-        keys.push((key, true));
-    } else if !now_down && was_down {
-        keys.push((key, false));
-    }
-}
-
-/// Fallback: convert an egui Key to a lowercase ASCII character.
-///
-/// Used when `Event::Text` / `Event::Ime` don't fire (e.g., certain IME states,
-/// accessibility tools, or platform edge cases). Returns lowercase because
-/// `char_to_scancode_sequence` handles shift detection from the character itself.
-fn egui_key_to_char(key: egui::Key) -> Option<char> {
-    match key {
-        egui::Key::A => Some('a'),
-        egui::Key::B => Some('b'),
-        egui::Key::C => Some('c'),
-        egui::Key::D => Some('d'),
-        egui::Key::E => Some('e'),
-        egui::Key::F => Some('f'),
-        egui::Key::G => Some('g'),
-        egui::Key::H => Some('h'),
-        egui::Key::I => Some('i'),
-        egui::Key::J => Some('j'),
-        egui::Key::K => Some('k'),
-        egui::Key::L => Some('l'),
-        egui::Key::M => Some('m'),
-        egui::Key::N => Some('n'),
-        egui::Key::O => Some('o'),
-        egui::Key::P => Some('p'),
-        egui::Key::Q => Some('q'),
-        egui::Key::R => Some('r'),
-        egui::Key::S => Some('s'),
-        egui::Key::T => Some('t'),
-        egui::Key::U => Some('u'),
-        egui::Key::V => Some('v'),
-        egui::Key::W => Some('w'),
-        egui::Key::X => Some('x'),
-        egui::Key::Y => Some('y'),
-        egui::Key::Z => Some('z'),
-        egui::Key::Num0 => Some('0'),
-        egui::Key::Num1 => Some('1'),
-        egui::Key::Num2 => Some('2'),
-        egui::Key::Num3 => Some('3'),
-        egui::Key::Num4 => Some('4'),
-        egui::Key::Num5 => Some('5'),
-        egui::Key::Num6 => Some('6'),
-        egui::Key::Num7 => Some('7'),
-        egui::Key::Num8 => Some('8'),
-        egui::Key::Num9 => Some('9'),
-        egui::Key::Minus => Some('-'),
-        egui::Key::Equals => Some('='),
-        egui::Key::OpenBracket => Some('['),
-        egui::Key::CloseBracket => Some(']'),
-        egui::Key::Backslash => Some('\\'),
-        egui::Key::Semicolon => Some(';'),
-        egui::Key::Quote => Some('\''),
-        egui::Key::Backtick => Some('`'),
-        egui::Key::Comma => Some(','),
-        egui::Key::Period => Some('.'),
-        egui::Key::Slash => Some('/'),
-        _ => None,
+        self.ui_inner(ui, frame, true, true, true, None);
     }
 }
 
@@ -800,5 +847,59 @@ mod tests {
         let app = RustyBoxApp::new_embedded(shared);
 
         assert!(app.should_request_repaint());
+    }
+
+    /// `display_size` for square pixels, as a `(width, height)` pair.
+    fn size(available: (f32, f32), texture: [u32; 2], ppp: f32, scale: DisplayScale) -> (f32, f32) {
+        let drawn = display_size(
+            egui::vec2(available.0, available.1),
+            texture,
+            ppp,
+            scale,
+            PixelAspect::Square,
+        );
+        (drawn.x, drawn.y)
+    }
+
+    #[test]
+    fn stretch_fills_the_whole_region_whatever_the_guest_shape() {
+        assert_eq!(
+            size((1000.0, 428.0), [640, 480], 2.0, DisplayScale::Stretch),
+            (1000.0, 428.0)
+        );
+    }
+
+    #[test]
+    fn fit_keeps_the_guest_shape_at_the_limiting_axis() {
+        let (w, h) = size((1000.0, 428.0), [640, 480], 1.0, DisplayScale::Fit);
+        assert_eq!(h, 428.0);
+        assert!((w - 428.0 * 640.0 / 480.0).abs() < 0.01, "width {w}");
+    }
+
+    #[test]
+    fn crisp_upscales_by_a_whole_physical_multiple() {
+        assert_eq!(
+            size((1000.0, 428.0), [320, 200], 1.0, DisplayScale::Crisp),
+            (640.0, 400.0)
+        );
+    }
+
+    #[test]
+    fn crisp_shrinks_a_guest_larger_than_the_region() {
+        let (w, h) = size((1000.0, 428.0), [2000, 1000], 1.0, DisplayScale::Crisp);
+        assert!((w - 856.0).abs() < 0.01 && (h - 428.0).abs() < 0.01, "{w}x{h}");
+    }
+
+    #[test]
+    fn crt_aspect_draws_a_4x3_box_under_fit() {
+        let drawn = display_size(
+            egui::vec2(1000.0, 428.0),
+            [720, 400],
+            1.0,
+            DisplayScale::Fit,
+            PixelAspect::Crt4x3,
+        );
+        assert_eq!(drawn.y, 428.0);
+        assert!((drawn.x - 428.0 * 4.0 / 3.0).abs() < 0.01, "width {}", drawn.x);
     }
 }

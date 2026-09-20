@@ -256,6 +256,38 @@ pub struct Instruction {
     pub(crate) displacement: u32,
 }
 
+impl Operands {
+    /// The all-zero operand set, as a `const` so arrays of instructions can be
+    /// built in a const context. `Default` is derived and derived impls are not
+    /// `const fn`, which is what blocks `.bss` placement of the icache.
+    pub const EMPTY: Self = Self {
+        dst: 0,
+        src1: 0,
+        src2: 0,
+        src3: 0,
+        segment: 0,
+        base: 0,
+        index: 0,
+        scale: 0,
+    };
+}
+
+impl Instruction {
+    /// A decoded-nothing instruction, identical to `Instruction::default()`.
+    ///
+    /// Exists as a `const` for the same reason as [`Operands::EMPTY`]: the
+    /// icache holds `[Instruction; BX_ICACHE_MEM_POOL]` and must be
+    /// constructible without running code.
+    pub const EMPTY: Self = Self {
+        opcode: Opcode::IaError,
+        length: 0,
+        flags: InstructionFlags::empty(),
+        operands: Operands::EMPTY,
+        immediate: 0,
+        displacement: 0,
+    };
+}
+
 // ============================================================================
 // Instruction accessor methods
 // ============================================================================
@@ -958,4 +990,19 @@ pub enum RepPrefix {
     Lock,
     RepNE,
     RepE,
+}
+
+#[cfg(test)]
+mod const_initialiser_tests {
+    use super::*;
+
+    /// The const forms exist only because derived `Default` is not `const fn`.
+    /// They must therefore be the same value — a drift here would change the
+    /// power-on state of every instruction slot in the icache without any
+    /// call site changing.
+    #[test]
+    fn const_empties_match_their_derived_defaults() {
+        assert_eq!(Operands::EMPTY, Operands::default());
+        assert_eq!(Instruction::EMPTY, Instruction::default());
+    }
 }

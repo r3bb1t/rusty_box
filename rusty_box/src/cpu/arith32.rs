@@ -4,14 +4,13 @@
 // Mirrors Bochs cpp/cpu/arith32.cc
 
 use crate::cpu::decoder::{BxSegregs, Instruction};
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 /// ADD_GdEd_R: ADD r32, r/m32 (register form)
 /// Opcode: 0x03, ModRM: r32, r/m32 (register)
 /// operands.dst = destination register
 /// operands.src1 = source register
-pub fn ADD_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADD_GdEd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst_idx = instr.dst() as usize;
@@ -27,8 +26,8 @@ pub fn ADD_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// ADD_EdGd_R: ADD r/m32, r32 (register form)
 /// Opcode: 0x01: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
-pub fn ADD_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADD_EdGd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1 = cpu.get_gpr32(instr.dst() as usize); // rm = destination/first operand
@@ -42,8 +41,8 @@ pub fn ADD_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// ADD_EAX_Id: ADD EAX, imm32
 /// Opcode: 0x05
 /// Immediate value stored in operand_data.Id
-pub fn ADD_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADD_EAX_Id<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let eax = cpu.eax();
@@ -57,8 +56,8 @@ pub fn ADD_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// ADD_EdId_R: ADD r32, imm32 (register form, sign-extended immediate)
 /// Original: bochs/cpu/arith32.cc ADD_EdIdR
 /// Opcode: 0x81/0x83, ModRM: r/m32, imm32/imm8
-pub fn ADD_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADD_EdId_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst_reg = instr.dst() as usize;
@@ -72,8 +71,8 @@ pub fn ADD_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// SUB_GdEd_R: SUB r32, r/m32 (register form)
 /// Opcode: 0x2B, ModRM: r32, r/m32 (register)
-pub fn SUB_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_GdEd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst_idx = instr.dst() as usize;
@@ -89,8 +88,8 @@ pub fn SUB_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// SUB_EdGd_R: SUB r/m32, r32 (register form)
 /// Opcode: 0x29: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
-pub fn SUB_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_EdGd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1 = cpu.get_gpr32(instr.dst() as usize); // rm = destination/first operand
@@ -103,8 +102,8 @@ pub fn SUB_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// SUB_EAX_Id: SUB EAX, imm32
 /// Opcode: 0x2D
-pub fn SUB_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_EAX_Id<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let eax = cpu.eax();
@@ -118,8 +117,8 @@ pub fn SUB_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// SUB_EdId_R: SUB r32, imm32 (register form, sign-extended immediate)
 /// Original: bochs/cpu/arith32.cc SUB_EdIdR
 /// Opcode: 0x81/0x83, ModRM: r/m32, imm32/imm8
-pub fn SUB_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_EdId_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst_reg = instr.dst() as usize;
@@ -134,8 +133,8 @@ pub fn SUB_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// CMP_EdId_R: CMP r32, imm32 (register form, sign-extended immediate)
 /// Original: bochs/cpu/arith32.cc CMP_EdIdR
 /// Opcode: 0x81/0x83, ModRM: r/m32, imm32/imm8
-pub fn CMP_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn CMP_EdId_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst_reg = instr.dst() as usize;
@@ -150,8 +149,8 @@ pub fn CMP_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// CMP_EdGd_R: CMP r/m32, r32 (register form)
 /// Opcode: 0x39: decoder swaps for 16/32-bit store: [0]=rm=first operand, [1]=nnn=second operand
 /// Performs rm - nnn and sets flags without storing result
-fn CMP_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+fn CMP_EdGd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1 = cpu.get_gpr32(instr.dst() as usize); // rm = first operand
@@ -163,8 +162,8 @@ fn CMP_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// ADC_EdGd_R: ADC r/m32, r32 (register form)
 /// Opcode: 0x11: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
-pub fn ADC_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EdGd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1 = cpu.get_gpr32(instr.dst() as usize); // rm = destination/first operand
@@ -179,8 +178,8 @@ pub fn ADC_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// ADC_GdEd_R: ADC r32, r/m32 (register form)
 /// Original: bochs/cpu/arith32.cc ADC_GdEd (register case)
 /// Opcode: 0x13, ModRM: r32, r/m32 (register)
-pub fn ADC_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_GdEd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst_idx = instr.dst() as usize;
@@ -202,8 +201,8 @@ pub fn ADC_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// ADD_EdGd_M: ADD r/m32, r32 (memory form) - read-modify-write
 /// Decoder swaps: src() = operands.src1 = nnn = SOURCE register
-pub fn ADD_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADD_EdGd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -217,8 +216,8 @@ pub fn ADD_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// ADD_GdEd_M: ADD r32, r/m32 (memory form) - read memory, write register
-pub fn ADD_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADD_GdEd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -232,8 +231,8 @@ pub fn ADD_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// ADD_EdId_M: ADD r/m32, imm32 (memory form)
-pub fn ADD_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADD_EdId_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -248,8 +247,8 @@ pub fn ADD_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// SUB_EdGd_M: SUB r/m32, r32 (memory form)
 /// Decoder swaps: src() = operands.src1 = nnn = SOURCE register
-pub fn SUB_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_EdGd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -263,8 +262,8 @@ pub fn SUB_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SUB_GdEd_M: SUB r32, r/m32 (memory form)
-pub fn SUB_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_GdEd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -278,8 +277,8 @@ pub fn SUB_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SUB_EdId_M: SUB r/m32, imm32 (memory form)
-pub fn SUB_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_EdId_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -294,8 +293,8 @@ pub fn SUB_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// CMP_EdGd_M: CMP r/m32, r32 (memory form)
 /// Decoder swaps: src() = operands.src1 = nnn = SOURCE register
-pub fn CMP_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn CMP_EdGd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -308,8 +307,8 @@ pub fn CMP_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// CMP_GdEd_M: CMP r32, r/m32 (memory form)
-pub fn CMP_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn CMP_GdEd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -322,8 +321,8 @@ pub fn CMP_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// CMP_EdId_M: CMP r/m32, imm32 (memory form)
-pub fn CMP_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn CMP_EdId_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -337,8 +336,8 @@ pub fn CMP_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// ADC_EdGd_M: ADC r/m32, r32 (memory form)
 /// Decoder swaps: src() = operands.src1 = nnn = SOURCE register
-pub fn ADC_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EdGd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -353,8 +352,8 @@ pub fn ADC_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// ADC_GdEd_M: ADC r32, r/m32 (memory form)
-pub fn ADC_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_GdEd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -378,8 +377,8 @@ pub fn ADC_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 // =========================================================================
 
 /// ADD r/m32, r32 - unified (Bochs: ADD_EdGdR / ADD_EdGdM)
-pub fn ADD_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADD_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -391,8 +390,8 @@ pub fn ADD_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// ADD r32, r/m32 - unified (Bochs: ADD_GdEdR / ADD_GdEdM)
-pub fn ADD_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADD_GdEd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -404,8 +403,8 @@ pub fn ADD_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// ADD r/m32, imm32 - unified (Bochs: ADD_EdIdR / ADD_EdIdM)
-pub fn ADD_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADD_EdId<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -417,8 +416,8 @@ pub fn ADD_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// SUB r/m32, r32 - unified (Bochs: SUB_EdGdR / SUB_EdGdM)
-pub fn SUB_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -430,8 +429,8 @@ pub fn SUB_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// SUB r32, r/m32 - unified (Bochs: SUB_GdEdR / SUB_GdEdM)
-pub fn SUB_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_GdEd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -443,8 +442,8 @@ pub fn SUB_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// SUB r/m32, imm32 - unified (Bochs: SUB_EdIdR / SUB_EdIdM)
-pub fn SUB_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_EdId<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -456,8 +455,8 @@ pub fn SUB_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// CMP r/m32, r32 - unified (Bochs: CMP_EdGdR / CMP_EdGdM)
-pub fn CMP_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn CMP_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -469,8 +468,8 @@ pub fn CMP_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// CMP r32, r/m32 - unified (Bochs: CMP_GdEdR / CMP_GdEdM)
-pub fn CMP_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn CMP_GdEd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -482,8 +481,8 @@ pub fn CMP_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// CMP r/m32, imm32 - unified (Bochs: CMP_EdIdR / CMP_EdIdM)
-pub fn CMP_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn CMP_EdId<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -495,8 +494,8 @@ pub fn CMP_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// ADC r/m32, r32 - unified (Bochs: ADC_EdGdR / ADC_EdGdM)
-pub fn ADC_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -508,8 +507,8 @@ pub fn ADC_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// ADC r32, r/m32 - unified (Bochs: ADC_GdEdR / ADC_GdEdM)
-pub fn ADC_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_GdEd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -521,8 +520,8 @@ pub fn ADC_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// ADC EAX, imm32 (opcode 0x15) - Bochs ADC_EAXId
-pub fn ADC_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EAX_Id<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1 = cpu.eax();
@@ -534,8 +533,8 @@ pub fn ADC_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// ADC r/m32, imm32 - register form (opcode 0x81 /2) - Bochs ADC_EdIdR
-pub fn ADC_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EdId_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
@@ -547,8 +546,8 @@ pub fn ADC_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// ADC r/m32, imm32 - memory form (opcode 0x81 /2) - Bochs ADC_EdIdM
-pub fn ADC_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EdId_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -563,8 +562,8 @@ pub fn ADC_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// ADC r/m32, imm32 - unified (Bochs ADC_EdIdR / ADC_EdIdM)
-pub fn ADC_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EdId<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -576,8 +575,8 @@ pub fn ADC_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// ADC r/m32, imm8 sign-extended - register form (opcode 0x83 /2) - Bochs ADC_EdIbR
-pub fn ADC_EdIb_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EdIb_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
@@ -589,8 +588,8 @@ pub fn ADC_EdIb_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// ADC r/m32, imm8 sign-extended - memory form (opcode 0x83 /2) - Bochs ADC_EdIbM
-pub fn ADC_EdIb_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EdIb_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -605,8 +604,8 @@ pub fn ADC_EdIb_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// ADC r/m32, imm8 sign-extended - unified (Bochs ADC_EdsIb)
-pub fn ADC_EdsIb<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EdsIb<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -618,8 +617,8 @@ pub fn ADC_EdsIb<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 }
 
 /// SBB r/m32, imm32 - memory form (opcode 0x81 /3) - Bochs SBB_EdIdM
-pub fn SBB_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EdId_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -634,8 +633,8 @@ pub fn SBB_EdId_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SBB r/m32, imm32 - unified (Bochs SBB_EdIdR / SBB_EdIdM)
-pub fn SBB_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EdId<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -647,8 +646,8 @@ pub fn SBB_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// SBB r/m32, imm8 sign-extended - memory form (opcode 0x83 /3) - Bochs SBB_EdIbM
-pub fn SBB_EdIb_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EdIb_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -663,8 +662,8 @@ pub fn SBB_EdIb_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SBB r/m32, imm8 sign-extended - unified (Bochs SBB_EdsIb)
-pub fn SBB_EdsIb<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EdsIb<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -681,8 +680,8 @@ pub fn SBB_EdsIb<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 // =========================================================================
 
 /// NEG r32 - Negate register (register form)
-pub fn NEG_EdR<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn NEG_EdR<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let dst = instr.dst() as usize;
@@ -693,8 +692,8 @@ pub fn NEG_EdR<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
 }
 
 /// NEG m32 - Negate memory (memory form)
-pub fn NEG_EdM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn NEG_EdM<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -707,8 +706,8 @@ pub fn NEG_EdM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
 }
 
 /// NEG r/m32 - unified dispatch
-pub fn NEG_Ed<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn NEG_Ed<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -724,8 +723,8 @@ pub fn NEG_Ed<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
 // =========================================================================
 
 /// SBB r/m32, r32 - register form (opcode 0x19)
-pub fn SBB_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EdGd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
@@ -737,8 +736,8 @@ pub fn SBB_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SBB r/m32, r32 - memory form
-pub fn SBB_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EdGd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -753,8 +752,8 @@ pub fn SBB_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SBB r/m32, r32 - unified dispatch
-pub fn SBB_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -766,8 +765,8 @@ pub fn SBB_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// SBB r32, r/m32 - register form (opcode 0x1B)
-pub fn SBB_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_GdEd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
@@ -779,8 +778,8 @@ pub fn SBB_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SBB r32, r/m32 - memory form
-pub fn SBB_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_GdEd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -795,8 +794,8 @@ pub fn SBB_GdEd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SBB r32, r/m32 - unified dispatch
-pub fn SBB_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_GdEd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -808,8 +807,8 @@ pub fn SBB_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// SBB EAX, imm32 (opcode 0x1D)
-pub fn SBB_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EAX_Id<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let eax = cpu.eax();
@@ -821,8 +820,8 @@ pub fn SBB_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SBB r/m32, imm32 (opcode 0x81 /3) - register form
-pub fn SBB_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EdId_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
@@ -834,8 +833,8 @@ pub fn SBB_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SBB r/m32, imm8 sign-extended (opcode 0x83 /3) - register form
-pub fn SBB_EdIb_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EdIb_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
@@ -857,16 +856,18 @@ pub fn SBB_EdIb_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// Otherwise, load dest into EAX. Flags set from the comparison.
 /// CMPXCHG r/m32, r32 — register form
 /// Bochs arith32.cc (CMPXCHG_EdGdR)
-pub fn CMPXCHG_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn CMPXCHG_EdGd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1_32 = cpu.get_gpr32(instr.dst() as usize);
     let diff_32 = cpu.eax().wrapping_sub(op1_32);
-    cpu.update_flags_sub32(cpu.eax(), op1_32, diff_32);
+    let eax = cpu.eax();
+    cpu.update_flags_sub32(eax, op1_32, diff_32);
 
     if diff_32 == 0 {
-        cpu.set_gpr32(instr.dst() as usize, cpu.get_gpr32(instr.src() as usize));
+        let src = cpu.get_gpr32(instr.src() as usize);
+        cpu.set_gpr32(instr.dst() as usize, src);
     } else {
         cpu.set_rax(op1_32 as u64);
     }
@@ -874,19 +875,21 @@ pub fn CMPXCHG_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 
 /// CMPXCHG r/m32, r32 — memory form
 /// Bochs arith32.cc (CMPXCHG_EdGdM)
-pub fn CMPXCHG_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+pub fn CMPXCHG_EdGd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
     let op1_32 = cpu.v_read_rmw_dword(seg, eaddr)?;
     let diff_32 = cpu.eax().wrapping_sub(op1_32);
-    cpu.update_flags_sub32(cpu.eax(), op1_32, diff_32);
+    let eax = cpu.eax();
+    cpu.update_flags_sub32(eax, op1_32, diff_32);
 
     if diff_32 == 0 {
         // dest <- src
-        cpu.write_rmw_linear_dword(cpu.get_gpr32(instr.src() as usize));
+        let src = cpu.get_gpr32(instr.src() as usize);
+        cpu.write_rmw_linear_dword(src);
     } else {
         // write back original value (Bochs: write_RMW_linear_dword(op1_32))
         cpu.write_rmw_linear_dword(op1_32);
@@ -899,8 +902,8 @@ pub fn CMPXCHG_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 /// Bochs arith32.cc (CMPXCHG8B)
 /// Compares EDX:EAX with m64. If equal, sets ZF and stores ECX:EBX into m64.
 /// Otherwise, clears ZF and loads m64 into EDX:EAX.
-pub fn CMPXCHG8B<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+pub fn CMPXCHG8B<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -942,8 +945,8 @@ pub fn CMPXCHG8B<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 
 /// XADD r/m32, r32 — register form
 /// Bochs arith32.cc
-pub fn XADD_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn XADD_EdGd_R<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1_32 = cpu.get_gpr32(instr.dst() as usize);
@@ -962,8 +965,8 @@ pub fn XADD_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
 // =========================================================================
 
 /// CMPXCHG r/m32, r32 — unified dispatch
-pub fn CMPXCHG_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+pub fn CMPXCHG_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -979,8 +982,8 @@ pub fn CMPXCHG_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 // =========================================================================
 
 /// XADD r/m32, r32 — unified dispatch
-pub fn XADD_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+pub fn XADD_EdGd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -993,8 +996,8 @@ pub fn XADD_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 
 /// XADD r/m32, r32 — memory form
 /// Bochs arith32.cc
-pub fn XADD_EdGd_M<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+pub fn XADD_EdGd_M<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);

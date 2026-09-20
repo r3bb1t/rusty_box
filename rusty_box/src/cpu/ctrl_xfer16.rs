@@ -3,13 +3,12 @@
 //! Based on Bochs ctrl_xfer16.cc
 
 use super::{
-    cpu::{BxCpuC, Exception},
-    cpuid::BxCpuIdTrait,
+    cpu::Exception,
     decoder::{BxSegregs, Instruction},
     error::{CpuError, Result},
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Helper functions for branching
     // =========================================================================
@@ -55,7 +54,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let ip = self.get_ip();
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, rip);
         Ok(())
     }
 
@@ -65,7 +65,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let ip = self.get_ip();
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, rip);
         Ok(())
     }
 
@@ -76,7 +77,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let new_ip = self.get_gpr16(dst);
         self.branch_near16(new_ip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
-        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, rip);
         Ok(())
     }
 
@@ -88,7 +90,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let new_ip = self.v_read_word(seg, eaddr)?;
         self.branch_near16(new_ip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
-        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, rip);
         Ok(())
     }
 
@@ -120,7 +123,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Call, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Call, rip);
         Ok(())
     }
 
@@ -138,7 +142,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         self.branch_near16(new_ip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
-        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
         Ok(())
     }
 
@@ -157,7 +162,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         self.branch_near16(new_ip)?;
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
-        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
         Ok(())
     }
 
@@ -178,7 +184,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn ret_near16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let return_ip = self.pop_16()?;
         self.branch_near16(return_ip)?;
-        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
         Ok(())
     }
 
@@ -198,7 +205,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let sp = self.get_gpr16(4);
             self.set_gpr16(4, sp.wrapping_add(imm16));
         }
-        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip());
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
         Ok(())
     }
 
@@ -620,7 +628,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         disp16: u16,
     ) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         if self.protected_mode() {
@@ -654,7 +662,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Called by CALL16_Ap and CALL16_Ep
     fn call_far16(&mut self, _instr: &Instruction, cs_raw: u16, disp16: u16) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         if self.protected_mode() {
@@ -724,14 +732,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Far JMP instructions (16-bit)
     // =========================================================================
 
-    /// JMP16_Ap - Far jump with absolute pointer (16-bit)
-    /// Matching C++ ctrl_xfer16.cc (similar to CALL16_Ap but for jump)
-    pub fn jmp16_ap(&mut self, instr: &Instruction) -> Result<()> {
-        let disp16 = instr.iw();
-        let cs_raw = instr.iw2();
-        self.jmp_far16(instr, cs_raw, disp16)
-    }
-
     /// JMP16_Ep - Far jump indirect (16-bit)
     /// Matching C++ ctrl_xfer16.cc
     pub fn jmp16_ep(&mut self, instr: &Instruction) -> Result<()> {
@@ -759,7 +759,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Matching C++ ctrl_xfer16.cc (similar to RETfar16_Iw but without imm16)
     pub fn retfar16(&mut self, _instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         if self.protected_mode() {
@@ -793,7 +793,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Matching C++ ctrl_xfer16.cc
     pub fn retfar16_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         let imm16 = instr.iw();

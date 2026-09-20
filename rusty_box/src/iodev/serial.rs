@@ -10,13 +10,14 @@
 //!   COM3: 0x3E8-0x3EF, IRQ 4
 //!   COM4: 0x2E8-0x2EF, IRQ 3
 
+use rusty_box_devices::api::{
+    DeviceCtx, DeviceKind, IoLen, IrqLine, PioDevice, TimedDevice, TimerKey,
+};
 use crate::ring_buffer::RingBuffer;
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -24,16 +25,49 @@ use crate::snapshot::{
 /// UART crystal oscillator frequency (Hz) — Bochs BX_PC_CLOCK_XTL
 const UART_CLOCK_HZ: u32 = 1_843_200;
 
+/// UARTs this device models — Bochs `serial.h` `BX_SERIAL_MAXDEV`.
+///
+/// Every per-port array below is sized by this, and it is the bound the
+/// machine's serial role handle checks, so the modelled set has exactly one
+/// definition (doctrine R5) — shrinking the array can never leave the handle
+/// indexing past its end.
+pub(crate) const SERIAL_PORT_COUNT: usize = 4;
+
 /// COM port base addresses
-const COM_BASES: [u16; 4] = [0x03F8, 0x02F8, 0x03E8, 0x02E8];
+const COM_BASES: [u16; SERIAL_PORT_COUNT] = [0x03F8, 0x02F8, 0x03E8, 0x02E8];
 /// COM port IRQ assignments — COM1=IRQ4, COM2=IRQ3, COM3=IRQ4, COM4=IRQ3
-const COM_IRQS: [u8; 4] = [4, 3, 4, 3];
+const COM_IRQS: [u8; SERIAL_PORT_COUNT] = [4, 3, 4, 3];
 
 /// FIFO size (16550A standard)
 const FIFO_SIZE: usize = 16;
 
 /// Bounded host-visible output retained when no consumer has drained it yet.
 const TX_OUTPUT_CAPACITY: usize = 4096;
+
+/// Draining iterator over one UART's transmitted bytes.
+///
+/// A named type rather than `impl Iterator` (doctrine R0): the machine's
+/// serial role handle forwards this return, and an anonymous type cannot be
+/// forwarded, stored, or documented. Wrapping also keeps
+/// [`TX_OUTPUT_CAPACITY`] out of the public signature, so the buffer can be
+/// resized without a breaking change.
+pub struct SerialTxDrain<'a>(crate::ring_buffer::Drain<'a, u8, TX_OUTPUT_CAPACITY>);
+
+impl Iterator for SerialTxDrain<'_> {
+    type Item = u8;
+
+    #[inline]
+    fn next(&mut self) -> Option<u8> {
+        self.0.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl ExactSizeIterator for SerialTxDrain<'_> {}
 
 /// RX FIFO trigger levels indexed by 2-bit rxtrigger field
 const RX_FIFO_TRIGGERS: [u8; 4] = [1, 4, 8, 14];
@@ -282,47 +316,6 @@ impl SerialPort {
         s.modem_status.dsr = true;
         s
     }
-
-    fn reset(&mut self) {
-        self.ls_interrupt = false;
-        self.ms_interrupt = false;
-        self.rx_interrupt = false;
-        self.tx_interrupt = false;
-        self.fifo_interrupt = false;
-        self.ls_ipending = false;
-        self.ms_ipending = false;
-        self.rx_ipending = false;
-        self.fifo_ipending = false;
-
-        self.rx_fifo.clear();
-        self.tx_fifo.clear();
-        self.tx_output.clear();
-
-        self.rxbuffer = 0;
-        self.thrbuffer = 0;
-        self.tsrbuffer = 0;
-        self.int_enable = IntEnable::default();
-        self.int_ident = IntIdent::default();
-        self.fifo_cntl = FifoControl::default();
-        self.line_cntl = LineControl::default();
-        self.modem_cntl = ModemControl::default();
-        self.line_status = LineStatus::default();
-        self.modem_status = ModemStatus::default();
-        self.scratch = 0;
-        self.divisor_lsb = 1;
-        self.divisor_msb = 0;
-        self.baudrate = 115200;
-        self.databyte_usec = 87;
-        // Timer handles persist across soft resets; timeout scheduling does not.
-        self.fifo_timeout_delay_usec = None;
-        self.fifo_timer_request_pending = true;
-        self.tx_timer_delay_usec = None;
-        self.tx_timer_request_pending = true;
-
-        // Simulate connected device
-        self.modem_status.cts = true;
-        self.modem_status.dsr = true;
-    }
 }
 
 /// Computes the timing derived from the UART's architectural divisor and line
@@ -363,12 +356,12 @@ const SERIAL_SNAPSHOT_HEADER_LEN: u64 = 8;
 const SERIAL_SNAPSHOT_PORT_FIXED_LEN: u64 = 74;
 
 #[cfg(feature = "std")]
-fn invalid_serial_snapshot(message: &'static str) -> io::Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_serial_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
-fn checked_serial_count(count: usize) -> io::Result<u32> {
+fn checked_serial_count(count: usize) -> SnapResult<u32> {
     if count > bounds::MAX_SNAPSHOT_QUEUE_LEN {
         return Err(invalid_serial_snapshot(
             "serial snapshot count exceeds implementation bound",
@@ -379,7 +372,7 @@ fn checked_serial_count(count: usize) -> io::Result<u32> {
 }
 
 #[cfg(feature = "std")]
-fn validate_serial_ring_len<const N: usize>(ring: &RingBuffer<u8, N>) -> io::Result<()> {
+fn validate_serial_ring_len<const N: usize>(ring: &RingBuffer<u8, N>) -> SnapResult<()> {
     if ring.len() > N.min(bounds::MAX_SNAPSHOT_QUEUE_LEN) {
         return Err(invalid_serial_snapshot(
             "serial snapshot ring length exceeds live capacity",
@@ -389,10 +382,10 @@ fn validate_serial_ring_len<const N: usize>(ring: &RingBuffer<u8, N>) -> io::Res
 }
 
 #[cfg(feature = "std")]
-fn write_serial_ring<W: Write, const N: usize>(
+fn write_serial_ring<W: SnapWrite, const N: usize>(
     writer: &mut W,
     ring: &RingBuffer<u8, N>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     validate_serial_ring_len(ring)?;
     writer.write_u32(checked_serial_count(ring.len())?)?;
     for byte in ring.iter() {
@@ -402,9 +395,9 @@ fn write_serial_ring<W: Write, const N: usize>(
 }
 
 #[cfg(feature = "std")]
-fn read_serial_ring<R: Read, const N: usize>(
-    reader: &mut SnapshotReader<R>,
-) -> io::Result<RingBuffer<u8, N>> {
+fn read_serial_ring<R: SnapRead, const N: usize>(
+    reader: &mut R,
+) -> SnapResult<RingBuffer<u8, N>> {
     let count = reader.read_count(N.min(bounds::MAX_SNAPSHOT_QUEUE_LEN))?;
     let mut ring = RingBuffer::new();
     for _ in 0..count {
@@ -414,7 +407,7 @@ fn read_serial_ring<R: Read, const N: usize>(
 }
 
 #[cfg(feature = "std")]
-fn write_optional_handle<W: Write>(writer: &mut W, handle: Option<usize>) -> io::Result<()> {
+fn write_optional_handle<W: SnapWrite>(writer: &mut W, handle: Option<usize>) -> SnapResult<()> {
     match handle {
         Some(handle) => {
             writer.write_bool(true)?;
@@ -428,7 +421,7 @@ fn write_optional_handle<W: Write>(writer: &mut W, handle: Option<usize>) -> io:
 }
 
 #[cfg(feature = "std")]
-fn read_optional_handle<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Option<usize>> {
+fn read_optional_handle<R: SnapRead>(reader: &mut R) -> SnapResult<Option<usize>> {
     if !reader.read_bool()? {
         return Ok(None);
     }
@@ -438,7 +431,7 @@ fn read_optional_handle<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<O
 }
 
 #[cfg(feature = "std")]
-fn write_optional_u64<W: Write>(writer: &mut W, value: Option<u64>) -> io::Result<()> {
+fn write_optional_u64<W: SnapWrite>(writer: &mut W, value: Option<u64>) -> SnapResult<()> {
     match value {
         Some(value) => {
             writer.write_bool(true)?;
@@ -449,7 +442,7 @@ fn write_optional_u64<W: Write>(writer: &mut W, value: Option<u64>) -> io::Resul
 }
 
 #[cfg(feature = "std")]
-fn read_optional_u64<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Option<u64>> {
+fn read_optional_u64<R: SnapRead>(reader: &mut R) -> SnapResult<Option<u64>> {
     if reader.read_bool()? {
         Ok(Some(reader.read_u64()?))
     } else {
@@ -467,7 +460,7 @@ fn validate_fifo_timeout_state(
     fifo_cntl: FifoControl,
     rx_fifo: &RingBuffer<u8, FIFO_SIZE>,
     fifo_timeout_delay_usec: Option<u64>,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     let Some(delay) = fifo_timeout_delay_usec else {
         return Ok(());
     };
@@ -494,7 +487,7 @@ fn validate_fifo_timeout_state(
 }
 
 #[cfg(feature = "std")]
-fn validate_serial_port_for_snapshot(port: &SerialPort) -> io::Result<()> {
+fn validate_serial_port_for_snapshot(port: &SerialPort) -> SnapResult<()> {
     validate_serial_ring_len(&port.rx_fifo)?;
     validate_serial_ring_len(&port.tx_fifo)?;
     validate_serial_ring_len(&port.tx_output)?;
@@ -530,7 +523,7 @@ fn validate_serial_port_for_snapshot(port: &SerialPort) -> io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn serial_port_snapshot_v3_len(port: &SerialPort) -> io::Result<u64> {
+fn serial_port_snapshot_v3_len(port: &SerialPort) -> SnapResult<u64> {
     validate_serial_port_for_snapshot(port)?;
     let rx_len = checked_snapshot_len_mul(
         u64::try_from(port.rx_fifo.len())
@@ -567,12 +560,12 @@ fn serial_port_snapshot_v3_len(port: &SerialPort) -> io::Result<u64> {
 }
 
 #[cfg(feature = "std")]
-fn save_serial_port_snapshot_v3<W: Write>(
+fn save_serial_port_snapshot_v3<W: SnapWrite>(
     port: &SerialPort,
     pending_irq_raise: bool,
     pending_irq_lower: bool,
     writer: &mut W,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     validate_serial_port_for_snapshot(port)?;
 
     writer.write_u16(port.base)?;
@@ -691,11 +684,11 @@ struct SerialPortSnapshot {
 
 #[cfg(feature = "std")]
 impl SerialPortSnapshot {
-    fn read<R: Read>(
-        reader: &mut SnapshotReader<R>,
+    fn read<R: SnapRead>(
+        reader: &mut R,
         expected_base: u16,
         expected_irq: u8,
-    ) -> io::Result<Self> {
+    ) -> SnapResult<Self> {
         let base = reader.read_u16()?;
         let irq = reader.read_u8()?;
         if base != expected_base || irq != expected_irq {
@@ -923,11 +916,11 @@ impl ExactSizeIterator for PendingIrqs {}
 /// 16550 UART Serial Controller — supports up to 4 COM ports
 #[derive(Debug)]
 pub struct BxSerialC {
-    ports: [SerialPort; 4],
+    ports: [SerialPort; SERIAL_PORT_COUNT],
     num_ports: usize,
     /// Pending IRQ raise/lower actions — processed by the PIC after handler returns
-    pending_irq_raise: [bool; 4],
-    pending_irq_lower: [bool; 4],
+    pending_irq_raise: [bool; SERIAL_PORT_COUNT],
+    pending_irq_lower: [bool; SERIAL_PORT_COUNT],
 }
 
 impl Default for BxSerialC {
@@ -938,7 +931,7 @@ impl Default for BxSerialC {
 
 impl BxSerialC {
     pub fn new(num_ports: usize) -> Self {
-        let num_ports = num_ports.min(4);
+        let num_ports = num_ports.min(SERIAL_PORT_COUNT);
         Self {
             ports: [
                 SerialPort::new(0),
@@ -947,23 +940,15 @@ impl BxSerialC {
                 SerialPort::new(3),
             ],
             num_ports,
-            pending_irq_raise: [false; 4],
-            pending_irq_lower: [false; 4],
+            pending_irq_raise: [false; SERIAL_PORT_COUNT],
+            pending_irq_lower: [false; SERIAL_PORT_COUNT],
         }
-    }
-
-    pub fn reset(&mut self) {
-        for port in &mut self.ports {
-            port.reset();
-        }
-        self.pending_irq_raise = [false; 4];
-        self.pending_irq_lower = [false; 4];
     }
 
     /// Drain transmitted bytes from a port (for host-side consumption)
     #[allow(dead_code)]
-    pub fn drain_tx_output(&mut self, port_index: usize) -> impl Iterator<Item = u8> + '_ {
-        self.ports[port_index].tx_output.drain()
+    pub fn drain_tx_output(&mut self, port_index: usize) -> SerialTxDrain<'_> {
+        SerialTxDrain(self.ports[port_index].tx_output.drain())
     }
 
     pub fn tx_output_len(&self, port_index: usize) -> usize {
@@ -1338,12 +1323,51 @@ impl BxSerialC {
         self.raise_interrupt(port_idx, IntSource::RxData);
     }
 
-    /// Feed data into a COM port's RX path (called from outside to inject serial input)
-    #[allow(dead_code)]
-    pub fn receive_byte(&mut self, port_index: usize, data: u8) {
-        if port_index < self.num_ports {
-            self.rx_fifo_enq(port_index, data);
+    /// Whether a port's receiver takes one more host byte now.
+    ///
+    /// Bochs serial.cc `rx_timer` reads from the host source only while
+    /// `(line_status.rxdata_ready == 0) || fifo_cntl.enable`. With the FIFO off
+    /// that is this gate exactly. With it on, Bochs reads regardless and
+    /// `rx_fifo_enq` drops a byte that finds the FIFO full, setting the
+    /// overrun bit; here the byte is held until there is room instead
+    /// (divergence D11). Named once so every host offer is gated the same way
+    /// (R5).
+    fn rx_has_room(&self, port_index: usize) -> bool {
+        let port = &self.ports[port_index];
+        if port.fifo_cntl.enable {
+            port.rx_fifo.len() < FIFO_SIZE
+        } else {
+            !port.line_status.rxdata_ready
         }
+    }
+
+    /// Offer one host byte to a COM port's receiver, returning whether it was
+    /// taken.
+    ///
+    /// A refusal is back-pressure, not an error: the receiver is full and the
+    /// byte must be offered again once the guest has read from it. Bochs
+    /// serial.cc `rx_timer` reads a host byte per character time, gated as
+    /// [`Self::rx_has_room`] describes; there is no host serial descriptor to
+    /// poll here, so the front end's queue is the source, the machine's input
+    /// pump is the timer, and the gate is applied at the point of offer.
+    /// Because a byte that finds the FIFO full is held rather than dropped
+    /// (divergence D11), host input never overruns the modelled UART.
+    ///
+    /// In loopback mode the byte is taken and discarded, as `rx_timer`
+    /// discards host input while `modem_cntl.local_loopback` is set: the
+    /// receiver then carries only what the guest itself transmits, and that
+    /// path still reaches `rx_fifo_enq`'s overrun as it does in Bochs.
+    #[allow(dead_code)]
+    #[must_use = "a refused byte never reached the guest and must be offered again"]
+    pub fn receive_byte(&mut self, port_index: usize, data: u8) -> bool {
+        if port_index >= self.num_ports || !self.rx_has_room(port_index) {
+            return false;
+        }
+        if self.ports[port_index].modem_cntl.local_loopback {
+            return true;
+        }
+        self.rx_fifo_enq(port_index, data);
+        true
     }
 
     // ========================================================================
@@ -1917,9 +1941,12 @@ impl BxSerialC {
 }
 
 #[cfg(feature = "std")]
-impl BxSerialC {
+impl crate::snapshot::SnapshotSection for BxSerialC {
+    const TAG: u32 = crate::snapshot::SEC_SERIAL;
+    type Restored = ();
+
     /// Encoded byte length of the complete SERIAL v3 section payload.
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         if self.num_ports > self.ports.len() {
             return Err(invalid_serial_snapshot(
                 "serial live port count exceeds controller capacity",
@@ -1936,8 +1963,8 @@ impl BxSerialC {
 
     /// Streams the complete SERIAL v3 section payload without staging a
     /// payload buffer or changing host output/callback wiring.
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        self.snapshot_v3_len()?;
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
+        self.snapshot_len()?;
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         writer.write_u32(checked_serial_count(self.num_ports)?)?;
 
@@ -1960,10 +1987,10 @@ impl BxSerialC {
 
     /// Decodes the complete SERIAL v3 section payload. Timer owner validation
     /// and derived timing are deliberately deferred to the restore hooks.
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(invalid_serial_snapshot(
                 "serial snapshot section version is unsupported",
@@ -1995,9 +2022,13 @@ impl BxSerialC {
             *pending_irq_lower = restored_pending_irq_lower;
         }
 
-        reader.finish_exact()
+        Ok(())
     }
 
+}
+
+#[cfg(feature = "std")]
+impl BxSerialC {
     /// Validates decoded FIFO-timeout and TX-shift handles after PC_SYSTEM
     /// owners have been restored. `validate_fifo` must reject non-SerialFifo(port)
     /// owners and `validate_tx` must reject non-SerialTx(port) owners.
@@ -2005,10 +2036,10 @@ impl BxSerialC {
         &self,
         mut validate_fifo: F,
         mut validate_tx: G,
-    ) -> io::Result<()>
+    ) -> SnapResult<()>
     where
-        F: FnMut(usize, usize) -> io::Result<()>,
-        G: FnMut(usize, usize) -> io::Result<()>,
+        F: FnMut(usize, usize) -> SnapResult<()>,
+        G: FnMut(usize, usize) -> SnapResult<()>,
     {
         if self.num_ports > self.ports.len() {
             return Err(invalid_serial_snapshot(
@@ -2028,7 +2059,7 @@ impl BxSerialC {
 
     /// Rebuilds deterministic UART timing once every section and timer owner
     /// has restored. It does not schedule timers or emit IRQ edges.
-    pub(crate) fn after_restore_snapshot_v3(&mut self) -> io::Result<()> {
+    pub(crate) fn after_restore_snapshot_v3(&mut self) -> SnapResult<()> {
         if self.num_ports > self.ports.len() {
             return Err(invalid_serial_snapshot(
                 "serial live port count exceeds controller capacity",
@@ -2049,10 +2080,121 @@ impl BxSerialC {
 }
 
 // ============================================================================
+// Device-API conversion
+//
+// The UART's own logic is untouched: it still records interrupt transitions
+// and timer deadlines in its internal latches, exactly as Bochs serial.cc
+// does through its `s.` state. What changes is who drains them. Previously the
+// central I/O dispatcher reached into the device afterwards to forward IRQs
+// and to copy timer deadlines into a side table for later replay. Now the
+// device drains its own latches into the capabilities it was handed, so the
+// effects land during the access — the synchronous shape Bochs has.
+
+impl BxSerialC {
+    /// Timer id for a port's RX FIFO-timeout — Bochs serial.cc `fifo_timer`.
+    #[inline]
+    pub(crate) const fn fifo_timer_local(port_index: usize) -> u16 {
+        (port_index as u16) * 2
+    }
+
+    /// Timer id for a port's TX shift register — Bochs serial.cc `tx_timer`.
+    #[inline]
+    pub(crate) const fn tx_timer_local(port_index: usize) -> u16 {
+        (port_index as u16) * 2 + 1
+    }
+
+    #[inline]
+    const fn timer_key(local: u16) -> TimerKey {
+        TimerKey {
+            device: DeviceKind::Serial,
+            local,
+        }
+    }
+
+    /// Deliver every interrupt transition the just-completed operation
+    /// produced. Replaces the dispatcher's `forward_serial_irqs`.
+    fn drain_irqs(&mut self, ctx: &mut DeviceCtx<'_>) {
+        for (irq, level) in self.take_pending_irqs() {
+            ctx.irq.set_level(IrqLine(irq), level);
+        }
+    }
+
+    /// Apply the port's pending timer deadlines. A `None` update means the
+    /// operation did not touch that deadline, which must leave an armed timer
+    /// running rather than restarting it.
+    fn drain_timers(&mut self, ctx: &mut DeviceCtx<'_>, port_index: usize) {
+        if let Some(update) = self.take_fifo_timer_update(port_index) {
+            let key = Self::timer_key(Self::fifo_timer_local(port_index));
+            match update {
+                Some(delay_usec) => ctx.timers.arm_oneshot_usec(key, delay_usec),
+                None => ctx.timers.cancel(key),
+            }
+        }
+        if let Some(update) = self.take_tx_timer_update(port_index) {
+            let key = Self::timer_key(Self::tx_timer_local(port_index));
+            match update {
+                Some(delay_usec) => ctx.timers.arm_oneshot_usec(key, delay_usec),
+                None => ctx.timers.cancel(key),
+            }
+        }
+    }
+
+    /// Drain both latch kinds for whichever port an access addressed.
+    fn drain_effects(&mut self, ctx: &mut DeviceCtx<'_>, port_index: Option<usize>) {
+        self.drain_irqs(ctx);
+        if let Some(index) = port_index {
+            self.drain_timers(ctx, index);
+        }
+    }
+
+    /// Drain latched work produced outside a port access or timer fire — a
+    /// host byte delivered to the receive path leaves the same interrupt and
+    /// FIFO-timeout state a guest-visible access would.
+    pub(crate) fn drain_pending_effects(&mut self, ctx: &mut DeviceCtx<'_>, port_index: usize) {
+        self.drain_effects(ctx, Some(port_index));
+    }
+}
+
+impl PioDevice for BxSerialC {
+    fn pio_read(&mut self, port: u16, len: IoLen, ctx: &mut DeviceCtx<'_>) -> u32 {
+        let value = self.read(port, len.bytes());
+        self.drain_effects(ctx, self.port_index_for_address(port));
+        value
+    }
+
+    fn pio_write(&mut self, port: u16, value: u32, len: IoLen, ctx: &mut DeviceCtx<'_>) {
+        self.write(port, value, len.bytes());
+        self.drain_effects(ctx, self.port_index_for_address(port));
+    }
+}
+
+impl TimedDevice for BxSerialC {
+    /// `local` encodes the port and which of its two timers fired; see
+    /// [`BxSerialC::fifo_timer_local`] and [`BxSerialC::tx_timer_local`].
+    ///
+    /// Both are one-shots, so a coalesced multi-period expiry is serviced once
+    /// — Bochs re-arms from inside the callback rather than accumulating.
+    fn timer_fired(&mut self, local: u16, _fires: u32, ctx: &mut DeviceCtx<'_>) {
+        let port_index = (local / 2) as usize;
+        if local % 2 == 0 {
+            // A timeout that finds the FIFO no longer eligible is a cancelled
+            // callback; the device reports that and nothing else happens.
+            let _asserted = self.fifo_timer_fired(port_index);
+        } else {
+            self.tx_timer_fired(port_index);
+        }
+        self.drain_effects(ctx, Some(port_index));
+    }
+}
+
+// ============================================================================
 // I/O port handler functions for the device infrastructure
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::{SnapError, SnapshotReader};
+    #[cfg(feature = "std")]
+    use crate::snapshot::SnapshotSection;
 
     #[cfg(feature = "std")]
     #[test]
@@ -2062,7 +2204,7 @@ mod tests {
         // live state changes.
         let serial = BxSerialC::new(1);
         let mut saved = Vec::new();
-        serial.save_snapshot_v3(&mut saved).unwrap();
+        serial.save(&mut saved).unwrap();
 
         // Layout: header = version u32 + num_ports u32 (8 bytes); the first
         // port record starts with base u16 + irq u8 + 9 interrupt/pending
@@ -2074,8 +2216,11 @@ mod tests {
         let mut target = BxSerialC::new(1);
         let mut reader =
             SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
-        let error = target.restore_snapshot_v3(&mut reader).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        let error = target.restore(&mut reader).unwrap_err();
+        assert!(
+            matches!(error, SnapError::Invalid(_)),
+            "a rejected device state names what was wrong: {error:?}"
+        );
         assert!(
             error.to_string().contains("count exceeds bound"),
             "unexpected rejection: {error}"
@@ -2255,7 +2400,7 @@ mod tests {
     fn serial_fifo_timeout_uses_three_character_deadline() {
         let mut serial = fifo_serial_with_four_byte_trigger();
 
-        serial.receive_byte(0, 0x11);
+        assert!(serial.receive_byte(0, 0x11), "an empty FIFO has room");
 
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
         assert_eq!(serial.read(COM_BASES[0] + REG_IIR_FCR, 1) & 0x01, 0x01);
@@ -2276,10 +2421,10 @@ mod tests {
     fn serial_fifo_byte_rearms_three_character_timeout() {
         let mut serial = fifo_serial_with_four_byte_trigger();
 
-        serial.receive_byte(0, 0x11);
+        assert!(serial.receive_byte(0, 0x11), "an empty FIFO has room");
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
 
-        serial.receive_byte(0, 0x22);
+        assert!(serial.receive_byte(0, 0x22), "one byte in, fifteen to go");
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
         assert_eq!(serial.read(COM_BASES[0] + REG_IIR_FCR, 1) & 0x01, 0x01);
     }
@@ -2289,7 +2434,7 @@ mod tests {
         let mut serial = fifo_serial_with_four_byte_trigger();
 
         for byte in 0..4 {
-            serial.receive_byte(0, byte);
+            assert!(serial.receive_byte(0, byte), "byte {byte} fits in the FIFO");
         }
 
         assert_eq!(serial.fifo_timeout_delay_usec(0), None);
@@ -2304,7 +2449,7 @@ mod tests {
     fn serial_fifo_drain_cancels_timeout() {
         let mut serial = fifo_serial_with_four_byte_trigger();
 
-        serial.receive_byte(0, 0x11);
+        assert!(serial.receive_byte(0, 0x11), "an empty FIFO has room");
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
 
         assert_eq!(serial.read(COM_BASES[0] + REG_RBR_THR, 1), 0x11);
@@ -2323,13 +2468,13 @@ mod tests {
 
         // Three bytes: below the trigger — no RXDATA, timeout armed.
         for b in 0..3u8 {
-            serial.receive_byte(0, b);
+            assert!(serial.receive_byte(0, b), "byte {b} fits in the FIFO");
         }
         assert_eq!(serial.take_pending_irqs().count(), 0, "below trigger: no IRQ");
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
 
         // Fourth byte hits the trigger exactly — one RXDATA raise, timeout gone.
-        serial.receive_byte(0, 3);
+        assert!(serial.receive_byte(0, 3), "the fourth byte fits");
         let mut irqs = serial.take_pending_irqs();
         assert_eq!(irqs.next(), Some((COM_IRQS[0], true)));
         assert_eq!(irqs.next(), None);
@@ -2337,7 +2482,7 @@ mod tests {
         assert_eq!(serial.fifo_timeout_delay_usec(0), None);
 
         // Fifth byte is above the trigger — no re-raise, timeout re-armed.
-        serial.receive_byte(0, 4);
+        assert!(serial.receive_byte(0, 4), "the fifth byte fits");
         assert_eq!(
             serial.take_pending_irqs().count(),
             0,
@@ -2350,7 +2495,10 @@ mod tests {
     fn serial_non_fifo_overrun_overwrites_rbr_and_raises_rxdata() {
         // Bochs serial.cc rx_fifo_enq (non-FIFO): a byte arriving while RBR is
         // still full sets overrun_error AND falls through to overwrite RBR and
-        // raise RXDATA — the new byte is delivered, not dropped.
+        // raise RXDATA — the new byte is delivered, not dropped. Loopback and
+        // the modem-status paths still reach it that way, so it is asserted
+        // where it lives rather than through `receive_byte`, which applies
+        // rx_timer's gate and never lets a host byte overrun.
         let mut serial = BxSerialC::new(1);
         let base = COM_BASES[0];
         serial.write(base + REG_LCR, 0x03, 1); // 8-bit word
@@ -2358,19 +2506,79 @@ mod tests {
         serial.write(base + REG_IER_DLM, 0x01, 1); // enable RXDATA interrupt
         let _ = serial.take_pending_irqs().count();
 
-        serial.receive_byte(0, b'A');
+        assert!(serial.receive_byte(0, b'A'), "an empty RBR has room");
         let mut irqs = serial.take_pending_irqs();
         assert_eq!(irqs.next(), Some((COM_IRQS[0], true)));
         drop(irqs);
 
-        // Second byte without draining RBR: overrun.
-        serial.receive_byte(0, b'B');
+        // A host byte offered while RBR is still full is REFUSED, so the
+        // front end holds it instead of losing 'A' — Bochs rx_timer reads
+        // nothing from the host source in exactly this state.
+        assert!(
+            !serial.receive_byte(0, b'B'),
+            "an unread RBR must refuse the next host byte, not overwrite it"
+        );
+
+        // Second byte without draining RBR, on the path that still bursts:
+        // overrun.
+        serial.rx_fifo_enq(0, b'B');
         // A fresh RXDATA raise fired for the overwriting byte.
         assert_eq!(serial.take_pending_irqs().next(), Some((COM_IRQS[0], true)));
         // overrun_error is reported (LSR bit 1) before the read clears it.
         assert_ne!(serial.read(base + REG_LSR, 1) & 0x02, 0, "overrun_error set");
         // RBR now holds the NEW byte, not the stale 'A'.
         assert_eq!(serial.read(base + REG_RBR_THR, 1), u32::from(b'B'));
+    }
+
+    #[test]
+    fn a_full_receive_fifo_refuses_a_host_byte_rather_than_overrunning() {
+        // Bochs serial.cc rx_fifo_enq drops a byte offered to a full FIFO and
+        // sets only the overrun bit. Offering through `receive_byte` reports
+        // the refusal instead, which is what lets a front end hold the byte
+        // until the guest has read one out.
+        let mut serial = BxSerialC::new(1);
+        let base = COM_BASES[0];
+        serial.write(base + REG_LCR, 0x03, 1);
+        serial.write(base + REG_IIR_FCR, 0x01, 1); // enable the receive FIFO
+
+        for i in 0..FIFO_SIZE {
+            assert!(
+                serial.receive_byte(0, i as u8),
+                "byte {i} fits in a 16-entry FIFO"
+            );
+        }
+        assert!(
+            !serial.receive_byte(0, 0xFF),
+            "the seventeenth byte must be refused, not dropped"
+        );
+        assert_eq!(
+            serial.read(base + REG_LSR, 1) & 0x02,
+            0,
+            "a held host byte raises no overrun, where Bochs would drop it and set OE"
+        );
+
+        // One read makes room for exactly one more.
+        assert_eq!(serial.read(base + REG_RBR_THR, 1), 0);
+        assert!(serial.receive_byte(0, 0xFF), "a drained slot takes a byte");
+    }
+
+    /// Bochs serial.cc `rx_timer` reads host input in loopback mode and
+    /// discards it: the receiver belongs to the guest's own transmitter then,
+    /// and a host byte mixed into what it loops back would be a byte it never
+    /// sent.
+    #[test]
+    fn host_input_is_discarded_while_the_guest_loops_back() {
+        let mut serial = BxSerialC::new(1);
+        let base = COM_BASES[0];
+        serial.write(base + REG_LCR, 0x03, 1);
+        serial.write(base + REG_MCR, 0x10, 1); // local loopback
+
+        assert!(serial.receive_byte(0, 0x41), "the byte is taken, as Bochs reads it");
+        assert_eq!(
+            serial.read(base + REG_LSR, 1) & 0x01,
+            0,
+            "nothing reached the receiver"
+        );
     }
 
     #[test]
@@ -2411,11 +2619,11 @@ mod tests {
         serial.write(base + REG_IER_DLM, 0x0f, 1);
         assert_eq!(serial.read(base + REG_IIR_FCR, 1) & 0x0e, 0x02);
 
-        serial.receive_byte(0, 0x10);
-        serial.receive_byte(0, 0x11);
-        serial.receive_byte(0, 0x12);
+        for byte in [0x10u8, 0x11, 0x12] {
+            assert!(serial.receive_byte(0, byte), "byte {byte:#04x} fits");
+        }
         assert_eq!(serial.read(base + REG_RBR_THR, 1), 0x10);
-        serial.receive_byte(0, 0x13);
+        assert!(serial.receive_byte(0, 0x13), "a drained slot takes a byte");
 
         // THR writes still drive the TX-hold interrupt raise (first byte frees
         // the hold register) and lower (second byte finds the shift register
@@ -2446,15 +2654,21 @@ mod tests {
         assert!(serial.pending_irq_lower[0]);
 
         let mut saved = Vec::new();
-        serial.save_snapshot_v3(&mut saved).unwrap();
-        assert_eq!(saved.len() as u64, serial.snapshot_v3_len().unwrap());
+        serial.save(&mut saved).unwrap();
+        assert_eq!(saved.len() as u64, serial.snapshot_len().unwrap());
 
-        serial.reset();
+        // Move the live port away from the saved one in every field the
+        // restore is checked on.
+        let drained: Vec<u32> = (0..3).map(|_| serial.read(base + REG_RBR_THR, 1)).collect();
+        assert_eq!(drained, vec![0x11, 0x12, 0x13]);
+        serial.write(base + REG_LCR, 0x03, 1);
+        serial.write(base + REG_IER_DLM, 0, 1);
+        serial.write(base + REG_MCR, 0, 1);
         serial.write(base + REG_SCR, 0xff, 1);
-        serial.receive_byte(0, 0xee);
+        assert!(serial.receive_byte(0, 0xee), "the drained receiver takes a byte");
 
         let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
-        serial.restore_snapshot_v3(&mut reader).unwrap();
+        serial.restore(&mut reader).unwrap();
         serial.after_restore_snapshot_v3().unwrap();
 
         assert_eq!(serial.fifo_timer_handle(0), Some(73));
@@ -2500,13 +2714,13 @@ mod tests {
         let _ = serial.take_pending_irqs().count();
 
         // A byte arrives and raises RXDATA.
-        serial.receive_byte(0, 0xaa);
+        assert!(serial.receive_byte(0, 0xaa), "an empty RBR has room");
         assert_eq!(serial.take_pending_irqs().next(), Some((COM_IRQS[0], true)));
 
         // Guest reads it (lowers), then a new byte arrives (raises) — both before
         // the next drain. Net must be a single raise, not a raise+lower pulse.
         assert_eq!(serial.read(base + REG_RBR_THR, 1), 0xaa);
-        serial.receive_byte(0, 0xbb);
+        assert!(serial.receive_byte(0, 0xbb), "the read emptied RBR");
         assert_eq!(
             serial.take_pending_irqs().collect::<Vec<_>>(),
             vec![(COM_IRQS[0], true)]

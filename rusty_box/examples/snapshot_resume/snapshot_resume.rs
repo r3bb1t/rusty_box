@@ -5,23 +5,23 @@
 //! then restore it in a FRESH PROCESS with the same media attached and
 //! continue executing.
 //!
-//! Run (defaults target the Windows 7 install ISO):
-//!   cargo run --release --example snapshot_resume --features std
+//! Run:
+//!   RB_ISO=path/to/guest.iso cargo run --release --example snapshot_resume --features std
 //!
 //! Environment:
-//!   RB_ISO          ISO path (default: C:\Users\olegg\Downloads\Windows.7.SP1.7601.28064.OneSmiLe.iso)
+//!   RB_ISO          ISO path (required; the harness refuses to start without it)
 //!   RB_MEM_MIB      Guest/host RAM in MiB (default 2048)
 //!   RB_BOOT_INSNS   Instructions before the snapshot (default 1_000_000_000)
 //!   RB_RESUME_INSNS Instructions after the restore (default 200_000_000)
 //!   RB_SNAPSHOT     Snapshot file (default target/snapshot_resume.rbx)
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{
+        AtaSlot, BootDevice, BootOrder, Emulator, EmulatorConfig, Ips, MachineBuilder, MemorySize,
+        RunBudget,
+    },
     gui::NoGui,
 };
-
-const DEFAULT_ISO: &str = r"C:\Users\olegg\Downloads\Windows.7.SP1.7601.28064.OneSmiLe.iso";
 
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
@@ -43,14 +43,16 @@ struct HarnessConfig {
 }
 
 impl HarnessConfig {
-    fn from_env() -> Self {
-        Self {
-            iso: env_string("RB_ISO", DEFAULT_ISO),
+    /// Fails when `RB_ISO` is unset or not Unicode: the harness has no guest
+    /// to boot without one, and no ISO path is portable enough to default to.
+    fn from_env() -> Result<Self, std::env::VarError> {
+        Ok(Self {
+            iso: std::env::var("RB_ISO")?,
             mem_mib: env_u64("RB_MEM_MIB", 2048),
             boot_insns: env_u64("RB_BOOT_INSNS", 1_000_000_000),
             resume_insns: env_u64("RB_RESUME_INSNS", 200_000_000),
             snapshot_path: env_string("RB_SNAPSHOT", "target/snapshot_resume.rbx"),
-        }
+        })
     }
 }
 
@@ -66,7 +68,16 @@ fn main() {
 }
 
 fn run(mode: &str) {
-    let config = HarnessConfig::from_env();
+    let config = match HarnessConfig::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!(
+                "snapshot_resume needs RB_ISO, the path of a bootable CD image \
+                 (RB_ISO=path/to/guest.iso): {error}"
+            );
+            std::process::exit(2);
+        }
+    };
     match mode {
         // Full mode drives both phases as separate OS processes so the
         // restore proves a genuinely fresh machine, not warm in-process state.
@@ -87,7 +98,7 @@ fn run(mode: &str) {
     }
 }
 
-fn build_machine(config: &HarnessConfig) -> Box<Emulator<'static, Corei7SkylakeX>> {
+fn build_machine(config: &HarnessConfig) -> Box<Emulator> {
     let workspace_root = workspace_root();
     let bios = std::fs::read(
         workspace_root.join("cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
@@ -100,27 +111,20 @@ fn build_machine(config: &HarnessConfig) -> Box<Emulator<'static, Corei7SkylakeX
 
     let mem_bytes = usize::try_from(config.mem_mib * 1024 * 1024).expect("memory size");
     let emulator_config = EmulatorConfig {
-        guest_memory_size: mem_bytes,
-        host_memory_size: mem_bytes,
-        ips: 120_000_000,
+        memory: MemorySize::bytes(mem_bytes),
+        ips: Ips::new(120_000_000),
         pci_enabled: true,
         ..EmulatorConfig::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(emulator_config).expect("build emulator");
-    emu.set_gui(NoGui::new());
-    emu.init_memory_and_pc_system().expect("init memory/pc-system");
-
-    let bios_load_addr = !(bios.len() as u64 - 1);
-    emu.load_bios(&bios, bios_load_addr).expect("load BIOS");
-    emu.load_optional_rom(&vga_bios, 0xC0000).expect("load VGA BIOS");
-    emu.init_cpu_and_devices().expect("init CPU/devices");
-    emu.configure_memory_in_cmos_from_config();
-    // ELTORITO boot codes: 3 = cdrom first.
-    emu.configure_boot_sequence(3, 0, 0);
-    emu.attach_cdrom(0, 0, &config.iso).expect("attach ISO");
-    emu.reset(ResetReason::Hardware).expect("hardware reset");
-    emu
+    MachineBuilder::new(emulator_config)
+        .gui(NoGui::new())
+        .bios(&bios)
+        .vga_bios(&vga_bios)
+        .boot_order(BootOrder::just(BootDevice::Cdrom))
+        .cdrom_file(AtaSlot::PRIMARY_MASTER, &config.iso)
+        .build()
+        .expect("build machine")
 }
 
 fn workspace_root() -> std::path::PathBuf {
@@ -136,14 +140,21 @@ fn workspace_root() -> std::path::PathBuf {
     }
 }
 
-fn run_instructions(emu: &mut Emulator<'static, Corei7SkylakeX>, budget: u64) -> u64 {
+fn run_instructions(emu: &mut Emulator, budget: u64) -> u64 {
     let mut executed_total = 0u64;
     while executed_total < budget {
         let chunk = (budget - executed_total).min(50_000_000);
-        let (executed, shutdown) = emu.step_batch(chunk).expect("step_batch");
-        assert!(!shutdown, "guest shut down inside the instruction budget");
-        assert!(executed > 0, "guest made no progress");
-        executed_total += executed;
+        let outcome = emu.step(RunBudget::Instructions(chunk)).expect("step");
+        assert!(
+            !outcome.is_terminal(),
+            "guest stopped ({:?}) inside the instruction budget",
+            outcome.stop
+        );
+        assert!(!outcome.progress.stalled(), "guest made no progress");
+        executed_total += outcome
+            .progress
+            .instructions()
+            .expect("this harness boots a uniprocessor machine");
     }
     executed_total
 }

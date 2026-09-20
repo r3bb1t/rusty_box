@@ -275,4 +275,6 @@ pub enum X86Feature {
     IsaMovrs,
     /// FRED (Flexible Return and Event Delivery) support
     IsaFred,
+    /// USER_MSR: URDMSR/UWRMSR instruction support
+    IsaUserMsr,
 }

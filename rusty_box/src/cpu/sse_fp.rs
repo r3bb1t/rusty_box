@@ -2,8 +2,7 @@
 //! post-computation SSE exception check. Mirrors Bochs `cpu/sse_pfp.cc`
 //! (`mxcsr_to_softfloat_status_word`, `check_exceptionsSSE`).
 
-use super::cpu::{BxCpuC, Exception};
-use super::cpuid::BxCpuIdTrait;
+use super::cpu::Exception;
 use super::instrumentation::Instrumentation;
 use super::softfloat3e::softfloat::SoftFloatStatus;
 use super::xmm::{BxMxcsr, Mxcsr, MXCSR_EXCEPTIONS};
@@ -28,7 +27,7 @@ pub(in crate::cpu) fn mxcsr_to_softfloat_status_word(mxcsr: BxMxcsr) -> SoftFloa
     }
 }
 
-impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
+impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Update MXCSR status bits from a SoftFloat exception-flags word and,
     /// if any unmasked exception occurred, raise #XM (or #UD when
     /// CR4.OSXMMEXCPT is clear). Bochs sse_pfp.cc `check_exceptionsSSE`.

@@ -14,8 +14,8 @@
 //!   samply record ./target/release/examples/perfbench
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, CpuSetupMode, ResetReason, X86Reg},
-    emulator::{Emulator, EmulatorConfig},
+    cpu::{CpuSetupMode, X86Reg},
+    emulator::{Emulator, EmulatorConfig, Ips, MemorySize},
 };
 use std::time::Instant;
 
@@ -76,12 +76,34 @@ static LOOP_STRAIGHT: &[u8] = &[
     0x75, 0xA1,             // jnz loop  (-95)
 ];
 
+// MODE=string: REP MOVSB then REP STOSB, 64 bytes each, re-armed every pass.
+// The other modes never touch the string handlers, so this is the only shape
+// that exercises `string.rs` — the REP loop, the per-element cursor updates and
+// the direction-flag path. RSI/RDI/RCX are reloaded each pass because REP
+// consumes them; the outer `jmp` runs forever and the instruction budget ends
+// the run, as with every other mode.
+#[rustfmt::skip]
+static LOOP_STRING: &[u8] = &[
+    0xBE, 0x00, 0x00, 0x50, 0x00,   // mov esi, 0x00500000   (src)
+    0xBF, 0x00, 0x00, 0x60, 0x00,   // mov edi, 0x00600000   (dst)
+    0xB9, 0x40, 0x00, 0x00, 0x00,   // mov ecx, 64
+    0xF3, 0xA4,                     // rep movsb
+    0xBF, 0x00, 0x00, 0x70, 0x00,   // mov edi, 0x00700000   (fill)
+    0xB9, 0x40, 0x00, 0x00, 0x00,   // mov ecx, 64
+    0xB0, 0x5A,                     // mov al, 0x5a
+    0xF3, 0xAA,                     // rep stosb
+    0xEB, 0xDF,                     // jmp loop  (-33)
+];
+
 fn select_loop() -> (&'static str, &'static [u8], u64) {
     // returns (name, code, insns_per_iter)
     match std::env::var("PERFBENCH_MODE").as_deref() {
         Ok("alu") => ("alu", LOOP_ALU, 7),
         Ok("branch") => ("branch", LOOP_BRANCH, 3),
         Ok("straight") => ("straight", LOOP_STRAIGHT, 32),
+        // 5 scalar setup insns + two REP passes; the emulator's own count is
+        // what the budget measures, so the per-iter figure is nominal here.
+        Ok("string") => ("string", LOOP_STRING, 9),
         _ => ("mixed", LOOP_MIXED, 7),
     }
 }
@@ -121,9 +143,8 @@ fn run() {
         .unwrap_or(16);
 
     let cfg = EmulatorConfig {
-        guest_memory_size: GUEST_RAM,
-        host_memory_size: GUEST_RAM,
-        ips: 1_000_000_000,
+        memory: MemorySize::bytes(GUEST_RAM),
+        ips: Ips::new(1_000_000_000),
         pci_enabled: false,
         cpu_params: rusty_box::params::BxParams::default()
             .with_topology(cpus, 1, 1)
@@ -132,10 +153,8 @@ fn run() {
         ..EmulatorConfig::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(cfg.clone()).expect("new");
-    emu.init_memory_and_pc_system().expect("init memory");
-    unsafe { emu.cpu_mut_unchecked() }.reset(ResetReason::Hardware);
-    emu.setup_cpu_mode(CpuSetupMode::FlatLong64).expect("mode");
+    let mut emu =
+        Emulator::new_with_mode(cfg.clone(), CpuSetupMode::FlatLong64).expect("machine");
 
     let (mode, code, _ipi) = select_loop();
     emu.mem_write(CODE_BASE, code).expect("write code");

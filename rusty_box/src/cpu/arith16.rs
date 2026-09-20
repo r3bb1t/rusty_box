@@ -4,12 +4,10 @@
 // Mirrors Bochs cpp/cpu/arith16.cc
 
 use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // INC/DEC instructions
     // =========================================================================
@@ -81,8 +79,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
 /// ADC_GwEwR: ADC r16, r16 (register form)
 /// Opcode: 0x13, ModRM: r16, r/m16 (register)
-pub fn ADC_GwEwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADC_GwEwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -98,8 +96,8 @@ pub fn ADC_GwEwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 
 /// ADC_GwEwM: ADC r16, r/m16 (memory form)
 /// Opcode: 0x13, ModRM: r16, r/m16 (memory)
-pub fn ADC_GwEwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADC_GwEwM<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -116,8 +114,8 @@ pub fn ADC_GwEwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// ADC_GwEw: ADC r16, r/m16
-pub fn ADC_GwEw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADC_GwEw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -129,8 +127,8 @@ pub fn ADC_GwEw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 
 /// ADD_EwIbR: ADD r/m16, imm8 (sign-extended, register form)
 /// Opcode: 0x83/0
-pub fn ADD_EwIbR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_EwIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
@@ -146,8 +144,8 @@ pub fn ADD_EwIbR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 
 /// ADD_EwIbM: ADD r/m16, imm8 (sign-extended, memory form)
 /// Opcode: 0x83/0 with memory operand
-pub fn ADD_EwIbM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADD_EwIbM<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -162,8 +160,8 @@ pub fn ADD_EwIbM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 
 /// ADD_EwIwR: ADD r16, imm16 (register form)
 /// Opcode: 0x81/0
-pub fn ADD_EwIwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_EwIwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
@@ -179,8 +177,8 @@ pub fn ADD_EwIwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 
 /// ADD_EwIwM: ADD m16, imm16 (memory form)
 /// Opcode: 0x81/0
-pub fn ADD_EwIwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_EwIwM<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -195,8 +193,8 @@ pub fn ADD_EwIwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 
 /// ADD_EwsIb: ADD r/m16, imm8 (sign-extended) - combined dispatcher
 /// Opcode: 0x83/0 with 66 prefix. Dispatches to register or memory form.
-pub fn ADD_EwsIb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_EwsIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -207,8 +205,8 @@ pub fn ADD_EwsIb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// ADD_EwIw: ADD r/m16, imm16
-pub fn ADD_EwIw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_EwIw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -220,8 +218,8 @@ pub fn ADD_EwIw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 
 /// ADD_EwGwM: ADD r/m16, r16 (memory form)
 /// Opcode: 0x01
-pub fn ADD_EwGwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_EwGwM<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -236,8 +234,8 @@ pub fn ADD_EwGwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 
 /// ADD_EwGwR: ADD r/m16, r16 (register form)
 /// Opcode 0x01: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
-pub fn ADD_EwGwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_EwGwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -251,8 +249,8 @@ pub fn ADD_EwGwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// ADD_EwGw: ADD r/m16, r16
-pub fn ADD_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_EwGw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -264,8 +262,8 @@ pub fn ADD_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 
 /// ADC_EwGwM: ADC r/m16, r16 (memory form)
 /// Opcode: 0x11
-pub fn ADC_EwGwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADC_EwGwM<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -280,8 +278,8 @@ pub fn ADC_EwGwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// ADC_EwGwR: ADC r/m16, r16 (register form)
-pub fn ADC_EwGwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADC_EwGwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -296,8 +294,8 @@ pub fn ADC_EwGwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// ADC_EwGw: ADC r/m16, r16
-pub fn ADC_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADC_EwGw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -309,8 +307,8 @@ pub fn ADC_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 
 /// ADC_EwIbR: ADC r16, imm8 (sign-extended, register form)
 /// Opcode: 0x83/2
-pub fn ADC_EwIbR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADC_EwIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
@@ -327,8 +325,8 @@ pub fn ADC_EwIbR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 
 /// ADC_EwIbM: ADC m16, imm8 (sign-extended, memory form)
 /// Opcode: 0x83/2
-pub fn ADC_EwIbM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EwIbM<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -343,8 +341,8 @@ pub fn ADC_EwIbM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 }
 
 /// ADC_EwsIb: ADC r/m16, imm8 (sign-extended) - dispatcher
-pub fn ADC_EwsIb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADC_EwsIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -359,8 +357,8 @@ pub fn ADC_EwsIb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 // =========================================================================
 
 /// CMP_EwGwR: CMP r/m16, r16 (register form)
-pub fn CMP_EwGwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn CMP_EwGwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -371,8 +369,8 @@ pub fn CMP_EwGwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// CMP_EwGwM: CMP r/m16, r16 (memory form)
-pub fn CMP_EwGwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn CMP_EwGwM<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -385,8 +383,8 @@ pub fn CMP_EwGwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// CMP_EwGw: CMP r/m16, r16 - Dispatcher
-pub fn CMP_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn CMP_EwGw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -401,8 +399,8 @@ pub fn CMP_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 // =========================================================================
 
 /// ADD_GwEwR: ADD r16, r16 (register form)
-pub fn ADD_GwEwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_GwEwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -416,8 +414,8 @@ pub fn ADD_GwEwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// ADD_GwEwM: ADD r16, r/m16 (memory form)
-pub fn ADD_GwEwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_GwEwM<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -433,8 +431,8 @@ pub fn ADD_GwEwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// ADD_GwEw: ADD r16, r/m16 - unified dispatch
-pub fn ADD_GwEw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_GwEw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -449,8 +447,8 @@ pub fn ADD_GwEw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 // =========================================================================
 
 /// SUB_EwGwM: SUB r/m16, r16 (memory form)
-pub fn SUB_EwGwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SUB_EwGwM<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -464,8 +462,8 @@ pub fn SUB_EwGwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SUB_EwGwR: SUB r/m16, r16 (register form)
-pub fn SUB_EwGwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SUB_EwGwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -479,8 +477,8 @@ pub fn SUB_EwGwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SUB_EwGw: SUB r/m16, r16 - unified dispatch
-pub fn SUB_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SUB_EwGw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -491,8 +489,8 @@ pub fn SUB_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// SUB_GwEwR: SUB r16, r16 (register form)
-pub fn SUB_GwEwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SUB_GwEwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -506,8 +504,8 @@ pub fn SUB_GwEwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SUB_GwEwM: SUB r16, r/m16 (memory form)
-pub fn SUB_GwEwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SUB_GwEwM<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -523,8 +521,8 @@ pub fn SUB_GwEwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SUB_GwEw: SUB r16, r/m16 - unified dispatch
-pub fn SUB_GwEw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SUB_GwEw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -539,8 +537,8 @@ pub fn SUB_GwEw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 // =========================================================================
 
 /// SBB_EwGwM: SBB r/m16, r16 (memory form)
-pub fn SBB_EwGwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SBB_EwGwM<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -555,8 +553,8 @@ pub fn SBB_EwGwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SBB_EwGwR: SBB r/m16, r16 (register form)
-pub fn SBB_EwGwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SBB_EwGwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -571,8 +569,8 @@ pub fn SBB_EwGwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SBB_EwGw: SBB r/m16, r16 - unified dispatch
-pub fn SBB_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SBB_EwGw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -583,8 +581,8 @@ pub fn SBB_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// SBB_GwEwR: SBB r16, r16 (register form)
-pub fn SBB_GwEwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SBB_GwEwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -599,8 +597,8 @@ pub fn SBB_GwEwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SBB_GwEwM: SBB r16, r/m16 (memory form)
-pub fn SBB_GwEwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SBB_GwEwM<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -617,8 +615,8 @@ pub fn SBB_GwEwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SBB_GwEw: SBB r16, r/m16 - unified dispatch
-pub fn SBB_GwEw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SBB_GwEw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -633,8 +631,8 @@ pub fn SBB_GwEw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 // =========================================================================
 
 /// CMP_GwEwR: CMP r16, r16 (register form)
-pub fn CMP_GwEwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn CMP_GwEwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -645,8 +643,8 @@ pub fn CMP_GwEwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// CMP_GwEwM: CMP r16, r/m16 (memory form)
-pub fn CMP_GwEwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn CMP_GwEwM<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -659,8 +657,8 @@ pub fn CMP_GwEwM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// CMP_GwEw: CMP r16, r/m16 - unified dispatch
-pub fn CMP_GwEw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn CMP_GwEw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -675,8 +673,8 @@ pub fn CMP_GwEw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 // =========================================================================
 
 /// ADD_Axiw: ADD AX, imm16
-pub fn ADD_Axiw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADD_Axiw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let ax = cpu.ax();
@@ -690,8 +688,8 @@ pub fn ADD_Axiw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// SUB_AX_Iw: SUB AX, imm16
-pub fn SUB_AX_Iw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SUB_AX_Iw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let ax = cpu.ax();
@@ -705,8 +703,8 @@ pub fn SUB_AX_Iw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SUB_EwIwR: SUB r16, imm16 (register form)
-pub fn SUB_EwIwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SUB_EwIwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
@@ -721,8 +719,8 @@ pub fn SUB_EwIwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SUB_EwIwM: SUB m16, imm16 (memory form)
-pub fn SUB_EwIwM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_EwIwM<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -736,8 +734,8 @@ pub fn SUB_EwIwM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 }
 
 /// SUB_EwIw: SUB r/m16, imm16 - dispatcher
-pub fn SUB_EwIw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SUB_EwIw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -748,8 +746,8 @@ pub fn SUB_EwIw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// SUB_EwIbR: SUB r16, imm8 (sign-extended, register form)
-pub fn SUB_EwIbR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SUB_EwIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
@@ -764,8 +762,8 @@ pub fn SUB_EwIbR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SUB_EwIbM: SUB m16, imm8 (sign-extended, memory form)
-pub fn SUB_EwIbM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SUB_EwIbM<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -779,8 +777,8 @@ pub fn SUB_EwIbM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 }
 
 /// SUB_EwsIb: SUB r/m16, imm8 (sign-extended) - dispatcher
-pub fn SUB_EwsIb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SUB_EwsIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -791,8 +789,8 @@ pub fn SUB_EwsIb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// ADC_AX_Iw: ADC AX, imm16 (opcode 0x15) - Bochs ADC_AXIw
-pub fn ADC_AX_Iw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADC_AX_Iw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let ax = cpu.ax();
@@ -805,8 +803,8 @@ pub fn ADC_AX_Iw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// ADC_EwIwR: ADC r16, imm16 (register form, opcode 0x81 /2)
-pub fn ADC_EwIwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADC_EwIwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
@@ -820,8 +818,8 @@ pub fn ADC_EwIwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// ADC_EwIwM: ADC m16, imm16 (memory form, opcode 0x81 /2)
-pub fn ADC_EwIwM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn ADC_EwIwM<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -836,8 +834,8 @@ pub fn ADC_EwIwM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 }
 
 /// ADC_EwIw: ADC r/m16, imm16 - dispatcher (Bochs AdcEwIw)
-pub fn ADC_EwIw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn ADC_EwIw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -848,8 +846,8 @@ pub fn ADC_EwIw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// SBB_AX_Iw: SBB AX, imm16 (opcode 0x1D) - Bochs SBB_AXIw
-pub fn SBB_AX_Iw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SBB_AX_Iw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let ax = cpu.ax();
@@ -862,8 +860,8 @@ pub fn SBB_AX_Iw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SBB_EwIwR: SBB r16, imm16 (register form, opcode 0x81 /3)
-pub fn SBB_EwIwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SBB_EwIwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
@@ -877,8 +875,8 @@ pub fn SBB_EwIwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SBB_EwIwM: SBB m16, imm16 (memory form, opcode 0x81 /3)
-pub fn SBB_EwIwM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EwIwM<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -893,8 +891,8 @@ pub fn SBB_EwIwM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 }
 
 /// SBB_EwIw: SBB r/m16, imm16 - dispatcher (Bochs SbbEwIw)
-pub fn SBB_EwIw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SBB_EwIw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -905,8 +903,8 @@ pub fn SBB_EwIw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// SBB_EwIbR: SBB r16, imm8 sign-extended (register form, opcode 0x83 /3)
-pub fn SBB_EwIbR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SBB_EwIbR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
@@ -920,8 +918,8 @@ pub fn SBB_EwIbR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// SBB_EwIbM: SBB m16, imm8 sign-extended (memory form, opcode 0x83 /3)
-pub fn SBB_EwIbM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn SBB_EwIbM<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -936,8 +934,8 @@ pub fn SBB_EwIbM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 }
 
 /// SBB_EwsIb: SBB r/m16, imm8 sign-extended - dispatcher (Bochs SbbEwsIb)
-pub fn SBB_EwsIb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn SBB_EwsIb<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -948,8 +946,8 @@ pub fn SBB_EwsIb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// CMP_EwIwR: CMP r16, imm16 (register form)
-pub fn CMP_EwIwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn CMP_EwIwR<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
@@ -961,8 +959,8 @@ pub fn CMP_EwIwR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 }
 
 /// CMP_EwIwM: CMP m16, imm16 (memory form)
-pub fn CMP_EwIwM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<I, T>,
+pub fn CMP_EwIwM<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -975,8 +973,8 @@ pub fn CMP_EwIwM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 }
 
 /// CMP_EwIw: CMP r/m16, imm16 - dispatcher
-pub fn CMP_EwIw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn CMP_EwIw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -993,8 +991,8 @@ pub fn CMP_EwIw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 
 /// CMPXCHG r/m16, r16 — register form
 /// Bochs arith16.cc (CMPXCHG_EwGwR)
-pub fn CMPXCHG_EwGw_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn CMPXCHG_EwGw_R<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -1003,7 +1001,8 @@ pub fn CMPXCHG_EwGw_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instr
     cpu.update_flags_sub16(ax, op1_16, diff_16);
 
     if diff_16 == 0 {
-        cpu.set_gpr16(instr.dst() as usize, cpu.get_gpr16(instr.src() as usize));
+        let src = cpu.get_gpr16(instr.src() as usize);
+        cpu.set_gpr16(instr.dst() as usize, src);
     } else {
         cpu.set_ax(op1_16);
     }
@@ -1011,8 +1010,8 @@ pub fn CMPXCHG_EwGw_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instr
 
 /// CMPXCHG r/m16, r16 — memory form
 /// Bochs arith16.cc (CMPXCHG_EwGwM)
-pub fn CMPXCHG_EwGw_M<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn CMPXCHG_EwGw_M<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -1023,7 +1022,8 @@ pub fn CMPXCHG_EwGw_M<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instr
     cpu.update_flags_sub16(ax, op1_16, diff_16);
 
     if diff_16 == 0 {
-        cpu.write_rmw_linear_word(cpu.get_gpr16(instr.src() as usize));
+        let src = cpu.get_gpr16(instr.src() as usize);
+        cpu.write_rmw_linear_word(src);
     } else {
         cpu.write_rmw_linear_word(op1_16);
         cpu.set_ax(op1_16);
@@ -1038,8 +1038,8 @@ pub fn CMPXCHG_EwGw_M<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instr
 
 /// XADD r/m16, r16 — register form
 /// Bochs arith16.cc
-pub fn XADD_EwGw_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn XADD_EwGw_R<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -1054,8 +1054,8 @@ pub fn XADD_EwGw_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrume
 
 /// XADD r/m16, r16 — memory form
 /// Bochs arith16.cc
-pub fn XADD_EwGw_M<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn XADD_EwGw_M<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr(instr);
@@ -1075,8 +1075,8 @@ pub fn XADD_EwGw_M<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrume
 // =========================================================================
 
 /// CMPXCHG r/m16, r16 — unified dispatch
-pub fn CMPXCHG_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn CMPXCHG_EwGw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -1092,8 +1092,8 @@ pub fn CMPXCHG_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrum
 // =========================================================================
 
 /// XADD r/m16, r16 — unified dispatch
-pub fn XADD_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn XADD_EwGw<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
@@ -1110,8 +1110,8 @@ pub fn XADD_EwGw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 // =========================================================================
 
 /// NEG r/m16 - unified dispatch
-pub fn NEG_Ew<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'c, I, T>,
+pub fn NEG_Ew<'c, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {

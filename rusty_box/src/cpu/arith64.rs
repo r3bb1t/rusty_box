@@ -14,10 +14,9 @@
 // ADD_COUT_VEC / SUB_COUT_VEC carry-vector formulas used by the 32-bit
 // counterparts in cpu.rs.
 
-use super::{BxCpuC, BxCpuIdTrait};
 use crate::cpu::decoder::{BxSegregs, Instruction};
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Flag update helpers for 64-bit arithmetic
     // =========================================================================
@@ -31,10 +30,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.oszapc.set_oszapc_add_64(op1, op2, res);
     }
 
-    /// SET_FLAGS_OSZAPC_SUB_64: update all six arithmetic flags after a 64-bit sub.
-    pub(super) fn update_flags_sub64(&mut self, op1: u64, op2: u64, res: u64) {
-        self.oszapc.set_oszapc_sub_64(op1, op2, res);
-    }
+
 
     /// SET_FLAGS_OSZAP_ADD_64: update OSZAP flags only (no CF) after a 64-bit add.
     /// Used by INC which must preserve CF.

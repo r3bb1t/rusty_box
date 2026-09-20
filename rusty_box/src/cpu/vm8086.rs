@@ -9,14 +9,12 @@
 //! - V8086 segment cache initialization (init_v8086_mode)
 
 use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
     descriptor::{SEG_ACCESS_ROK, SEG_ACCESS_WOK, SEG_VALID_CACHE},
     eflags::EFlags,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Return from protected mode (CPL=0) to V8086 mode via IRET.
     ///
     /// Bochs: BX_CPU_C::stack_return_to_v86() in vm8086.cc
@@ -301,10 +299,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.sregs[sreg].cache.segment = true;
             self.sregs[sreg].cache.r#type = 3; // BX_DATA_READ_WRITE_ACCESSED
 
-            self.sregs[sreg]
-                .cache
-                .u
-                .set_segment_base((self.sregs[sreg].selector.value as u64) << 4);
+            let base = (self.sregs[sreg].selector.value as u64) << 4;
+            self.sregs[sreg].cache.u.set_segment_base(base);
             self.sregs[sreg].cache.u.set_segment_limit_scaled(0xFFFF);
             self.sregs[sreg].cache.u.set_segment_g(false);
             self.sregs[sreg].cache.u.set_segment_d_b(false);

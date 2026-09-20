@@ -1,4 +1,4 @@
-use crate::memory::{BxMemoryStubC, CpuTlbPin};
+use crate::memory::BxMemoryStubC;
 
 #[test]
 fn stub_keeps_guest_ram_separate_from_rom_storage() {
@@ -12,7 +12,7 @@ fn stub_keeps_guest_ram_separate_from_rom_storage() {
     }
     {
         let guest = mem_stub
-            .get_vector_offset(0, &[] as &[CpuTlbPin])
+            .get_vector_offset(0)
             .unwrap();
         guest[3] = b's';
         assert_eq!(&guest[..4], b"abcs");
@@ -30,7 +30,7 @@ fn guest_block_zero_starts_at_the_internal_guest_base() {
 
     let backing_ptr = mem_stub.actual_vector_slice().as_ptr();
     let guest_ptr = mem_stub
-        .get_vector_offset(0, &[] as &[CpuTlbPin])
+        .get_vector_offset(0)
         .unwrap()
         .as_ptr();
     let rom_ptr = mem_stub.rom().as_ptr();

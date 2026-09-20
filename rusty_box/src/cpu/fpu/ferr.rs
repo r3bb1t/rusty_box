@@ -14,8 +14,6 @@
 //! - Helper accessors: is_tag_empty, read/write FPU registers, setcc, clear_c1
 //! - write_eflags_fpu_compare: for FCOMI/FUCOMI (sets EFLAGS ZF/PF/CF)
 
-use super::super::cpu::BxCpuC;
-use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::{BxSegregs, Instruction};
 use super::super::i387::*;
 use super::super::softfloat3e::softfloat::*;
@@ -56,7 +54,7 @@ pub(in crate::cpu) fn i387cw_to_softfloat_status_word(control_word: u16) -> Soft
 // Methods on BxCpuC
 // ---------------------------------------------------------------------------
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // -----------------------------------------------------------------------
     // FPU_check_pending_exceptions  (from fpu.cc)
     // -----------------------------------------------------------------------

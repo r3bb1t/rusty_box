@@ -35,7 +35,6 @@ use super::softfloat3e::softfloat::{
 use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
@@ -44,7 +43,7 @@ use super::{
 // unused-import lint is allowed rather than losing the no-std resolution.
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use crate::cpu::float::FloatExt;
+use rusty_box_core::FloatExt;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -68,8 +67,8 @@ fn qword_elements(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -83,16 +82,16 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register with dword-granularity masking, zeroing upper beyond VL
-fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -114,8 +113,8 @@ fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// Write ZMM register with qword-granularity masking, zeroing upper beyond VL
-fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -136,7 +135,7 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Read packed SP source: register or memory, dword-element granularity
     #[inline]
     fn read_src_ps(
@@ -224,7 +223,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn rndscale_status(&self, instr: &Instruction) -> (SoftFloatStatus, u8, u8) {
         let imm8 = instr.ib();
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         if (imm8 & 0x04) == 0 {
             status.softfloat_rounding_mode = imm8 & 0x03;
         }
@@ -372,7 +371,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src2 = self.read_rm_ps(instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -397,7 +396,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src2 = self.read_rm_pd(instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -422,7 +421,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = self.read_src_ps(instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -446,7 +445,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = self.read_src_pd(instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -477,7 +476,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let (sign_ctrl, interv) = (((imm8 >> 2) & 0x3) as i32, (imm8 & 0x3) as i32);
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -506,7 +505,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let (sign_ctrl, interv) = (((imm8 >> 2) & 0x3) as i32, (imm8 & 0x3) as i32);
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 != 0 {
@@ -537,7 +536,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn reduce_status(&self, instr: &Instruction) -> (SoftFloatStatus, u8) {
         let control = instr.ib();
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         mxcsr_to_softfloat_status_word_imm_override(&mut status, control);
         softfloat_suppress_exception(
             &mut status,
@@ -597,7 +596,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src2 = self.read_rm_ps(instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let (is_max, is_abs, sign_ctrl) = range_control(instr.ib());
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -627,7 +626,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src2 = self.read_rm_pd(instr, nelements)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let (is_max, is_abs, sign_ctrl) = range_control(instr.ib());
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -667,7 +666,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let dst = read_zmm(self, instr.dst());
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let imm8 = instr.ib();
         let mut result = BxPackedZmmRegister::default();
         for n in 0..nelements {
@@ -697,7 +696,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let dst = read_zmm(self, instr.dst());
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let imm8 = instr.ib();
         let mut result = BxPackedZmmRegister::default();
         for n in 0..nelements {
@@ -858,8 +857,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 /// Write a scalar single result: element 0 masked, elements 1..3 from `src1`,
 /// everything above cleared. Bochs BX_WRITE_XMM_REG_CLEAR_HIGH on the merged
 /// operand.
-fn write_scalar_ss_round<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_scalar_ss_round<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
     result_elem0: Float32,
@@ -881,8 +880,8 @@ fn write_scalar_ss_round<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 }
 
 /// Qword counterpart of [`write_scalar_ss_round`].
-fn write_scalar_sd_round<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_scalar_sd_round<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
     result_elem0: Float64,
@@ -937,8 +936,6 @@ mod tests {
     //! scale, and VRANGE's carries a magnitude flag and a sign override that
     //! can hand back a value whose sign belongs to neither input's ordering.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::BxSegregs;
     use crate::cpu::xmm::MXCSR_RESET;
     use rusty_box_decoder::opcode::Opcode;
@@ -962,15 +959,20 @@ mod tests {
         i
     }
 
-    fn cpu() -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC<'static, AmdRyzen>> {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
-        c.mxcsr.mxcsr = MXCSR_RESET;
-        c
+    /// Returns the machine, not the context: an `ExecCtx` borrows the parts it
+    /// is built from, so it cannot outlive a helper that owns them. Callers
+    /// keep the machine in their own frame and take a context from it.
+    fn cpu() -> crate::cpu::exec_ctx::TestMachine {
+        let mut m =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        m.ctx().mxcsr.mxcsr = MXCSR_RESET;
+        m
     }
 
     #[test]
     fn vreduce_subtracts_the_scaled_rounding_of_its_operand() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm32u(0, 1.75f32.to_bits());
 
         // scale 0, round-to-nearest-even: 1.75 rounds to 2, remainder -0.25.
@@ -1001,7 +1003,8 @@ mod tests {
 
     #[test]
     fn vreducepd_matches_the_single_precision_behaviour() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm64u(0, 1.75f64.to_bits());
         c.execute_instruction(&evex(Opcode::EvexVreducepdVpdWpdIbKmask, 0, 0x00))
             .unwrap();
@@ -1013,7 +1016,8 @@ mod tests {
 
     #[test]
     fn vrange_sign_control_can_override_the_comparison_result() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         // src1 (vvvv) = -3.0, src2 (rm) = 2.0.
         c.vmm[2].set_zmm32u(0, (-3.0f32).to_bits());
         c.vmm[1].set_zmm32u(0, 2.0f32.to_bits());
@@ -1045,7 +1049,8 @@ mod tests {
 
     #[test]
     fn vrange_magnitude_mode_ignores_the_operand_signs() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[2].set_zmm64u(0, (-3.0f64).to_bits());
         c.vmm[1].set_zmm64u(0, 2.0f64.to_bits());
 
@@ -1063,7 +1068,8 @@ mod tests {
 
     #[test]
     fn vrange_and_vreduce_scalar_forms_touch_only_element_zero() {
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         // vvvv supplies the upper elements of the destination.
         c.vmm[2].set_zmm32u(0, (-3.0f32).to_bits());
         c.vmm[2].set_zmm32u(1, 0x1111_1111);
@@ -1094,7 +1100,8 @@ mod tests {
         // src1(), so a handler that reads them positionally computes
         // rm * 2^floor(vvvv) instead. scalef is not commutative, so the two
         // give different answers for every asymmetric pair.
-        let mut c = cpu();
+        let mut machine = cpu();
+        let mut c = machine.ctx();
         c.vmm[2].set_zmm32u(0, 3.0f32.to_bits()); // vvvv: the value
         c.vmm[1].set_zmm32u(0, 2.0f32.to_bits()); // rm:   the exponent
         c.execute_instruction(&evex(Opcode::EvexVscalefpsVpsHpsWps, 0, 0))

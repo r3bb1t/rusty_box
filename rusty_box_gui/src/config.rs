@@ -1,17 +1,35 @@
 use crate::args::{Args, BootDevice, DiskGeometry, DisplayBackend, LogLevel};
 use crate::error::RunError;
+use rusty_box::cpu::decoder::features::X86Feature;
 use rusty_box::params::{BxParamError, BxParams};
 use rusty_box::CpuidFreq;
 use std::{
-    env, fs, io,
+    fs, io,
     path::{Path, PathBuf},
 };
 
 pub const DEFAULT_CONFIG_FILE: &str = "rusty_box.toml";
 
+// The value a setting takes when neither the command line nor the file sets
+// it. `resolve_config_with_base` and `blank_config` both read these, so a
+// "New VM" is what a file with no keys resolves to.
+const DEFAULT_MEMORY_MIB: u32 = 32;
+const DEFAULT_MEMORY_BLOCK_KIB: u32 = 128;
+const DEFAULT_IPS: u32 = 4_000_000;
+const DEFAULT_PCI: bool = true;
+const DEFAULT_SYNC_SLOWDOWN: bool = false;
+const DEFAULT_SYNC_REALTIME: bool = false;
+const DEFAULT_SMP_QUANTUM: u32 = 16;
+const DEFAULT_CPUID_FREQ: CpuidFreq = CpuidFreq::None;
+const DEFAULT_MAX_INSTRUCTIONS: u64 = u64::MAX;
+const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Warn;
+const DEFAULT_PCI_VGA: bool = false;
+
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileConfig {
+    #[serde(skip_serializing_if = "VmToml::is_empty")]
+    pub vm: VmToml,
     pub emulator: EmulatorToml,
     pub display: DisplayToml,
     pub rom: RomToml,
@@ -21,9 +39,35 @@ pub struct FileConfig {
     pub logging: LoggingToml,
 }
 
+/// The `[vm]` table: what a VM library file says about the VM itself rather
+/// than its hardware.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VmToml {
+    /// The name the shell shows. A library file without one is shown under
+    /// its file name.
+    pub name: Option<String>,
+}
+
+impl VmToml {
+    /// Whether the table says nothing, in which case the file carries no
+    /// `[vm]` header at all: a bare header would be an unknown table to a
+    /// reader without this key.
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EmulatorToml {
+    /// Which engine retires the guest's instructions: `"interpreter"` or
+    /// `"whp"`. `--engine` overrides it; absent everywhere, the interpreter.
+    pub engine: Option<Engine>,
+    /// Which processor the machine offers its guest: `"preset"` or
+    /// `"host-shared"`. `--cpu-capabilities` overrides it; absent everywhere,
+    /// the preset.
+    pub cpu_capabilities: Option<CpuCapabilities>,
     pub memory_mib: Option<u32>,
     pub host_memory_mib: Option<u32>,
     pub memory_block_kib: Option<u32>,
@@ -58,6 +102,42 @@ pub struct DisplayToml {
     /// Register the VGA as a PCI device so Linux `bochs-drm` can bind for a KMS
     /// framebuffer. Off by default; experimental (needs a guest boot to verify).
     pub pci_vga: Option<bool>,
+    /// Stretch the console to fill the screen rather than keep the guest's
+    /// shape. The phone's full-screen console reads it. Default false.
+    pub stretch: Option<bool>,
+    /// The phone trackpad's cursor speed, percent of the finger's own travel
+    /// across the guest's image: 50 to 300. Default 100.
+    pub pointer_speed_percent: Option<u16>,
+}
+
+/// The phone trackpad's cursor speed, in percent of the finger's own travel
+/// across the guest's image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerSpeed {
+    percent: u16,
+}
+
+impl PointerSpeed {
+    /// The cursor keeps pace with the finger.
+    pub const DEFAULT: Self = Self { percent: 100 };
+    /// The slowest and fastest the trackpad offers.
+    pub const RANGE_PERCENT: core::ops::RangeInclusive<u16> = 50..=300;
+
+    /// `percent` held to [`Self::RANGE_PERCENT`].
+    pub fn from_percent(percent: u16) -> Self {
+        Self {
+            percent: percent.clamp(*Self::RANGE_PERCENT.start(), *Self::RANGE_PERCENT.end()),
+        }
+    }
+
+    pub fn percent(self) -> u16 {
+        self.percent
+    }
+
+    /// The multiplier over the finger's travel.
+    pub fn factor(self) -> f32 {
+        f32::from(self.percent) / 100.0
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -108,8 +188,71 @@ pub struct LoggingToml {
     pub level: Option<LogLevel>,
 }
 
+/// Which engine retires the guest's instructions.
+///
+/// Named rather than a bool because a third is already foreseen — a KVM leaf
+/// on Linux — and because a reader of `--engine whp` should not have to know
+/// which way round a flag points.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Deserialize,
+    serde::Serialize,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Engine {
+    /// This port's own interpreter. Everywhere, and the default.
+    #[default]
+    Interpreter,
+    /// The Windows Hypervisor Platform. Needs a Windows build with `hv-whp`
+    /// and without `guest-trace`, and a host that has the platform enabled;
+    /// refused rather than downgraded when any of these is missing.
+    Whp,
+}
+
+/// Which processor the machine offers its guest.
+///
+/// A machine setting, not an engine one. A guest keeps what it enabled across
+/// a switch from the hypervisor to the interpreter, so both must offer the
+/// same processor or the switch changes the hardware underneath it.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum CpuCapabilities {
+    /// This port's own processor model, whole. The same guest sees the same
+    /// processor on every host, which is what makes a run reproducible — and
+    /// what a guest under study must have.
+    #[default]
+    Preset,
+    /// The model, narrowed to what this host can also carry.
+    ///
+    /// Needed by a machine that may run on the hypervisor: `XSETBV` is not a
+    /// trapped instruction there, so a guest that believes the preset enables
+    /// a register file the silicon lacks, and the platform then refuses the
+    /// whole processor state.
+    HostShared,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedConfig {
+    /// Which engine retires the guest's instructions.
+    pub engine: Engine,
+    /// Which processor the machine offers its guest.
+    pub cpu_capabilities: CpuCapabilities,
     pub memory_mib: u32,
     pub host_memory_mib: u32,
     pub memory_block_kib: u32,
@@ -128,15 +271,16 @@ pub struct ResolvedConfig {
     pub disk: Option<ResolvedDisk>,
     pub cdrom: Option<ResolvedCdrom>,
     pub log_level: LogLevel,
-    /// Where "Save to config" persists these settings. `None` when resolved
-    /// without a file context (tests, `resolve_config`); the native launcher
-    /// fills it in `load_config`.
-    pub config_path: Option<PathBuf>,
     /// Optional pre-boot VBE mode (width, height, bpp) applied to the VGA
     /// controller before reset. `None` leaves the built-in defaults.
     pub vga_mode: Option<VgaMode>,
     /// Register the VGA on PCI (experimental KMS / `bochs-drm` path). Default off.
     pub pci_vga: bool,
+    /// The phone's full-screen console fills the screen instead of keeping the
+    /// guest's shape.
+    pub console_stretch: bool,
+    /// The phone trackpad's cursor speed.
+    pub pointer_speed: PointerSpeed,
 }
 
 /// A pre-boot VBE display mode.
@@ -170,54 +314,81 @@ pub struct ResolvedCdrom {
     pub drive: usize,
 }
 
+/// The launch configuration: the file `--config` names, if any, with the
+/// command line's flags over it. Nothing the command line does not name is
+/// read. A `rusty_box.toml` in the working directory or its parent would let
+/// anyone who can drop a file there decide what the launcher boots and which
+/// file a disk creation overwrites (CWE-427), so neither is consulted.
 pub fn load_config(args: &Args) -> Result<ResolvedConfig, RunError> {
-    let cwd = env::current_dir().ok();
-    let (file, config_dir, config_path) = if args.no_config {
-        // No file was loaded, but "Save to config" should still have a target.
-        let save_path = cwd.as_deref().map(|cwd| cwd.join(DEFAULT_CONFIG_FILE));
-        (FileConfig::default(), None, save_path)
-    } else if let Some(path) = &args.config {
-        (
-            load_toml_file(path)?,
-            path.parent().map(Path::to_path_buf),
-            Some(path.clone()),
-        )
-    } else if let Some(default_path) = cwd.as_deref().and_then(find_default_config_file) {
-        let config_dir = default_path.parent().map(Path::to_path_buf);
-        (
-            load_toml_file(&default_path)?,
-            config_dir,
-            Some(default_path),
-        )
-    } else {
-        let save_path = cwd.as_deref().map(|cwd| cwd.join(DEFAULT_CONFIG_FILE));
-        (FileConfig::default(), None, save_path)
-    };
-
-    resolve_config_with_base(file, args, config_dir.as_deref(), config_path)
-}
-
-fn find_default_config_file(start_dir: &Path) -> Option<PathBuf> {
-    let local = start_dir.join(DEFAULT_CONFIG_FILE);
-    if local.exists() {
-        return Some(local);
+    match &args.config {
+        Some(path) => {
+            let file = load_toml_file(path)?;
+            resolve_config_with_base(file, args, path.parent())
+        }
+        None => resolve_config_with_base(FileConfig::default(), args, None),
     }
-
-    let parent = start_dir.parent()?.join(DEFAULT_CONFIG_FILE);
-    parent.exists().then_some(parent)
 }
 
 pub fn resolve_config(file: FileConfig, args: &Args) -> Result<ResolvedConfig, RunError> {
-    resolve_config_with_base(file, args, None, None)
+    resolve_config_with_base(file, args, None)
+}
+
+/// A configuration with nothing chosen yet: no firmware, no media, and every
+/// setting at the value `resolve_config` gives a missing key. The shell shows
+/// it as "New VM" when it has no other VM to show.
+pub fn blank_config() -> ResolvedConfig {
+    ResolvedConfig {
+        engine: Engine::default(),
+        cpu_capabilities: CpuCapabilities::default(),
+        memory_mib: DEFAULT_MEMORY_MIB,
+        host_memory_mib: DEFAULT_MEMORY_MIB,
+        memory_block_kib: DEFAULT_MEMORY_BLOCK_KIB,
+        ips: DEFAULT_IPS,
+        pci: DEFAULT_PCI,
+        sync_slowdown: DEFAULT_SYNC_SLOWDOWN,
+        sync_realtime: DEFAULT_SYNC_REALTIME,
+        smp_quantum: DEFAULT_SMP_QUANTUM,
+        cpuid_freq: DEFAULT_CPUID_FREQ,
+        max_instructions: DEFAULT_MAX_INSTRUCTIONS,
+        cpu_params: BxParams::default(),
+        display: default_display_backend(),
+        bios: PathBuf::new(),
+        vga_bios: None,
+        boot_order: Vec::new(),
+        disk: None,
+        cdrom: None,
+        log_level: DEFAULT_LOG_LEVEL,
+        vga_mode: None,
+        pci_vga: DEFAULT_PCI_VGA,
+        console_stretch: false,
+        pointer_speed: PointerSpeed::DEFAULT,
+    }
+}
+
+/// Resolves a file the shell keeps itself — a VM library file, or the VM a
+/// first run imports from beside the executable — with no command line over
+/// it. Relative paths in it resolve against `dir`, the folder the file lives
+/// in.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn resolve_config_in(file: FileConfig, dir: &Path) -> Result<ResolvedConfig, RunError> {
+    resolve_config_with_base(file, &Args::default(), Some(dir))
 }
 
 fn resolve_config_with_base(
     file: FileConfig,
     args: &Args,
     config_dir: Option<&Path>,
-    config_path: Option<PathBuf>,
 ) -> Result<ResolvedConfig, RunError> {
-    let memory_mib = args.memory_mib.or(file.emulator.memory_mib).unwrap_or(32);
+    let engine = args.engine.or(file.emulator.engine).unwrap_or_default();
+    let cpu_capabilities = args
+        .cpu_capabilities
+        .or(file.emulator.cpu_capabilities)
+        .unwrap_or_default();
+
+    let memory_mib = args
+        .memory_mib
+        .or(file.emulator.memory_mib)
+        .unwrap_or(DEFAULT_MEMORY_MIB);
     ensure_nonzero("memory_mib", memory_mib)?;
 
     let host_memory_mib = args
@@ -229,10 +400,10 @@ fn resolve_config_with_base(
     let memory_block_kib = args
         .memory_block_kib
         .or(file.emulator.memory_block_kib)
-        .unwrap_or(128);
+        .unwrap_or(DEFAULT_MEMORY_BLOCK_KIB);
     ensure_nonzero("memory_block_kib", memory_block_kib)?;
 
-    let ips = args.ips.or(file.emulator.ips).unwrap_or(4_000_000);
+    let ips = args.ips.or(file.emulator.ips).unwrap_or(DEFAULT_IPS);
     ensure_nonzero("ips", ips)?;
 
     let pci = if args.pci {
@@ -240,31 +411,31 @@ fn resolve_config_with_base(
     } else if args.no_pci {
         false
     } else {
-        file.emulator.pci.unwrap_or(true)
+        file.emulator.pci.unwrap_or(DEFAULT_PCI)
     };
     let sync_slowdown = if args.sync_slowdown {
         true
     } else if args.no_sync_slowdown {
         false
     } else {
-        file.emulator.sync_slowdown.unwrap_or(false)
+        file.emulator.sync_slowdown.unwrap_or(DEFAULT_SYNC_SLOWDOWN)
     };
     let max_instructions = args
         .max_instructions
         .or(file.emulator.max_instructions)
-        .unwrap_or(u64::MAX);
+        .unwrap_or(DEFAULT_MAX_INSTRUCTIONS);
     // Bochs `clock: sync=realtime`; default none (see EmulatorToml docs).
     let sync_realtime = if args.sync_realtime {
         true
     } else {
-        file.emulator.sync_realtime.unwrap_or(false)
+        file.emulator.sync_realtime.unwrap_or(DEFAULT_SYNC_REALTIME)
     };
     // Bochs `cpu: quantum=N` (config.cc BXPN_SMP_QUANTUM): range 1-32
     // (config.h BX_SMP_QUANTUM_MIN/MAX), default 16.
     let smp_quantum = args
         .smp_quantum
         .or(file.emulator.smp_quantum)
-        .unwrap_or(16);
+        .unwrap_or(DEFAULT_SMP_QUANTUM);
     if !(1..=32).contains(&smp_quantum) {
         return Err(RunError::InvalidSmpQuantum { value: smp_quantum });
     }
@@ -275,7 +446,8 @@ fn resolve_config_with_base(
         .as_deref()
         .or(file.emulator.cpuid_freq.as_deref())
     {
-        None | Some("none") => CpuidFreq::None,
+        None => DEFAULT_CPUID_FREQ,
+        Some("none") => CpuidFreq::None,
         Some("hardware") => CpuidFreq::Hardware,
         Some("ips") => CpuidFreq::Ips,
         Some(other) => {
@@ -293,7 +465,7 @@ fn resolve_config_with_base(
     let log_level = args
         .log_level
         .or(file.logging.level)
-        .unwrap_or(LogLevel::Warn);
+        .unwrap_or(DEFAULT_LOG_LEVEL);
     let bios = match args.bios.clone() {
         Some(path) => path,
         None => file
@@ -322,7 +494,12 @@ fn resolve_config_with_base(
         _ => None,
     };
 
-    let pci_vga = file.display.pci_vga.unwrap_or(false);
+    let pci_vga = file.display.pci_vga.unwrap_or(DEFAULT_PCI_VGA);
+    let console_stretch = file.display.stretch.unwrap_or(false);
+    let pointer_speed = file
+        .display
+        .pointer_speed_percent
+        .map_or(PointerSpeed::DEFAULT, PointerSpeed::from_percent);
 
     let disk = resolve_disk(&file, args, config_dir)?;
     let cdrom = resolve_cdrom(&file, args, config_dir);
@@ -330,6 +507,8 @@ fn resolve_config_with_base(
     validate_boot_order(&boot_order, disk.is_some(), cdrom.is_some())?;
 
     Ok(ResolvedConfig {
+        engine,
+        cpu_capabilities,
         memory_mib,
         host_memory_mib,
         memory_block_kib,
@@ -348,9 +527,10 @@ fn resolve_config_with_base(
         disk,
         cdrom,
         log_level,
-        config_path,
         vga_mode,
         pci_vga,
+        console_stretch,
+        pointer_speed,
     })
 }
 
@@ -398,13 +578,18 @@ pub(crate) fn topology_error_message(error: BxParamError) -> String {
 }
 
 impl ResolvedConfig {
-    /// Reconstruct a serializable [`FileConfig`] snapshot of these settings so the
-    /// GUI can persist edits back to `rusty_box.toml`. Paths are emitted verbatim
-    /// (already resolved to absolute form during loading), so a subsequent load
-    /// resolves to an equal configuration.
+    /// A serializable [`FileConfig`] snapshot of these settings, as the VM
+    /// library writes it. Paths are emitted as they are; `VmLibrary::save`
+    /// makes relative ones absolute first, so reading its file back resolves
+    /// to an equal configuration.
     pub fn to_file_config(&self) -> FileConfig {
         let topology = self.cpu_params.cpu_topology();
         let emulator = EmulatorToml {
+            // Only persist a non-default engine and processor so existing
+            // configs stay stable.
+            engine: (self.engine != Engine::default()).then_some(self.engine),
+            cpu_capabilities: (self.cpu_capabilities != CpuCapabilities::default())
+                .then_some(self.cpu_capabilities),
             memory_mib: Some(self.memory_mib),
             host_memory_mib: Some(self.host_memory_mib),
             memory_block_kib: Some(self.memory_block_kib),
@@ -416,23 +601,27 @@ impl ResolvedConfig {
             pci: Some(self.pci),
             sync_slowdown: Some(self.sync_slowdown),
             // Only persist a non-default value so existing configs stay stable.
-            sync_realtime: self.sync_realtime.then_some(true),
+            sync_realtime: (self.sync_realtime != DEFAULT_SYNC_REALTIME)
+                .then_some(self.sync_realtime),
             // Only persist a non-default quantum so existing configs stay stable.
-            smp_quantum: (self.smp_quantum != 16).then_some(self.smp_quantum),
-            max_instructions: (self.max_instructions != u64::MAX).then_some(self.max_instructions),
+            smp_quantum: (self.smp_quantum != DEFAULT_SMP_QUANTUM).then_some(self.smp_quantum),
+            max_instructions: (self.max_instructions != DEFAULT_MAX_INSTRUCTIONS)
+                .then_some(self.max_instructions),
             // Only persist a non-default mode so existing configs stay stable.
-            cpuid_freq: match self.cpuid_freq {
-                CpuidFreq::None => None,
-                CpuidFreq::Hardware => Some("hardware".to_string()),
-                CpuidFreq::Ips => Some("ips".to_string()),
-            },
+            cpuid_freq: (self.cpuid_freq != DEFAULT_CPUID_FREQ)
+                .then(|| cpuid_freq_toml(self.cpuid_freq).to_owned()),
         };
         let display = DisplayToml {
             backend: Some(self.display),
             width: self.vga_mode.map(|mode| mode.width),
             height: self.vga_mode.map(|mode| mode.height),
             bpp: self.vga_mode.map(|mode| mode.bpp),
-            pci_vga: self.pci_vga.then_some(true),
+            pci_vga: (self.pci_vga != DEFAULT_PCI_VGA).then_some(self.pci_vga),
+            // Only persist a stretched console so existing configs stay stable.
+            stretch: self.console_stretch.then_some(true),
+            // Only persist a non-default speed so existing configs stay stable.
+            pointer_speed_percent: (self.pointer_speed != PointerSpeed::DEFAULT)
+                .then_some(self.pointer_speed.percent()),
         };
         let rom = RomToml {
             bios: Some(self.bios.clone()),
@@ -470,6 +659,7 @@ impl ResolvedConfig {
             level: Some(self.log_level),
         };
         FileConfig {
+            vm: VmToml::default(),
             emulator,
             display,
             rom,
@@ -479,22 +669,21 @@ impl ResolvedConfig {
             logging,
         }
     }
-
-    /// Persist these settings to `path` as pretty TOML.
-    pub fn save_to_toml(&self, path: &Path) -> Result<(), RunError> {
-        let file = self.to_file_config();
-        let text = toml::to_string_pretty(&file)
-            .map_err(|source| RunError::ConfigSerialize { source })?;
-        fs::write(path, text).map_err(|source| RunError::ConfigWrite {
-            path: path.to_owned(),
-            source,
-        })
-    }
 }
 
 /// Render an [`ImageSize`](rusty_box_bximage::ImageSize) back into a TOML size
 /// string that `ImageSize::parse` reads to the identical value. Disk-creation
 /// sizes always come from `parse`/`gib`/`mib`, so they are whole MiB multiples.
+/// The spelling `emulator.cpuid_freq` gives `mode` (Bochs `cpu:
+/// cpuid_freq=`), the one `resolve_config` reads back.
+fn cpuid_freq_toml(mode: CpuidFreq) -> &'static str {
+    match mode {
+        CpuidFreq::None => "none",
+        CpuidFreq::Hardware => "hardware",
+        CpuidFreq::Ips => "ips",
+    }
+}
+
 fn image_size_to_toml(size: rusty_box_bximage::ImageSize) -> String {
     const MIB: u64 = 1024 * 1024;
     const GIB: u64 = 1024 * MIB;
@@ -517,8 +706,11 @@ pub fn load_toml_file(path: &Path) -> Result<FileConfig, RunError> {
     })
 }
 
+/// `path` based on the config file's directory when it is relative. An empty
+/// path names no file, so there is nothing to base: it stays empty rather
+/// than becoming the directory itself.
 fn resolve_toml_path(config_dir: Option<&Path>, path: PathBuf) -> PathBuf {
-    if path.is_relative() {
+    if path.is_relative() && !path.as_os_str().is_empty() {
         config_dir.map_or(path.clone(), |dir| dir.join(path))
     } else {
         path
@@ -825,6 +1017,64 @@ fn auto_detect_chs(path: &Path) -> Result<DiskGeometry, RunError> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+impl CpuCapabilities {
+    /// Narrow `params` to the processor a guest can be offered under this
+    /// setting.
+    ///
+    /// Only the features whose state a guest must enable through `XCR0` are
+    /// considered, because those are the ones a host can refuse outright: the
+    /// guest turns the component on itself and the register file has to exist.
+    /// An instruction the host lacks but whose state it carries is this port's
+    /// to emulate either way.
+    pub fn narrow(self, params: BxParams) -> BxParams {
+        match self {
+            Self::Preset => params,
+            Self::HostShared => {
+                let carried = host_xsave_components();
+                /// `CPUID.D:0` bits 5, 6 and 7 — the opmask registers, the
+                /// upper half of ZMM0-15, and ZMM16-31. A guest enables them
+                /// together, so a host either carries the set or none of it.
+                const AVX512_STATE: u64 = (1 << 5) | (1 << 6) | (1 << 7);
+                /// Bit 2 — the upper half of the YMM registers.
+                const AVX_STATE: u64 = 1 << 2;
+
+                let mut narrowed = params;
+                if carried & AVX512_STATE != AVX512_STATE {
+                    narrowed = narrowed.excluding(X86Feature::IsaAvx512);
+                }
+                if carried & AVX_STATE == 0 {
+                    narrowed = narrowed.excluding(X86Feature::IsaAvx);
+                }
+                // `MONITOR`/`MWAIT` unconditionally, whatever the host's own
+                // processor can do: the guest does not run on the host's
+                // processor directly, it runs in a partition, and the platform
+                // does not offer the instruction pair to one. A guest told it
+                // has them commits to them permanently — Linux selects
+                // `mwait_idle` at boot and never reconsiders — so this cannot
+                // be discovered and worked around later.
+                narrowed.excluding(X86Feature::IsaMonitorMwait)
+            }
+        }
+    }
+}
+
+/// The extended-state components this host's processor can hold, as
+/// `CPUID.D:0` reports them in EDX:EAX.
+///
+/// Answering zero where the leaf cannot be asked is the conservative reading —
+/// it narrows the machine rather than widening it — but no host this runs on
+/// lacks the leaf.
+#[cfg(target_arch = "x86_64")]
+fn host_xsave_components() -> u64 {
+    let reported = core::arch::x86_64::__cpuid_count(0xD, 0);
+    (u64::from(reported.edx) << 32) | u64::from(reported.eax)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn host_xsave_components() -> u64 {
+    0
+}
+
 pub(crate) fn detect_disk_geometry(path: &Path) -> Result<DiskGeometry, RunError> {
     auto_detect_chs(path)
 }
@@ -872,21 +1122,45 @@ mod tests {
     }
 
     #[test]
-    fn finds_parent_default_config_when_run_from_crate_dir() {
-        let parent = unique_temp_dir("rusty-box-gui-parent-config");
-        let child = parent.join("rusty_box_gui");
-        fs::create_dir_all(&child).unwrap();
-        let config_path = parent.join(DEFAULT_CONFIG_FILE);
-        fs::write(&config_path, "[rom]\nbios = \"bios.bin\"\n").unwrap();
-
-        let found = find_default_config_file(&child);
-
-        assert_eq!(found, Some(config_path.clone()));
-        remove_test_file(&config_path);
-        remove_test_dir(&child);
-        remove_test_dir(&parent);
+    fn a_vm_table_names_the_vm() {
+        let file = config("[vm]\nname = \"Alpine\"\n[rom]\nbios = \"bios.bin\"\n");
+        assert_eq!(file.vm.name.as_deref(), Some("Alpine"));
     }
 
+    #[test]
+    fn a_file_without_a_vm_table_still_parses() {
+        let file = config("[rom]\nbios = \"bios.bin\"\n");
+        assert_eq!(file.vm.name, None);
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_saved_file_carries_no_vm_name_of_its_own() {
+        let file = config("[rom]\nbios = \"bios.bin\"\n");
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+        assert_eq!(resolved.to_file_config().vm.name, None);
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_blank_config_is_what_an_empty_bios_path_resolves_to() {
+        let file = FileConfig {
+            rom: RomToml {
+                bios: Some(PathBuf::new()),
+                vga_bios: None,
+            },
+            ..FileConfig::default()
+        };
+        assert_eq!(resolve_config(file, &args(["rusty_box_gui"])).unwrap(), blank_config());
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn without_config_the_command_line_alone_describes_the_machine() {
+        let resolved = load_config(&args(["rusty_box_gui", "--bios", "b.bin"])).unwrap();
+        assert_eq!(resolved.bios, PathBuf::from("b.bin"));
+        assert_eq!(resolved.memory_mib, 32);
+    }
     #[test]
     fn cli_overrides_toml_without_losing_other_toml_values() {
         let file = config(
@@ -942,6 +1216,73 @@ path = "boot.iso"
         assert_eq!(
             resolved.to_file_config().emulator.cpuid_freq.as_deref(),
             Some("ips")
+        );
+    }
+
+    const WHP_FILE: &str = r#"
+[emulator]
+engine = "whp"
+cpu_capabilities = "host-shared"
+
+[rom]
+bios = "bios.bin"
+
+[cdrom]
+path = "boot.iso"
+"#;
+
+    #[test]
+    fn cli_engine_and_capabilities_beat_the_file_s() {
+        let resolved = resolve_config(
+            config(WHP_FILE),
+            &args([
+                "rusty_box_gui",
+                "--engine",
+                "interpreter",
+                "--cpu-capabilities",
+                "preset",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.engine, Engine::Interpreter);
+        assert_eq!(resolved.cpu_capabilities, CpuCapabilities::Preset);
+    }
+
+    #[test]
+    fn the_file_s_engine_and_capabilities_hold_when_the_command_line_names_none() {
+        let resolved = resolve_config(config(WHP_FILE), &args(["rusty_box_gui"])).unwrap();
+
+        assert_eq!(resolved.engine, Engine::Whp);
+        assert_eq!(resolved.cpu_capabilities, CpuCapabilities::HostShared);
+    }
+
+    #[test]
+    fn engine_and_capabilities_default_when_nothing_names_them() {
+        let resolved = resolve_config(
+            config("[rom]\nbios = \"bios.bin\"\n\n[cdrom]\npath = \"boot.iso\"\n"),
+            &args(["rusty_box_gui"]),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.engine, Engine::Interpreter);
+        assert_eq!(resolved.cpu_capabilities, CpuCapabilities::Preset);
+        // At their defaults, neither is written back.
+        let emulator = resolved.to_file_config().emulator;
+        assert_eq!(emulator.engine, None);
+        assert_eq!(emulator.cpu_capabilities, None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_empty_bios_path_stays_empty_wherever_the_file_lives() {
+        let file = config("[rom]\nbios = \"\"\n\n[cdrom]\npath = \"boot.iso\"\n");
+        let resolved = resolve_config_in(file, Path::new("library")).unwrap();
+
+        assert_eq!(resolved.bios, PathBuf::new());
+        assert_eq!(
+            resolved.cdrom.map(|cdrom| cdrom.path),
+            Some(Path::new("library").join("boot.iso"))
         );
     }
 
@@ -1465,6 +1806,45 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     }
 
     #[test]
+    fn console_stretch_is_read_from_the_display_section() {
+        let file = config(
+            r#"
+[display]
+stretch = true
+
+[rom]
+bios = "bios.bin"
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+"#,
+        );
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        assert!(resolved.console_stretch);
+        assert_eq!(resolved.to_file_config().display.stretch, Some(true));
+    }
+
+    #[test]
+    fn a_file_without_stretch_keeps_the_guest_shape_and_writes_no_key() {
+        let file = config(
+            r#"
+[rom]
+bios = "bios.bin"
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+"#,
+        );
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        assert!(!resolved.console_stretch);
+        assert_eq!(resolved.to_file_config().display.stretch, None);
+    }
+
+    #[test]
     fn vga_mode_requires_both_width_and_height() {
         let file = config(
             r#"
@@ -1489,6 +1869,8 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         let file = config(
             r#"
 [emulator]
+engine = "whp"
+cpu_capabilities = "host-shared"
 memory_mib = 512
 host_memory_mib = 512
 memory_block_kib = 128
@@ -1535,6 +1917,10 @@ level = "info"
         let round_tripped = resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap();
 
         assert_eq!(resolved, round_tripped);
+        assert!(serialized.contains("engine = \"whp\""));
+        assert!(serialized.contains("cpu_capabilities = \"host-shared\""));
+        // A file with nothing to say about the VM carries no `[vm]` table.
+        assert!(!serialized.contains("[vm]"));
     }
 
     #[test]
@@ -1563,5 +1949,85 @@ overwrite = false
             .and_then(|disk| disk.creation.as_ref())
             .expect("created disk should survive the round trip");
         assert_eq!(creation.size, rusty_box_bximage::ImageSize::gib(12));
+    }
+
+    /// A file the shell keeps resolves the same under `Args::default()` as
+    /// under an empty command line, which `resolve_config_in` relies on.
+    #[test]
+    fn a_shell_file_resolves_the_same_under_the_default_args_as_under_no_flags() {
+        let empty = Args::try_parse_from(["rusty_box_gui"]).expect("the command line parses");
+
+        assert_eq!(
+            resolve_config(config(WHP_FILE), &Args::default()).unwrap(),
+            resolve_config(config(WHP_FILE), &empty).unwrap()
+        );
+    }
+
+    /// Every setting away from its default survives a save and a load: a
+    /// field `to_file_config` drops, or writes in a form `resolve_config`
+    /// reads differently, fails here. The literal names every field, so a
+    /// field added later must be given a value here too.
+    #[test]
+    fn save_round_trip_keeps_every_setting_away_from_its_default() {
+        let size = ImageSize::gib(2);
+        let geometry = rusty_box_bximage::calculate_hard_disk_geometry(
+            size,
+            rusty_box_bximage::SectorSize::Bytes512,
+        )
+        .unwrap();
+        let resolved = ResolvedConfig {
+            engine: Engine::Whp,
+            cpu_capabilities: CpuCapabilities::HostShared,
+            memory_mib: 512,
+            host_memory_mib: 256,
+            memory_block_kib: 256,
+            ips: 100_000_000,
+            pci: !DEFAULT_PCI,
+            sync_slowdown: !DEFAULT_SYNC_SLOWDOWN,
+            sync_realtime: !DEFAULT_SYNC_REALTIME,
+            smp_quantum: 8,
+            cpuid_freq: CpuidFreq::Hardware,
+            max_instructions: 15_000_000_000,
+            cpu_params: BxParams::default().with_topology(2, 2, 1).unwrap(),
+            display: DisplayBackend::Headless,
+            bios: PathBuf::from("roms/bios.bin"),
+            vga_bios: Some(PathBuf::from("roms/vgabios.bin")),
+            boot_order: vec![BootDevice::Cdrom, BootDevice::Disk],
+            disk: Some(ResolvedDisk {
+                path: PathBuf::from("c.img"),
+                geometry: DiskGeometry {
+                    cylinders: geometry.cylinders as u32,
+                    heads: geometry.heads as u8,
+                    sectors_per_track: geometry.sectors_per_track as u8,
+                },
+                channel: 0,
+                drive: 1,
+                creation: Some(ResolvedDiskCreation {
+                    path: PathBuf::from("c.img"),
+                    size,
+                    overwrite: true,
+                }),
+            }),
+            cdrom: Some(ResolvedCdrom {
+                path: PathBuf::from("boot.iso"),
+                channel: 1,
+                drive: 1,
+            }),
+            log_level: LogLevel::Debug,
+            vga_mode: Some(VgaMode {
+                width: 1280,
+                height: 1024,
+                bpp: 16,
+            }),
+            pci_vga: !DEFAULT_PCI_VGA,
+            console_stretch: true,
+            pointer_speed: PointerSpeed::from_percent(175),
+        };
+
+        let serialized = toml::to_string_pretty(&resolved.to_file_config()).unwrap();
+        let reparsed: FileConfig = toml::from_str(&serialized).unwrap();
+        let round_tripped = resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap();
+
+        assert_eq!(round_tripped, resolved, "{serialized}");
     }
 }

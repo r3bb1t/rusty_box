@@ -1,8 +1,8 @@
 //! Rusty Box Web — x86 emulator running in the browser via WASM.
 //!
 //! Uses eframe/egui for rendering. On WASM, the emulator runs cooperatively
-//! (step_batch per frame). On native, it runs the same cooperative loop
-//! for testing without needing a browser.
+//! (`Emulator::step` calls within each frame). On native, it runs the same
+//! cooperative loop for testing without needing a browser.
 
 mod app;
 

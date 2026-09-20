@@ -6,6 +6,8 @@
 
 use alloc::{boxed::Box, vec::Vec};
 
+use rusty_box_devices::display::sink::{CursorPos, Dimensions, DisplaySink, Redraw, Rgb, TilePos};
+
 /// Display mode for the GUI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayMode {
@@ -15,7 +17,10 @@ pub enum DisplayMode {
     Sim,
 }
 
-pub use crate::iodev::vga::VgaTextModeInfo;
+/// Facade: [`BxGui::text_update`] takes one of these, so a front end
+/// implementing this trait must be able to name it without depending on the
+/// device crate directly.
+pub use rusty_box_devices::display::vga::VgaTextModeInfo;
 
 /// GUI trait - all GUI implementations must provide these methods
 ///
@@ -40,16 +45,17 @@ pub trait BxGui: Send + Sync {
     /// from `bx_vgacore_c::update_charmap()`. `data` is 256 glyphs x 32 bytes of
     /// raw VGA bitmap, each byte MSB-first (bit 7 = leftmost pixel). Default
     /// no-op so text-only and headless GUIs need not implement it.
-    fn set_text_charmap(&mut self, map: usize, data: &[u8]) {
-        let _ = (map, data);
-    }
+    #[allow(unused_variables)]
+    fn set_text_charmap(&mut self, map: usize, data: &[u8]) {}
 
     /// Update a graphics tile
     fn graphics_tile_update(&mut self, tile: &[u8], x: u32, y: u32);
 
-    /// Update a graphics tile with explicit RGBA dimensions.
+    /// Update a graphics tile with explicit RGBA dimensions. The default
+    /// forwards to the fixed-tile-size path, which reads the dimensions from
+    /// the tile geometry the device declared at init.
+    #[allow(unused_variables)]
     fn graphics_tile_update_rgba(&mut self, tile: &[u8], x: u32, y: u32, width: u32, height: u32) {
-        let _ = (width, height);
         self.graphics_tile_update(tile, x, y);
     }
 
@@ -178,5 +184,78 @@ pub trait BxGui: Send + Sync {
     /// Append text to the serial console log (for display in GUI)
     fn append_serial_log(&self, _text: &str) {
         // Default: no-op
+    }
+}
+
+/// Presents a [`BxGui`] as the [`DisplaySink`] a display adapter pushes to.
+///
+/// The two vocabularies are the same one — both are `bx_gui_c`'s — so this only
+/// unpacks the named types and restores the sentinel `BxGui` implementations
+/// expect for an absent cursor.
+pub struct GuiSink<'a> {
+    gui: &'a mut dyn BxGui,
+}
+
+impl<'a> GuiSink<'a> {
+    #[inline]
+    pub fn new(gui: &'a mut dyn BxGui) -> Self {
+        Self { gui }
+    }
+}
+
+impl DisplaySink for GuiSink<'_> {
+    fn dimension_update(&mut self, dims: Dimensions) {
+        self.gui.dimension_update(
+            dims.width,
+            dims.height,
+            dims.font_height,
+            dims.font_width,
+            u32::from(dims.bits_per_pixel),
+        );
+    }
+
+    fn text_update(
+        &mut self,
+        previous: &[u8],
+        current: &[u8],
+        cursor: Option<CursorPos>,
+        info: &VgaTextModeInfo,
+    ) {
+        // Bochs marks "no cursor" with an out-of-range cell rather than an
+        // absent one, and every `BxGui` implementation tests for it.
+        let (cursor_x, cursor_y) = match cursor {
+            Some(at) => (at.col, at.row),
+            None => (0xffff, 0xffff),
+        };
+        self.gui
+            .text_update(previous, current, cursor_x, cursor_y, info);
+    }
+
+    fn graphics_tile_update(&mut self, rgba: &[u8], at: TilePos) {
+        self.gui
+            .graphics_tile_update_rgba(rgba, at.x, at.y, at.width, at.height);
+    }
+
+    fn palette_change(&mut self, index: u8, colour: Rgb) -> Redraw {
+        if self
+            .gui
+            .palette_change(index, colour.red, colour.green, colour.blue)
+        {
+            Redraw::Full
+        } else {
+            Redraw::NotNeeded
+        }
+    }
+
+    fn set_text_charmap(&mut self, map: usize, glyphs: &[u8]) {
+        self.gui.set_text_charmap(map, glyphs);
+    }
+
+    fn clear_screen(&mut self) {
+        self.gui.clear_screen();
+    }
+
+    fn flush(&mut self) {
+        self.gui.flush();
     }
 }

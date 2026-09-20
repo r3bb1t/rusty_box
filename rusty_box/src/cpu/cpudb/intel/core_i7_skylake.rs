@@ -203,7 +203,7 @@ const LEAF1_ECX_BASE: CpuIdStd1Ecx = CpuIdStd1Ecx::SSE3
     .union(CpuIdStd1Ecx::DTES64) // extra
     .union(CpuIdStd1Ecx::MONITOR_MWAIT)
     .union(CpuIdStd1Ecx::DS_CPL) // extra
-    .union(CpuIdStd1Ecx::VMX) // VMX MSRs + #UD on VMXON (stubs)
+    .union(CpuIdStd1Ecx::VMX) // cpu/vmx.rs (Bochs vmx.cc); capabilities: get_vmx_extensions_bitmask
     .union(CpuIdStd1Ecx::EST) // extra
     .union(CpuIdStd1Ecx::TM2) // extra
     .union(CpuIdStd1Ecx::SSSE3)
@@ -373,6 +373,14 @@ impl Corei7SkylakeX {
 }
 
 impl BxCpuIdTrait for Corei7SkylakeX {
+    const INIT: Self = Self {
+        cpuid_freq: CpuidFreq::None,
+        // Placeholder: every Emulator construction path (emulator/mod.rs)
+        // replaces it with the machine's ips through set_cpuid_freq before a
+        // guest runs.
+        ips: 4_000_000,
+    };
+
     fn get_name(&self) -> &'static str {
         "corei7_skylake_x"
     }
@@ -418,10 +426,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
     }
 
     fn new() -> Self {
-        Self {
-            cpuid_freq: CpuidFreq::default(),
-            ips: 4_000_000, // Bochs config.cc BXPN_IPS default; overwritten via set_cpuid_freq()
-        }
+        Self::INIT
     }
 
     /// Returns ISA extensions bitmask for Skylake-X.

@@ -11,9 +11,6 @@ pub enum CpuError {
     #[error("exception({vector:?}): bad vector, error_code={error_code}")]
     BadVector { vector: Exception, error_code: u16 },
 
-    #[error("Shadow stack prematurely busy is left set !")]
-    ShadowStackPrematurelyBusy,
-
     #[error("CPU/Emulator not initialized - call initialize() first")]
     CpuNotInitialized,
 
@@ -54,6 +51,17 @@ pub enum CpuError {
     #[error("machine boundary effect failed")]
     MachineBoundaryFailed,
 
+    /// The machine's engine refused work the machine cannot do without it: an
+    /// I/O APIC message its backend would not take, an interrupt edge it could
+    /// not be told about.
+    ///
+    /// Carried whole rather than reduced to the operation that failed. The
+    /// fault's kind and the backend's own error number are what separate a
+    /// mapping that could not be applied from a processor that would not run,
+    /// and a refused interrupt leaves no other trace to read.
+    #[error("engine fault: {0}")]
+    EngineFault(rusty_box_core::EngineFault),
+
     /// Bochs-style control flow: exceptions/interrupt delivery longjmp back to the
     /// main decode loop. We model that by unwinding the current instruction/trace
     /// and restarting decode.
@@ -66,18 +74,12 @@ pub enum CpuError {
     #[error("x86 exception #{vector} delivered but unhandled")]
     Exception { vector: u8 },
 
-    /// Bochs vmx.cc `VMabort` — architecturally fatal VMM-state error
-    /// (MSR-load/store failure, host PDPTR corruption, MCE during
-    /// VMEXIT, etc.). Mirrors Bochs `shutdown()` propagation: the
-    /// surrounding cpu loop must terminate the emulated CPU.
-    #[error("VMX abort: code={code:?}")]
-    VmxAbort { code: super::vmx::VmxAbortCode },
-
     /// Bochs `BX_PANIC` equivalents reachable from the VMX path —
     /// "impossible" CPU states (e.g., VMEXIT requested while not in
-    /// VMX-guest mode without the bit-31 vmentry-failure flag).
-    /// Distinct from `VmxAbort` because these signal a host-side
-    /// implementation bug, not a guest-induced architectural fault.
+    /// VMX-guest mode without the bit-31 vmentry-failure flag). A host-side
+    /// implementation bug, not a guest-induced architectural fault: a VMX
+    /// abort the guest causes shuts the processor down instead, as Bochs
+    /// `VMabort` does.
     #[error("VMX internal error: {reason:?}")]
     VmxInternalError {
         reason: super::vmx::VmxInternalReason,

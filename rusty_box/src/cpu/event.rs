@@ -1,29 +1,144 @@
 use super::{
     cpu::CpuActivityState,
-    cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
     eflags::EFlags,
+    exec_ctx::ExecCtx,
     svm::{SvmVmexit, BX_VM_CR_MSR_INIT_REDIRECT_MASK, SVM_INTERCEPT0_INIT, SVM_INTERCEPT0_SMI},
     vmx::VmxVmexitReason,
     BxCpuC,
 };
 
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
+/// What one INTA moment produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "an acknowledged vector was consumed from its controller; dropping it loses the interrupt"]
+pub(crate) enum AcknowledgedInterrupt {
+    /// The LAPIC answered; delivery (or a VMX fold) is the caller's.
+    Lapic(u8),
+    /// The 8259 answered through the fabric's counted INTA; spurious
+    /// vectors arrive here exactly as a real INTA would produce them.
+    Pic(u8),
+    /// Nothing deliverable; the deasserted pin was reconciled.
+    None,
+}
+
+/// What discharging the trap the previous instruction owed produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "a delivered #DB moved the processor; what the caller does next depends on which this was"]
+pub(crate) enum TrapDischarge {
+    /// The trap was taken: the processor stands at its `#DB` handler's entry,
+    /// or wherever an intercept exited to.
+    Delivered,
+    /// Nothing was owed, and the latch is clear.
+    NothingOwed,
+}
+
+/// Async-event servicing runs on the execution context: interrupt delivery
+/// reads the IDT and pushes stack frames, and the hold-acknowledge path hands
+/// guest memory to the DMA controller. Bochs `handleAsyncEvent` (event.cc)
+/// reaches the same state through the globals this borrow replaces.
+impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
+    /// Handle wait for event - matches Bochs event.cc:handleWaitForEvent()
+    /// Called when CPU is halted (HLT) or waiting (MWAIT)
+    /// Returns true if should return from cpu_loop
+    fn handle_wait_for_event(&mut self) -> bool {
+        // For WAIT_FOR_SIPI, just return (matches Bochs event.cc)
+        if matches!(self.activity_state, CpuActivityState::WaitForSipi) {
+            tracing::trace!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");
+            return true;
+        }
+
+        // Handle DMA also when CPU is halted (Bochs event.cc)
+        if self.get_hrq() {
+            self.device_manager.dma.raise_hlda(&mut *self.memory);
+            // Bochs dma.cc raise_HLDA: synchronous set_HRQ(0) at
+            // terminal count (see handle_async_event above).
+            if let Some(level) = self.device_manager.dma.take_hrq_request() {
+                self.pc_system.set_hrq(level);
+            }
+        }
+
+        // For single processor, check if an external interrupt can wake us.
+        // Matches Bochs event.cc
+        //
+        // MWAIT_IF (ECX[0]=1 at MWAIT): wake on interrupt even when IF=0
+        // (Bochs event.cc)
+        let mwait_if = matches!(self.activity_state, CpuActivityState::MwaitIf);
+        let in_mwait = matches!(
+            self.activity_state,
+            CpuActivityState::Mwait | CpuActivityState::MwaitIf
+        );
+
+        // The interrupt-class events, which need EFLAGS.IF — or the MWAIT_IF
+        // state that MWAIT's ECX[0] asks for. Bochs event.cc tests these with
+        // `is_pending`, not the unmasked form. `lapic.intr` is this port's
+        // mirror of the LAPIC's INTR line and is read alongside the event bit
+        // so a raise that has not been synced yet still ends the wait.
+        let interrupt_pending = self.pending_event
+            & (BxCpuC::<T>::BX_EVENT_PENDING_INTR
+                | BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR
+                | BxCpuC::<T>::BX_EVENT_PENDING_UINTR)
+            != 0
+            || self.lapic.intr;
+
+        // Everything else that ends the wait: delivered asynchronously and
+        // therefore independent of IF, but only while unmasked. The VMX
+        // members are events whose only answer is a VMEXIT, and
+        // `handle_async_event` returns the moment this function says "still
+        // halted" — so an event left out here is one the processor can never
+        // reach, not merely one it reaches late.
+        let wake_on_unmasked: u32 = BxCpuC::<T>::BX_EVENT_NMI
+            | BxCpuC::<T>::BX_EVENT_SMI
+            | BxCpuC::<T>::BX_EVENT_INIT
+            | BxCpuC::<T>::BX_EVENT_VMX_VTPR_UPDATE
+            | BxCpuC::<T>::BX_EVENT_VMX_VEOI_UPDATE
+            | BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_APIC_WRITE
+            | BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG
+            | BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI;
+
+        if (interrupt_pending && (self.eflags.contains(EFlags::IF_) || mwait_if))
+            || self.is_unmasked_event_pending(wake_on_unmasked)
+        {
+            // Bochs event.cc: reset the monitor when waking out of MWAIT, and
+            // clear the inhibits so the resumed instruction stream starts
+            // clean.
+            if in_mwait {
+                self.monitor.reset_monitor();
+            }
+            self.inhibit_mask = 0;
+            return false; // Continue to delivery
+        }
+
+        // Bochs event.cc gives the expired preemption timer a branch of its
+        // own, and deliberately not the two side effects above: nothing was
+        // delivered, so the MONITOR stays armed and the inhibits stand. The
+        // wait ends only so the VMEXIT can be taken.
+        if self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED) {
+            return false;
+        }
+
+        // Monitor triggered by a write (wakeup_monitor set activity_state to
+        // Active). Bochs event.cc breaks out here without touching
+        // inhibit_mask — only the interrupt-wake branch clears it.
+        if matches!(self.activity_state, CpuActivityState::Active) {
+            tracing::trace!("CPU activity_state became ACTIVE, waking up");
+            return false;
+        }
+
+        // HALT condition remains: return from cpu_loop so other CPUs (or the
+        // emulator scheduler) get a chance, leaving inhibit_mask untouched
+        // exactly like Bochs event.cc handleWaitForEvent's return-1 path.
+        true
+    }
+
     /// Handle async events - matches Bochs event.cc handleAsyncEvent()
     /// Returns true if should return from cpu_loop
-    pub(super) fn handle_async_event(
-        &mut self,
-        pic: Option<&mut crate::pic::BxPicC>,
-        mut dma: Option<&mut crate::dma::BxDmaC>,
-        mut mem: Option<&mut crate::memory::BxMemC<'c>>,
-        pins: &[crate::memory::CpuTlbPin],
-    ) -> bool {
+    pub(super) fn handle_async_event(&mut self) -> bool {
         // Check if CPU is in non-active state (HLT, MWAIT, etc.)
         // Matches Bochs event.cc
         if !matches!(self.activity_state, CpuActivityState::Active) {
             // For one processor, pass the time as quickly as possible until
             // an interrupt wakes up the CPU.
-            if self.handle_wait_for_event(dma.as_deref_mut(), mem.as_deref_mut(), pins) {
+            if self.handle_wait_for_event() {
                 return true; // Return to caller of cpu_loop
             }
         }
@@ -31,17 +146,17 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Priority 2: Trap on Task Switch (T flag in TSS)
         // Bochs event.cc — deliver #DB BEFORE clearing the bit
         // so that DR6 still has BT set when the handler reads it
-        if self.debug_trap & Self::BX_DEBUG_TRAP_TASK_SWITCH_BIT != 0 {
+        if self.debug_trap & BxCpuC::<T>::BX_DEBUG_TRAP_TASK_SWITCH_BIT != 0 {
             // Bochs: exception() calls longjmp, never returns.
             // We must propagate CpuLoopRestart by returning false.
             // The caller (cpu_loop_n) will restart the loop.
             if let Err(super::error::CpuError::CpuLoopRestart) =
                 self.exception(super::cpu::Exception::Db, 0)
             {
-                self.debug_trap &= !Self::BX_DEBUG_TRAP_TASK_SWITCH_BIT;
+                self.debug_trap &= !BxCpuC::<T>::BX_DEBUG_TRAP_TASK_SWITCH_BIT;
                 return false;
             }
-            self.debug_trap &= !Self::BX_DEBUG_TRAP_TASK_SWITCH_BIT;
+            self.debug_trap &= !BxCpuC::<T>::BX_DEBUG_TRAP_TASK_SWITCH_BIT;
         }
 
         // Priority 3: External Hardware Interventions (Bochs event.cc)
@@ -50,7 +165,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // SMI (Bochs event.cc): gated on SVM GIF; an SVM guest with the SMI
         // intercept set exits instead (Svm_Vmexit longjmps, so the SMI stays
         // pending and GIF=0 after the exit holds it until STGI).
-        if self.is_unmasked_event_pending(Self::BX_EVENT_SMI) && self.svm_gif {
+        if self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_SMI) && self.svm_gif {
             if self.in_svm_guest && self.svm_intercept_check(SVM_INTERCEPT0_SMI) {
                 match self.svm_vmexit(SvmVmexit::Smi as i32, 0, 0) {
                     Err(super::error::CpuError::CpuLoopRestart) => {
@@ -61,14 +176,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     Ok(()) => {}
                 }
             }
-            self.clear_event(Self::BX_EVENT_SMI);
+            self.clear_event(BxCpuC::<T>::BX_EVENT_SMI);
             self.enter_system_management_mode();
         }
 
         // INIT (Bochs event.cc): reset CPU via reset(BX_RESET_SOFTWARE).
         // Used by multiprocessor startup (INIT-SIPI-SIPI sequence).
         // Gated on SVM GIF like SMI.
-        if self.is_unmasked_event_pending(Self::BX_EVENT_INIT) && self.svm_gif {
+        if self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_INIT) && self.svm_gif {
             // Bochs event.cc: SVM INIT intercept exits with INIT still pending.
             if self.in_svm_guest && self.svm_intercept_check(SVM_INTERCEPT0_INIT) {
                 match self.svm_vmexit(SvmVmexit::Init as i32, 0, 0) {
@@ -83,7 +198,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             // Bochs event.cc: VM_CR.R_INIT redirects INIT to #SX; the only
             // error code is 1 and indicates redirection of INIT.
             if self.msr.svm_vm_cr & BX_VM_CR_MSR_INIT_REDIRECT_MASK != 0 {
-                self.clear_event(Self::BX_EVENT_INIT);
+                self.clear_event(BxCpuC::<T>::BX_EVENT_INIT);
                 tracing::info!("SVM INIT Redirect to #SX");
                 match self.exception(super::cpu::Exception::Sx, 1) {
                     Ok(()) | Err(super::error::CpuError::CpuLoopRestart) => {}
@@ -91,7 +206,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
                 return false;
             }
-            self.clear_event(Self::BX_EVENT_INIT);
+            self.clear_event(BxCpuC::<T>::BX_EVENT_INIT);
             // Bochs event.cc: INIT in VMX non-root operation causes
             // VMexit(VMX_VMEXIT_INIT) — the exit unwinds (Bochs longjmp),
             // so the CPU reset below is skipped.
@@ -142,26 +257,16 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // Priority 4: Debug trap exceptions (TF single-step, data/I/O breakpoints)
         // Bochs event.cc — check inhibition FIRST, then debug_trap
-        if !self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
-            // Bochs event.cc: OR code breakpoint matches into debug_trap
+        if !self.debug_trap_inhibited() {
+            // Bochs event.cc: OR code breakpoint matches into debug_trap.
+            // Here and not inside the discharge: this tests the address of
+            // the instruction ABOUT to run against DR0–DR3, a check an engine
+            // running that instruction on hardware gets from the hardware.
             self.debug_trap |= self.pending_code_breakpoint_trap();
-            if self.debug_trap & 0xF000 != 0 {
-                // BX_DEBUG_SINGLE_STEP_BIT or BX_DEBUG_DR_ACCESS_BIT set
-                // Bochs: exception() longjmps — propagate restart
-                if let Err(super::error::CpuError::CpuLoopRestart) =
-                    self.exception(super::cpu::Exception::Db, 0)
-                {
-                    // Bochs's longjmp lands in cpu_loop's setjmp handler,
-                    // which commits `prev_rip = RIP` before resuming (cpu.cc).
-                    // Every other delivery arm here does the same; without it
-                    // the #DB handler runs with prev_rip still pointing at the
-                    // interrupted instruction, so the next fault inside the
-                    // handler reports the wrong address.
-                    self.prev_rip = self.rip();
-                    return false;
-                }
-            } else {
-                self.debug_trap = 0;
+            match self.discharge_the_trap_owed() {
+                Ok(TrapDischarge::Delivered) => return false,
+                Ok(TrapDischarge::NothingOwed) => {}
+                Err(error) => tracing::warn!("#DB delivery failed: {:?}", error),
             }
         }
 
@@ -196,22 +301,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.poll_vmx_preemption_timer();
         }
 
-        // Bochs vapic.cc / event.cc — process posted interrupts at the
-        // start of the Priority-5 external-event check so a pending
-        // notification clears PID.ON and raises
-        // BX_EVENT_PENDING_VMX_VIRTUAL_INTR before the interrupt-window
-        // VMEXIT path runs.
-        if self.in_vmx_guest && self.posted_interrupt_pending() {
-            if let Err(e) = self.process_posted_interrupts() {
-                tracing::warn!("posted-interrupt processing failed: {:?}", e);
-            }
-        }
-
-        if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
-            // STI/MOV SS shadow — skip all external interrupts this boundary
-            // (Bochs event.cc)
+        if self.interrupts_inhibited(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS) || !self.svm_gif {
+            // STI/MOV SS shadow, or SVM CLGI — the whole chain is skipped this
+            // boundary. Bochs event.cc heads Priority 5 with
+            // `interrupts_inhibited(BX_INHIBIT_INTERRUPTS) || !SVM_GIF`, so a
+            // guest running with GIF clear takes no external event at all.
         } else if self.in_vmx_guest
-            && self.is_unmasked_event_pending(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED)
+            && self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED)
         {
             // Bochs event.cc — VMexit(VMX_VMEXIT_VMX_PREEMPTION_TIMER_EXPIRED, 0).
             match self.vmexit_check_preemption_timer() {
@@ -225,7 +321,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 Ok(false) => {}
             }
         } else if self.in_vmx_guest
-            && self.is_unmasked_event_pending(Self::BX_EVENT_VMX_VIRTUAL_NMI)
+            && self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_VMX_VIRTUAL_NMI)
         {
             // Bochs event.cc — VMexit(VMX_VMEXIT_NMI_WINDOW, 0).
             match self.vmexit_check_nmi_window() {
@@ -238,9 +334,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
                 Ok(false) => {}
             }
-        } else if self.is_unmasked_event_pending(Self::BX_EVENT_NMI) {
+        } else if self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_NMI) {
             // NMI delivery (Bochs event.cc)
-            self.clear_event(Self::BX_EVENT_NMI);
+            self.clear_event(BxCpuC::<T>::BX_EVENT_NMI);
             self.ext = true;
             // Bochs vmexit.cc VMexit_Event(BX_NMI, 2, 0, 0): pin-based NMI
             // exit fires before delivery into the guest IDT.
@@ -248,14 +344,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 match self.vmexit_check_nmi() {
                     Ok(true) => {
                         self.ext = false;
-                        self.mask_event(Self::BX_EVENT_NMI);
+                        self.mask_event(BxCpuC::<T>::BX_EVENT_NMI);
                         self.prev_rip = self.rip();
                         return false;
                     }
                     Ok(false) => {}
                     Err(super::error::CpuError::CpuLoopRestart) => {
                         self.ext = false;
-                        self.mask_event(Self::BX_EVENT_NMI);
+                        self.mask_event(BxCpuC::<T>::BX_EVENT_NMI);
                         self.prev_rip = self.rip();
                         return false;
                     }
@@ -264,7 +360,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     }
                 }
             }
-            self.mask_event(Self::BX_EVENT_NMI); // Block further NMIs until IRET
+            self.mask_event(BxCpuC::<T>::BX_EVENT_NMI); // Block further NMIs until IRET
             let result = self.interrupt(2, super::exception::InterruptType::Nmi, false, false, 0); // NMI vector = 2
             self.ext = false;
             match result {
@@ -280,7 +376,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
             }
         } else if self.in_vmx_guest
-            && (self.pending_event & Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING) != 0
+            && (self.pending_event & BxCpuC::<T>::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING) != 0
             && self.eflags.contains(EFlags::IF_)
         {
             // Bochs event.cc — VMexit(VMX_VMEXIT_INTERRUPT_WINDOW, 0).
@@ -295,10 +391,28 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 Ok(false) => {}
             }
         } else if self.is_unmasked_event_pending(
-            Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
+            BxCpuC::<T>::BX_EVENT_PENDING_INTR
+                | BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR
+                | BxCpuC::<T>::BX_EVENT_PENDING_VMX_VIRTUAL_INTR,
         ) {
             // HandleExtInterrupt (Bochs event.cc).
             //
+            // A virtual interrupt outranks everything else here: Bochs tests
+            // it with `is_pending` before `VMexit_ExtInterrupt`, delivers it
+            // straight into the guest's own IDT with no exit, and longjmps
+            // back to the decode loop — so nothing below runs for it.
+            if self.in_vmx_guest
+                && self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_VMX_VIRTUAL_INTR != 0
+            {
+                match self.vmx_deliver_virtual_interrupt() {
+                    Ok(()) | Err(super::error::CpuError::CpuLoopRestart) => {}
+                    Err(e) => {
+                        tracing::warn!("VMX virtual interrupt delivery failed: {:?}", e);
+                    }
+                }
+                return false;
+            }
+
             // Bochs vmexit.cc VMexit_ExtInterrupt: with EXTERNAL_INTERRUPT_VMEXIT
             // set and INTA_ON_VMEXIT clear, the VMEXIT happens BEFORE the
             // controller is acknowledged so the interrupt remains pending in
@@ -322,86 +436,24 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
             }
 
-            // Deliver exactly ONE interrupt: LAPIC first, then PIC.
-            let mut delivered = false;
-
-            // Check LAPIC first (higher priority than PIC in APIC mode)
-            if !delivered && self.lapic.intr {
-                // Clear event before acknowledge — acknowledge_int() calls
-                // service_local_apic() which may re-signal if more IRQs pending.
-                self.clear_event(Self::BX_EVENT_PENDING_LAPIC_INTR);
-                let vector = self.lapic.acknowledge_int();
-                self.sync_lapic_events();
-                if vector > 0 {
-                    #[cfg(debug_assertions)]
-                    {
-                        self.diag_hae_intr_delivered += 1;
-                        self.diag_iac_vectors[vector as usize] += 1;
-                    }
-                    self.activity_state = CpuActivityState::Active;
-                    self.ext = true;
-                    // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
-                    // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set
-                    // — the acknowledged vector is recorded in exit_intr_info.
-                    if self.in_vmx_guest {
-                        match self.vmexit_check_event_intr(vector) {
-                            Ok(true) => {
-                                self.ext = false;
-                                self.prev_rip = self.rip();
-                                return false;
-                            }
-                            Ok(false) => {}
-                            Err(super::error::CpuError::CpuLoopRestart) => {
-                                self.ext = false;
-                                self.prev_rip = self.rip();
-                                return false;
-                            }
-                            Err(e) => {
-                                tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
-                            }
-                        }
-                    }
-                    let result = self.interrupt(
-                        vector,
-                        super::exception::InterruptType::ExternalInterrupt,
-                        false,
-                        false,
-                        0,
-                    );
-                    self.ext = false;
-                    delivered = true;
-                    match result {
-                        Ok(()) => {
-                            // Bochs event.cc — update prev_rip after delivery
-                            self.prev_rip = self.rip();
-                        }
-                        Err(super::error::CpuError::CpuLoopRestart) => {
-                            // interrupt() delivered via exception path (CpuLoopRestart).
-                            // Bochs event.cc: prev_rip = RIP after successful delivery.
-                            self.prev_rip = self.rip();
-                            return false;
-                        }
-                        Err(e) => {
-                            tracing::warn!("LAPIC interrupt delivery failed: {:?}", e);
-                        }
-                    }
-                }
-            }
-
-            // Then check PIC (legacy 8259 path) — only if LAPIC didn't deliver
-            if !delivered {
-                if let Some(pic) = pic {
-                    if pic.has_interrupt() {
-                        let vector = pic.iac();
-                        tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
-                        vector, self.rip(), self.sregs[0].selector.value,
-                        self.cpu_mode, self.eflags.contains(super::eflags::EFlags::IF_));
-                        // Wake from halt if needed
-                        self.activity_state = CpuActivityState::Active;
-                        // Mark as external interrupt (EXT=1)
+            // Deliver exactly ONE interrupt: LAPIC first, then PIC. The INTA
+            // moment itself — priority order, the fabric's counted 8259
+            // acknowledge, spurious vectors, the deasserted-pin reconcile —
+            // is the shared body; what stays here is delivery into the guest
+            // and the VMX folds around it.
+            match self.acknowledge_external_interrupt() {
+                AcknowledgedInterrupt::Lapic(vector) => {
+                    // Bochs event.cc HandleExtInterrupt consults posted-interrupt
+                    // processing with the vector the controller just acknowledged:
+                    // if it IS the notification vector, it is consumed folding PIR
+                    // into the virtual IRR and never reaches the guest as itself.
+                    if self.in_vmx_guest && self.vmx_posted_interrupt_processing(vector) {
+                        // Consumed; nothing is delivered this boundary.
+                    } else {
                         self.ext = true;
                         // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
-                        // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set.
+                        // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set
+                        // — the acknowledged vector is recorded in exit_intr_info.
                         if self.in_vmx_guest {
                             match self.vmexit_check_event_intr(vector) {
                                 Ok(true) => {
@@ -420,7 +472,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                                 }
                             }
                         }
-                        // Deliver interrupt (matches Bochs interrupt() call in event.cc)
                         let result = self.interrupt(
                             vector,
                             super::exception::InterruptType::ExternalInterrupt,
@@ -431,78 +482,116 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         self.ext = false;
                         match result {
                             Ok(()) => {
+                                // Bochs event.cc — update prev_rip after delivery
                                 self.prev_rip = self.rip();
                             }
                             Err(super::error::CpuError::CpuLoopRestart) => {
+                                // interrupt() delivered via exception path (CpuLoopRestart).
+                                // Bochs event.cc: prev_rip = RIP after successful delivery.
                                 self.prev_rip = self.rip();
                                 return false;
                             }
                             Err(e) => {
-                                tracing::warn!("PIC interrupt delivery failed: {:?}", e);
+                                tracing::warn!("LAPIC interrupt delivery failed: {:?}", e);
                             }
-                        }
-                    } else {
-                        // The CPU event bit mirrors the PIC INT pin. If no vector is
-                        // deliverable, reconcile a stale assertion now; otherwise
-                        // async_event remains set and every instruction exits its
-                        // trace to rescan an empty PIC indefinitely.
-                        // Consume deferred PIC edge flags while reconciling the
-                        // current deasserted INT pin. A later device assertion
-                        // will set irq_pending again, so it cannot be erased by
-                        // this acknowledge's stale irq_cleared flag.
-                        pic.reconcile_deasserted_intr();
-                        self.clear_event(Self::BX_EVENT_PENDING_INTR);
-                        if self.pending_event & Self::BX_EVENT_PENDING_LAPIC_INTR == 0 {
-                            self.async_event = super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                        }
-                        #[cfg(debug_assertions)]
-                        {
-                            self.diag_hae_intr_pic_empty += 1;
                         }
                     }
                 }
+                AcknowledgedInterrupt::Pic(vector) => {
+                    // Mark as external interrupt (EXT=1)
+                    self.ext = true;
+                    // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
+                    // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set.
+                    if self.in_vmx_guest {
+                        match self.vmexit_check_event_intr(vector) {
+                            Ok(true) => {
+                                self.ext = false;
+                                self.prev_rip = self.rip();
+                                return false;
+                            }
+                            Ok(false) => {}
+                            Err(super::error::CpuError::CpuLoopRestart) => {
+                                self.ext = false;
+                                self.prev_rip = self.rip();
+                                return false;
+                            }
+                            Err(e) => {
+                                tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
+                            }
+                        }
+                    }
+                    // Deliver interrupt (matches Bochs interrupt() call in event.cc)
+                    let result = self.interrupt(
+                        vector,
+                        super::exception::InterruptType::ExternalInterrupt,
+                        false,
+                        false,
+                        0,
+                    );
+                    self.ext = false;
+                    match result {
+                        Ok(()) => {
+                            self.prev_rip = self.rip();
+                        }
+                        Err(super::error::CpuError::CpuLoopRestart) => {
+                            self.prev_rip = self.rip();
+                            return false;
+                        }
+                        Err(e) => {
+                            tracing::warn!("PIC interrupt delivery failed: {:?}", e);
+                        }
+                    }
+                }
+                AcknowledgedInterrupt::None => {}
             }
-        } else if self.pending_event
-            & (Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR)
-            != 0
-        {
-            // Event is pending but masked (IF=0) — don't clear it, just count
-            #[cfg(debug_assertions)]
-            {
-                self.diag_hae_intr_if_blocked += 1;
+        } else if self.get_hrq() {
+            // Assert Hold Acknowledge (HLDA) and perform the DMA transfer.
+            // Bochs event.cc makes this the TRAILING arm of the Priority-5
+            // chain, so a boundary that delivered an interrupt — or that had
+            // interrupts inhibited at the chain head — takes no hold this
+            // time round.
+            // NOTE: similar code in `handle_wait_for_event` (Bochs event.cc).
+            self.device_manager.dma.raise_hlda(&mut *self.memory);
+            // Bochs dma.cc raise_HLDA calls bx_pc_system.set_HRQ(0)
+            // synchronously at terminal count; apply it here so the
+            // async_event clear below observes the dropped line instead
+            // of thrashing the trace until the next boundary.
+            if let Some(level) = self.device_manager.dma.take_hrq_request() {
+                self.pc_system.set_hrq(level);
             }
         }
 
-        // DMA HRQ handling (Bochs event.cc)
-        // NOTE: similar code in handleWaitForEvent (event.cc)
-        // Assert Hold Acknowledge (HLDA) and perform DMA transfer
-        if self.get_hrq() {
-            if let Some(dma) = dma {
-                dma.raise_hlda(mem.as_deref_mut(), pins);
-                // Bochs dma.cc raise_HLDA calls bx_pc_system.set_HRQ(0)
-                // synchronously at terminal count; apply it here so the
-                // async_event clear below observes the dropped line instead
-                // of thrashing the trace until the next boundary.
-                if let Some(level) = dma.take_hrq_request() {
-                    if let Some(ps) = self.pc_system_mut() {
-                        ps.set_hrq(level);
-                    }
-                }
-            }
+        // Diagnostic only, and deliberately outside the chain above: an
+        // external interrupt that is pending but masked by IF delivers
+        // nothing, and in Bochs it does not displace the hold-acknowledge
+        // arm either.
+        #[cfg(debug_assertions)]
+        if !self.is_unmasked_event_pending(
+            BxCpuC::<T>::BX_EVENT_PENDING_INTR | BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR,
+        ) && (self.pending_event
+            & (BxCpuC::<T>::BX_EVENT_PENDING_INTR | BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR))
+            != 0
+        {
+            self.diag_hae_intr_if_blocked += 1;
         }
 
         // End of handleAsyncEvent: schedule TF->debug_trap for next boundary
         // Bochs event.cc
         if self.eflags.contains(EFlags::TF) {
-            self.debug_trap |= Self::BX_DEBUG_SINGLE_STEP_BIT;
-            self.async_event = 1;
+            self.debug_trap |= BxCpuC::<T>::BX_DEBUG_SINGLE_STEP_BIT;
         }
 
-        // Bochs event.cc: Conditionally clear async_event
-        // Only clear when no events remain pending (debug_trap, pending events, HRQ)
+        // Bochs event.cc: conditionally clear async_event. A guest with GIF
+        // clear parks its pending events, so they do not by themselves keep
+        // the CPU on the slow path; the monitor trap flag does, whatever GIF
+        // says, as does a scheduled debug trap or an asserted HRQ line.
         let has_unmasked_events = (self.pending_event & !self.event_mask) != 0;
         let hrq_active = self.get_hrq();
-        if !has_unmasked_events && self.debug_trap == 0 && !hrq_active {
+        if !((self.svm_gif && has_unmasked_events)
+            || self.debug_trap != 0
+            || self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_VMX_MONITOR_TRAP_FLAG)
+            || hrq_active)
+        {
             self.async_event = 0;
         }
 
@@ -517,11 +606,157 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         false // Continue execution
     }
 
+    /// Deliver the trap the previous instruction owes, or clear the latch.
+    ///
+    /// Bochs event.cc handleAsyncEvent, Priority 4, past its guards:
+    /// `if (debug_trap & 0xf000) exception(BX_DB_EXCEPTION, 0); else
+    /// debug_trap = 0;`. The ONE body for that decision (R5). The interpreter
+    /// takes it at the head of every instruction; an execution engine takes
+    /// it at the end of an errand, because the errand's instruction retired
+    /// on the shadow and the head it would have been delivered at belongs to
+    /// the hardware.
+    ///
+    /// The guards stay with the caller, which must know both: the `MOV SS`
+    /// inhibit ([`BxCpuC::debug_trap_inhibited`]), which the interpreter
+    /// answers by skipping this boundary and an engine by retiring one more
+    /// instruction; and the code-breakpoint match, which tests the NEXT
+    /// instruction's address against DR0–DR3 — hardware makes that check
+    /// itself, so an engine does not OR it in.
+    ///
+    /// On every `Ok` path `debug_trap` is zero afterwards: a delivered `#DB`
+    /// commits the latch to DR6 and clears it (Bochs exception.cc), and
+    /// nothing owed is cleared here. Deliberately NOT the whole of
+    /// `handle_async_event`: its tail re-arms the single step from the TF the
+    /// processor holds NOW, the wrong flag for an instruction that has
+    /// already retired — and a stranded latch when that instruction was the
+    /// `POPF` or `IRET` that set it.
+    pub(crate) fn discharge_the_trap_owed(&mut self) -> super::Result<TrapDischarge> {
+        if !self.owes_a_debug_trap() {
+            self.debug_trap = 0;
+            return Ok(TrapDischarge::NothingOwed);
+        }
+        match self.exception(super::cpu::Exception::Db, 0) {
+            // Bochs `exception` longjmps into cpu_loop's setjmp handler, which
+            // commits `prev_rip = RIP` before resuming (cpu.cc); this port's
+            // `CpuLoopRestart` is that longjmp, and the commit belongs to
+            // whoever catches it. Without it the #DB handler runs with
+            // prev_rip still on the interrupted instruction, and the next
+            // fault inside the handler reports the wrong address.
+            Ok(()) | Err(super::error::CpuError::CpuLoopRestart) => {
+                self.prev_rip = self.rip();
+                Ok(TrapDischarge::Delivered)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// One interrupt-acknowledge moment: LAPIC first, then the 8259, in the
+    /// priority order Bochs event.cc HandleExtInterrupt takes them.
+    ///
+    /// The machine's single INTA chain (R5): the interpreter delivers what
+    /// this returns into the guest's IDT, and an execution engine injects it
+    /// into its partition — both through this body, so the priority order,
+    /// the fabric's counted acknowledge and the spurious-vector handling can
+    /// never drift between them.
+    pub(crate) fn acknowledge_external_interrupt(&mut self) -> AcknowledgedInterrupt {
+        // Check LAPIC first (higher priority than PIC in APIC mode)
+        if self.lapic.intr {
+            // Clear event before acknowledge — acknowledge_int() calls
+            // service_local_apic() which may re-signal if more IRQs pending.
+            self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR);
+            let vector = self.lapic.acknowledge_int();
+            self.sync_lapic_events();
+            // Whatever the LAPIC answered is the answer, spurious vectors
+            // included: Bochs event.cc interrupt_acknowledge hands the result
+            // of acknowledge_int() straight on, and the 8259 sits behind a
+            // LAPIC that raised INTR — it does not get a second INTA cycle
+            // this boundary.
+            #[cfg(debug_assertions)]
+            {
+                self.diag_hae_intr_delivered += 1;
+                self.diag_iac_vectors[vector as usize] += 1;
+            }
+            self.activity_state = CpuActivityState::Active;
+            return AcknowledgedInterrupt::Lapic(vector);
+        }
+
+        // Then the 8259, through LINT0 — only if the LAPIC didn't answer.
+        //
+        // LVT0 gates the INTA as well as the raise (`set_legacy_intr_level`),
+        // because the two are separate hazards and this one is reachable
+        // without the other: the body is entered for a pending *LAPIC* event
+        // too, and a local APIC with nothing left to answer falls through to
+        // the 8259 with the legacy event never having been raised at all.
+        if self.lapic.lint0_admits_ext_int() && self.device_manager.irq.int_pin_asserted() {
+            let vector = self.device_manager.irq.acknowledge();
+            tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
+            vector, self.rip(), self.sregs[0].selector.value,
+            self.cpu_mode, self.eflags.contains(super::eflags::EFlags::IF_));
+            // Wake from halt if needed
+            self.activity_state = CpuActivityState::Active;
+            AcknowledgedInterrupt::Pic(vector)
+        } else {
+            // The CPU event bit mirrors the PIC INT pin. If no vector is
+            // deliverable, reconcile a stale assertion now; otherwise
+            // async_event remains set and every instruction exits its
+            // trace to rescan an empty PIC indefinitely.
+            // Consume deferred PIC edge flags while reconciling the
+            // current deasserted INT pin. A later device assertion
+            // will set irq_pending again, so it cannot be erased by
+            // this acknowledge's stale irq_cleared flag.
+            //
+            // Only when the pin really is low: LINT0 can refuse a line that is
+            // still asserted, and telling the 8259 its pin fell would retire
+            // the edge the guest owes itself once it unmasks.
+            if !self.device_manager.irq.int_pin_asserted() {
+                self.device_manager.irq.pic_mut().reconcile_deasserted_intr();
+            }
+            self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
+            if self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR == 0 {
+                // An assignment, so the request the stale pin raised is
+                // dropped with the pin. `BX_ASYNC_EVENT_SCHEDULER_BOUNDARY`
+                // is carried across because it latches a machine boundary
+                // that Bochs, having no analogue, cannot lose in the first
+                // place — the rule `enter_sleep_state` (proc_ctrl.rs) applies
+                // to its own assignment, and the reason the bit is in
+                // `TraceBookkeeping::MASK` (arch_state.rs).
+                self.async_event = (self.async_event
+                    & super::cpu::BX_ASYNC_EVENT_SCHEDULER_BOUNDARY)
+                    | super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+            }
+            #[cfg(debug_assertions)]
+            {
+                self.diag_hae_intr_pic_empty += 1;
+            }
+            AcknowledgedInterrupt::None
+        }
+    }
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Bochs `deliver_SMI`: signal SMI unconditionally; masking is
     /// checked when the event is processed in `handle_async_event`.
     #[inline]
     pub(crate) fn deliver_smi(&mut self) {
         self.signal_event(Self::BX_EVENT_SMI);
+    }
+
+    /// Whether this processor has been signalled a system-management interrupt
+    /// it has not yet taken.
+    ///
+    /// The question an engine that runs the guest somewhere else must ask.
+    /// [`Self::deliver_smi`] sets a bit in this processor's event word, which
+    /// the interpreter consults in `handle_async_event` — Bochs
+    /// `cpu/event.cc handleAsyncEvent`, where an SMI is a "Priority 3: External
+    /// Hardware Interventions" tested ahead of `INTR`. A guest executing inside
+    /// a hypervisor partition consults nothing here, so its engine has to.
+    #[must_use]
+    pub fn owes_a_system_management_interrupt(&self) -> bool {
+        // Masked, not a bare pending read: SMM entry masks this event and `RSM`
+        // unmasks it (`cpu/smm.cc`), so a processor already inside
+        // system-management mode owes nothing — Bochs
+        // `cpu/event.cc handleAsyncEvent` tests it the same way.
+        self.is_unmasked_event_pending(Self::BX_EVENT_SMI)
     }
 
     /// Bochs `deliver_NMI`: signal NMI.
@@ -538,6 +773,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
     }
 
+}
+
+/// Startup-IPI delivery runs on the execution context: a SIPI taken in VMX
+/// non-root operation exits, and the exit walks the VMEXIT MSR store/load lists
+/// in guest memory (Bochs event.cc `deliver_SIPI`).
+impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
     /// Bochs `deliver_SIPI`: start a CPU waiting for SIPI at `vector * 0x100`.
     pub(crate) fn deliver_sipi(&mut self, vector: u8) {
         if !matches!(self.activity_state, CpuActivityState::WaitForSipi) {
@@ -548,7 +789,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             return;
         }
 
-        self.unmask_event(Self::BX_EVENT_INIT | Self::BX_EVENT_SMI | Self::BX_EVENT_NMI);
+        self.unmask_event(BxCpuC::<T>::BX_EVENT_INIT | BxCpuC::<T>::BX_EVENT_SMI | BxCpuC::<T>::BX_EVENT_NMI);
         // Bochs event.cc deliver_SIPI: SIPI arriving while in VMX non-root
         // operation (guest activity state wait-for-SIPI) causes
         // VMexit(VMX_VMEXIT_SIPI, vector) — the exit unwinds (Bochs longjmp),
@@ -557,7 +798,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Callers that invoke this from emulator context wire the memory bus
         // first (apply_lapic_cpu_event), so the VMEXIT MSR lists resolve.
         if self.in_vmx_guest {
-            self.async_event &= !Self::BX_ASYNC_EVENT_SLEEP;
+            self.async_event &= !BxCpuC::<T>::BX_ASYNC_EVENT_SLEEP;
             match self.vmexit_unconditional(VmxVmexitReason::Sipi, vector as u64) {
                 Ok(_) | Err(super::error::CpuError::CpuLoopRestart) => {}
                 Err(e) => tracing::warn!("VMX SIPI vmexit failed: {:?}", e),
@@ -565,7 +806,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             return;
         }
         self.activity_state = CpuActivityState::Active;
-        self.async_event &= !Self::BX_ASYNC_EVENT_SLEEP;
+        self.async_event &= !BxCpuC::<T>::BX_ASYNC_EVENT_SLEEP;
         self.set_rip(0);
         self.load_seg_reg_real_mode(BxSegregs::Cs, (vector as u16) << 8);
         tracing::info!(
@@ -575,104 +816,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.eip()
         );
     }
+}
 
-    /// Handle wait for event - matches Bochs event.cc:handleWaitForEvent()
-    /// Called when CPU is halted (HLT) or waiting (MWAIT)
-    /// Returns true if should return from cpu_loop
-    fn handle_wait_for_event(
-        &mut self,
-        dma: Option<&mut crate::dma::BxDmaC>,
-        mem: Option<&mut crate::memory::BxMemC<'c>>,
-        pins: &[crate::memory::CpuTlbPin],
-    ) -> bool {
-        // For WAIT_FOR_SIPI, just return (matches Bochs event.cc)
-        if matches!(self.activity_state, CpuActivityState::WaitForSipi) {
-            tracing::trace!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");
-            return true;
-        }
-
-        // Handle DMA also when CPU is halted (Bochs event.cc)
-        if self.get_hrq() {
-            if let Some(dma) = dma {
-                dma.raise_hlda(mem, pins);
-                // Bochs dma.cc raise_HLDA: synchronous set_HRQ(0) at
-                // terminal count (see handle_async_event above).
-                if let Some(level) = dma.take_hrq_request() {
-                    if let Some(ps) = self.pc_system_mut() {
-                        ps.set_hrq(level);
-                    }
-                }
-            }
-        }
-
-        // For single processor, check if an external interrupt can wake us.
-        // Matches Bochs event.cc
-        //
-        // MWAIT_IF (ECX[0]=1 at MWAIT): wake on interrupt even when IF=0
-        // (Bochs event.cc)
-        let mwait_if = matches!(self.activity_state, CpuActivityState::MwaitIf);
-        let in_mwait = matches!(
-            self.activity_state,
-            CpuActivityState::Mwait | CpuActivityState::MwaitIf
-        );
-
-        // SMI/INIT wake HLT/MWAIT regardless of IF (Bochs event.cc
-        // handleWaitForEvent checks unmasked BX_EVENT_SMI | BX_EVENT_INIT).
-        if self.is_unmasked_event_pending(Self::BX_EVENT_SMI | Self::BX_EVENT_INIT) {
-            if in_mwait {
-                self.monitor.reset_monitor();
-            }
-            self.inhibit_mask = 0;
-            return false; // Continue to SMI/INIT delivery
-        }
-
-        // NMI can wake from HLT/MWAIT only when unmasked (Bochs event.cc).
-        if self.is_unmasked_event_pending(Self::BX_EVENT_NMI) {
-            // Bochs event.cc: reset monitor when waking from MWAIT
-            if in_mwait {
-                self.monitor.reset_monitor();
-            }
-            self.inhibit_mask = 0;
-            return false; // Continue to NMI delivery
-        }
-
-        // PIC interrupt can wake from HLT/MWAIT if IF=1
-        if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0
-            && (self.eflags.contains(EFlags::IF_) || mwait_if)
-        {
-            // Bochs event.cc: reset monitor when waking from MWAIT
-            if in_mwait {
-                self.monitor.reset_monitor();
-            }
-            self.inhibit_mask = 0;
-            return false; // Continue to interrupt delivery
-        }
-
-        // LAPIC interrupt can also wake from HLT/MWAIT if IF=1
-        if (self.pending_event & Self::BX_EVENT_PENDING_LAPIC_INTR != 0 || self.lapic.intr)
-            && (self.eflags.contains(EFlags::IF_) || mwait_if)
-        {
-            // Bochs event.cc: reset monitor when waking from MWAIT
-            if in_mwait {
-                self.monitor.reset_monitor();
-            }
-            self.inhibit_mask = 0;
-            return false; // Continue to LAPIC interrupt delivery
-        }
-
-        // Monitor triggered by a write (wakeup_monitor set activity_state to
-        // Active). Bochs event.cc breaks out here without touching
-        // inhibit_mask — only the interrupt-wake branch clears it.
-        if matches!(self.activity_state, CpuActivityState::Active) {
-            tracing::trace!("CPU activity_state became ACTIVE, waking up");
-            return false;
-        }
-
-        // HALT condition remains: return from cpu_loop so other CPUs (or the
-        // emulator scheduler) get a chance, leaving inhibit_mask untouched
-        // exactly like Bochs event.cc handleWaitForEvent's return-1 path.
-        true
-    }
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     /// Whether this CPU would deliver a Priority-4 debug trap at its next
     /// async-event boundary.
@@ -772,8 +918,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::arch_state::VcpuArchState;
     use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::ResetReason;
     use crate::params::{BxParams, CpuTopology};
 
@@ -793,10 +939,93 @@ mod tests {
             .cpu_topology()
     }
 
-    fn make_cpu(cpu_id: u32) -> alloc::boxed::Box<BxCpuC<'static, Corei7SkylakeX>> {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+    fn make_cpu(cpu_id: u32) -> alloc::boxed::Box<BxCpuC> {
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.configure_smp(cpu_id, smp_topology());
         cpu
+    }
+
+    /// The machine a CPU under test executes against.
+    ///
+    /// SIPI delivery and async-event servicing live on [`ExecCtx`], so they
+    /// need a bus even along the paths that never reach memory — a VMexit taken
+    /// out of either one does. The parts outlive each `ctx()` call so state a
+    /// test establishes on one call is still there on the next.
+    struct TestBus {
+        memory: crate::memory::BxMemC,
+        devices: crate::iodev::BxDevicesC,
+        device_manager: crate::iodev::devices::DeviceManager,
+        pc_system: crate::pc_system::BxPcSystemC,
+    }
+
+    impl TestBus {
+        fn new() -> Self {
+            const MIB: usize = 1024 * 1024;
+            Self {
+                memory: crate::memory::BxMemC::new(
+                    crate::memory::BxMemoryStubC::create_and_init(MIB, MIB, 4096).unwrap(),
+                    false,
+                ),
+                devices: crate::iodev::BxDevicesC::new(),
+                device_manager: crate::iodev::devices::DeviceManager::new(),
+                pc_system: crate::pc_system::BxPcSystemC::new(),
+            }
+        }
+
+        fn ctx<'a>(&'a mut self, cpu: &'a mut BxCpuC) -> ExecCtx<'a, ()> {
+            ExecCtx::new(
+                cpu,
+                crate::emulator::PcIo::new(
+                    &mut self.memory,
+                    &mut self.devices,
+                    &mut self.device_manager,
+                    &mut self.pc_system,
+                ),
+            )
+        }
+
+        /// The same four parts as [`Self::ctx`], as the loan an execution
+        /// engine holds — the shape `Emulator` lends to a hardware backend.
+        fn io(&mut self) -> crate::emulator::PcIo<'_> {
+            crate::emulator::PcIo::new(
+                &mut self.memory,
+                &mut self.devices,
+                &mut self.device_manager,
+                &mut self.pc_system,
+            )
+        }
+    }
+
+    /// An acknowledge that finds no controller holding a vector drops the
+    /// request the stale pin raised, and drops nothing else: a scheduler
+    /// boundary latched on the same word survives it, because the device
+    /// that asked for that boundary is still waiting for the machine to take
+    /// it.
+    #[test]
+    fn an_empty_acknowledge_keeps_the_scheduler_boundary_latched() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        cpu.reset(ResetReason::Hardware);
+        cpu.raise_async_event();
+        cpu.request_scheduler_boundary();
+
+        let acknowledged = bus.ctx(&mut cpu).acknowledge_external_interrupt();
+
+        assert_eq!(
+            acknowledged,
+            AcknowledgedInterrupt::None,
+            "neither the LAPIC nor the 8259 holds a vector after a hardware reset"
+        );
+        assert!(
+            cpu.wants_a_machine_boundary(),
+            "the boundary the machine owes is latched on async_event and must \
+             survive an acknowledge that found nothing to deliver"
+        );
+        assert_ne!(
+            cpu.async_event & crate::cpu::cpu::BX_ASYNC_EVENT_STOP_TRACE,
+            0,
+            "the running trace still stops, so the loop re-scans at its boundary"
+        );
     }
 
     #[test]
@@ -820,7 +1049,7 @@ mod tests {
             "AP must not advertise BSP bit"
         );
         assert_ne!(
-            ap.async_event & BxCpuC::<Corei7SkylakeX>::BX_ASYNC_EVENT_SLEEP,
+            ap.async_event & BxCpuC::<()>::BX_ASYNC_EVENT_SLEEP,
             0
         );
     }
@@ -828,9 +1057,10 @@ mod tests {
     #[test]
     fn sipi_starts_only_waiting_application_processor_at_vector_segment() {
         let mut ap = make_cpu(1);
+        let mut bus = TestBus::new();
         ap.reset(ResetReason::Hardware);
 
-        ap.deliver_sipi(TEST_SIPI_VECTOR);
+        bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
 
         assert_eq!(ap.activity_state, CpuActivityState::Active);
         assert_eq!(ap.get_cs_selector(), TEST_SIPI_CS_SELECTOR);
@@ -841,16 +1071,17 @@ mod tests {
     #[test]
     fn init_event_software_resets_active_ap_back_to_wait_for_sipi() {
         let mut ap = make_cpu(1);
+        let mut bus = TestBus::new();
         ap.reset(ResetReason::Hardware);
-        ap.deliver_sipi(TEST_SIPI_VECTOR);
+        bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
         ap.set_rax(NONZERO_RAX_SENTINEL);
 
         ap.deliver_init();
         assert_ne!(
-            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT,
+            ap.pending_event & BxCpuC::<()>::BX_EVENT_INIT,
             0
         );
-        let exited = ap.handle_async_event(None, None, None, &[]);
+        let exited = bus.ctx(&mut ap).handle_async_event();
 
         assert!(exited, "AP entering WAIT_FOR_SIPI must exit the cpu loop");
         assert_eq!(ap.rax(), 0);
@@ -860,8 +1091,9 @@ mod tests {
     #[test]
     fn svm_gif_false_holds_smi_and_init_pending() {
         let mut ap = make_cpu(1);
+        let mut bus = TestBus::new();
         ap.reset(ResetReason::Hardware);
-        ap.deliver_sipi(TEST_SIPI_VECTOR);
+        bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
         ap.set_rax(NONZERO_RAX_SENTINEL);
 
         // Bochs event.cc handleAsyncEvent: SMI and INIT checks are gated on
@@ -869,11 +1101,11 @@ mod tests {
         ap.svm_gif = false;
         ap.deliver_smi();
         ap.deliver_init();
-        let exited = ap.handle_async_event(None, None, None, &[]);
+        let exited = bus.ctx(&mut ap).handle_async_event();
 
         assert!(!exited);
-        assert!(ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI));
-        assert!(ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT));
+        assert!(ap.is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_SMI));
+        assert!(ap.is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_INIT));
         assert!(!ap.in_smm, "SMI must not enter SMM while GIF=0");
         assert_eq!(ap.activity_state, CpuActivityState::Active);
         assert_eq!(
@@ -884,9 +1116,9 @@ mod tests {
 
         // STGI: with GIF set again, the held INIT is processed. Drop the SMI
         // first so this test does not depend on SMM entry machinery.
-        ap.clear_event(BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI);
+        ap.clear_event(BxCpuC::<()>::BX_EVENT_SMI);
         ap.svm_gif = true;
-        let exited = ap.handle_async_event(None, None, None, &[]);
+        let exited = bus.ctx(&mut ap).handle_async_event();
 
         assert!(exited, "AP entering WAIT_FOR_SIPI must exit the cpu loop");
         assert_eq!(ap.rax(), 0);
@@ -896,16 +1128,17 @@ mod tests {
     #[test]
     fn svm_smi_intercept_takes_vmexit_and_keeps_smi_pending() {
         let mut ap = make_cpu(1);
+        let mut bus = TestBus::new();
         ap.reset(ResetReason::Hardware);
-        ap.deliver_sipi(TEST_SIPI_VECTOR);
+        bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
 
         ap.in_svm_guest = true;
         let mut vmcb = crate::cpu::svm::VmcbCache::default();
         vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_SMI;
-        ap.vmcb = Some(vmcb);
+        ap.vmcb = vmcb;
 
         ap.deliver_smi();
-        let exited = ap.handle_async_event(None, None, None, &[]);
+        let exited = bus.ctx(&mut ap).handle_async_event();
 
         // Bochs event.cc: Svm_Vmexit(SVM_VMEXIT_SMI) fires instead of SMM
         // entry, and the SMI stays pending (held by GIF=0 after the exit).
@@ -913,7 +1146,7 @@ mod tests {
         assert!(!ap.in_svm_guest, "SMI intercept must exit SVM guest mode");
         assert!(!ap.svm_gif, "GIF must be clear after SVM VMEXIT");
         assert!(
-            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI != 0,
+            ap.pending_event & BxCpuC::<()>::BX_EVENT_SMI != 0,
             "intercepted SMI must stay pending"
         );
         assert!(!ap.in_smm, "SMI intercept must preempt SMM entry");
@@ -922,16 +1155,17 @@ mod tests {
     #[test]
     fn svm_init_intercept_takes_vmexit_and_keeps_init_pending() {
         let mut ap = make_cpu(1);
+        let mut bus = TestBus::new();
         ap.reset(ResetReason::Hardware);
-        ap.deliver_sipi(TEST_SIPI_VECTOR);
+        bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
 
         ap.in_svm_guest = true;
         let mut vmcb = crate::cpu::svm::VmcbCache::default();
         vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_INIT;
-        ap.vmcb = Some(vmcb);
+        ap.vmcb = vmcb;
 
         ap.deliver_init();
-        let exited = ap.handle_async_event(None, None, None, &[]);
+        let exited = bus.ctx(&mut ap).handle_async_event();
 
         // Bochs event.cc: Svm_Vmexit(SVM_VMEXIT_INIT) fires with INIT still
         // pending; the CPU reset is skipped.
@@ -939,7 +1173,7 @@ mod tests {
         assert!(!ap.in_svm_guest, "INIT intercept must exit SVM guest mode");
         assert!(!ap.svm_gif, "GIF must be clear after SVM VMEXIT");
         assert!(
-            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT != 0,
+            ap.pending_event & BxCpuC::<()>::BX_EVENT_INIT != 0,
             "intercepted INIT must stay pending"
         );
         // An INIT reset would park the AP in WAIT_FOR_SIPI; the intercept
@@ -968,7 +1202,7 @@ mod tests {
         let bits = cpu.code_breakpoint_match(0x1234);
         assert_ne!(bits & 0x1, 0, "B0 status bit must be set on a match");
         assert_ne!(
-            bits & BxCpuC::<Corei7SkylakeX>::BX_DEBUG_TRAP_HIT,
+            bits & BxCpuC::<()>::BX_DEBUG_TRAP_HIT,
             0,
             "HIT must be set because DR0 is enabled in DR7"
         );
@@ -1003,7 +1237,7 @@ mod tests {
 
         let bits = cpu.pending_code_breakpoint_trap();
         assert_ne!(
-            bits & BxCpuC::<Corei7SkylakeX>::BX_DEBUG_TRAP_HIT,
+            bits & BxCpuC::<()>::BX_DEBUG_TRAP_HIT,
             0,
             "a DR0 armed on CS.base + EIP must hit (Bochs event.cc \
              code_breakpoint_match(get_laddr(CS, prev_rip)))"
@@ -1033,7 +1267,7 @@ mod tests {
         let bits = cpu.code_breakpoint_match(0x2000);
         assert_ne!(bits & 0x1, 0, "B0 status bit still reported for a match");
         assert_eq!(
-            bits & BxCpuC::<Corei7SkylakeX>::BX_DEBUG_TRAP_HIT,
+            bits & BxCpuC::<()>::BX_DEBUG_TRAP_HIT,
             0,
             "HIT must NOT be set: DR0 is not enabled in DR7"
         );
@@ -1042,16 +1276,17 @@ mod tests {
     #[test]
     fn smm_entry_masks_smi_and_nmi_until_rsm() {
         let mut ap = make_cpu(1);
+        let mut bus = TestBus::new();
         ap.reset(ResetReason::Hardware);
-        ap.deliver_sipi(TEST_SIPI_VECTOR);
+        bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
 
-        let held = BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI
-            | BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI
-            | BxCpuC::<Corei7SkylakeX>::BX_EVENT_VMX_VIRTUAL_NMI;
+        let held = BxCpuC::<()>::BX_EVENT_SMI
+            | BxCpuC::<()>::BX_EVENT_NMI
+            | BxCpuC::<()>::BX_EVENT_VMX_VIRTUAL_NMI;
 
         // SMI delivery enters SMM at the next instruction boundary.
         ap.deliver_smi();
-        let exited = ap.handle_async_event(None, None, None, &[]);
+        let exited = bus.ctx(&mut ap).handle_async_event();
         assert!(!exited);
         assert!(ap.in_smm, "SMI must enter System Management Mode");
         // Bochs smm.cc enter_system_management_mode masks SMI/NMI/virtual-NMI.
@@ -1064,10 +1299,10 @@ mod tests {
         // An NMI arriving during SMM stays pending and is not dispatched.
         ap.deliver_nmi();
         let rip_in_smm = ap.rip();
-        let exited = ap.handle_async_event(None, None, None, &[]);
+        let exited = bus.ctx(&mut ap).handle_async_event();
         assert!(!exited);
         assert_ne!(
-            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI,
+            ap.pending_event & BxCpuC::<()>::BX_EVENT_NMI,
             0,
             "NMI during SMM must stay pending until RSM"
         );
@@ -1078,7 +1313,8 @@ mod tests {
         );
 
         // RSM releases the held events (Bochs smm.cc RSM).
-        ap.rsm(&crate::cpu::decoder::Instruction::default())
+        bus.ctx(&mut ap)
+            .rsm(&crate::cpu::decoder::Instruction::default())
             .expect("RSM must succeed outside VMX/SVM guest mode");
         assert!(!ap.in_smm);
         assert_eq!(
@@ -1087,7 +1323,7 @@ mod tests {
             "RSM must unmask SMI, NMI, and VMX virtual-NMI"
         );
         assert_ne!(
-            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI,
+            ap.pending_event & BxCpuC::<()>::BX_EVENT_NMI,
             0,
             "the held NMI is still pending after RSM for the next boundary"
         );
@@ -1098,8 +1334,9 @@ mod tests {
         use crate::cpu::crregs::{BxCr0, BxCr4};
 
         let mut ap = make_cpu(1);
+        let mut bus = TestBus::new();
         ap.reset(ResetReason::Hardware);
-        ap.deliver_sipi(TEST_SIPI_VECTOR);
+        bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
 
         // Simulate a CPU in VMX non-root operation when the SMI hits.
         ap.cr4.insert(BxCr4::VMXE);
@@ -1107,7 +1344,7 @@ mod tests {
         ap.in_vmx_guest = true;
 
         ap.deliver_smi();
-        let exited = ap.handle_async_event(None, None, None, &[]);
+        let exited = bus.ctx(&mut ap).handle_async_event();
         assert!(!exited);
         assert!(ap.in_smm, "SMI must enter System Management Mode");
 
@@ -1128,7 +1365,8 @@ mod tests {
         // RSM restores VMX operation and forces CR0.PE/NE/PG + CR4.VMXE
         // in the restored state (Bochs smm.cc
         // resume_from_system_management_mode).
-        ap.rsm(&crate::cpu::decoder::Instruction::default())
+        bus.ctx(&mut ap)
+            .rsm(&crate::cpu::decoder::Instruction::default())
             .expect("RSM must succeed outside VMX/SVM guest mode");
         assert!(!ap.in_smm);
         assert!(ap.in_vmx, "RSM must restore VMX root operation");
@@ -1148,6 +1386,7 @@ mod tests {
     #[test]
     fn vmx_sipi_takes_vmexit_instead_of_starting_ap() {
         let mut ap = make_cpu(1);
+        let mut bus = TestBus::new();
         ap.reset(ResetReason::Hardware);
         assert_eq!(ap.activity_state, CpuActivityState::WaitForSipi);
 
@@ -1156,7 +1395,7 @@ mod tests {
         ap.in_vmx = true;
         ap.in_vmx_guest = true;
 
-        ap.deliver_sipi(TEST_SIPI_VECTOR);
+        bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
 
         // Bochs event.cc deliver_SIPI: VMexit(VMX_VMEXIT_SIPI, vector) fires
         // instead of the real-mode activation.
@@ -1170,15 +1409,660 @@ mod tests {
         );
         assert_eq!(
             ap.event_mask
-                & (BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI | BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI),
+                & (BxCpuC::<()>::BX_EVENT_SMI | BxCpuC::<()>::BX_EVENT_NMI),
             0,
             "SIPI unmasks SMI/NMI before the VMexit (Bochs deliver_SIPI)"
         );
         assert_ne!(
-            ap.event_mask & BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT,
+            ap.event_mask & BxCpuC::<()>::BX_EVENT_INIT,
             0,
             "the VMexit itself re-masks INIT (Bochs vmx.cc: INIT is \
              disabled in VMX root mode)"
+        );
+    }
+
+    /// IRQ1's line at the fabric.
+    const KEYBOARD_LINE: rusty_box_devices::api::IrqLine = rusty_box_devices::api::IrqLine(1);
+    /// IRQ1 through the master 8259's power-on offset (pic.rs `new`: 0x08).
+    const IRQ1_VECTOR: u8 = 0x09;
+    /// The master 8259's spurious vector: its offset + 7 (Bochs pic.cc IAC).
+    const SPURIOUS_VECTOR: u8 = 0x0F;
+
+    /// A machine with IRQ1 raised at the fabric and mirrored onto the CPU's
+    /// event bit — the pair `sync_io_events` (emulator/io.rs) leaves behind
+    /// when a device dispatch latches the PIC line. IF is set so the
+    /// interpreter's Priority-5 arm sees the event unmasked.
+    fn machine_with_irq1_raised() -> (alloc::boxed::Box<BxCpuC>, TestBus) {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        cpu.reset(ResetReason::Hardware);
+        // The 8259 powers on with every line masked; unmask them all, as a
+        // guest's OCW1 write would.
+        bus.device_manager.irq.pic_mut().master.imr = 0x00;
+        bus.device_manager.irq.raise(KEYBOARD_LINE);
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+        cpu.eflags.insert(EFlags::IF_);
+        cpu.handle_interrupt_mask_change();
+        (cpu, bus)
+    }
+
+    /// The extracted INTA body and the interpreter's delivery agree: raising
+    /// a PIC line and letting handle_async_event run delivers the same
+    /// vector, through the same counted acknowledge, as popping it directly.
+    #[test]
+    fn the_popper_and_the_interpreter_acknowledge_identically() {
+        // Machine A: the interpreter's own delivery path.
+        let (mut cpu, mut bus) = machine_with_irq1_raised();
+        assert_eq!(bus.device_manager.irq.acknowledge_count(), 0);
+
+        let exited = bus.ctx(&mut cpu).handle_async_event();
+
+        assert!(!exited);
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            1,
+            "the interpreter takes exactly one counted INTA"
+        );
+        assert_eq!(bus.device_manager.irq.vectors_acknowledged(IRQ1_VECTOR), 1);
+        // Delivery really happened: real-mode delivery loads CS:IP from IVT
+        // entry 9 (zeroed memory: 0000:0000) and clears IF.
+        assert_eq!(cpu.get_cs_selector(), 0);
+        assert_eq!(cpu.rip(), 0);
+        assert!(!cpu.eflags.contains(EFlags::IF_));
+
+        // Machine B: identical setup, the vector popped directly — the
+        // engine's INTA moment.
+        let (mut cpu, mut bus) = machine_with_irq1_raised();
+        assert_eq!(bus.device_manager.irq.acknowledge_count(), 0);
+
+        let popped = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(popped, Some(IRQ1_VECTOR), "same vector as the interpreter");
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            1,
+            "same acknowledge delta as the interpreter"
+        );
+        assert_eq!(bus.device_manager.irq.vectors_acknowledged(IRQ1_VECTOR), 1);
+    }
+
+    /// A line that drops between assertion and acknowledge produces the
+    /// 8259's spurious vector through the popper exactly as a real INTA
+    /// would — Bochs pic.cc IAC: no unmasked request answers offset + 7.
+    #[test]
+    fn a_line_lowered_before_the_inta_pops_the_spurious_vector() {
+        let (mut cpu, mut bus) = machine_with_irq1_raised();
+        // The device drops the line before the acknowledge. The edge-latched
+        // INT pin stays asserted — Bochs pic.cc lower_irq clears IRR only.
+        bus.device_manager.irq.lower(KEYBOARD_LINE);
+        assert!(bus.device_manager.irq.int_pin_asserted());
+
+        let popped = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(popped, Some(SPURIOUS_VECTOR));
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            1,
+            "a spurious INTA is still a counted INTA"
+        );
+        assert_eq!(
+            bus.device_manager.irq.vectors_acknowledged(SPURIOUS_VECTOR),
+            1
+        );
+    }
+
+    /// With nothing asserted at the PIC the popper answers None and
+    /// reconciles the stale CPU event bit, exactly as the interpreter's
+    /// deasserted-pin branch does — and takes no INTA doing it.
+    #[test]
+    fn an_empty_pic_pops_none_and_reconciles_the_stale_event_bit() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        cpu.reset(ResetReason::Hardware);
+        // A stale assertion: the event bit set with the INT pin deasserted.
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
+
+        let popped = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(popped, None);
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            0,
+            "no INTA on an empty PIC"
+        );
+        assert_eq!(
+            cpu.pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
+            0,
+            "the stale event bit is reconciled"
+        );
+        assert_eq!(
+            cpu.async_event,
+            BxCpuC::<()>::BX_ASYNC_EVENT_STOP_TRACE,
+            "the boundary ends the trace instead of rescanning an empty PIC"
+        );
+    }
+
+    /// A LAPIC vector in priority class 0x40 — above the power-on PPR of 0,
+    /// so the LAPIC will deliver it, and distinct from every 8259 vector.
+    const LAPIC_VECTOR: u8 = 0x41;
+    /// xAPIC spurious-vector register offset (Bochs apic.h BX_LAPIC_SPURIOUS_VECTOR).
+    const LAPIC_SVR_OFFSET: u64 = 0xF0;
+    /// The guest-visible IRR/ISR word holding [`LAPIC_VECTOR`]'s bit:
+    /// word 0x41 / 32 = 2 of the register file (Bochs apic.cc read_aligned).
+    const LAPIC_VECTOR_ISR_OFFSET: u64 = 0x120;
+    const LAPIC_VECTOR_IRR_OFFSET: u64 = 0x220;
+    /// Bit 0x41 % 32 = 1 inside that word.
+    const LAPIC_VECTOR_REG_BIT: u32 = 1 << 1;
+
+    /// With BOTH controllers armed, the LAPIC answers the boundary and the
+    /// 8259 is left untouched — Bochs event.cc interrupt_acknowledge
+    /// consults the local APIC before DEV_pic_iac. The 8259's request must
+    /// survive the LAPIC's turn: the next pop answers with the PIC's vector.
+    #[test]
+    fn the_lapic_outranks_the_pic_and_the_pic_request_survives() {
+        use crate::cpu::apic::{ApicDeliveryMode, APIC_EDGE_TRIGGERED};
+
+        let (mut cpu, mut bus) = machine_with_irq1_raised();
+        // The guest software-enables its LAPIC before use — an SVR write
+        // with bit 8 set, keeping the power-on spurious vector 0xFF.
+        cpu.lapic.write_aligned(LAPIC_SVR_OFFSET, 0x1FF, 0);
+        // A fixed interrupt arrives over the APIC bus and lands in the IRR.
+        assert!(
+            cpu.lapic.deliver(
+                LAPIC_VECTOR,
+                ApicDeliveryMode::Fixed as u8,
+                APIC_EDGE_TRIGGERED
+            ),
+            "fixed delivery is accepted"
+        );
+        assert!(cpu.lapic.intr, "service_local_apic raised INTR");
+        cpu.sync_lapic_events();
+        assert_ne!(
+            cpu.pending_event & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR,
+            0,
+            "the sync point mirrored INTR onto the CPU event bit"
+        );
+
+        let first = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(
+            first,
+            Some(LAPIC_VECTOR),
+            "the LAPIC's vector wins the boundary"
+        );
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            0,
+            "the 8259 saw no INTA while the LAPIC answered"
+        );
+        // The vector really moved IRR -> ISR: the guest-visible ISR word
+        // reads it back, and the LAPIC's INTR line dropped.
+        assert_eq!(
+            cpu.lapic.read_aligned(LAPIC_VECTOR_ISR_OFFSET, 0) & LAPIC_VECTOR_REG_BIT,
+            LAPIC_VECTOR_REG_BIT,
+            "the acknowledged vector is in service"
+        );
+        assert!(!cpu.lapic.intr, "the LAPIC consumed its request");
+
+        // The PIC's request was preserved, not dropped: the next boundary
+        // answers with it, through the fabric's counted INTA.
+        let second = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(
+            second,
+            Some(IRQ1_VECTOR),
+            "the 8259's request survived the LAPIC's turn"
+        );
+        assert_eq!(bus.device_manager.irq.acknowledge_count(), 1);
+        assert_eq!(bus.device_manager.irq.vectors_acknowledged(IRQ1_VECTOR), 1);
+    }
+
+    /// Vector 0 is a vector. With the SVR's vector bits programmed to 0 (the
+    /// xAPIC model keeps all eight writable — Bochs apic.cc
+    /// write_spurious_interrupt_register) a nothing-deliverable acknowledge
+    /// answers 0 (Bochs apic.cc acknowledge_int returns spurious_vector), and
+    /// Bochs event.cc interrupt_acknowledge hands that answer on unchanged.
+    /// The 8259 sat behind a LAPIC that raised INTR, so it does not get an
+    /// INTA cycle this boundary — its request stays latched for the next one.
+    #[test]
+    fn a_zero_vector_from_the_lapic_is_delivered_and_the_pic_waits() {
+        use crate::cpu::apic::{ApicDeliveryMode, APIC_EDGE_TRIGGERED};
+
+        let (mut cpu, mut bus) = machine_with_irq1_raised();
+        // The guest software-enables the LAPIC with spurious vector 0.
+        cpu.lapic.write_aligned(LAPIC_SVR_OFFSET, 0x100, 0);
+        // A fixed interrupt raises INTR...
+        assert!(cpu.lapic.deliver(
+            LAPIC_VECTOR,
+            ApicDeliveryMode::Fixed as u8,
+            APIC_EDGE_TRIGGERED
+        ));
+        assert!(cpu.lapic.intr);
+        cpu.sync_lapic_events();
+        // ...and the guest raises TPR to the vector's class before the
+        // INTA — the race that makes the acknowledge answer the spurious
+        // vector (Bochs apic.cc acknowledge_int: vector & 0xf0 <= get_ppr()).
+        cpu.lapic.set_tpr(LAPIC_VECTOR);
+        assert!(
+            cpu.lapic.intr,
+            "raising TPR does not lower an already-raised INTR"
+        );
+
+        let popped = bus.io().pop_deliverable_vector(&mut cpu);
+
+        assert_eq!(
+            popped,
+            Some(0),
+            "the LAPIC's spurious vector is the answer, zero included"
+        );
+        assert_eq!(
+            bus.device_manager.irq.acknowledge_count(),
+            0,
+            "the 8259 was not acknowledged behind a LAPIC that answered"
+        );
+        assert!(
+            bus.device_manager.irq.int_pin_asserted(),
+            "the 8259 still holds its request for the next boundary"
+        );
+        assert!(!cpu.lapic.intr, "the spurious acknowledge lowered INTR");
+        // The blocked request stays latched for when TPR drops: the
+        // guest-visible IRR word still holds the vector's bit.
+        assert_eq!(
+            cpu.lapic.read_aligned(LAPIC_VECTOR_IRR_OFFSET, 0) & LAPIC_VECTOR_REG_BIT,
+            LAPIC_VECTOR_REG_BIT,
+            "the TPR-blocked request is not dropped"
+        );
+    }
+
+    /// A halted processor is woken by every event Bochs wakes it for.
+    ///
+    /// `handleWaitForEvent` (event.cc) ends the wait for NMI/SMI/INIT *and*
+    /// for the events only a VMEXIT can answer — the virtual-APIC updates,
+    /// the monitor trap flag and the virtual NMI. `handleAsyncEvent` calls
+    /// it first and returns immediately when it says "still halted", so an
+    /// event missing from this condition is one the processor can never
+    /// reach: the VMEXIT below it never runs.
+    #[test]
+    fn a_halted_processor_wakes_for_the_events_only_a_vmexit_can_answer() {
+        for event in [
+            BxCpuC::<()>::BX_EVENT_VMX_MONITOR_TRAP_FLAG,
+            BxCpuC::<()>::BX_EVENT_VMX_VIRTUAL_NMI,
+            BxCpuC::<()>::BX_EVENT_VMX_VTPR_UPDATE,
+            BxCpuC::<()>::BX_EVENT_VMX_VEOI_UPDATE,
+            BxCpuC::<()>::BX_EVENT_VMX_VIRTUAL_APIC_WRITE,
+        ] {
+            let mut cpu = make_cpu(0);
+            let mut bus = TestBus::new();
+            cpu.reset(ResetReason::Hardware);
+            cpu.activity_state = CpuActivityState::Hlt;
+            cpu.unmask_event(event);
+            cpu.signal_event(event);
+
+            let mut ctx = bus.ctx(&mut cpu);
+
+            assert!(
+                !ctx.handle_wait_for_event(),
+                "event {event:#x} must end the wait so its VMEXIT can be taken"
+            );
+        }
+    }
+
+    /// The expired VMX preemption timer ends the wait without the side
+    /// effects an interrupt wake has.
+    ///
+    /// Bochs event.cc gives it a branch of its own, after the interrupt
+    /// condition: it breaks out of the wait loop but does not reset the
+    /// MONITOR and does not clear the inhibit mask, because nothing was
+    /// delivered — the processor is only being let go so the VMEXIT can run.
+    #[test]
+    fn an_expired_preemption_timer_ends_the_wait_without_clearing_inhibits() {
+        const INHIBITED: u32 = 1;
+
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        cpu.reset(ResetReason::Hardware);
+        cpu.activity_state = CpuActivityState::Mwait;
+        cpu.monitor.arm(0x1000, crate::cpu::cpu::BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.inhibit_mask = INHIBITED;
+        cpu.unmask_event(BxCpuC::<()>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+
+        let mut ctx = bus.ctx(&mut cpu);
+        assert!(
+            !ctx.handle_wait_for_event(),
+            "an expired preemption timer ends the wait"
+        );
+
+        assert!(
+            cpu.monitor.armed(),
+            "the preemption timer delivered nothing, so the MONITOR stays armed"
+        );
+        assert_eq!(
+            cpu.inhibit_mask, INHIBITED,
+            "the preemption timer does not clear the inhibits an interrupt wake clears"
+        );
+    }
+
+    /// A user interrupt wakes a halted processor on the same terms as any
+    /// other interrupt: Bochs event.cc puts `BX_EVENT_PENDING_UINTR` in the
+    /// group gated on EFLAGS.IF (or the MWAIT_IF state MWAIT's ECX[0] asks
+    /// for), alongside the 8259's and the LAPIC's.
+    #[test]
+    fn a_user_interrupt_wakes_a_halted_processor_only_when_interrupts_are_enabled() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        cpu.reset(ResetReason::Hardware);
+        cpu.activity_state = CpuActivityState::Hlt;
+        cpu.eflags.remove(super::super::eflags::EFlags::IF_);
+        cpu.unmask_event(BxCpuC::<()>::BX_EVENT_PENDING_UINTR);
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_UINTR);
+
+        assert!(
+            bus.ctx(&mut cpu).handle_wait_for_event(),
+            "with interrupts disabled the wait continues"
+        );
+
+        cpu.eflags.insert(super::super::eflags::EFlags::IF_);
+
+        assert!(
+            !bus.ctx(&mut cpu).handle_wait_for_event(),
+            "with interrupts enabled the user interrupt ends the wait"
+        );
+    }
+
+    // ── The trap an errand owes ─────────────────────────────────────────
+    //
+    // An execution engine hands ONE instruction to the shadow processor to
+    // service an access the hardware cannot finish, and takes the processor
+    // back the moment it retires. The interpreter delivers a single-step
+    // `#DB` at the head of the NEXT instruction (Bochs event.cc
+    // handleAsyncEvent, Priority 4) — a head an errand never reaches — so the
+    // errand's tail asks for the trap by name. These tests drive the two
+    // verbs the tail uses, in the tail's order, and assert only what the
+    // guest can see (R9).
+
+    /// Where the trap tests' real-mode guest lives: its code, its `#DB`
+    /// handler, its stack, and the IVT slot vector 1 occupies.
+    const TRAP_CODE: u16 = 0x1000;
+    const TRAP_HANDLER: u16 = 0x1100;
+    const TRAP_STACK_TOP: u16 = 0x7000;
+    const IVT_VECTOR_1: u64 = 1 * 4;
+    /// EFLAGS bit 1 reads as one; the rest of the word starts clear.
+    const RFLAGS_RESERVED: u64 = 0x2;
+    const RFLAGS_TF: u64 = 1 << 8;
+    /// `VcpuArchState::gprs` is in the processor's own order; RSP is fourth.
+    const GPR_RSP: usize = 4;
+    /// A real-mode interrupt frame: FLAGS, CS, IP — three words.
+    const REAL_MODE_FRAME: u16 = 6;
+
+    /// Load `code` at 0:TRAP_CODE and point IVT vector 1 at a handler that
+    /// is a lone `iret` — never reached by these tests, which stop at its
+    /// entry.
+    fn install_real_mode_guest(bus: &mut TestBus, code: &[u8]) {
+        bus.memory
+            .write_ram(u64::from(TRAP_CODE), code)
+            .expect("the guest's code is RAM");
+        bus.memory
+            .write_ram(u64::from(TRAP_HANDLER), &[0xCF])
+            .expect("the handler is RAM");
+        let mut vector = [0u8; 4];
+        vector[..2].copy_from_slice(&TRAP_HANDLER.to_le_bytes());
+        bus.memory
+            .write_ram(IVT_VECTOR_1, &vector)
+            .expect("the IVT is RAM");
+    }
+
+    /// Bring a processor to 0:TRAP_CODE with SS:SP = 0:TRAP_STACK_TOP and
+    /// `rflags`, the way an errand begins: through the architectural state
+    /// exchange (`import_arch_state`), which is the path whose flags write
+    /// has to arm the boundary.
+    fn reset_into_real_mode_at(cpu: &mut BxCpuC, rflags: u64) {
+        cpu.reset(ResetReason::Hardware);
+        let mut state = VcpuArchState::default();
+        cpu.export_arch_state(&mut state);
+        state.rip = u64::from(TRAP_CODE);
+        state.rflags = rflags;
+        state.gprs[GPR_RSP] = u64::from(TRAP_STACK_TOP);
+        let cs = &mut state.segments[BxSegregs::Cs as usize];
+        cs.selector = 0;
+        cs.base = 0;
+        cpu.import_arch_state(&state)
+            .expect("a reset state moved to low memory imports");
+    }
+
+    /// The seam re-reads the processor from the hardware before every errand;
+    /// this is that read-back with only the flags changed.
+    fn reimport_with_rflags(cpu: &mut BxCpuC, rflags: u64) {
+        let mut state = VcpuArchState::default();
+        cpu.export_arch_state(&mut state);
+        state.rflags = rflags;
+        cpu.import_arch_state(&state)
+            .expect("a state the processor just exported imports");
+    }
+
+    fn read_word(bus: &mut TestBus, addr: u64) -> u16 {
+        let mut word = [0u8; 2];
+        let read = bus
+            .memory
+            .read_ram(addr, &mut word)
+            .expect("the stack is RAM");
+        assert_eq!(read, word.len(), "a whole word is readable at {addr:#x}");
+        u16::from_le_bytes(word)
+    }
+
+    /// The errand's tail, in the engine's order: retire the trapped
+    /// instruction whole, then deliver whatever trap it owes.
+    fn run_one_errand(bus: &mut TestBus, cpu: &mut BxCpuC) {
+        bus.io()
+            .finish_the_instruction(cpu)
+            .expect("the errand's instruction retires");
+        bus.io()
+            .deliver_the_trap_owed(cpu)
+            .expect("the trap owed is discharged");
+    }
+
+    /// An instruction retired by an errand with TF set is owed a single-step
+    /// `#DB`, and the guest sees it exactly as it would under the interpreter:
+    /// the handler entered, the frame's saved IP past the retired
+    /// instruction, DR6.BS set, TF clear for the handler.
+    #[test]
+    fn an_errand_delivers_the_step_the_retired_instruction_owes() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        // inc bx
+        install_real_mode_guest(&mut bus, &[0x43]);
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED | RFLAGS_TF);
+
+        run_one_errand(&mut bus, &mut cpu);
+
+        assert_eq!(cpu.bx(), 1, "the errand's instruction retired");
+        assert_eq!(cpu.get_cs_base(), 0, "the handler's segment is the IVT's");
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_HANDLER),
+            "the processor stands at the #DB handler's entry"
+        );
+        assert_eq!(
+            cpu.sp(),
+            TRAP_STACK_TOP - REAL_MODE_FRAME,
+            "one real-mode interrupt frame was pushed"
+        );
+        assert_eq!(
+            read_word(&mut bus, u64::from(TRAP_STACK_TOP - REAL_MODE_FRAME)),
+            TRAP_CODE + 1,
+            "the saved IP is the address after the retired instruction"
+        );
+        assert!(cpu.dr6.bs(), "DR6.BS reports a single step");
+        assert!(
+            !cpu.eflags.contains(EFlags::TF),
+            "TF is clear for the handler"
+        );
+        assert_eq!(cpu.debug_trap, 0, "nothing is left latched for the next errand");
+    }
+
+    /// An errand whose instruction SETS TF owes nothing, and leaves nothing
+    /// behind to fire at the next errand.
+    ///
+    /// x86 traps after the instruction that RAN with TF set, not after the
+    /// one that set it — Bochs event.cc handleAsyncEvent arms
+    /// `BX_DEBUG_SINGLE_STEP_BIT` at the boundary before an instruction, from
+    /// the TF it starts with. `POPF` and `IRET` are what a stepping debugger
+    /// runs, so an errand retiring one is the ordinary case. A discharge that
+    /// re-armed from the new TF would strand a latch in the shadow; the
+    /// hardware then runs the guest and delivers that step itself, and the
+    /// latch fires at whatever the next errand happens to be.
+    #[test]
+    fn an_errand_that_sets_tf_strands_no_step_for_the_next_errand() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        // popf ; inc bx — the second is the next errand's instruction.
+        install_real_mode_guest(&mut bus, &[0x9D, 0x43]);
+        // The word POPF pops: TF set.
+        bus.memory
+            .write_ram(
+                u64::from(TRAP_STACK_TOP),
+                &((RFLAGS_RESERVED | RFLAGS_TF) as u16).to_le_bytes(),
+            )
+            .expect("the stack is RAM");
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED);
+
+        run_one_errand(&mut bus, &mut cpu);
+
+        assert!(cpu.eflags.contains(EFlags::TF), "POPF set TF");
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_CODE + 1),
+            "no trap after the instruction that set TF"
+        );
+        assert_eq!(cpu.sp(), TRAP_STACK_TOP + 2, "POPF popped and nothing was pushed");
+        assert_eq!(cpu.debug_trap, 0, "no latch survives the errand");
+
+        // The hardware runs the guest from here and takes the next step
+        // itself; when the next errand arrives the exit header says TF is
+        // clear.
+        reimport_with_rflags(&mut cpu, RFLAGS_RESERVED);
+
+        run_one_errand(&mut bus, &mut cpu);
+
+        assert_eq!(cpu.bx(), 1, "the next errand's instruction retired");
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_CODE + 2),
+            "no stranded step fires against the next errand's instruction"
+        );
+        assert_eq!(cpu.sp(), TRAP_STACK_TOP + 2, "no frame was pushed");
+        assert!(!cpu.dr6.bs(), "DR6.BS never reported a step");
+        assert_eq!(cpu.debug_trap, 0, "no latch survives the second errand either");
+    }
+
+    /// `MOV SS` inhibits the trap for exactly one instruction (Bochs cpu.h
+    /// `BX_INHIBIT_INTERRUPTS_BY_MOVSS`; `inhibit_interrupts` refuses to
+    /// extend the window), so the errand's tail retires that one instruction
+    /// and delivers then — the frame's saved IP is past BOTH instructions,
+    /// as it is under the interpreter, and no step is stranded or lost.
+    #[test]
+    fn a_step_owed_by_mov_ss_is_delivered_after_the_instruction_it_shadows() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        // mov ss,ax (AX is zero out of reset, so SS stays 0) ; inc bx
+        install_real_mode_guest(&mut bus, &[0x8E, 0xD0, 0x43]);
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED | RFLAGS_TF);
+
+        run_one_errand(&mut bus, &mut cpu);
+
+        assert_eq!(cpu.bx(), 1, "the shadowed instruction retired before the trap");
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_HANDLER),
+            "the processor stands at the #DB handler's entry"
+        );
+        assert_eq!(
+            read_word(&mut bus, u64::from(TRAP_STACK_TOP - REAL_MODE_FRAME)),
+            TRAP_CODE + 3,
+            "the saved IP is past the instruction MOV SS shadowed"
+        );
+        assert!(cpu.dr6.bs(), "DR6.BS reports a single step");
+        assert_eq!(cpu.debug_trap, 0, "nothing is left latched for the next errand");
+    }
+
+    /// A processor that goes to sleep owing a step keeps the step for its
+    /// wake. Bochs event.cc handleAsyncEvent runs handleWaitForEvent before
+    /// Priority 4, so a halted processor is not woken by its own trap: the
+    /// errand's tail leaves the latch in place, the processor stays halted,
+    /// and the interpreted instruction the slice head hands a woken
+    /// processor delivers the trap first — ahead of the event that woke it.
+    #[test]
+    fn a_step_owed_by_a_halted_processor_is_kept_for_the_wake() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        // mov ss,ax ; hlt — the instruction the inhibit shadows halts.
+        install_real_mode_guest(&mut bus, &[0x8E, 0xD0, 0xF4]);
+        // The handler: inc cx ; iret — its first instruction marks the wake.
+        bus.memory
+            .write_ram(u64::from(TRAP_HANDLER), &[0x41, 0xCF])
+            .expect("the handler is RAM");
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED | RFLAGS_TF);
+
+        run_one_errand(&mut bus, &mut cpu);
+
+        assert_eq!(
+            cpu.activity_state,
+            CpuActivityState::Hlt,
+            "the processor stays halted"
+        );
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_CODE + 3),
+            "no handler was entered"
+        );
+        assert_eq!(cpu.sp(), TRAP_STACK_TOP, "no frame was pushed");
+        assert!(!cpu.dr6.bs(), "DR6 reports nothing yet");
+        assert!(cpu.owes_a_debug_trap(), "the step is owed, not lost");
+
+        // With nothing pending, the machine's own verb finds it still
+        // waiting: Bochs event.cc handleAsyncEvent asks handleWaitForEvent
+        // before Priority 4, so a halted processor is not woken by the trap
+        // it owes.
+        bus.io()
+            .emulate_one(&mut cpu)
+            .expect("a wait that continues retires nothing");
+        assert_eq!(
+            cpu.activity_state,
+            CpuActivityState::Hlt,
+            "still halted with nothing to wake it"
+        );
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_CODE + 3),
+            "the trap did not end the wait"
+        );
+        assert_eq!(cpu.sp(), TRAP_STACK_TOP, "still no frame");
+        assert!(cpu.owes_a_debug_trap(), "the step is still owed");
+
+        // The machine wakes it the way the slice head does: an event arrives
+        // and the halted processor is handed one interpreted instruction.
+        cpu.signal_event(BxCpuC::<()>::BX_EVENT_NMI);
+        bus.io()
+            .emulate_one(&mut cpu)
+            .expect("the wake retires");
+
+        assert_eq!(cpu.activity_state, CpuActivityState::Active);
+        assert_eq!(
+            cpu.rip(),
+            u64::from(TRAP_HANDLER + 1),
+            "the #DB handler was entered and its first instruction retired"
+        );
+        assert_eq!(cpu.cx(), 1, "that instruction was the handler's");
+        assert_eq!(
+            read_word(&mut bus, u64::from(TRAP_STACK_TOP - REAL_MODE_FRAME)),
+            TRAP_CODE + 3,
+            "the saved IP is past the HLT"
+        );
+        assert!(cpu.dr6.bs(), "DR6.BS reports the single step");
+        assert_eq!(cpu.debug_trap, 0, "the latch was consumed by the wake");
+        assert!(
+            cpu.is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_NMI),
+            "the NMI that ended the wait is still pending: the trap outranks it"
         );
     }
 }

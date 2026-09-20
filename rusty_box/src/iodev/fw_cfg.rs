@@ -8,13 +8,11 @@
 //!
 //! Reference: `cpp_orig/bochs/iodev/fw_cfg.cc` (700 lines)
 
-use crate::memory::{BxMemC, CpuTlbPin};
-#[cfg(feature = "std")]
-use std::io::{self, Error, ErrorKind, Read, Write};
+use crate::memory::BxMemC;
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
 };
 
 // ─── I/O Ports ──────────────────────────────────────────────────────────
@@ -304,7 +302,7 @@ impl BxFwCfg {
     /// The parent PLATFORM section owns the section-version prefix.  This
     /// component intentionally writes only its state body.
     #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         self.validate_snapshot_v3_state()?;
 
         let slot_bytes = checked_snapshot_len_mul(
@@ -327,7 +325,7 @@ impl BxFwCfg {
 
     /// Streams the PLATFORM fw_cfg component body without staging a payload.
     #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.validate_snapshot_v3_state()?;
 
         writer.write_u32(u32::from(self.slot_count))?;
@@ -360,10 +358,10 @@ impl BxFwCfg {
     /// stream; a later I/O error leaves the instance non-resumable, matching
     /// the parent snapshot restore contract.
     #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<()> {
+        reader: &mut R,
+    ) -> SnapResult<()> {
         let slot_count = reader.read_count(FW_CFG_MAX_ENTRIES)?;
         let data_used = reader.read_len(FW_CFG_DATA_POOL_SIZE)?;
         let cur_entry = reader.read_u16()?;
@@ -420,7 +418,7 @@ impl BxFwCfg {
     }
 
     #[cfg(feature = "std")]
-    fn validate_snapshot_v3_state(&self) -> io::Result<()> {
+    fn validate_snapshot_v3_state(&self) -> SnapResult<()> {
         let slot_count = usize::from(self.slot_count);
         let file_count = usize::from(self.file_count);
         if slot_count > FW_CFG_MAX_ENTRIES
@@ -534,8 +532,7 @@ impl BxFwCfg {
         address: u16,
         value: u32,
         io_len: u8,
-        mem: Option<&mut BxMemC<'_>>,
-        pins: &[CpuTlbPin],
+        mem: &mut BxMemC,
     ) {
         match address {
             FW_CFG_IO_BASE => {
@@ -564,7 +561,7 @@ impl BxFwCfg {
                     } else if offset == 4 {
                         // Low 32 bits → port 0x518 — triggers DMA
                         self.dma_addr = (self.dma_addr & 0xFFFF_FFFF_0000_0000) | swapped as u64;
-                        self.trigger_dma(mem, pins);
+                        self.trigger_dma(&mut *mem);
                     }
                 } else if io_len == 1 {
                     // Byte-by-byte write (big-endian)
@@ -574,7 +571,7 @@ impl BxFwCfg {
 
                     // Trigger when last byte (offset 7) is written
                     if offset == 7 {
-                        self.trigger_dma(mem, pins);
+                        self.trigger_dma(&mut *mem);
                     }
                 }
             }
@@ -582,17 +579,11 @@ impl BxFwCfg {
         }
     }
 
-    /// Trigger DMA processing if memory is available, then clear dma_addr.
-    fn trigger_dma(&mut self, mem: Option<&mut BxMemC<'_>>, pins: &[CpuTlbPin]) {
+    /// Process the descriptor the guest just finished addressing, then clear
+    /// `dma_addr` so a partial re-write cannot replay it.
+    fn trigger_dma(&mut self, mem: &mut BxMemC) {
         let addr = self.dma_addr;
-        if let Some(m) = mem {
-            self.process_dma(addr, m, pins);
-        } else {
-            tracing::error!(
-                "fw_cfg DMA: triggered at {:#x} but no memory available",
-                addr
-            );
-        }
+        self.process_dma(addr, mem);
         self.dma_addr = 0;
     }
 
@@ -604,11 +595,11 @@ impl BxFwCfg {
     /// - control (4 bytes): SELECT/READ/SKIP/WRITE flags + key in upper 16 bits
     /// - length (4 bytes)
     /// - address (8 bytes): guest physical address for data transfer
-    fn process_dma(&mut self, dma_addr: u64, mem: &mut BxMemC<'_>, pins: &[CpuTlbPin]) {
+    fn process_dma(&mut self, dma_addr: u64, mem: &mut BxMemC) {
         // A DMA descriptor is indivisible: do not interpret a short/hole
         // prefix, because its control word may not belong to this request.
         let mut desc = [0u8; 16];
-        match mem.read_ram(pins, dma_addr, &mut desc) {
+        match mem.read_ram(dma_addr, &mut desc) {
             Ok(16) => {}
             Ok(copied) => {
                 tracing::error!(
@@ -650,7 +641,7 @@ impl BxFwCfg {
             if let Some(data) = self.get_entry_data(key) {
                 let available = data.len().saturating_sub(entry_offset);
                 let requested = available.min(length as usize);
-                let committed = match mem.write_ram(pins, address, &data[entry_offset..entry_offset + requested]) {
+                let committed = match mem.write_ram(address, &data[entry_offset..entry_offset + requested]) {
                     Ok(copied) => copied,
                     Err(error) => {
                         tracing::error!("fw_cfg DMA READ: write to {address:#x} failed: {error:?}");
@@ -687,7 +678,7 @@ impl BxFwCfg {
 
         control &= !FW_CFG_DMA_CTL_SELECT;
         let ctrl_be = control.to_be_bytes();
-        match mem.write_ram(pins, dma_addr, &ctrl_be) {
+        match mem.write_ram(dma_addr, &ctrl_be) {
             Ok(4) => {}
             Ok(copied) => tracing::error!(
                 "fw_cfg DMA: completion at {dma_addr:#x} is short ({copied}/4 bytes)"
@@ -920,8 +911,8 @@ impl BxFwCfg {
     }
 }
 #[cfg(feature = "std")]
-fn invalid_fw_cfg_snapshot(message: &'static str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid_fw_cfg_snapshot(message: &'static str) -> SnapError {
+    SnapError::Invalid(message)
 }
 
 #[cfg(feature = "std")]
@@ -930,7 +921,7 @@ fn validate_fw_cfg_slots(
     data_used: usize,
     cur_entry: u16,
     cur_offset: u32,
-) -> io::Result<()> {
+) -> SnapResult<()> {
     if data_used > FW_CFG_DATA_POOL_SIZE {
         return Err(invalid_fw_cfg_snapshot("fw_cfg data pool exceeds capacity"));
     }
@@ -991,7 +982,7 @@ fn validate_fw_cfg_file_directory(
     file_count: usize,
     data_pool: &[u8; FW_CFG_DATA_POOL_SIZE],
     directory: &[u8; FW_CFG_FILE_DIRECTORY_SIZE],
-) -> io::Result<()> {
+) -> SnapResult<()> {
     if file_dir_len > FW_CFG_FILE_DIRECTORY_SIZE || file_count > FW_CFG_FILE_SLOTS {
         return Err(invalid_fw_cfg_snapshot("fw_cfg file directory exceeds capacity"));
     }
@@ -1113,9 +1104,10 @@ mod tests {
     const TEST_CPU_COUNT: u32 = 4;
 
     use super::*;
+    use crate::snapshot::SnapError;
 
-    fn read_u16_entry(fw_cfg: &mut BxFwCfg, key: u16) -> u16 {
-        fw_cfg.write_port(FW_CFG_IO_BASE, key as u32, SELECTOR_WRITE_BYTES, None, &[]);
+    fn read_u16_entry(fw_cfg: &mut BxFwCfg, key: u16, mem: &mut BxMemC) -> u16 {
+        fw_cfg.write_port(FW_CFG_IO_BASE, key as u32, SELECTOR_WRITE_BYTES, mem);
         let lo = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES) as u16;
         let hi = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES) as u16;
         lo | (hi << 8)
@@ -1143,39 +1135,40 @@ mod tests {
         descriptor[..4].copy_from_slice(&control.to_be_bytes());
         descriptor[4..8].copy_from_slice(&(5u32).to_be_bytes());
         descriptor[8..].copy_from_slice(&DESTINATION.to_be_bytes());
-        assert_eq!(mem.write_ram(&[], DESCRIPTOR, &descriptor).unwrap(), 16);
+        assert_eq!(mem.write_ram(DESCRIPTOR, &descriptor).unwrap(), 16);
         mem.smc_mark_icache_mask(DESCRIPTOR, u32::MAX);
         mem.smc_mark_icache_mask(DESTINATION, u32::MAX);
         let before_smc = mem.smc_seq_next();
 
-        fw_cfg.process_dma(DESCRIPTOR, &mut mem, &[]);
+        fw_cfg.process_dma(DESCRIPTOR, &mut mem);
 
         let mut payload = [0; 5];
-        assert_eq!(mem.read_ram(&[], DESTINATION, &mut payload).unwrap(), payload.len());
+        assert_eq!(mem.read_ram(DESTINATION, &mut payload).unwrap(), payload.len());
         assert_eq!(payload, [0x61, 0x62, 0x63, 0x64, 0x65]);
         let mut completion = [0; 4];
-        assert_eq!(mem.read_ram(&[], DESCRIPTOR, &mut completion).unwrap(), 4);
+        assert_eq!(mem.read_ram(DESCRIPTOR, &mut completion).unwrap(), 4);
         assert_eq!(u32::from_be_bytes(completion), (KEY as u32) << 16);
         assert!(mem.smc_seq_next() > before_smc);
 
         descriptor[..4].copy_from_slice(&FW_CFG_DMA_CTL_WRITE.to_be_bytes());
-        assert_eq!(mem.write_ram(&[], DESCRIPTOR, &descriptor).unwrap(), 16);
-        fw_cfg.process_dma(DESCRIPTOR, &mut mem, &[]);
-        assert_eq!(mem.read_ram(&[], DESCRIPTOR, &mut completion).unwrap(), 4);
+        assert_eq!(mem.write_ram(DESCRIPTOR, &descriptor).unwrap(), 16);
+        fw_cfg.process_dma(DESCRIPTOR, &mut mem);
+        assert_eq!(mem.read_ram(DESCRIPTOR, &mut completion).unwrap(), 4);
         assert_eq!(u32::from_be_bytes(completion), FW_CFG_DMA_CTL_ERROR);
     }
 
     #[test]
     fn init_exposes_configured_cpu_count() {
         let mut fw_cfg = BxFwCfg::new();
+        let mut mem = crate::memory::test_ram();
         fw_cfg.init(TEST_RAM_SIZE, TEST_CPU_COUNT);
 
         assert_eq!(
-            read_u16_entry(&mut fw_cfg, FW_CFG_NB_CPUS),
+            read_u16_entry(&mut fw_cfg, FW_CFG_NB_CPUS, &mut mem),
             TEST_CPU_COUNT as u16
         );
         assert_eq!(
-            read_u16_entry(&mut fw_cfg, FW_CFG_MAX_CPUS),
+            read_u16_entry(&mut fw_cfg, FW_CFG_MAX_CPUS, &mut mem),
             TEST_CPU_COUNT as u16
         );
     }
@@ -1184,7 +1177,6 @@ mod tests {
     fn platform_snapshot_resumes_fw_cfg_pio_and_partial_dma_address() {
         use crate::memory::{BxMemC, BxMemoryStubC};
         use crate::snapshot::SnapshotReader;
-        use std::io::{Cursor, ErrorKind};
 
         const MIB: usize = 1024 * 1024;
         const DESCRIPTOR: u64 = 2 * MIB as u64;
@@ -1205,8 +1197,7 @@ mod tests {
             FW_CFG_IO_BASE,
             payload_key as u32,
             SELECTOR_WRITE_BYTES,
-            None,
-            &[],
+            &mut mem,
         );
         assert_eq!(
             source.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES),
@@ -1219,20 +1210,20 @@ mod tests {
         descriptor[..4].copy_from_slice(&control.to_be_bytes());
         descriptor[4..8].copy_from_slice(&(PAYLOAD.len() as u32).to_be_bytes());
         descriptor[8..].copy_from_slice(&DESTINATION.to_be_bytes());
-        assert_eq!(mem.write_ram(&[], DESCRIPTOR, &descriptor).unwrap(), descriptor.len());
+        assert_eq!(mem.write_ram(DESCRIPTOR, &descriptor).unwrap(), descriptor.len());
 
         // Write all but the triggering byte of a bytewise DMA address.  The
         // final byte must resume the descriptor after restoration.
-        source.write_port(0x518, 0, 1, None, &[]);
-        source.write_port(0x519, 0x20, 1, None, &[]);
-        source.write_port(0x51A, 0, 1, None, &[]);
+        source.write_port(0x518, 0, 1, &mut mem);
+        source.write_port(0x519, 0x20, 1, &mut mem);
+        source.write_port(0x51A, 0, 1, &mut mem);
         assert_eq!(source.dma_addr, DESCRIPTOR);
 
         let mut saved = Vec::new();
         source.save_snapshot_v3_body(&mut saved).unwrap();
 
         let mut restored = BxFwCfg::new();
-        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
         restored.restore_snapshot_v3_body(&mut reader).unwrap();
         reader.finish_exact().unwrap();
 
@@ -1242,11 +1233,11 @@ mod tests {
             "the restored selector and PIO offset must resume at the next byte"
         );
         assert_eq!(restored.dma_addr, DESCRIPTOR);
-        restored.write_port(0x51B, 0, 1, Some(&mut mem), &[]);
+        restored.write_port(0x51B, 0, 1, &mut mem);
 
         let mut payload = [0u8; PAYLOAD.len()];
         assert_eq!(
-            mem.read_ram(&[], DESTINATION, &mut payload).unwrap(),
+            mem.read_ram(DESTINATION, &mut payload).unwrap(),
             payload.len()
         );
         assert_eq!(payload, PAYLOAD);
@@ -1258,8 +1249,11 @@ mod tests {
         let mut malformed = saved;
         malformed[40..42].copy_from_slice(&(data_used as u16).to_le_bytes());
         let malformed_len = malformed.len() as u64;
-        let mut reader = SnapshotReader::new(Cursor::new(malformed), malformed_len).unwrap();
+        let mut reader = SnapshotReader::new(malformed.as_slice(), malformed_len).unwrap();
         let error = restored.restore_snapshot_v3_body(&mut reader).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(
+            matches!(error, SnapError::Invalid(_)),
+            "a rejected device state names what was wrong: {error:?}"
+        );
     }
 }

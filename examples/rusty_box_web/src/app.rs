@@ -1,15 +1,28 @@
 //! WASM-compatible eframe application for Rusty Box.
 //!
-//! Single-threaded cooperative execution: each frame calls `step_batch()`
-//! to advance the emulator, then renders the VGA framebuffer as an egui
+//! Single-threaded cooperative execution: each frame calls `Emulator::step`
+//! until the frame's instruction budget is spent or the guest stops, then
+//! renders the VGA framebuffer as an egui
 //! texture. No threads, no Arc<Mutex<>> — the emulator and display are
 //! owned directly by the app.
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder, RunBudget,
+    },
     gui::shared_display::SharedDisplay,
 };
+
+/// The VGA BIOS padded to a whole number of 512-byte option-ROM blocks, which
+/// is what the ROM window expects.
+fn padded_vga_bios() -> Vec<u8> {
+    let mut data = VGA_BIOS_DATA.to_vec();
+    let remainder = data.len() % 512;
+    if remainder != 0 {
+        data.resize(data.len() + (512 - remainder), 0);
+    }
+    data
+}
 
 // Embedded binary assets (compiled into the WASM)
 const BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
@@ -23,7 +36,7 @@ const DLX_CYLINDERS: u16 = 306;
 const DLX_HEADS: u8 = 4;
 const DLX_SPT: u8 = 17;
 
-/// Instructions per sub-batch (cpu_loop_n_with_io may return early)
+/// Instruction budget of one `Emulator::step` call.
 const BATCH_SIZE: u64 = 50_000;
 /// Total instruction budget per frame (~200K * 60fps = ~12M IPS target)
 const FRAME_BUDGET: u64 = 200_000;
@@ -58,7 +71,7 @@ enum BootMode {
 /// The eframe application — owns the emulator and display directly.
 pub struct WasmEmulatorApp {
     boot_mode: BootMode,
-    emulator: Option<Box<Emulator<'static, Corei7SkylakeX>>>,
+    emulator: Option<Box<Emulator>>,
     display: SharedDisplay,
     texture: Option<egui::TextureHandle>,
     initialized: bool,
@@ -103,40 +116,26 @@ impl WasmEmulatorApp {
     /// Initialize the emulator for DLX Linux (embedded disk).
     fn initialize_dlx(&mut self) {
         let config = EmulatorConfig {
-            guest_memory_size: 32 * 1024 * 1024,
-            host_memory_size: 32 * 1024 * 1024,
+            memory: MemorySize::bytes(32 * 1024 * 1024),
             memory_block_size: 128 * 1024,
-            ips: 300_000_000,
+            ips: Ips::new(300_000_000),
             pci_enabled: true,
             ..Default::default()
         };
 
-        let result = (|| -> rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>> {
-            let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
-            emu.init_memory_and_pc_system()?;
-
-            let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
-            emu.load_bios(BIOS_DATA, bios_load_addr)?;
-
-            let mut vga_data = VGA_BIOS_DATA.to_vec();
-            let remainder = vga_data.len() % 512;
-            if remainder != 0 {
-                vga_data.resize(vga_data.len() + (512 - remainder), 0);
-            }
-            emu.load_optional_rom(&vga_data, 0xC0000)?;
-
-            emu.init_cpu_and_devices()?;
-            emu.configure_memory_in_cmos(640, 31 * 1024);
-            emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
-            emu.configure_boot_sequence(2, 0, 0); // Boot from disk
-
-            emu.attach_disk_data(0, 0, DISK_DATA.to_vec(), DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT);
-
-            emu.init_gui(0, &[])?;
-            emu.reset(ResetReason::Hardware)?;
-            emu.start();
-            emu.force_vga_update();
-
+        let result = (|| -> rusty_box::Result<Box<Emulator>> {
+            let vga_data = padded_vga_bios();
+            let mut emu = MachineBuilder::new(config)
+                .bios(BIOS_DATA)
+                .vga_bios(&vga_data)
+                .boot_order(BootOrder::just(BootDevice::Disk))
+                .disk_bytes(
+                    AtaSlot::PRIMARY_MASTER,
+                    DISK_DATA.to_vec(),
+                    DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT),
+                )
+                .build()?;
+            emu.display().force_update();
             Ok(emu)
         })();
 
@@ -147,50 +146,31 @@ impl WasmEmulatorApp {
     fn initialize_alpine(&mut self, iso_data: Vec<u8>) {
         let ram_size = 256 * 1024 * 1024; // 256 MB for Alpine
         let config = EmulatorConfig {
-            guest_memory_size: ram_size,
-            host_memory_size: ram_size,
+            memory: MemorySize::bytes(ram_size),
             memory_block_size: 128 * 1024,
-            ips: 300_000_000,
+            ips: Ips::new(300_000_000),
             pci_enabled: true,
             ..Default::default()
         };
 
-        let result = (|| -> rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>> {
-            let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
-            emu.init_memory_and_pc_system()?;
-
-            let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
-            emu.load_bios(BIOS_DATA, bios_load_addr)?;
-
-            let mut vga_data = VGA_BIOS_DATA.to_vec();
-            let remainder = vga_data.len() % 512;
-            if remainder != 0 {
-                vga_data.resize(vga_data.len() + (512 - remainder), 0);
-            }
-            emu.load_optional_rom(&vga_data, 0xC0000)?;
-
-            emu.init_cpu_and_devices()?;
-
-            // 256 MB: 640 KB conventional + ~255 MB extended
-            let ext_kb = ((ram_size / 1024) - 1024).min(u16::MAX as usize);
-            emu.configure_memory_in_cmos(640, ext_kb as u16);
-            emu.configure_boot_sequence(3, 0, 0); // Boot from CD-ROM
-
-            // Attach CD-ROM on secondary channel (channel 1, drive 0)
-            emu.attach_cdrom_data(1, 0, iso_data);
-
-            emu.init_gui(0, &[])?;
-            emu.reset(ResetReason::Hardware)?;
-            emu.start();
-            emu.force_vga_update();
-
+        let result = (|| -> rusty_box::Result<Box<Emulator>> {
+            let vga_data = padded_vga_bios();
+            // The CMOS memory size comes from the configuration, so the guest
+            // is told about all 256 MB.
+            let mut emu = MachineBuilder::new(config)
+                .bios(BIOS_DATA)
+                .vga_bios(&vga_data)
+                .boot_order(BootOrder::just(BootDevice::Cdrom))
+                .cdrom_bytes(AtaSlot::SECONDARY_MASTER, iso_data)
+                .build()?;
+            emu.display().force_update();
             Ok(emu)
         })();
 
         self.finish_init(result);
     }
 
-    fn finish_init(&mut self, result: rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>>) {
+    fn finish_init(&mut self, result: rusty_box::Result<Box<Emulator>>) {
         match result {
             Ok(emu) => {
                 self.emulator = Some(emu);
@@ -307,22 +287,19 @@ impl WasmEmulatorApp {
 
         ctx.input(|i| {
             for event in &i.events {
-                match event {
-                    egui::Event::Text(text) => {
-                        for ch in text.chars() {
-                            let seq = rusty_box::gui::char_to_scancode_sequence(ch);
-                            for sc in &seq {
-                                emu.send_scancode(*sc);
-                            }
-                        }
+                for seq in key_sequences(event) {
+                    // `scancodes` stops at the first byte the guest's ring
+                    // refuses and returns how many it took. Nothing re-sends
+                    // the rest: a full ring can leave the guest a make with no
+                    // break, or a prefix with no code, so the dropped bytes
+                    // are logged.
+                    let sent = emu.keyboard().scancodes(&seq);
+                    if sent < seq.len() {
+                        log::warn!(
+                            "guest keyboard buffer full: dropped scancodes {:02X?}",
+                            &seq[sent..]
+                        );
                     }
-                    egui::Event::Key { key, pressed, .. } => {
-                        let seq = egui_key_to_scancodes(*key, *pressed);
-                        for sc in &seq {
-                            emu.send_scancode(*sc);
-                        }
-                    }
-                    _ => {}
                 }
             }
         });
@@ -665,26 +642,32 @@ impl eframe::App for WasmEmulatorApp {
             if let Some(ref mut emu) = self.emulator {
                 let mut frame_executed = 0u64;
                 while frame_executed < FRAME_BUDGET {
-                    match emu.step_batch(BATCH_SIZE) {
-                        Ok((executed, is_shutdown)) => {
-                            frame_executed += executed;
-                            if is_shutdown {
+                    match emu.step(RunBudget::Instructions(BATCH_SIZE)) {
+                        Ok(outcome) => {
+                            // Whichever unit the machine measures in: this is a
+                            // frame budget, not an instruction count.
+                            frame_executed += outcome.progress.count();
+                            // A terminal outcome ends the run for good. It
+                            // includes a guest ACPI power-off, which leaves the
+                            // CPU healthy, so the run's end is read from here and
+                            // never from the CPU's state.
+                            if outcome.is_terminal() {
                                 self.shutdown = true;
                                 break;
                             }
-                            if executed == 0 {
+                            if outcome.progress.stalled() {
                                 break;
                             }
                         }
                         Err(e) => {
-                            log::error!("step_batch error: {:?}", e);
+                            log::error!("step error: {:?}", e);
                             self.shutdown = true;
                             break;
                         }
                     }
                 }
                 self.total_instructions += frame_executed;
-                emu.update_display(&mut self.display);
+                emu.display().render_into(&mut self.display);
             }
         }
 
@@ -715,6 +698,29 @@ impl eframe::App for WasmEmulatorApp {
 
 // ---- PS/2 scancode mapping for egui keys ----
 
+/// The Set 2 scancode sequences one egui input event sends the guest: one per
+/// character of an `Event::Text`, one per `Event::Key`, each handed to the
+/// keyboard in a single call.
+///
+/// `Event::Text` carries every key that types a character, the space bar
+/// included. `Event::Key` is translated only for the keys
+/// [`egui_key_to_scancodes`] maps, none of which eframe reports as text; any
+/// other key yields an empty sequence, because a key that types a character
+/// reaches the guest through its `Event::Text` and one that types nothing is
+/// not sent. So a single press reaches the guest once.
+fn key_sequences(event: &egui::Event) -> Vec<Vec<u8>> {
+    match event {
+        egui::Event::Text(text) => text
+            .chars()
+            .map(rusty_box::gui::char_to_scancode_sequence)
+            .collect(),
+        egui::Event::Key { key, pressed, .. } => vec![egui_key_to_scancodes(*key, *pressed)],
+        _ => Vec::new(),
+    }
+}
+
+/// Set 2 scancodes for the keys egui reports without text. A key that types
+/// a character is absent here: it arrives as `Event::Text` instead.
 fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
     let (extended, make_code) = match key {
         egui::Key::Escape => (false, 0x76u8),
@@ -733,7 +739,6 @@ fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
         egui::Key::Enter => (false, 0x5A),
         egui::Key::Tab => (false, 0x0D),
         egui::Key::Backspace => (false, 0x66),
-        egui::Key::Space => (false, 0x29),
         egui::Key::Delete => (true, 0x71),
         egui::Key::Insert => (true, 0x70),
         egui::Key::Home => (true, 0x6C),
@@ -761,4 +766,39 @@ fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
         seq.push(make_code);
     }
     seq
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn space_key(pressed: bool) -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: Some(egui::Key::Space),
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// One press of the space bar, in the order egui reports it — the key
+    /// going down, the text it typed, the key coming up — reaches the guest
+    /// as exactly one make and one break.
+    #[test]
+    fn one_space_press_reaches_the_guest_once() {
+        let press = [
+            space_key(true),
+            egui::Event::Text(" ".to_owned()),
+            space_key(false),
+        ];
+
+        let sent: Vec<u8> = press
+            .iter()
+            .flat_map(key_sequences)
+            .flatten()
+            .collect();
+
+        assert_eq!(sent, [0x29, 0xF0, 0x29]);
+    }
 }

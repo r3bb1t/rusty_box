@@ -15,16 +15,16 @@
 //!
 //! The PM timer is the primary time source for ACPI-aware operating systems.
 //! It runs at exactly 3,579,545 Hz (the NTSC color subcarrier frequency)
-//! and wraps every ~2.34 seconds (24-bit counter).
+//! and wraps every ~4.69 seconds (24-bit counter); its top bit, which
+//! raises TMROF_STS, flips every ~2.34 seconds.
 
 use bitflags::bitflags;
+use rusty_box_core::time::VmClock;
 
-#[cfg(feature = "std")]
-use std::io::{self, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
     SNAPSHOT_SECTION_VERSION,
 };
 
@@ -96,6 +96,18 @@ bitflags! {
     }
 }
 
+/// What an ACPI config-space write asks the machine to do. The PM and SMBus
+/// register blocks each live at a programmable I/O base, and the controller
+/// cannot move its own port registrations.
+///
+/// Bochs re-registers them inline in `pci_write_handler` (acpi.cc); here the
+/// I/O bus lives outside the device, so the request travels back as data.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AcpiWriteEffects {
+    pub pm_base_changed: bool,
+    pub sm_base_changed: bool,
+}
+
 /// I/O access mask for PM register space (64 ports).
 /// Each entry is a bitmask: bit 0 = byte, bit 1 = word, bit 2 = dword.
 /// Bochs acpi.cc
@@ -127,6 +139,9 @@ pub struct SmBusState {
 
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
+
+#[cfg(feature = "std")]
+use super::realtime::RealtimeClock;
 
 // ─── ACPI Controller ─────────────────────────────────────────────────────────
 
@@ -165,20 +180,18 @@ pub struct BxAcpiCtrl {
     /// PCI configuration space (256 bytes)
     pub pci_conf: [u8; PCI_CONF_SIZE],
 
-    /// Accumulated microseconds for PM timer computation.
-    /// Mirrors Bochs `bx_virt_timer.time_usec()`: `tick()` advances the
-    /// synchronized base, and PM timer reads add the live icount delta so tight
-    /// guest polling loops do not see a stale timer for an entire CPU batch.
-    pub time_usec: u64,
-    /// Whether icount-based live PM timer sync has been initialized.
-    has_icount_sync: bool,
-    /// CPU icount at the last `time_usec` synchronization point.
-    icount_at_sync: u64,
-    /// Instructions per second used to convert icount deltas to usec.
-    ips: u64,
-    /// Host clock anchor for Bochs-style realtime PM timer synchronization.
+    /// The PM clock on host time, when the machine runs `clock:
+    /// sync=realtime`; `None` when the PM clock is the machine's own emulated
+    /// clock.
+    ///
+    /// The PM timer keeps no count of its own. Bochs acpi.cc `get_pmtmr`
+    /// reads `bx_virt_timer.time_usec(is_realtime)` at every access, and so
+    /// does [`Self::live_time_usec`]: the machine clock a caller hands in, or
+    /// this clock's reading. Set once, when the machine's clocks are brought
+    /// up, and moved only by a snapshot restore — a reset leaves it alone, as
+    /// Bochs acpi.cc `reset` leaves the timer.
     #[cfg(feature = "std")]
-    realtime_start: Option<std::time::Instant>,
+    realtime: Option<RealtimeClock>,
 
     /// IRQ 9 level (SCI) — the emulator loop syncs this to the PIC.
     pub irq9_level: bool,
@@ -226,7 +239,7 @@ pub struct BxAcpiCtrl {
 /// relocates from the live PM/SM I/O ranges before committing these bases.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AcpiSnapshotRestore {
+pub struct AcpiSnapshotRestore {
     pub(crate) pm_base: u32,
     pub(crate) sm_base: u32,
     pub(crate) overflow_timer_handle: Option<usize>,
@@ -240,12 +253,12 @@ impl Default for BxAcpiCtrl {
 
 impl BxAcpiCtrl {
     #[cfg(feature = "std")]
-    fn invalid_snapshot_v3(message: &'static str) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, message)
+    fn invalid_snapshot_v3(message: &'static str) -> SnapError {
+        SnapError::Invalid(message)
     }
 
     #[cfg(feature = "std")]
-    fn validate_snapshot_v3_pci_identity(pci_conf: &[u8; PCI_CONF_SIZE]) -> io::Result<()> {
+    fn validate_snapshot_v3_pci_identity(pci_conf: &[u8; PCI_CONF_SIZE]) -> SnapResult<()> {
         const PIIX4_PM_IDENTITY: [(usize, u8); 8] = [
             (0x00, 0x86),
             (0x01, 0x80),
@@ -272,7 +285,7 @@ impl BxAcpiCtrl {
         pm_base: u32,
         sm_base: u32,
         pci_conf: &[u8; PCI_CONF_SIZE],
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         let pmbar = u32::from_le_bytes([
             pci_conf[0x40],
             pci_conf[0x41],
@@ -317,7 +330,6 @@ impl BxAcpiCtrl {
         &self,
         devfunc: u8,
         uefi_enabled: bool,
-        ips: u64,
         pmsts: u16,
         pmen: u16,
         pmcntrl: u16,
@@ -325,7 +337,7 @@ impl BxAcpiCtrl {
         pci_conf: &[u8; PCI_CONF_SIZE],
         pm_base: u32,
         sm_base: u32,
-    ) -> io::Result<()> {
+    ) -> SnapResult<()> {
         const PM_STATUS_MASK: u16 = 0x8731;
         const PM_ENABLE_MASK: u16 = 0x0521;
         const PM_CONTROL_MASK: u16 = 0x3C07;
@@ -338,11 +350,6 @@ impl BxAcpiCtrl {
         if uefi_enabled != self.uefi_enabled {
             return Err(Self::invalid_snapshot_v3(
                 "ACPI UEFI configuration differs from live configuration",
-            ));
-        }
-        if ips != self.ips {
-            return Err(Self::invalid_snapshot_v3(
-                "ACPI instructions-per-second differs from live configuration",
             ));
         }
         if pmsts & !PM_STATUS_MASK != 0
@@ -361,13 +368,18 @@ impl BxAcpiCtrl {
         Self::validate_snapshot_v3_bases(pm_base, sm_base, pci_conf)
     }
 
+}
+
+#[cfg(feature = "std")]
+impl crate::snapshot::SnapshotSection for BxAcpiCtrl {
+    const TAG: u32 = crate::snapshot::SEC_ACPI;
+    type Restored = AcpiSnapshotRestore;
+
     /// Exact byte count for the single-section ACPI v3 payload.
-    #[cfg(feature = "std")]
-    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+    fn snapshot_len(&self) -> SnapResult<u64> {
         self.validate_snapshot_v3_state(
             self.devfunc,
             self.uefi_enabled,
-            self.ips,
             self.pmsts,
             self.pmen,
             self.pmcntrl,
@@ -401,7 +413,6 @@ impl BxAcpiCtrl {
             4,
             1,
             1,
-            8,
             pm_register_len,
             8,
             1,
@@ -409,7 +420,7 @@ impl BxAcpiCtrl {
             smbus_register_len,
             smbus_data_len,
             pci_conf_len,
-            8,
+            1,
             1,
             base_len,
         ] {
@@ -418,6 +429,9 @@ impl BxAcpiCtrl {
         if let Some(handle) = self.overflow_timer_handle {
             u64::try_from(handle)
                 .map_err(|_| Self::invalid_snapshot_v3("ACPI timer handle does not fit"))?;
+            len = checked_snapshot_len_add(len, 8)?;
+        }
+        if self.realtime.is_some() {
             len = checked_snapshot_len_add(len, 8)?;
         }
         if len > bounds::MAX_SNAPSHOT_SECTION_LEN {
@@ -429,14 +443,12 @@ impl BxAcpiCtrl {
     }
 
     /// Stream all serializable ACPI state into a versioned v3 section payload.
-    #[cfg(feature = "std")]
-    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        self.snapshot_v3_len()?;
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
+        self.snapshot_len()?;
 
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         writer.write_u8(self.devfunc)?;
         writer.write_bool(self.uefi_enabled)?;
-        writer.write_u64(self.ips)?;
         writer.write_u16(self.pmsts)?;
         writer.write_u16(self.pmen)?;
         writer.write_u16(self.pmcntrl)?;
@@ -458,7 +470,13 @@ impl BxAcpiCtrl {
         writer.write_u8(self.smbus.index)?;
         writer.write_bytes(&self.smbus.data)?;
         writer.write_bytes(&self.pci_conf)?;
-        writer.write_u64(self.time_usec)?;
+        // An emulated PM clock is the machine clock, which the PC-system
+        // section carries. A realtime one is host time, which no other section
+        // has, so its reading at the save travels here.
+        writer.write_bool(self.realtime.is_some())?;
+        if let Some(usec) = self.realtime_usec() {
+            writer.write_u64(usec)?;
+        }
         writer.write_bool(self.irq9_level)?;
         writer.write_u32(self.pm_base)?;
         writer.write_u32(self.sm_base)
@@ -468,11 +486,10 @@ impl BxAcpiCtrl {
     ///
     /// PM/SM bases and the raw timer slot are returned for parent-owned
     /// validation and atomic topology relocation.
-    #[cfg(feature = "std")]
-    pub(crate) fn restore_snapshot_v3<R: Read>(
+    fn restore<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<AcpiSnapshotRestore> {
+        reader: &mut R,
+    ) -> SnapResult<AcpiSnapshotRestore> {
         let section_version = reader.read_u32()?;
         if section_version != SNAPSHOT_SECTION_VERSION {
             return Err(Self::invalid_snapshot_v3(
@@ -482,7 +499,6 @@ impl BxAcpiCtrl {
 
         let devfunc = reader.read_u8()?;
         let uefi_enabled = reader.read_bool()?;
-        let ips = reader.read_u64()?;
         let pmsts = reader.read_u16()?;
         let pmen = reader.read_u16()?;
         let pmcntrl = reader.read_u16()?;
@@ -509,16 +525,18 @@ impl BxAcpiCtrl {
         reader.read_bytes(&mut smbus_data)?;
         let mut pci_conf = [0; PCI_CONF_SIZE];
         reader.read_bytes(&mut pci_conf)?;
-        let time_usec = reader.read_u64()?;
+        let realtime_usec = if reader.read_bool()? {
+            Some(reader.read_u64()?)
+        } else {
+            None
+        };
         let irq9_level = reader.read_bool()?;
         let pm_base = reader.read_u32()?;
         let sm_base = reader.read_u32()?;
-        reader.finish_exact()?;
 
         self.validate_snapshot_v3_state(
             devfunc,
             uefi_enabled,
-            ips,
             pmsts,
             pmen,
             pmcntrl,
@@ -527,6 +545,14 @@ impl BxAcpiCtrl {
             pm_base,
             sm_base,
         )?;
+        if realtime_usec.is_some() != self.realtime.is_some() {
+            return Err(Self::invalid_snapshot_v3(
+                "ACPI realtime configuration does not match",
+            ));
+        }
+        // The realtime PM clock resumes at the reading it was saved with: the
+        // host time between the save and this restore is not guest time.
+        let realtime = realtime_usec.map(RealtimeClock::reading);
 
         self.pmsts = pmsts;
         self.pmen = pmen;
@@ -544,7 +570,7 @@ impl BxAcpiCtrl {
             data: smbus_data,
         };
         self.pci_conf = pci_conf;
-        self.time_usec = time_usec;
+        self.realtime = realtime;
         self.irq9_level = irq9_level;
 
         Ok(AcpiSnapshotRestore {
@@ -554,19 +580,13 @@ impl BxAcpiCtrl {
         })
     }
 
-    /// Recreate host-only timer anchors and derive SCI without injecting an edge.
+}
+
+impl BxAcpiCtrl {
+    /// Derive SCI against the restored machine clock without injecting an edge.
     #[cfg(feature = "std")]
-    pub(crate) fn post_restore_snapshot_v3(&mut self, system_ticks: u64) -> bool {
-        self.has_icount_sync = self.ips != 0;
-        self.icount_at_sync = system_ticks;
-
-        if self.realtime_start.is_some() {
-            let now = std::time::Instant::now();
-            self.realtime_start =
-                now.checked_sub(std::time::Duration::from_micros(self.time_usec));
-        }
-
-        self.pm_update_sci(system_ticks);
+    pub(crate) fn post_restore_snapshot_v3(&mut self, clock: VmClock) -> bool {
+        self.pm_update_sci(clock);
         self.irq9_level
     }
 
@@ -585,12 +605,8 @@ impl BxAcpiCtrl {
             pmreg: [0; 0x38],
             smbus: SmBusState::default(),
             pci_conf: [0; PCI_CONF_SIZE],
-            time_usec: 0,
-            has_icount_sync: false,
-            icount_at_sync: 0,
-            ips: 0,
             #[cfg(feature = "std")]
-            realtime_start: None,
+            realtime: None,
             irq9_level: false,
             smi_request_pending: false,
             soft_off_pending: false,
@@ -623,6 +639,23 @@ impl BxAcpiCtrl {
 
     /// Reset the ACPI controller.
     /// Bochs: bx_acpi_ctrl_c::reset() (acpi.cc)
+    /// The chipset store this controller is asking for, if any.
+    ///
+    /// Bochs acpi.cc PM1_CNT suspend-to-ram (S3) calls `DEV_cmos_set_reg(0xF,
+    /// 0xFE)` — the shutdown-status byte the BIOS reads on the resume path —
+    /// before requesting the hardware reset. A device reaches only its own
+    /// state, so the store is described here and performed by the chipset.
+    pub(crate) fn take_pending_effect(
+        &mut self,
+    ) -> Option<rusty_box_devices::api::ChipsetEffect> {
+        core::mem::take(&mut self.suspend_to_ram_pending).then_some(
+            rusty_box_devices::api::ChipsetEffect::CmosByte {
+                index: 0x0F,
+                value: 0xFE,
+            },
+        )
+    }
+
     pub fn reset(&mut self) {
         // PCI command/status (acpi.cc)
         self.pci_conf[0x04] = 0x00;
@@ -702,14 +735,11 @@ impl BxAcpiCtrl {
         self.pmcntrl = 0;
         self.tmr_overflow_time = 0xFF_FFFF;
         self.pmreg = [0; 0x38];
+        // The PM timer is left running: it is read from the machine clock
+        // (see `realtime`), which no reset rewinds. The overflow point
+        // above goes back to the first wrap all the same, so a guest past it
+        // finds TMROF_STS set on its next status read — as in Bochs.
 
-        self.time_usec = 0;
-        self.has_icount_sync = false;
-        self.icount_at_sync = 0;
-        #[cfg(feature = "std")]
-        if self.realtime_start.is_some() {
-            self.realtime_start = Some(std::time::Instant::now());
-        }
         // Clear SMBus state (acpi.cc)
         self.smbus = SmBusState::default();
 
@@ -743,48 +773,49 @@ impl BxAcpiCtrl {
         }
     }
 
-    /// Initialize icount-based PM timer synchronization.
-    pub fn init_icount_sync(&mut self, icount: u64, ips: u64) {
-        self.has_icount_sync = true;
-        self.icount_at_sync = icount;
-        self.ips = ips;
-    }
-
-    /// Enable Bochs-style realtime synchronization for the ACPI PM timer.
+    /// Run the PM clock on host time from zero — Bochs `clock:
+    /// sync=realtime`, which acpi.cc `init` reads into `is_realtime`.
+    ///
+    /// The machine calls this while bringing its clocks up; without it the PM
+    /// clock is the machine's emulated clock. A clock already on host time is
+    /// left where it stands, because only a snapshot restore moves it.
     #[cfg(feature = "std")]
     pub fn enable_realtime_sync(&mut self) {
-        self.realtime_start = Some(std::time::Instant::now());
+        self.realtime.get_or_insert_with(|| RealtimeClock::reading(0));
     }
 
 
     // ─── PM Timer ────────────────────────────────────────────────────────
 
-    #[inline]
-    fn live_time_usec(&self, icount: u64) -> u64 {
-        #[cfg(feature = "std")]
-        if let Some(start) = self.realtime_start {
-            return start.elapsed().as_micros() as u64;
-        }
+    /// The realtime PM clock's reading, in microseconds, when there is one.
+    #[cfg(feature = "std")]
+    fn realtime_usec(&self) -> Option<u64> {
+        self.realtime.map(|clock| clock.usec())
+    }
 
-        if self.has_icount_sync && self.ips != 0 && icount >= self.icount_at_sync {
-            self.time_usec
-                .wrapping_add((icount - self.icount_at_sync).saturating_mul(1_000_000) / self.ips)
-        } else {
-            self.time_usec
+    /// The PM clock, in microseconds — Bochs acpi.cc
+    /// `bx_virt_timer.time_usec(is_realtime)`: host time since the realtime
+    /// anchor under `sync=realtime`, otherwise the machine clock `clock` reads.
+    #[inline]
+    fn live_time_usec(&self, clock: VmClock) -> u64 {
+        #[cfg(feature = "std")]
+        if let Some(usec) = self.realtime_usec() {
+            return usec;
         }
+        clock.micros()
     }
 
     /// Get the 24-bit PM timer value.
     /// Bochs: get_pmtmr() (acpi.cc)
-    fn get_pmtmr(&self, icount: u64) -> u32 {
-        let value = muldiv64(self.live_time_usec(icount), PM_FREQ as u32, 1_000_000);
+    fn get_pmtmr(&self, clock: VmClock) -> u32 {
+        let value = muldiv64(self.live_time_usec(clock), PM_FREQ as u32, 1_000_000);
         (value & 0xFF_FFFF) as u32
     }
 
     /// Get PM status with timer overflow check.
     /// Bochs: get_pmsts() (acpi.cc)
-    fn get_pmsts(&mut self, icount: u64) -> u16 {
-        let value = muldiv64(self.live_time_usec(icount), PM_FREQ as u32, 1_000_000);
+    fn get_pmsts(&mut self, clock: VmClock) -> u16 {
+        let value = muldiv64(self.live_time_usec(clock), PM_FREQ as u32, 1_000_000);
         if value >= self.tmr_overflow_time {
             self.pmsts |= PmStatus::TMROF_STS.bits();
         }
@@ -793,8 +824,8 @@ impl BxAcpiCtrl {
 
     /// Update SCI interrupt level based on current status and enable.
     /// Bochs: pm_update_sci() (acpi.cc)
-    fn pm_update_sci(&mut self, icount: u64) {
-        let pmsts = self.get_pmsts(icount);
+    fn pm_update_sci(&mut self, clock: VmClock) {
+        let pmsts = self.get_pmsts(clock);
         // SCI fires if any enabled status bit is set
         // Bochs acpi.cc: (pmsts & pmen) & (RTC_EN | PWRBTN_EN | GBL_EN | TMROF_EN)
         let sci_mask = PmEnable::RTC_EN.bits()
@@ -833,9 +864,38 @@ impl BxAcpiCtrl {
     /// The caller converts this microsecond delay to a fixed pc-system owner
     /// deadline. Re-evaluating after every PM1 register access makes both
     /// rearming and SCI changes visible before guest execution resumes.
-    pub(crate) fn overflow_delay_usec(&mut self, system_ticks: u64) -> Option<u64> {
-        self.pm_update_sci(system_ticks);
-        self.overflow_remaining_from_usec(self.live_time_usec(system_ticks))
+    pub(crate) fn overflow_delay_usec(&mut self, clock: VmClock) -> Option<u64> {
+        self.pm_update_sci(clock);
+        self.overflow_remaining_from_usec(self.live_time_usec(clock))
+    }
+
+    /// The device's single scheduler timer — the PM-clock overflow.
+    pub(crate) const OVERFLOW_TIMER_LOCAL: u16 = 0;
+
+    #[inline]
+    const fn overflow_timer_key() -> rusty_box_devices::api::TimerKey {
+        rusty_box_devices::api::TimerKey {
+            device: rusty_box_devices::api::DeviceKind::Acpi,
+            local: Self::OVERFLOW_TIMER_LOCAL,
+        }
+    }
+
+    /// Publish the SCI line and the freshly predicted overflow deadline.
+    ///
+    /// Bochs acpi.cc re-evaluates both after every PM1 register access, so the
+    /// guest observes them before execution resumes; here they land on the
+    /// interrupt and timer capabilities directly rather than being latched.
+    fn drain_effects(
+        &mut self,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+        delay_usec: Option<u64>,
+    ) {
+        ctx.irq
+            .set_level(rusty_box_devices::api::IrqLine(9), self.irq9_level);
+        match delay_usec {
+            Some(delay) => ctx.timers.arm_oneshot_usec(Self::overflow_timer_key(), delay),
+            None => ctx.timers.cancel(Self::overflow_timer_key()),
+        }
     }
 
     /// Service the ACPI PM-overflow timer owner and return a rearm delay.
@@ -843,22 +903,35 @@ impl BxAcpiCtrl {
     /// A realtime pc-system deadline is only a prediction. If its callback is
     /// early relative to the freshly sampled host clock, leave PM overflow
     /// state unchanged and return the newly predicted remaining delay.
-    pub(crate) fn overflow_timer(&mut self, system_ticks: u64) -> Option<u64> {
+    pub(crate) fn overflow_timer(&mut self, clock: VmClock) -> Option<u64> {
         #[cfg(feature = "std")]
-        if self.realtime_start.is_some() && self.overflow_armed() {
-            let current_usec = self.live_time_usec(system_ticks);
+        if self.realtime.is_some() && self.overflow_armed() {
+            let current_usec = self.live_time_usec(clock);
             if Self::pm_timer_ticks_at_usec(current_usec) < self.tmr_overflow_time {
                 return self.overflow_remaining_from_usec(current_usec);
             }
         }
 
-        self.overflow_delay_usec(system_ticks)
+        self.overflow_delay_usec(clock)
     }
 
     /// Set IRQ 9 level (ACPI SCI).
     /// Bochs: set_irq_level() (acpi.cc)
     fn set_irq_level(&mut self, level: bool) {
         self.irq9_level = level;
+    }
+
+    /// The host pressed the machine's power button.
+    ///
+    /// Bochs acpi.cc raises `PWRBTN_STS` and re-evaluates SCI, which is all a
+    /// power button physically does: an ACPI-aware guest sees the status bit,
+    /// takes the interrupt if it enabled `PWRBTN_EN`, and decides for itself
+    /// whether to shut down. A guest that ignores it keeps running — which is
+    /// the behaviour a real machine has, and the reason this cannot be a
+    /// "power off" verb.
+    pub(crate) fn press_power_button(&mut self, clock: VmClock) {
+        self.pmsts |= PmStatus::PWRBTN_STS.bits();
+        self.pm_update_sci(clock);
     }
 
     /// Handle SMI command (ACPI enable/disable).
@@ -885,7 +958,7 @@ impl BxAcpiCtrl {
 
     /// Read from PM or SMBus register space.
     /// Bochs: read_handler() / read() (acpi.cc)
-    pub fn read(&mut self, address: u16, io_len: u8, icount: u64) -> u32 {
+    pub fn read(&mut self, address: u16, io_len: u8, clock: VmClock) -> u32 {
         let mut value: u32 = 0xFFFF_FFFF;
 
         if self.pm_base != 0 && (address as u32 & 0xFFC0) == self.pm_base {
@@ -898,7 +971,7 @@ impl BxAcpiCtrl {
             match reg {
                 // PM1 Status (acpi.cc)
                 0x00 => {
-                    value = self.get_pmsts(icount) as u32;
+                    value = self.get_pmsts(clock) as u32;
                 }
                 // PM1 Enable (acpi.cc)
                 0x02 => {
@@ -910,7 +983,7 @@ impl BxAcpiCtrl {
                 }
                 // PM Timer (acpi.cc)
                 0x08 => {
-                    value = self.get_pmtmr(icount);
+                    value = self.get_pmtmr(clock);
                 }
                 // Generic PM registers (acpi.cc)
                 _ => {
@@ -982,7 +1055,7 @@ impl BxAcpiCtrl {
 
     /// Write to PM or SMBus register space.
     /// Bochs: write_handler() / write() (acpi.cc)
-    pub fn write(&mut self, address: u16, value: u32, io_len: u8, icount: u64) {
+    pub fn write(&mut self, address: u16, value: u32, io_len: u8, clock: VmClock) {
         if self.pm_base != 0 && (address as u32 & 0xFFC0) == self.pm_base {
             // PM register space
             if (self.pci_conf[0x80] & 0x01) == 0 {
@@ -998,19 +1071,19 @@ impl BxAcpiCtrl {
             match reg {
                 // PM1 Status — write-1-to-clear (acpi.cc)
                 0x00 => {
-                    let pmsts = self.get_pmsts(icount);
+                    let pmsts = self.get_pmsts(clock);
                     // If clearing TMROF_STS, recompute next overflow time
                     if pmsts & (value as u16) & PmStatus::TMROF_STS.bits() != 0 {
-                        let d = muldiv64(self.live_time_usec(icount), PM_FREQ as u32, 1_000_000);
+                        let d = muldiv64(self.live_time_usec(clock), PM_FREQ as u32, 1_000_000);
                         self.tmr_overflow_time = (d + 0x80_0000) & !0x7F_FFFF;
                     }
                     self.pmsts &= !(value as u16);
-                    self.pm_update_sci(icount);
+                    self.pm_update_sci(clock);
                 }
                 // PM1 Enable (acpi.cc)
                 0x02 => {
                     self.pmen = value as u16;
-                    self.pm_update_sci(icount);
+                    self.pm_update_sci(clock);
                 }
                 // PM1 Control (acpi.cc)
                 0x04 => {
@@ -1044,7 +1117,7 @@ impl BxAcpiCtrl {
                             _ => {}
                         }
                     }
-                    self.pm_update_sci(icount);
+                    self.pm_update_sci(clock);
                 }
                 // Write-ignored registers (acpi.cc)
                 0x0C | 0x0D | 0x14 | 0x15 | 0x18 | 0x19 | 0x1C | 0x1D | 0x1E | 0x1F | 0x30
@@ -1114,20 +1187,23 @@ impl BxAcpiCtrl {
         }
     }
 
-    // ─── PCI Configuration Space ─────────────────────────────────────────
+}
+
+// ─── PCI Configuration Space ─────────────────────────────────────────────
+
+impl rusty_box_devices::pci::PciDevice for BxAcpiCtrl {
+    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 3);
+    type WriteEffects = AcpiWriteEffects;
 
     /// Write to PCI configuration space.
     /// Bochs: pci_write_handler() (acpi.cc)
-    ///
-    /// Returns (pm_base_changed, sm_base_changed) to signal that the emulator
-    /// should re-register I/O ports.
-    pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> (bool, bool) {
+    fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> AcpiWriteEffects {
         let mut pm_base_change = false;
         let mut sm_base_change = false;
 
         // Addresses 0x10-0x33 are ignored (BAR region) — acpi.cc
         if (0x10..0x34).contains(&address) {
-            return (false, false);
+            return AcpiWriteEffects::default();
         }
 
         for i in 0..io_len as usize {
@@ -1213,11 +1289,14 @@ impl BxAcpiCtrl {
             }
         }
 
-        (pm_base_change, sm_base_change)
+        AcpiWriteEffects {
+            pm_base_changed: pm_base_change,
+            sm_base_changed: sm_base_change,
+        }
     }
 
     /// Read from PCI configuration space.
-    pub fn pci_read(&self, address: u8, io_len: u8) -> u32 {
+    fn pci_read(&self, address: u8, io_len: u8) -> u32 {
         let mut value: u32 = 0;
         for i in 0..io_len as usize {
             let addr = address as usize + i;
@@ -1228,6 +1307,9 @@ impl BxAcpiCtrl {
         value
     }
 
+}
+
+impl BxAcpiCtrl {
     /// Check if an I/O port address falls within the PM base range.
     pub fn is_pm_port(&self, port: u16) -> bool {
         self.pm_base != 0 && (port as u32 & 0xFFC0) == self.pm_base
@@ -1277,11 +1359,104 @@ fn muldiv64(a: u64, b: u32, c: u32) -> u64 {
     (res_hi << 32) | res_lo
 }
 
+// ─── Device-API conversion ───────────────────────────────────────────────────
+
+impl rusty_box_devices::api::PioDevice for BxAcpiCtrl {
+    fn pio_read(
+        &mut self,
+        port: u16,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+    ) -> u32 {
+        let value = self.read(port, len.bytes(), ctx.clock);
+        let delay = self.overflow_delay_usec(ctx.clock);
+        self.drain_effects(ctx, delay);
+        value
+    }
+
+    fn pio_write(
+        &mut self,
+        port: u16,
+        value: u32,
+        len: rusty_box_devices::api::IoLen,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+    ) {
+        self.write(port, value, len.bytes(), ctx.clock);
+        let delay = self.overflow_delay_usec(ctx.clock);
+        self.drain_effects(ctx, delay);
+    }
+}
+
+impl rusty_box_devices::api::TimedDevice for BxAcpiCtrl {
+    /// The PM clock is free-running, so a coalesced expiry is serviced once
+    /// per elapsed period — Bochs acpi.cc re-arms from inside the callback and
+    /// each pass re-predicts the next overflow.
+    fn timer_fired(
+        &mut self,
+        _local: u16,
+        fires: u32,
+        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
+    ) {
+        let mut delay = None;
+        for _ in 0..fires {
+            delay = self.overflow_timer(ctx.clock);
+        }
+        self.drain_effects(ctx, delay);
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_box_devices::pci::PciDevice;
+
+    /// The machine clock `usec` microseconds after power-on, on a 1 MHz clock
+    /// so one tick is one microsecond.
+    fn clock_at_usec(usec: u64) -> VmClock {
+        VmClock::new(
+            rusty_box_core::time::VmInstant::from_ticks(usec),
+            rusty_box_core::time::ClockHz::new(1_000_000).unwrap(),
+        )
+    }
+
+    /// A power button is a request the guest may refuse, and the guest says
+    /// whether it wants to hear about it by setting `PWRBTN_EN`. Pressing it
+    /// always raises the status bit — that is the button being pressed — but
+    /// raises SCI only for a guest that asked for the interrupt.
+    ///
+    /// Getting this wrong in the permissive direction would interrupt a guest
+    /// that never armed the button; in the strict direction it would drop the
+    /// press entirely and an ACPI-aware guest would never shut down.
+    #[test]
+    fn the_power_button_interrupts_only_a_guest_that_armed_it() {
+        let mut acpi = BxAcpiCtrl::new();
+        acpi.pmen = 0;
+
+        acpi.press_power_button(clock_at_usec(0));
+
+        assert_ne!(
+            acpi.pmsts & PmStatus::PWRBTN_STS.bits(),
+            0,
+            "the press is recorded whether or not the guest is listening"
+        );
+        assert!(
+            !acpi.irq9_level,
+            "a guest that never set PWRBTN_EN must not be interrupted"
+        );
+
+        let mut armed = BxAcpiCtrl::new();
+        armed.pmen = PmEnable::PWRBTN_EN.bits();
+
+        armed.press_power_button(clock_at_usec(0));
+
+        assert_ne!(armed.pmsts & PmStatus::PWRBTN_STS.bits(), 0);
+        assert!(
+            armed.irq9_level,
+            "a guest that armed the button must take the SCI"
+        );
+    }
 
     #[test]
     fn test_acpi_new() {
@@ -1315,29 +1490,55 @@ mod tests {
 
     #[test]
     fn test_pm_timer_ticks() {
-        let mut acpi = BxAcpiCtrl::new();
+        let acpi = BxAcpiCtrl::new();
         // At time 0, timer should be 0
-        assert_eq!(acpi.get_pmtmr(0), 0);
+        assert_eq!(acpi.get_pmtmr(clock_at_usec(0)), 0);
         // After 1 second (1,000,000 usec), timer should be ~3,579,545
-        acpi.time_usec = 1_000_000;
-        let tmr = acpi.get_pmtmr(0);
+        let tmr = acpi.get_pmtmr(clock_at_usec(1_000_000));
         assert_eq!(tmr, PM_FREQ as u32 & 0xFF_FFFF);
-        // After ~2.34 seconds, should wrap (24-bit)
-        acpi.time_usec = 5_000_000; // ~5 seconds
-        let tmr = acpi.get_pmtmr(0);
-        assert!(tmr < 0xFF_FFFF); // Must have wrapped
+        // Past ~4.69 seconds the 24-bit counter has wrapped
+        let five_seconds = muldiv64(5_000_000, PM_FREQ as u32, 1_000_000);
+        let tmr = acpi.get_pmtmr(clock_at_usec(5_000_000));
+        assert_eq!(u64::from(tmr), five_seconds & 0xFF_FFFF);
     }
 
+    /// A guest's PM timer read is the machine clock at the moment of the read,
+    /// scaled to 3.579545 MHz — Bochs acpi.cc `get_pmtmr`. There is no count
+    /// kept between reads for anything to freeze or rewind.
     #[test]
-    fn test_pm_timer_read_uses_live_icount_delta() {
+    fn a_pm_timer_read_is_the_machine_clock_at_the_pm_frequency() {
         let mut acpi = BxAcpiCtrl::new();
         acpi.pm_base = 0xB000;
         acpi.pci_conf[0x80] = 0x01; // Enable PM decode
-        acpi.init_icount_sync(1_000, 1_000_000);
 
         let pm_addr = acpi.pm_base as u16 + 0x08;
-        assert_eq!(acpi.read(pm_addr, 4, 1_000), 0);
-        assert_eq!(acpi.read(pm_addr, 4, 1_001_000), PM_FREQ as u32 & 0xFF_FFFF);
+        assert_eq!(acpi.read(pm_addr, 4, clock_at_usec(0)), 0);
+        assert_eq!(
+            acpi.read(pm_addr, 4, clock_at_usec(1_000_000)),
+            PM_FREQ as u32 & 0xFF_FFFF
+        );
+        assert_eq!(
+            acpi.read(pm_addr, 4, clock_at_usec(1_000)),
+            (PM_FREQ / 1_000) as u32,
+            "a later read at an earlier clock reads the earlier time: nothing is cached"
+        );
+    }
+
+    /// A reset leaves a PM timer on the machine clock reading the machine
+    /// clock. Bochs acpi.cc `reset` does not touch the timer.
+    #[test]
+    fn a_reset_leaves_the_pm_timer_on_the_machine_clock() {
+        let mut acpi = BxAcpiCtrl::new();
+        acpi.pm_base = 0xB000;
+        acpi.pci_conf[0x80] = 0x01; // PMIOSE: decode the PM block
+        let pm_timer = acpi.pm_base as u16 + 0x08;
+
+        let before = acpi.read(pm_timer, 4, clock_at_usec(10_000));
+        acpi.reset();
+        let after = acpi.read(pm_timer, 4, clock_at_usec(20_000));
+
+        assert_eq!(before, (PM_FREQ / 100) as u32);
+        assert_eq!(after, (PM_FREQ / 50) as u32);
     }
 
     #[test]
@@ -1362,7 +1563,7 @@ mod tests {
 
         // Write 1 to PWRBTN_STS to clear it (address = pm_base + 0x00)
         let pm_addr = acpi.pm_base as u16;
-        acpi.write(pm_addr, PmStatus::PWRBTN_STS.bits() as u32, 2, 0);
+        acpi.write(pm_addr, PmStatus::PWRBTN_STS.bits() as u32, 2, clock_at_usec(0));
 
         // PWRBTN_STS should be cleared, TMROF_STS may still be set (depends on timer)
         assert_eq!(acpi.pmsts & PmStatus::PWRBTN_STS.bits(), 0);
@@ -1387,9 +1588,14 @@ mod tests {
         // Write PM base = 0xB000 via PCI config 0x40-0x43
         // Byte at 0x40: (0x00 & 0xC0) | 0x01 = 0x01
         // Byte at 0x41: 0xB0
-        acpi.pci_write(0x40, 0x01, 1); // Low byte with I/O indicator
-        let (changed, _) = acpi.pci_write(0x41, 0xB0, 1);
-        assert!(changed);
+        // Low byte with the I/O indicator: the window is still at 0, so
+        // nothing has moved yet.
+        assert_eq!(
+            acpi.pci_write(0x40, 0x01, 1),
+            AcpiWriteEffects::default()
+        );
+        let effects = acpi.pci_write(0x41, 0xB0, 1);
+        assert!(effects.pm_base_changed);
         assert_eq!(acpi.pm_base, 0xB000);
     }
 
@@ -1403,7 +1609,7 @@ mod tests {
 
         // Write 33 bytes to block data register (0x07) — should wrap at 32
         for i in 0..33u32 {
-            acpi.write(sm_addr + 0x07, i, 1, 0);
+            acpi.write(sm_addr + 0x07, i, 1, clock_at_usec(0));
         }
         // Index should have wrapped: 33 mod 32 = 1
         assert_eq!(acpi.smbus.index, 1);
@@ -1420,12 +1626,14 @@ mod tests {
         acpi.tmr_overflow_time = 100;
 
         // At time 0, no overflow
-        assert_eq!(acpi.get_pmsts(0) & PmStatus::TMROF_STS.bits(), 0);
+        assert_eq!(
+            acpi.get_pmsts(clock_at_usec(0)) & PmStatus::TMROF_STS.bits(),
+            0
+        );
 
         // Advance past overflow point
         // 100 PM ticks = 100 / 3_579_545 seconds = ~28 usec
-        acpi.time_usec = 100; // ~358 PM ticks at 3.58 MHz
-        let pmsts = acpi.get_pmsts(0);
+        let pmsts = acpi.get_pmsts(clock_at_usec(100)); // ~358 PM ticks at 3.58 MHz
         assert_ne!(pmsts & PmStatus::TMROF_STS.bits(), 0);
     }
 
@@ -1444,7 +1652,11 @@ mod tests {
         assert!(!acpi.smi_request_pending);
 
         // The BIOS smm_init: pci_config_writel(d, 0x58, value | (1 << 25)).
-        acpi.pci_write(0x58, 1 << 25, 4);
+        // 0x58 is not a BAR, so nothing outside the device has to move.
+        assert_eq!(
+            acpi.pci_write(0x58, 1 << 25, 4),
+            AcpiWriteEffects::default()
+        );
         acpi.generate_smi(0x00);
         assert!(acpi.smi_request_pending, "APMC_EN set: SMI delivered");
 
@@ -1463,12 +1675,11 @@ mod tests {
         let mut acpi = BxAcpiCtrl::new();
         acpi.pm_base = 0xB000;
         acpi.pci_conf[0x80] = 0x01; // PM I/O space enable
-        acpi.init_icount_sync(0, 1_000_000);
         assert!(!acpi.soft_off_pending);
 
         // SUS_EN with SLP_TYP = 0.
         let value = PmControl::SUS_EN.bits() as u32;
-        acpi.write(acpi.pm_base as u16 + 0x04, value, 2, 0);
+        acpi.write(acpi.pm_base as u16 + 0x04, value, 2, clock_at_usec(0));
 
         assert!(acpi.soft_off_pending, "S5 must request emulator shutdown");
         assert!(acpi.reset_request.is_none(), "S5 stops, it does not reset");
@@ -1481,11 +1692,10 @@ mod tests {
         let mut acpi = BxAcpiCtrl::new();
         acpi.pm_base = 0xB000;
         acpi.pci_conf[0x80] = 0x01; // PM I/O space enable
-        acpi.init_icount_sync(0, 1_000_000);
 
         // SUS_EN with SLP_TYP = 1 (bits 10-12).
         let value = PmControl::SUS_EN.bits() as u32 | (1 << 10);
-        acpi.write(acpi.pm_base as u16 + 0x04, value, 2, 0);
+        acpi.write(acpi.pm_base as u16 + 0x04, value, 2, clock_at_usec(0));
 
         assert!(!acpi.soft_off_pending, "S3 suspends, it does not power off");
         assert_eq!(
@@ -1510,25 +1720,31 @@ mod tests {
         let mut acpi = BxAcpiCtrl::new();
 
         // Establish a real PM base first.
-        acpi.pci_write(0x40, 0x0000_B000, 4);
+        assert!(acpi.pci_write(0x40, 0x0000_B000, 4).pm_base_changed);
         assert_eq!(acpi.pm_base, 0xB000);
 
         // All-ones size probe must NOT relocate the window.
-        let (pm_changed, _) = acpi.pci_write(0x40, 0xFFFF_FFFF, 4);
-        assert!(!pm_changed, "a size probe must not signal a base change");
+        let effects = acpi.pci_write(0x40, 0xFFFF_FFFF, 4);
+        assert!(
+            !effects.pm_base_changed,
+            "a size probe must not signal a base change"
+        );
         assert_eq!(acpi.pm_base, 0xB000, "PM window must stay put");
 
         // Re-writing the same base is also not a change.
-        let (pm_changed, _) = acpi.pci_write(0x40, 0x0000_B000, 4);
-        assert!(!pm_changed);
+        let effects = acpi.pci_write(0x40, 0x0000_B000, 4);
+        assert!(!effects.pm_base_changed);
         assert_eq!(acpi.pm_base, 0xB000);
 
         // The SM BAR behaves identically (16-port alignment -> 0xFFF0 probe).
-        acpi.pci_write(0x90, 0x0000_B100, 4);
+        assert!(acpi.pci_write(0x90, 0x0000_B100, 4).sm_base_changed);
         let sm_base = acpi.sm_base;
         assert_eq!(sm_base, 0xB100);
-        let (_, sm_changed) = acpi.pci_write(0x90, 0xFFFF_FFFF, 4);
-        assert!(!sm_changed, "a size probe must not signal a base change");
+        let effects = acpi.pci_write(0x90, 0xFFFF_FFFF, 4);
+        assert!(
+            !effects.sm_base_changed,
+            "a size probe must not signal a base change"
+        );
         assert_eq!(acpi.sm_base, 0xB100, "SM window must stay put");
     }
 
@@ -1537,22 +1753,23 @@ mod tests {
         let mut acpi = BxAcpiCtrl::new();
         acpi.pm_base = 0xB000;
         acpi.pci_conf[0x80] = 0x01;
-        acpi.init_icount_sync(0, 1_000_000);
 
         acpi.write(
             acpi.pm_base as u16 + 0x02,
             PmEnable::TMROF_EN.bits() as u32,
             2,
-            0,
+            clock_at_usec(0),
         );
-        let delay = acpi.overflow_delay_usec(0).expect("TMROF should arm");
+        let delay = acpi
+            .overflow_delay_usec(clock_at_usec(0))
+            .expect("TMROF should arm");
         assert_eq!(
             delay,
             muldiv64(0xFF_FFFF, 1_000_000, PM_FREQ as u32) + 1
         );
         assert!(!acpi.irq9_level);
 
-        assert_eq!(acpi.overflow_timer(delay), None);
+        assert_eq!(acpi.overflow_timer(clock_at_usec(delay)), None);
         assert_ne!(acpi.pmsts & PmStatus::TMROF_STS.bits(), 0);
         assert!(acpi.irq9_level);
     }
@@ -1565,13 +1782,13 @@ mod tests {
         acpi.pmen = PmEnable::TMROF_EN.bits();
 
         let predicted = acpi
-            .overflow_delay_usec(0)
+            .overflow_delay_usec(clock_at_usec(0))
             .expect("future host overflow should be scheduled");
         let overflow_time = acpi.tmr_overflow_time;
         let pmsts = acpi.pmsts;
 
         let rearmed = acpi
-            .overflow_timer(0)
+            .overflow_timer(clock_at_usec(0))
             .expect("early callback should rearm from host time");
         assert!(rearmed > 0);
         assert!(rearmed <= predicted);
@@ -1582,21 +1799,94 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    fn pm_timer_realtime_sync_advances_without_icount_progress() {
+    fn pm_timer_realtime_sync_advances_without_machine_clock_progress() {
         let mut acpi = BxAcpiCtrl::new();
         acpi.pm_base = 0xB000;
         acpi.pci_conf[0x80] = 0x01; // Enable PM decode
-        acpi.init_icount_sync(1_000, 300_000_000);
         acpi.enable_realtime_sync();
 
         let pm_addr = acpi.pm_base as u16 + 0x08;
-        let before = acpi.read(pm_addr, 4, 1_000);
+        let before = acpi.read(pm_addr, 4, clock_at_usec(1_000));
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let after = acpi.read(pm_addr, 4, 1_000);
+        let after = acpi.read(pm_addr, 4, clock_at_usec(1_000));
 
         assert!(
             after > before,
-            "ACPI PM timer should advance from host realtime even when icount is unchanged"
+            "ACPI PM timer should advance from host realtime even when the machine clock is still"
+        );
+    }
+
+    /// A reset leaves a realtime PM timer counting from where it was. Bochs
+    /// acpi.cc `reset` does not touch the timer: `get_pmtmr` reads
+    /// `bx_virt_timer.time_usec(is_realtime)`, and no device reset rewinds it.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_realtime_pm_timer_keeps_counting_across_a_reset() {
+        let mut acpi = BxAcpiCtrl::new();
+        acpi.pm_base = 0xB000;
+        acpi.pci_conf[0x80] = 0x01; // PMIOSE: decode the PM block
+        acpi.enable_realtime_sync();
+        let pm_timer = acpi.pm_base as u16 + 0x08;
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let before = acpi.read(pm_timer, 4, clock_at_usec(0));
+        acpi.reset();
+        let after = acpi.read(pm_timer, 4, clock_at_usec(0));
+
+        assert!(
+            after >= before,
+            "the PM timer must not restart at a reset: read {after} after {before}"
+        );
+    }
+
+    /// The realtime anchor is set once. Bringing the machine's clocks up a
+    /// second time must not rewind the PM timer, which only a restore moves.
+    #[test]
+    fn a_second_realtime_start_does_not_rewind_the_pm_timer() {
+        let mut acpi = BxAcpiCtrl::new();
+        acpi.pm_base = 0xB000;
+        acpi.pci_conf[0x80] = 0x01; // PMIOSE: decode the PM block
+        acpi.enable_realtime_sync();
+        let pm_timer = acpi.pm_base as u16 + 0x08;
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let before = acpi.read(pm_timer, 4, clock_at_usec(0));
+        acpi.enable_realtime_sync();
+        let after = acpi.read(pm_timer, 4, clock_at_usec(0));
+
+        assert!(after >= before, "read {after} after {before}");
+    }
+
+    /// A realtime PM clock resumes at the reading it was saved with, however
+    /// long the machine had run. Counting that back from the host's clock
+    /// fails for a reading older than the clock's origin — on Linux, anything
+    /// longer than the host has been up, the ordinary case for a snapshot
+    /// taken before the host last rebooted. The reading here is past any
+    /// host clock's origin, so the test holds on every host.
+    #[test]
+    fn a_realtime_pm_clock_restores_a_reading_older_than_the_host() {
+        use crate::snapshot::{IoSink, SnapshotSection};
+        const LONG_AGO_USEC: u64 = u64::MAX / 4;
+
+        let mut saved = BxAcpiCtrl::new();
+        saved.enable_realtime_sync();
+        let mut bytes = Vec::new();
+        saved.save(&mut IoSink::new(&mut bytes)).unwrap();
+        // The reading is the eight bytes before `irq9_level` and the two port
+        // bases (1 + 4 + 4).
+        let at = bytes.len() - 17;
+        bytes[at..at + 8].copy_from_slice(&LONG_AGO_USEC.to_le_bytes());
+
+        let mut restored = BxAcpiCtrl::new();
+        restored.enable_realtime_sync();
+        restored
+            .restore(&mut &bytes[..])
+            .expect("a long-running machine's snapshot restores");
+
+        let reading = restored.realtime_usec().unwrap();
+        assert!(
+            (LONG_AGO_USEC..LONG_AGO_USEC + 60_000_000).contains(&reading),
+            "resumes at the saved reading, read {reading}"
         );
     }
 }

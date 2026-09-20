@@ -27,7 +27,6 @@ use super::softfloat3e::f64_mul_add::f64_mul_add;
 use super::softfloat3e::softfloat::softfloat_get_exception_flags;
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
@@ -54,8 +53,8 @@ fn qword_elements(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -69,16 +68,16 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register with dword-granularity masking, zeroing upper bits beyond VL
-fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -102,8 +101,8 @@ fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// Write ZMM register with qword-granularity masking
-fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -128,8 +127,8 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 /// Read rm operand (W) as packed dwords from register or memory.
 /// Register form: reads src1() (rm register = W).
 /// Memory form: reads from memory at resolved address.
-fn read_rm_ps<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_rm_ps<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -143,8 +142,8 @@ fn read_rm_ps<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
 /// Read rm operand (W) as packed qwords from register or memory.
 /// Register form: reads src1() (rm register = W).
 /// Memory form: reads from memory at resolved address.
-fn read_rm_pd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_rm_pd<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -155,7 +154,7 @@ fn read_rm_pd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// The shared body of all twelve packed single-precision EVEX FMA
     /// handlers. Bochs avx512_fma.cc `EVEX_FMA_PACKED_SINGLE`.
     fn evex_fma_packed_ps(
@@ -171,7 +170,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let w = read_rm_ps(self, instr, vl)?; // W = rm/memory
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 == 0 {
@@ -201,7 +200,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let w = read_rm_pd(self, instr, vl)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
-        self.softfloat_rc_override(&mut status, instr);
+        crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             if (mask >> i) & 1 == 0 {
@@ -449,8 +448,6 @@ mod tests {
     //! multiply-add. Only comparing the two mnemonics against each other, on
     //! the same inputs, pins the parity down.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::{BxSegregs, Instruction};
     use crate::cpu::xmm::MXCSR_RESET;
     use rusty_box_decoder::opcode::Opcode;
@@ -474,8 +471,8 @@ mod tests {
 
     /// H=2.0, V=3.0, W=1.0 in every element, so H*V = 6.0 and the two
     /// possible results are 6+1=7 and 6-1=5 — far apart and exact.
-    fn seed<I: crate::cpu::cpuid::BxCpuIdTrait>(
-        cpu: &mut crate::cpu::cpu::BxCpuC<'_, I, ()>,
+    fn seed(
+        cpu: &mut crate::cpu::cpu::BxCpuC<()>,
     ) {
         cpu.mxcsr.mxcsr = MXCSR_RESET;
         for n in 0..4 {
@@ -490,7 +487,9 @@ mod tests {
         let add = 7.0f32.to_bits();
         let sub = 5.0f32.to_bits();
 
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         seed(&mut cpu);
         cpu.execute_instruction(&evex_reg(Opcode::EvexVfmaddsub213psVpsHpsWps))
             .unwrap();
@@ -499,7 +498,9 @@ mod tests {
         assert_eq!(cpu.vmm[0].zmm32u(2), sub);
         assert_eq!(cpu.vmm[0].zmm32u(3), add);
 
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         seed(&mut cpu);
         cpu.execute_instruction(&evex_reg(Opcode::EvexVfmsubadd213psVpsHpsWps))
             .unwrap();
@@ -511,7 +512,9 @@ mod tests {
 
     #[test]
     fn fmaddsub_double_precision_keeps_the_same_parity() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.mxcsr.mxcsr = MXCSR_RESET;
         for n in 0..2 {
             cpu.vmm[0].set_zmm64u(n, 3.0f64.to_bits()); // V

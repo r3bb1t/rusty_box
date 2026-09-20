@@ -1,9 +1,114 @@
 #![allow(unused_variables)]
 #![allow(unused_unsafe)]
 
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
+use crate::convert::u64_from_usize;
+use crate::cpu::BxCpuC;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+/// Pack one `IA32_VMX_*_CTLS` capability MSR: allowed-1 (what a guest MAY set)
+/// in the high half, allowed-0 (what it MUST set) in the low half. Bochs
+/// vmx.cc reads these MSRs back through the same pair when validating VMENTRY.
+#[inline]
+const fn vmx_ctls_msr(allowed_0: u32, allowed_1: u32) -> u64 {
+    ((allowed_1 as u64) << 32) | allowed_0 as u64
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Leave the ACTIVE activity state. Bochs proc_ctrl.cc `enter_sleep_state`.
+    ///
+    /// The single entry point for every sleep state, which is what makes the
+    /// async-event indication impossible to forget: Bochs comments its
+    /// `async_event = 1` with "so processor knows to check", and that flag is
+    /// the only reason `cpu_loop`'s top calls `handleAsyncEvent` on the next
+    /// pass and notices the CPU is no longer running. A state entered without
+    /// it keeps fetching.
+    ///
+    /// The SLEEP bit is Bochs's `1`, written as an assignment like Bochs's so
+    /// STOP_TRACE is dropped here too. `BX_ASYNC_EVENT_SCHEDULER_BOUNDARY` is
+    /// carried across because it latches a machine boundary that Bochs, having
+    /// no analogue, cannot lose in the first place.
+    pub(super) fn enter_sleep_state(&mut self, state: super::cpu::CpuActivityState) {
+        use super::cpu::CpuActivityState;
+        match state {
+            // Bochs: BX_ASSERT(0) — not a target for entering the active state.
+            CpuActivityState::Active | CpuActivityState::VmxLastActivityState => {
+                tracing::error!("enter_sleep_state: invalid target state {state:?}");
+                return;
+            }
+            CpuActivityState::Hlt | CpuActivityState::Mwait | CpuActivityState::MwaitIf => {}
+            CpuActivityState::WaitForSipi => {
+                // Bochs masks these, then falls through to mask interrupts.
+                self.mask_event(Self::BX_EVENT_INIT | Self::BX_EVENT_SMI | Self::BX_EVENT_NMI);
+                self.clear_if_for_sleep();
+            }
+            // Shutdown masks interrupts, so only NMI/SMI/INIT can wake a CPU
+            // that triple-faulted — the architectural behaviour, and what
+            // `handle_wait_for_event` tests once the flag above gets it there.
+            CpuActivityState::Shutdown => self.clear_if_for_sleep(),
+        }
+        self.activity_state = state;
+        self.async_event = (self.async_event & super::cpu::BX_ASYNC_EVENT_SCHEDULER_BOUNDARY)
+            | Self::BX_ASYNC_EVENT_SLEEP;
+        // Bochs ends `enter_sleep_state` with BX_INSTR_HLT, so the hook reports
+        // every sleep entry, not just the HLT instruction: MWAIT fires it after
+        // BX_INSTR_MWAIT (mwait.cc) rather than instead of it, and an AP parking
+        // in WAIT_FOR_SIPI (init.cc) reports too.
+        if self.instrumentation.active.has_hlt_mwait() {
+            self.instrumentation.fire_hlt();
+        }
+    }
+
+    /// Bochs `clear_IF()` (cpu.h `IMPLEMENT_EFLAG_SET_ACCESSOR_IF`): clearing
+    /// the flag re-gates the pending external-interrupt events, so the two
+    /// always move together.
+    fn clear_if_for_sleep(&mut self) {
+        self.eflags.remove(super::eflags::EFlags::IF_);
+        self.handle_interrupt_mask_change();
+    }
+
+    /// A triple fault a backend's processor took in hardware — the way in for
+    /// an engine that runs the guest itself, where the interpreter's own
+    /// arrives through `exception`.
+    ///
+    /// Applies the machine's choice as Bochs exception.cc does
+    /// (`reset_on_triple_fault`): for [`OnTripleFault::ShutDown`] the processor
+    /// enters the shutdown state here, and for
+    /// [`OnTripleFault::ResetTheMachine`] the caller resets the machine, which
+    /// only the machine can do. Returns the choice so the caller knows which.
+    /// Such a backend runs no nested guest — this port withholds VMX and SVM
+    /// from it — so there is no VM exit to take first.
+    ///
+    /// [`OnTripleFault::ShutDown`]: crate::params::OnTripleFault::ShutDown
+    /// [`OnTripleFault::ResetTheMachine`]: crate::params::OnTripleFault::ResetTheMachine
+    pub fn take_hardware_triple_fault(&mut self) -> crate::params::OnTripleFault {
+        let action = self.on_triple_fault;
+        match action {
+            crate::params::OnTripleFault::ResetTheMachine => {
+                tracing::error!("3rd exception with no resolution — resetting the machine");
+            }
+            crate::params::OnTripleFault::ShutDown => {
+                tracing::warn!("3rd exception with no resolution — shutdown");
+                self.enter_sleep_state(super::cpu::CpuActivityState::Shutdown);
+            }
+        }
+        action
+    }
+
+    /// The tail Bochs repeats at every change of processor context — SMM
+    /// entry and RSM, SVM `VMRUN` and `#VMEXIT`, VMX VM entry and VM exit:
+    /// `handleCpuContextChange`, the monitor disarmed, and
+    /// `BX_INSTR_TLB_CNTRL(BX_INSTR_CONTEXT_SWITCH)` (smm.cc
+    /// `enter_system_management_mode`, `resume_from_system_management_mode`;
+    /// svm.cc `SvmEnterLoadCheckGuestState`, `SvmExitLoadHostState`; vmx.cc
+    /// `VMenterLoadCheckGuestState`, `VMexitLoadHostState`).
+    pub(super) fn finish_context_switch(&mut self) {
+        self.handle_cpu_context_change();
+        self.monitor.reset_monitor();
+        if self.instrumentation.active.has_tlb() {
+            self.instrumentation
+                .fire_tlb_cntrl(super::instrumentation::TlbCntrl::ContextSwitch);
+        }
+    }
+
     pub(super) fn handle_cpu_context_change(&mut self) {
         self.tlb_flush();
 
@@ -228,33 +333,64 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.tsc_adjust = newval.wrapping_sub(system_ticks.wrapping_mul(Self::TSC_SCALE)) as i64
     }
 
-    /// Get current system ticks from pc_system (Bochs: bx_pc_system.time_ticks()).
-    /// Falls back to `cpu_ticks()` when pc_system is not wired (unit tests).
+    /// Tick count for a CPU that is not executing against a machine.
+    ///
+    /// Ticks this CPU has retired, with no machine clock involved.
+    ///
+    /// Deliberately NOT named `system_ticks`: that name also exists on
+    /// [`ExecCtx`](crate::cpu::exec_ctx::ExecCtx), and a `BxCpuC` method
+    /// reached through `Deref` from a context binds to THIS one silently.
+    /// A distinct name is what keeps a caller that wants machine time from
+    /// getting CPU-local time without a compile error.
+    #[inline]
+    pub(crate) fn cpu_local_ticks(&self) -> u64 {
+        self.cpu_ticks()
+    }
+}
+
+// =========================================================================
+// System control instructions
+// =========================================================================
+
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
+    /// Put the processor in the shutdown state — Bochs proc_ctrl.cc
+    /// `shutdown`, the one way in for a triple fault the machine does not
+    /// reset on, an `RSM` from an inconsistent state-save image, a VMX abort
+    /// and an SVM host state whose PDPTEs are invalid.
+    ///
+    /// An SVM guest that intercepts `SHUTDOWN` exits to its host instead.
+    /// Otherwise the processor sleeps with interrupts masked, so only NMI, SMI
+    /// and INIT reach it. Either way the instruction is over: this always
+    /// unwinds to the decode loop, as Bochs's `longjmp` does.
+    pub(super) fn shutdown(&mut self) -> crate::cpu::Result<()> {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_SHUTDOWN) {
+            self.svm_vmexit(super::svm::SvmVmexit::Shutdown as i32, 0, 0)?;
+        }
+        self.enter_sleep_state(super::cpu::CpuActivityState::Shutdown);
+        Err(crate::cpu::CpuError::CpuLoopRestart)
+    }
+
+    /// Current system ticks — Bochs `bx_pc_system.time_ticks()`.
     ///
     /// UP observes the live pc-system clock plus the ticks this CPU generated
-    /// in the wired batch — `cpu_ticks()`, so fast-REP bulk transfers advance
+    /// in the current batch — `cpu_ticks()`, so fast-REP bulk transfers advance
     /// time exactly like Bochs BX_TICKN. SMP freezes every CPU's view at the
     /// round-start epoch and advances global time only when the emulator
     /// completes that full round.
     #[inline]
     pub(crate) fn system_ticks(&self) -> u64 {
-        let Some(pc_system) = self.pc_system_ptr else {
-            return self.cpu_ticks();
-        };
-        if self.pc_system_tick_denominator == 1 {
-            // SAFETY: pc_system_ptr is wired only for the active execution
-            // scope and cleared before the emulator regains this borrow.
-            let live_ticks = unsafe { pc_system.as_ref().time_ticks() };
-            live_ticks
-                .wrapping_add(self.cpu_ticks().wrapping_sub(self.pc_system_cpu_ticks_at_sync))
-        } else {
-            self.pc_system_ticks_at_sync
+        match self.slice_clock {
+            // Assembled outside a slice — no machine clock has been taken,
+            // so reading `pc_system` here would measure against a stale
+            // epoch from whichever slice ran last.
+            crate::cpu::cpu::SliceClock::Detached => self.cpu_local_ticks(),
+            crate::cpu::cpu::SliceClock::LiveUp { cpu_ticks_at_sync } => {
+                let live_ticks = self.pc_system.time_ticks();
+                live_ticks.wrapping_add(self.cpu_ticks().wrapping_sub(cpu_ticks_at_sync))
+            }
+            crate::cpu::cpu::SliceClock::FrozenRound { epoch } => epoch,
         }
     }
-
-    // =========================================================================
-    // System control instructions
-    // =========================================================================
 
     /// WBINVD — Write Back and Invalidate Cache
     /// Based on Bochs proc_ctrl.cc
@@ -279,7 +415,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return Ok(());
         }
         // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_WBINVD)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cache() {
             self.instrumentation
                 .fire_cache_cntrl(super::instrumentation::CacheCntrl::Wbinvd);
@@ -308,7 +443,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.vmx_vmexit(super::vmx::VmxVmexitReason::Invd, 0);
         }
         // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_INVD)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cache() {
             self.instrumentation
                 .fire_cache_cntrl(super::instrumentation::CacheCntrl::Invd);
@@ -354,7 +488,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.tlb_invlpg(laddr);
 
         // BOCHS BX_INSTR_TLB_CNTRL with INVLPG kind.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
             self.instrumentation
                 .fire_tlb_cntrl(super::instrumentation::TlbCntrl::Invlpg { laddr });
@@ -459,7 +592,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let paddr = self.translate_data_read(laddr)?;
 
         // Bochs mwait.cc: validate monitored address has valid host mapping.
-        // MMIO addresses (host_page_addr=0) cannot be monitored — MWAIT may
+        // MMIO addresses (no cached host page) cannot be monitored — MWAIT may
         // never wake. MONITOR still succeeds (acceptable — just warn).
         if self.get_host_write_ptr(laddr)?.is_none() {
             tracing::warn!(
@@ -533,7 +666,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // BOCHS BX_INSTR_MWAIT(cpu_id, addr, len, flags)
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_hlt_mwait() {
             let flags = super::instrumentation::MwaitFlags::from_bits_truncate(self.ecx());
             let addr = self.monitor.monitor_addr;
@@ -558,15 +690,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mwait_if = self.ecx() & 0x1 != 0;
 
         // Bochs mwait.cc: enter_sleep_state(new_state)
-        // Matches the pattern in hlt() — set activity state and async event
         if mwait_if {
-            self.activity_state = super::cpu::CpuActivityState::MwaitIf;
             tracing::trace!("MWAIT: entering sleep state MwaitIf (wake on interrupt even if IF=0)");
+            self.enter_sleep_state(super::cpu::CpuActivityState::MwaitIf);
         } else {
-            self.activity_state = super::cpu::CpuActivityState::Mwait;
             tracing::trace!("MWAIT: entering sleep state Mwait");
+            self.enter_sleep_state(super::cpu::CpuActivityState::Mwait);
         }
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE | Self::BX_ASYNC_EVENT_SLEEP;
 
         Ok(())
     }
@@ -752,7 +882,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // BOCHS BX_INSTR_CLFLUSH(cpu_id, laddr, paddr).
         // We don't actually flush a cache (no D-cache modeled), but we surface
         // the linear/physical addresses so users can track flushed lines.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
             let seg = super::decoder::BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
@@ -765,8 +894,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let paddr = self.translate_data_read(laddr).unwrap_or(0);
             self.instrumentation.fire_clflush(laddr, paddr);
         }
-        #[cfg(not(feature = "instrumentation"))]
-        let _ = instr;
         Ok(())
     }
 
@@ -842,7 +969,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_rax(ticks & 0xFFFF_FFFF);
         self.set_rdx(ticks >> 32);
         // ECX = IA32_TSC_AUX MSR (processor ID) — Bochs proc_ctrl.cc
-        self.set_rcx(self.msr.tsc_aux as u64);
+        let rcx = self.msr.tsc_aux as u64;
+        self.set_rcx(rcx);
 
         Ok(())
     }
@@ -956,17 +1084,55 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// An index this architecture does not define — Bochs msr.cc
+    /// `handle_unknown_rdmsr`. Reads as zero, or #GPs, by the machine's
+    /// `ignore_bad_msrs` policy.
+    ///
+    /// Bochs first offers the index to the CPU model and then to its
+    /// build-time configurable MSR array. No model in `cpu/cpudb` implements
+    /// an MSR of its own, and the configurable array is a Bochs build option
+    /// this port does not carry, so the policy is the whole of it.
+    fn handle_unknown_rdmsr(&mut self, msr: u32) -> crate::cpu::Result<u64> {
+        tracing::debug!("RDMSR: unknown register {msr:#010x}");
+        if !self.ignore_bad_msrs {
+            self.exception(super::cpu::Exception::Gp, 0)?;
+        }
+        Ok(0)
+    }
+
+    /// The read dispatch's last resort. An index the descriptor table names
+    /// but the dispatch has no arm for is a hole in this port — Bochs BX_PANICs
+    /// on exactly that — so it is reported rather than quietly answered.
+    fn missing_or_unknown_rdmsr(&mut self, msr: u32) -> crate::cpu::Result<u64> {
+        if msr < super::msr::BX_MSR_MAX_INDEX && super::msr::msr_descriptor(msr).is_some() {
+            tracing::error!("RDMSR: missing MSR handling for MSR {msr:#010x}");
+        }
+        self.handle_unknown_rdmsr(msr)
+    }
+
     /// MSR-table dispatch for read — Bochs msr.cc switch body. Does not
     /// perform CPL or VMX/SVM intercept checks; callers (`rdmsr` and the
     /// VMX MSR-store list helper) own those gates.
     pub(super) fn rdmsr_value(&mut self, msr: u32) -> crate::cpu::Result<u64> {
+        use super::decoder::features::X86Feature;
         use super::msr::*;
-        if (0x800..=0x8FF).contains(&msr) {
+        // Bochs msr.cc reserves 0x800..=0x8FF for the x2APIC only on a model
+        // that has one; without the extension the range is ordinary MSR space
+        // and the table below answers it.
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaX2apic)
+            && (0x800..=0x8FF).contains(&msr)
+        {
             if self.lapic.get_mode() != super::apic::ApicMode::X2apicMode {
                 self.exception(super::cpu::Exception::Gp, 0)?;
                 return Ok(0);
             }
             let index = (msr - 0x800) << 4;
+            // Bochs msr.cc RDMSR — the counterpart of the WRMSR redirection
+            // below: a guest with x2APIC virtualisation reads back the virtual
+            // TPR it wrote, not the host's.
+            if let Some(value) = self.vmx_virtualize_x2apic_read(index) {
+                return Ok(value);
+            }
             // LAPIC reads convert through `live_ticks(cpu_ticks)` (apic.cc
             // get_current_timer_count), which subtracts `cpu_ticks_at_sync` —
             // the CPU tick clock, like the MMIO read paths. `system_ticks()`
@@ -977,6 +1143,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             self.exception(super::cpu::Exception::Gp, 0)?;
             return Ok(0);
+        }
+        if msr < BX_MSR_MAX_INDEX {
+            let Some(descriptor) = msr_descriptor(msr) else {
+                return self.handle_unknown_rdmsr(msr);
+            };
+            if !self.bx_cpuid_support_isa_extension(descriptor.feature) {
+                // Bochs msr.cc: an architectural MSR whose feature the model
+                // does not have does NOT exist, and #GPs whatever the
+                // unknown-MSR policy says — that policy only covers indices
+                // this architecture never defined.
+                tracing::debug!(
+                    "RDMSR {}: {:?} not enabled in the cpu model, #GP(0)",
+                    descriptor.name,
+                    descriptor.feature
+                );
+                self.exception(super::cpu::Exception::Gp, 0)?;
+                return Ok(0);
+            }
         }
         let val: u64 = match msr {
             BX_MSR_TSC => self.get_virtual_tsc(self.system_ticks()),
@@ -1009,10 +1193,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Bochs msr.cc IA32_FEATURE_CONTROL read — carries the VMX enable
             // and LOCK bits firmware programs before VMXON.
             BX_MSR_IA32_FEATURE_CONTROL => self.msr.ia32_feature_ctrl as u64,
-            BX_MSR_BIOS_SIGN_ID => 0x02000065, // Skylake-X microcode revision
             BX_MSR_MTRRCAP => BX_MSR_MTRRCAP_DEFAULT,
-            BX_MSR_PMC0..=BX_MSR_PMC7 => 0, // Performance counters — return 0
-            BX_MSR_PERFEVTSEL0..=BX_MSR_PERFEVTSEL7 => 0, // Perf event selects — return 0
+            // Bochs msr.cc logs the selector read and hands it to the
+            // unknown-MSR policy: the counters themselves are not modelled.
+            BX_MSR_PERFEVTSEL0..=BX_MSR_PERFEVTSEL7 => {
+                tracing::debug!(
+                    "RDMSR: read of MSR_IA32_PERFEVTSEL{}",
+                    msr - BX_MSR_PERFEVTSEL0
+                );
+                return self.handle_unknown_rdmsr(msr);
+            }
+            // Bochs msr.cc: the TSC offset a guest may program directly.
+            BX_MSR_TSC_ADJUST => self.tsc_adjust as u64,
+            // Bochs msr.cc: the supervisor state components XSAVES may save.
+            BX_MSR_XSS => self.msr.ia32_xss,
+            // Bochs msr.cc: the MSRLIST serialization barrier reads as zero.
+            BX_MSR_IA32_BARRIER => 0,
+            // Bochs msr.cc IA32_ARCH_CAPABILITIES — bits [4:0] set:
+            //   [0] RDCL_NO, [1] IBRS_ALL, [2] RSBA,
+            //   [3] SKIP_L1DFL_VMENTRY, [4] SSB_NO.
+            BX_MSR_IA32_ARCH_CAPABILITIES => 0x1F,
+            BX_MSR_IA32_SPEC_CTRL => self.msr.ia32_spec_ctrl as u64,
+            // Bochs msr.cc: write-only MSRs, so a read is a #GP.
+            BX_MSR_IA32_PRED_CMD | BX_MSR_IA32_FLUSH_CMD => {
+                tracing::debug!("RDMSR: MSR {msr:#010x} is write only, #GP(0)");
+                self.exception(super::cpu::Exception::Gp, 0)?;
+                return Ok(0);
+            }
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr as u64,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr,
             BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr,
@@ -1031,16 +1238,48 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 let idx = (msr - BX_MSR_MTRRFIX4K_C0000) as usize;
                 self.msr.mtrrfix4k[idx].U64()
             }
-            // Long-mode MSRs (Bochs msr.cc)
-            BX_MSR_EFER => self.efer.get32() as u64,
-            BX_MSR_STAR => self.msr.star,
-            BX_MSR_LSTAR => self.msr.lstar,
-            BX_MSR_CSTAR => self.msr.cstar,
-            BX_MSR_FMASK => self.msr.fmask as u64,
-            BX_MSR_FSBASE => self.get_segment_base(super::decoder::BxSegregs::Fs),
-            BX_MSR_GSBASE => self.get_segment_base(super::decoder::BxSegregs::Gs),
-            BX_MSR_KERNELGSBASE => self.msr.kernelgsbase,
-            BX_MSR_TSC_AUX => self.msr.tsc_aux as u64,
+            // Long-mode MSRs (Bochs msr.cc). Above BX_MSR_MAX_INDEX there is no
+            // descriptor to gate on, so each carries the gate Bochs writes into
+            // its own case.
+            BX_MSR_EFER => {
+                if self.efer_suppmask == 0 {
+                    tracing::debug!("RDMSR MSR_EFER: EFER is not supported");
+                    return self.handle_unknown_rdmsr(msr);
+                }
+                self.efer.get32() as u64
+            }
+            BX_MSR_STAR => {
+                if (self.efer_suppmask & super::crregs::BxEfer::SCE.bits()) == 0 {
+                    tracing::debug!("RDMSR MSR_STAR: SYSCALL/SYSRET not enabled in the cpu model");
+                    self.exception(super::cpu::Exception::Gp, 0)?;
+                    return Ok(0);
+                }
+                self.msr.star
+            }
+            BX_MSR_LSTAR | BX_MSR_CSTAR | BX_MSR_FMASK | BX_MSR_FSBASE | BX_MSR_GSBASE
+            | BX_MSR_KERNELGSBASE => {
+                if !self.bx_cpuid_support_isa_extension(X86Feature::IsaLongMode) {
+                    tracing::debug!("RDMSR {msr:#010x}: long mode not enabled in the cpu model");
+                    self.exception(super::cpu::Exception::Gp, 0)?;
+                    return Ok(0);
+                }
+                match msr {
+                    BX_MSR_LSTAR => self.msr.lstar,
+                    BX_MSR_CSTAR => self.msr.cstar,
+                    BX_MSR_FMASK => self.msr.fmask as u64,
+                    BX_MSR_FSBASE => self.get_segment_base(super::decoder::BxSegregs::Fs),
+                    BX_MSR_GSBASE => self.get_segment_base(super::decoder::BxSegregs::Gs),
+                    _ => self.msr.kernelgsbase,
+                }
+            }
+            BX_MSR_TSC_AUX => {
+                if !self.bx_cpuid_support_isa_extension(X86Feature::IsaRdtscp) {
+                    tracing::debug!("RDMSR MSR_TSC_AUX: RDTSCP not enabled in the cpu model");
+                    self.exception(super::cpu::Exception::Gp, 0)?;
+                    return Ok(0);
+                }
+                self.msr.tsc_aux as u64
+            }
             // VMX capability MSRs (Bochs msr.cc)
             // Return Bochs-compatible default values so kernel VMX probing doesn't #GP
             // FRED MSRs
@@ -1054,51 +1293,96 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.msr.ia32_fred_ssp[idx]
             }
             BX_MSR_IA32_FRED_CONFIG => self.msr.ia32_fred_cfg,
-            0x480 => {
+            BX_MSR_VMX_BASIC => {
                 // IA32_VMX_BASIC: VMCS revision=1, VMCS size=4096, memory type=WB(6)
                 // Bits 48=1 (true controls supported), bit 55=1 (INS/OUTS exit info)
                 0x0001_0006_0000_0001u64
             }
-            0x481 => 0x0000_003F_0000_003Fu64, // IA32_VMX_PINBASED_CTLS
-            0x482 => 0x0401_E172_0401_E172u64, // IA32_VMX_PROCBASED_CTLS
-            0x483 => 0x0003_6FFF_0000_0000u64, // IA32_VMX_EXIT_CTLS
-            0x484 => 0x0000_FFFF_0000_0011u64, // IA32_VMX_ENTRY_CTLS
-            0x485 => 0x0000_0000_0000_0000u64, // IA32_VMX_MISC
-            0x486 => 0x0000_0000_8000_0000u64, // IA32_VMX_CR0_FIXED0
-            0x487 => 0x0000_0000_FFFF_FFFFu64, // IA32_VMX_CR0_FIXED1
-            0x488 => 0x0000_0000_0000_2000u64, // IA32_VMX_CR4_FIXED0
-            0x489 => 0x0000_0000_003F_27FFu64, // IA32_VMX_CR4_FIXED1
-            0x48A => 0x0000_002C_0000_0000u64, // IA32_VMX_VMCS_ENUM
-            0x48B => {
-                // IA32_VMX_PROCBASED_CTLS2 — high 32 bits advertise the
-                // "allowed-1" set, low 32 bits the "must-be-1" set. We
-                // advertise EPT_ENABLE (1<<1), VPID_ENABLE (1<<5), and
-                // INVPCID (1<<12) — each backed by a real implementation
-                // (EPT walker, INVEPT/INVVPID handlers, INVPCID intercept).
-                const ALLOWED_1: u64 = super::vmx::VMX_VM_EXEC_CTRL2_EPT_ENABLE as u64
-                    | super::vmx::VMX_VM_EXEC_CTRL2_VPID_ENABLE as u64
-                    | super::vmx::VMX_VM_EXEC_CTRL2_INVPCID as u64;
-                ALLOWED_1 << 32
+            // Each of these packs allowed-1 in the high half and allowed-0
+            // (must-be-1) in the low half, and MUST equal the matching
+            // constants in vmx.rs — a guest reads the MSR to decide what it
+            // may set, and VMENTRY then validates against the constant.
+            BX_MSR_VMX_PINBASED_CTRLS => vmx_ctls_msr(
+                super::vmx::VMX_PINBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PINBASED_CTLS_ALLOWED_1,
+            ),
+            BX_MSR_VMX_PROCBASED_CTRLS => vmx_ctls_msr(
+                super::vmx::VMX_PROCBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PROCBASED_CTLS_ALLOWED_1,
+            ),
+            BX_MSR_VMX_VMEXIT_CTRLS => vmx_ctls_msr(
+                super::vmx::VMX_EXIT_CTLS_ALLOWED_0,
+                super::vmx::VMX_EXIT_CTLS_ALLOWED_1,
+            ),
+            BX_MSR_VMX_VMENTRY_CTRLS => 0x0000_FFFF_0000_0011u64,
+            BX_MSR_VMX_MISC => 0x0000_0000_0000_0000u64,
+            BX_MSR_VMX_CR0_FIXED0 => 0x0000_0000_8000_0000u64,
+            BX_MSR_VMX_CR0_FIXED1 => 0x0000_0000_FFFF_FFFFu64,
+            BX_MSR_VMX_CR4_FIXED0 => 0x0000_0000_0000_2000u64,
+            BX_MSR_VMX_CR4_FIXED1 => 0x0000_0000_003F_27FFu64,
+            BX_MSR_VMX_VMCS_ENUM => 0x0000_002C_0000_0000u64,
+            // IA32_VMX_PROCBASED_CTLS2 — no secondary control is required, so
+            // allowed-0 is zero and only the allowed-1 half carries anything.
+            // Read from the same constant VMENTRY validates against: a guest
+            // discovers the feature set here and would never set a bit this
+            // MSR does not advertise.
+            BX_MSR_VMX_PROCBASED_CTRLS2 => {
+                vmx_ctls_msr(0, super::vmx::VMX_PROCBASED_CTLS2_ALLOWED_1)
             }
-            0x48C => 0x0000_003F_0000_003Fu64, // IA32_VMX_TRUE_PINBASED_CTLS
-            0x48D => 0x0401_E172_0401_E172u64, // IA32_VMX_TRUE_PROCBASED_CTLS
-            0x48E => 0x0003_6FFF_0000_0000u64, // IA32_VMX_TRUE_EXIT_CTLS
-            0x48F => 0x0000_FFFF_0000_0011u64, // IA32_VMX_TRUE_ENTRY_CTLS
-            0x490 => 0x0000_0000_0000_0000u64, // IA32_VMX_VMFUNC
-            0x491 => 0x0000_0000_0000_0000u64, // IA32_VMX_PROCBASED_CTLS3
-            // SVM MSRs
-            super::svm::BX_SVM_VM_CR_MSR => self.msr.svm_vm_cr as u64,
-            super::svm::BX_SVM_IGNNE_MSR => 0, // IGNNE not supported
-            super::svm::BX_SVM_SMM_CTL_MSR => 0, // SMM_CTL not supported
-            super::svm::BX_SVM_VM_HSAVE_PA_MSR => self.msr.svm_hsave_pa,
-            _ => {
-                // Bochs msr.cc: unknown MSRs raise #GP(0).
-                if !self.ignore_bad_msrs {
-                    tracing::trace!("RDMSR: unknown MSR={:#010x}, #GP(0)", msr);
+            // IA32_VMX_EPT_VPID_CAP — Bochs vmcs.cc `init_ept_vpid_capabilities`
+            // composes this from what the EPT walker and the invalidation
+            // instructions actually implement:
+            //   [0]     execute-only EPT translations
+            //   [6]     4-level page walk (the only length is_eptptr_valid takes)
+            //   [8]     UC EPT paging structure memory type
+            //   [14]    WB EPT paging structure memory type
+            //   [16]    2 MiB EPT pages
+            //   [20]    INVEPT supported
+            //   [25:24] INVEPT single-context and all-context types
+            //   [32]    INVVPID supported
+            //   [43:40] INVVPID individual/single/all/single-non-global types
+            BX_MSR_VMX_EPT_VPID_CAP => {
+                const EPT_CAPS: u64 = 0x0611_4141;
+                const VPID_CAPS: u64 = 0x0000_0F01 << 32;
+                EPT_CAPS | VPID_CAPS
+            }
+            BX_MSR_VMX_TRUE_PINBASED_CTRLS => vmx_ctls_msr(
+                super::vmx::VMX_PINBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PINBASED_CTLS_ALLOWED_1,
+            ),
+            BX_MSR_VMX_TRUE_PROCBASED_CTRLS => vmx_ctls_msr(
+                super::vmx::VMX_PROCBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PROCBASED_CTLS_ALLOWED_1,
+            ),
+            BX_MSR_VMX_TRUE_VMEXIT_CTRLS => vmx_ctls_msr(
+                super::vmx::VMX_EXIT_CTLS_ALLOWED_0,
+                super::vmx::VMX_EXIT_CTLS_ALLOWED_1,
+            ),
+            BX_MSR_VMX_TRUE_VMENTRY_CTRLS => 0x0000_FFFF_0000_0011u64,
+            BX_MSR_VMX_VMFUNC => 0x0000_0000_0000_0000u64,
+            // IA32_VMX_PROCBASED_CTLS3 and IA32_VMX_EXIT_CTLS2. Bochs msr.cc
+            // answers each only while its `vmx_cap` has supported bits for it
+            // and #GPs otherwise; this port implements no tertiary execution
+            // control and no secondary exit control, so neither exists.
+            BX_MSR_VMX_PROCBASED_CTRLS3 | BX_MSR_VMX_VMEXIT_CTRLS2 => {
+                tracing::debug!("RDMSR: MSR {msr:#010x} has no supported bits, #GP(0)");
+                self.exception(super::cpu::Exception::Gp, 0)?;
+                return Ok(0);
+            }
+            // SVM MSRs (Bochs msr.cc, each gated on the SVM extension).
+            super::svm::BX_SVM_VM_CR_MSR | super::svm::BX_SVM_VM_HSAVE_PA_MSR => {
+                if !self.bx_cpuid_support_isa_extension(X86Feature::IsaSvm) {
+                    tracing::debug!("RDMSR {msr:#010x}: SVM not enabled in the cpu model");
                     self.exception(super::cpu::Exception::Gp, 0)?;
+                    return Ok(0);
                 }
-                0
+                if msr == super::svm::BX_SVM_VM_CR_MSR {
+                    self.msr.svm_vm_cr as u64
+                } else {
+                    self.msr.svm_hsave_pa
+                }
             }
+            _ => return self.missing_or_unknown_rdmsr(msr),
         };
         Ok(val)
     }
@@ -1121,7 +1405,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let msr = self.ecx();
         let val = ((self.edx() as u64) << 32) | (self.eax() as u64);
 
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cpuid_msr() {
             self.instrumentation.fire_wrmsr(msr, val);
         }
@@ -1138,15 +1421,70 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// An index this architecture does not define — Bochs msr.cc
+    /// `handle_unknown_wrmsr`, the write counterpart of
+    /// [`Self::handle_unknown_rdmsr`]: the value is dropped, or the write
+    /// #GPs, by the machine's `ignore_bad_msrs` policy.
+    fn handle_unknown_wrmsr(&mut self, msr: u32) -> crate::cpu::Result<()> {
+        tracing::debug!("WRMSR: unknown register {msr:#010x}");
+        if !self.ignore_bad_msrs {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        Ok(())
+    }
+
+    /// The write dispatch's last resort; [`Self::missing_or_unknown_rdmsr`]
+    /// for writes.
+    fn missing_or_unknown_wrmsr(&mut self, msr: u32) -> crate::cpu::Result<()> {
+        if msr < super::msr::BX_MSR_MAX_INDEX && super::msr::msr_descriptor(msr).is_some() {
+            tracing::error!("WRMSR: missing MSR handling for MSR {msr:#010x}");
+        }
+        self.handle_unknown_wrmsr(msr)
+    }
+
+    /// The gate Bochs msr.cc writes into each of the long-mode MSRs' cases:
+    /// without BX_ISA_LONG_MODE the register does not exist. Above
+    /// `BX_MSR_MAX_INDEX` there is no descriptor to carry it.
+    fn require_long_mode_for_msr(&mut self, msr: u32) -> crate::cpu::Result<()> {
+        if self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaLongMode) {
+            return Ok(());
+        }
+        tracing::debug!("WRMSR {msr:#010x}: long mode not enabled in the cpu model");
+        self.exception(super::cpu::Exception::Gp, 0)
+    }
+
+    /// The same gate for the two SVM MSRs (Bochs msr.cc `BX_ISA_SVM`).
+    fn require_svm_for_msr(&mut self, msr: u32) -> crate::cpu::Result<()> {
+        if self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaSvm) {
+            return Ok(());
+        }
+        tracing::debug!("WRMSR {msr:#010x}: SVM not enabled in the cpu model");
+        self.exception(super::cpu::Exception::Gp, 0)
+    }
+
     /// MSR-table dispatch for write — Bochs msr.cc switch body. Does not
     /// perform CPL or VMX/SVM intercept checks; callers own those gates.
     pub(super) fn wrmsr_value(&mut self, msr: u32, val: u64) -> crate::cpu::Result<()> {
+        use super::decoder::features::X86Feature;
         use super::msr::*;
-        if (0x800..=0x8FF).contains(&msr) {
+        // The read's rule, for the same reason (Bochs msr.cc).
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaX2apic)
+            && (0x800..=0x8FF).contains(&msr)
+        {
             if self.lapic.get_mode() != super::apic::ApicMode::X2apicMode {
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
             let index = (msr - 0x800) << 4;
+            // Bochs vapic.cc: a guest running with a TPR shadow virtualises
+            // the three x2APIC registers that drive the interrupt cycle, so
+            // the write lands in the virtual-APIC page and runs the matching
+            // virtualization instead of reaching the physical LAPIC. Without
+            // this the guest could never retire a virtually-delivered
+            // interrupt: its EOI would clear the wrong ISR and SVI would stay
+            // set, holding PPR high and blocking every later virtual interrupt.
+            if let Some(result) = self.vmx_virtualize_x2apic_write(index, val) {
+                return result;
+            }
             let current_ticks = self.system_ticks();
             if self.lapic.write_x2apic(index, val, current_ticks) {
                 self.sync_lapic_events();
@@ -1154,11 +1492,28 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        if msr < BX_MSR_MAX_INDEX {
+            let Some(descriptor) = msr_descriptor(msr) else {
+                return self.handle_unknown_wrmsr(msr);
+            };
+            if !self.bx_cpuid_support_isa_extension(descriptor.feature) {
+                tracing::debug!(
+                    "WRMSR {}: {:?} not enabled in the cpu model, #GP(0)",
+                    descriptor.name,
+                    descriptor.feature
+                );
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
         match msr {
-            BX_MSR_TSC => self.set_tsc(val, self.system_ticks()),
+            BX_MSR_TSC => {
+                let ticks = self.system_ticks();
+                self.set_tsc(val, ticks);
+            }
             BX_MSR_APICBASE => {
                 self.msr.apicbase = val as _;
-                self.lapic.set_base(self.msr.apicbase);
+                let apicbase = self.msr.apicbase;
+                self.lapic.set_base(apicbase);
                 self.sync_lapic_events();
             }
             BX_MSR_PLATFORM_ID => {
@@ -1236,7 +1591,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Bochs msr.cc PKS write — val stored, then set_PKeys recomputes allow masks.
             BX_MSR_IA32_PKRS => {
-                self.set_pkeys(self.pkru, val as u32);
+                let pkru = self.pkru;
+                self.set_pkeys(pkru, val as u32);
             }
             // Bochs msr.cc IA32_FEATURE_CONTROL write — once the LOCK bit
             // (bit 0) is set, changing the MSR raises #GP. Firmware can rerun
@@ -1260,6 +1616,59 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_VMX_BASIC..=BX_MSR_VMX_VMEXIT_CTRLS2 => {
                 tracing::trace!("WRMSR: VMX capability MSR {:#x} is read-only, #GP(0)", msr);
                 return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            // Bochs msr.cc logs the write and hands it to the unknown-MSR
+            // policy: no performance counter is modelled behind a selector.
+            BX_MSR_PERFEVTSEL0..=BX_MSR_PERFEVTSEL7 => {
+                tracing::debug!(
+                    "WRMSR: write into MSR_IA32_PERFEVTSEL{}: {val:#018x}",
+                    msr - BX_MSR_PERFEVTSEL0
+                );
+                return self.handle_unknown_wrmsr(msr);
+            }
+            // Bochs msr.cc: the guest's own TSC offset, taken whole.
+            BX_MSR_TSC_ADJUST => self.tsc_adjust = val as i64,
+            // Bochs msr.cc: only the supervisor state components this CPU
+            // actually offers may be enabled.
+            BX_MSR_XSS => {
+                let allowed = u64::from(self.get_ia32_xss_allow_mask());
+                if (val & !allowed) != 0 {
+                    tracing::debug!(
+                        "WRMSR: reserved or unsupported bit in MSR_IA32_XSS: {val:#018x}"
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.ia32_xss = val;
+            }
+            // Bochs msr.cc: the MSRLIST barrier accepts anything and keeps
+            // nothing — writing it is the serialization.
+            BX_MSR_IA32_BARRIER => {}
+            BX_MSR_IA32_ARCH_CAPABILITIES => {
+                tracing::debug!("WRMSR: IA32_ARCH_CAPABILITIES is a read only MSR");
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            // Bochs msr.cc `isValidMSR_IA32_SPEC_CTRL`: bits [10,8:0] except
+            // bit 9 — IBRS, STIBP, SSBD, IPRED_DIS_U/S, RRSBA_DIS_U/S, PSFD,
+            // DDPD_U and BHI_DIS_S.
+            BX_MSR_IA32_SPEC_CTRL => {
+                const VALID: u64 = 0x5FF;
+                if (val & !VALID) != 0 {
+                    tracing::debug!(
+                        "WRMSR: attempt to set reserved bits of IA32_SPEC_CTRL: {val:#018x}"
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.ia32_spec_ctrl = val as u32;
+            }
+            // Bochs msr.cc: IBPB and the L1D flush are commands, not state —
+            // only bit 0 is defined and nothing is remembered.
+            BX_MSR_IA32_PRED_CMD | BX_MSR_IA32_FLUSH_CMD => {
+                if (val & !1) != 0 {
+                    tracing::debug!(
+                        "WRMSR: attempt to set reserved bits of MSR {msr:#010x}: {val:#018x}"
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
             }
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,
@@ -1336,8 +1745,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 );
                 self.efer = new_efer;
             }
-            BX_MSR_STAR => self.msr.star = val,
+            BX_MSR_STAR => {
+                if (self.efer_suppmask & super::crregs::BxEfer::SCE.bits()) == 0 {
+                    tracing::debug!("WRMSR MSR_STAR: SYSCALL/SYSRET not enabled in the cpu model");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.star = val;
+            }
             BX_MSR_LSTAR => {
+                self.require_long_mode_for_msr(msr)?;
                 if !self.is_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_LSTAR, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
@@ -1345,14 +1761,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.msr.lstar = val;
             }
             BX_MSR_CSTAR => {
+                self.require_long_mode_for_msr(msr)?;
                 if !self.is_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_CSTAR, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.msr.cstar = val;
             }
-            BX_MSR_FMASK => self.msr.fmask = val as u32,
+            BX_MSR_FMASK => {
+                self.require_long_mode_for_msr(msr)?;
+                self.msr.fmask = val as u32;
+            }
             BX_MSR_FSBASE => {
+                self.require_long_mode_for_msr(msr)?;
                 if !self.is_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_FSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
@@ -1360,6 +1781,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_segment_base(super::decoder::BxSegregs::Fs, val);
             }
             BX_MSR_GSBASE => {
+                self.require_long_mode_for_msr(msr)?;
                 if !self.is_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_GSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
@@ -1367,13 +1789,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_segment_base(super::decoder::BxSegregs::Gs, val);
             }
             BX_MSR_KERNELGSBASE => {
+                self.require_long_mode_for_msr(msr)?;
                 if !self.is_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_KERNELGSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.msr.kernelgsbase = val;
             }
-            BX_MSR_TSC_AUX => self.msr.tsc_aux = val as u32,
+            BX_MSR_TSC_AUX => {
+                if !self.bx_cpuid_support_isa_extension(
+                    super::decoder::features::X86Feature::IsaRdtscp,
+                ) {
+                    tracing::debug!("WRMSR MSR_TSC_AUX: RDTSCP not enabled in the cpu model");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.tsc_aux = val as u32;
+            }
             // FRED MSRs
             BX_MSR_IA32_FRED_RSP0..=BX_MSR_IA32_FRED_RSP3 => {
                 let idx = (msr - BX_MSR_IA32_FRED_RSP0) as usize;
@@ -1385,22 +1816,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.msr.ia32_fred_ssp[idx] = val;
             }
             BX_MSR_IA32_FRED_CONFIG => self.msr.ia32_fred_cfg = val,
-            // SVM MSRs
+            // SVM MSRs (Bochs msr.cc, each gated on the SVM extension).
             super::svm::BX_SVM_VM_CR_MSR => {
+                self.require_svm_for_msr(msr)?;
                 self.svm_update_vm_cr_msr(val)?;
             }
-            super::svm::BX_SVM_IGNNE_MSR => { /* IGNNE: ignore write */ }
-            super::svm::BX_SVM_SMM_CTL_MSR => { /* SMM_CTL: ignore write */ }
             super::svm::BX_SVM_VM_HSAVE_PA_MSR => {
-                self.msr.svm_hsave_pa = val;
-            }
-            _ => {
-                // Bochs: unknown MSRs raise #GP(0)
-                if !self.ignore_bad_msrs {
-                    tracing::trace!("WRMSR: unknown MSR={:#010x}, #GP(0)", msr);
+                self.require_svm_for_msr(msr)?;
+                if !super::vmx::is_valid_page_aligned_phy_addr(val) {
+                    tracing::debug!(
+                        "WRMSR SVM_HSAVE_PA_MSR: invalid or not page aligned physical address"
+                    );
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
+                self.msr.svm_hsave_pa = val;
             }
+            _ => return self.missing_or_unknown_wrmsr(msr),
         }
         tracing::trace!("WRMSR: MSR={:#010x} = {:#018x}", msr, val);
         Ok(())
@@ -1499,8 +1930,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             4 | 6 => {
                 // DR6: preserve reserved bits, only allow bits 0-3 (B0-B3) and bits 13-15 (BD,BS,BT)
                 // Bochs crregs.cc: (dr6.val32 & 0xFFFF0FF0) | (val & 0x0000E00F)
-                self.dr6
-                    .set32((self.dr6.get32() & 0xFFFF0FF0) | (val & 0x0000E00F));
+                let dr6 = (self.dr6.get32() & 0xFFFF0FF0) | (val & 0x0000E00F);
+                self.dr6.set32(dr6);
             }
             5 | 7 => {
                 // DR7: mask off reserved bits and set bit 10 (always 1)
@@ -1813,8 +2244,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
+        // The `pre_syscall` hook fires once the instruction is known to be a
+        // system call — FRED delivers it, or `IA32_SYSENTER_CS` is usable —
+        // and before any architectural state changes, so a SYSENTER that
+        // faults on its CS never reaches it. In long mode Bochs checks
+        // `SYSENTER_EIP`/`ESP` for canonical form only after clearing VM, IF
+        // and RF, so those faults still follow the hook.
+
         // FRED event delivery for SYSENTER
         if self.cr4.fred() {
+            if self.pre_syscall_skips() {
+                return Ok(());
+            }
             self.set_fred_event_info_and_data(
                 2, // BX_EVENT_SYSENTER
                 super::exception::InterruptType::EventOther,
@@ -1831,6 +2272,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         if (self.msr.sysenter_cs_msr & 0xFFFC) == 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        if self.pre_syscall_skips() {
+            return Ok(());
         }
 
         self.invalidate_prefetch_q();
@@ -1865,23 +2309,23 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.setup_flat_ss(0);
         // Load RSP/RIP from MSRs (Bochs proc_ctrl.cc)
         if self.long_mode() {
-            self.set_rsp(self.msr.sysenter_esp_msr);
-            self.set_rip(self.msr.sysenter_eip_msr);
+            let rsp = self.msr.sysenter_esp_msr;
+            self.set_rsp(rsp);
+            let rip = self.msr.sysenter_eip_msr;
+            self.set_rip(rip);
         } else {
-            self.set_esp(self.msr.sysenter_esp_msr as u32);
-            self.set_eip(self.msr.sysenter_eip_msr as u32);
+            let esp = self.msr.sysenter_esp_msr as u32;
+            self.set_esp(esp);
+            let eip = self.msr.sysenter_eip_msr as u32;
+            self.set_eip(eip);
         }
 
         // Bochs: BX_INSTR_FAR_BRANCH(BX_CPU_ID, BX_INSTR_IS_SYSENTER, ...)
         let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .value;
-        self.on_far_branch(
-            super::instrumentation::BranchType::Sysenter,
-            0,
-            new_cs,
-            self.rip(),
-        );
+        let rip = self.rip();
+        self.on_far_branch(super::instrumentation::BranchType::Sysenter, 0, new_cs, rip);
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1927,8 +2371,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             );
             self.setup_flat_cs(3, true);
 
-            self.set_rsp(self.rcx());
-            self.set_rip(self.rdx());
+            let rsp = self.rcx();
+            self.set_rsp(rsp);
+            let rip = self.rdx();
+            self.set_rip(rip);
         } else {
             // 32-bit SYSEXIT: CS = (sysenter_cs_msr + 16) | 3 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
@@ -1937,8 +2383,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             );
             self.setup_flat_cs(3, false);
 
-            self.set_esp(self.ecx());
-            self.set_eip(self.edx());
+            let esp = self.ecx();
+            self.set_esp(esp);
+            let eip = self.edx();
+            self.set_eip(eip);
         }
 
         // SS = (sysenter_cs_msr + (os64 ? 40 : 24)) | 3 (Bochs proc_ctrl.cc)
@@ -1953,12 +2401,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .value;
-        self.on_far_branch(
-            super::instrumentation::BranchType::Sysexit,
-            0,
-            new_cs,
-            self.rip(),
-        );
+        let rip = self.rip();
+        self.on_far_branch(super::instrumentation::BranchType::Sysexit, 0, new_cs, rip);
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -2107,6 +2551,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs: proc_ctrl.cc
     // ========================================================================
 
+    /// Fire the `pre_syscall` hook for a SYSCALL or SYSENTER about to make its
+    /// transition, and apply what the hook asked for: a stop is recorded for
+    /// the CPU loop, and `true` means the hook skipped the transition
+    /// (Unicorn-style intercept). RIP is already past the opcode — the
+    /// dispatcher advanced it before the handler ran — so a skipped system
+    /// call returns with nothing else done.
+    fn pre_syscall_skips(&mut self) -> bool {
+        let action = self.fire_pre_syscall();
+        if action.is_stop() {
+            self.instrumentation.stop_request = true;
+        }
+        action.is_skip()
+    }
+
     pub(super) fn syscall(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::eflags::EFlags;
 
@@ -2126,24 +2584,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.diag_syscall_ring_idx += 1;
             self.diag_syscall_count += 1;
         }
-        // Fire the `pre_syscall` hook BEFORE the CS/RIP transition. The hook
-        // reads registers / memory / CR3 via `HookCtx` (user state is still
-        // intact). Returns an `InstrAction` controlling whether we execute
-        // the architectural transition, skip it (Unicorn-style intercept),
-        // stop the CPU loop, or both.
-        #[cfg(feature = "instrumentation")]
-        let action = self.fire_pre_syscall();
-        #[cfg(not(feature = "instrumentation"))]
-        let action = crate::cpu::instrumentation::InstrAction::Continue;
-
-        if action.is_stop() {
-            self.instrumentation.stop_request = true;
-        }
-        if action.is_skip() {
-            // Skip the architectural CS/RIP transition. RIP has already been
-            // advanced past the SYSCALL opcode bytes by the decoder /
-            // dispatcher wrapper before this handler runs, so there's nothing
-            // to do here — just return.
+        // The `pre_syscall` hook fires before the CS/RIP transition, while the
+        // caller's registers, memory and CR3 are still intact.
+        if self.pre_syscall_skips() {
             return Ok(());
         }
         self.invalidate_prefetch_q();
@@ -2227,12 +2670,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .value;
-        self.on_far_branch(
-            super::instrumentation::BranchType::Syscall,
-            0,
-            new_cs,
-            self.rip(),
-        );
+        let rip = self.rip();
+        self.on_far_branch(super::instrumentation::BranchType::Syscall, 0, new_cs, rip);
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -2303,30 +2742,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 temp_rip = self.ecx() as u64;
             }
 
-            // SS: (star >> 48) + 8) | 3 — base, limit, attributes unchanged (Bochs proc_ctrl.cc)
+            // SS: (star >> 48) + 8) | 3, then the whole flat segment the SDM
+            // writes — base 0, limit 4G, G=1, B=1 (Intel SDM vol. 2 SYSRET;
+            // divergence "SYSRET writes the flat SS the SDM describes" in
+            // docs/bochs-parity-divergences.md — Bochs leaves base, limit and
+            // granularity as they were, which is AMD's reading, leaves a
+            // 4-GiB limit claiming byte granularity when the previous SS came
+            // from a hypervisor's null-segment convention, and is the same
+            // fixed setup this port's own SYSCALL already performs).
             super::segment_ctrl_pro::parse_selector(
                 ((((self.msr.star >> 48) + 8) & 0xFFFC) | 3) as u16,
                 &mut self.sregs[super::decoder::BxSegregs::Ss as usize].selector,
             );
-            {
-                use super::descriptor::{
-                    SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G,
-                    SEG_VALID_CACHE,
-                };
-                let ss_idx = super::decoder::BxSegregs::Ss as usize;
-                self.sregs[ss_idx].cache.valid = SEG_VALID_CACHE
-                    | SEG_ACCESS_ROK
-                    | SEG_ACCESS_WOK
-                    | SEG_ACCESS_ROK4_G
-                    | SEG_ACCESS_WOK4_G;
-                self.sregs[ss_idx].cache.p = true;
-                self.sregs[ss_idx].cache.dpl = 3;
-                self.sregs[ss_idx].cache.segment = true;
-                self.sregs[ss_idx].cache.r#type = 0x3;
-            }
+            self.setup_flat_ss(3);
 
             // Bochs proc_ctrl.cc — restore RFLAGS from R11
-            self.write_eflags(self.r11() as u32, EFlags::VALID_MASK.bits());
+            let r11 = self.r11() as u32;
+            let bits = EFlags::VALID_MASK.bits();
+            self.write_eflags(r11, bits);
         } else {
             // Legacy/compat mode SYSRET (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
@@ -2335,27 +2768,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             );
             self.setup_flat_cs(3, false);
 
-            // SS: (star >> 48) + 8) | 3 — base, limit, attributes unchanged (Bochs proc_ctrl.cc)
+            // SS as in the 64-bit arm above: the SDM's whole flat segment,
+            // not Bochs's attributes-unchanged reading — see the divergence
+            // note there.
             super::segment_ctrl_pro::parse_selector(
                 ((((self.msr.star >> 48) + 8) & 0xFFFC) | 3) as u16,
                 &mut self.sregs[super::decoder::BxSegregs::Ss as usize].selector,
             );
-            {
-                use super::descriptor::{
-                    SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G,
-                    SEG_VALID_CACHE,
-                };
-                let ss_idx = super::decoder::BxSegregs::Ss as usize;
-                self.sregs[ss_idx].cache.valid = SEG_VALID_CACHE
-                    | SEG_ACCESS_ROK
-                    | SEG_ACCESS_WOK
-                    | SEG_ACCESS_ROK4_G
-                    | SEG_ACCESS_WOK4_G;
-                self.sregs[ss_idx].cache.p = true;
-                self.sregs[ss_idx].cache.dpl = 3;
-                self.sregs[ss_idx].cache.segment = true;
-                self.sregs[ss_idx].cache.r#type = 0x3;
-            }
+            self.setup_flat_ss(3);
 
             // Bochs proc_ctrl.cc — assert_IF()
             self.eflags.insert(super::eflags::EFlags::IF_);
@@ -2371,12 +2791,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .value;
-        self.on_far_branch(
-            super::instrumentation::BranchType::Sysret,
-            0,
-            new_cs,
-            self.rip(),
-        );
+        let rip = self.rip();
+        self.on_far_branch(super::instrumentation::BranchType::Sysret, 0, new_cs, rip);
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -3198,66 +3614,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
-    /// Recompute rd_pkey/wr_pkey allow-masks from current PKRU/PKRS/CR4/CR0.
-    /// Bochs proc_ctrl.cc set_PKeys. Call this anywhere Bochs invokes set_PKeys:
-    /// after PKRU/PKRS WRMSR, after CR0.WP flip, after CR4.PKE/PKS flip, at CPU
-    /// reset, and on VMX/SVM host-load paths.
-    pub(super) fn set_pkeys(&mut self, pkru_val: u32, pkrs_val: u32) {
-        self.pkru = pkru_val;
-        self.pkrs = pkrs_val;
-
-        use super::paging::TlbAccess;
-        const ALL_RW: TlbAccess = TlbAccess::SYS_READ_OK
-            .union(TlbAccess::USER_READ_OK)
-            .union(TlbAccess::SYS_WRITE_OK)
-            .union(TlbAccess::USER_WRITE_OK);
-        const USER_RW: TlbAccess = TlbAccess::USER_READ_OK.union(TlbAccess::USER_WRITE_OK);
-        const SYS_RW: TlbAccess = TlbAccess::SYS_READ_OK.union(TlbAccess::SYS_WRITE_OK);
-
-        for i in 0..16 {
-            let mut rd_allow = ALL_RW;
-            let mut wr_allow = ALL_RW;
-
-            if self.long_mode() {
-                if self.cr4.pke() {
-                    // PKRU.accessDisable → strip user read/write.
-                    if pkru_val & (1 << (i * 2)) != 0 {
-                        rd_allow.remove(USER_RW);
-                        wr_allow.remove(USER_RW);
-                    }
-                    // PKRU.writeDisable → strip user write; also sys write when CR0.WP.
-                    if pkru_val & (1 << (i * 2 + 1)) != 0 {
-                        wr_allow.remove(TlbAccess::USER_WRITE_OK);
-                        if self.cr0.wp() {
-                            wr_allow.remove(TlbAccess::SYS_WRITE_OK);
-                        }
-                    }
-                }
-                if self.cr4.pks() {
-                    if pkrs_val & (1 << (i * 2)) != 0 {
-                        rd_allow.remove(SYS_RW);
-                        wr_allow.remove(SYS_RW);
-                    }
-                    if pkrs_val & (1 << (i * 2 + 1)) != 0 && self.cr0.wp() {
-                        wr_allow.remove(TlbAccess::SYS_WRITE_OK);
-                    }
-                }
-            }
-
-            // Bochs proc_ctrl.cc BX_SUPPORT_CET branch — for every regular
-            // access bit that's set, also set the corresponding SS bit. The
-            // SS flags live 4 positions above their regular counterparts in
-            // TlbAccess, so a bitflag-friendly shift-merge works.
-            let rd_ss = TlbAccess::from_bits_retain(rd_allow.bits() << 4);
-            let wr_ss = TlbAccess::from_bits_retain(wr_allow.bits() << 4);
-            rd_allow.insert(rd_ss);
-            wr_allow.insert(wr_ss);
-
-            self.rd_pkey[i] = rd_allow.bits();
-            self.wr_pkey[i] = wr_allow.bits();
-        }
-    }
-
     /// PKRU state — Bochs xsave.cc xsave_pkru_state. The PKRU component is 8
     /// bytes wide but only the low dword is architecturally defined, and Bochs
     /// writes just those 4 bytes, leaving the upper 4 untouched.
@@ -3316,9 +3672,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 }
             }
         }
-        for (i, chunk) in buf.chunks_exact(8).enumerate() {
-            let val = u64::from_le_bytes(chunk.try_into().unwrap());
-            self.v_write_qword(seg, base.wrapping_add((i * 8) as u64), val)?;
+        // Chunking into fixed-size arrays hands `from_le_bytes` what it wants
+        // directly, where `chunks_exact` produced slices whose known length
+        // had to be re-established at run time.
+        let (qwords, _) = buf.as_chunks::<8>();
+        for (i, qword) in qwords.iter().enumerate() {
+            let val = u64::from_le_bytes(*qword);
+            self.v_write_qword(seg, base.wrapping_add(u64_from_usize(i * 8)), val)?;
         }
         Ok(())
     }
@@ -3377,14 +3737,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         for (tile_idx, tile) in tiles.iter().enumerate() {
             for (row_idx, row) in tile.chunks_exact(super::avx::BX_TILE_ROW_BYTES).enumerate() {
-                let off = base.wrapping_add(
-                    ((tile_idx * super::avx::BX_TILE_MAX_ROWS + row_idx)
-                        * super::avx::BX_TILE_ROW_BYTES) as u64,
-                );
+                let off = base.wrapping_add(u64_from_usize(
+                    (tile_idx * super::avx::BX_TILE_MAX_ROWS + row_idx)
+                        * super::avx::BX_TILE_ROW_BYTES,
+                ));
                 // 64-byte row → 8 qwords.
-                for (q, chunk) in row.chunks_exact(8).enumerate() {
-                    let val = u64::from_le_bytes(chunk.try_into().unwrap());
-                    self.v_write_qword(seg, off.wrapping_add((q * 8) as u64), val)?;
+                let (qwords, _) = row.as_chunks::<8>();
+                for (q, qword) in qwords.iter().enumerate() {
+                    let val = u64::from_le_bytes(*qword);
+                    self.v_write_qword(seg, off.wrapping_add(u64_from_usize(q * 8)), val)?;
                 }
             }
         }
@@ -4137,7 +4498,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Take effect of changing the PKRU state — Bochs xsave.cc xrstor(),
         // keyed on the requested bitmap rather than on which branch above ran.
         if (requested & (1u64 << super::crregs::Xcr0Component::Pkru as u32)) != 0 {
-            self.set_pkeys(pkru_tmp, self.pkrs);
+            let pkrs = self.pkrs;
+            self.set_pkeys(pkru_tmp, pkrs);
         }
 
         Ok(())
@@ -4148,19 +4510,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 mod tests {
     //! Bochs-parity tests for `proc_ctrl::wrmsr_value` MSR-write side effects.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
-    use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::crregs::BxEfer;
     use crate::cpu::decoder::Instruction;
     use crate::cpu::msr::{
-        BX_MSR_APICBASE, BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_FEATURE_CONTROL,
-        BX_MSR_IA32_MPERF, BX_MSR_TSC, BX_MSR_TSC_DEADLINE,
+        BX_MSR_APICBASE, BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_ARCH_CAPABILITIES,
+        BX_MSR_IA32_FEATURE_CONTROL, BX_MSR_IA32_FLUSH_CMD, BX_MSR_IA32_MPERF,
+        BX_MSR_IA32_PRED_CMD, BX_MSR_IA32_SPEC_CTRL, BX_MSR_KERNELGSBASE, BX_MSR_LSTAR,
+        BX_MSR_TSC, BX_MSR_TSC_AUX, BX_MSR_TSC_DEADLINE,
     };
     use crate::cpu::svm::BX_VM_CR_MSR_SVMDIS_MASK;
     use crate::params::BxParams;
-    use crate::pc_system::BxPcSystemC;
-    use core::ptr::NonNull;
 
     /// Bochs `SetEFER` (cpu/crregs.cc): a write that tries to set
     /// `EFER.SVME` while `VM_CR.SVMDIS` is locked must #GP(0) and leave the
@@ -4171,7 +4530,10 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                let mut machine = crate::cpu::exec_ctx::TestMachine::with_model(
+                    crate::cpu::CpuModel::amd_ryzen(),
+                );
+                let mut cpu = machine.ctx();
                 // Make SVME a supported bit so the reserved-bits gate doesn't
                 // shadow the SVMDIS check (AmdRyzen advertises IsaSvm so this
                 // is already set, but force it for clarity).
@@ -4205,7 +4567,10 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                let mut machine = crate::cpu::exec_ctx::TestMachine::with_model(
+                    crate::cpu::CpuModel::amd_ryzen(),
+                );
+                let mut cpu = machine.ctx();
                 cpu.efer_suppmask |= BxEfer::SVME.bits();
                 cpu.msr.svm_vm_cr = 0;
 
@@ -4221,53 +4586,76 @@ mod tests {
             .unwrap();
     }
 
+    /// Uniprocessor machine time is the live pc-system clock plus whatever
+    /// this CPU has retired since the slice began — Bochs `BX_TICKN`.
     #[test]
-    fn wired_system_ticks_include_live_icount_delta() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
-        let mut pc_system = BxPcSystemC::new();
-        pc_system.initialize(1_000_000);
-        pc_system.tickn(1_234);
+    fn up_system_ticks_include_live_icount_delta() {
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        machine.pc_system_mut().initialize(1_000_000);
+        machine.pc_system_mut().tickn(1_234);
+        let mut cpu = machine.ctx();
 
         cpu.icount = 500;
-        cpu.set_pc_system_ptr(NonNull::from(&mut pc_system));
+        cpu.begin_slice_clock(1);
         assert_eq!(cpu.system_ticks(), 1_234);
 
         cpu.icount = 777;
-        assert_eq!(cpu.system_ticks(), 1_511);
-        cpu.clear_pc_system();
+        assert_eq!(
+            cpu.system_ticks(),
+            1_511,
+            "ticks retired inside the slice must be visible immediately"
+        );
     }
 
+    /// A CPU that never began a slice has no machine clock to read, so it
+    /// reports its own ticks rather than measuring against a stale epoch.
     #[test]
-    fn wired_smp_system_ticks_remain_at_round_epoch() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
-        let mut pc_system = BxPcSystemC::new();
-        pc_system.initialize(1_000_000);
-        pc_system.tickn(1_234);
+    fn detached_system_ticks_report_cpu_local_time() {
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        machine.pc_system_mut().initialize(1_000_000);
+        machine.pc_system_mut().tickn(9_999);
+        let mut cpu = machine.ctx();
+
+        cpu.icount = 42;
+        assert_eq!(
+            cpu.system_ticks(),
+            cpu.cpu_local_ticks(),
+            "an unstarted slice must not adopt the pc-system clock"
+        );
+    }
+
+    /// SMP freezes every CPU's view at the round-start epoch; global time
+    /// advances only when the emulator completes the round.
+    #[test]
+    fn smp_system_ticks_remain_at_round_epoch() {
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        machine.pc_system_mut().initialize(1_000_000);
+        machine.pc_system_mut().tickn(1_234);
+        let mut cpu = machine.ctx();
 
         cpu.icount = 500;
-        cpu.set_pc_system_ptr_with_tick_denominator(NonNull::from(&mut pc_system), 8);
+        cpu.begin_slice_clock(8);
         assert_eq!(cpu.system_ticks(), 1_234);
 
         // A sibling may not observe this round's batch time before the
         // emulator wraps the full CPU round.
-        pc_system.tickn(71);
+        cpu.pc_system.tickn(71);
         cpu.icount = 780;
         assert_eq!(cpu.system_ticks(), 1_234);
-        cpu.clear_pc_system();
     }
 
     #[test]
     fn tsc_deadline_msr_arms_local_apic_timer() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-        let mut pc_system = BxPcSystemC::new();
-        pc_system.initialize(1_000_000);
-        pc_system.tickn(2_000);
-        cpu.set_pc_system_ptr(NonNull::from(&mut pc_system));
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        cpu.pc_system.initialize(1_000_000);
+        cpu.pc_system.tickn(2_000);
 
         let current_ticks = cpu.system_ticks();
-        assert!(cpu
-            .lapic
-            .write_x2apic(0x320, 0x0004_0030, current_ticks));
+        assert!(cpu.lapic.write_x2apic(0x320, 0x0004_0030, current_ticks));
         let deadline = current_ticks + 123;
 
         cpu.wrmsr_value(BX_MSR_TSC_DEADLINE, deadline).unwrap();
@@ -4286,14 +4674,18 @@ mod tests {
             })
         );
         assert!(cpu.take_scheduler_boundary_request());
-        cpu.clear_pc_system();
     }
 
     #[test]
     fn guest_tsc_paths_use_virtual_offset_but_aperf_mperf_stay_physical() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut cpu = machine.ctx();
         cpu.icount = 77;
-        cpu.set_tsc(1_000, cpu.system_ticks());
+        // Bound first: through `Deref` the receiver and the argument would be
+        // two separate borrows of the context.
+        let ticks = cpu.system_ticks();
+        cpu.set_tsc(1_000, ticks);
         cpu.tsc_offset = 55;
         cpu.msr.tsc_aux = 0xCAFE_BABE;
 
@@ -4320,9 +4712,145 @@ mod tests {
         );
     }
 
+    /// Turn one ISA extension on or off for a CPU under test — the bitmask a
+    /// CPU model fills at init, which every feature gate reads.
+    fn set_cpu_feature<T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
+        feature: super::super::decoder::features::X86Feature,
+        on: bool,
+    ) {
+        let index = feature as usize;
+        let (word, bit) = (index / 32, 1u32 << (index % 32));
+        if on {
+            cpu.ia_extensions_bitmask[word] |= bit;
+        } else {
+            cpu.ia_extensions_bitmask[word] &= !bit;
+        }
+    }
+
+    /// An architectural MSR whose feature the CPU model does not have does not
+    /// exist, and reading it faults — Bochs msr.cc looks the index up in
+    /// `msr_desc[]` and refuses before the dispatch switch. An index the
+    /// architecture never defined is a different thing: `handle_unknown_rdmsr`
+    /// answers it under the machine's `ignore_bad_msrs` policy, which is how a
+    /// guest can tell "this processor has no such register" from "nothing is
+    /// there". The two answers must not be the same, or the gate is not wired.
+    #[test]
+    fn an_msr_the_model_lacks_faults_where_an_undefined_index_reads_zero() {
+        use super::super::decoder::features::X86Feature;
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        assert!(
+            cpu.ignore_bad_msrs,
+            "this test distinguishes the two refusals under the permissive policy"
+        );
+
+        set_cpu_feature(&mut cpu, X86Feature::IsaTscDeadline, true);
+        cpu.rdmsr_value(BX_MSR_TSC_DEADLINE)
+            .expect("a model with the TSC-deadline timer has the MSR");
+
+        set_cpu_feature(&mut cpu, X86Feature::IsaTscDeadline, false);
+        assert!(
+            cpu.rdmsr_value(BX_MSR_TSC_DEADLINE).is_err(),
+            "RDMSR of an MSR whose feature is off must #GP(0)"
+        );
+        assert!(
+            cpu.wrmsr_value(BX_MSR_TSC_DEADLINE, 0).is_err(),
+            "WRMSR of an MSR whose feature is off must #GP(0)"
+        );
+        assert!(
+            cpu.read_msr_for_api(BX_MSR_TSC_DEADLINE).is_err(),
+            "a host has no value to read for an MSR this processor does not have"
+        );
+
+        // 0x234 is inside the table's range and has no descriptor — it falls
+        // between the variable-range MTRRs and the fixed ones — so it is not
+        // an MSR at all and the permissive policy answers it.
+        const NO_MSR_LIVES_HERE: u32 = 0x234;
+        assert!(NO_MSR_LIVES_HERE < super::super::msr::BX_MSR_MAX_INDEX);
+        assert_eq!(
+            cpu.rdmsr_value(NO_MSR_LIVES_HERE).expect("ignored, not faulted"),
+            0
+        );
+        cpu.wrmsr_value(NO_MSR_LIVES_HERE, 0xDEAD)
+            .expect("ignored, not faulted");
+    }
+
+    /// The MSRs above the descriptor table carry their gate in their own case
+    /// (Bochs msr.cc): TSC_AUX exists only with RDTSCP, and the SYSCALL and
+    /// long-mode registers only with what enables them. Their refusal is a
+    /// #GP either way — the unknown-MSR policy does not cover a register the
+    /// architecture defines.
+    #[test]
+    fn the_long_mode_msrs_answer_only_where_their_feature_is_on() {
+        use super::super::decoder::features::X86Feature;
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+
+        set_cpu_feature(&mut cpu, X86Feature::IsaRdtscp, false);
+        assert!(
+            cpu.rdmsr_value(BX_MSR_TSC_AUX).is_err(),
+            "RDMSR MSR_TSC_AUX without RDTSCP must #GP(0)"
+        );
+        assert!(
+            cpu.wrmsr_value(BX_MSR_TSC_AUX, 7).is_err(),
+            "WRMSR MSR_TSC_AUX without RDTSCP must #GP(0)"
+        );
+        set_cpu_feature(&mut cpu, X86Feature::IsaRdtscp, true);
+        cpu.wrmsr_value(BX_MSR_TSC_AUX, 7).expect("RDTSCP is on");
+        assert_eq!(cpu.rdmsr_value(BX_MSR_TSC_AUX).unwrap(), 7);
+
+        set_cpu_feature(&mut cpu, X86Feature::IsaLongMode, false);
+        assert!(
+            cpu.rdmsr_value(BX_MSR_LSTAR).is_err(),
+            "RDMSR MSR_LSTAR without long mode must #GP(0)"
+        );
+        assert!(
+            cpu.wrmsr_value(BX_MSR_KERNELGSBASE, 0).is_err(),
+            "WRMSR MSR_KERNELGSBASE without long mode must #GP(0)"
+        );
+    }
+
+    /// The SCA-mitigation MSRs Bochs answers and this port did not reach at
+    /// all: IA32_SPEC_CTRL kept its reserved bits, IA32_ARCH_CAPABILITIES
+    /// enumerated the mitigations, and the two command MSRs are write-only.
+    #[test]
+    fn the_sca_mitigation_msrs_read_write_and_refuse_as_the_architecture_says() {
+        use super::super::decoder::features::X86Feature;
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        set_cpu_feature(&mut cpu, X86Feature::IsaScaMitigations, true);
+
+        cpu.wrmsr_value(BX_MSR_IA32_SPEC_CTRL, 0x5FF)
+            .expect("every defined IA32_SPEC_CTRL bit");
+        assert_eq!(cpu.rdmsr_value(BX_MSR_IA32_SPEC_CTRL).unwrap(), 0x5FF);
+        assert!(
+            cpu.wrmsr_value(BX_MSR_IA32_SPEC_CTRL, 0x200).is_err(),
+            "bit 9 of IA32_SPEC_CTRL is reserved"
+        );
+
+        assert_eq!(cpu.rdmsr_value(BX_MSR_IA32_ARCH_CAPABILITIES).unwrap(), 0x1F);
+        assert!(
+            cpu.wrmsr_value(BX_MSR_IA32_ARCH_CAPABILITIES, 0).is_err(),
+            "IA32_ARCH_CAPABILITIES is read only"
+        );
+
+        cpu.wrmsr_value(BX_MSR_IA32_PRED_CMD, 1)
+            .expect("IBPB is bit 0");
+        assert!(
+            cpu.wrmsr_value(BX_MSR_IA32_FLUSH_CMD, 2).is_err(),
+            "only bit 0 of IA32_FLUSH_CMD is defined"
+        );
+        assert!(
+            cpu.rdmsr_value(BX_MSR_IA32_PRED_CMD).is_err(),
+            "IA32_PRED_CMD is write only"
+        );
+    }
+
     #[test]
     fn feature_control_allows_idempotent_locked_firmware_write() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
         cpu.reset(crate::cpu::ResetReason::Hardware);
 
         cpu.wrmsr_value(BX_MSR_IA32_FEATURE_CONTROL, 0x5).unwrap();
@@ -4339,7 +4867,8 @@ mod tests {
 
     #[test]
     fn wrmsr_apicbase_updates_lapic_base_and_mode() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
         cpu.reset(crate::cpu::ResetReason::Hardware);
 
         let relocated_xapic_base = 0xfee1_0800u64;
@@ -4377,7 +4906,8 @@ mod tests {
             .with_topology(8, 1, 1)
             .unwrap()
             .cpu_topology();
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
         cpu.configure_smp(SOURCE_APIC_ID, topology);
         cpu.reset(crate::cpu::ResetReason::Hardware);
         cpu.configure_smp(SOURCE_APIC_ID, topology);
@@ -4410,8 +4940,6 @@ mod avx_mode_tests {
     //! anything, so every EVEX opcode carrying PREPARE_EVEX became #UD at
     //! decode no matter what the guest had enabled in XCR0.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::crregs::{BxCr0, BxCr4};
     use crate::cpu::opcodes_table::{BxAvxVectorLength, FetchModeMask};
 
@@ -4420,46 +4948,67 @@ mod avx_mode_tests {
     const XCR0_YMM: u32 = 1 << 2;
     const XCR0_AVX512: u32 = (1 << 5) | (1 << 6) | (1 << 7);
 
-    fn cpu_with(xcr0: u32) -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC<'static, AmdRyzen>> {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+    /// Configure an existing machine in place.
+    ///
+    /// Deliberately not a constructor returning `TestMachine` by value: that
+    /// struct embeds memory, devices and the PC system, and moving it out of a
+    /// helper overflows the default test stack.
+    fn set_xcr0(machine: &mut crate::cpu::exec_ctx::TestMachine, xcr0: u32) {
+        let mut c = machine.ctx();
         c.cr0.insert(BxCr0::PE);
         // protected_mode() reads cpu_mode, which CR0.PE alone does not update.
         c.cpu_mode = crate::cpu::cpu::CpuMode::Ia32Protected;
         c.cr4.insert(BxCr4::OSXSAVE);
         c.xcr0.set32(xcr0);
         c.handle_avx_mode_change();
-        c
+    }
+
+    fn amd_machine() -> crate::cpu::exec_ctx::TestMachine {
+        crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen())
     }
 
     #[test]
     fn evex_decode_gate_needs_opmask_and_both_zmm_halves() {
+        // One machine for every case: the gate is recomputed from XCR0 on
+        // each call, and a TestMachine is far too large to keep several
+        // alive on a test stack at once.
+        let mut machine = amd_machine();
+
         // AVX state alone opens AVX but not EVEX.
-        let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM);
-        assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
-        assert!(!c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
-        assert!(!c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
-        assert_eq!(c.maxvl, BxAvxVectorLength::Vl256);
+        set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM);
+        {
+            let c = machine.ctx();
+            assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
+            assert!(!c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+            assert!(!c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
+            assert_eq!(c.maxvl, BxAvxVectorLength::Vl256);
+        }
 
         // All three AVX-512 bits open it.
-        let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
-        assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
-        assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
-        assert!(c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
-        assert_eq!(c.maxvl, BxAvxVectorLength::Vl512);
+        set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        {
+            let c = machine.ctx();
+            assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
+            assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+            assert!(c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
+            assert_eq!(c.maxvl, BxAvxVectorLength::Vl512);
+        }
 
         // Any one of them missing closes it again.
         for missing in [1u32 << 5, 1 << 6, 1 << 7] {
-            let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | (XCR0_AVX512 & !missing));
+            set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM | (XCR0_AVX512 & !missing));
+            let c = machine.ctx();
             assert!(
                 !c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK),
                 "XCR0 without bit {missing:#x} must not enable EVEX"
             );
         }
     }
-
     #[test]
     fn a_pending_task_switch_closes_avx_and_evex_together() {
-        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        let mut machine = amd_machine();
+        set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        let mut c = machine.ctx();
         assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
 
         c.cr0.insert(BxCr0::TS);
@@ -4480,7 +5029,9 @@ mod avx_mode_tests {
 
         // An AVX guest with no ZMM state: bits 256..511 are not architecturally
         // visible, so a VEX write does not touch them.
-        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM);
+        let mut machine = amd_machine();
+        set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM);
+        let mut c = machine.ctx();
         for q in 0..8 {
             c.vmm[1].set_zmm64u(q, 0xA5A5_A5A5_A5A5_A5A5);
         }
@@ -4493,13 +5044,77 @@ mod avx_mode_tests {
         );
 
         // With ZMM state enabled the same write clears the whole register.
-        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        let mut machine = amd_machine();
+        set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        let mut c = machine.ctx();
         for q in 0..8 {
             c.vmm[1].set_zmm64u(q, 0xA5A5_A5A5_A5A5_A5A5);
         }
         c.write_xmm_reg(1, BxPackedXmmRegister::default());
         for q in 2..8 {
             assert_eq!(c.vmm[1].zmm64u(q), 0, "qword {q}");
+        }
+    }
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Recompute rd_pkey/wr_pkey allow-masks from current PKRU/PKRS/CR4/CR0.
+    /// Bochs proc_ctrl.cc set_PKeys. Call this anywhere Bochs invokes set_PKeys:
+    /// after PKRU/PKRS WRMSR, after CR0.WP flip, after CR4.PKE/PKS flip, at CPU
+    /// reset, and on VMX/SVM host-load paths.
+    pub(super) fn set_pkeys(&mut self, pkru_val: u32, pkrs_val: u32) {
+        self.pkru = pkru_val;
+        self.pkrs = pkrs_val;
+
+        use super::paging::TlbAccess;
+        const ALL_RW: TlbAccess = TlbAccess::SYS_READ_OK
+            .union(TlbAccess::USER_READ_OK)
+            .union(TlbAccess::SYS_WRITE_OK)
+            .union(TlbAccess::USER_WRITE_OK);
+        const USER_RW: TlbAccess = TlbAccess::USER_READ_OK.union(TlbAccess::USER_WRITE_OK);
+        const SYS_RW: TlbAccess = TlbAccess::SYS_READ_OK.union(TlbAccess::SYS_WRITE_OK);
+
+        for i in 0..16 {
+            let mut rd_allow = ALL_RW;
+            let mut wr_allow = ALL_RW;
+
+            if self.long_mode() {
+                if self.cr4.pke() {
+                    // PKRU.accessDisable → strip user read/write.
+                    if pkru_val & (1 << (i * 2)) != 0 {
+                        rd_allow.remove(USER_RW);
+                        wr_allow.remove(USER_RW);
+                    }
+                    // PKRU.writeDisable → strip user write; also sys write when CR0.WP.
+                    if pkru_val & (1 << (i * 2 + 1)) != 0 {
+                        wr_allow.remove(TlbAccess::USER_WRITE_OK);
+                        if self.cr0.wp() {
+                            wr_allow.remove(TlbAccess::SYS_WRITE_OK);
+                        }
+                    }
+                }
+                if self.cr4.pks() {
+                    if pkrs_val & (1 << (i * 2)) != 0 {
+                        rd_allow.remove(SYS_RW);
+                        wr_allow.remove(SYS_RW);
+                    }
+                    if pkrs_val & (1 << (i * 2 + 1)) != 0 && self.cr0.wp() {
+                        wr_allow.remove(TlbAccess::SYS_WRITE_OK);
+                    }
+                }
+            }
+
+            // Bochs proc_ctrl.cc BX_SUPPORT_CET branch — for every regular
+            // access bit that's set, also set the corresponding SS bit. The
+            // SS flags live 4 positions above their regular counterparts in
+            // TlbAccess, so a bitflag-friendly shift-merge works.
+            let rd_ss = TlbAccess::from_bits_retain(rd_allow.bits() << 4);
+            let wr_ss = TlbAccess::from_bits_retain(wr_allow.bits() << 4);
+            rd_allow.insert(rd_ss);
+            wr_allow.insert(wr_ss);
+
+            self.rd_pkey[i] = rd_allow.bits();
+            self.wr_pkey[i] = wr_allow.bits();
         }
     }
 }

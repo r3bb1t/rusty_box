@@ -5,8 +5,6 @@
 //! Mirrors Bochs cpu/cet.cc — ENDBR32/ENDBR64, shadow stack helpers,
 //! indirect branch tracking, and legacy endbranch treatment.
 
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
-
 use super::decoder::{BxSegregs, Instruction};
 use super::Result;
 
@@ -58,7 +56,7 @@ pub(super) fn is_invalid_cet_control(val: u64) -> bool {
     false
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // CET query helpers — Bochs cet.cc
     // =========================================================================
@@ -281,7 +279,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let cpl = self.cs_rpl();
             let off = self.ssp().wrapping_sub(4);
             self.shadow_stack_write_dword(off, cpl, 0)?;
-            self.set_ssp(self.ssp() & !0x7);
+            let ssp = self.ssp() & !0x7;
+            self.set_ssp(ssp);
         }
 
         self.shadow_stack_push_64(cs as u64)?;
@@ -343,10 +342,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // SS pages (architecturally unusual but defensible).
         let lpf = offset & super::tlb::LPF_MASK;
         let host_ptr: Option<*mut u64> = {
-            let tlb = self.dtlb.get_entry_of(offset, 7);
-            if tlb.lpf == lpf && tlb.host_page_addr != 0 {
-                let byte_ptr =
-                    super::access::host_at_page_offset_mut(tlb.host_page_addr as *mut u8, offset);
+            let tlb = self.dtlb.entry_of(offset, 7);
+            if tlb.lpf == lpf && tlb.host_page.is_some() {
+                let byte_ptr = super::access::host_at_page_offset_mut(
+                    super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page),
+                    offset,
+                );
                 // SSP is architecturally 8-byte aligned on every caller; the
                 // raw byte pointer thus aligns for u64/AtomicU64.
                 debug_assert_eq!(offset & 0x7, 0, "SS cmpxchg offset must be 8-byte aligned");
@@ -667,7 +668,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         old_ssp &= !0x07u64;
         self.shadow_stack_write_qword(old_ssp - 8, cpl, tmp)?;
 
-        self.set_ssp(self.ssp() + 8);
+        let ssp = self.ssp() + 8;
+        self.set_ssp(ssp);
         Ok(())
     }
 
@@ -823,9 +825,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// PAUSE handler. Checks VMX/SVM intercepts before executing as no-op hint.
     /// Bochs proc_ctrl.cc
     pub(super) fn pause(&mut self, _instr: &Instruction) -> Result<()> {
-        // Bochs proc_ctrl.cc — VMX PAUSE exit
-        if self.in_vmx_guest {
-            self.vmexit_pause()?;
+        // Bochs proc_ctrl.cc — VMX PAUSE exit. Bochs longjmps out of
+        // `VMexit_PAUSE`, so nothing after it runs; returning here is the same
+        // end. PAUSE Loop Exiting (PLE) timing is not modelled — it needs the
+        // TSC gap tracker.
+        if self.in_vmx_guest && self.vmexit_check_pause()? {
+            return Ok(());
         }
 
         // Bochs proc_ctrl.cc — SVM PAUSE intercept
@@ -837,13 +842,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// VMX PAUSE exit handler.
-    /// Bochs vmexit.cc VMexit_PAUSE() — checks PAUSE Exiting control. PAUSE
-    /// Loop Exiting (PLE) timing is not modelled (PLE needs the TSC gap tracker).
-    fn vmexit_pause(&mut self) -> Result<()> {
-        let _ = self.vmexit_check_pause()?;
-        Ok(())
-    }
 }
 
 // ============================================================================
@@ -855,32 +853,34 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 #[cfg(test)]
 mod tests {
 
-/// Emulator construction needs a bigger stack than the default 2 MiB test
-/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
-/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
-/// enough concurrent reservations to intermittently exhaust the process
-/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
-const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
+    /// Emulator construction needs a bigger stack than the default 2 MiB test
+    /// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+    /// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+    /// enough concurrent reservations to intermittently exhaust the process
+    /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+    const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpu::CpuMode;
-    use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
+    use crate::cpu::cpu::{CpuMode};
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
-    use crate::memory::{BxMemC, BxMemoryStubC, CpuTlbPin};
-    use core::ptr::NonNull;
 
     /// Build a fresh CPU and switch it into protected mode with CET enabled in CR4.
     /// Caller fills in the IA32_S_CET / IA32_U_CET MSR for the specific test.
-    fn make_cet_cpu() -> alloc::boxed::Box<BxCpuC<'static, Corei7SkylakeX>> {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
-        cpu.cpu_mode = CpuMode::Ia32Protected;
-        cpu.cr4 = BxCr4::CET;
-        // Default to CPL=0 (kernel) by clearing CS RPL.
-        cpu.sregs[BxSegregs::Cs as usize].selector.rpl = 0;
-        cpu.msr.ia32_cet_control[0] = 0;
-        cpu.msr.ia32_cet_control[1] = 0;
-        cpu
+    ///
+    /// Returns the whole machine: shadow-stack ops run on the execution
+    /// context, so the test borrows a `ctx()` out of this.
+    fn make_cet_cpu() -> crate::cpu::exec_ctx::TestMachine {
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        {
+            let mut cpu = machine.ctx();
+            cpu.cpu_mode = CpuMode::Ia32Protected;
+            cpu.cr4 = BxCr4::CET;
+            // Default to CPL=0 (kernel) by clearing CS RPL.
+            cpu.sregs[BxSegregs::Cs as usize].selector.rpl = 0;
+            cpu.msr.ia32_cet_control[0] = 0;
+            cpu.msr.ia32_cet_control[1] = 0;
+        }
+        machine
     }
 
     #[test]
@@ -888,7 +888,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut cpu = make_cet_cpu();
+                let mut machine = make_cet_cpu();
+                let mut cpu = machine.ctx();
 
                 // Disabled out of the gate \u2014 MSR bit clear.
                 assert!(!cpu.shadow_stack_enabled(0));
@@ -919,7 +920,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut cpu = make_cet_cpu();
+                let mut machine = make_cet_cpu();
+                let mut cpu = machine.ctx();
                 cpu.msr.ia32_cet_control[0] = CET_ENDBRANCH_ENABLED;
                 assert_eq!(
                     cpu.msr.ia32_cet_control[0] & CET_WAIT_FOR_ENBRANCH,
@@ -948,7 +950,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut cpu = make_cet_cpu();
+                let mut machine = make_cet_cpu();
+                let mut cpu = machine.ctx();
                 cpu.msr.ia32_cet_control[0] =
                     CET_ENDBRANCH_ENABLED | CET_ENABLE_NO_TRACK_INDIRECT_BRANCH_PREFIX;
 
@@ -979,7 +982,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut cpu = make_cet_cpu();
+                let mut machine = make_cet_cpu();
+                let mut cpu = machine.ctx();
                 cpu.msr.ia32_cet_control[0] = CET_ENDBRANCH_ENABLED | CET_WAIT_FOR_ENBRANCH;
 
                 // ENDBR matched: clear WAIT, do not suppress.
@@ -1018,26 +1022,14 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut cpu = make_cet_cpu();
+                let mut machine = make_cet_cpu();
+                let mut cpu = machine.ctx();
                 cpu.msr.ia32_cet_control[0] =
                     CET_SHADOW_STACK_ENABLED | CET_SHADOW_STACK_WRITE_ENABLED;
 
-                let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
-                let mut mem = BxMemC::new(mem_stub, false);
-
-                // Mirror the execution scope: even this one-CPU fixture has
-                // a complete stable pin set for any physical fallback.
-                cpu.a20_mask = mem.a20_mask();
-                let (host_base, host_len) = mem.identity_guest_base();
-                assert!(!host_base.is_null());
-                cpu.mem_host_base = host_base;
-                cpu.mem_host_len = host_len;
-                let pin = CpuTlbPin::new(&cpu);
-                cpu.wire_memory_access(
-                    NonNull::from(&mut mem),
-                    core::slice::from_ref(&pin),
-                    &pin,
-                );
+                // The context carries the machine's own 1 MiB RAM; a physical
+                // fallback resolves against it.
+                assert!(!cpu.mem_host_base.is_null());
 
                 // Place SSP somewhere inside the 1 MiB RAM region, 16-byte aligned,
                 // away from the BIOS shadow region (0xA0000+) and low IVT.
@@ -1081,7 +1073,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let cs_token = cpu.shadow_stack_pop_64().unwrap();
                 assert_eq!(cs_token, 0x0008, "third pop yields CS");
                 assert_eq!(cpu.ssp(), INITIAL_SSP, "SSP back to start after three pops");
-                cpu.clear_memory_access();
             })
             .unwrap()
             .join()

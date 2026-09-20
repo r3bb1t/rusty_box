@@ -1,111 +1,153 @@
 # Rusty Box UEFI
 
-UEFI application that runs a Bochs-compatible x86 emulator on bare UEFI firmware.
-Boots DLX Linux via full BIOS POST -- an emulator-in-emulator running on real (or virtual) hardware.
+A UEFI application that runs the Rusty Box emulator on UEFI firmware. Inside the
+emulator it boots the DLX Linux disk image through a full BIOS POST, which makes
+it an emulator running as a UEFI program on real or virtual hardware.
 
-**No Rust allocator required.** All large structures (CPU ~17 MB, Emulator ~3 MB, guest RAM 36 MB)
-are placed via UEFI `allocate_pages` with pointer-based initialization. The `alloc` crate is not
-linked at all.
+**No Rust allocator.** `rusty_box` is built with `default-features = false`, so
+the `alloc` crate is not linked. Every large structure lives in pages from
+UEFI's `allocate_pages`. That makes this crate the reference for building a
+machine without an allocator.
 
-## What it does
+## Construction without an allocator
 
-The UEFI application:
+`src/main.rs` places the machine in three steps, each into memory the caller
+owns. In outline (the real code reports each failure with `bail!` rather than
+`?`):
 
-1. Allocates memory for CPU, Emulator, and 32 MB guest RAM via UEFI boot services
-2. Loads embedded BIOS ROM, VGA BIOS, and DLX Linux disk image (all compiled in)
-3. Runs a full BIOS POST: memory sizing, PCI enumeration, ACPI/SMBIOS/MP tables
-4. Boots DLX Linux through the emulated BIOS boot path (MBR -> LILO -> kernel)
-5. Prints BIOS and serial output to the UEFI console
+```rust
+// 1. The CPU, in zeroed UEFI pages.
+let cpu = BxCpuBuilder::new().init_cpu_at(cpu_ptr, ())?;            // unsafe
+
+// 2. Guest memory, over an external buffer of
+//    rusty_box::config::mem_buffer_size(guest_bytes) bytes.
+let mem_stub = BxMemoryStubC::create_from_raw(
+    mem_ptr, mem_buf_size, guest_bytes, host_bytes, block_size)?;   // unsafe
+
+// 3. The machine, in a &'static mut MaybeUninit<Emulator>.
+let emu = MachineBuilder::new(config)
+    .bios(BIOS_ROM)
+    .vga_bios(VGA_BIOS)
+    .boot_order(BootOrder::just(BootDevice::Disk))
+    .disk_static(AtaSlot::PRIMARY_MASTER, DLX_DISK,
+                 DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT))
+    .build_at(emu_storage, cpus, mem_stub)?;
+```
+
+`build_at` exists only in builds without `alloc`. It places the machine in the
+storage it is given, then runs the same hardware initialisation and reset that
+`MachineBuilder::build` performs, with no `Box`. The machine borrows its CPUs as
+a slice, `cpus`, which also lives in UEFI pages. UEFI pages are never freed here,
+so the `'static` borrows hold for the life of the program.
+
+## What it does at run time
+
+1. Switches to a 1 MiB stack allocated from UEFI pages; the firmware's own
+   stack is often much smaller.
+2. Allocates and builds the machine as above: 32 MB of guest RAM, PCI enabled,
+   and the embedded DLX disk as the primary master.
+3. Queues keystrokes meant as F1, to pass the BIOS keyboard-error prompt.
+4. Runs the guest with `emu.step(RunBudget::Instructions(100_000))`, up to
+   20,000,000,000 instructions in total. After every step it prints what the
+   guest wrote to the BIOS debug port (0xE9) and to COM1 on the UEFI console.
+5. After 50,000,000 instructions, types keystrokes meant as a `root` login.
+6. Stops when `outcome.is_terminal()` reports guest power-off, CPU shutdown, a
+   stop request or an engine fault, or when a step returns an error. It then
+   waits 30 seconds before returning to the firmware.
 
 ## Current status
 
-The emulator completes full BIOS POST and reaches `Booting from 0000:7c00`.
-The BIOS successfully:
+Last observed: the BIOS completes POST and hands control to the boot sector
+(`Booting from 0000:7c00`). On the way it detects 32 MB of RAM, enumerates the
+PCI devices (i440FX, PIIX3, IDE, ISA bridge), builds the MP, SMBIOS, ACPI and
+HPET tables, and identifies the VGA BIOS and the ATA disk (306/4/17 CHS). DLX
+Linux has not been seen to finish loading after that point. This has not been
+re-measured against the run loop described above.
 
-- Detects 32 MB RAM
-- Enumerates PCI devices (i440FX, PIIX3, IDE, ISA bridge)
-- Builds MP, SMBIOS, ACPI, and HPET tables
-- Identifies VGA BIOS and ATA disk (306/4/17 CHS geometry)
-- Transfers control to the boot sector
+Gaps visible in the code:
 
-DLX Linux boot from the MBR is in progress -- the kernel load phase after
-`Booting from 0000:7c00` currently stalls. This is a known limitation being
-investigated (likely related to read-only disk data or IDE DMA timing).
+- The keystrokes are written as Set 1 scancodes (`0x3B`/`0xBB` for F1;
+  `0x13`/`0x93`, `0x18`/`0x98`, … for `root` and Enter). `Keyboard::scancodes`
+  takes Set 2 bytes whenever the 8042 is translating, which it is at reset
+  (`scancodes_translate: true` in `rusty_box/src/iodev/keyboard.rs`). The guest
+  therefore receives different keys.
+- Nothing presses Enter at DLX's `LILO boot:` prompt, which waits indefinitely.
+  The headless `dlxlinux` example sends one when the prompt appears.
+- Only port 0xE9 and COM1 reach the UEFI console. DLX prints its kernel
+  messages and login prompt to the VGA text screen, which this app never shows.
 
 ## Prerequisites
 
-- Rust toolchain with the `x86_64-unknown-uefi` target
-- A UEFI VM or machine for testing (VMware Workstation, QEMU+OVMF, or real hardware)
+- A Rust toolchain with the `x86_64-unknown-uefi` target.
+- The three files the binary embeds with `include_bytes!`. They are not in the
+  repository (`/cpp_orig` and `/dlxlinux` are gitignored), so the build fails
+  until they exist at these paths, relative to the workspace root:
 
-## Step-by-step: Build and run
+  | File | Size | Source |
+  |------|------|--------|
+  | `cpp_orig/bochs/bochs/bios/BIOS-bochs-latest` | 128 KB | a Bochs source checkout |
+  | `cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin` | 32 KB | a Bochs source checkout |
+  | `dlxlinux/hd10meg.img` | 10.2 MiB | [Bochs DLX Linux disk image](https://bochs.sourceforge.io/diskimages.html) |
 
-### 1. Install the UEFI target
+- A UEFI machine to run it on: QEMU with OVMF, VMware Workstation with UEFI
+  firmware, or real hardware.
+
+## Build
 
 ```bash
 rustup target add x86_64-unknown-uefi
-```
-
-### 2. Build the EFI binary
-
-```bash
 cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi
 ```
 
-The binary is produced at:
-```
-target/x86_64-unknown-uefi/release/rusty_box_uefi.efi
-```
+The binary is written to
+`target/x86_64-unknown-uefi/release/rusty_box_uefi.efi`. It is larger than the
+10.2 MiB disk image it carries.
 
-### 3. Prepare EFI disk directory
-
-Create a directory with the standard EFI boot layout:
-
-```bash
-mkdir -p efi_disk/EFI/BOOT
-cp target/x86_64-unknown-uefi/release/rusty_box_uefi.efi efi_disk/EFI/BOOT/BOOTX64.EFI
-```
-
-Or use the helper script:
+The `verbose` feature adds a log line roughly every 500,000 instructions. The
+line shows the running total, RIP, the step's progress with its unit, and the
+interrupt flag:
 
 ```bash
-python examples/rusty_box_uefi/make_vmdk.py
+cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi --features verbose
 ```
 
-This creates a `rusty_box_uefi_disk/` directory with the correct layout.
+`cargo xtask ci` builds this crate in its "UEFI example build" step, without
+`verbose`.
 
-### 4a. Run with VMware Workstation
+## Prepare the boot directory
 
-1. **Create a new VM:**
-   - Guest OS: Other 64-bit
-   - Memory: 512 MB or more
-   - Remove the default hard disk
+UEFI firmware boots `EFI/BOOT/BOOTX64.EFI` from a FAT volume. From the workspace
+root:
 
-2. **Enable EFI firmware:**
-   - VM Settings -> Options -> Advanced -> Firmware type: **UEFI**
+```bash
+mkdir -p rusty_box_uefi_disk/EFI/BOOT
+cp target/x86_64-unknown-uefi/release/rusty_box_uefi.efi rusty_box_uefi_disk/EFI/BOOT/BOOTX64.EFI
+printf '\\EFI\\BOOT\\BOOTX64.EFI\r\n' > rusty_box_uefi_disk/startup.nsh
+```
 
-3. **Set up the EFI disk:**
-   - Copy the `efi_disk/` directory contents into your VM folder
-     (so `<VM folder>/efi_disk/EFI/BOOT/BOOTX64.EFI` exists)
-   - Add a hard disk: Use an existing virtual disk -> browse to `boot.vmdk`
-   - OR: create a shared folder pointing to `efi_disk/` and navigate from UEFI Shell
+```
+rusty_box_uefi_disk/
++-- EFI/
+|   +-- BOOT/
+|       +-- BOOTX64.EFI    # the emulator, with both ROMs and the DLX disk embedded
++-- startup.nsh            # the UEFI Shell runs this at startup
+```
 
-4. **Add a startup.nsh** (optional, for auto-boot):
-   Create `efi_disk/startup.nsh` containing:
-   ```
-   \EFI\BOOT\BOOTX64.EFI
-   ```
+`python examples/rusty_box_uefi/make_iso.py` builds the same directory in the
+current directory (the `--output` option names it; the default is
+`rusty_box_uefi_disk`) and prints QEMU commands (without `-m`). `make_vmdk.py`
+builds the same `rusty_box_uefi_disk` directory, whatever `--output` says.
+Despite its name, it writes no VMDK. Both scripts delete the directory first if
+it exists.
 
-5. **Power on the VM.** The emulator starts automatically via `BOOTX64.EFI`.
+Both scripts also create a `rusty_box/` subdirectory in the output directory,
+which the app does not use. If they find an Alpine ISO (given with
+`--alpine-iso`, or the first `alpine-virt*.iso` in the workspace root), they
+copy it there, as `rusty_box_uefi_disk/rusty_box/alpine.iso`. The app never
+reads that file, and `make_iso.py`'s warning that the app "will fail at
+runtime" without one does not apply.
 
-6. **To update after rebuilding:**
-   ```bash
-   cp target/x86_64-unknown-uefi/release/rusty_box_uefi.efi "<VM folder>/efi_disk/EFI/BOOT/BOOTX64.EFI"
-   ```
-   Then restart the VM.
-
-### 4b. Run with QEMU
-
-Requires OVMF firmware (included with most QEMU installations).
+### QEMU with OVMF
 
 **Linux:**
 ```bash
@@ -125,62 +167,36 @@ qemu-system-x86_64 ^
   -nographic
 ```
 
-### 4c. Run on real hardware
+### VMware Workstation
 
-1. Format a USB drive as FAT32
-2. Copy the `efi_disk/` contents to the USB root
-3. Boot from the USB drive with UEFI boot enabled in BIOS settings
+Set **VM Settings → Options → Advanced → Firmware type** to **UEFI**, and give
+the VM a FAT-formatted disk that holds the contents of `rusty_box_uefi_disk/`.
+Neither helper script produces a VMDK, so make that disk with an external tool.
 
-## EFI disk layout
+### Real hardware
 
-```
-efi_disk/
-+-- EFI/
-|   +-- BOOT/
-|       +-- BOOTX64.EFI    # The emulator binary (~4 MB, includes BIOS ROMs + DLX disk)
-+-- startup.nsh             # Optional: auto-run script for UEFI Shell
-```
-
-All data is embedded in the binary at compile time:
-- **BIOS ROM** (`BIOS-bochs-latest`, 128 KB)
-- **VGA BIOS** (`VGABIOS-lgpl-latest.bin`, 40 KB)
-- **DLX Linux disk** (`hd10meg.img`, 10 MB)
-
-## How it works
-
-1. UEFI firmware loads `BOOTX64.EFI`
-2. The app switches to a 1 MB heap-allocated stack (UEFI default is ~128 KB)
-3. Allocates pages for BxCpuC (~17 MB), Emulator (~3 MB), and guest RAM (~36 MB)
-4. Initializes CPU via `BxCpuBuilder::init_cpu_at()` (placement construction)
-5. Creates memory stub via `BxMemoryStubC::create_from_raw()` (external buffer)
-6. Initializes Emulator via `Emulator::init_at()` (no Box, no allocator)
-7. Loads BIOS + VGA BIOS into guest memory, configures CMOS and disk geometry
-8. Runs the emulated CPU in 100K-instruction batches with device ticking
-9. Drains BIOS debug output (port 0xE9) and serial output (COM1) to UEFI console
-
-## Verbose output
-
-Build with the `verbose` feature for per-batch instruction count and RIP logging:
-
-```bash
-cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi --features verbose
-```
+1. Format a USB drive as FAT32.
+2. Copy the contents of `rusty_box_uefi_disk/` to the drive's root.
+3. Boot from the drive with UEFI boot enabled.
 
 ## Memory layout
 
 | Allocation | Size | Method |
 |------------|------|--------|
-| CPU (BxCpuC) | ~17 MB | `uefi::boot::allocate_pages` + `init_cpu_at` |
-| Guest RAM + BIOS ROM | ~36 MB | `uefi::boot::allocate_pages` + `create_from_raw` |
-| Emulator struct | ~3 MB | `uefi::boot::allocate_pages` + `init_at` |
-| Stack | 1 MB | `uefi::boot::allocate_pages` + asm switch |
-| **Total** | **~57 MB** | No Rust `#[global_allocator]` used |
+| Stack | 1 MiB | `uefi::boot::allocate_pages`, switched to in `asm!` |
+| CPU (`BxCpuC`) | `size_of::<BxCpuC>()`, printed at startup | `allocate_pages` + `BxCpuBuilder::init_cpu_at` |
+| CPU slice | one `&'static mut BxCpuC` | `allocate_pages` |
+| Guest memory buffer | 32 MiB of RAM + 4 MiB BIOS ROM + 128 KiB expansion ROM + 8 KiB (`rusty_box::config::mem_buffer_size`) | `allocate_pages` + `BxMemoryStubC::create_from_raw` |
+| Machine (`Emulator`) | `size_of::<Emulator>()`, printed at startup | `allocate_pages` + `MachineBuilder::build_at` |
+
+No `#[global_allocator]` is defined.
 
 ## Limitations
 
-- DLX Linux boot stalls after `Booting from 0000:7c00` (under investigation)
-- Disk writes are silently dropped (DLX disk image is `&'static [u8]`, read-only)
-- Serial console output only (no VGA framebuffer rendering)
-- 32 MB guest RAM (configurable in source)
-- No networking in the guest
-- GeForce GPU emulation excluded (requires alloc for 16-256 MB VRAM)
+- The boot gaps listed under [Current status](#current-status).
+- Guest disk writes complete but are discarded: the DLX image is a
+  `&'static [u8]`, and the ATA write path for a borrowed image stores nothing.
+- No VGA output reaches the screen; only port 0xE9 and COM1 are printed.
+- 32 MB of guest RAM, set in the `EmulatorConfig` in `src/main.rs`.
+- No network device; the emulator does not model one.
+- No GeForce display model: it needs `alloc`, which this build does not link.

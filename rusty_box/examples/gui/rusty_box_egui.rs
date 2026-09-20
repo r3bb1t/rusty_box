@@ -17,8 +17,7 @@
 //! ```
 
 use rusty_box::{
-    cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MemorySize, MachineBuilder},
     gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
     Result,
 };
@@ -94,8 +93,10 @@ fn main() {
         &workspace_root,
         &[
             "binaries/bios/VGABIOS-lgpl-latest.bin",
+            "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin",
             "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin",
             "VGABIOS-lgpl-latest.bin",
+            "../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin",
             "../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin",
         ],
         |data| data.len() % 512 == 0,
@@ -197,63 +198,51 @@ fn run_emulator(
     // wall-clock time. HLT idle sync handles idle separately. Override RUSTY_BOX_NOSYNC=1.
     let sync = std::env::var("RUSTY_BOX_NOSYNC").map_or(true, |v| v != "1");
     let config = EmulatorConfig {
-        guest_memory_size: ram_bytes,
-        host_memory_size: ram_bytes,
+        memory: MemorySize::bytes(ram_bytes),
         memory_block_size: 128 * 1024,
-        ips: 300_000_000,
+        ips: Ips::new(300_000_000),
         pci_enabled: true,
         sync_slowdown: sync,
         ..Default::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
-
-    emu.stop_flag = {
-        let d = shared.lock().unwrap();
-        Arc::clone(&d.stop_flag)
-    };
-
-    let bridge = BridgeGui::new(Arc::clone(&shared));
-    emu.set_gui(bridge);
-
-    emu.init_memory_and_pc_system()?;
-
-    let bios_size = bios_data.len() as u64;
-    let bios_load_addr = !(bios_size - 1);
-    emu.load_bios(bios_data, bios_load_addr)?;
+    let mut builder = MachineBuilder::new(config)
+        .gui(BridgeGui::new(Arc::clone(&shared)))
+        .bios(bios_data);
 
     if let Some(vga_data) = vga_bios {
-        emu.load_optional_rom(vga_data, 0xC0000)?;
+        builder = builder.vga_bios(vga_data);
     }
 
-    emu.init_cpu_and_devices()?;
-
-    // Profile-specific configuration
+    // Profile-specific media, plus the direct-boot payload the machine needs
+    // once it exists.
+    let mut direct_boot = None;
+    let disk_path_str;
+    let iso_path_str;
     match profile {
         BootProfile::Dlx { disk_path } => {
-            emu.configure_memory_in_cmos(640, 31 * 1024);
-            emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
-            emu.configure_boot_sequence(2, 0, 0);
-            let disk_path_str = disk_path.to_string_lossy().to_string();
-            emu.attach_disk(0, 0, &disk_path_str, DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT)
-                .expect("Failed to attach DLX disk image");
+            disk_path_str = disk_path.to_string_lossy().to_string();
+            builder = builder
+                .boot_order(BootOrder::just(BootDevice::Disk))
+                .disk_file(
+                    AtaSlot::PRIMARY_MASTER,
+                    &disk_path_str,
+                    DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT),
+                );
             println!("DLX disk attached: {}", disk_path.display());
         }
         BootProfile::Alpine { iso_path, .. } => {
-            emu.configure_memory_in_cmos_from_config();
-            emu.configure_boot_sequence(3, 0, 0); // CD-ROM first
-            let iso_path_str = iso_path.to_string_lossy().to_string();
-            emu.attach_cdrom(1, 0, &iso_path_str)
-                .expect("Failed to attach Alpine CD-ROM image");
+            iso_path_str = iso_path.to_string_lossy().to_string();
+            builder = builder
+                .boot_order(BootOrder::just(BootDevice::Cdrom))
+                .cdrom_file(AtaSlot::SECONDARY_MASTER, &iso_path_str);
             println!("Alpine CD-ROM attached: {}", iso_path.display());
         }
         BootProfile::AlpineDirect { iso_path, .. } => {
-            // Direct kernel boot — extract vmlinuz + initramfs from ISO
-            emu.configure_memory_in_cmos_from_config();
-            // Attach ISO as CD-ROM so Alpine Init can mount the squashfs root filesystem
-            let iso_path_str = iso_path.to_string_lossy().to_string();
-            emu.attach_cdrom(1, 0, &iso_path_str)
-                .expect("Failed to attach Alpine ISO as CD-ROM");
+            // Direct kernel boot — the ISO still rides along so Alpine's init
+            // can mount the squashfs root filesystem.
+            iso_path_str = iso_path.to_string_lossy().to_string();
+            builder = builder.cdrom_file(AtaSlot::SECONDARY_MASTER, &iso_path_str);
             println!("CD-ROM attached: {}", iso_path.display());
             let iso_data = std::fs::read(iso_path).expect("Failed to read ISO");
             let (kernel, initramfs) =
@@ -266,58 +255,32 @@ fn run_emulator(
                 kernel.len(),
                 initramfs.len()
             );
-            emu.init_gui(0, &[])?;
-            emu.reset(ResetReason::Hardware)?;
-            emu.init_gui_signal_handlers();
-            emu.init_vga_text_mode3(); // No BIOS runs — initialize VGA for kernel vgacon
-            emu.start();
-            emu.setup_direct_linux_boot(&kernel, Some(&initramfs), &cmdline)?;
-            // Skip the common init_gui/reset/start below
-            println!("Emulator started (max {} instructions)", max_instructions);
-            let start_time = Instant::now();
-            let result = emu.run_interactive(max_instructions);
-            let elapsed = start_time.elapsed();
-            match result {
-                Ok(executed) => {
-                    let mips = if elapsed.as_secs_f64() > 0.001 {
-                        executed as f64 / elapsed.as_secs_f64() / 1_000_000.0
-                    } else {
-                        0.0
-                    };
-                    println!(
-                        "Executed {} instructions in {:.3}s ({:.2} MIPS)",
-                        executed,
-                        elapsed.as_secs_f64(),
-                        mips
-                    );
-                }
-                Err(ref e) => eprintln!("Execution error: {:?}", e),
-            }
-            println!("\n===== VGA TEXT DUMP =====");
-            println!("{}", emu.vga_text_dump());
-            if let Ok(mut display) = shared.lock() {
-                display.emu_running = false;
-            }
-            if let Some(ref mut gui) = emu.gui_mut() {
-                gui.exit();
-            }
-            return Ok(());
+            direct_boot = Some((kernel, initramfs, cmdline));
         }
     }
 
-    emu.init_gui(0, &[])?;
-    emu.reset(ResetReason::Hardware)?;
-    emu.init_gui_signal_handlers();
-    emu.start();
+    let mut emu = builder.build()?;
+
+    emu.set_stop_flag({
+        let d = shared.lock().unwrap();
+        Arc::clone(&d.stop_flag)
+    });
+
+    if let Some((kernel, initramfs, cmdline)) = direct_boot {
+        // No BIOS runs — initialize VGA for the kernel's vgacon.
+        emu.display().init_text_mode3();
+        emu.setup_direct_linux_boot(&kernel, Some(&initramfs), &cmdline)?;
+    }
 
     // For Alpine BIOS boot: pre-queue Enter at the ISOLINUX boot prompt.
     // The SYSLINUX config already specifies the right kernel, initrd, and modules.
     // We just add console=ttyS0 for serial output visibility.
     // No PCI means no ata_piix/DMA — kernel uses legacy ISA IDE, matching Bochs.
     if matches!(profile, BootProfile::Alpine { .. }) {
-        emu.prepare_run();
         println!("Pre-queuing ISOLINUX boot: Enter (use ISO default config)");
-        emu.send_string("\n");
+        if !emu.keyboard().type_text("\n").is_complete() {
+            println!("  (the keystroke was refused; the prompt may still be waiting)");
+        }
     }
 
     println!("Emulator started (max {} instructions)", max_instructions);
@@ -346,7 +309,9 @@ fn run_emulator(
     }
 
     println!("\n===== VGA TEXT DUMP =====");
-    println!("{}", emu.vga_text_dump());
+    if let Some(text) = emu.display().text() {
+        println!("{}", text.to_text());
+    }
 
     if let Ok(mut display) = shared.lock() {
         display.emu_running = false;
@@ -420,8 +385,9 @@ fn detect_boot_profile(workspace_root: &std::path::Path) -> BootProfile {
     }
 }
 
-/// Non-panicking check for Alpine ISO existence (for auto-detection).
-/// Searches workspace root, parent, and current directory.
+/// Non-panicking check for Alpine ISO existence (for auto-detection):
+/// `ALPINE_ISO` or `ALPINE_DISK` when it names an existing file, otherwise
+/// [`search_for_alpine_iso`].
 fn try_find_alpine_iso(workspace_root: &std::path::Path) -> Option<std::path::PathBuf> {
     if let Ok(path) = std::env::var("ALPINE_ISO") {
         let p = std::path::PathBuf::from(&path);
@@ -435,7 +401,14 @@ fn try_find_alpine_iso(workspace_root: &std::path::Path) -> Option<std::path::Pa
             return Some(p);
         }
     }
-    // Search workspace root, its parent, and current dir for alpine*.iso
+    search_for_alpine_iso(workspace_root)
+}
+
+/// The first `alpine*.iso` in the workspace root, its parent, or the current
+/// directory. Auto-detection and the Alpine boot arms both search through
+/// this one function, so an ISO that selects the Alpine profile is an ISO the
+/// profile then finds.
+fn search_for_alpine_iso(workspace_root: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut search_dirs = vec![workspace_root.to_path_buf()];
     if let Some(parent) = workspace_root.parent() {
         search_dirs.push(parent.to_path_buf());
@@ -445,12 +418,7 @@ fn try_find_alpine_iso(workspace_root: &std::path::Path) -> Option<std::path::Pa
             search_dirs.push(cwd);
         }
     }
-    for dir in &search_dirs {
-        if let Some(iso) = find_iso_in_dir(dir) {
-            return Some(iso);
-        }
-    }
-    None
+    search_dirs.iter().find_map(|dir| find_iso_in_dir(dir))
 }
 
 fn find_iso_in_dir(dir: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -482,20 +450,14 @@ fn find_alpine_iso(workspace_root: &std::path::Path) -> std::path::PathBuf {
         }
         return p;
     }
-    // Auto-detect alpine*.iso in workspace root
-    let iso = std::fs::read_dir(workspace_root).ok().and_then(|entries| {
-        entries.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
-            p.extension().map(|ext| ext == "iso").unwrap_or(false)
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_lowercase().contains("alpine"))
-                    .unwrap_or(false)
-        })
-    });
-    match iso {
+    match search_for_alpine_iso(workspace_root) {
         Some(p) => p,
         None => {
-            eprintln!("ERROR: No Alpine ISO found. Set ALPINE_ISO=/path/to/alpine.iso");
+            eprintln!(
+                "ERROR: No alpine*.iso found in {}, its parent, or the current directory. \
+                 Set ALPINE_ISO=/path/to/alpine.iso",
+                workspace_root.display()
+            );
             std::process::exit(1);
         }
     }

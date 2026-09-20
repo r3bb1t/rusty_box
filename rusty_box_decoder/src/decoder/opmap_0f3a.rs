@@ -224,45 +224,49 @@ pub(super) const BxOpcodeTable0F3A02: [u64; 1] = [form_opcode(
     Opcode::VpblenddVdqHdqWdqIb,
 )];
 
-// KSHIFTL/KSHIFTR — VEX.L0.66.0F3A.W0/W1 30-33 /r ib
+// KSHIFTR/KSHIFTL — VEX.L0.66.0F3A.W0/W1 30-33 /r ib
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A30..BxOpcodeGroup_VEX_0F3A33:
+// the opcode byte picks the direction and the width pair (30 = R b/w,
+// 31 = R d/q, 32 = L b/w, 33 = L d/q) and VEX.W picks the narrower (W0) or
+// wider (W1) member of that pair.
 pub(super) const BxOpcodeTable0F3A30: [u64; 2] = [
     form_opcode(
         attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_66),
-        Opcode::KshiftlbKgbKebIb,
-    ),
-    form_opcode(
-        attrs!(VEX | VL128 | VEX_W1 | SSE_PREFIX_66),
         Opcode::KshiftrbKgbKebIb,
-    ),
-];
-pub(super) const BxOpcodeTable0F3A31: [u64; 2] = [
-    form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_66),
-        Opcode::KshiftlwKgwKewIb,
     ),
     form_opcode(
         attrs!(VEX | VL128 | VEX_W1 | SSE_PREFIX_66),
         Opcode::KshiftrwKgwKewIb,
     ),
 ];
+pub(super) const BxOpcodeTable0F3A31: [u64; 2] = [
+    form_opcode(
+        attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_66),
+        Opcode::KshiftrdKgdKedIb,
+    ),
+    form_opcode(
+        attrs!(VEX | VL128 | VEX_W1 | SSE_PREFIX_66),
+        Opcode::KshiftrqKgqKeqIb,
+    ),
+];
 pub(super) const BxOpcodeTable0F3A32: [u64; 2] = [
+    form_opcode(
+        attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_66),
+        Opcode::KshiftlbKgbKebIb,
+    ),
+    form_opcode(
+        attrs!(VEX | VL128 | VEX_W1 | SSE_PREFIX_66),
+        Opcode::KshiftlwKgwKewIb,
+    ),
+];
+pub(super) const BxOpcodeTable0F3A33: [u64; 2] = [
     form_opcode(
         attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_66),
         Opcode::KshiftldKgdKedIb,
     ),
     form_opcode(
         attrs!(VEX | VL128 | VEX_W1 | SSE_PREFIX_66),
-        Opcode::KshiftrdKgdKedIb,
-    ),
-];
-pub(super) const BxOpcodeTable0F3A33: [u64; 2] = [
-    form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_66),
         Opcode::KshiftlqKgqKeqIb,
-    ),
-    form_opcode(
-        attrs!(VEX | VL128 | VEX_W1 | SSE_PREFIX_66),
-        Opcode::KshiftrqKgqKeqIb,
     ),
 ];
 

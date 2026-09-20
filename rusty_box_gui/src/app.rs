@@ -10,24 +10,46 @@ use std::sync::{
     {Arc, Mutex},
 };
 
-use egui::{Color32, RichText, Stroke};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::destination::{SidebarAction, VmBarAction};
+use crate::shell::destination::{Destination, ShellPage};
+use crate::shell::sidebar::VmLibraryEntry;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::theme::{SPACE_PAGE, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_DISPLAY};
+use crate::shell::theme::{
+    configure_shell_style, shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED,
+    BG_BASE, BG_PANEL, SPACE_GROUP, SPACE_ITEM, TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY,
+    TEXT_SECONDARY, TEXT_TITLE,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::vm_bar::VmBarState;
+#[cfg(target_arch = "wasm32")]
+use crate::shell::widgets::disabled_tile;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::widgets::{
+    action_tile_enabled, hairline_above, home_fact, path_field_width, selection_row, status_text,
+    RowMark, ShellStateBadge, BROWSE, HOME_FACT_GAP, ROOT_INDENT,
+};
+use crate::shell::widgets::{
+    action_tile, field_row, metadata_text, page_header, primary_button, status_dot,
+    ActionTileWeight,
+};
+#[cfg(target_arch = "wasm32")]
+use egui::Color32;
+use egui::RichText;
+// The wasm build drives the machine directly from the frame loop below; the
+// native build hands it to a runner thread instead.
+#[cfg(target_arch = "wasm32")]
+use rusty_box::emulator::RunBudget;
 use rusty_box::params::{
     BxParams, BX_CPU_CORES_LIMIT, BX_CPU_HT_THREADS_LIMIT, BX_CPU_PROCESSORS_LIMIT,
     BX_MAX_SMP_THREADS_SUPPORTED,
 };
-use rusty_box_bximage::{
-    calculate_hard_disk_geometry, CreatedImage as BxCreatedImage, FloppyFormat, ImageSize,
-    SectorSize,
-};
+use rusty_box_bximage::{calculate_hard_disk_geometry, FloppyFormat, SectorSize};
+#[cfg(target_arch = "wasm32")]
+use rusty_box_bximage::{CreatedImage as BxCreatedImage, ImageSize};
 #[cfg(not(target_arch = "wasm32"))]
-use rusty_box_bximage::{create_flat_hard_disk, create_floppy, ExistingFilePolicy};
-
-const BG_BASE: Color32 = Color32::from_rgb(0x0B, 0x0F, 0x14);
-const BG_PANEL: Color32 = Color32::from_rgb(0x11, 0x18, 0x21);
-const BG_CARD: Color32 = Color32::from_rgb(0x17, 0x21, 0x2B);
-const STROKE_HAIRLINE: Color32 = Color32::from_rgb(0x26, 0x34, 0x43);
-const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xE8, 0xEE, 0xF5);
-const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x98, 0xA8);
+use rusty_box_bximage::{create_floppy, ExistingFilePolicy};
 
 /// Common pre-boot VBE resolutions offered by the Display panel picker.
 const VGA_MODE_PRESETS: &[(u16, u16)] = &[
@@ -44,10 +66,12 @@ fn vga_mode_label(mode: Option<crate::config::VgaMode>) -> String {
         Some(mode) => format!("{}×{} @ {}bpp", mode.width, mode.height, mode.bpp),
     }
 }
-const ACCENT_CYAN: Color32 = Color32::from_rgb(0x46, 0xD9, 0xC7);
-const ACCENT_BLUE: Color32 = Color32::from_rgb(0x6A, 0xA8, 0xFF);
-const ACCENT_AMBER: Color32 = Color32::from_rgb(0xF2, 0xB8, 0x4B);
-const ACCENT_RED: Color32 = Color32::from_rgb(0xFF, 0x5C, 0x6C);
+
+/// The device list takes a fixed column; the detail card takes the rest.
+/// A card's width is the layout's decision, never the card's own.
+#[cfg(not(target_arch = "wasm32"))]
+const HARDWARE_LIST_WIDTH: f32 = 150.0;
+
 #[cfg(target_arch = "wasm32")]
 const BROWSER_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -56,8 +80,39 @@ pub enum NativeEmulatorCommand {
     Start(crate::config::ResolvedConfig),
 }
 
+/// A path field the shell fills from a file chooser.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BrowseTarget {
+    /// The hard disk image attached at the next power-on.
+    HardDisk,
+    /// The CD/DVD image attached at the next power-on.
+    Cdrom,
+    /// The system BIOS ROM.
+    Bios,
+    /// The VGA BIOS ROM.
+    VgaBios,
+    /// The folder and name the new-disk sheet saves its disk under.
+    NewDisk,
+    /// Where the floppy maker writes its next image.
+    NewFloppy,
+}
+
+/// A Browse press the Android host answers with a file browser of its own.
+#[cfg(target_os = "android")]
+pub(crate) struct BrowseRequest {
+    pub(crate) target: BrowseTarget,
+    /// What the field holds now, so the browser can open beside it.
+    pub(crate) current: PathBuf,
+    /// The name offered for a file still to be created; `None` when an
+    /// existing file is chosen.
+    pub(crate) save_name: Option<&'static str>,
+}
+
+/// Ordered by gravity: an `Error` outranks a `Warning`, which outranks
+/// `Info`. `NativeShellApp::notify` keeps the gravest of one frame.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ShellNoticeKind {
     Info,
     Warning,
@@ -95,33 +150,39 @@ impl ShellNotice {
     }
 }
 
+/// Whether a phone draws a notice of `kind`: the ones that report something
+/// that did not happen, in full or in part — a save that did not reach its
+/// file, a launch whose first VM was not finished, a power-on that stopped.
+/// A phone has no room for the ones that report something that did.
+#[cfg(not(target_arch = "wasm32"))]
+fn phone_shows_notice(kind: ShellNoticeKind) -> bool {
+    match kind {
+        ShellNoticeKind::Info => false,
+        ShellNoticeKind::Warning | ShellNoticeKind::Error => true,
+    }
+}
+
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 fn pick_native_file() -> Option<PathBuf> {
     rfd::FileDialog::new().pick_file()
 }
 
-#[cfg(all(not(target_arch = "wasm32"), target_os = "android"))]
-fn pick_native_file() -> Option<PathBuf> {
-    None
-}
-
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-fn save_native_file(default_name: &'static str) -> Option<PathBuf> {
+fn save_native_file(default_name: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_file_name(default_name)
         .save_file()
-}
-
-#[cfg(all(not(target_arch = "wasm32"), target_os = "android"))]
-fn save_native_file(_default_name: &'static str) -> Option<PathBuf> {
-    None
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub struct NativeShellApp {
     emulator: rusty_box::gui::RustyBoxApp,
     chrome: ShellChrome,
-    disk_creator: DiskCreatorPanel,
+    floppy_maker: FloppyMaker,
+    /// The floppy maker's window is open.
+    floppy_maker_open: bool,
+    /// The Hard disk page's new-disk sheet, while it is open.
+    new_disk: Option<NewDiskDraft>,
     profiles: Vec<NativeVmProfile>,
     config: crate::config::ResolvedConfig,
     settings: NativeVmSettings,
@@ -129,7 +190,45 @@ pub struct NativeShellApp {
     command_tx: Sender<NativeEmulatorCommand>,
     shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
     shell_notice: Option<ShellNotice>,
+    /// The folder every library VM's edits are written to.
+    library: crate::library::VmLibrary,
+    /// Library files that do not load, listed under "Could not load".
+    broken_files: Vec<crate::library::BrokenVmFile>,
+    /// A destructive step the user has yet to confirm or cancel.
+    pending_confirm: Option<PendingConfirm>,
+    /// The overwrite creations settled this session, by path: each file the
+    /// user agreed to let a startup-disk creation erase, and each one that
+    /// did not exist when its VM was powered on, so there was nothing to
+    /// erase and nothing to ask. The runner erases an overwrite creation's
+    /// file at the first power-on of the session that uses the path and at
+    /// no later one, and provisions a plain creation at every power-on
+    /// without erasing anything, so one answer per file covers the session.
+    overwrite_confirmed: std::collections::HashSet<PathBuf>,
+    /// The gravest notice raised in this frame, which a lesser one may not
+    /// replace; see `notify`.
+    gravest_raised: Option<ShellNoticeKind>,
+    /// A Browse press the Android host has yet to answer.
+    #[cfg(target_os = "android")]
+    browse_request: Option<BrowseTarget>,
+    /// The full-screen console's menu is open.
+    #[cfg(target_os = "android")]
+    full_screen_menu_open: bool,
+    /// The full-screen menu asked the Android host for its key pad.
+    #[cfg(target_os = "android")]
+    keypad_requested: bool,
 }
+
+/// The full-screen console's menu button: a glyph the VM bar already draws,
+/// so the default fonts are known to hold it.
+#[cfg(target_os = "android")]
+const FULL_SCREEN_MENU: &str = "☰";
+/// The menu button's side, points: a comfortable thumb target.
+#[cfg(target_os = "android")]
+const FULL_SCREEN_BUTTON_SIZE: f32 = 40.0;
+/// The menu button's fill over the guest: dark enough to find, light enough
+/// to leave the guest's corner readable under it.
+#[cfg(target_os = "android")]
+const FULL_SCREEN_BUTTON_ALPHA: u8 = 110;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
@@ -185,6 +284,8 @@ struct NativeVmSettings {
     boot_order: Vec<crate::args::BootDevice>,
     pci: bool,
     sync_slowdown: bool,
+    /// Which engine retires the guest's instructions.
+    engine: crate::config::Engine,
     max_instructions: u64,
     log_level: crate::args::LogLevel,
     bios_path: String,
@@ -203,6 +304,11 @@ struct NativeVmSettings {
     vga_mode: Option<crate::config::VgaMode>,
     /// Register the VGA on PCI (experimental KMS / bochs-drm path).
     pci_vga: bool,
+    /// The phone's full-screen console fills the screen instead of keeping
+    /// the guest's shape.
+    console_stretch: bool,
+    /// The phone trackpad's cursor speed.
+    pointer_speed: crate::config::PointerSpeed,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -222,6 +328,7 @@ impl NativeVmSettings {
             boot_order: config.boot_order.clone(),
             pci: config.pci,
             sync_slowdown: config.sync_slowdown,
+            engine: config.engine,
             max_instructions: if config.max_instructions == u64::MAX {
                 0
             } else {
@@ -237,7 +344,13 @@ impl NativeVmSettings {
             disk_path: disk.map_or_else(String::new, |disk| disk.path.display().to_string()),
             disk_channel: disk.map_or(0, |disk| disk.channel),
             disk_drive: disk.map_or(0, |disk| disk.drive),
-            disk_chs_override: None,
+            // The geometry the configuration already resolved, carried rather
+            // than re-derived. Detecting it a second time here is a second
+            // answer for the same disk, and the two disagree whenever the
+            // image's sector count is not a multiple of the detected heads
+            // times sectors-per-track: the tail of the image becomes
+            // unreachable, which is where a boot loader keeps its map.
+            disk_chs_override: disk.map(|disk| disk.geometry),
             disk_creation: disk.and_then(|disk| disk.creation.clone()),
             cdrom_enabled: cdrom.is_some(),
             cdrom_path: cdrom.map_or_else(String::new, |cdrom| cdrom.path.display().to_string()),
@@ -245,6 +358,8 @@ impl NativeVmSettings {
             cdrom_drive: cdrom.map_or(0, |cdrom| cdrom.drive),
             vga_mode: config.vga_mode,
             pci_vga: config.pci_vga,
+            console_stretch: config.console_stretch,
+            pointer_speed: config.pointer_speed,
         }
     }
 
@@ -267,6 +382,7 @@ impl NativeVmSettings {
             })?;
         config.pci = self.pci;
         config.sync_slowdown = self.sync_slowdown;
+        config.engine = self.engine;
         config.max_instructions = if self.max_instructions == 0 {
             u64::MAX
         } else {
@@ -274,9 +390,10 @@ impl NativeVmSettings {
         };
         config.log_level = self.log_level;
 
-        let bios_path = trimmed_optional_path(&self.bios_path)
-            .ok_or_else(|| "BIOS path is required".to_owned())?;
-        config.bios = bios_path;
+        // A blank BIOS path applies as none, as the blank "New VM" has it:
+        // the VM can be edited and kept without one, and `start_vm` refuses
+        // to power it on until it has one.
+        config.bios = trimmed_optional_path(&self.bios_path).unwrap_or_default();
         config.vga_bios = trimmed_optional_path(&self.vga_bios_path);
 
         if self.disk_enabled {
@@ -334,12 +451,18 @@ impl NativeVmSettings {
 
         config.vga_mode = self.vga_mode;
         config.pci_vga = self.pci_vga;
+        config.console_stretch = self.console_stretch;
+        config.pointer_speed = self.pointer_speed;
 
-        config.boot_order = self.boot_order_for_attached_media()?;
+        config.boot_order = self.boot_order_for_attached_media();
         Ok(())
     }
 
-    fn boot_order_for_attached_media(&self) -> Result<Vec<crate::args::BootDevice>, String> {
+    /// The chosen boot order over the attached media. Empty when nothing is
+    /// attached, as the resolver has it for the egui shell
+    /// (`config::allow_empty_boot_order`): the VM can be edited and kept, and
+    /// `start_vm` refuses to power it on until a medium is attached.
+    fn boot_order_for_attached_media(&self) -> Vec<crate::args::BootDevice> {
         let mut order = Vec::with_capacity(2);
         // Keep the user's chosen order, dropping unattached or duplicate devices.
         for device in &self.boot_order {
@@ -357,11 +480,7 @@ impl NativeVmSettings {
                 order.push(device);
             }
         }
-        if order.is_empty() {
-            Err("At least one bootable hard disk or CD/DVD must be attached".to_owned())
-        } else {
-            Ok(order)
-        }
+        order
     }
 
     fn is_boot_device_attached(&self, device: crate::args::BootDevice) -> bool {
@@ -372,57 +491,347 @@ impl NativeVmSettings {
     }
 }
 
+/// Where a VM in the list came from, and so where its edits go.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VmOrigin {
+    /// A library file; every applied edit is written back to it.
+    Library(crate::library::VmStem),
+    /// In memory only — the command line's machine, or the blank "New VM" —
+    /// until the user keeps it in the library.
+    Launch,
+}
+
+/// Whether a library VM's file holds the VM as it is.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveState {
+    /// The file holds the VM as it is. A VM without a file is always `Saved`:
+    /// it has nothing to write, and only a library VM is ever marked.
+    Saved,
+    /// An applied edit is not in the file yet; the next flush, from an idle
+    /// frame or from an action, writes it.
+    Unsaved,
+    /// The last write failed. Only an action's flush — a selection, `+`,
+    /// Keep, power-on, exit — tries again, or the next applied edit, which
+    /// marks the VM `Unsaved`; an idle frame does not, so a lasting fault is
+    /// not retried on every frame.
+    WriteFailed,
+}
+
+/// What brought a VM's name or config to where it is, for
+/// `NativeVmProfile::mark_against_file`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigChange {
+    /// An edit the user applied. A VM whose last write failed is `Unsaved`
+    /// again, so the next flush tries its file once more.
+    Edit,
+    /// The shell reading the VM's settings into its config, as a selection
+    /// does. A write that failed stays failed, for an action to try again.
+    Reading,
+}
+
+/// Which of the VMs whose files are behind a flush writes.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlushScope {
+    /// `Unsaved` VMs only: an idle frame's flush.
+    Unsaved,
+    /// `Unsaved` and `WriteFailed` VMs: an action's flush, where a failed
+    /// write is tried again.
+    UnsavedAndFailed,
+}
+
+/// What a library VM's file holds, as last read from or written to it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VmFileContents {
+    name: String,
+    config: crate::config::ResolvedConfig,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl VmFileContents {
+    fn of(name: &str, config: &crate::config::ResolvedConfig) -> Self {
+        Self {
+            name: name.to_owned(),
+            config: config.clone(),
+        }
+    }
+
+    fn holds(&self, name: &str, config: &crate::config::ResolvedConfig) -> bool {
+        self.name == name && &self.config == config
+    }
+}
+
+/// A destructive step waiting for the user to confirm it in a dialog.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingConfirm {
+    /// Deleting the VM that was selected when the delete was asked for.
+    /// `index` and `origin` identify it, so a confirm that finds another VM
+    /// selected deletes nothing; `name` is what the dialog calls it. A library
+    /// VM's file goes with it.
+    DeleteVm {
+        index: usize,
+        origin: VmOrigin,
+        name: String,
+    },
+    /// Deleting a library file that does not load.
+    DeleteBroken(PathBuf),
+    /// Powering on the VM at `index` with `origin`, whose startup-disk
+    /// creation erases the existing file `path`. `index` and `origin`
+    /// identify it, so a confirm that finds another VM selected starts
+    /// nothing.
+    OverwriteDisk {
+        index: usize,
+        origin: VmOrigin,
+        path: PathBuf,
+    },
+}
+
+/// What a VM lacks to be powered on. A VM without a BIOS path or a medium to
+/// boot from is still one the shell edits and keeps — the blank "New VM", a
+/// phone's first VM, a bundled VM that names only its ROMs — so completeness
+/// is checked here, at power-on, and nowhere earlier.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerOnGap {
+    Bios,
+    Media,
+    BiosAndMedia,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PowerOnGap {
+    /// What `config` lacks to be powered on; `None` when it has a BIOS path
+    /// and a hard disk or CD/DVD attached.
+    fn of(config: &crate::config::ResolvedConfig) -> Option<Self> {
+        let no_bios = config.bios.as_os_str().is_empty();
+        let no_media = config.disk.is_none() && config.cdrom.is_none();
+        match (no_bios, no_media) {
+            (false, false) => None,
+            (true, false) => Some(Self::Bios),
+            (false, true) => Some(Self::Media),
+            (true, true) => Some(Self::BiosAndMedia),
+        }
+    }
+
+    /// The notice that refuses the power-on, naming where each missing
+    /// setting is made; the BIOS half points where `RunError::MissingBios`
+    /// does.
+    fn notice(self) -> &'static str {
+        match self {
+            Self::Bios => "Set a BIOS path under Hardware › Display before powering on.",
+            Self::Media => "Attach a hard disk or CD/DVD before powering on.",
+            Self::BiosAndMedia => {
+                "Set a BIOS path under Hardware › Display and attach a hard disk or CD/DVD \
+                 before powering on."
+            }
+        }
+    }
+}
+
+/// What a confirmation dialog says.
+#[cfg(not(target_arch = "wasm32"))]
+struct ConfirmWording {
+    title: String,
+    body: String,
+    verb: &'static str,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeVmProfile {
     name: String,
     config: crate::config::ResolvedConfig,
     settings: NativeVmSettings,
+    origin: VmOrigin,
+    /// What the VM's file holds, as last read from or written to it; `None`
+    /// for a VM with no file. `save_state` is `Saved` exactly when this holds
+    /// `name` and `config`, which `apply_pending_settings` and the flush keep
+    /// true.
+    file: Option<VmFileContents>,
+    save_state: SaveState,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeVmProfile {
-    fn from_config(name: impl Into<String>, config: crate::config::ResolvedConfig) -> Self {
+    /// The VM `config` describes under `name`. A library VM's file holds
+    /// what was read from it: `config` under `name`.
+    fn from_config(
+        name: impl Into<String>,
+        config: crate::config::ResolvedConfig,
+        origin: VmOrigin,
+    ) -> Self {
+        let name = name.into();
         let settings = NativeVmSettings::from_config(&config);
+        let file = match origin {
+            VmOrigin::Library(_) => Some(VmFileContents::of(&name, &config)),
+            VmOrigin::Launch => None,
+        };
         Self {
-            name: name.into(),
+            name,
             config,
             settings,
+            origin,
+            file,
+            save_state: SaveState::Saved,
         }
     }
 
-    fn duplicate(&self, name: impl Into<String>) -> Self {
-        let mut copy = self.clone();
-        copy.name = name.into();
-        copy
+    /// A copy of this VM under `name`, kept where `origin` says. A library
+    /// copy's file holds this VM's config under that name:
+    /// `add_vm_copying_selected` writes it before making the copy.
+    fn duplicate(&self, name: impl Into<String>, origin: VmOrigin) -> Self {
+        let name = name.into();
+        let file = match origin {
+            VmOrigin::Library(_) => Some(VmFileContents::of(&name, &self.config)),
+            VmOrigin::Launch => None,
+        };
+        Self {
+            name,
+            origin,
+            file,
+            save_state: SaveState::Saved,
+            ..self.clone()
+        }
     }
 
+    /// Whether the VM's file, as last known, holds the VM as it is now. A VM
+    /// with no file holds nothing.
+    fn file_is_current(&self) -> bool {
+        self.file
+            .as_ref()
+            .is_some_and(|file| file.holds(&self.name, &self.config))
+    }
+
+    /// Applies the VM's settings to its config, or leaves the config as it
+    /// was when they do not apply. A file that held the VM before holds it
+    /// after: the settings are applied to the config the file gave, so what
+    /// they change is how the shell reads that file — a boot order put in
+    /// the shell's own form, say — not what the VM is, and nothing is
+    /// written for it.
     fn apply_settings(&mut self) -> Result<(), String> {
-        self.settings.apply_to_config(&mut self.config)
+        let mut config = self.config.clone();
+        self.settings.apply_to_config(&mut config)?;
+        let file_was_current = self.file_is_current();
+        self.config = config;
+        if file_was_current {
+            self.file = Some(VmFileContents::of(&self.name, &self.config));
+        }
+        Ok(())
+    }
+
+    /// Marks a library VM after `change`: `Saved` when its file holds it as
+    /// it is, and otherwise `Unsaved` — except that a reading leaves a failed
+    /// write failed, since only an action or an applied edit tries it again.
+    /// A VM with no file has nothing to mark. Every site that changes a VM's
+    /// name or config keeps the `save_state` invariant through this one
+    /// match.
+    fn mark_against_file(&mut self, change: ConfigChange) {
+        if let VmOrigin::Library(_) = self.origin {
+            self.save_state = match (self.file_is_current(), change, self.save_state) {
+                (true, _, _) => SaveState::Saved,
+                (false, ConfigChange::Edit, _) => SaveState::Unsaved,
+                (false, ConfigChange::Reading, SaveState::WriteFailed) => SaveState::WriteFailed,
+                (false, ConfigChange::Reading, SaveState::Saved | SaveState::Unsaved) => {
+                    SaveState::Unsaved
+                }
+            };
+        }
     }
 
     fn vm_info(&self) -> NativeVmInfo {
         NativeVmInfo::from_config_named(&self.config, &self.name)
     }
 
+    /// The sidebar's row for this VM: a temporary VM is marked as unsaved,
+    /// and a library VM whose last write failed as not saved.
     fn library_entry(&self) -> VmLibraryEntry {
         let info = self.vm_info();
-        VmLibraryEntry::new(
+        let entry = VmLibraryEntry::new(
             &info.name,
             &info.boot,
             format!("{} MB", info.memory_mib),
             format_path_for_summary(info.disk.as_deref()),
             format_path_for_summary(info.cdrom.as_deref()),
-        )
+        );
+        match (&self.origin, self.save_state) {
+            (VmOrigin::Launch, _) => entry.unsaved(),
+            (VmOrigin::Library(_), SaveState::WriteFailed) => entry.write_failed(),
+            (VmOrigin::Library(_), SaveState::Saved | SaveState::Unsaved) => entry,
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ShellPage {
-    Home,
-    Console,
-    Hardware,
-    Images,
+/// The VM list the shell opens with.
+#[cfg(not(target_arch = "wasm32"))]
+struct OpeningList {
+    /// Never empty.
+    profiles: Vec<NativeVmProfile>,
+    broken: Vec<crate::library::BrokenVmFile>,
+    selected: usize,
+    notice: Option<ShellNotice>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OpeningList {
+    /// The launch VM first, as a temporary VM, then the library's VMs in the
+    /// library's order. Selected is the launch VM when there is one, the
+    /// library VM the start names when it names one, and otherwise the VM
+    /// shown last. With neither a launch VM nor a library VM, a blank
+    /// temporary "New VM", so the shell always has a VM to show. A message
+    /// the start carries is shown as a warning; a library that cannot be read
+    /// opens as empty, with that error as the notice instead, it being the
+    /// more serious of the two.
+    fn from_start(start: &crate::runner::ShellStart) -> Self {
+        let (contents, notice) = match start.library.load() {
+            Ok(contents) => (contents, start.notice.clone().map(ShellNotice::warning)),
+            Err(error) => (
+                crate::library::LibraryContents::default(),
+                Some(ShellNotice::error(error.to_string())),
+            ),
+        };
+        let mut profiles = Vec::new();
+        let wanted = match &start.opening {
+            crate::runner::ShellOpening::Launch(launch) => {
+                profiles.push(NativeVmProfile::from_config(
+                    launch.name.clone(),
+                    launch.config.clone(),
+                    VmOrigin::Launch,
+                ));
+                None
+            }
+            crate::runner::ShellOpening::LibraryVm(stem) => Some(stem.clone()),
+            crate::runner::ShellOpening::LastShown => start.library.last_selected(),
+        };
+        let mut selected = 0;
+        for vm in contents.vms {
+            if wanted.as_ref() == Some(&vm.stem) {
+                selected = profiles.len();
+            }
+            profiles.push(NativeVmProfile::from_config(
+                vm.name,
+                vm.config,
+                VmOrigin::Library(vm.stem),
+            ));
+        }
+        if profiles.is_empty() {
+            profiles.push(NativeVmProfile::from_config(
+                "New VM",
+                crate::config::blank_config(),
+                VmOrigin::Launch,
+            ));
+        }
+        Self {
+            profiles,
+            broken: contents.broken,
+            selected,
+            notice,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -457,46 +866,10 @@ impl HardwareDevice {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VmLibraryEntry {
-    name: String,
-    boot: String,
-    memory: String,
-    disk: String,
-    cdrom: String,
-}
-
-impl VmLibraryEntry {
-    fn new(
-        name: impl Into<String>,
-        boot: impl Into<String>,
-        memory: impl Into<String>,
-        disk: impl Into<String>,
-        cdrom: impl Into<String>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            boot: boot.into(),
-            memory: memory.into(),
-            disk: disk.into(),
-            cdrom: cdrom.into(),
-        }
-    }
-
-    fn matches_filter(&self, filter: &str) -> bool {
-        filter.is_empty()
-            || self.name.to_ascii_lowercase().contains(filter)
-            || self.boot.to_ascii_lowercase().contains(filter)
-            || self.disk.to_ascii_lowercase().contains(filter)
-            || self.cdrom.to_ascii_lowercase().contains(filter)
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct ShellChrome {
-    selected_page: ShellPage,
+    destination: Destination,
     selected_hardware: HardwareDevice,
-    selected_vm: usize,
     vm_library: Vec<VmLibraryEntry>,
     library_filter: String,
     show_serial: bool,
@@ -507,9 +880,8 @@ pub(crate) struct ShellChrome {
 impl Default for ShellChrome {
     fn default() -> Self {
         Self {
-            selected_page: ShellPage::Home,
+            destination: Destination::default(),
             selected_hardware: HardwareDevice::Memory,
-            selected_vm: 0,
             vm_library: Vec::new(),
             library_filter: String::new(),
             show_serial: true,
@@ -520,6 +892,19 @@ impl Default for ShellChrome {
 }
 
 impl ShellChrome {
+    pub(crate) fn page(&self) -> ShellPage {
+        self.destination.page()
+    }
+
+    pub(crate) fn selected_vm(&self) -> usize {
+        self.destination.vm()
+    }
+
+    /// Moves to a page of the VM already shown.
+    pub(crate) fn go_to(&mut self, page: ShellPage) {
+        self.destination = self.destination.select_page(page);
+    }
+
     fn with_library(vm_library: Vec<VmLibraryEntry>) -> Self {
         Self {
             vm_library,
@@ -541,11 +926,6 @@ fn shell_should_draw_library(chrome: &ShellChrome) -> bool {
     chrome.show_library
 }
 
-#[cfg(test)]
-fn shell_menu_labels() -> [&'static str; 4] {
-    ["File", "Edit", "VM", "Help"]
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ShellStatus {
@@ -553,12 +933,6 @@ pub(crate) struct ShellStatus {
     pub ips: u32,
     pub reset_requested: bool,
     pub start_pending: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CreatorKind {
-    HardDisk,
-    Floppy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,19 +943,25 @@ struct CreatedImage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CreatedImageKind {
+    /// A native shell attaches a hard disk it made; a browser downloads it.
+    #[cfg(not(target_arch = "wasm32"))]
     HardDisk,
     Floppy,
 }
 
+/// The floppy maker: a standalone floppy image, made from the `…` menu. The
+/// shell cannot attach a floppy to a VM yet, so the maker only writes one.
 #[derive(Debug)]
-struct DiskCreatorPanel {
-    kind: CreatorKind,
+struct FloppyMaker {
     path: String,
-    hard_disk_size: String,
     floppy_format: FloppyFormat,
     #[cfg(not(target_arch = "wasm32"))]
     overwrite: bool,
     status: Option<CreatorStatus>,
+    /// The maker's Browse was pressed; the shell answers it, since only the
+    /// shell can reach the platform's file chooser.
+    #[cfg(not(target_arch = "wasm32"))]
+    browse_requested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,33 +970,238 @@ enum CreatorStatus {
     Error(String),
 }
 
-impl Default for DiskCreatorPanel {
+impl Default for FloppyMaker {
     fn default() -> Self {
         Self {
-            kind: CreatorKind::HardDisk,
-            path: default_image_path().to_owned(),
-            hard_disk_size: default_hard_disk_size().to_owned(),
+            path: FLOPPY_FILE_NAME.to_owned(),
             floppy_format: FloppyFormat::M1_44,
             #[cfg(not(target_arch = "wasm32"))]
             overwrite: false,
             status: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            browse_requested: false,
         }
     }
 }
 
-fn default_image_path() -> &'static str {
-    if cfg!(target_arch = "wasm32") {
-        "rusty-box.img"
-    } else {
-        "c.img"
+/// The file name a new floppy image is offered under.
+const FLOPPY_FILE_NAME: &str = "floppy.img";
+
+/// A hard disk not yet created: what the Hard disk page's new-disk sheet
+/// holds while it is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NewDiskDraft {
+    /// The file name, offered from the VM's name.
+    name: String,
+    size: crate::hard_disk::DiskSize,
+    /// The number the Custom chip carries, in `DiskSize::CUSTOM_UNIT`s.
+    custom: u32,
+    /// Where the disk is saved; a browser downloads it instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    folder: DiskFolder,
+    /// The draft names a file that exists: the sheet asks whether to replace
+    /// it or save under this free name.
+    #[cfg(not(target_arch = "wasm32"))]
+    conflict: Option<String>,
+    error: Option<String>,
+}
+
+impl NewDiskDraft {
+    /// A draft for the VM called `vm_name`: its name, the default size, the
+    /// Documents folder.
+    fn for_vm(vm_name: &str) -> Self {
+        let size = crate::hard_disk::DiskSize::DEFAULT;
+        Self {
+            name: crate::hard_disk::default_disk_name(vm_name),
+            size,
+            custom: size_in_custom_units(size),
+            #[cfg(not(target_arch = "wasm32"))]
+            folder: DiskFolder::Documents,
+            #[cfg(not(target_arch = "wasm32"))]
+            conflict: None,
+            error: None,
+        }
     }
 }
 
-fn default_hard_disk_size() -> &'static str {
-    if cfg!(target_arch = "wasm32") {
-        "10M"
-    } else {
-        "20G"
+/// What the new-disk sheet was asked to do this frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NewDiskAction {
+    None,
+    /// Create the disk, stopping at a file of the same name.
+    Create,
+    /// Create it over the file of the same name.
+    #[cfg(not(target_arch = "wasm32"))]
+    Replace,
+    /// Create it under this free name.
+    #[cfg(not(target_arch = "wasm32"))]
+    SaveAs(String),
+    /// Choose where to save it.
+    #[cfg(not(target_arch = "wasm32"))]
+    OtherFolder,
+    /// Put the sheet away.
+    Cancel,
+}
+
+/// The new-disk sheet's form over `draft`: the name, the size chips, where
+/// the disk is saved (a browser downloads it instead), and the verbs. Reports
+/// the verb pressed.
+#[cfg(feature = "gui-egui")]
+fn draw_new_disk_form(ui: &mut egui::Ui, draft: &mut NewDiskDraft) -> NewDiskAction {
+    use crate::hard_disk::DiskSize;
+    let mut action = NewDiskAction::None;
+    shell_card_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new("New disk").size(TEXT_BODY).strong().color(TEXT_PRIMARY));
+        ui.add_space(SPACE_ITEM);
+        field_row(ui, "Name", |ui| {
+            if ui
+                .add(egui::TextEdit::singleline(&mut draft.name).desired_width(240.0))
+                .changed()
+            {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    draft.conflict = None;
+                }
+                draft.error = None;
+            }
+        });
+        field_row(ui, "Size", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for preset in DiskSize::PRESETS {
+                    if ui.selectable_label(draft.size == preset, preset.label()).clicked() {
+                        draft.size = preset;
+                    }
+                }
+                let custom = !DiskSize::PRESETS.contains(&draft.size);
+                if ui.selectable_label(custom, "Custom").clicked() {
+                    draft.size = DiskSize::custom(draft.custom);
+                }
+                if custom
+                    && ui
+                        .add(
+                            egui::DragValue::new(&mut draft.custom)
+                                .range(DiskSize::CUSTOM_RANGE)
+                                .suffix(format!(" {}", DiskSize::CUSTOM_UNIT)),
+                        )
+                        .changed()
+                {
+                    draft.size = DiskSize::custom(draft.custom);
+                }
+            });
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        field_row(ui, "", |ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new("Linux 2 GB+ · Windows 7 16 GB+ · Windows 10 32 GB+")
+                        .size(TEXT_SECONDARY)
+                        .color(TEXT_MUTED),
+                );
+                ui.label(
+                    RichText::new("The file grows as the guest fills it.")
+                        .size(TEXT_SECONDARY)
+                        .color(TEXT_MUTED),
+                );
+            });
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        field_row(ui, "Save to", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let in_documents = draft.folder == DiskFolder::Documents;
+                if ui
+                    .selectable_label(in_documents, DiskFolder::Documents.label())
+                    .clicked()
+                {
+                    draft.folder = DiskFolder::Documents;
+                    draft.conflict = None;
+                }
+                if !in_documents {
+                    // The chosen folder shows as the selected chip.
+                    drop(ui.selectable_label(true, draft.folder.label()));
+                }
+                if ui.button("Other folder…").clicked() {
+                    action = NewDiskAction::OtherFolder;
+                }
+            });
+        });
+        ui.add_space(SPACE_GROUP);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(free) = draft.conflict.clone() {
+            ui.label(
+                RichText::new(format!("{} is already in this folder.", draft.name.trim()))
+                    .color(ACCENT_AMBER),
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Replace it").clicked() {
+                    action = NewDiskAction::Replace;
+                }
+                if ui.button(format!("Save as {free}")).clicked() {
+                    action = NewDiskAction::SaveAs(free.clone());
+                }
+                if ui.button("Cancel").clicked() {
+                    action = NewDiskAction::Cancel;
+                }
+            });
+            return;
+        }
+        let create = if cfg!(target_arch = "wasm32") {
+            "Download disk image"
+        } else {
+            "Create and attach"
+        };
+        ui.horizontal(|ui| {
+            if ui.add(primary_button(create)).clicked() {
+                action = NewDiskAction::Create;
+            }
+            if ui.button("Cancel").clicked() {
+                action = NewDiskAction::Cancel;
+            }
+        });
+        if let Some(error) = &draft.error {
+            ui.colored_label(ACCENT_RED, error);
+        }
+    });
+    action
+}
+
+/// `size` counted in `DiskSize::CUSTOM_UNIT`s, for the Custom chip to start from.
+fn size_in_custom_units(size: crate::hard_disk::DiskSize) -> u32 {
+    let mib = size.image_size().bytes() / (1024 * 1024);
+    u32::try_from(mib / u64::from(crate::hard_disk::DiskSize::CUSTOM_UNIT_MIB)).unwrap_or(u32::MAX)
+}
+
+/// The folder a new disk is saved in.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiskFolder {
+    /// `Rusty Box` under the user's Documents folder.
+    Documents,
+    /// A folder the user chose.
+    Chosen(PathBuf),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DiskFolder {
+    /// The folder on disk, or why there is none.
+    fn resolve(&self) -> Result<PathBuf, String> {
+        match self {
+            Self::Documents => crate::hard_disk::documents_base()
+                .map(|base| crate::hard_disk::documents_folder_under(&base))
+                .ok_or_else(|| {
+                    "This system does not say where Documents is; choose another folder."
+                        .to_owned()
+                }),
+            Self::Chosen(folder) => Ok(folder.clone()),
+        }
+    }
+
+    /// The chip's caption.
+    fn label(&self) -> String {
+        match self {
+            Self::Documents => "Documents/Rusty Box".to_owned(),
+            Self::Chosen(folder) => folder.display().to_string(),
+        }
     }
 }
 
@@ -741,78 +1326,78 @@ pub(crate) fn status_snapshot(
     }
 }
 
-fn configure_shell_style(ctx: &egui::Context) {
-    use egui::{style::Selection, Theme, ThemePreference, Vec2};
-
-    ctx.set_theme(ThemePreference::Dark);
-    ctx.style_mut_of(Theme::Dark, |style| {
-        style.visuals.panel_fill = BG_BASE;
-        style.visuals.window_fill = BG_PANEL;
-        style.visuals.extreme_bg_color = Color32::from_rgb(0x07, 0x0A, 0x0E);
-        style.visuals.hyperlink_color = ACCENT_BLUE;
-        style.visuals.text_cursor.stroke.color = ACCENT_CYAN;
-        style.visuals.selection = Selection {
-            bg_fill: Color32::from_rgb(0x1E, 0x5F, 0x62),
-            stroke: Stroke::new(1.0_f32, ACCENT_CYAN),
-        };
-        style.visuals.widgets.noninteractive.bg_fill = BG_PANEL;
-        style.visuals.widgets.inactive.bg_fill = BG_CARD;
-        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(0x1D, 0x2A, 0x36);
-        style.visuals.widgets.active.bg_fill = Color32::from_rgb(0x21, 0x35, 0x43);
-        style.visuals.widgets.inactive.fg_stroke.color = TEXT_PRIMARY;
-        style.visuals.widgets.hovered.fg_stroke.color = Color32::WHITE;
-        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-        style.spacing.button_padding = Vec2::new(12.0, 6.0);
-    });
-}
-
-fn shell_card_frame() -> egui::Frame {
-    egui::Frame::new()
-        .fill(BG_CARD)
-        .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-        .corner_radius(12)
-        .inner_margin(egui::Margin::same(16))
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeShellApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
         command_tx: Sender<NativeEmulatorCommand>,
-        config: crate::config::ResolvedConfig,
+        start: crate::runner::ShellStart,
     ) -> Self {
         configure_shell_style(&cc.egui_ctx);
-        let profile = NativeVmProfile::from_config("Rusty Box", config);
-        let vm_info = profile.vm_info();
-        let settings = profile.settings.clone();
-        let config = profile.config.clone();
-        let chrome = ShellChrome::with_library(vec![profile.library_entry()]);
-        #[cfg(target_os = "android")]
-        let chrome = {
-            let mut chrome = chrome;
-            chrome.show_library = false;
-            chrome.show_serial = false;
-            chrome
-        };
         let emulator = rusty_box::gui::RustyBoxApp::new(cc, Arc::clone(&shared));
         #[cfg(target_os = "android")]
         let emulator = {
             let mut emulator = emulator;
-            emulator.set_fit_to_available(true);
+            emulator.set_display_scale(rusty_box::gui::DisplayScale::Fit);
+            // A finger is not a mouse: on a phone the guest's image is a
+            // trackpad with its own left and right buttons.
+            emulator.set_pointer_mode(rusty_box::gui::PointerMode::Touchpad);
             emulator
         };
+        Self::with_emulator(emulator, shared, command_tx, start)
+    }
+
+    /// The shell around `emulator`, opened on `start`'s VM list. `new` builds
+    /// the emulator view from the window; tests build it without one.
+    fn with_emulator(
+        emulator: rusty_box::gui::RustyBoxApp,
+        shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
+        command_tx: Sender<NativeEmulatorCommand>,
+        start: crate::runner::ShellStart,
+    ) -> Self {
+        let opening = OpeningList::from_start(&start);
+        let shown = &opening.profiles[opening.selected];
+        let config = shown.config.clone();
+        let settings = shown.settings.clone();
+        let vm_info = shown.vm_info();
+        let mut chrome = ShellChrome::with_library(
+            opening
+                .profiles
+                .iter()
+                .map(NativeVmProfile::library_entry)
+                .collect(),
+        );
+        chrome.destination = chrome.destination.select_vm(opening.selected);
+        #[cfg(target_os = "android")]
+        {
+            chrome.show_library = false;
+            chrome.show_serial = false;
+        }
         Self {
             emulator,
             chrome,
-            disk_creator: DiskCreatorPanel::default(),
-            profiles: vec![profile],
+            floppy_maker: FloppyMaker::default(),
+            floppy_maker_open: false,
+            new_disk: None,
+            profiles: opening.profiles,
             config,
             settings,
             vm_info,
             command_tx,
             shared,
-            shell_notice: None,
+            shell_notice: opening.notice,
+            library: start.library,
+            broken_files: opening.broken,
+            pending_confirm: None,
+            overwrite_confirmed: std::collections::HashSet::new(),
+            gravest_raised: None,
+            #[cfg(target_os = "android")]
+            browse_request: None,
+            #[cfg(target_os = "android")]
+            full_screen_menu_open: false,
+            #[cfg(target_os = "android")]
+            keypad_requested: false,
         }
     }
 
@@ -825,13 +1410,12 @@ impl NativeShellApp {
     }
 
     fn draw_shell_notice(&mut self, ui: &mut egui::Ui) {
-        if cfg!(target_os = "android") {
-            return;
-        }
-
         let Some(notice) = self.shell_notice.clone() else {
             return;
         };
+        if cfg!(target_os = "android") && !phone_shows_notice(notice.kind) {
+            return;
+        }
         let (label, color) = match notice.kind {
             ShellNoticeKind::Info => ("Info", ACCENT_CYAN),
             ShellNoticeKind::Warning => ("Warning", ACCENT_AMBER),
@@ -847,7 +1431,26 @@ impl NativeShellApp {
                 }
             });
         });
-        ui.add_space(12.0);
+        ui.add_space(SPACE_GROUP);
+    }
+
+    /// Shows `notice`, unless a graver one was raised earlier in the same
+    /// frame. One frame runs one user action, so within an action the user
+    /// sees the worst that happened: a lesser notice never replaces it.
+    fn notify(&mut self, notice: ShellNotice) {
+        if self
+            .gravest_raised
+            .is_some_and(|raised| raised > notice.kind)
+        {
+            return;
+        }
+        self.gravest_raised = Some(notice.kind);
+        self.shell_notice = Some(notice);
+    }
+
+    /// Starts a frame: the last frame's notices no longer outrank new ones.
+    fn begin_frame(&mut self) {
+        self.gravest_raised = None;
     }
 
     fn take_runtime_error_notice(&mut self) {
@@ -858,482 +1461,401 @@ impl NativeShellApp {
             .and_then(|mut display| display.runtime_error.take());
 
         if let Some(message) = runtime_error {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
         }
     }
 
+    /// A file dropped on the window while Hardware › Hard disk is shown
+    /// becomes the VM's hard disk, as its Use a disk file would make it.
     #[cfg(not(target_arch = "wasm32"))]
     fn handle_native_dropped_files(&mut self, ctx: &egui::Context) {
-        if self.chrome.selected_page != ShellPage::Images {
+        if self.chrome.page() != ShellPage::Hardware
+            || self.chrome.selected_hardware != HardwareDevice::HardDisk
+        {
             return;
         }
-
         let dropped = ctx.input(|input| input.raw.dropped_files.clone());
         let Some(file) = dropped.first() else {
             return;
         };
-
-        match &file.path {
-            Some(path) => {
-                self.disk_creator.path = path.display().to_string();
-            }
-            None => {
-                self.disk_creator.status = Some(CreatorStatus::Error(
-                    "dropped file has no host path".to_owned(),
-                ));
+        // A native drop always carries the file's absolute path.
+        if self.set_browsed_path(BrowseTarget::HardDisk, file.path().to_path_buf()) {
+            if let Err(message) = self.apply_pending_settings() {
+                self.notify(ShellNotice::error(message));
             }
         }
     }
 
-    fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("vm_menu_bar")
-            .exact_size(32.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::symmetric(12, 4)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let status = self.runtime_status();
-                    let running = status.running;
-                    let start_blocked = running || status.start_pending;
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Open Console").clicked() {
-                            self.chrome.selected_page = ShellPage::Console;
-                            ui.close();
-                        }
-                        if ui.button("Duplicate VM Profile").clicked() {
-                            self.duplicate_selected_profile();
-                            ui.close();
-                        }
-                        if ui.button("Create Disk Image").clicked() {
-                            self.chrome.selected_page = ShellPage::Images;
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button("Quit").clicked() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.menu_button("Edit", |ui| {
-                        if ui.button("Clear Library Search").clicked() {
-                            self.chrome.library_filter.clear();
-                            ui.close();
-                        }
-                    });
-                    ui.menu_button("VM", |ui| {
-                        if ui
-                            .add_enabled(!start_blocked, egui::Button::new("Power On"))
-                            .clicked()
-                        {
-                            self.start_vm();
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(running, egui::Button::new("Power Off"))
-                            .clicked()
-                        {
-                            self.request_power_off();
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(running, egui::Button::new("Restart VM"))
-                            .clicked()
-                        {
-                            self.request_reset();
-                            ui.close();
-                        }
-                    });
-                    ui.menu_button("Input", |ui| {
-                        if ui
-                            .add_enabled(running, egui::Button::new("Send Ctrl+Alt+Del"))
-                            .clicked()
-                        {
-                            self.emulator.send_ctrl_alt_del();
-                            ui.close();
-                        }
-                        let captured = self.emulator.mouse_captured();
-                        let label = if captured {
-                            "Release Mouse"
-                        } else {
-                            "Capture Mouse"
-                        };
-                        if ui.add_enabled(running, egui::Button::new(label)).clicked() {
-                            self.emulator.toggle_mouse_capture();
-                            ui.close();
-                        }
-                    });
-                    ui.menu_button("Help", |ui| {
-                        if ui.button("About Rusty Box Workstation").clicked() {
-                            self.chrome.show_about = true;
-                            ui.close();
-                        }
-                    });
-                    ui.separator();
-                    self.nav_button(ui, ShellPage::Home, "Home");
-                    self.nav_button(ui, ShellPage::Console, "Console");
-                    self.nav_button(ui, ShellPage::Hardware, "Hardware");
-                    self.nav_button(ui, ShellPage::Images, "Images");
-                    if ui
-                        .add_enabled(!start_blocked, egui::Button::new("Power On"))
-                        .clicked()
-                    {
-                        self.start_vm();
-                    }
-                });
-            });
+    /// Draws the VM bar and acts on its click. The bar reports what was asked
+    /// for; the verbs that change the machine's state go through the same
+    /// methods every other surface uses, so the bar cannot reach a state the
+    /// rest of the shell cannot.
+    fn draw_vm_bar(&mut self, ui: &mut egui::Ui) {
+        let status = self.runtime_status();
+        let action = crate::shell::vm_bar::draw_vm_bar(
+            ui,
+            VmBarState {
+                name: &self.vm_info.name,
+                #[cfg(not(target_os = "android"))]
+                badge: shell_state_badge(&status, self.has_error_notice()),
+                #[cfg(target_os = "android")]
+                page: self.chrome.page(),
+                running: status.running,
+                start_pending: status.start_pending,
+                on_console: self.chrome.page() == ShellPage::Console,
+                serial_shown: self.chrome.show_serial,
+                mouse_captured: self.emulator.mouse_captured(),
+            },
+        );
+        match action {
+            None => {}
+            Some(VmBarAction::ToggleSidebar) => {
+                self.chrome.show_library = !self.chrome.show_library;
+            }
+            Some(VmBarAction::PowerOn) => self.start_vm(),
+            Some(VmBarAction::PowerOff) => self.request_power_off(),
+            Some(VmBarAction::Restart) => self.request_reset(),
+            Some(VmBarAction::ToggleSerial) => {
+                self.chrome.show_serial = !self.chrome.show_serial;
+            }
+            Some(VmBarAction::ToggleMouseCapture) => self.emulator.toggle_mouse_capture(),
+            Some(VmBarAction::SendCtrlAltDel) => self.emulator.send_ctrl_alt_del(),
+            Some(VmBarAction::CreateFloppy) => self.floppy_maker_open = true,
+            Some(VmBarAction::ShowAbout) => self.chrome.show_about = true,
+            Some(VmBarAction::Quit) => {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            #[cfg(target_os = "android")]
+            Some(VmBarAction::GoTo(page)) => self.chrome.go_to(page),
+        }
     }
 
-    fn draw_toolbar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("vm_toolbar")
-            .exact_size(46.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(0x0D, 0x13, 0x1A))
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::symmetric(14, 6)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let status = self.runtime_status();
-                    let running = status.running;
-                    let start_blocked = running || status.start_pending;
-                    let primary = if running {
-                        "▶ Console"
-                    } else if status.start_pending {
-                        "▶ Starting…"
-                    } else {
-                        "▶ Power On"
-                    };
-                    if ui
-                        .add_enabled(running || !start_blocked, egui::Button::new(primary))
-                        .clicked()
-                    {
-                        if running {
-                            self.chrome.selected_page = ShellPage::Console;
-                        } else {
-                            self.start_vm();
-                        }
-                    }
-                    if ui
-                        .add_enabled(running, egui::Button::new("■ Power Off"))
-                        .clicked()
-                    {
-                        self.request_power_off();
-                    }
-                    if ui
-                        .add_enabled(running, egui::Button::new("↻ Restart VM"))
-                        .clicked()
-                    {
-                        self.request_reset();
-                    }
-                    if ui.button("▣ Hardware").clicked() {
-                        self.chrome.selected_page = ShellPage::Hardware;
-                    }
-                    if ui.button("＋ New Image").clicked() {
-                        self.chrome.selected_page = ShellPage::Images;
-                    }
-                    ui.checkbox(&mut self.chrome.show_library, "Library");
-                    ui.checkbox(&mut self.chrome.show_serial, "Serial");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(&self.vm_info.name)
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                    });
-                });
-            });
+    /// Draws the tree and hands its click to `handle_sidebar_action`.
+    fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
+        let badge = shell_state_badge(&self.runtime_status(), self.has_error_notice());
+        let visible = self.chrome.visible_vm_indices();
+        let action = crate::shell::sidebar::draw_sidebar(
+            ui,
+            &self.chrome.vm_library,
+            &visible,
+            self.chrome.destination,
+            &mut self.chrome.library_filter,
+            badge,
+            &self.broken_files,
+        );
+        if let Some(action) = action {
+            self.handle_sidebar_action(action);
+        }
     }
 
-    fn draw_library(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("vm_library")
-            .resizable(true)
-            .default_size(250.0)
-            .min_size(210.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::same(14)),
-            )
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Library")
-                        .size(16.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                if ui.button("＋ Duplicate VM Profile").clicked() {
-                    self.duplicate_selected_profile();
+    /// Acts on a click in the tree. A page of the VM already shown is a move;
+    /// a different VM is a profile switch, which goes through `select_profile`
+    /// so that profile's config and settings are loaded too. Deleting a file
+    /// that does not load waits for confirmation like every other delete. On
+    /// Android the tree is a drawer over the page, so a pick in it closes it
+    /// as well.
+    fn handle_sidebar_action(&mut self, action: SidebarAction) {
+        match action {
+            SidebarAction::NewVm => {
+                self.add_vm_copying_selected();
+                #[cfg(target_os = "android")]
+                {
+                    self.chrome.show_library = false;
                 }
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.chrome.library_filter)
-                        .hint_text("Type here to search"),
-                );
-                ui.add_space(8.0);
-                ui.label(RichText::new("▾ My Computer").color(TEXT_MUTED));
+            }
+            SidebarAction::DeleteBroken(index) => {
+                if let Some(file) = self.broken_files.get(index) {
+                    self.pending_confirm = Some(PendingConfirm::DeleteBroken(file.path.clone()));
+                }
+            }
+            SidebarAction::Select(destination) => {
+                if destination.vm() == self.chrome.destination.vm() {
+                    self.chrome.go_to(destination.page());
+                } else {
+                    self.select_profile(destination.vm());
+                }
+                #[cfg(target_os = "android")]
+                {
+                    self.chrome.show_library = false;
+                }
+            }
+        }
+    }
 
-                let visible = self.chrome.visible_vm_indices();
-                let mut delete_requested = false;
-                let mut selected_index = None;
-                for index in visible {
-                    let mut delete_clicked = false;
-                    let clicked = {
-                        let entry = &self.chrome.vm_library[index];
-                        let selected = ui.selectable_label(
-                            self.chrome.selected_vm == index,
-                            format!("  ▣ {}", entry.name),
-                        );
-                        if self.chrome.selected_vm == index {
-                            ui.indent(format!("vm_library_metadata_{index}"), |ui| {
-                                ui.label(metadata_text("Boot", &entry.boot));
-                                ui.label(metadata_text("Memory", &entry.memory));
-                                ui.label(metadata_text("Disk", &entry.disk));
-                                ui.label(metadata_text("CD/DVD", &entry.cdrom));
-                                let status = self.runtime_status();
-                                let delete_enabled = !status.running
-                                    && !status.start_pending
-                                    && self.profiles.len() > 1;
-                                delete_clicked = ui
-                                    .add_enabled(
-                                        delete_enabled,
-                                        egui::Button::new("Delete Profile"),
-                                    )
-                                    .clicked();
-                            });
-                        }
-                        selected.clicked()
-                    };
-                    if delete_clicked {
-                        delete_requested = true;
-                    } else if clicked {
-                        selected_index = Some(index);
-                    }
-                }
-                if delete_requested {
-                    self.delete_selected_profile();
-                } else if let Some(index) = selected_index {
-                    self.select_profile(index);
-                }
-                if self.chrome.vm_library.is_empty() {
-                    ui.label(RichText::new("No VM sessions registered").color(TEXT_MUTED));
-                }
-            });
+    /// Whether the shell is currently showing the user an error notice; the
+    /// state badge reads it as a fault until the notice is dismissed.
+    fn has_error_notice(&self) -> bool {
+        self.shell_notice
+            .as_ref()
+            .is_some_and(|notice| notice.kind == ShellNoticeKind::Error)
     }
 
     fn draw_status_strip(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("vm_status_strip")
-            .exact_size(30.0)
+        let strip = egui::Panel::bottom("vm_status_strip")
+            .exact_size(28.0)
             .frame(
                 egui::Frame::new()
                     .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::symmetric(14, 4)),
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     if self.shared.is_poisoned() {
                         status_dot(ui, ACCENT_RED);
-                        ui.label(
-                            RichText::new("State unavailable")
-                                .monospace()
-                                .size(11.0)
-                                .color(ACCENT_RED),
-                        );
+                        ui.label(status_text("State unavailable").color(ACCENT_RED));
                         return;
                     }
 
                     let snapshot = self.runtime_status();
-                    let state = if snapshot.running {
-                        "Running"
-                    } else if snapshot.start_pending {
-                        "Starting"
-                    } else {
-                        "Stopped"
-                    };
-                    let state_color = if snapshot.running {
-                        ACCENT_CYAN
-                    } else if snapshot.start_pending {
-                        ACCENT_AMBER
+                    let badge = shell_state_badge(&snapshot, self.has_error_notice());
+                    status_dot(ui, badge.color);
+                    ui.label(status_text(badge.label).color(badge.color));
+                    ui.separator();
+                    ui.label(
+                        status_text(engine_label(self.settings.engine)).color(TEXT_PRIMARY),
+                    );
+                    ui.separator();
+                    ui.label(
+                        status_text(format!(
+                            "{} MB · {}",
+                            self.vm_info.memory_mib,
+                            cpu_count_label(self.vm_info.cpus)
+                        ))
+                        .color(TEXT_MUTED),
+                    );
+                    ui.separator();
+                    // A published rate is a fact and reads in the data accent;
+                    // an absent one is drawn muted so it cannot pass for zero.
+                    let ips_color = if snapshot.ips > 0 {
+                        ACCENT_BLUE
                     } else {
                         TEXT_MUTED
                     };
-                    status_dot(ui, state_color);
-                    ui.label(
-                        RichText::new(state)
-                            .monospace()
-                            .size(11.0)
-                            .color(state_color),
-                    );
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format_ips_u32(snapshot.ips))
-                            .monospace()
-                            .size(11.0)
-                            .color(ACCENT_BLUE),
-                    );
-                    ui.separator();
-                    let reset = if snapshot.reset_requested {
-                        "Restart queued"
-                    } else {
-                        "Ready"
-                    };
-                    ui.label(
-                        RichText::new(reset)
-                            .monospace()
-                            .size(11.0)
-                            .color(TEXT_MUTED),
-                    );
+                    ui.label(status_text(format_ips_u32(snapshot.ips)).color(ips_color));
+                    if snapshot.reset_requested {
+                        ui.separator();
+                        ui.label(status_text("Restart queued").color(ACCENT_AMBER));
+                    }
                 });
             });
+        hairline_above(ui, strip.response.rect);
     }
 
     fn draw_central(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.take_runtime_error_notice();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG_BASE))
-            .show(ui, |ui| match self.chrome.selected_page {
-                ShellPage::Home => self.draw_home_page(ui),
-                ShellPage::Console => self.draw_console_page(ui, frame),
-                ShellPage::Hardware => self.draw_hardware_page(ui),
-                ShellPage::Images => self.draw_images_page(ui),
+            .show(ui, |ui| {
+                match self.chrome.page() {
+                    ShellPage::Home => self.draw_home_page(ui),
+                    ShellPage::Console => self.draw_console_page(ui, frame),
+                    ShellPage::Hardware => self.draw_hardware_page(ui),
+                }
             });
     }
 
     fn draw_home_page(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            self.draw_shell_notice(ui);
-            ui.add_space(24.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new("RUSTY BOX WORKSTATION")
-                        .size(26.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                ui.label(
-                    RichText::new("Graphite VM library for x86 experiments").color(TEXT_MUTED),
-                );
-            });
-            ui.add_space(24.0);
-            shell_card_frame().show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Selected VM").strong().color(TEXT_PRIMARY));
-                    let mut name_changed = false;
-                    if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm) {
-                        name_changed |= ui
-                            .add(
-                                egui::TextEdit::singleline(&mut profile.name)
-                                    .desired_width(220.0),
-                            )
-                            .changed();
-                    }
-                    if ui.button("Duplicate VM Profile").clicked() {
-                        self.duplicate_selected_profile();
-                    }
+            egui::Frame::new()
+                .inner_margin(egui::Margin::same(SPACE_PAGE))
+                .show(ui, |ui| {
+                    self.draw_shell_notice(ui);
+                    self.draw_home_header(ui);
+                    ui.add_space(SPACE_GROUP);
                     let status = self.runtime_status();
-                    let delete_enabled =
-                        !status.running && !status.start_pending && self.profiles.len() > 1;
-                    if ui
-                        .add_enabled(delete_enabled, egui::Button::new("Delete Profile"))
-                        .clicked()
-                    {
-                        self.delete_selected_profile();
-                    }
-                    if ui.button("Hardware Settings").clicked() {
-                        self.chrome.selected_page = ShellPage::Hardware;
-                    }
-                    if name_changed {
-                        if let Err(message) = self.apply_pending_settings() {
-                            self.shell_notice = Some(ShellNotice::error(message));
-                        }
-                    }
+                    let start_enabled = !status.running && !status.start_pending;
+                    ui.columns(3, |columns| {
+                        action_tile_enabled(
+                            &mut columns[0],
+                            "Power On VM",
+                            "Start this VM with the settings selected below.",
+                            ACCENT_CYAN,
+                            ActionTileWeight::Primary,
+                            start_enabled,
+                            || self.start_vm(),
+                        );
+                        // Cyan is the primary verb's colour and no other tile
+                        // is a verb, so the two shortcuts rest on the hairline.
+                        action_tile(
+                            &mut columns[1],
+                            "New Hard Disk",
+                            "Create a disk and attach it to this VM.",
+                            STROKE_HAIRLINE,
+                            ActionTileWeight::Secondary,
+                            || self.open_new_disk_sheet(),
+                        );
+                        action_tile(
+                            &mut columns[2],
+                            "Hardware Settings",
+                            "Inspect boot media and VM hardware limits.",
+                            STROKE_HAIRLINE,
+                            ActionTileWeight::Secondary,
+                            || self.chrome.go_to(ShellPage::Hardware),
+                        );
+                    });
                 });
-                ui.label(
-                    RichText::new(
-                        "Profiles are independent launch configurations. Power on starts only the selected VM.",
-                    )
-                    .color(TEXT_MUTED),
-                );
-            });
-            ui.add_space(16.0);
-            let status = self.runtime_status();
-            let start_enabled = !status.running && !status.start_pending;
-            ui.columns(3, |columns| {
-                action_tile_enabled(
-                    &mut columns[0],
-                    "Power On VM",
-                    "Start this VM with the settings selected below.",
-                    ACCENT_CYAN,
-                    start_enabled,
-                    || self.start_vm(),
-                );
-                action_tile(
-                    &mut columns[1],
-                    "Create Disk Image",
-                    "Build bximage-compatible hard disks and floppies.",
-                    ACCENT_BLUE,
-                    || self.chrome.selected_page = ShellPage::Images,
-                );
-                action_tile(
-                    &mut columns[2],
-                    "Hardware Settings",
-                    "Inspect boot media and VM hardware limits.",
-                    ACCENT_AMBER,
-                    || self.chrome.selected_page = ShellPage::Hardware,
-                );
-            });
         });
+    }
+
+    /// The selected VM as the Summary page's headline: its state badge and
+    /// engine, its editable name, the facts the tree already summarises about
+    /// it, and the profile verbs that have no other home — "Keep in library"
+    /// for the temporary VM, and delete or discard. Power belongs to the VM
+    /// bar and duplication to the sidebar's `+`, so neither is repeated here.
+    fn draw_home_header(&mut self, ui: &mut egui::Ui) {
+        let status = self.runtime_status();
+        let badge = shell_state_badge(&status, self.has_error_notice());
+        shell_card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                status_dot(ui, badge.color);
+                ui.label(status_text(badge.label).color(badge.color));
+                ui.label(status_text("·").color(TEXT_MUTED));
+                ui.label(status_text(engine_label(self.settings.engine)).color(TEXT_MUTED));
+            });
+            let mut name_changed = false;
+            if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm()) {
+                name_changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut profile.name)
+                            .font(egui::FontId::proportional(TEXT_DISPLAY))
+                            .desired_width(320.0),
+                    )
+                    .changed();
+            }
+            if name_changed {
+                if let Err(message) = self.apply_pending_settings() {
+                    self.notify(ShellNotice::error(message));
+                }
+            }
+            ui.add_space(SPACE_ITEM);
+            if let Some(entry) = self.chrome.vm_library.get(self.chrome.selected_vm()) {
+                let cpus = cpu_count_label(self.vm_info.cpus);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = HOME_FACT_GAP;
+                    home_fact(ui, "Memory", &entry.memory);
+                    home_fact(ui, "Processors", &cpus);
+                    home_fact(ui, "Boot", &entry.boot);
+                    home_fact(ui, "CD/DVD", &entry.cdrom);
+                    home_fact(ui, "Disk", &entry.disk);
+                });
+            }
+            ui.add_space(SPACE_ITEM);
+            let stopped = !status.running && !status.start_pending;
+            let origin = self.profiles[self.chrome.selected_vm()].origin.clone();
+            ui.horizontal_wrapped(|ui| {
+                if origin == VmOrigin::Launch
+                    && ui
+                        .add(primary_button("Keep in library"))
+                        .on_hover_text("Save this VM to the library so it is listed at every launch")
+                        .clicked()
+                {
+                    self.keep_selected_in_library();
+                }
+                let verb = match origin {
+                    VmOrigin::Library(_) => "Delete VM",
+                    VmOrigin::Launch => "Discard",
+                };
+                if ui
+                    .add_enabled(stopped && self.profiles.len() > 1, egui::Button::new(verb))
+                    .clicked()
+                {
+                    self.request_delete_selected();
+                }
+            });
+            let caption = self.summary_caption();
+            ui.label(RichText::new(caption).size(TEXT_CAPTION).color(TEXT_MUTED));
+        });
+    }
+
+    /// The Summary page's caption on where the selected VM is kept: its
+    /// library file and whether that file holds it, or that it is temporary.
+    fn summary_caption(&self) -> String {
+        let profile = &self.profiles[self.chrome.selected_vm()];
+        match &profile.origin {
+            VmOrigin::Launch => "Temporary VM. Not saved until it is kept in the library.".to_owned(),
+            VmOrigin::Library(stem) => {
+                let path = self.library.path_of(stem);
+                match profile.save_state {
+                    SaveState::Saved => format!("Saved automatically to {}", path.display()),
+                    SaveState::Unsaved => format!("Saving to {} when the edit ends", path.display()),
+                    SaveState::WriteFailed => format!(
+                        "Not saved: the last write to {} failed. \
+                         It is tried again at the next change, selection or power-on.",
+                        path.display()
+                    ),
+                }
+            }
+        }
     }
 
     fn draw_console_page(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.draw_shell_notice(ui);
+        let status = self.runtime_status();
+        // The embedded view owns the whole console region in every state — the
+        // serial panel stays readable while the VM is off. The shell supplies
+        // only the words for the powered-off display, and none while the
+        // machine runs or is about to.
+        let placeholder = if status.running || status.start_pending {
+            None
+        } else {
+            Some(powered_off_placeholder())
+        };
         self.emulator
-            .ui_embedded_with_serial(ui, frame, self.chrome.show_serial);
+            .ui_embedded_with_serial(ui, frame, self.chrome.show_serial, placeholder);
     }
 
     fn draw_hardware_page(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            self.draw_shell_notice(ui);
-            ui.horizontal(|ui| {
-                shell_card_frame().show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.set_min_width(190.0);
-                        ui.label(RichText::new("Devices").strong().color(TEXT_PRIMARY));
-                        ui.add_space(8.0);
-                        for device in HardwareDevice::ALL {
-                            if ui
-                                .selectable_label(
-                                    self.chrome.selected_hardware == device,
-                                    device.label(),
-                                )
-                                .clicked()
-                            {
-                                self.chrome.selected_hardware = device;
-                            }
-                        }
-                    });
-                });
-                shell_card_frame().show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.set_min_width(520.0);
-                        ui.label(
-                            RichText::new(format!(
-                                "Hardware Summary  |  {}",
-                                self.chrome.selected_hardware.label()
-                            ))
-                            .size(18.0)
-                            .strong(),
-                        );
-                        ui.separator();
-                        self.draw_hardware_detail(ui);
-                    });
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(SPACE_PAGE))
+            .show(ui, |ui| {
+                self.draw_shell_notice(ui);
+                page_header(ui, "Hardware", "Settings apply at power-on.");
+                let height = ui.available_height();
+                // A card stands exactly as tall as its column when its content
+                // is the column less the frame's total margin: the padding and
+                // the hairline on both edges.
+                let card_content_height =
+                    (height - shell_card_frame().total_margin().sum().y).max(0.0);
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(HARDWARE_LIST_WIDTH, height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            // The list is a navigator: it sits on the panel
+                            // surface `selection_row` paints its selection over.
+                            shell_card_frame().fill(BG_PANEL).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.set_min_height(card_content_height);
+                                for device in HardwareDevice::ALL {
+                                    let mark = if self.chrome.selected_hardware == device {
+                                        RowMark::Destination
+                                    } else {
+                                        RowMark::Plain
+                                    };
+                                    if selection_row(ui, device.label(), ROOT_INDENT, mark, None)
+                                        .clicked()
+                                    {
+                                        self.chrome.selected_hardware = device;
+                                    }
+                                }
+                            });
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            shell_card_frame().show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.set_min_height(card_content_height);
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    self.draw_hardware_detail(ui);
+                                });
+                            });
+                        },
+                    );
                 });
             });
-        });
     }
 
     fn draw_hardware_detail(&mut self, ui: &mut egui::Ui) {
@@ -1345,15 +1867,14 @@ impl NativeShellApp {
             HardwareDevice::Memory => {
                 let memory_step = if cfg!(target_os = "android") { 64 } else { 1 };
                 let memory_block_step = if cfg!(target_os = "android") { 64 } else { 1 };
-                hardware_intro(
+                page_header(
                     ui,
                     "Memory",
                     "Edit guest memory, host memory, and allocation block size before power-on.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Guest memory").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Guest memory", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.memory_mib,
                             1,
@@ -1362,11 +1883,10 @@ impl NativeShellApp {
                             editable,
                             memory_step,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Host memory").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Host memory", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.host_memory_mib,
                             1,
@@ -1375,11 +1895,10 @@ impl NativeShellApp {
                             editable,
                             memory_step,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Memory block").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Memory block", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.memory_block_kib,
                             1,
@@ -1388,21 +1907,20 @@ impl NativeShellApp {
                             editable,
                             memory_block_step,
                             None,
-                        );
+                        )
                     });
                 });
             }
             HardwareDevice::Processors => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Virtual CPU",
                     "Select virtual processors and pacing before power-on. Max instructions of 0 means unlimited.",
                 );
                 detail_row(ui, "Virtual processors", &self.vm_info.cpus.to_string());
                 ui.add_enabled_ui(editable, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Sockets").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Sockets", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.cpu_sockets,
                             1,
@@ -1411,15 +1929,10 @@ impl NativeShellApp {
                             editable,
                             1,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Cores / socket")
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Cores / socket", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.cpu_cores,
                             1,
@@ -1428,15 +1941,10 @@ impl NativeShellApp {
                             editable,
                             1,
                             None,
-                        );
+                        )
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Threads / core")
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                        changed |= draw_u32_field(
+                    changed |= field_row(ui, "Threads / core", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.cpu_threads,
                             1,
@@ -1445,7 +1953,7 @@ impl NativeShellApp {
                             editable,
                             1,
                             None,
-                        );
+                        )
                     });
                     let total = self
                         .settings
@@ -1460,10 +1968,11 @@ impl NativeShellApp {
                     } else {
                         RichText::new(format!("{total} logical CPUs")).color(TEXT_MUTED)
                     };
-                    ui.label(total_text);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("IPS target").strong().color(TEXT_PRIMARY));
-                        changed |= draw_u32_field(
+                    field_row(ui, "", |ui| {
+                        ui.label(total_text);
+                    });
+                    changed |= field_row(ui, "IPS target", |ui| {
+                        draw_u32_field(
                             ui,
                             &mut self.settings.ips,
                             1,
@@ -1472,18 +1981,47 @@ impl NativeShellApp {
                             editable,
                             1_000_000,
                             Some(1_000_000.0),
-                        );
+                        )
                     });
-                    changed |= ui
-                        .checkbox(&mut self.settings.sync_slowdown, "Sync slowdown")
-                        .changed();
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Max instructions")
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                        changed |= draw_u64_field(
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(&mut self.settings.sync_slowdown, "Sync slowdown")
+                            .changed()
+                    });
+                    // Which engine retires the guest's instructions. The
+                    // hypervisor is offered in the builds that carry its path —
+                    // Windows, with `hv-whp` and without `guest-trace`, the gate
+                    // `runner.rs` compiles the engine under. The host is not
+                    // asked here: a host without the platform is refused at
+                    // power-on (`RunError::NoHypervisor`).
+                    field_row(ui, "Engine", |ui| {
+                        egui::ComboBox::from_id_salt("Engine")
+                            .selected_text(engine_label(self.settings.engine))
+                            .show_ui(ui, |ui| {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut self.settings.engine,
+                                        crate::config::Engine::Interpreter,
+                                        engine_label(crate::config::Engine::Interpreter),
+                                    )
+                                    .changed();
+                                #[cfg(all(
+                                    not(feature = "guest-trace"),
+                                    feature = "hv-whp",
+                                    windows
+                                ))]
+                                {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut self.settings.engine,
+                                            crate::config::Engine::Whp,
+                                            engine_label(crate::config::Engine::Whp),
+                                        )
+                                        .changed();
+                                }
+                            });
+                    });
+                    changed |= field_row(ui, "Max instructions", |ui| {
+                        draw_u64_field(
                             ui,
                             &mut self.settings.max_instructions,
                             0,
@@ -1492,19 +2030,21 @@ impl NativeShellApp {
                             editable,
                             1_000_000,
                             Some(1.0),
-                        );
+                        )
                     });
                 });
             }
             HardwareDevice::Devices => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Devices",
                     "PCI and boot order apply at the next Power On.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    changed |= ui.checkbox(&mut self.settings.pci, "Enable PCI").changed();
-                    ui.add_space(6.0);
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(&mut self.settings.pci, "Enable PCI").changed()
+                    });
+                    ui.add_space(SPACE_ITEM);
                     ui.label(
                         RichText::new("Boot order (first match boots)")
                             .strong()
@@ -1516,26 +2056,22 @@ impl NativeShellApp {
                     let mut remove: Option<usize> = None;
                     let len = self.settings.boot_order.len();
                     for (index, device) in self.settings.boot_order.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("{}. {device}", index + 1))
-                                    .color(TEXT_PRIMARY),
-                            );
+                        field_row(ui, &format!("{}. {device}", index + 1), |ui| {
                             if ui
-                                .add_enabled(index > 0, egui::Button::new("▲"))
+                                .add_enabled(index > 0, egui::Button::new("⏶"))
                                 .on_hover_text("Move earlier")
                                 .clicked()
                             {
                                 move_up = Some(index);
                             }
                             if ui
-                                .add_enabled(index + 1 < len, egui::Button::new("▼"))
+                                .add_enabled(index + 1 < len, egui::Button::new("⏷"))
                                 .on_hover_text("Move later")
                                 .clicked()
                             {
                                 move_down = Some(index);
                             }
-                            if ui.button("✕").on_hover_text("Remove").clicked() {
+                            if ui.button("×").on_hover_text("Remove").clicked() {
                                 remove = Some(index);
                             }
                         });
@@ -1559,168 +2095,88 @@ impl NativeShellApp {
                     ] {
                         if !self.settings.boot_order.contains(&device) {
                             let attached = self.settings.is_boot_device_attached(device);
-                            if ui
-                                .add_enabled(attached, egui::Button::new(format!("Add {device}")))
-                                .clicked()
-                            {
-                                self.settings.boot_order.push(device);
-                                changed = true;
-                            }
+                            field_row(ui, "", |ui| {
+                                if ui
+                                    .add_enabled(
+                                        attached,
+                                        egui::Button::new(format!("Add {device}")),
+                                    )
+                                    .clicked()
+                                {
+                                    self.settings.boot_order.push(device);
+                                    changed = true;
+                                }
+                            });
                         }
                     }
                 });
                 detail_row(ui, "Effective boot order", &self.vm_info.boot);
             }
             HardwareDevice::HardDisk => {
-                hardware_intro(
-                    ui,
-                    "Hard disk",
-                    "Attach or detach hard disk media for the next launch.",
-                );
-                ui.add_enabled_ui(editable, |ui| {
-                    changed |= ui
-                        .checkbox(&mut self.settings.disk_enabled, "Enable hard disk")
-                        .changed();
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("Disk path").strong().color(TEXT_PRIMARY));
-                        changed |= ui
-                            .add(
-                                egui::TextEdit::singleline(&mut self.settings.disk_path)
-                                    .desired_width(360.0),
-                            )
-                            .changed();
-                        if ui.button("Browse").clicked() {
-                            if let Some(path) = pick_native_file() {
-                                self.settings.disk_path = path.display().to_string();
-                                self.settings.disk_enabled = true;
-                                changed = true;
-                            }
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("ATA channel").strong().color(TEXT_PRIMARY));
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut self.settings.disk_channel).range(0..=1))
-                            .changed();
-                        ui.label(RichText::new("drive").strong().color(TEXT_PRIMARY));
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut self.settings.disk_drive).range(0..=1))
-                            .changed();
-                    });
-
-                    let mut override_enabled = self.settings.disk_chs_override.is_some();
-                    if ui
-                        .checkbox(&mut override_enabled, "Override CHS geometry")
-                        .on_hover_text(
-                            "Force a specific cylinders/heads/sectors geometry instead of \
-                             auto-detecting it from the image size.",
-                        )
-                        .changed()
-                    {
-                        self.settings.disk_chs_override = override_enabled.then(|| {
-                            self.config.disk.as_ref().map_or(
-                                crate::args::DiskGeometry {
-                                    cylinders: 16_383,
-                                    heads: 16,
-                                    sectors_per_track: 63,
-                                },
-                                |disk| disk.geometry,
-                            )
-                        });
-                        changed = true;
-                    }
-                    if let Some(chs) = &mut self.settings.disk_chs_override {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Cylinders").strong().color(TEXT_PRIMARY));
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut chs.cylinders)
-                                        .range(1..=(rusty_box_bximage::BOCHS_MAX_CYLINDERS - 1) as u32),
-                                )
-                                .changed();
-                            ui.label(RichText::new("heads").strong().color(TEXT_PRIMARY));
-                            changed |= ui
-                                .add(egui::DragValue::new(&mut chs.heads).range(1..=u8::MAX))
-                                .changed();
-                            ui.label(RichText::new("sectors").strong().color(TEXT_PRIMARY));
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut chs.sectors_per_track)
-                                        .range(1..=u8::MAX),
-                                )
-                                .changed();
-                        });
-                    }
-                });
-                if let Some(disk) = &self.config.disk {
-                    detail_row(ui, "Detected CHS", &disk.geometry.to_string());
-                    detail_row(
-                        ui,
-                        "Controller",
-                        &format!("ATA {}:{}", disk.channel, disk.drive),
+                page_header(ui, "Hard disk", "The disk the VM installs to and boots from.");
+                if !editable {
+                    ui.label(
+                        RichText::new("Power the VM off to change its disk.")
+                            .size(TEXT_SECONDARY)
+                            .color(TEXT_MUTED),
                     );
-                } else {
-                    detail_row(ui, "Attached disk", "None");
                 }
-                if ui.button("Create disk image").clicked() {
-                    self.chrome.selected_page = ShellPage::Images;
-                }
+                ui.add_enabled_ui(editable, |ui| {
+                    changed |= self.draw_hard_disk(ui);
+                });
             }
             HardwareDevice::CdDvd => {
-                hardware_intro(
+                page_header(
                     ui,
                     "CD/DVD",
                     "Attach or detach ISO media and optionally boot it first.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    changed |= ui
-                        .checkbox(&mut self.settings.cdrom_enabled, "Enable CD/DVD")
-                        .changed();
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("ISO path").strong().color(TEXT_PRIMARY));
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(&mut self.settings.cdrom_enabled, "Enable CD/DVD")
+                            .changed()
+                    });
+                    field_row(ui, "ISO path", |ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.cdrom_path)
-                                    .desired_width(360.0),
+                                    .desired_width(path_field_width(ui)),
                             )
                             .changed();
-                        if ui.button("Browse").clicked() {
-                            if let Some(path) = pick_native_file() {
-                                self.settings.cdrom_path = path.display().to_string();
-                                self.settings.cdrom_enabled = true;
-                                changed = true;
-                            }
+                        if ui.button(BROWSE).clicked() {
+                            changed |= self.browse(BrowseTarget::Cdrom);
                         }
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("ATA channel").strong().color(TEXT_PRIMARY));
+                    field_row(ui, "ATA channel", |ui| {
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut self.settings.cdrom_channel).range(0..=1),
                             )
                             .changed();
-                        ui.label(RichText::new("drive").strong().color(TEXT_PRIMARY));
+                        ui.label(RichText::new("drive").color(TEXT_MUTED));
                         changed |= ui
                             .add(egui::DragValue::new(&mut self.settings.cdrom_drive).range(0..=1))
                             .changed();
                     });
                     let mut boot_cdrom = self.settings.boot_order.first()
                         == Some(&crate::args::BootDevice::Cdrom);
-                    if ui.checkbox(&mut boot_cdrom, "Boot CD/DVD first").changed() {
-                        // Reposition the CD/DVD within the boot order without
-                        // disturbing the other devices' relative order.
-                        self.settings
-                            .boot_order
-                            .retain(|device| *device != crate::args::BootDevice::Cdrom);
-                        if boot_cdrom {
+                    field_row(ui, "", |ui| {
+                        if ui.checkbox(&mut boot_cdrom, "Boot CD/DVD first").changed() {
+                            // Reposition the CD/DVD within the boot order without
+                            // disturbing the other devices' relative order.
                             self.settings
                                 .boot_order
-                                .insert(0, crate::args::BootDevice::Cdrom);
-                        } else {
-                            self.settings.boot_order.push(crate::args::BootDevice::Cdrom);
+                                .retain(|device| *device != crate::args::BootDevice::Cdrom);
+                            if boot_cdrom {
+                                self.settings
+                                    .boot_order
+                                    .insert(0, crate::args::BootDevice::Cdrom);
+                            } else {
+                                self.settings.boot_order.push(crate::args::BootDevice::Cdrom);
+                            }
+                            changed = true;
                         }
-                        changed = true;
-                    }
+                    });
                 });
                 if let Some(cdrom) = &self.config.cdrom {
                     detail_row(
@@ -1733,92 +2189,93 @@ impl NativeShellApp {
                 }
             }
             HardwareDevice::Display => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Display and ROMs",
                     "BIOS, VGA BIOS, and logging are applied on the next Power On.",
                 );
                 ui.add_enabled_ui(editable, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("BIOS path").strong().color(TEXT_PRIMARY));
+                    field_row(ui, "BIOS path", |ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.bios_path)
-                                    .desired_width(360.0),
+                                    .desired_width(path_field_width(ui)),
                             )
                             .changed();
-                        if ui.button("Browse").clicked() {
-                            if let Some(path) = pick_native_file() {
-                                self.settings.bios_path = path.display().to_string();
-                                changed = true;
-                            }
+                        if ui.button(BROWSE).clicked() {
+                            changed |= self.browse(BrowseTarget::Bios);
                         }
                     });
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("VGA BIOS path").strong().color(TEXT_PRIMARY));
+                    field_row(ui, "VGA BIOS path", |ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.settings.vga_bios_path)
-                                    .desired_width(360.0),
+                                    .desired_width(path_field_width(ui)),
                             )
                             .changed();
-                        if ui.button("Browse").clicked() {
-                            if let Some(path) = pick_native_file() {
-                                self.settings.vga_bios_path = path.display().to_string();
-                                changed = true;
-                            }
+                        if ui.button(BROWSE).clicked() {
+                            changed |= self.browse(BrowseTarget::VgaBios);
                         }
                     });
-                    egui::ComboBox::from_label("Log level")
-                        .selected_text(format!("{:?}", self.settings.log_level))
-                        .show_ui(ui, |ui| {
-                            for (level, label) in [
-                                (crate::args::LogLevel::Trace, "trace"),
-                                (crate::args::LogLevel::Debug, "debug"),
-                                (crate::args::LogLevel::Info, "info"),
-                                (crate::args::LogLevel::Warn, "warn"),
-                                (crate::args::LogLevel::Error, "error"),
-                            ] {
-                                changed |= ui
-                                    .selectable_value(&mut self.settings.log_level, level, label)
-                                    .changed();
-                            }
-                        });
+                    field_row(ui, "Log level", |ui| {
+                        egui::ComboBox::from_id_salt("Log level")
+                            .selected_text(format!("{:?}", self.settings.log_level))
+                            .show_ui(ui, |ui| {
+                                for (level, label) in [
+                                    (crate::args::LogLevel::Trace, "trace"),
+                                    (crate::args::LogLevel::Debug, "debug"),
+                                    (crate::args::LogLevel::Info, "info"),
+                                    (crate::args::LogLevel::Warn, "warn"),
+                                    (crate::args::LogLevel::Error, "error"),
+                                ] {
+                                    changed |= ui
+                                        .selectable_value(&mut self.settings.log_level, level, label)
+                                        .changed();
+                                }
+                            });
+                    });
 
-                    egui::ComboBox::from_label("Display resolution")
-                        .selected_text(vga_mode_label(self.settings.vga_mode))
-                        .show_ui(ui, |ui| {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.settings.vga_mode,
-                                    None,
-                                    "Default (VGA / VBE)",
-                                )
-                                .changed();
-                            for &(w, h) in VGA_MODE_PRESETS {
-                                let mode = crate::config::VgaMode {
-                                    width: w,
-                                    height: h,
-                                    bpp: 32,
-                                };
+                    field_row(ui, "Display resolution", |ui| {
+                        egui::ComboBox::from_id_salt("Display resolution")
+                            .selected_text(vga_mode_label(self.settings.vga_mode))
+                            .show_ui(ui, |ui| {
                                 changed |= ui
                                     .selectable_value(
                                         &mut self.settings.vga_mode,
-                                        Some(mode),
-                                        format!("{w}×{h} @ 32bpp"),
+                                        None,
+                                        "Default (VGA / VBE)",
                                     )
                                     .changed();
-                            }
-                        });
-                    ui.label(
-                        RichText::new(
-                            "Raises the VBE ceiling so the guest can select this mode (via GRUB \
-                             gfxpayload / vesafb).",
-                        )
-                        .color(TEXT_MUTED),
-                    );
-                    changed |= ui
-                        .checkbox(
+                                for &(w, h) in VGA_MODE_PRESETS {
+                                    let mode = crate::config::VgaMode {
+                                        width: w,
+                                        height: h,
+                                        bpp: 32,
+                                    };
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut self.settings.vga_mode,
+                                            Some(mode),
+                                            format!("{w}×{h} @ 32bpp"),
+                                        )
+                                        .changed();
+                                }
+                            });
+                    });
+                    field_row(ui, "", |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(
+                                    "Raises the VBE ceiling so the guest can select this mode (via \
+                                     GRUB gfxpayload / vesafb).",
+                                )
+                                .color(TEXT_MUTED),
+                            )
+                            .wrap(),
+                        );
+                    });
+                    changed |= field_row(ui, "", |ui| {
+                        ui.checkbox(
                             &mut self.settings.pci_vga,
                             "Register VGA on PCI (experimental KMS / bochs-drm)",
                         )
@@ -1826,7 +2283,8 @@ impl NativeShellApp {
                             "Exposes the adapter as PCI 1234:1111 so Linux bochs-drm can bind for \
                              a full KMS framebuffer. Experimental — verify with a guest boot.",
                         )
-                        .changed();
+                        .changed()
+                    });
                 });
                 detail_row(ui, "Adapter", "VGA text/graphics framebuffer");
                 detail_row(ui, "Applied BIOS", &self.vm_info.bios.display().to_string());
@@ -1836,63 +2294,282 @@ impl NativeShellApp {
                     &format_path_for_summary(self.vm_info.vga_bios.as_deref()),
                 );
                 if ui.button("Open console").clicked() {
-                    self.chrome.selected_page = ShellPage::Console;
+                    self.chrome.go_to(ShellPage::Console);
                 }
             }
         }
 
         if changed {
             if let Err(message) = self.apply_pending_settings() {
-                self.shell_notice = Some(ShellNotice::error(message));
+                self.notify(ShellNotice::error(message));
             }
         }
 
-        ui.add_space(12.0);
-        ui.separator();
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Save settings to config file").clicked() {
-                self.save_settings_to_config_file();
-            }
-            if let Some(path) = &self.config.config_path {
-                ui.label(RichText::new(format!("→ {}", path.display())).color(TEXT_MUTED));
+            match &self.profiles[self.chrome.selected_vm()].origin {
+                VmOrigin::Library(stem) => {
+                    ui.label(metadata_text("File", &self.library.path_of(stem).display().to_string()));
+                }
+                VmOrigin::Launch => {
+                    ui.label(
+                        RichText::new("Not saved. Keep this VM in the library from its Summary page.")
+                            .color(TEXT_MUTED),
+                    );
+                }
             }
         });
 
         if !editable {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_ITEM);
             ui.label(RichText::new("Power off before changing VM hardware.").color(ACCENT_AMBER));
         }
     }
 
-    /// Persist the current profile's settings to its TOML config file so they
-    /// survive across launches.
-    fn save_settings_to_config_file(&mut self) {
-        if let Err(message) = self.apply_pending_settings() {
-            self.shell_notice = Some(ShellNotice::error(message));
+    /// The floppy maker's window while it is open, and its Browse.
+    fn draw_floppy_maker(&mut self, ctx: &egui::Context) {
+        if !self.floppy_maker_open {
             return;
         }
-        let Some(path) = self.config.config_path.clone() else {
-            self.shell_notice = Some(ShellNotice::error(
-                "No config file path is known for this session; cannot save.".to_owned(),
-            ));
-            return;
-        };
-        match self.config.save_to_toml(&path) {
-            Ok(()) => {
-                self.shell_notice = Some(ShellNotice::info(format!(
-                    "Saved settings to {}.",
-                    path.display()
-                )));
-            }
-            Err(error) => {
-                self.shell_notice = Some(ShellNotice::error(error.to_string()));
+        let mut open = true;
+        if let Some(created) = self.floppy_maker.ui_window(ctx, &mut open) {
+            self.handle_created_image(created);
+        }
+        self.floppy_maker_open = open;
+        if std::mem::take(&mut self.floppy_maker.browse_requested)
+            && self.browse(BrowseTarget::NewFloppy)
+        {
+            if let Err(message) = self.apply_pending_settings() {
+                self.notify(ShellNotice::error(message));
             }
         }
     }
-    fn draw_images_page(&mut self, ui: &mut egui::Ui) {
-        self.draw_shell_notice(ui);
-        if let Some(created) = self.disk_creator.ui_page(ui) {
-            self.handle_created_image(created);
+
+    /// Opens Hardware › Hard disk with a new-disk sheet for the selected VM.
+    fn open_new_disk_sheet(&mut self) {
+        self.chrome.go_to(ShellPage::Hardware);
+        self.chrome.selected_hardware = HardwareDevice::HardDisk;
+        self.new_disk = Some(NewDiskDraft::for_vm(&self.vm_info.name));
+    }
+
+    /// The Hard disk page's body: the new-disk sheet while it is open;
+    /// otherwise a choice between a new disk and a file when the VM has no
+    /// disk, or the disk it has. Returns whether the VM's settings changed.
+    fn draw_hard_disk(&mut self, ui: &mut egui::Ui) -> bool {
+        if self.new_disk.is_some() {
+            self.draw_new_disk_sheet(ui);
+            return false;
+        }
+        let mut changed = false;
+        let mut open_sheet = false;
+        match crate::hard_disk::HardDiskState::of(
+            self.settings.disk_enabled,
+            &self.settings.disk_path,
+        ) {
+            crate::hard_disk::HardDiskState::Empty => {
+                ui.columns(2, |columns| {
+                    action_tile(
+                        &mut columns[0],
+                        "+ New disk",
+                        "Pick a size, then create it.",
+                        ACCENT_CYAN,
+                        ActionTileWeight::Primary,
+                        || open_sheet = true,
+                    );
+                    action_tile(
+                        &mut columns[1],
+                        "Use a disk file",
+                        "Choose an image you already have.",
+                        STROKE_HAIRLINE,
+                        ActionTileWeight::Secondary,
+                        || changed = self.browse(BrowseTarget::HardDisk),
+                    );
+                });
+            }
+            crate::hard_disk::HardDiskState::Attached { path } => {
+                shell_card_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let name = path.file_name().map_or_else(
+                        || path.display().to_string(),
+                        |name| name.to_string_lossy().into_owned(),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(name).size(TEXT_BODY).strong().color(TEXT_PRIMARY));
+                        match std::fs::metadata(&path) {
+                            Ok(metadata) => ui.label(
+                                RichText::new(format!(
+                                    "· {}",
+                                    crate::hard_disk::format_disk_bytes(metadata.len())
+                                ))
+                                .color(TEXT_MUTED),
+                            ),
+                            Err(_) => ui.label(
+                                RichText::new("· the file is missing").color(ACCENT_RED),
+                            ),
+                        };
+                    });
+                    if let Some(folder) = path.parent() {
+                        ui.label(
+                            RichText::new(folder.display().to_string())
+                                .size(TEXT_SECONDARY)
+                                .color(TEXT_MUTED),
+                        );
+                    }
+                    ui.add_space(SPACE_ITEM);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Change").clicked() {
+                            changed |= self.browse(BrowseTarget::HardDisk);
+                        }
+                        if ui.button("Detach").clicked() {
+                            self.settings.disk_enabled = false;
+                            changed = true;
+                        }
+                        if ui.button("+ New disk").clicked() {
+                            open_sheet = true;
+                        }
+                    });
+                });
+                ui.add_space(SPACE_ITEM);
+                egui::CollapsingHeader::new("Advanced")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        changed |= self.draw_disk_advanced(ui);
+                    });
+            }
+        }
+        if open_sheet {
+            self.open_new_disk_sheet();
+        }
+        changed
+    }
+
+    /// The disk's controller slot and geometry, which rarely need changing.
+    /// Returns whether the VM's settings changed.
+    fn draw_disk_advanced(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut changed = false;
+        field_row(ui, "ATA channel", |ui| {
+            changed |= ui
+                .add(egui::DragValue::new(&mut self.settings.disk_channel).range(0..=1))
+                .changed();
+            ui.label(RichText::new("drive").color(TEXT_MUTED));
+            changed |= ui
+                .add(egui::DragValue::new(&mut self.settings.disk_drive).range(0..=1))
+                .changed();
+        });
+        let mut override_enabled = self.settings.disk_chs_override.is_some();
+        field_row(ui, "", |ui| {
+            if ui
+                .checkbox(&mut override_enabled, "Override CHS geometry")
+                .on_hover_text(
+                    "Force a specific cylinders/heads/sectors geometry instead of \
+                     auto-detecting it from the image size.",
+                )
+                .changed()
+            {
+                self.settings.disk_chs_override = override_enabled.then(|| {
+                    self.config.disk.as_ref().map_or(
+                        crate::args::DiskGeometry {
+                            cylinders: 16_383,
+                            heads: 16,
+                            sectors_per_track: 63,
+                        },
+                        |disk| disk.geometry,
+                    )
+                });
+                changed = true;
+            }
+        });
+        if let Some(chs) = &mut self.settings.disk_chs_override {
+            field_row(ui, "Cylinders", |ui| {
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut chs.cylinders)
+                            .range(1..=(rusty_box_bximage::BOCHS_MAX_CYLINDERS - 1) as u32),
+                    )
+                    .changed();
+                ui.label(RichText::new("heads").color(TEXT_MUTED));
+                changed |= ui
+                    .add(egui::DragValue::new(&mut chs.heads).range(1..=u8::MAX))
+                    .changed();
+                ui.label(RichText::new("sectors").color(TEXT_MUTED));
+                changed |= ui
+                    .add(egui::DragValue::new(&mut chs.sectors_per_track).range(1..=u8::MAX))
+                    .changed();
+            });
+        }
+        if let Some(disk) = &self.config.disk {
+            detail_row(ui, "Detected CHS", &disk.geometry.to_string());
+            detail_row(ui, "Controller", &format!("ATA {}:{}", disk.channel, disk.drive));
+        }
+        changed
+    }
+
+    /// The new-disk sheet: its name, size and folder, and the verbs that
+    /// create it or put it away.
+    fn draw_new_disk_sheet(&mut self, ui: &mut egui::Ui) {
+        let Some(draft) = self.new_disk.as_mut() else {
+            return;
+        };
+        let action = draw_new_disk_form(ui, draft);
+        match action {
+            NewDiskAction::None => {}
+            NewDiskAction::Create => self.create_new_disk(ExistingFilePolicy::CreateNew),
+            NewDiskAction::Replace => self.create_new_disk(ExistingFilePolicy::Truncate),
+            NewDiskAction::SaveAs(name) => {
+                if let Some(draft) = self.new_disk.as_mut() {
+                    draft.name = name;
+                }
+                self.create_new_disk(ExistingFilePolicy::CreateNew);
+            }
+            NewDiskAction::OtherFolder => {
+                // The folder is the sheet's, not the VM's settings: the answer
+                // never changes them.
+                if self.browse(BrowseTarget::NewDisk) {
+                    if let Err(message) = self.apply_pending_settings() {
+                        self.notify(ShellNotice::error(message));
+                    }
+                }
+            }
+            NewDiskAction::Cancel => self.new_disk = None,
+        }
+    }
+
+    /// Creates the sheet's disk and attaches it to the VM. A file of the same
+    /// name stops a plain create: the sheet then asks whether to replace it
+    /// or save under the first free name.
+    fn create_new_disk(&mut self, existing: ExistingFilePolicy) {
+        let Some(draft) = self.new_disk.as_mut() else {
+            return;
+        };
+        draft.error = None;
+        let name = draft.name.trim().to_owned();
+        if name.is_empty() {
+            draft.error = Some("Give the disk a name.".to_owned());
+            return;
+        }
+        let folder = match draft.folder.resolve() {
+            Ok(folder) => folder,
+            Err(message) => {
+                draft.error = Some(message);
+                return;
+            }
+        };
+        let path = folder.join(&name);
+        if existing == ExistingFilePolicy::CreateNew && path.exists() {
+            draft.conflict = Some(crate::hard_disk::first_free_name(&name, |candidate| {
+                folder.join(candidate).exists()
+            }));
+            return;
+        }
+        draft.conflict = None;
+        match crate::hard_disk::create_disk(&path, draft.size, existing) {
+            Ok(_) => {
+                self.new_disk = None;
+                self.handle_created_image(CreatedImage {
+                    path,
+                    kind: CreatedImageKind::HardDisk,
+                });
+            }
+            Err(message) => draft.error = Some(message),
         }
     }
 
@@ -1901,7 +2578,7 @@ impl NativeShellApp {
             CreatedImageKind::HardDisk => {
                 let status = self.runtime_status();
                 if status.running || status.start_pending {
-                    self.shell_notice = Some(ShellNotice::warning(
+                    self.notify(ShellNotice::warning(
                         "Disk image created. Stop the VM before attaching it.",
                     ));
                     return;
@@ -1909,7 +2586,7 @@ impl NativeShellApp {
                 self.attach_created_image_to_selected_profile(created.path);
             }
             CreatedImageKind::Floppy => {
-                self.shell_notice = Some(ShellNotice::info(
+                self.notify(ShellNotice::info(
                     "Floppy image created. Floppy drive emulation is not wired yet.",
                 ));
             }
@@ -1922,46 +2599,129 @@ impl NativeShellApp {
         self.settings.disk_creation = None;
         match self.apply_pending_settings() {
             Ok(()) => {
-                self.shell_notice = Some(ShellNotice::info(format!(
+                self.notify(ShellNotice::info(format!(
                     "Attached created disk image to {}.",
                     self.vm_info.name
                 )));
             }
             Err(message) => {
-                self.shell_notice = Some(ShellNotice::error(message));
+                self.notify(ShellNotice::error(message));
             }
         }
     }
 
-    fn nav_button(&mut self, ui: &mut egui::Ui, page: ShellPage, label: &str) {
-        if ui
-            .selectable_label(self.chrome.selected_page == page, label)
-            .clicked()
-        {
-            self.chrome.selected_page = page;
-        }
-    }
-
+    /// Applies the edited settings to the selected VM in memory and marks a
+    /// library VM `Unsaved` when its name or config differs from what its
+    /// file holds, `Saved` when not — so an apply that changes nothing, a
+    /// selection or a power-on, does not rewrite the file over an edit made
+    /// to it outside the shell. The file is written by the next flush, not
+    /// here, so a field edited keystroke by keystroke is written once it is
+    /// left rather than on every change.
     fn apply_pending_settings(&mut self) -> Result<(), String> {
         self.settings.apply_to_config(&mut self.config)?;
-        if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm) {
+        if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm()) {
             profile.config.clone_from(&self.config);
             profile.settings.clone_from(&self.settings);
+            profile.mark_against_file(ConfigChange::Edit);
             self.refresh_selected_profile_metadata()?;
             self.config
-                .clone_from(&self.profiles[self.chrome.selected_vm].config);
+                .clone_from(&self.profiles[self.chrome.selected_vm()].config);
         } else {
             self.vm_info = NativeVmInfo::from_config(&self.config);
         }
         Ok(())
     }
 
-    fn refresh_selected_profile_metadata(&mut self) -> Result<(), String> {
-        let index = self.chrome.selected_vm;
-        if index >= self.profiles.len() {
-            return Ok(());
+    /// Writes the library VMs `scope` names among those whose files are
+    /// behind. A write that succeeds makes the file what the VM is; one that
+    /// fails leaves the VM `WriteFailed`, is logged, and is shown as an error
+    /// by this attempt alone. Either way the VM's sidebar row says which.
+    fn flush(&mut self, scope: FlushScope) {
+        for index in 0..self.profiles.len() {
+            let profile = &self.profiles[index];
+            let VmOrigin::Library(stem) = &profile.origin else {
+                continue;
+            };
+            let due = match (profile.save_state, scope) {
+                (SaveState::Saved, _) | (SaveState::WriteFailed, FlushScope::Unsaved) => false,
+                (SaveState::Unsaved, _) | (SaveState::WriteFailed, FlushScope::UnsavedAndFailed) => {
+                    true
+                }
+            };
+            if !due {
+                continue;
+            }
+            match self.library.save(stem, &profile.name, &profile.config) {
+                Ok(()) => {
+                    let profile = &mut self.profiles[index];
+                    profile.file = Some(VmFileContents::of(&profile.name, &profile.config));
+                    profile.save_state = SaveState::Saved;
+                }
+                Err(error) => {
+                    tracing::error!(vm = stem.as_str(), %error, "the VM's file was not written");
+                    self.profiles[index].save_state = SaveState::WriteFailed;
+                    self.notify(ShellNotice::error(error.to_string()));
+                }
+            }
+            self.refresh_library_entry(index);
         }
-        self.profiles[index].apply_settings()?;
+    }
+
+    /// Makes the sidebar's row for the VM at `index` say what the VM is now.
+    fn refresh_library_entry(&mut self, index: usize) {
+        if let Some(entry) = self.chrome.vm_library.get_mut(index) {
+            *entry = self.profiles[index].library_entry();
+        }
+    }
+
+    /// An action's flush: writes every VM whose file is behind, one whose
+    /// last write failed included.
+    fn flush_unsaved(&mut self) {
+        self.flush(FlushScope::UnsavedAndFailed);
+    }
+
+    /// The end of a frame's flush. Writes the `Unsaved` VMs, and only while
+    /// no widget holds keyboard focus (`Memory::focused`) and no widget is
+    /// being dragged (`Context::dragged_id`), so an edit is written once the
+    /// field it is typed in is left or the drag ends, not on every change. A
+    /// VM whose write failed is left for an action to try again.
+    fn flush_unsaved_when_idle(&mut self, ctx: &egui::Context) {
+        let editing = ctx.memory(|memory| memory.focused().is_some()) || ctx.dragged_id().is_some();
+        if !editing {
+            self.flush(FlushScope::Unsaved);
+        }
+    }
+
+    /// The flush for the frame on which the window went behind another
+    /// (`Event::WindowFocused(false)`) — on a phone, the activity leaving the
+    /// foreground, after which the process can be killed with no further
+    /// frame. An action's flush: an edit in a field that still has focus is
+    /// written without waiting for the field to be left, and a write that
+    /// failed is tried again. It runs on that frame alone, so a window that
+    /// stays unfocused does not retry a lasting fault every frame.
+    fn flush_when_window_focus_is_lost(&mut self, ctx: &egui::Context) {
+        let lost = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::WindowFocused(false)))
+        });
+        if lost {
+            self.flush_unsaved();
+        }
+    }
+
+    /// Applies the selected VM's settings to it, marks it against its file,
+    /// and makes its sidebar row and the VM information shown say what the
+    /// VM is — whether or not the settings apply: a failed apply leaves the
+    /// VM as it was, and the row and the information show it as it is.
+    fn refresh_selected_profile_metadata(&mut self) -> Result<(), String> {
+        let index = self.chrome.selected_vm();
+        let Some(profile) = self.profiles.get_mut(index) else {
+            return Ok(());
+        };
+        let applied = profile.apply_settings();
+        profile.mark_against_file(ConfigChange::Reading);
         if index < self.chrome.vm_library.len() {
             self.chrome.vm_library[index] = self.profiles[index].library_entry();
         } else {
@@ -1972,91 +2732,319 @@ impl NativeShellApp {
                 .collect();
         }
         self.vm_info = self.profiles[index].vm_info();
-        Ok(())
+        applied
     }
 
+    /// Shows the VM at `index`. The VM being left is applied and written
+    /// first, so nothing of it waits on a later frame.
     fn select_profile(&mut self, index: usize) {
         if index >= self.profiles.len() {
             return;
         }
         let status = self.runtime_status();
         if status.running || status.start_pending {
-            self.shell_notice = Some(ShellNotice::warning(
-                "Stop the running VM before selecting another profile.",
+            self.notify(ShellNotice::warning(
+                "Stop the running VM before selecting another VM.",
             ));
             return;
         }
         if let Err(message) = self.apply_pending_settings() {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
             return;
         }
-        self.chrome.selected_vm = index;
+        self.flush_unsaved();
+        self.chrome.destination = self.chrome.destination.select_vm(index);
         let profile = &self.profiles[index];
         self.config = profile.config.clone();
         self.settings = profile.settings.clone();
-        if let Err(message) = self.refresh_selected_profile_metadata() {
-            self.shell_notice = Some(ShellNotice::error(message));
-            return;
+        if let VmOrigin::Library(stem) = self.profiles[index].origin.clone() {
+            self.remember(&stem);
         }
-        self.chrome.selected_page = ShellPage::Home;
+        if let Err(message) = self.refresh_selected_profile_metadata() {
+            self.notify(ShellNotice::error(message));
+        }
     }
 
-    fn duplicate_selected_profile(&mut self) {
-        if self.profiles.is_empty() {
+    /// Adds a library VM copied from the selected one and selects it. Its file
+    /// is written at once, so it is there at the next launch. Refused while
+    /// the machine runs or is starting, when the new VM could not be selected.
+    fn add_vm_copying_selected(&mut self) {
+        let status = self.runtime_status();
+        if status.running || status.start_pending {
+            self.notify(ShellNotice::warning(
+                "Stop the running VM before adding a VM.",
+            ));
             return;
         }
         if let Err(message) = self.apply_pending_settings() {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
             return;
         }
-        let base = self.chrome.selected_vm.min(self.profiles.len() - 1);
-        let name = format!("{} Copy {}", self.profiles[base].name, self.profiles.len());
-        let profile = self.profiles[base].duplicate(name);
+        self.flush_unsaved();
+        let base = self.chrome.selected_vm().min(self.profiles.len() - 1);
+        let name = format!("{} copy", self.profiles[base].name);
+        let stem = match self.library.create(&name, &self.profiles[base].config) {
+            Ok(stem) => stem,
+            Err(error) => {
+                self.notify(ShellNotice::error(error.to_string()));
+                return;
+            }
+        };
+        let profile = self.profiles[base].duplicate(name, VmOrigin::Library(stem));
+        self.chrome.vm_library.push(profile.library_entry());
         self.profiles.push(profile);
-        self.chrome.vm_library.push(
-            self.profiles
-                .last()
-                .expect("profile was just pushed")
-                .library_entry(),
-        );
         self.select_profile(self.profiles.len() - 1);
     }
 
+    /// Adds the temporary launch VM to the library. From then on it is an
+    /// ordinary library VM: its edits are saved and the next launch lists it.
+    /// A `remember` warning outranks the saved notice, so it is set last.
+    fn keep_selected_in_library(&mut self) {
+        if let Err(message) = self.apply_pending_settings() {
+            self.notify(ShellNotice::error(message));
+            return;
+        }
+        self.flush_unsaved();
+        let index = self.chrome.selected_vm();
+        let Some(profile) = self.profiles.get(index) else {
+            return;
+        };
+        if profile.origin != VmOrigin::Launch {
+            return;
+        }
+        match self.library.create(&profile.name, &profile.config) {
+            Ok(stem) => {
+                let profile = &mut self.profiles[index];
+                profile.origin = VmOrigin::Library(stem.clone());
+                profile.file = Some(VmFileContents::of(&profile.name, &profile.config));
+                profile.save_state = SaveState::Saved;
+                self.chrome.vm_library[index] = self.profiles[index].library_entry();
+                self.notify(ShellNotice::info(format!(
+                    "Saved {} to the VM library.",
+                    self.profiles[index].name
+                )));
+                self.remember(&stem);
+            }
+            Err(error) => self.notify(ShellNotice::error(error.to_string())),
+        }
+    }
+
+    /// Removes the selected VM and, for a library VM, its file. The VM goes as
+    /// it stands: nothing about it is validated or written first, so a VM
+    /// whose settings no longer apply — a disk image that is gone, an empty
+    /// BIOS path — is still deleted, and its unsaved edits go with it. A
+    /// refresh error outranks a `remember` warning, so the refresh comes last.
     fn delete_selected_profile(&mut self) {
         let status = self.runtime_status();
         if status.running || status.start_pending {
-            self.shell_notice = Some(ShellNotice::warning(
-                "Stop the running VM before deleting profiles.",
+            self.notify(ShellNotice::warning(
+                "Stop the running VM before deleting it.",
             ));
             return;
         }
         if self.profiles.len() == 1 {
-            self.shell_notice = Some(ShellNotice::warning("At least one VM profile is required."));
-            return;
-        }
-        if let Err(message) = self.apply_pending_settings() {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::warning("At least one VM is required."));
             return;
         }
 
-        let index = self.chrome.selected_vm.min(self.profiles.len() - 1);
-        self.profiles.remove(index);
-        if index < self.chrome.vm_library.len() {
-            self.chrome.vm_library.remove(index);
+        let removed = self.chrome.selected_vm().min(self.profiles.len() - 1);
+        if let VmOrigin::Library(stem) = &self.profiles[removed].origin {
+            if let Err(error) = self.library.delete(stem) {
+                self.notify(ShellNotice::error(error.to_string()));
+                return;
+            }
         }
-        self.chrome.selected_vm = index.min(self.profiles.len() - 1);
-        let profile = &self.profiles[self.chrome.selected_vm];
+        self.profiles.remove(removed);
+        if removed < self.chrome.vm_library.len() {
+            self.chrome.vm_library.remove(removed);
+        }
+        self.chrome.destination = self
+            .chrome
+            .destination
+            .clamped_after_removal(removed, self.profiles.len());
+        let profile = &self.profiles[self.chrome.selected_vm()];
         self.config = profile.config.clone();
         self.settings = profile.settings.clone();
+        if let VmOrigin::Library(stem) = self.profiles[self.chrome.selected_vm()].origin.clone() {
+            self.remember(&stem);
+        }
         if let Err(message) = self.refresh_selected_profile_metadata() {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
         }
     }
 
+    /// Asks the user to confirm deleting the selected VM. The VM is captured
+    /// here, so the confirm deletes it and nothing else.
+    fn request_delete_selected(&mut self) {
+        let index = self.chrome.selected_vm();
+        let Some(profile) = self.profiles.get(index) else {
+            return;
+        };
+        self.pending_confirm = Some(PendingConfirm::DeleteVm {
+            index,
+            origin: profile.origin.clone(),
+            name: profile.name.clone(),
+        });
+    }
+
+    /// Runs the step waiting for confirmation, if any. A delete or an
+    /// overwrite whose VM is no longer the selected one does nothing and
+    /// says so. An agreed overwrite is kept for the session, and the
+    /// power-on it stopped runs.
+    fn confirm_pending(&mut self) {
+        match self.pending_confirm.take() {
+            None => {}
+            Some(PendingConfirm::DeleteVm { index, origin, .. }) => {
+                if self.is_selected(index, &origin) {
+                    self.delete_selected_profile();
+                } else {
+                    self.notify(ShellNotice::warning(
+                        "Another VM was selected while the delete waited; nothing was deleted.",
+                    ));
+                }
+            }
+            Some(PendingConfirm::DeleteBroken(path)) => self.delete_broken_file(&path),
+            Some(PendingConfirm::OverwriteDisk {
+                index,
+                origin,
+                path,
+            }) => {
+                if self.is_selected(index, &origin) {
+                    self.overwrite_confirmed.extend([path]);
+                    self.start_vm();
+                } else {
+                    self.notify(ShellNotice::warning(
+                        "Another VM was selected while the power-on waited; nothing was started.",
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Whether the VM at `index` with `origin` is the one selected now.
+    fn is_selected(&self, index: usize, origin: &VmOrigin) -> bool {
+        self.chrome.selected_vm() == index
+            && self
+                .profiles
+                .get(index)
+                .is_some_and(|profile| &profile.origin == origin)
+    }
+
+    /// Drops the step waiting for confirmation.
+    fn cancel_pending(&mut self) {
+        self.pending_confirm = None;
+    }
+
+    fn confirm_wording(&self, pending: &PendingConfirm) -> ConfirmWording {
+        match pending {
+            PendingConfirm::DeleteVm {
+                origin: VmOrigin::Library(stem),
+                name,
+                ..
+            } => ConfirmWording {
+                title: format!("Delete {name}?"),
+                body: format!(
+                    "Its file {} is removed from the VM library. Disk images it uses are kept.",
+                    self.library.path_of(stem).display()
+                ),
+                verb: "Delete",
+            },
+            PendingConfirm::DeleteVm {
+                origin: VmOrigin::Launch,
+                name,
+                ..
+            } => ConfirmWording {
+                title: format!("Discard {name}?"),
+                body: "This VM is not in the library, so nothing is left of it.".to_owned(),
+                verb: "Discard",
+            },
+            PendingConfirm::DeleteBroken(path) => ConfirmWording {
+                title: format!(
+                    "Delete {}?",
+                    path.file_name()
+                        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+                ),
+                body: "The file could not be loaded as a VM. It is removed from the VM library."
+                    .to_owned(),
+                verb: "Delete",
+            },
+            PendingConfirm::OverwriteDisk { path, .. } => ConfirmWording {
+                title: format!("Overwrite {}?", path.display()),
+                body: "This VM's startup disk is set to be recreated, which erases the existing file."
+                    .to_owned(),
+                verb: "Overwrite and power on",
+            },
+        }
+    }
+
+    /// The dialog for the step waiting for confirmation. Its verb runs the
+    /// step; Cancel, Escape or a click outside drops it.
+    fn draw_pending_confirm(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_confirm.clone() else {
+            return;
+        };
+        let wording = self.confirm_wording(&pending);
+        let mut confirmed = false;
+        let mut cancelled = false;
+        let modal = egui::Modal::new(egui::Id::new("shell_confirm")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label(RichText::new(wording.title).strong().color(TEXT_PRIMARY));
+            ui.add_space(SPACE_ITEM);
+            ui.label(RichText::new(wording.body).color(TEXT_MUTED));
+            ui.add_space(SPACE_GROUP);
+            ui.horizontal(|ui| {
+                confirmed = ui.add(primary_button(wording.verb)).clicked();
+                cancelled = ui.button("Cancel").clicked();
+            });
+        });
+        if confirmed {
+            self.confirm_pending();
+        } else if cancelled || modal.should_close() {
+            self.cancel_pending();
+        }
+    }
+
+    fn delete_broken_file(&mut self, path: &Path) {
+        match self.library.delete_file(path) {
+            Ok(()) => self.broken_files.retain(|file| file.path != path),
+            Err(error) => self.notify(ShellNotice::error(error.to_string())),
+        }
+    }
+
+    /// Records `stem` as the VM the next launch shows. Failing costs only
+    /// that, so it is reported as a warning.
+    fn remember(&mut self, stem: &crate::library::VmStem) {
+        if let Err(error) = self.library.remember_selected(stem) {
+            self.notify(ShellNotice::warning(error.to_string()));
+        }
+    }
+
+    /// The existing file this power-on's startup-disk creation would erase,
+    /// unless the user already agreed to it this session.
+    fn unconfirmed_overwrite(&self) -> Option<PathBuf> {
+        let creation = self.config.disk.as_ref()?.creation.as_ref()?;
+        let erases = creation.overwrite && creation.path.exists();
+        (erases && !self.overwrite_confirmed.contains(&creation.path))
+            .then(|| creation.path.clone())
+    }
+
+    /// The file this power-on's overwrite creation makes where nothing
+    /// exists yet: the runner creates it now and erases it at no later
+    /// power-on this session, so there is nothing to ask about, now or then.
+    fn overwrite_with_nothing_to_erase(&self) -> Option<PathBuf> {
+        let creation = self.config.disk.as_ref()?.creation.as_ref()?;
+        (creation.overwrite && !creation.path.exists()).then(|| creation.path.clone())
+    }
+
+    /// Powers on the selected VM: its edits are applied and written first,
+    /// then a VM that lacks a BIOS path or a medium to boot from is refused
+    /// with a notice naming what is missing, and a startup-disk creation that
+    /// would erase an existing file is put to the user before anything
+    /// starts, so a power-on that stops at either has still written the VM.
     fn start_vm(&mut self) {
         let snapshot = self.runtime_status();
         if snapshot.running {
-            self.chrome.selected_page = ShellPage::Console;
+            self.chrome.go_to(ShellPage::Console);
             return;
         }
         if snapshot.start_pending {
@@ -2064,9 +3052,25 @@ impl NativeShellApp {
         }
 
         if let Err(message) = self.apply_pending_settings() {
-            self.shell_notice = Some(ShellNotice::error(message));
+            self.notify(ShellNotice::error(message));
             return;
         }
+        self.flush_unsaved();
+        if let Some(gap) = PowerOnGap::of(&self.config) {
+            self.notify(ShellNotice::warning(gap.notice()));
+            return;
+        }
+        if let Some(path) = self.unconfirmed_overwrite() {
+            let index = self.chrome.selected_vm();
+            self.pending_confirm = Some(PendingConfirm::OverwriteDisk {
+                index,
+                origin: self.profiles[index].origin.clone(),
+                path,
+            });
+            return;
+        }
+        self.overwrite_confirmed
+            .extend(self.overwrite_with_nothing_to_erase());
         if let Ok(mut display) = self.shared.lock() {
             display.start_pending = true;
         }
@@ -2075,13 +3079,13 @@ impl NativeShellApp {
             .send(NativeEmulatorCommand::Start(self.config.clone()))
         {
             Ok(()) => {
-                self.chrome.selected_page = ShellPage::Console;
+                self.chrome.go_to(ShellPage::Console);
             }
             Err(_) => {
                 if let Ok(mut display) = self.shared.lock() {
                     display.start_pending = false;
                 }
-                self.shell_notice = Some(ShellNotice::error(
+                self.notify(ShellNotice::error(
                     "Emulator worker is not available. Restart the application.",
                 ));
             }
@@ -2098,100 +3102,132 @@ impl NativeShellApp {
         }
     }
 
+    /// How the phone draws this frame: see `android_support::console_view`.
+    /// Only a notice the phone shows holds the shell's bars.
     #[cfg(target_os = "android")]
-    fn draw_android_console_header(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("android_console_header")
-            .exact_size(32.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::symmetric(12, 4)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let status = self.runtime_status();
-                    let running = status.running;
-                    let start_blocked = running || status.start_pending;
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Home").clicked() {
-                            self.chrome.selected_page = ShellPage::Home;
-                            ui.close();
-                        }
-                        if ui.button("Create Disk Image").clicked() {
-                            self.chrome.selected_page = ShellPage::Images;
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button("Quit").clicked() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.menu_button("VM", |ui| {
-                        if ui
-                            .add_enabled(!start_blocked, egui::Button::new("Power On"))
-                            .clicked()
-                        {
-                            self.start_vm();
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(running, egui::Button::new("Power Off"))
-                            .clicked()
-                        {
-                            self.request_power_off();
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(running, egui::Button::new("Restart VM"))
-                            .clicked()
-                        {
-                            self.request_reset();
-                            ui.close();
-                        }
-                    });
-                    ui.separator();
-                    let state = if running {
-                        "Running"
-                    } else if status.start_pending {
-                        "Starting"
-                    } else {
-                        "Stopped"
-                    };
-                    ui.label(
-                        RichText::new(state)
-                            .monospace()
-                            .size(11.0)
-                            .color(TEXT_PRIMARY),
-                    );
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format_ips_u32(status.ips))
-                            .monospace()
-                            .size(11.0)
-                            .color(ACCENT_BLUE),
-                    );
-                    ui.separator();
-                    self.nav_button(ui, ShellPage::Home, "Home");
-                    self.nav_button(ui, ShellPage::Console, "Console");
-                    self.nav_button(ui, ShellPage::Hardware, "Hardware");
-                    self.nav_button(ui, ShellPage::Images, "Images");
-                    if ui
-                        .add_enabled(!start_blocked, egui::Button::new("Power On"))
-                        .clicked()
-                    {
-                        self.start_vm();
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(&self.vm_info.name)
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                    });
+    fn console_view(&self) -> crate::android_support::ConsoleView {
+        use crate::android_support::{console_view, MachineActivity, NoticeWaiting};
+        let notice = match &self.shell_notice {
+            Some(notice) if phone_shows_notice(notice.kind) => NoticeWaiting::Shown,
+            Some(_) | None => NoticeWaiting::None,
+        };
+        console_view(
+            self.chrome.page(),
+            MachineActivity::of(&self.runtime_status()),
+            notice,
+        )
+    }
+
+    /// The guest alone on the phone's screen, fitted or stretched as the VM
+    /// is set, under a corner button that opens the console's menu.
+    #[cfg(target_os = "android")]
+    fn draw_full_screen_console(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let scale = if self.settings.console_stretch {
+            rusty_box::gui::DisplayScale::Stretch
+        } else {
+            rusty_box::gui::DisplayScale::Fit
+        };
+        self.emulator.set_display_scale(scale);
+        let area = ui.max_rect();
+        self.emulator.ui_embedded_with_serial(ui, frame, false, None);
+
+        let ctx = ui.ctx().clone();
+        egui::Area::new(egui::Id::new("full_screen_menu_button"))
+            .fixed_pos(area.left_top() + egui::vec2(SPACE_GROUP, SPACE_GROUP))
+            .order(egui::Order::Foreground)
+            .show(&ctx, |ui| {
+                let button = egui::Button::new(RichText::new(FULL_SCREEN_MENU).color(TEXT_PRIMARY))
+                    .fill(egui::Color32::from_black_alpha(FULL_SCREEN_BUTTON_ALPHA))
+                    .corner_radius(FULL_SCREEN_BUTTON_SIZE / 2.0)
+                    .min_size(egui::vec2(FULL_SCREEN_BUTTON_SIZE, FULL_SCREEN_BUTTON_SIZE));
+                if ui.add(button).clicked() {
+                    self.full_screen_menu_open = !self.full_screen_menu_open;
+                }
+            });
+        if self.full_screen_menu_open {
+            self.draw_full_screen_menu(&ctx, area);
+        }
+    }
+
+    /// The full-screen console's menu: the machine's state and rate, the key
+    /// pad, the verbs that act on the guest, the fit or stretch choice, and
+    /// the way back to the shell with the machine left running.
+    #[cfg(target_os = "android")]
+    fn draw_full_screen_menu(&mut self, ctx: &egui::Context, area: egui::Rect) {
+        let status = self.runtime_status();
+        let badge = shell_state_badge(&status, self.has_error_notice());
+        let below_button = SPACE_GROUP + FULL_SCREEN_BUTTON_SIZE + SPACE_ITEM;
+        egui::Window::new("full_screen_menu")
+            .title_bar(false)
+            .resizable(false)
+            .collapsible(false)
+            .fixed_pos(area.left_top() + egui::vec2(SPACE_GROUP, below_button))
+            .constrain_to(area)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    status_dot(ui, badge.color);
+                    ui.label(status_text(badge.label).color(badge.color));
+                    ui.label(status_text("·").color(TEXT_MUTED));
+                    ui.label(status_text(engine_label(self.settings.engine)).color(TEXT_PRIMARY));
+                    ui.label(status_text("·").color(TEXT_MUTED));
+                    ui.label(status_text(format_ips_u32(status.ips)).color(ACCENT_BLUE));
                 });
+                ui.separator();
+                if ui.button("Keys").clicked() {
+                    self.keypad_requested = true;
+                    self.full_screen_menu_open = false;
+                }
+                if ui
+                    .add_enabled(status.running, egui::Button::new("Ctrl+Alt+Del"))
+                    .clicked()
+                {
+                    self.emulator.send_ctrl_alt_del();
+                }
+                let mut stretch = self.settings.console_stretch;
+                if ui.checkbox(&mut stretch, "Stretch to fill").changed() {
+                    self.settings.console_stretch = stretch;
+                    if let Err(message) = self.apply_pending_settings() {
+                        self.notify(ShellNotice::error(message));
+                    }
+                }
+                let mut speed = self.settings.pointer_speed.percent();
+                let slider = egui::Slider::new(&mut speed, crate::config::PointerSpeed::RANGE_PERCENT)
+                    .text("Pointer speed")
+                    .suffix(" %");
+                if ui.add(slider).changed() {
+                    self.settings.pointer_speed = crate::config::PointerSpeed::from_percent(speed);
+                    if let Err(message) = self.apply_pending_settings() {
+                        self.notify(ShellNotice::error(message));
+                    }
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(status.running, egui::Button::new("■ Power off"))
+                    .clicked()
+                {
+                    self.request_power_off();
+                    self.full_screen_menu_open = false;
+                }
+                if ui
+                    .add_enabled(status.running, egui::Button::new("↻ Restart"))
+                    .clicked()
+                {
+                    self.request_reset();
+                    self.full_screen_menu_open = false;
+                }
+                if ui.button("Exit to shell").clicked() {
+                    self.chrome.go_to(ShellPage::Home);
+                    self.full_screen_menu_open = false;
+                }
             });
     }
+
+    /// Whether the full-screen menu asked for the key pad since the last call.
+    #[cfg(target_os = "android")]
+    pub(crate) fn take_keypad_request(&mut self) -> bool {
+        core::mem::take(&mut self.keypad_requested)
+    }
+
     fn request_reset(&mut self) {
         if !self.is_vm_running() {
             return;
@@ -2202,117 +3238,256 @@ impl NativeShellApp {
             display.reset_requested = true;
         }
     }
+
+    /// Offers a file for the field `target` names and puts the choice there.
+    /// Returns whether the VM's settings changed, for the caller to apply with
+    /// its other edits. The host's dialog answers before this returns.
+    #[cfg(not(target_os = "android"))]
+    fn browse(&mut self, target: BrowseTarget) -> bool {
+        let chosen = match target {
+            BrowseTarget::NewDisk => {
+                let name = self
+                    .new_disk
+                    .as_ref()
+                    .map_or_else(|| "disk.img".to_owned(), |draft| draft.name.clone());
+                save_native_file(&name)
+            }
+            BrowseTarget::NewFloppy => save_native_file(FLOPPY_FILE_NAME),
+            BrowseTarget::HardDisk
+            | BrowseTarget::Cdrom
+            | BrowseTarget::Bios
+            | BrowseTarget::VgaBios => pick_native_file(),
+        };
+        chosen.is_some_and(|path| self.set_browsed_path(target, path))
+    }
+
+    /// Records a Browse press for the Android host, which answers it in a
+    /// later frame with a file browser drawn over the shell and hands the
+    /// choice back through [`Self::apply_browsed_path`]. Nothing changes yet.
+    #[cfg(target_os = "android")]
+    fn browse(&mut self, target: BrowseTarget) -> bool {
+        self.browse_request = Some(target);
+        false
+    }
+
+    /// Puts a chosen `path` into the field `target` names. Returns whether the
+    /// VM's settings changed: an attached disk, CD or ROM does; the path of an
+    /// image still to be created does not.
+    fn set_browsed_path(&mut self, target: BrowseTarget, path: PathBuf) -> bool {
+        let text = path.display().to_string();
+        match target {
+            BrowseTarget::HardDisk => {
+                self.settings.disk_path = text;
+                self.settings.disk_enabled = true;
+                true
+            }
+            BrowseTarget::Cdrom => {
+                self.settings.cdrom_path = text;
+                self.settings.cdrom_enabled = true;
+                true
+            }
+            BrowseTarget::Bios => {
+                self.settings.bios_path = text;
+                true
+            }
+            BrowseTarget::VgaBios => {
+                self.settings.vga_bios_path = text;
+                true
+            }
+            BrowseTarget::NewDisk => {
+                if let Some(draft) = self.new_disk.as_mut() {
+                    if let Some(folder) = path.parent() {
+                        draft.folder = DiskFolder::Chosen(folder.to_path_buf());
+                    }
+                    if let Some(name) = path.file_name() {
+                        draft.name = name.to_string_lossy().into_owned();
+                    }
+                    draft.conflict = None;
+                    draft.error = None;
+                }
+                false
+            }
+            BrowseTarget::NewFloppy => {
+                self.floppy_maker.path = text;
+                false
+            }
+        }
+    }
+
+    /// The Browse press waiting for the Android host, if any, with the path
+    /// its field holds now.
+    #[cfg(target_os = "android")]
+    pub(crate) fn take_browse_request(&mut self) -> Option<BrowseRequest> {
+        let target = self.browse_request.take()?;
+        let (current, save_name) = match target {
+            BrowseTarget::HardDisk => (PathBuf::from(self.settings.disk_path.trim()), None),
+            BrowseTarget::Cdrom => (PathBuf::from(self.settings.cdrom_path.trim()), None),
+            BrowseTarget::Bios => (PathBuf::from(self.settings.bios_path.trim()), None),
+            BrowseTarget::VgaBios => (PathBuf::from(self.settings.vga_bios_path.trim()), None),
+            BrowseTarget::NewDisk => {
+                // The browser opens in the sheet's folder, offering its name.
+                let current = self.new_disk.as_ref().map_or_else(PathBuf::new, |draft| {
+                    draft
+                        .folder
+                        .resolve()
+                        .unwrap_or_default()
+                        .join(draft.name.trim())
+                });
+                (current, Some("disk.img"))
+            }
+            BrowseTarget::NewFloppy => (
+                PathBuf::from(self.floppy_maker.path.trim()),
+                Some(FLOPPY_FILE_NAME),
+            ),
+        };
+        Some(BrowseRequest {
+            target,
+            current,
+            save_name,
+        })
+    }
+
+    /// Takes the Android host's answer to a Browse press and applies the VM's
+    /// settings as an edit on the page would.
+    #[cfg(target_os = "android")]
+    pub(crate) fn apply_browsed_path(&mut self, target: BrowseTarget, path: PathBuf) {
+        if self.set_browsed_path(target, path) {
+            if let Err(message) = self.apply_pending_settings() {
+                self.notify(ShellNotice::error(message));
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeShellApp {
+    /// One frame of the shell: the VM bar, the tree, the status strip and the
+    /// page — or, on a phone whose console shows a live machine, the guest
+    /// alone under its corner menu. A runtime error is taken first, so the
+    /// frame that raises it already shows it.
+    fn draw_shell(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.take_runtime_error_notice();
+        #[cfg(target_os = "android")]
+        {
+            self.emulator
+                .set_pointer_speed(self.settings.pointer_speed.factor());
+            if self.console_view() == crate::android_support::ConsoleView::FullScreen {
+                self.draw_full_screen_console(ui, frame);
+                return;
+            }
+            self.full_screen_menu_open = false;
+            self.emulator
+                .set_display_scale(rusty_box::gui::DisplayScale::Fit);
+        }
+
+        self.draw_vm_bar(ui);
+        if shell_should_draw_library(&self.chrome) {
+            self.draw_sidebar(ui);
+        }
+        self.draw_status_strip(ui);
+        self.draw_central(ui, frame);
+        self.draw_floppy_maker(ui.ctx());
+        draw_about_window(ui.ctx(), &mut self.chrome);
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl eframe::App for NativeShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.begin_frame();
         self.handle_native_dropped_files(ui.ctx());
-        #[cfg(target_os = "android")]
-        if self.chrome.selected_page == ShellPage::Console {
-            self.draw_android_console_header(ui);
-            self.draw_status_strip(ui);
-            self.draw_central(ui, frame);
-            draw_about_window(ui.ctx(), &mut self.chrome);
-            return;
-        }
+        self.draw_pending_confirm(ui.ctx());
+        self.draw_shell(ui, frame);
+        self.flush_when_window_focus_is_lost(ui.ctx());
+        self.flush_unsaved_when_idle(ui.ctx());
+    }
 
-        self.draw_menu_bar(ui);
-        self.draw_toolbar(ui);
-        if shell_should_draw_library(&self.chrome) {
-            self.draw_library(ui);
-        }
-        self.draw_status_strip(ui);
-        self.draw_central(ui, frame);
-        draw_about_window(ui.ctx(), &mut self.chrome);
+    /// eframe's save, made when the window is taken away from the app — on
+    /// Android `Event::Suspended`, from the activity's `surfaceDestroyed`,
+    /// the last call before the process can be killed — and at exit, and
+    /// only when eframe has a storage to save to: the Android runner opens
+    /// one so that the call is made (`runner::run_android_shell`). Every edit
+    /// still only in memory is written. Nothing is put in the storage: the VM
+    /// files are the shell's store.
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.flush_unsaved();
+    }
+
+    /// No periodic save: an edit is written when it ends, not on a timer that
+    /// would catch a field mid-edit.
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::MAX
+    }
+
+    /// egui's memory — window positions, what is open — is not kept between
+    /// runs.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
+    /// The window is closing: every edit still only in memory is written.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.flush_unsaved();
     }
 }
 
-impl DiskCreatorPanel {
+impl FloppyMaker {
+    /// The floppy maker's window, while `open`. Returns the image it made.
     #[cfg(feature = "gui-egui")]
-    fn ui_page(&mut self, ui: &mut egui::Ui) -> Option<CreatedImage> {
+    fn ui_window(&mut self, ctx: &egui::Context, open: &mut bool) -> Option<CreatedImage> {
         let mut created_image = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(12.0);
-            shell_card_frame().show(ui, |ui| {
+        egui::Window::new("Create floppy image")
+            .open(open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
                 ui.label(
-                    RichText::new("Disk Images")
-                        .size(22.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
+                    RichText::new("A VM cannot use a floppy yet; the image is only written.")
+                        .size(TEXT_SECONDARY)
+                        .color(TEXT_MUTED),
                 );
-                ui.label(
-                    RichText::new(
-                        "Create flat hard disks and floppy images using the bximage backend.",
-                    )
-                    .color(TEXT_MUTED),
-                );
-            });
-            ui.add_space(12.0);
-
-            shell_card_frame().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.kind, CreatorKind::HardDisk, "Hard Disk");
-                    ui.selectable_value(&mut self.kind, CreatorKind::Floppy, "Floppy");
-                });
-                ui.separator();
-
-                #[cfg(not(target_arch = "wasm32"))]
-                ui.horizontal(|ui| {
-                    ui.label("Path");
-                    ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(360.0));
-                    if ui.button("Browse...").clicked() {
-                        self.choose_native_image_path();
-                    }
-                });
-
-                #[cfg(target_arch = "wasm32")]
-                ui.horizontal(|ui| {
-                    ui.label("Filename");
-                    ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(300.0));
-                });
-
-                match self.kind {
-                    CreatorKind::HardDisk => {
-                        ui.horizontal(|ui| {
-                            ui.label("Size");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.hard_disk_size)
-                                    .hint_text("20G")
-                                    .desired_width(120.0),
-                            );
-                            ui.label(
-                                RichText::new("Examples: 10M, 512M, 20G, 512").color(TEXT_MUTED),
-                            );
+                field_row(ui, "Format", |ui| {
+                    egui::ComboBox::from_id_salt("Floppy format")
+                        .selected_text(self.floppy_format.friendly_label())
+                        .show_ui(ui, |ui| {
+                            for format in FloppyFormat::ALL {
+                                ui.selectable_value(
+                                    &mut self.floppy_format,
+                                    format,
+                                    format.friendly_label(),
+                                );
+                            }
                         });
-                    }
-                    CreatorKind::Floppy => {
-                        egui::ComboBox::from_label("Floppy format")
-                            .selected_text(self.floppy_format.friendly_label())
-                            .show_ui(ui, |ui| {
-                                for format in FloppyFormat::ALL {
-                                    ui.selectable_value(
-                                        &mut self.floppy_format,
-                                        format,
-                                        format.friendly_label(),
-                                    );
-                                }
-                            });
-                    }
-                }
+                });
 
                 #[cfg(not(target_arch = "wasm32"))]
-                ui.checkbox(&mut self.overwrite, "Overwrite existing file");
+                field_row(ui, "Save as", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.path)
+                            .desired_width(path_field_width(ui)),
+                    );
+                    if ui.button(BROWSE).clicked() {
+                        self.browse_requested = true;
+                    }
+                });
+                #[cfg(target_arch = "wasm32")]
+                field_row(ui, "File name", |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(240.0));
+                });
+                #[cfg(not(target_arch = "wasm32"))]
+                field_row(ui, "", |ui| {
+                    ui.checkbox(&mut self.overwrite, "Replace an existing file");
+                });
 
+                ui.add_space(SPACE_ITEM);
                 let action = if cfg!(target_arch = "wasm32") {
-                    "Download image"
+                    "Download floppy image"
                 } else {
-                    "Create image"
+                    "Create floppy image"
                 };
-                if ui.button(action).clicked() {
+                if ui.add(primary_button(action)).clicked() {
                     created_image = self.create_image();
                 }
-
                 if let Some(status) = &self.status {
                     match status {
                         CreatorStatus::Success(message) => {
@@ -2324,23 +3499,7 @@ impl DiskCreatorPanel {
                     }
                 }
             });
-        });
         created_image
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn default_image_filename(&self) -> &'static str {
-        match self.kind {
-            CreatorKind::HardDisk => "c.img",
-            CreatorKind::Floppy => "floppy.img",
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn choose_native_image_path(&mut self) {
-        if let Some(path) = save_native_file(self.default_image_filename()) {
-            self.path = path.display().to_string();
-        }
     }
 
     fn create_image(&mut self) -> Option<CreatedImage> {
@@ -2357,29 +3516,16 @@ impl DiskCreatorPanel {
             } else {
                 ExistingFilePolicy::CreateNew
             };
-            match self.kind {
-                CreatorKind::HardDisk => self.create_hard_disk(&path, policy),
-                CreatorKind::Floppy => create_floppy(&path, self.floppy_format, policy)
-                    .map_err(|error| error.to_string()),
-            }
+            create_floppy(&path, self.floppy_format, policy).map_err(|error| error.to_string())
         };
 
         #[cfg(target_arch = "wasm32")]
-        let result = match self.kind {
-            CreatorKind::HardDisk => ImageSize::parse(&self.hard_disk_size)
-                .map_err(|error| error.to_string())
-                .and_then(|size| create_browser_hard_disk_bytes(&path, size))
-                .and_then(|(bytes, created)| {
-                    download_bytes(&path, bytes)?;
-                    Ok(created)
-                }),
-            CreatorKind::Floppy => create_browser_floppy_bytes(&path, self.floppy_format).and_then(
-                |(bytes, created)| {
-                    download_bytes(&path, bytes)?;
-                    Ok(created)
-                },
-            ),
-        };
+        let result = create_browser_floppy_bytes(&path, self.floppy_format).and_then(
+            |(bytes, created)| {
+                download_bytes(&path, bytes)?;
+                Ok(created)
+            },
+        );
 
         match result {
             Ok(created) => {
@@ -2388,10 +3534,7 @@ impl DiskCreatorPanel {
                 ));
                 Some(CreatedImage {
                     path: std::path::PathBuf::from(path),
-                    kind: match self.kind {
-                        CreatorKind::HardDisk => CreatedImageKind::HardDisk,
-                        CreatorKind::Floppy => CreatedImageKind::Floppy,
-                    },
+                    kind: CreatedImageKind::Floppy,
                 })
             }
             Err(error) => {
@@ -2400,32 +3543,20 @@ impl DiskCreatorPanel {
             }
         }
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn create_hard_disk(
-        &self,
-        path: &str,
-        policy: ExistingFilePolicy,
-    ) -> Result<BxCreatedImage, String> {
-        let size = ImageSize::parse(&self.hard_disk_size).map_err(|error| error.to_string())?;
-        // Reject sizes whose physical geometry exceeds the emulator's cylinder limit
-        // (BOCHS_MAX_CYLINDERS, 2^24) *before* touching the filesystem. Everything below
-        // that — including 32 GiB+ — is a valid disk.
-        calculate_hard_disk_geometry(size, SectorSize::Bytes512).map_err(|error| error.to_string())?;
-
-        create_flat_hard_disk(path, size, SectorSize::Bytes512, policy)
-            .map_err(|error| error.to_string())
-    }
 }
 
 #[cfg(target_arch = "wasm32")]
 type WebEmulator =
-    Box<rusty_box::emulator::Emulator<'static, rusty_box::cpu::core_i7_skylake::Corei7SkylakeX>>;
+    Box<rusty_box::emulator::Emulator>;
 
 #[cfg(target_arch = "wasm32")]
 pub struct WebShellApp {
     chrome: ShellChrome,
-    disk_creator: DiskCreatorPanel,
+    floppy_maker: FloppyMaker,
+    /// The floppy maker's window is open.
+    floppy_maker_open: bool,
+    /// The Hard disk page's new-disk sheet, while it is open.
+    new_disk: Option<NewDiskDraft>,
     boot_mode: WebBootMode,
     emulator: Option<WebEmulator>,
     display: rusty_box::gui::shared_display::SharedDisplay,
@@ -2447,6 +3578,9 @@ pub struct WebShellApp {
     frame_count: u64,
     /// Previous PS/2 button bitmask for relative mouse forwarding.
     web_prev_mouse_buttons: u8,
+    /// The modifiers held at the end of the previous frame, so each Shift,
+    /// Ctrl and Alt edge is forwarded once.
+    web_held_modifiers: rusty_box::gui::host_input::HeldModifiers,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2457,14 +3591,11 @@ enum WebBootMode {
 }
 #[cfg(any(test, target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Assembling a machine is one blocking call, so the browser gets a frame to
+/// paint the notice before it runs.
 enum WebStartupStage {
-    CreateEmulator,
-    InitializeMemory,
-    LoadBios,
-    LoadVgaBios,
-    InitializeDevices,
-    AttachMedia,
-    StartEmulator,
+    Announce,
+    BuildMachine,
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -2482,7 +3613,8 @@ enum WebRuntimeState {
 enum WebConsoleSurface {
     Error,
     Starting,
-    Display,
+    /// The guest's display, drawn from this texture.
+    Display(egui::TextureId),
     Launcher,
     WaitingForDisplay,
 }
@@ -2490,7 +3622,6 @@ enum WebConsoleSurface {
 #[cfg(target_arch = "wasm32")]
 struct WebStartupState {
     stage: WebStartupStage,
-    emulator: Option<WebEmulator>,
     iso_data: Option<Vec<u8>>,
     memory_mib: usize,
     cpu_count: u32,
@@ -2500,8 +3631,7 @@ struct WebStartupState {
 impl WebStartupState {
     fn new(iso_data: Vec<u8>, memory_mib: usize, cpu_count: u32) -> Self {
         Self {
-            stage: WebStartupStage::CreateEmulator,
-            emulator: None,
+            stage: WebStartupStage::Announce,
             iso_data: Some(iso_data),
             memory_mib,
             cpu_count,
@@ -2550,29 +3680,28 @@ const WEB_FRAME_TIME_BUDGET_MS: u64 = 6;
 #[cfg(any(test, target_arch = "wasm32"))]
 const WEB_STARTUP_STEPS_PER_FRAME: usize = 1;
 
+/// What one startup frame does: paint its stage's notice and leave the next
+/// stage for the next frame, or build the machine, which ends the startup.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn web_next_startup_stage(stage: WebStartupStage) -> Option<WebStartupStage> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebStartupStep {
+    NextFrame(WebStartupStage),
+    Build,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_startup_step(stage: WebStartupStage) -> WebStartupStep {
     match stage {
-        WebStartupStage::CreateEmulator => Some(WebStartupStage::InitializeMemory),
-        WebStartupStage::InitializeMemory => Some(WebStartupStage::LoadBios),
-        WebStartupStage::LoadBios => Some(WebStartupStage::LoadVgaBios),
-        WebStartupStage::LoadVgaBios => Some(WebStartupStage::InitializeDevices),
-        WebStartupStage::InitializeDevices => Some(WebStartupStage::AttachMedia),
-        WebStartupStage::AttachMedia => Some(WebStartupStage::StartEmulator),
-        WebStartupStage::StartEmulator => None,
+        WebStartupStage::Announce => WebStartupStep::NextFrame(WebStartupStage::BuildMachine),
+        WebStartupStage::BuildMachine => WebStartupStep::Build,
     }
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
 fn web_startup_stage_label(stage: WebStartupStage) -> &'static str {
     match stage {
-        WebStartupStage::CreateEmulator => "Allocating guest memory",
-        WebStartupStage::InitializeMemory => "Allocating guest memory",
-        WebStartupStage::LoadBios => "Loading BIOS",
-        WebStartupStage::LoadVgaBios => "Loading VGA BIOS",
-        WebStartupStage::InitializeDevices => "Initializing devices",
-        WebStartupStage::AttachMedia => "Attaching boot media",
-        WebStartupStage::StartEmulator => "Starting CPU",
+        WebStartupStage::Announce => "Allocating guest memory",
+        WebStartupStage::BuildMachine => "Starting virtual machine",
     }
 }
 
@@ -2625,15 +3754,15 @@ fn web_runtime_state(
 fn web_console_surface(
     has_error: bool,
     startup_pending: bool,
-    has_texture: bool,
+    texture: Option<egui::TextureId>,
     launcher: bool,
 ) -> WebConsoleSurface {
     if has_error {
         WebConsoleSurface::Error
     } else if startup_pending {
         WebConsoleSurface::Starting
-    } else if has_texture {
-        WebConsoleSurface::Display
+    } else if let Some(texture) = texture {
+        WebConsoleSurface::Display(texture)
     } else if launcher {
         WebConsoleSurface::Launcher
     } else {
@@ -2656,19 +3785,16 @@ fn web_should_continue_emulator_frame(frame_executed: u64, elapsed: core::time::
 fn web_uploaded_media_config(
     memory_mib: usize,
     cpu_count: u32,
-) -> rusty_box::emulator::EmulatorConfig {
+) -> Result<rusty_box::emulator::EmulatorConfig, rusty_box::params::BxParamError> {
     let ram_size = memory_mib * 1024 * 1024;
-    rusty_box::emulator::EmulatorConfig {
-        guest_memory_size: ram_size,
-        host_memory_size: ram_size,
+    Ok(rusty_box::emulator::EmulatorConfig {
+        memory: rusty_box::emulator::MemorySize::bytes(ram_size),
         memory_block_size: 128 * 1024,
-        ips: 300_000_000,
+        ips: rusty_box::emulator::Ips::new(300_000_000),
         pci_enabled: true,
-        cpu_params: BxParams::default()
-            .with_topology(cpu_count, 1, 1)
-            .expect("web CPU count is range-checked by the launcher"),
+        cpu_params: BxParams::default().with_topology(cpu_count, 1, 1)?,
         ..Default::default()
-    }
+    })
 }
 #[cfg(target_arch = "wasm32")]
 const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
@@ -2689,7 +3815,9 @@ impl WebShellApp {
         )]);
         Self {
             chrome,
-            disk_creator: DiskCreatorPanel::default(),
+            floppy_maker: FloppyMaker::default(),
+            floppy_maker_open: false,
+            new_disk: None,
             boot_mode: WebBootMode::Launcher,
             emulator: None,
             display: rusty_box::gui::shared_display::SharedDisplay::new(),
@@ -2710,6 +3838,7 @@ impl WebShellApp {
             cached_ips: 0.0,
             frame_count: 0,
             web_prev_mouse_buttons: 0,
+            web_held_modifiers: rusty_box::gui::host_input::HeldModifiers::default(),
         }
     }
 
@@ -2721,7 +3850,7 @@ impl WebShellApp {
             self.web_cpu_count,
         ));
         self.boot_mode = WebBootMode::UploadedMedia;
-        self.chrome.selected_page = ShellPage::Console;
+        self.chrome.go_to(ShellPage::Console);
         self.initialized = false;
         self.init_error = None;
         self.shutdown = false;
@@ -2763,91 +3892,35 @@ impl WebShellApp {
             return Ok(None);
         };
 
-        match startup.stage {
-            WebStartupStage::CreateEmulator => {
-                let emu = rusty_box::emulator::Emulator::<
-                    rusty_box::cpu::core_i7_skylake::Corei7SkylakeX,
-                >::new(web_uploaded_media_config(
-                    startup.memory_mib,
-                    startup.cpu_count,
-                ))
-                .map_err(|error| format!("{error:?}"))?;
-                startup.emulator = Some(emu);
+        match web_startup_step(startup.stage) {
+            WebStartupStep::NextFrame(next) => {
+                startup.stage = next;
+                Ok(None)
             }
-            WebStartupStage::InitializeMemory => {
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before memory initialization")
-                    .init_memory_and_pc_system()
-                    .map_err(|error| format!("{error:?}"))?;
-            }
-            WebStartupStage::LoadBios => {
-                let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before BIOS load")
-                    .load_bios(BIOS_DATA, bios_load_addr)
-                    .map_err(|error| format!("{error:?}"))?;
-            }
-            WebStartupStage::LoadVgaBios => {
+            WebStartupStep::Build => {
+                let iso_data = startup.iso_data.take().ok_or_else(|| {
+                    "uploaded boot media was not available during startup".to_owned()
+                })?;
                 let mut vga_data = VGA_BIOS_DATA.to_vec();
                 let remainder = vga_data.len() % 512;
                 if remainder != 0 {
                     vga_data.resize(vga_data.len() + (512 - remainder), 0);
                 }
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before VGA BIOS load")
-                    .load_optional_rom(&vga_data, 0xC0000)
+                let cpu_count = startup.cpu_count;
+                let config = web_uploaded_media_config(startup.memory_mib, cpu_count)
+                    .map_err(|error| format!("Invalid CPU count {cpu_count}: {error:?}"))?;
+                use rusty_box::emulator::{AtaSlot, BootDevice, BootOrder, MachineBuilder};
+                let mut emu = MachineBuilder::new(config)
+                    .bios(BIOS_DATA)
+                    .vga_bios(&vga_data)
+                    .boot_order(BootOrder::just(BootDevice::Cdrom))
+                    .cdrom_bytes(AtaSlot::SECONDARY_MASTER, iso_data)
+                    .build()
                     .map_err(|error| format!("{error:?}"))?;
-            }
-            WebStartupStage::InitializeDevices => {
-                let emu = startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before device initialization");
-                emu.init_cpu_and_devices()
-                    .map_err(|error| format!("{error:?}"))?;
-                let ram_size = startup.memory_mib * 1024 * 1024;
-                let ext_kb = ((ram_size / 1024) - 1024).min(u16::MAX as usize);
-                emu.configure_memory_in_cmos(640, ext_kb as u16);
-                emu.configure_boot_sequence(3, 0, 0);
-            }
-            WebStartupStage::AttachMedia => {
-                let iso_data = startup.iso_data.take().ok_or_else(|| {
-                    "uploaded boot media was not available during startup".to_owned()
-                })?;
-                startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before media attach")
-                    .attach_cdrom_data(1, 0, iso_data);
-            }
-            WebStartupStage::StartEmulator => {
-                let emu = startup
-                    .emulator
-                    .as_mut()
-                    .expect("startup emulator should exist before emulator start");
-                emu.init_gui(0, &[]).map_err(|error| format!("{error:?}"))?;
-                emu.reset(rusty_box::cpu::ResetReason::Hardware)
-                    .map_err(|error| format!("{error:?}"))?;
-                emu.start();
-                emu.force_vga_update();
-                return Ok(Some(
-                    startup
-                        .emulator
-                        .take()
-                        .expect("startup emulator should exist after start"),
-                ));
+                emu.display().force_update();
+                Ok(Some(emu))
             }
         }
-
-        startup.stage = web_next_startup_stage(startup.stage)
-            .expect("startup stage should advance until StartEmulator");
-        Ok(None)
     }
 
     fn web_has_vm(&self) -> bool {
@@ -2859,9 +3932,9 @@ impl WebShellApp {
 
     fn handle_primary_toolbar_action(&mut self) {
         if self.web_has_vm() {
-            self.chrome.selected_page = ShellPage::Console;
+            self.chrome.go_to(ShellPage::Console);
         } else {
-            self.chrome.selected_page = ShellPage::Home;
+            self.chrome.go_to(ShellPage::Home);
             self.open_file_picker();
         }
     }
@@ -2982,14 +4055,22 @@ impl WebShellApp {
                     frame_executed,
                     web_time::Instant::now().duration_since(frame_start),
                 ) {
-                    match emu.step_batch(WEB_BATCH_SIZE) {
-                        Ok((executed, is_shutdown)) => {
-                            frame_executed = frame_executed.saturating_add(executed);
-                            if is_shutdown {
+                    match emu.step(RunBudget::Instructions(WEB_BATCH_SIZE)) {
+                        Ok(outcome) => {
+                            // Whichever unit the machine measures in: this
+                            // paces a frame, and a frame is over when enough
+                            // has happened, not when a particular kind has.
+                            frame_executed =
+                                frame_executed.saturating_add(outcome.progress.count());
+                            // Every terminal cause, not just a CPU shutdown: a
+                            // guest that powers itself off through ACPI leaves
+                            // the CPU healthy, so testing the CPU alone would
+                            // keep pumping a machine that asked to be off.
+                            if outcome.is_terminal() {
                                 self.shutdown = true;
                                 break;
                             }
-                            if executed == 0 {
+                            if outcome.progress.stalled() {
                                 break;
                             }
                         }
@@ -3001,33 +4082,26 @@ impl WebShellApp {
                     }
                 }
                 self.total_instructions = self.total_instructions.saturating_add(frame_executed);
-                emu.update_display(&mut self.display);
+                emu.display().render_into(&mut self.display);
             }
         }
     }
 
+    /// Forward this frame's keyboard to the guest, with the `Emulator` as the
+    /// sink (single-threaded wasm applies events immediately) — the same
+    /// translator the native shell feeds through its shared display. A widget
+    /// that has asked for the keyboard (the Library search box) keeps it, as
+    /// on native; the translator consumes what it forwards.
     fn process_keyboard(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
         let Some(emu) = &mut self.emulator else {
             return;
         };
-        ctx.input(|input| {
-            for event in &input.events {
-                match event {
-                    egui::Event::Text(text) => {
-                        for ch in text.chars() {
-                            for (key, pressed) in rusty_box::gui::char_to_bx_key_sequence(ch) {
-                                emu.send_key(key, pressed);
-                            }
-                        }
-                    }
-                    egui::Event::Key { key, pressed, .. } => {
-                        if let Some(bx_key) = egui_key_to_bx_key(*key) {
-                            emu.send_key(bx_key, *pressed);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        let held = self.web_held_modifiers;
+        self.web_held_modifiers = ctx.input_mut(|input| {
+            rusty_box::gui::host_input::translate_egui_keyboard(input, held, &mut **emu)
         });
     }
 
@@ -3114,8 +4188,12 @@ impl WebShellApp {
                             self.open_file_picker();
                             ui.close();
                         }
-                        if ui.button("Create Disk Image").clicked() {
-                            self.chrome.selected_page = ShellPage::Images;
+                        if ui.button("New Hard Disk…").clicked() {
+                            self.open_new_disk_sheet();
+                            ui.close();
+                        }
+                        if ui.button("Create floppy image…").clicked() {
+                            self.floppy_maker_open = true;
                             ui.close();
                         }
                     });
@@ -3144,7 +4222,6 @@ impl WebShellApp {
                     self.nav_button(ui, ShellPage::Home, "Home");
                     self.nav_button(ui, ShellPage::Console, "Console");
                     self.nav_button(ui, ShellPage::Hardware, "Hardware");
-                    self.nav_button(ui, ShellPage::Images, "Images");
                 });
             });
     }
@@ -3170,10 +4247,10 @@ impl WebShellApp {
                         self.reset_web_vm();
                     }
                     if ui.button("▣ Hardware").clicked() {
-                        self.chrome.selected_page = ShellPage::Hardware;
+                        self.chrome.go_to(ShellPage::Hardware);
                     }
-                    if ui.button("＋ New Image").clicked() {
-                        self.chrome.selected_page = ShellPage::Images;
+                    if ui.button("+ New Disk").clicked() {
+                        self.open_new_disk_sheet();
                     }
                     ui.checkbox(&mut self.chrome.show_library, "Library");
                     ui.checkbox(&mut self.chrome.show_serial, "Serial");
@@ -3206,16 +4283,16 @@ impl WebShellApp {
                         .hint_text("Type here to search"),
                 );
                 ui.add_space(8.0);
-                ui.label(RichText::new("▾ My Computer").color(TEXT_MUTED));
+                ui.label(RichText::new("⏷ My Computer").color(TEXT_MUTED));
                 let visible = self.chrome.visible_vm_indices();
                 for index in visible {
                     let clicked = {
                         let entry = &self.chrome.vm_library[index];
                         let selected = ui.selectable_label(
-                            self.chrome.selected_vm == index,
+                            self.chrome.selected_vm() == index,
                             format!("  ▣ {}", entry.name),
                         );
-                        if self.chrome.selected_vm == index {
+                        if self.chrome.selected_vm() == index {
                             ui.indent(format!("web_library_metadata_{index}"), |ui| {
                                 ui.label(metadata_text("Boot", &entry.boot));
                                 ui.label(metadata_text("Memory", &entry.memory));
@@ -3226,8 +4303,7 @@ impl WebShellApp {
                         selected.clicked()
                     };
                     if clicked {
-                        self.chrome.selected_vm = index;
-                        self.chrome.selected_page = ShellPage::Home;
+                        self.chrome.destination = Destination::new(index, ShellPage::Home);
                     }
                 }
             });
@@ -3279,14 +4355,43 @@ impl WebShellApp {
     fn draw_central(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG_BASE))
-            .show(ui, |ui| match self.chrome.selected_page {
+            .show(ui, |ui| match self.chrome.page() {
                 ShellPage::Home => self.draw_web_home_page(ui),
                 ShellPage::Console => self.draw_web_console_page(ui),
                 ShellPage::Hardware => self.draw_web_hardware_page(ui),
-                ShellPage::Images => {
-                    drop(self.disk_creator.ui_page(ui));
-                }
             });
+        if self.floppy_maker_open {
+            let mut open = true;
+            // The browser saves the floppy as a download; the shell has
+            // nothing to attach it to.
+            drop(self.floppy_maker.ui_window(ui.ctx(), &mut open));
+            self.floppy_maker_open = open;
+        }
+    }
+
+    /// Opens Hardware › Hard disk with a new-disk sheet.
+    fn open_new_disk_sheet(&mut self) {
+        self.chrome.go_to(ShellPage::Hardware);
+        self.chrome.selected_hardware = HardwareDevice::HardDisk;
+        self.new_disk = Some(NewDiskDraft::for_vm("Rusty Box"));
+    }
+
+    /// Builds the sheet's disk image in memory and saves it as a download.
+    fn download_new_disk(&mut self) {
+        let Some(draft) = self.new_disk.as_mut() else {
+            return;
+        };
+        let name = draft.name.trim().to_owned();
+        if name.is_empty() {
+            draft.error = Some("Give the disk a name.".to_owned());
+            return;
+        }
+        let downloaded = create_browser_hard_disk_bytes(&name, draft.size.image_size())
+            .and_then(|(bytes, _created)| download_bytes(&name, bytes));
+        match downloaded {
+            Ok(()) => self.new_disk = None,
+            Err(message) => draft.error = Some(message),
+        }
     }
 
     fn draw_web_home_page(&mut self, ui: &mut egui::Ui) {
@@ -3310,7 +4415,8 @@ impl WebShellApp {
                     &mut columns[0],
                     WEB_BOOT_MEDIA_ACTION_LABEL,
                     WEB_BOOT_MEDIA_ACTION_DESCRIPTION,
-                    ACCENT_BLUE,
+                    ACCENT_CYAN,
+                    ActionTileWeight::Primary,
                     || self.open_file_picker(),
                 );
                 disabled_tile(
@@ -3320,10 +4426,11 @@ impl WebShellApp {
                 );
                 action_tile(
                     &mut columns[2],
-                    "Create Disk Image",
-                    "Download bximage-compatible zero-filled images.",
+                    "New Hard Disk",
+                    "Download a blank disk image to keep.",
                     ACCENT_CYAN,
-                    || self.chrome.selected_page = ShellPage::Images,
+                    ActionTileWeight::Secondary,
+                    || self.open_new_disk_sheet(),
                 );
             });
         });
@@ -3333,7 +4440,7 @@ impl WebShellApp {
         match web_console_surface(
             self.init_error.is_some(),
             self.startup.is_some(),
-            self.texture.is_some(),
+            self.texture.as_ref().map(egui::TextureHandle::id),
             self.boot_mode == WebBootMode::Launcher,
         ) {
             WebConsoleSurface::Error => {
@@ -3357,7 +4464,7 @@ impl WebShellApp {
                     .startup
                     .as_ref()
                     .map(|startup| startup.stage)
-                    .unwrap_or(WebStartupStage::CreateEmulator);
+                    .unwrap_or(WebStartupStage::Announce);
                 ui.centered_and_justified(|ui| {
                     ui.vertical_centered(|ui| {
                         ui.spinner();
@@ -3373,11 +4480,7 @@ impl WebShellApp {
                     });
                 });
             }
-            WebConsoleSurface::Display => {
-                let texture = self
-                    .texture
-                    .as_ref()
-                    .expect("display surface requires a texture");
+            WebConsoleSurface::Display(texture) => {
                 let available = ui.available_size();
                 let tex_w = (self.display.fb_width.max(1)) as f32;
                 let tex_h = self.display.fb_height.max(1) as f32;
@@ -3395,7 +4498,7 @@ impl WebShellApp {
                 };
                 let mut image_rect = None;
                 ui.centered_and_justified(|ui| {
-                    let response = ui.image(egui::load::SizedTexture::new(texture.id(), size));
+                    let response = ui.image(egui::load::SizedTexture::new(texture, size));
                     image_rect = Some(response.rect);
                 });
                 if let Some(rect) = image_rect {
@@ -3469,7 +4572,7 @@ impl WebShellApp {
     fn draw_web_hardware_detail(&mut self, ui: &mut egui::Ui) {
         match self.chrome.selected_hardware {
             HardwareDevice::Memory => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Browser memory",
                     "Choose guest RAM before boot. Wasm32 can address up to 4 GiB, but allocation still depends on browser and device memory.",
@@ -3509,7 +4612,7 @@ impl WebShellApp {
                 }
             }
             HardwareDevice::Processors => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Cooperative CPU",
                     "Select virtual processors before boot. Browser execution still uses frame-sized batches to keep the UI responsive.",
@@ -3545,7 +4648,7 @@ impl WebShellApp {
                 }
             }
             HardwareDevice::Devices => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Browser devices",
                     "The browser build exposes a fixed virtual machine profile and does not persist hardware edits.",
@@ -3554,20 +4657,32 @@ impl WebShellApp {
                 detail_row(ui, "Boot media", "Upload on Home");
             }
             HardwareDevice::HardDisk => {
-                hardware_intro(
+                page_header(
                     ui,
-                    "Browser disk images",
-                    "The browser does not attach host disks. Use Images to download flat disk or floppy images.",
+                    "Hard disk",
+                    "The browser cannot attach a disk yet; a new disk downloads for you to keep.",
                 );
                 detail_row(ui, "Attached disk", "None");
-                detail_row(ui, "Disk images", "Download from Images page");
+                ui.add_space(SPACE_GROUP);
+                match self.new_disk.as_mut() {
+                    Some(draft) => match draw_new_disk_form(ui, draft) {
+                        NewDiskAction::None => {}
+                        NewDiskAction::Create => self.download_new_disk(),
+                        NewDiskAction::Cancel => self.new_disk = None,
+                    },
+                    None => {
+                        if ui.add(primary_button("+ New disk")).clicked() {
+                            self.open_new_disk_sheet();
+                        }
+                    }
+                }
             }
             HardwareDevice::CdDvd => {
                 let attached_media = match (&self.uploaded_media_name, self.uploaded_media_bytes) {
                     (Some(name), Some(byte_len)) => web_uploaded_media_summary(name, byte_len),
                     _ => "No uploaded media".to_owned(),
                 };
-                hardware_intro(
+                page_header(
                     ui,
                     "Uploaded boot media",
                     "Home opens a browser file picker and attaches the selected image as bootable CD/DVD media.",
@@ -3576,7 +4691,7 @@ impl WebShellApp {
                 detail_row(ui, "Boot mode", "Uploaded boot image");
             }
             HardwareDevice::Display => {
-                hardware_intro(
+                page_header(
                     ui,
                     "Canvas display",
                     "The VGA framebuffer is uploaded as an egui texture and scaled with nearest-neighbor filtering.",
@@ -3588,10 +4703,10 @@ impl WebShellApp {
     }
     fn nav_button(&mut self, ui: &mut egui::Ui, page: ShellPage, label: &str) {
         if ui
-            .selectable_label(self.chrome.selected_page == page, label)
+            .selectable_label(self.chrome.page() == page, label)
             .clicked()
         {
-            self.chrome.selected_page = page;
+            self.chrome.go_to(page);
         }
     }
 
@@ -3609,7 +4724,7 @@ impl WebShellApp {
         self.clear_uploaded_media_metadata();
         if self.boot_mode != WebBootMode::Launcher {
             self.boot_mode = WebBootMode::Launcher;
-            self.chrome.selected_page = ShellPage::Home;
+            self.chrome.go_to(ShellPage::Home);
         }
     }
 }
@@ -3640,7 +4755,7 @@ impl eframe::App for WebShellApp {
         if web_should_pump_emulator_this_frame(advanced_startup_this_frame, has_input_this_frame) {
             self.pump_emulator();
         }
-        if self.chrome.selected_page == ShellPage::Console {
+        if self.chrome.page() == ShellPage::Console {
             self.process_keyboard(ui.ctx());
         }
         self.update_ips();
@@ -3671,7 +4786,7 @@ fn draw_about_window(ctx: &egui::Context, chrome: &mut ShellChrome) {
         .resizable(false)
         .open(&mut chrome.show_about)
         .show(ctx, |ui| {
-            ui.label(RichText::new("Rusty Box Workstation").size(18.0).strong());
+            ui.label(RichText::new("Rusty Box Workstation").size(TEXT_TITLE).strong());
             ui.label("VMware-style shell for Rusty Box emulator sessions.");
             ui.separator();
             ui.label(metadata_text(
@@ -3687,18 +4802,6 @@ fn draw_about_window(ctx: &egui::Context, chrome: &mut ShellChrome) {
                 "upload ISO, download generated images",
             ));
         });
-}
-
-fn metadata_text(label: &str, value: &str) -> RichText {
-    RichText::new(format!("{label}: {value}"))
-        .size(11.0)
-        .color(TEXT_MUTED)
-}
-
-fn hardware_intro(ui: &mut egui::Ui, title: &str, body: &str) {
-    ui.label(RichText::new(title).size(16.0).strong().color(TEXT_PRIMARY));
-    ui.label(RichText::new(body).color(TEXT_MUTED));
-    ui.add_space(10.0);
 }
 
 #[cfg(target_os = "android")]
@@ -3815,17 +4918,48 @@ fn draw_u64_field(
     ui.add_enabled(editable, widget).changed()
 }
 
+/// A read-only fact on the pane's grid: the caption in the label column, the
+/// value beside it, wrapping so a long path stays inside the card.
 fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.horizontal_wrapped(|ui| {
-        ui.set_min_width(150.0);
-        ui.label(RichText::new(label).strong().color(TEXT_PRIMARY));
-        ui.label(RichText::new(value).color(TEXT_MUTED));
+    field_row(ui, label, |ui| {
+        ui.add(egui::Label::new(RichText::new(value).color(TEXT_PRIMARY)).wrap());
     });
 }
 
-fn status_dot(ui: &mut egui::Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 3.5, color);
+#[cfg(not(target_arch = "wasm32"))]
+fn cpu_count_label(cpus: u32) -> String {
+    if cpus == 1 {
+        "1 CPU".to_owned()
+    } else {
+        format!("{cpus} CPUs")
+    }
+}
+
+/// The badge for a runner status: cyan runs, amber waits, red has faulted, and
+/// idle is muted.
+#[cfg(not(target_arch = "wasm32"))]
+fn shell_state_badge(status: &ShellStatus, faulted: bool) -> ShellStateBadge {
+    if status.running {
+        ShellStateBadge {
+            label: "Running",
+            color: ACCENT_CYAN,
+        }
+    } else if status.start_pending {
+        ShellStateBadge {
+            label: "Starting",
+            color: ACCENT_AMBER,
+        }
+    } else if faulted {
+        ShellStateBadge {
+            label: "Faulted",
+            color: ACCENT_RED,
+        }
+    } else {
+        ShellStateBadge {
+            label: "Stopped",
+            color: TEXT_MUTED,
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3841,6 +4975,38 @@ fn format_ips_u32(ips: u32) -> String {
     }
 }
 
+/// The Console's powered-off display: the shell's copy on the shell's type
+/// scale, laid out as one centred block so the embedded view can place it as a
+/// single label. The `rusty_box` crate learns neither the palette nor that the
+/// power verbs live in a bar above the console.
+#[cfg(not(target_arch = "wasm32"))]
+fn powered_off_placeholder() -> rusty_box::gui::ConsolePlaceholder {
+    use egui::text::{LayoutJob, TextFormat};
+    use egui::{Align, FontId};
+
+    let mut job = LayoutJob::default();
+    job.halign = Align::Center;
+    job.append(
+        "This VM is powered off\n",
+        0.0,
+        TextFormat {
+            font_id: FontId::proportional(TEXT_TITLE),
+            color: TEXT_MUTED,
+            ..Default::default()
+        },
+    );
+    job.append(
+        "Power on in the bar above to start it.",
+        0.0,
+        TextFormat {
+            font_id: FontId::proportional(TEXT_CAPTION),
+            color: TEXT_MUTED,
+            ..Default::default()
+        },
+    );
+    rusty_box::gui::ConsolePlaceholder(job)
+}
+
 #[cfg(target_arch = "wasm32")]
 fn format_ips_f64(ips: f64) -> String {
     if ips >= 1_000_000.0 {
@@ -3852,49 +5018,6 @@ fn format_ips_f64(ips: f64) -> String {
     } else {
         "---".to_owned()
     }
-}
-
-fn action_tile(
-    ui: &mut egui::Ui,
-    title: &str,
-    body: &str,
-    accent: Color32,
-    on_click: impl FnMut(),
-) {
-    action_tile_enabled(ui, title, body, accent, true, on_click);
-}
-
-fn action_tile_enabled(
-    ui: &mut egui::Ui,
-    title: &str,
-    body: &str,
-    accent: Color32,
-    enabled: bool,
-    mut on_click: impl FnMut(),
-) {
-    shell_card_frame().show(ui, |ui| {
-        ui.set_min_height(150.0);
-        let title_color = if enabled { TEXT_PRIMARY } else { TEXT_MUTED };
-        ui.label(RichText::new(title).size(18.0).strong().color(title_color));
-        ui.label(RichText::new(body).color(TEXT_MUTED));
-        ui.add_space(16.0);
-        let button = egui::Button::new(RichText::new(title).strong())
-            .fill(Color32::from_rgb(0x1E, 0x35, 0x43))
-            .stroke(Stroke::new(1.0_f32, accent));
-        if ui.add_enabled(enabled, button).clicked() {
-            on_click();
-        }
-    });
-}
-
-#[cfg(target_arch = "wasm32")]
-fn disabled_tile(ui: &mut egui::Ui, title: &str, body: &str) {
-    shell_card_frame().show(ui, |ui| {
-        ui.set_min_height(150.0);
-        ui.label(RichText::new(title).size(18.0).strong().color(TEXT_MUTED));
-        ui.label(RichText::new(body).color(TEXT_MUTED));
-        ui.add_enabled(false, egui::Button::new("Unavailable"));
-    });
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -3936,7 +5059,7 @@ fn create_browser_hard_disk_bytes(
         .map_err(|error| error.to_string())?;
     if geometry.final_bytes > BROWSER_MAX_DOWNLOAD_BYTES {
         return Err(
-            "browser downloads are capped at 64 MiB; use the desktop app for sparse large disks"
+            "browser downloads are capped at 64 MiB; use the desktop app for larger disks"
                 .to_owned(),
         );
     }
@@ -3969,45 +5092,12 @@ fn js_error(error: wasm_bindgen::JsValue) -> String {
         .unwrap_or_else(|| "browser JavaScript operation failed".to_owned())
 }
 
-#[cfg(target_arch = "wasm32")]
-/// Map an egui key to the guest key it represents.
-///
-/// The guest key (not a raw scancode) is what gets delivered, so the keyboard
-/// controller can render it through the guest's active scancode set — Bochs
-/// keyboard.cc `gen_scancode`. Returns `None` for keys the guest has no
-/// equivalent for; printable characters arrive separately as `egui::Event::Text`.
-fn egui_key_to_bx_key(key: egui::Key) -> Option<rusty_box::iodev::scancodes::BxKey> {
-    use rusty_box::iodev::scancodes::BxKey;
-    Some(match key {
-        egui::Key::Escape => BxKey::Esc,
-        egui::Key::F1 => BxKey::F1,
-        egui::Key::F2 => BxKey::F2,
-        egui::Key::F3 => BxKey::F3,
-        egui::Key::F4 => BxKey::F4,
-        egui::Key::F5 => BxKey::F5,
-        egui::Key::F6 => BxKey::F6,
-        egui::Key::F7 => BxKey::F7,
-        egui::Key::F8 => BxKey::F8,
-        egui::Key::F9 => BxKey::F9,
-        egui::Key::F10 => BxKey::F10,
-        egui::Key::F11 => BxKey::F11,
-        egui::Key::F12 => BxKey::F12,
-        egui::Key::Enter => BxKey::Enter,
-        egui::Key::Tab => BxKey::Tab,
-        egui::Key::Backspace => BxKey::Backspace,
-        egui::Key::ArrowUp => BxKey::Up,
-        egui::Key::ArrowDown => BxKey::Down,
-        egui::Key::ArrowLeft => BxKey::Left,
-        egui::Key::ArrowRight => BxKey::Right,
-        egui::Key::Home => BxKey::Home,
-        egui::Key::End => BxKey::End,
-        egui::Key::PageUp => BxKey::PageUp,
-        egui::Key::PageDown => BxKey::PageDown,
-        egui::Key::Delete => BxKey::Delete,
-        egui::Key::Insert => BxKey::Insert,
-        egui::Key::Space => BxKey::Space,
-        _ => return None,
-    })
+/// What an engine is called in the window.
+fn engine_label(engine: crate::config::Engine) -> &'static str {
+    match engine {
+        crate::config::Engine::Interpreter => "Interpreter",
+        crate::config::Engine::Whp => "Windows Hypervisor",
+    }
 }
 
 #[cfg(test)]
@@ -4016,12 +5106,20 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// A path no other test of this process has: the clock alone is not
+    /// enough, since two tests can start within one of its ticks.
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after Unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("{name}-{}-{nanos}.img", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "{name}-{}-{nanos}-{sequence}.img",
+            std::process::id()
+        ))
     }
 
     fn remove_test_file(path: &std::path::Path) {
@@ -4040,6 +5138,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn test_resolved_config() -> crate::config::ResolvedConfig {
         crate::config::ResolvedConfig {
+            engine: crate::config::Engine::Interpreter,
+            cpu_capabilities: crate::config::CpuCapabilities::Preset,
             memory_mib: 256,
             host_memory_mib: 256,
             memory_block_kib: 128,
@@ -4062,14 +5162,77 @@ mod tests {
             }),
             cpu_params: BxParams::default(),
             log_level: crate::args::LogLevel::Warn,
-            config_path: None,
             vga_mode: None,
             pci_vga: false,
+            console_stretch: false,
+            pointer_speed: crate::config::PointerSpeed::DEFAULT,
+        }
+    }
+
+    /// A scratch library folder, removed when the test ends.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct ScratchLibrary {
+        dir: std::path::PathBuf,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl ScratchLibrary {
+        fn new() -> Self {
+            let dir = unique_temp_path("rusty-box-gui-library").with_extension("");
+            fs::create_dir_all(&dir).expect("create scratch library");
+            Self { dir }
+        }
+
+        fn library(&self) -> crate::library::VmLibrary {
+            crate::library::VmLibrary::open(self.dir.clone()).expect("open scratch library")
+        }
+
+        fn toml_files(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(&self.dir)
+                .expect("list scratch library")
+                .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".toml"))
+                .collect();
+            names.sort();
+            names
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    impl Drop for ScratchLibrary {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.dir) {
+                eprintln!("could not remove {}: {error}", self.dir.display());
+            }
+        }
+    }
+
+    /// A shell opened the way the command line opens it: `test_resolved_config()`
+    /// as the temporary launch VM over an empty scratch library.
+    #[cfg(not(target_arch = "wasm32"))]
     fn native_test_app() -> (
+        NativeShellApp,
+        std::sync::mpsc::Receiver<NativeEmulatorCommand>,
+        ScratchLibrary,
+    ) {
+        let scratch = ScratchLibrary::new();
+        let launch = crate::runner::LaunchVm {
+            name: "Rusty Box".to_owned(),
+            config: test_resolved_config(),
+            source: crate::runner::LaunchSource::Flags,
+        };
+        let (app, command_rx) = native_test_app_over(&scratch, Some(launch), None);
+        (app, command_rx, scratch)
+    }
+
+    /// A shell opened over `scratch`, on the library it holds: `launch` as
+    /// the temporary VM when there is one, and `notice` as the start's message.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_test_app_over(
+        scratch: &ScratchLibrary,
+        launch: Option<crate::runner::LaunchVm>,
+        notice: Option<String>,
+    ) -> (
         NativeShellApp,
         std::sync::mpsc::Receiver<NativeEmulatorCommand>,
     ) {
@@ -4077,33 +5240,1315 @@ mod tests {
             rusty_box::gui::shared_display::SharedDisplay::new(),
         ));
         let (command_tx, command_rx) = std::sync::mpsc::channel();
-        let profile = NativeVmProfile::from_config("Rusty Box", test_resolved_config());
-        let vm_info = profile.vm_info();
-        let settings = profile.settings.clone();
-        let config = profile.config.clone();
-        let chrome = ShellChrome::with_library(vec![profile.library_entry()]);
-
+        let emulator = rusty_box::gui::RustyBoxApp::new_embedded(Arc::clone(&shared));
+        let start = crate::runner::ShellStart {
+            library: scratch.library(),
+            opening: launch.map_or(
+                crate::runner::ShellOpening::LastShown,
+                crate::runner::ShellOpening::Launch,
+            ),
+            notice,
+        };
         (
-            NativeShellApp {
-                emulator: rusty_box::gui::RustyBoxApp::new_embedded(Arc::clone(&shared)),
-                chrome,
-                disk_creator: DiskCreatorPanel::default(),
-                profiles: vec![profile],
-                config,
-                settings,
-                vm_info,
-                command_tx,
-                shared,
-                shell_notice: None,
-            },
+            NativeShellApp::with_emulator(emulator, shared, command_tx, start),
             command_rx,
         )
+    }
+
+    /// A shell opened over a scratch library holding one VM, "Alpine", and
+    /// no launch VM, so the library VM is the one selected.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn library_app() -> (
+        NativeShellApp,
+        std::sync::mpsc::Receiver<NativeEmulatorCommand>,
+        ScratchLibrary,
+    ) {
+        let scratch = ScratchLibrary::new();
+        scratch.library().create("Alpine", &test_resolved_config()).expect("seed");
+        let (app, command_rx) = native_test_app_over(&scratch, None, None);
+        (app, command_rx, scratch)
+    }
+
+    /// What the start could not do is the first thing the shell shows.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_start_notice_opens_the_shell_with_that_warning() {
+        let scratch = ScratchLibrary::new();
+
+        let (app, _command_rx) = native_test_app_over(
+            &scratch,
+            None,
+            Some("The VM bundled in C:\\app was not imported: bad file".to_owned()),
+        );
+
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::warning(
+                "The VM bundled in C:\\app was not imported: bad file"
+            ))
+        );
+        assert_eq!(app.profiles[0].name, "New VM");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_launch_vm_comes_first_selected_and_unsaved() {
+        let scratch = ScratchLibrary::new();
+        scratch.library().create("Win 7", &test_resolved_config()).expect("seed");
+        let launch = crate::runner::LaunchVm {
+            name: "Command line".to_owned(),
+            config: test_resolved_config(),
+            source: crate::runner::LaunchSource::Flags,
+        };
+
+        let (app, _command_rx) = native_test_app_over(&scratch, Some(launch), None);
+
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(app.chrome.selected_vm(), 0);
+        assert_eq!(app.profiles[0].origin, VmOrigin::Launch);
+        assert_eq!(app.chrome.vm_library[0].source, crate::shell::sidebar::EntrySource::Unsaved);
+        assert_eq!(app.chrome.vm_library[1].name, "Win 7");
+        assert_eq!(app.chrome.vm_library[1].source, crate::shell::sidebar::EntrySource::Saved);
+        // Opening the shell writes nothing: the launch VM stays in memory.
+        assert_eq!(scratch.toml_files(), ["win-7.toml"]);
+    }
+
+    /// The library VM the command line named by its file is the one shown,
+    /// over the VM shown last, and no temporary VM is listed beside it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_library_vm_named_on_the_command_line_is_selected_with_no_temporary_vm() {
+        let scratch = ScratchLibrary::new();
+        let library = scratch.library();
+        let alpha = library.create("Alpha", &test_resolved_config()).expect("alpha");
+        let beta = library.create("Beta", &test_resolved_config()).expect("beta");
+        library.remember_selected(&alpha).expect("remember");
+        let start = crate::runner::ShellStart {
+            library,
+            opening: crate::runner::ShellOpening::LibraryVm(beta.clone()),
+            notice: None,
+        };
+
+        let opening = OpeningList::from_start(&start);
+
+        assert_eq!(opening.profiles.len(), 2);
+        assert!(opening
+            .profiles
+            .iter()
+            .all(|profile| matches!(profile.origin, VmOrigin::Library(_))));
+        assert_eq!(opening.profiles[opening.selected].origin, VmOrigin::Library(beta));
+        assert_eq!(opening.profiles[opening.selected].name, "Beta");
+        assert_eq!(scratch.toml_files(), ["alpha.toml", "beta.toml"]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn without_a_launch_vm_the_shell_opens_on_the_vm_shown_last() {
+        let scratch = ScratchLibrary::new();
+        let library = scratch.library();
+        library.create("Alpha", &test_resolved_config()).expect("alpha");
+        let beta = library.create("Beta", &test_resolved_config()).expect("beta");
+        library.remember_selected(&beta).expect("remember");
+
+        let (app, _command_rx) = native_test_app_over(&scratch, None, None);
+
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(app.chrome.selected_vm(), 1);
+        assert_eq!(app.vm_info.name, "Beta");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn with_nothing_to_show_the_shell_opens_on_a_blank_new_vm() {
+        let scratch = ScratchLibrary::new();
+
+        let (app, _command_rx) = native_test_app_over(&scratch, None, None);
+
+        assert_eq!(app.profiles.len(), 1);
+        assert_eq!(app.profiles[0].name, "New VM");
+        assert_eq!(app.profiles[0].origin, VmOrigin::Launch);
+        assert_eq!(app.config, crate::config::blank_config());
+        // The blank VM is in memory only; the library is as empty as it was.
+        assert_eq!(scratch.toml_files(), Vec::<String>::new());
+    }
+
+    /// A library folder that cannot be read does not refuse the shell: it
+    /// opens on the blank VM, with the error where the user can see it, ahead
+    /// of any message the start carried.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_library_that_cannot_be_read_opens_on_a_blank_vm_with_a_notice() {
+        let scratch = ScratchLibrary::new();
+        let library = scratch.library();
+        fs::remove_dir_all(&scratch.dir).expect("remove the folder under the library");
+        let start = crate::runner::ShellStart {
+            library,
+            opening: crate::runner::ShellOpening::LastShown,
+            notice: Some("a bundled VM was not imported".to_owned()),
+        };
+
+        let opening = OpeningList::from_start(&start);
+
+        assert_eq!(opening.profiles.len(), 1);
+        assert_eq!(opening.profiles[0].name, "New VM");
+        assert!(opening.broken.is_empty());
+        assert!(
+            matches!(
+                &opening.notice,
+                Some(notice) if notice.kind == ShellNoticeKind::Error
+                    && notice.message.contains("failed to read the VM library")
+            ),
+            "notice: {:?}",
+            opening.notice
+        );
+        fs::create_dir_all(&scratch.dir).expect("restore the folder for the scratch cleanup");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_library_file_that_does_not_load_is_listed_as_broken() {
+        let scratch = ScratchLibrary::new();
+        fs::write(scratch.dir.join("bad.toml"), "memory_mib = [").expect("write");
+
+        let (app, _command_rx) = native_test_app_over(&scratch, None, None);
+
+        assert_eq!(app.broken_files.len(), 1);
+        assert_eq!(app.broken_files[0].path, scratch.dir.join("bad.toml"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_applied_edit_is_written_by_the_next_flush() {
+        let (mut app, _command_rx, scratch) = library_app();
+
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+
+        assert_eq!(app.profiles[0].save_state, SaveState::Unsaved);
+        assert_eq!(scratch.library().load().expect("reload").vms[0].config.memory_mib, 256);
+
+        app.flush_unsaved();
+
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+        assert_eq!(scratch.library().load().expect("reload").vms[0].config.memory_mib, 512);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_renamed_vm_keeps_its_file() {
+        let (mut app, _command_rx, scratch) = library_app();
+
+        app.profiles[0].name = "Alpine edge".to_owned();
+        app.apply_pending_settings().unwrap();
+        app.flush_unsaved();
+
+        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
+        assert_eq!(scratch.library().load().expect("reload").vms[0].name, "Alpine edge");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn edits_to_the_launch_vm_write_nothing() {
+        let (mut app, _command_rx, scratch) = native_test_app();
+
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        app.flush_unsaved();
+
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+        assert!(scratch.toml_files().is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keeping_the_launch_vm_puts_it_in_the_library() {
+        let (mut app, _command_rx, scratch) = native_test_app();
+
+        app.keep_selected_in_library();
+
+        assert_eq!(scratch.toml_files(), ["rusty-box.toml"]);
+        assert!(matches!(app.profiles[0].origin, VmOrigin::Library(_)));
+        assert_eq!(app.chrome.vm_library[0].source, crate::shell::sidebar::EntrySource::Saved);
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::info("Saved Rusty Box to the VM library."))
+        );
+        app.settings.memory_mib = 768;
+        app.apply_pending_settings().unwrap();
+        app.flush_unsaved();
+        assert_eq!(scratch.library().load().expect("reload").vms[0].config.memory_mib, 768);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_new_vm_is_a_library_copy_of_the_selected_one() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 384;
+        app.apply_pending_settings().unwrap();
+
+        app.add_vm_copying_selected();
+
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(app.chrome.selected_vm(), 1);
+        assert_eq!(app.vm_info.name, "Alpine copy");
+        assert_eq!(scratch.toml_files(), ["alpine-copy.toml", "alpine.toml"]);
+        let reloaded = scratch.library().load().expect("reload");
+        assert!(reloaded.vms.iter().all(|vm| vm.config.memory_mib == 384));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deleting_a_vm_asks_first_and_then_removes_its_file() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+
+        app.request_delete_selected();
+        assert_eq!(
+            app.pending_confirm,
+            Some(PendingConfirm::DeleteVm {
+                index: 1,
+                origin: VmOrigin::Library(crate::library::VmStem::parse("alpine-copy").unwrap()),
+                name: "Alpine copy".to_owned(),
+            })
+        );
+        assert_eq!(scratch.toml_files().len(), 2);
+
+        app.confirm_pending();
+
+        assert_eq!(app.pending_confirm, None);
+        assert_eq!(app.profiles.len(), 1);
+        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_cancelled_delete_keeps_the_vm() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+
+        app.request_delete_selected();
+        app.cancel_pending();
+
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(scratch.toml_files().len(), 2);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn selecting_a_vm_remembers_it_for_the_next_launch() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+
+        app.select_profile(0);
+
+        let reloaded = scratch.library().load().expect("reload");
+        let alpine = reloaded
+            .vms
+            .iter()
+            .find(|vm| vm.name == "Alpine")
+            .expect("the seeded VM")
+            .stem
+            .clone();
+        assert_eq!(alpine.as_str(), "alpine");
+        assert_eq!(scratch.library().last_selected(), Some(alpine));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_broken_file_is_deleted_only_after_confirmation() {
+        let scratch = ScratchLibrary::new();
+        let bad = scratch.dir.join("bad.toml");
+        fs::write(&bad, "memory_mib = [").expect("write");
+        let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+
+        app.pending_confirm = Some(PendingConfirm::DeleteBroken(bad.clone()));
+        assert!(bad.exists());
+        app.confirm_pending();
+
+        assert!(!bad.exists());
+        assert!(app.broken_files.is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn selecting_another_vm_writes_the_one_being_left() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+        app.settings.memory_mib = 640;
+        app.apply_pending_settings().unwrap();
+
+        app.select_profile(0);
+
+        let reloaded = scratch.library().load().expect("reload");
+        let copy = reloaded
+            .vms
+            .iter()
+            .find(|vm| vm.name == "Alpine copy")
+            .expect("the copy");
+        assert_eq!(copy.config.memory_mib, 640);
+        assert!(app
+            .profiles
+            .iter()
+            .all(|profile| profile.save_state == SaveState::Saved));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_failed_flush_keeps_the_vm_unsaved_and_shows_the_error() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let file = scratch.dir.join("alpine.toml");
+        fs::remove_file(&file).expect("remove");
+        fs::create_dir(&file).expect("a folder in the file's way");
+
+        app.flush_unsaved();
+
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
+        assert!(
+            matches!(&app.shell_notice, Some(notice) if notice.kind == ShellNoticeKind::Error),
+            "notice: {:?}",
+            app.shell_notice
+        );
+
+        fs::remove_dir(&file).expect("clear the way");
+        app.flush_unsaved();
+
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+        assert_eq!(scratch.library().load().expect("reload").vms[0].config.memory_mib, 512);
+    }
+
+    /// The memory the seeded VM's file holds, reloaded from the folder.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn memory_in_file(scratch: &ScratchLibrary) -> u32 {
+        scratch.library().load().expect("reload").vms[0].config.memory_mib
+    }
+
+    /// Runs `body` inside one egui pass with nothing drawn, the way the
+    /// frame-end flush runs inside `ui`. Nothing is drawn, so the pass paints
+    /// nothing; that is all its output is checked for.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn in_a_pass(ctx: &egui::Context, body: impl FnOnce(&egui::Context)) {
+        in_a_pass_with(ctx, egui::RawInput::default(), body);
+    }
+
+    /// `in_a_pass` over the frame's `input`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn in_a_pass_with(
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        body: impl FnOnce(&egui::Context),
+    ) {
+        ctx.begin_pass(input);
+        body(ctx);
+        let output = ctx.end_pass();
+        assert!(output.shapes.is_empty(), "a pass with nothing drawn paints nothing");
+    }
+
+    /// The frame on which the window went behind another, as egui-winit
+    /// reports it: on Android, the activity leaving the foreground.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn window_focus_lost() -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::WindowFocused(false)],
+            focused: false,
+            ..egui::RawInput::default()
+        }
+    }
+
+    /// eframe's storage as the shell sees it: nothing is ever put in it, so
+    /// it keeps nothing. `save` is the shell's hook for the activity's window
+    /// being taken away, not a store.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct NoStore;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl eframe::Storage for NoStore {
+        fn get_string(&self, _key: &str) -> Option<String> {
+            None
+        }
+
+        fn set_string(&mut self, _key: &str, _value: String) {}
+
+        fn remove_string(&mut self, _key: &str) {}
+
+        fn flush(&mut self) {}
+    }
+
+    /// Every entry of the scratch folder by name, dot files included.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn all_entries(scratch: &ScratchLibrary) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(&scratch.dir)
+            .expect("list scratch library")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_failed_write_waits_for_the_next_action() {
+        let (mut app, command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let file = scratch.dir.join("alpine.toml");
+        fs::remove_file(&file).expect("remove");
+        fs::create_dir(&file).expect("a folder in the file's way");
+        app.flush_unsaved();
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
+        assert!(
+            matches!(&app.shell_notice, Some(notice) if notice.kind == ShellNoticeKind::Error),
+            "notice: {:?}",
+            app.shell_notice
+        );
+
+        // Closed by the user; an idle frame neither tries again nor reopens it.
+        app.shell_notice = None;
+        let ctx = egui::Context::default();
+        in_a_pass(&ctx, |ctx| app.flush_unsaved_when_idle(ctx));
+
+        assert_eq!(app.shell_notice, None);
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
+        assert_eq!(all_entries(&scratch), ["alpine.toml"]);
+
+        // An action tries again: still blocked, so the error is raised once more.
+        app.select_profile(0);
+
+        assert!(
+            matches!(&app.shell_notice, Some(notice) if notice.kind == ShellNoticeKind::Error),
+            "notice: {:?}",
+            app.shell_notice
+        );
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
+
+        // The way cleared, the next action writes it.
+        fs::remove_dir(&file).expect("clear the way");
+        app.start_vm();
+
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+        assert_eq!(memory_in_file(&scratch), 512);
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(NativeEmulatorCommand::Start(config)) if config.memory_mib == 512
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_summary_caption_says_whether_the_vm_is_saved() {
+        let (mut app, _command_rx, scratch) = library_app();
+        let file = scratch.dir.join("alpine.toml");
+
+        assert_eq!(
+            app.summary_caption(),
+            format!("Saved automatically to {}", file.display())
+        );
+
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+
+        assert_eq!(
+            app.summary_caption(),
+            format!("Saving to {} when the edit ends", file.display())
+        );
+
+        fs::remove_file(&file).expect("remove");
+        fs::create_dir(&file).expect("a folder in the file's way");
+        app.flush_unsaved();
+
+        assert_eq!(
+            app.summary_caption(),
+            format!(
+                "Not saved: the last write to {} failed. \
+                 It is tried again at the next change, selection or power-on.",
+                file.display()
+            )
+        );
+
+        let (launch_app, _launch_rx, _launch_scratch) = native_test_app();
+        assert_eq!(
+            launch_app.summary_caption(),
+            "Temporary VM. Not saved until it is kept in the library."
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_vm_whose_write_failed_is_marked_save_failed_in_the_sidebar() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        assert_eq!(app.chrome.vm_library[1].row_label(), "Alpine copy");
+        let copy_file = scratch.dir.join("alpine-copy.toml");
+        fs::remove_file(&copy_file).expect("remove");
+        fs::create_dir(&copy_file).expect("a folder in the file's way");
+
+        app.select_profile(0);
+
+        assert_eq!(app.profiles[1].save_state, SaveState::WriteFailed);
+        assert_eq!(
+            app.chrome.vm_library[1].source,
+            crate::shell::sidebar::EntrySource::WriteFailed
+        );
+        assert_eq!(app.chrome.vm_library[1].row_label(), "Alpine copy (save failed)");
+
+        fs::remove_dir(&copy_file).expect("clear the way");
+        app.flush_unsaved();
+
+        assert_eq!(app.profiles[1].save_state, SaveState::Saved);
+        assert_eq!(app.chrome.vm_library[1].row_label(), "Alpine copy");
+    }
+
+    /// Appends a line to the file at `path`, the way a hand edit outside the
+    /// shell would, and returns what the file then holds.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hand_edit(path: &std::path::Path) -> String {
+        let hand_edited = format!(
+            "{}\n# edited outside the shell\n",
+            fs::read_to_string(path).expect("read")
+        );
+        fs::write(path, &hand_edited).expect("write");
+        hand_edited
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_unchanged_vm_is_not_rewritten_by_a_selection_or_a_power_on() {
+        let (mut app, command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+        let copy_file = scratch.dir.join("alpine-copy.toml");
+        let copy_hand_edited = hand_edit(&copy_file);
+
+        app.select_profile(0);
+
+        assert_eq!(fs::read_to_string(&copy_file).expect("read"), copy_hand_edited);
+
+        let file = scratch.dir.join("alpine.toml");
+        let hand_edited = hand_edit(&file);
+
+        app.start_vm();
+
+        assert_eq!(fs::read_to_string(&file).expect("read"), hand_edited);
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(NativeEmulatorCommand::Start(_))
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_idle_flush_waits_for_focus_and_drags_to_end() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let ctx = egui::Context::default();
+        let field = egui::Id::new("field");
+
+        in_a_pass(&ctx, |ctx| {
+            ctx.memory_mut(|memory| memory.request_focus(field));
+            app.flush_unsaved_when_idle(ctx);
+        });
+        assert_eq!(memory_in_file(&scratch), 256);
+
+        in_a_pass(&ctx, |ctx| {
+            ctx.memory_mut(|memory| memory.surrender_focus(field));
+            ctx.set_dragged_id(field);
+            app.flush_unsaved_when_idle(ctx);
+        });
+        assert_eq!(memory_in_file(&scratch), 256);
+
+        in_a_pass(&ctx, |ctx| {
+            ctx.stop_dragging();
+            app.flush_unsaved_when_idle(ctx);
+        });
+        assert_eq!(memory_in_file(&scratch), 512);
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+    }
+
+    /// An edit in a field that still has focus reaches its file on the frame
+    /// the window goes behind another — on a phone, the activity leaving the
+    /// foreground — without waiting for the field to be left; a window that
+    /// keeps focus waits as before.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_edit_still_being_typed_is_written_when_the_window_loses_focus() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let ctx = egui::Context::default();
+        let field = egui::Id::new("field");
+
+        in_a_pass(&ctx, |ctx| {
+            ctx.memory_mut(|memory| memory.request_focus(field));
+            app.flush_when_window_focus_is_lost(ctx);
+            app.flush_unsaved_when_idle(ctx);
+        });
+        assert_eq!(memory_in_file(&scratch), 256);
+        assert_eq!(app.profiles[0].save_state, SaveState::Unsaved);
+
+        in_a_pass_with(&ctx, window_focus_lost(), |ctx| {
+            ctx.memory_mut(|memory| memory.request_focus(field));
+            app.flush_when_window_focus_is_lost(ctx);
+        });
+        assert_eq!(memory_in_file(&scratch), 512);
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+    }
+
+    /// A write that failed is tried again by the loss of focus, as by any
+    /// action, and by nothing while the window stays unfocused.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn losing_focus_retries_a_failed_write_once() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let file = scratch.dir.join("alpine.toml");
+        fs::remove_file(&file).expect("remove");
+        fs::create_dir(&file).expect("a folder in the file's way");
+        app.flush_unsaved();
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
+        app.shell_notice = None;
+        let ctx = egui::Context::default();
+
+        // Unfocused frames after the loss neither try again nor say anything.
+        in_a_pass_with(
+            &ctx,
+            egui::RawInput {
+                focused: false,
+                ..egui::RawInput::default()
+            },
+            |ctx| app.flush_when_window_focus_is_lost(ctx),
+        );
+        assert_eq!(app.profiles[0].save_state, SaveState::WriteFailed);
+        assert_eq!(app.shell_notice, None);
+
+        // The way cleared, the next loss of focus writes it.
+        fs::remove_dir(&file).expect("clear the way");
+        in_a_pass_with(&ctx, window_focus_lost(), |ctx| {
+            app.flush_when_window_focus_is_lost(ctx);
+        });
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+        assert_eq!(memory_in_file(&scratch), 512);
+    }
+
+    /// eframe calls `save` when the activity's window is taken away, which
+    /// on a phone is the last chance before the process can be killed: the
+    /// edits still in memory reach their files then, and nothing else is
+    /// persisted — no egui memory, and no periodic save that would write a
+    /// field mid-edit.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_activity_whose_window_is_taken_away_writes_its_edits() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        assert_eq!(memory_in_file(&scratch), 256);
+
+        eframe::App::save(&mut app, &mut NoStore);
+
+        assert_eq!(memory_in_file(&scratch), 512);
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+        assert!(!eframe::App::persist_egui_memory(&app));
+        assert_eq!(
+            eframe::App::auto_save_interval(&app),
+            std::time::Duration::MAX
+        );
+    }
+
+    /// A phone draws the notices that report something that did not happen —
+    /// a launch whose seed was not finished, a save that did not reach its
+    /// file — and not the ones that report something that did.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_phone_shows_what_did_not_happen_and_not_what_did() {
+        let scratch = ScratchLibrary::new();
+        let (app, _command_rx) = native_test_app_over(
+            &scratch,
+            None,
+            Some("The settings saved in /data/rusty_box.toml were not imported: bad file.".to_owned()),
+        );
+        let start = app.shell_notice.clone().expect("the start's notice");
+        assert!(phone_shows_notice(start.kind), "hidden on a phone: {start:?}");
+
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let file = scratch.dir.join("alpine.toml");
+        fs::remove_file(&file).expect("remove");
+        fs::create_dir(&file).expect("a folder in the file's way");
+        app.flush_unsaved();
+        let failed = app.shell_notice.clone().expect("the failed write's notice");
+        assert_eq!(failed.kind, ShellNoticeKind::Error);
+        assert!(phone_shows_notice(failed.kind), "hidden on a phone: {failed:?}");
+
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        app.keep_selected_in_library();
+        let kept = app.shell_notice.clone().expect("the kept VM's notice");
+        assert_eq!(kept.kind, ShellNoticeKind::Info);
+        assert!(!phone_shows_notice(kept.kind), "shown on a phone: {kept:?}");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_writes_the_vm_first() {
+        let (mut app, command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+
+        app.start_vm();
+
+        assert_eq!(memory_in_file(&scratch), 512);
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(NativeEmulatorCommand::Start(config)) if config.memory_mib == 512
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn closing_the_window_writes_the_unsaved_vm() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+
+        eframe::App::on_exit(&mut app, None);
+
+        assert_eq!(memory_in_file(&scratch), 512);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_deleted_vm_leaves_no_unsaved_edit_behind() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        assert_eq!(app.profiles[1].save_state, SaveState::Unsaved);
+
+        app.request_delete_selected();
+        app.confirm_pending();
+        app.flush_unsaved();
+
+        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_flush_error_outranks_the_remember_warning_of_the_same_selection() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+        app.settings.memory_mib = 512;
+        app.apply_pending_settings().unwrap();
+        let copy_file = scratch.dir.join("alpine-copy.toml");
+        fs::remove_file(&copy_file).expect("remove");
+        fs::create_dir(&copy_file).expect("a folder in the file's way");
+        let record = scratch.dir.join(".last");
+        fs::remove_file(&record).expect("remove the record");
+        fs::create_dir(&record).expect("a folder where the record goes");
+
+        app.select_profile(0);
+
+        assert_eq!(app.chrome.selected_vm(), 0);
+        assert_eq!(app.profiles[1].save_state, SaveState::WriteFailed);
+        assert!(
+            matches!(&app.shell_notice, Some(notice) if notice.kind == ShellNoticeKind::Error),
+            "notice: {:?}",
+            app.shell_notice
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_vm_whose_settings_no_longer_apply_is_still_deleted() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+        app.settings.disk_enabled = true;
+        app.settings.disk_path.clear();
+        assert_eq!(
+            app.apply_pending_settings(),
+            Err("Hard disk path is required when hard disk is enabled".to_owned())
+        );
+
+        app.request_delete_selected();
+        app.confirm_pending();
+
+        assert_eq!(app.profiles.len(), 1);
+        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
+        assert!(
+            !matches!(&app.shell_notice, Some(notice) if notice.kind == ShellNoticeKind::Error),
+            "notice: {:?}",
+            app.shell_notice
+        );
+    }
+
+    /// A VM the way a phone's first VM is made, or a bundled VM that names
+    /// only its ROMs: a BIOS, no hard disk, no CD, and so no boot order.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn media_less_config() -> crate::config::ResolvedConfig {
+        let mut config = test_resolved_config();
+        config.cdrom = None;
+        config.boot_order = Vec::new();
+        config
+    }
+
+    /// The blank "New VM" has no BIOS path and no media. Typing a BIOS path
+    /// applies, and Keep puts the VM in the library with it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_blank_new_vm_takes_a_bios_path_and_is_kept_in_the_library() {
+        let scratch = ScratchLibrary::new();
+        let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+        assert_eq!(app.profiles[0].name, "New VM");
+
+        app.settings.bios_path = "roms/bios.bin".to_owned();
+        assert_eq!(app.apply_pending_settings(), Ok(()));
+        app.keep_selected_in_library();
+
+        assert_eq!(scratch.toml_files(), ["new-vm.toml"]);
+        assert!(matches!(app.profiles[0].origin, VmOrigin::Library(_)));
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::info("Saved New VM to the VM library."))
+        );
+        let kept = scratch.library().load().expect("reload");
+        assert_eq!(kept.vms[0].name, "New VM");
+        assert!(kept.vms[0].config.bios.ends_with("roms/bios.bin"));
+        assert!(kept.vms[0].config.boot_order.is_empty());
+    }
+
+    /// A library VM with no medium to boot from is renamed like any other:
+    /// the rename marks it `Unsaved`, and the flush writes it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_vm_with_no_media_is_renamed_and_its_file_written() {
+        let scratch = ScratchLibrary::new();
+        scratch
+            .library()
+            .create("Rusty Box", &media_less_config())
+            .expect("seed");
+        let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+
+        app.profiles[0].name = "Phone".to_owned();
+        assert_eq!(app.apply_pending_settings(), Ok(()));
+
+        assert_eq!(app.profiles[0].save_state, SaveState::Unsaved);
+        app.flush_unsaved();
+
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+        assert_eq!(scratch.toml_files(), ["rusty-box.toml"]);
+        assert_eq!(scratch.library().load().expect("reload").vms[0].name, "Phone");
+    }
+
+    /// A VM with nothing to boot from is refused at power-on, with the
+    /// notice naming what to attach, and no machine is started.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_with_no_media_is_refused_and_names_what_is_missing() {
+        let scratch = ScratchLibrary::new();
+        scratch
+            .library()
+            .create("Rusty Box", &media_less_config())
+            .expect("seed");
+        let (mut app, command_rx) = native_test_app_over(&scratch, None, None);
+
+        app.start_vm();
+
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::warning(
+                "Attach a hard disk or CD/DVD before powering on."
+            ))
+        );
+        assert!(command_rx.try_recv().is_err());
+        assert!(!app.shared.lock().unwrap().start_pending);
+    }
+
+    /// The blank "New VM" lacks both, and its refusal names both, pointing
+    /// at the BIOS setting where `RunError::MissingBios` does.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_of_the_blank_new_vm_names_the_bios_and_the_media() {
+        let scratch = ScratchLibrary::new();
+        let (mut app, command_rx) = native_test_app_over(&scratch, None, None);
+
+        app.start_vm();
+
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::warning(
+                "Set a BIOS path under Hardware › Display and attach a hard disk or CD/DVD \
+                 before powering on."
+            ))
+        );
+        assert!(command_rx.try_recv().is_err());
+
+        app.settings.cdrom_enabled = true;
+        app.settings.cdrom_path = "boot.iso".to_owned();
+        app.start_vm();
+
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::warning(
+                "Set a BIOS path under Hardware › Display before powering on."
+            ))
+        );
+        assert!(command_rx.try_recv().is_err());
+        assert!(crate::error::RunError::MissingBios
+            .to_string()
+            .contains("under Hardware › Display"));
+    }
+
+    /// A library VM with no media is selected like any other, and selecting
+    /// away from it works.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_vm_with_no_media_can_be_selected_and_left() {
+        let scratch = ScratchLibrary::new();
+        let library = scratch.library();
+        library.create("Alpine", &test_resolved_config()).expect("seed");
+        library.create("Bare", &media_less_config()).expect("seed");
+        let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+        let bare = app
+            .profiles
+            .iter()
+            .position(|profile| profile.name == "Bare")
+            .expect("the media-less VM is listed");
+        let alpine = app
+            .profiles
+            .iter()
+            .position(|profile| profile.name == "Alpine")
+            .expect("the seeded VM is listed");
+
+        app.select_profile(bare);
+        assert_eq!(app.chrome.selected_vm(), bare);
+        assert_eq!(app.vm_info.name, "Bare");
+
+        app.select_profile(alpine);
+
+        assert_eq!(app.chrome.selected_vm(), alpine);
+        assert_eq!(app.vm_info.name, "Alpine");
+        assert_eq!(app.shell_notice, None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keeping_a_vm_shows_the_remember_warning_over_the_saved_notice() {
+        let (mut app, _command_rx, scratch) = native_test_app();
+        fs::create_dir(scratch.dir.join(".last")).expect("a folder where the record goes");
+
+        app.keep_selected_in_library();
+
+        assert_eq!(scratch.toml_files(), ["rusty-box.toml"]);
+        assert!(
+            matches!(&app.shell_notice, Some(notice) if notice.kind == ShellNoticeKind::Warning),
+            "notice: {:?}",
+            app.shell_notice
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_delete_confirmed_after_the_selection_moved_deletes_nothing() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.add_vm_copying_selected();
+        app.request_delete_selected();
+
+        app.select_profile(0);
+        app.confirm_pending();
+
+        assert_eq!(app.pending_confirm, None);
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(scratch.toml_files().len(), 2);
+        assert!(
+            matches!(&app.shell_notice, Some(notice) if notice.kind == ShellNoticeKind::Warning),
+            "notice: {:?}",
+            app.shell_notice
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn delete_broken_in_the_tree_asks_about_that_file() {
+        let scratch = ScratchLibrary::new();
+        fs::write(scratch.dir.join("bad-a.toml"), "memory_mib = [").expect("write");
+        fs::write(scratch.dir.join("bad-b.toml"), "memory_mib = [").expect("write");
+        let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+        assert_eq!(app.broken_files.len(), 2);
+
+        app.handle_sidebar_action(SidebarAction::DeleteBroken(0));
+
+        assert_eq!(
+            app.pending_confirm,
+            Some(PendingConfirm::DeleteBroken(scratch.dir.join("bad-a.toml")))
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn confirm_wording_names_the_vm_or_file() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.request_delete_selected();
+        let library = app.confirm_wording(app.pending_confirm.as_ref().expect("pending"));
+        assert_eq!(library.title, "Delete Alpine?");
+        assert!(library
+            .body
+            .contains(&scratch.dir.join("alpine.toml").display().to_string()));
+        assert_eq!(library.verb, "Delete");
+
+        let (mut launch_app, _launch_rx, _launch_scratch) = native_test_app();
+        launch_app.request_delete_selected();
+        let launch =
+            launch_app.confirm_wording(launch_app.pending_confirm.as_ref().expect("pending"));
+        assert_eq!(launch.title, "Discard Rusty Box?");
+        assert_eq!(launch.verb, "Discard");
+
+        let broken = app.confirm_wording(&PendingConfirm::DeleteBroken(scratch.dir.join("bad.toml")));
+        assert_eq!(broken.title, "Delete bad.toml?");
+        assert_eq!(broken.verb, "Delete");
+
+        let disk = scratch.dir.join("disk.img");
+        let overwrite = app.confirm_wording(&PendingConfirm::OverwriteDisk {
+            index: 0,
+            origin: VmOrigin::Launch,
+            path: disk.clone(),
+        });
+        assert_eq!(overwrite.title, format!("Overwrite {}?", disk.display()));
+        assert_eq!(
+            overwrite.body,
+            "This VM's startup disk is set to be recreated, which erases the existing file."
+        );
+        assert_eq!(overwrite.verb, "Overwrite and power on");
+    }
+
+    /// The command line's VM with a startup disk at `disk` that is recreated,
+    /// erasing the file, at power-on.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn overwriting_launch(disk: &std::path::Path) -> crate::runner::LaunchVm {
+        let mut config = test_resolved_config();
+        config.disk = Some(crate::config::ResolvedDisk {
+            path: disk.to_path_buf(),
+            geometry: crate::args::DiskGeometry {
+                cylinders: 16,
+                heads: 16,
+                sectors_per_track: 63,
+            },
+            channel: 0,
+            drive: 0,
+            creation: Some(crate::config::ResolvedDiskCreation {
+                path: disk.to_path_buf(),
+                size: rusty_box_bximage::ImageSize::mib(8),
+                overwrite: true,
+            }),
+        });
+        config.boot_order = vec![crate::args::BootDevice::Disk];
+        crate::runner::LaunchVm {
+            name: "Overwriting".to_owned(),
+            config,
+            source: crate::runner::LaunchSource::Flags,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_that_would_erase_an_existing_disk_asks_first() {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-overwrite");
+        write_test_disk(&disk);
+        let (mut app, command_rx) =
+            native_test_app_over(&scratch, Some(overwriting_launch(&disk)), None);
+
+        app.start_vm();
+
+        assert_eq!(
+            app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk {
+                index: 0,
+                origin: VmOrigin::Launch,
+                path: disk.clone(),
+            })
+        );
+        assert!(command_rx.try_recv().is_err());
+
+        app.confirm_pending();
+
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+        remove_test_file(&disk);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_disk_that_does_not_exist_yet_is_created_without_asking() {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-fresh-disk");
+        let (mut app, command_rx) =
+            native_test_app_over(&scratch, Some(overwriting_launch(&disk)), None);
+
+        app.start_vm();
+
+        assert_eq!(app.pending_confirm, None);
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+
+        // The runner created the file at that power-on, as here, and erases
+        // it at no later one this session, so the next power-on asks nothing
+        // either.
+        write_test_disk(&disk);
+        app.shared.lock().unwrap().start_pending = false;
+        app.start_vm();
+
+        assert_eq!(app.pending_confirm, None);
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+        remove_test_file(&disk);
+    }
+
+    /// A plain creation's power-on settles nothing: when the same file is
+    /// then set to be recreated, the power-on that would erase it asks.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_plain_power_on_does_not_settle_a_later_overwrite_of_the_same_file() {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-plain-then-overwrite");
+        let mut launch = overwriting_launch(&disk);
+        if let Some(creation) = launch
+            .config
+            .disk
+            .as_mut()
+            .and_then(|disk| disk.creation.as_mut())
+        {
+            creation.overwrite = false;
+        }
+        let (mut app, command_rx) = native_test_app_over(&scratch, Some(launch), None);
+
+        app.start_vm();
+
+        assert_eq!(app.pending_confirm, None);
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+        assert!(!app.overwrite_confirmed.contains(&disk));
+
+        write_test_disk(&disk);
+        app.shared.lock().unwrap().start_pending = false;
+        if let Some(creation) = app.settings.disk_creation.as_mut() {
+            creation.overwrite = true;
+        }
+        app.start_vm();
+
+        assert_eq!(
+            app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk {
+                index: 0,
+                origin: VmOrigin::Launch,
+                path: disk.clone(),
+            })
+        );
+        assert!(command_rx.try_recv().is_err());
+        remove_test_file(&disk);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_cancelled_overwrite_is_asked_again_and_an_agreed_one_is_not() {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-overwrite-again");
+        write_test_disk(&disk);
+        let (mut app, command_rx) =
+            native_test_app_over(&scratch, Some(overwriting_launch(&disk)), None);
+
+        app.start_vm();
+        app.cancel_pending();
+
+        assert_eq!(app.pending_confirm, None);
+        assert!(command_rx.try_recv().is_err());
+
+        app.start_vm();
+
+        assert_eq!(
+            app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk {
+                index: 0,
+                origin: VmOrigin::Launch,
+                path: disk.clone(),
+            })
+        );
+
+        app.confirm_pending();
+
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+
+        // Powered off again. The runner recreated the disk at the first
+        // power-on and does not again this session, so nothing is asked.
+        app.shared.lock().unwrap().start_pending = false;
+        app.start_vm();
+
+        assert_eq!(app.pending_confirm, None);
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+        remove_test_file(&disk);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_overwrite_confirmed_for_another_vm_starts_nothing() {
+        let scratch = ScratchLibrary::new();
+        scratch.library().create("Alpine", &test_resolved_config()).expect("seed");
+        let disk = unique_temp_path("rusty-box-gui-overwrite-other");
+        write_test_disk(&disk);
+        let (mut app, command_rx) =
+            native_test_app_over(&scratch, Some(overwriting_launch(&disk)), None);
+        app.start_vm();
+        assert!(matches!(
+            app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk { index: 0, .. })
+        ));
+
+        app.select_profile(1);
+        app.confirm_pending();
+
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::warning(
+                "Another VM was selected while the power-on waited; nothing was started."
+            ))
+        );
+        assert!(command_rx.try_recv().is_err());
+        assert!(!app.overwrite_confirmed.contains(&disk));
+
+        // Back on the overwriting VM, the question is asked again: nothing
+        // was recorded for it.
+        app.select_profile(0);
+        app.start_vm();
+
+        assert_eq!(
+            app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk {
+                index: 0,
+                origin: VmOrigin::Launch,
+                path: disk.clone(),
+            })
+        );
+        remove_test_file(&disk);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn adding_a_vm_is_refused_while_the_vm_runs() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.shared.lock().unwrap().emu_running = true;
+
+        app.add_vm_copying_selected();
+
+        assert_eq!(app.profiles.len(), 1);
+        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::warning("Stop the running VM before adding a VM."))
+        );
     }
 
     #[test]
     fn shell_starts_on_home_page() {
         let chrome = ShellChrome::default();
-        assert_eq!(chrome.selected_page, ShellPage::Home);
+        assert_eq!(chrome.page(), ShellPage::Home);
+        assert_eq!(chrome.selected_vm(), 0);
     }
 
     #[test]
@@ -4136,14 +6581,6 @@ mod tests {
         assert!(shell_should_draw_library(&chrome));
         chrome.show_library = false;
         assert!(!shell_should_draw_library(&chrome));
-    }
-
-    #[test]
-    fn shell_menu_labels_omit_redundant_view_and_tabs() {
-        let labels = shell_menu_labels();
-        assert_eq!(labels, ["File", "Edit", "VM", "Help"]);
-        assert!(!labels.contains(&"View"));
-        assert!(!labels.contains(&"Tabs"));
     }
 
     #[test]
@@ -4195,9 +6632,25 @@ mod tests {
         assert!(!web_cpu_count_is_supported(
             BX_MAX_SMP_THREADS_SUPPORTED + 1
         ));
-        assert_eq!(web_uploaded_media_config(128, 8).cpu_params.cpu_count(), 8);
+        assert_eq!(
+            web_uploaded_media_config(128, 8).map(|config| config.cpu_params.cpu_count()),
+            Ok(8)
+        );
         assert!(web_can_edit_cpu_count(false));
         assert!(!web_can_edit_cpu_count(true));
+    }
+
+    #[test]
+    fn a_web_cpu_count_the_machine_cannot_take_is_an_error() {
+        assert_eq!(
+            web_uploaded_media_config(128, BX_MAX_SMP_THREADS_SUPPORTED + 1)
+                .map(|config| config.cpu_params.cpu_count()),
+            Err(rusty_box::params::BxParamError::TooManyLogicalProcessors {
+                count: BX_MAX_SMP_THREADS_SUPPORTED + 1,
+                max: BX_MAX_SMP_THREADS_SUPPORTED,
+            })
+        );
+        assert!(web_uploaded_media_config(128, 0).is_err());
     }
 
     #[test]
@@ -4234,17 +6687,15 @@ mod tests {
     #[test]
     fn web_uploaded_media_startup_is_split_across_frames() {
         assert_eq!(WEB_STARTUP_STEPS_PER_FRAME, 1);
+        // The notice is painted on its own frame, so the browser is never
+        // asked to render it and run the blocking build in the same one.
         assert_eq!(
-            web_next_startup_stage(WebStartupStage::CreateEmulator),
-            Some(WebStartupStage::InitializeMemory)
+            web_startup_step(WebStartupStage::Announce),
+            WebStartupStep::NextFrame(WebStartupStage::BuildMachine)
         );
-        assert_eq!(web_next_startup_stage(WebStartupStage::StartEmulator), None);
+        assert_eq!(web_startup_step(WebStartupStage::BuildMachine), WebStartupStep::Build);
         assert_eq!(
-            web_startup_stage_label(WebStartupStage::CreateEmulator),
-            "Allocating guest memory"
-        );
-        assert_eq!(
-            web_startup_stage_label(WebStartupStage::InitializeMemory),
+            web_startup_stage_label(WebStartupStage::Announce),
             "Allocating guest memory"
         );
     }
@@ -4252,8 +6703,21 @@ mod tests {
     #[test]
     fn web_console_prefers_startup_message_over_stale_texture() {
         assert_eq!(
-            web_console_surface(false, true, true, false),
+            web_console_surface(false, true, Some(egui::TextureId::Managed(1)), false),
             WebConsoleSurface::Starting
+        );
+    }
+
+    #[test]
+    fn web_console_draws_the_texture_it_holds() {
+        let texture = egui::TextureId::Managed(7);
+        assert_eq!(
+            web_console_surface(false, false, Some(texture), false),
+            WebConsoleSurface::Display(texture)
+        );
+        assert_eq!(
+            web_console_surface(false, false, None, false),
+            WebConsoleSurface::WaitingForDisplay
         );
     }
 
@@ -4537,14 +7001,13 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn native_vm_settings_require_bios_and_clamp_numbers() {
+    fn native_vm_settings_apply_a_blank_bios_as_none_and_clamp_numbers() {
         let mut config = test_resolved_config();
         let mut settings = NativeVmSettings::from_config(&config);
-        settings.bios_path.clear();
-        assert_eq!(
-            settings.apply_to_config(&mut config),
-            Err("BIOS path is required".to_owned())
-        );
+        settings.bios_path = "   ".to_owned();
+        assert_eq!(settings.apply_to_config(&mut config), Ok(()));
+        assert_eq!(config.bios, std::path::PathBuf::new());
+        assert_eq!(PowerOnGap::of(&config), Some(PowerOnGap::Bios));
 
         settings.bios_path = "bios.bin".to_owned();
         settings.memory_mib = 0;
@@ -4563,10 +7026,27 @@ mod tests {
         assert!(config.vga_bios.is_none());
     }
 
+    /// With nothing attached the boot order applies empty, as the resolver
+    /// leaves it for the egui shell, and the power-on is what refuses.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_vm_settings_apply_no_media_as_an_empty_boot_order() {
+        let mut config = test_resolved_config();
+        let mut settings = NativeVmSettings::from_config(&config);
+        settings.cdrom_enabled = false;
+        settings.disk_enabled = false;
+
+        assert_eq!(settings.apply_to_config(&mut config), Ok(()));
+
+        assert!(config.boot_order.is_empty());
+        assert_eq!(config.cdrom, None);
+        assert_eq!(PowerOnGap::of(&config), Some(PowerOnGap::Media));
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_start_vm_sends_selected_config_when_stopped() {
-        let (mut app, command_rx) = native_test_app();
+        let (mut app, command_rx, _library) = native_test_app();
         app.settings.memory_mib = 640;
         app.settings.ips = 123_000_000;
         app.settings.cdrom_path = "install.iso".to_owned();
@@ -4587,7 +7067,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_start_vm_ignores_duplicate_start_while_pending() {
-        let (mut app, command_rx) = native_test_app();
+        let (mut app, command_rx, _library) = native_test_app();
 
         app.start_vm();
         app.start_vm();
@@ -4604,9 +7084,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_start_vm_reports_disconnected_worker_on_shell() {
-        let (mut app, command_rx) = native_test_app();
+        let (mut app, command_rx, _library) = native_test_app();
         drop(command_rx);
-        app.disk_creator.status = Some(CreatorStatus::Success("existing status".to_owned()));
+        app.floppy_maker.status = Some(CreatorStatus::Success("existing status".to_owned()));
 
         app.start_vm();
 
@@ -4617,7 +7097,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            app.disk_creator.status,
+            app.floppy_maker.status,
             Some(CreatorStatus::Success("existing status".to_owned()))
         );
         assert!(!app.shared.lock().unwrap().start_pending);
@@ -4626,7 +7106,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_runtime_error_becomes_shell_notice() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
         app.shared.lock().unwrap().runtime_error =
             Some("Emulator startup failed: BIOS missing".to_owned());
 
@@ -4642,7 +7122,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_power_controls_do_not_request_stop_when_stopped() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
 
         app.request_power_off();
         app.request_reset();
@@ -4659,10 +7139,10 @@ mod tests {
     #[test]
     fn native_profile_duplicate_keeps_independent_settings() {
         let config = test_resolved_config();
-        let mut profile = NativeVmProfile::from_config("Base", config);
+        let mut profile = NativeVmProfile::from_config("Base", config, VmOrigin::Launch);
         profile.settings.memory_mib = 384;
 
-        let mut copy = profile.duplicate("Second VM");
+        let mut copy = profile.duplicate("Second VM", VmOrigin::Launch);
         copy.settings.memory_mib = 768;
 
         assert_eq!(profile.name, "Base");
@@ -4674,25 +7154,26 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_profile_duplicate_select_delete_rename_refreshes_metadata() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
         app.profiles[0].name = "Base VM".to_owned();
         app.settings.memory_mib = 512;
         app.apply_pending_settings().unwrap();
 
-        app.duplicate_selected_profile();
+        app.add_vm_copying_selected();
 
         assert_eq!(app.profiles.len(), 2);
-        assert_eq!(app.chrome.selected_vm, 1);
+        assert_eq!(app.chrome.selected_vm(), 1);
         assert_eq!(app.chrome.vm_library[1].memory, "512 MB");
         app.profiles[1].name = "Copy VM".to_owned();
         app.apply_pending_settings().unwrap();
         assert_eq!(app.vm_info.name, "Copy VM");
         assert_eq!(app.chrome.vm_library[1].name, "Copy VM");
 
-        app.delete_selected_profile();
+        app.request_delete_selected();
+        app.confirm_pending();
 
         assert_eq!(app.profiles.len(), 1);
-        assert_eq!(app.chrome.selected_vm, 0);
+        assert_eq!(app.chrome.selected_vm(), 0);
         assert_eq!(app.vm_info.name, "Base VM");
         assert_eq!(app.chrome.vm_library[0].name, "Base VM");
     }
@@ -4700,25 +7181,27 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_profile_delete_requires_stopped_multiple_profiles() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
 
-        app.delete_selected_profile();
+        app.request_delete_selected();
+        app.confirm_pending();
 
         assert_eq!(app.profiles.len(), 1);
         assert_eq!(
             app.shell_notice,
-            Some(ShellNotice::warning("At least one VM profile is required."))
+            Some(ShellNotice::warning("At least one VM is required."))
         );
 
-        app.duplicate_selected_profile();
+        app.add_vm_copying_selected();
         app.shared.lock().unwrap().emu_running = true;
-        app.delete_selected_profile();
+        app.request_delete_selected();
+        app.confirm_pending();
 
         assert_eq!(app.profiles.len(), 2);
         assert_eq!(
             app.shell_notice,
             Some(ShellNotice::warning(
-                "Stop the running VM before deleting profiles."
+                "Stop the running VM before deleting it."
             ))
         );
     }
@@ -4726,26 +7209,72 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_profile_selection_refuses_while_running() {
-        let (mut app, _command_rx) = native_test_app();
-        app.duplicate_selected_profile();
-        assert_eq!(app.chrome.selected_vm, 1);
+        let (mut app, _command_rx, _library) = native_test_app();
+        app.add_vm_copying_selected();
+        assert_eq!(app.chrome.selected_vm(), 1);
         app.shared.lock().unwrap().emu_running = true;
 
         app.select_profile(0);
 
-        assert_eq!(app.chrome.selected_vm, 1);
+        assert_eq!(app.chrome.selected_vm(), 1);
         assert_eq!(
             app.shell_notice,
             Some(ShellNotice::warning(
-                "Stop the running VM before selecting another profile."
+                "Stop the running VM before selecting another VM."
             ))
         );
+    }
+
+    /// A library VM whose file the shell reads into its own form — the boot
+    /// order with the attached disk appended — is not rewritten for that by
+    /// a selection: selecting it, away and back leaves its file as written.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn selecting_away_and_back_does_not_rewrite_a_vm_the_shell_normalises() {
+        let scratch = ScratchLibrary::new();
+        scratch
+            .library()
+            .create("Alpine", &test_resolved_config())
+            .expect("seed");
+        let file = scratch.dir.join("both.toml");
+        let written = "[vm]\nname = \"Both\"\n\n[display]\nbackend = \"egui\"\n\n[rom]\n\
+                       bios = \"bios.bin\"\n\n[boot]\norder = [\"cdrom\"]\n\n[disk]\n\
+                       path = \"disk.img\"\n\
+                       chs = { cylinders = 16, heads = 16, sectors_per_track = 63 }\n\n\
+                       [cdrom]\npath = \"boot.iso\"\n";
+        fs::write(&file, written).expect("write the VM file by hand");
+        let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+        let both = app
+            .profiles
+            .iter()
+            .position(|profile| profile.name == "Both")
+            .expect("the hand-written VM is listed");
+        let alpine = app
+            .profiles
+            .iter()
+            .position(|profile| profile.name == "Alpine")
+            .expect("the seeded VM is listed");
+
+        app.select_profile(both);
+
+        assert_eq!(
+            app.profiles[both].config.boot_order,
+            vec![crate::args::BootDevice::Cdrom, crate::args::BootDevice::Disk]
+        );
+        assert_eq!(app.profiles[both].save_state, SaveState::Saved);
+
+        app.select_profile(alpine);
+        app.select_profile(both);
+
+        assert_eq!(fs::read_to_string(&file).expect("read"), written);
+        assert_eq!(app.profiles[both].save_state, SaveState::Saved);
+        assert_eq!(app.shell_notice, None);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn created_image_hard_disk_attaches_to_stopped_profile() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
         let disk = unique_temp_path("rusty-box-gui-created-attach");
         write_test_disk(&disk);
 
@@ -4772,7 +7301,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn created_image_hard_disk_warns_while_running() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
         let original_disk_path = app.settings.disk_path.clone();
         app.shared.lock().unwrap().emu_running = true;
 
@@ -4793,7 +7322,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn created_image_floppy_reports_unwired_notice() {
-        let (mut app, _command_rx) = native_test_app();
+        let (mut app, _command_rx, _library) = native_test_app();
 
         app.handle_created_image(CreatedImage {
             path: std::path::PathBuf::from("floppy.img"),
@@ -4815,67 +7344,14 @@ mod tests {
     }
 
     #[test]
-    fn disk_creator_default_filenames_match_kind() {
-        let mut panel = DiskCreatorPanel::default();
-        panel.kind = CreatorKind::HardDisk;
-        assert_eq!(panel.default_image_filename(), "c.img");
-        panel.kind = CreatorKind::Floppy;
-        assert_eq!(panel.default_image_filename(), "floppy.img");
+    fn the_floppy_maker_offers_floppy_img() {
+        assert_eq!(FloppyMaker::default().path, "floppy.img");
     }
 
     #[test]
-    fn hard_disk_panel_creates_vmware_like_default() {
-        let path = unique_temp_path("rusty-box-gui-panel-hard-disk");
-        let mut panel = DiskCreatorPanel::default();
-        panel.path = path.display().to_string();
-        panel.hard_disk_size = "10M".to_owned();
-
-        panel.create_image();
-
-        assert_eq!(fs::metadata(&path).unwrap().len(), 10_321_920);
-        assert!(matches!(panel.status, Some(CreatorStatus::Success(_))));
-        remove_test_file(&path);
-    }
-
-    #[test]
-    fn hard_disk_panel_rejects_non_integer_size() {
-        let mut panel = DiskCreatorPanel::default();
-        panel.hard_disk_size = "ten".to_owned();
-
-        panel.create_image();
-
-        assert_eq!(
-            panel.status,
-            Some(CreatorStatus::Error(
-                "invalid disk size 'ten'; use whole-number sizes like 20G or 512M".to_owned()
-            ))
-        );
-    }
-
-    #[test]
-    fn hard_disk_panel_rejects_beyond_bochs_cylinder_limit() {
-        // 32 GiB is now accepted; only sizes whose physical geometry exceeds
-        // BOCHS_MAX_CYLINDERS (2^24, ~8063 GiB with 16h/63s/512b) are rejected — and
-        // rejected before any file is written, so this stays cheap.
-        let path = unique_temp_path("rusty-box-gui-panel-huge-disk");
-        let mut panel = DiskCreatorPanel::default();
-        panel.path = path.display().to_string();
-        panel.hard_disk_size = "9000G".to_owned();
-
-        panel.create_image();
-
-        assert!(matches!(
-            &panel.status,
-            Some(CreatorStatus::Error(message)) if message.contains("exceeds Bochs limit")
-        ));
-        assert!(fs::metadata(&path).is_err());
-    }
-
-    #[test]
-    fn floppy_panel_creates_144m_image() {
+    fn floppy_maker_creates_144m_image() {
         let path = unique_temp_path("rusty-box-gui-panel-floppy");
-        let mut panel = DiskCreatorPanel::default();
-        panel.kind = CreatorKind::Floppy;
+        let mut panel = FloppyMaker::default();
         panel.path = path.display().to_string();
         panel.floppy_format = FloppyFormat::M1_44;
 
@@ -4887,37 +7363,10 @@ mod tests {
     }
 
     #[test]
-    fn hard_disk_panel_accepts_human_size_suffix() {
-        let path = unique_temp_path("rusty-box-gui-human-size");
-        let mut panel = DiskCreatorPanel::default();
-        panel.path = path.display().to_string();
-        panel.hard_disk_size = "10M".to_owned();
-        panel.create_image();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 10_321_920);
-        remove_test_file(&path);
-    }
-
-    #[test]
-    fn hard_disk_panel_rejects_existing_without_overwrite() {
-        let path = unique_temp_path("rusty-box-gui-existing");
-        std::fs::write(&path, b"already here").unwrap();
-        let mut panel = DiskCreatorPanel::default();
-        panel.path = path.display().to_string();
-        panel.hard_disk_size = "10M".to_owned();
-        panel.overwrite = false;
-        panel.create_image();
-        assert!(
-            matches!(&panel.status, Some(CreatorStatus::Error(msg)) if msg.contains("already exists"))
-        );
-        remove_test_file(&path);
-    }
-
-    #[test]
-    fn floppy_panel_rejects_existing_without_overwrite() {
+    fn floppy_maker_rejects_existing_without_overwrite() {
         let path = unique_temp_path("rusty-box-gui-existing-floppy");
         std::fs::write(&path, b"already here").unwrap();
-        let mut panel = DiskCreatorPanel::default();
-        panel.kind = CreatorKind::Floppy;
+        let mut panel = FloppyMaker::default();
         panel.path = path.display().to_string();
         panel.overwrite = false;
         panel.create_image();

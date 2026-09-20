@@ -85,9 +85,7 @@ pub(super) fn set_segment_ar_data(
     d.valid != 0
 }
 
-impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
-    super::cpu::BxCpuC<'_, I, T>
-{
+impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
     /// Fetch raw descriptor from GDT or LDT
     /// Based on BX_CPU_C::fetch_raw_descriptor in segment_ctrl_pro.cc
     pub(super) fn fetch_raw_descriptor(&mut self, selector: &BxSelector) -> Result<(u32, u32)> {
@@ -658,7 +656,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         self.handle_alignment_check();
 
         // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
+        self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         Ok(())
@@ -674,7 +672,6 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         cpl: u8,
     ) -> Result<()> {
         // Capture prev CS before load_cs changes it (BOCHS BX_INSTR_FAR_BRANCH_ORIGIN).
-        #[cfg(feature = "instrumentation")]
         let prev_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
 
         // Bochs ctrl_xfer_pro.cc
@@ -716,7 +713,6 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         // BOCHS BX_INSTR_FAR_BRANCH fires here with generic Jmp kind;
         // call sites that know the specific kind (CALL, RET, IRET, INT, SYSENTER...)
         // fire their own far_branch hook with the correct BranchType.
-        #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_branch() {
             let new_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
             let src_rip = self.prev_rip;
@@ -1997,17 +1993,17 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             self.branch_far(&mut cs_selector, &mut cs_descriptor, return_eip as u64, cpl)?;
 
             if self.is_stack_32bit() {
-                self.set_esp(
-                    self.esp()
-                        .wrapping_add(stack_param_offset)
-                        .wrapping_add(pop_bytes as u32),
-                );
+                let esp = self
+                    .esp()
+                    .wrapping_add(stack_param_offset)
+                    .wrapping_add(pop_bytes as u32);
+                self.set_esp(esp);
             } else {
-                self.set_sp(
-                    self.sp()
-                        .wrapping_add(stack_param_offset as u16)
-                        .wrapping_add(pop_bytes),
-                );
+                let sp = self
+                    .sp()
+                    .wrapping_add(stack_param_offset as u16)
+                    .wrapping_add(pop_bytes);
+                self.set_sp(sp);
             }
         } else {
             // ── Outer privilege return ──
@@ -2621,7 +2617,8 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             // Load CS:RIP (guaranteed to be in 64 bit mode)
             self.branch_far(&mut cs_selector, &mut cs_descriptor, new_rip, cpl)?;
 
-            self.set_rsp(self.rsp().wrapping_sub(16));
+            let rsp = self.rsp().wrapping_sub(16);
+            self.set_rsp(rsp);
 
             // Bochs call_far.cc call_gate64 \u2014 CALL GATE64 TO SAME PRIVILEGE.
             if self.shadow_stack_enabled(cpl) {
@@ -2712,11 +2709,11 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             self.branch_far(&mut cs_selector, &mut cs_descriptor, return_rip, cpl)?;
 
             if self.long64_mode() {
-                self.set_rsp(
-                    self.rsp()
-                        .wrapping_add(stack_param_offset)
-                        .wrapping_add(pop_bytes as u64),
-                );
+                let rsp = self
+                    .rsp()
+                    .wrapping_add(stack_param_offset)
+                    .wrapping_add(pop_bytes as u64);
+                self.set_rsp(rsp);
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
             } else if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b() {
                 let val = self
@@ -3010,9 +3007,11 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             // We are NOT in 64-bit mode for this path
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
             if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b() {
-                self.set_esp(self.esp().wrapping_add(top_nbytes_same as u32));
+                let esp = self.esp().wrapping_add(top_nbytes_same as u32);
+                self.set_esp(esp);
             } else {
-                self.set_sp(self.sp().wrapping_add(top_nbytes_same as u16));
+                let sp = self.sp().wrapping_add(top_nbytes_same as u16);
+                self.set_sp(sp);
             }
             if do_clear_same {
                 self.shadow_stack_atomic_clear_busy(prev_ssp_same, cpl)?;

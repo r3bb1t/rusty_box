@@ -8,7 +8,7 @@
 //! Mirrors Bochs `cpu/avx/avx512.cc`, `avx512_move.cc`, `avx512_conflict.cc`.
 
 use super::avx512_load::cut_opmask_to;
-use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, xmm::BxPackedZmmRegister};
+use super::{cpu::BxCpuC, decoder::Instruction, xmm::BxPackedZmmRegister};
 
 // ============================================================================
 // Helper functions (duplicated from avx512.rs — module-private there)
@@ -106,8 +106,8 @@ fn pmov_convert(raw: u64, src: PmovSrc, dst: PmovDst, sat: PmovSat) -> u64 {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -121,16 +121,16 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register with dword-granularity masking, zeroing upper bits beyond VL
-fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -153,8 +153,8 @@ fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// Write ZMM register with qword-granularity masking
-fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -175,7 +175,7 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VPCOMPRESSD — Compress packed dwords (EVEX.66.0F38.W0 8B)
     // ========================================================================
@@ -701,8 +701,6 @@ mod tests {
     //! *data* rather than as a writemask, and VPCONFLICT looks only backwards
     //! — element n never sees elements above it.
 
-    use crate::cpu::builder::BxCpuBuilder;
-    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::BxSegregs;
     use rusty_box_decoder::opcode::Opcode;
 
@@ -725,7 +723,9 @@ mod tests {
 
     #[test]
     fn opmask_broadcasts_read_the_mask_as_data() {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.bx_write_opmask(1, 0xFFFF_00AB);
 
         c.execute_instruction(&evex_misc(Opcode::EvexVpbroadcastmb2qVdqKeb, 1))
@@ -743,7 +743,9 @@ mod tests {
 
     #[test]
     fn vpconflictq_marks_only_earlier_matching_elements() {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         c.vmm[1].set_zmm64u(0, 7);
         c.vmm[1].set_zmm64u(1, 9);
         c.vmm[1].set_zmm64u(2, 7);
@@ -762,7 +764,9 @@ mod tests {
 
     #[test]
     fn expand_and_compress_are_inverses_over_the_opmask() {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+        let mut c = machine.ctx();
         // Source holds 10,11,12,13 contiguously.
         for (n, v) in [10u32, 11, 12, 13].into_iter().enumerate() {
             c.vmm[1].set_zmm32u(n, v);

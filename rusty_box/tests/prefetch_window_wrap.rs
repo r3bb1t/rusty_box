@@ -19,7 +19,7 @@
 
 #![cfg(feature = "std")]
 
-use rusty_box::cpu::{core_i7_skylake::Corei7SkylakeX, CpuSetupMode, X86Reg};
+use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
 /// Same sizing rationale as fp_vex_scalar_ops.rs.
@@ -45,7 +45,7 @@ fn far_indirect_jump_must_leave_the_stale_prefetch_window() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
 
             // Map V2's 2 MiB page: PDPT[4] -> NEW_PD, NEW_PD[1] -> V2_BACKING (P|RW|PS).

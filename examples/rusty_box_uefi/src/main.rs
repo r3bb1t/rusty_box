@@ -1,18 +1,36 @@
-//! Rusty Box UEFI — boots DLX Linux via full BIOS POST.
+//! Rusty Box UEFI — runs the embedded DLX Linux disk from BIOS POST.
 //!
-//! Everything embedded at compile time: BIOS, VGA BIOS, DLX disk image.
-//! Normal BIOS boot path — identical to the desktop dlxlinux example.
-//! No Rust allocator required — all large structs placed via UEFI page allocation.
+//! The BIOS, the VGA BIOS and the DLX disk image are embedded at compile time.
+//! The machine is driven with `Emulator::step` in 100,000-instruction budgets,
+//! and what the guest writes to the debug port and to COM1 is printed on the
+//! UEFI console; a console that refuses a write ends the run with the
+//! firmware's status. Keys go in through `Keyboard::tap`, which renders each
+//! one in the guest's active scancode set: F1 before POST, then `root` and
+//! Enter once 50 million instructions have run.
+//!
+//! Neither is an answer to a prompt. Bochs rombios asks for no F1: its POST
+//! reads a key only in `interactive_bootkey`, which discards every pending
+//! keystroke first. The app does not watch the screen, so it does not answer
+//! LILO's `boot:` prompt either — on the DLX image that prompt waits for a key
+//! with no timeout — and the login keys land on whatever reads the keyboard at
+//! 50 million instructions, not on a detected `login:`. Reaching a DLX shell
+//! takes the screen-watching loop of `rusty_box/examples/dlxlinux`.
+//!
+//! No Rust allocator: every large structure lives in UEFI boot-services pages.
 
 #![no_main]
 #![no_std]
 
-use log::{error, info};
+use core::mem::MaybeUninit;
+use log::{error, info, warn};
 use uefi::prelude::*;
 
 use rusty_box::{
-    cpu::{builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX, cpu::BxCpuC, ResetReason},
-    emulator::{Emulator, EmulatorConfig},
+    cpu::{builder::BxCpuBuilder, cpu::BxCpuC},
+    emulator::{
+        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder, RunBudget,
+    },
+    iodev::scancodes::BxKey,
     memory::BxMemoryStubC,
 };
 
@@ -26,7 +44,10 @@ const DLX_CYLINDERS: u16 = 306;
 const DLX_HEADS: u8 = 4;
 const DLX_SPT: u8 = 17;
 
-fn print_bytes(bytes: &[u8]) {
+/// Print guest bytes on the UEFI console: printable ASCII as it is, `\n` as
+/// CR LF, every other byte dropped. Fails with the firmware's error the first
+/// time the console refuses a string.
+fn print_bytes(bytes: &[u8]) -> uefi::Result {
     let mut buf = [0u16; 128];
     let mut pos = 0;
     for &b in bytes {
@@ -44,44 +65,46 @@ fn print_bytes(bytes: &[u8]) {
         pos += 1;
         if pos >= buf.len() - 2 {
             buf[pos] = 0;
+            // SAFETY: the loop stores only printable ASCII, CR and LF below
+            // `pos`, so the slice has no interior NUL; `buf[pos]` ends it.
             let s = unsafe { uefi::CStr16::from_u16_with_nul_unchecked(&buf[..=pos]) };
-            let _ = uefi::system::with_stdout(|out| {
-                let _ = out.output_string(s);
-            });
+            uefi::system::with_stdout(|out| out.output_string(s))?;
             pos = 0;
         }
     }
     if pos > 0 {
         buf[pos] = 0;
+        // SAFETY: as above — no interior NUL below `pos`, `buf[pos]` ends it.
         let s = unsafe { uefi::CStr16::from_u16_with_nul_unchecked(&buf[..=pos]) };
-        let _ = uefi::system::with_stdout(|out| {
-            let _ = out.output_string(s);
-        });
+        uefi::system::with_stdout(|out| out.output_string(s))?;
     }
+    Ok(())
 }
 
 /// Drain an iterator of bytes and print them. Avoids Vec allocation.
-fn drain_and_print(iter: impl Iterator<Item = u8>) {
+fn drain_and_print(iter: impl Iterator<Item = u8>) -> uefi::Result {
     let mut tmp = [0u8; 256];
     let mut pos = 0;
     for b in iter {
         tmp[pos] = b;
         pos += 1;
         if pos == tmp.len() {
-            print_bytes(&tmp[..pos]);
+            print_bytes(&tmp[..pos])?;
             pos = 0;
         }
     }
     if pos > 0 {
-        print_bytes(&tmp[..pos]);
+        print_bytes(&tmp[..pos])?;
     }
+    Ok(())
 }
 
 macro_rules! bail {
     ($($arg:tt)*) => {{ error!($($arg)*); uefi::boot::stall(10_000_000); return Status::ABORTED; }};
 }
 
-/// Allocate `count` zeroed pages via UEFI boot services.
+/// Allocate `count` pages via UEFI boot services. The firmware does not
+/// promise their contents, so callers zero what they use.
 fn alloc_pages(count: usize) -> *mut u8 {
     uefi::boot::allocate_pages(
         uefi::boot::AllocateType::AnyPages,
@@ -99,8 +122,7 @@ fn alloc_zeroed_for<T>() -> *mut T {
     if ptr.is_null() {
         panic!("UEFI page allocation failed for {} bytes", size);
     }
-    // allocate_pages returns zeroed memory (LOADER_DATA from firmware)
-    // but let's be safe:
+    // UEFI AllocatePages does not promise zeroed pages.
     unsafe {
         core::ptr::write_bytes(ptr, 0, size);
     }
@@ -139,8 +161,21 @@ fn main() -> Status {
             out("xmm4") _, out("xmm5") _,
         );
     }
-    let _ = unsafe { uefi::boot::free_pages(stack_base, stack_pages) };
-    unsafe { core::mem::transmute::<usize, Status>(result) }
+    let status = unsafe { core::mem::transmute::<usize, Status>(result) };
+    // SAFETY: `stack_base` is the `stack_pages`-page block allocated above, and
+    // `run` has returned, so nothing runs on that stack any more.
+    match unsafe { uefi::boot::free_pages(stack_base, stack_pages) } {
+        Ok(()) => status,
+        Err(e) => {
+            error!("freeing the {stack_pages}-page run stack failed: {e:?}");
+            // A failed run keeps its own status; a clean one reports the leak.
+            if status == Status::SUCCESS {
+                e.status()
+            } else {
+                status
+            }
+        }
+    }
 }
 
 /// Actual entry point — runs on a large heap-allocated stack.
@@ -156,31 +191,40 @@ fn run() -> Status {
     );
 
     let config = EmulatorConfig {
-        guest_memory_size: 32 * 1024 * 1024,
-        host_memory_size: 32 * 1024 * 1024,
+        memory: MemorySize::bytes(32 * 1024 * 1024),
         memory_block_size: 128 * 1024,
-        ips: 300_000_000,
+        ips: Ips::new(300_000_000),
         pci_enabled: true,
         ..Default::default()
     };
 
     // --- Allocate large structs via UEFI pages (no Rust allocator) ---
 
-    // 1. CPU (~17-50MB, mostly BxICache fixed arrays)
+    // 1. CPU (its size is logged below)
     info!(
         "Allocating CPU ({} bytes)...",
-        core::mem::size_of::<BxCpuC<Corei7SkylakeX>>()
+        core::mem::size_of::<BxCpuC>()
     );
-    let cpu_ptr: *mut BxCpuC<Corei7SkylakeX> = alloc_zeroed_for();
-    let cpu = unsafe {
-        match BxCpuBuilder::<Corei7SkylakeX>::init_cpu_at(cpu_ptr, ()) {
+    let cpu_ptr: *mut BxCpuC = alloc_zeroed_for();
+    let cpu: &'static mut BxCpuC = unsafe {
+        match BxCpuBuilder::new().init_cpu_at(cpu_ptr, ()) {
             Ok(cpu) => cpu,
             Err(e) => bail!("CPU init failed: {:?}", e),
         }
     };
 
+    // The machine borrows its CPU set as a slice, so the slice itself needs
+    // somewhere to live that outlasts the machine. UEFI pages are never freed
+    // here, which is what makes the `'static` borrow honest — the same reason
+    // the CPU above can be `&'static mut`.
+    let cpu_handles: *mut &'static mut BxCpuC = alloc_zeroed_for();
+    let cpus: &'static mut [&'static mut BxCpuC] = unsafe {
+        cpu_handles.write(cpu);
+        core::slice::from_raw_parts_mut(cpu_handles, 1)
+    };
+
     // 2. Guest RAM buffer (~36MB: 32MB guest + 4MB BIOS ROM + 128KB expansion + pad)
-    let mem_buf_size = rusty_box::config::mem_buffer_size(config.guest_memory_size);
+    let mem_buf_size = rusty_box::config::mem_buffer_size(config.memory.guest_bytes());
     let mem_pages = (mem_buf_size + 4095) / 4096;
     let mem_ptr = alloc_pages(mem_pages);
     if mem_ptr.is_null() {
@@ -197,8 +241,8 @@ fn run() -> Status {
         match BxMemoryStubC::create_from_raw(
             mem_ptr,
             mem_buf_size,
-            config.guest_memory_size,
-            config.host_memory_size,
+            config.memory.guest_bytes(),
+            config.memory.host_bytes(),
             config.memory_block_size,
         ) {
             Ok(s) => s,
@@ -206,103 +250,102 @@ fn run() -> Status {
         }
     };
 
-    // 3. Emulator struct (~2-3MB, embeds DeviceManager with VGA/IDE buffers)
+    // 3. The machine itself (its size is logged below)
     info!(
         "Allocating Emulator ({} bytes)...",
-        core::mem::size_of::<Emulator<Corei7SkylakeX>>()
+        core::mem::size_of::<Emulator>()
     );
-    let emu_ptr: *mut Emulator<Corei7SkylakeX> = alloc_zeroed_for();
-    let emu = unsafe {
-        match Emulator::<Corei7SkylakeX>::init_at(emu_ptr, cpu, mem_stub, config) {
-            Ok(e) => e,
-            Err(e) => bail!("Emulator init failed: {:?}", e),
-        }
+    let emu_ptr: *mut MaybeUninit<Emulator> = alloc_zeroed_for();
+    // SAFETY: `alloc_zeroed_for` returned firmware pages sized and aligned for
+    // the machine, and nothing else ever borrows them.
+    let emu_storage: &'static mut MaybeUninit<Emulator> = unsafe { &mut *emu_ptr };
+    let emu = match MachineBuilder::new(config)
+        .bios(BIOS_ROM)
+        .vga_bios(VGA_BIOS)
+        .boot_order(BootOrder::just(BootDevice::Disk))
+        .disk_static(
+            AtaSlot::PRIMARY_MASTER,
+            DLX_DISK,
+            DiskGeometry::new(DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT),
+        )
+        .build_at(emu_storage, cpus, mem_stub)
+    {
+        Ok(e) => e,
+        Err(e) => bail!("Machine build failed: {:?}", e),
     };
 
-    // --- Initialize hardware ---
-    emu.init_pc_system();
-
-    let bios_addr = !(BIOS_ROM.len() as u64 - 1);
-    if let Err(e) = emu.load_bios(BIOS_ROM, bios_addr) {
-        bail!("BIOS: {:?}", e);
-    }
-    let _ = emu.load_optional_rom(VGA_BIOS, 0xC0000);
-
-    if let Err(e) = emu.init_cpu_and_devices() {
-        bail!("CPU init: {:?}", e);
-    }
-
-    emu.configure_memory_in_cmos_from_config();
-    emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
-    emu.configure_boot_sequence(2, 0, 0);
-    emu.attach_disk_data_ref(0, 0, DLX_DISK, DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT);
-
-    if let Err(e) = emu.reset(ResetReason::Hardware) {
-        bail!("Reset: {:?}", e);
-    }
-    emu.start();
-    emu.prepare_run();
-
     info!("Starting BIOS boot...");
-    emu.send_scancode(0x3B); // F1 (skip keyboard error)
-    emu.send_scancode(0xBB);
+    // An F1 tap before POST, rendered in the guest's active scancode set.
+    if !emu.keyboard().tap(BxKey::F1) {
+        warn!("the keyboard refused part of the F1 tap");
+    }
 
-    // Main loop — mirrors run_interactive
+    // Main loop: step, print what the guest wrote, stop on a terminal outcome.
     let batch: u64 = 100_000;
     let max: u64 = 20_000_000_000;
     let mut total: u64 = 0;
     let mut login_sent = false;
 
     while total < max {
-        let (n, shutdown) = match emu.step_batch(batch) {
+        let outcome = match emu.step(RunBudget::Instructions(batch)) {
             Ok(result) => result,
             Err(e) => {
                 error!("CPU error at {}M: {:?}", total / 1_000_000, e);
                 break;
             }
         };
-        total += n;
+        // Whichever unit this machine measures in — the loop below is a
+        // progress budget, not an instruction count.
+        total += outcome.progress.count();
 
-
-        // Drain and print BIOS/serial output (no Vec allocation)
-        {
-            let mut had_output = false;
-            for b in emu.devices.drain_port_e9_output() {
-                if !had_output {
-                    had_output = true;
-                }
-                // Print byte-by-byte through print_bytes
-                print_bytes(&[b]);
-            }
+        // Print what the guest wrote to the debug port and to COM1 (no Vec
+        // allocation). The console is this app's only output, so one that
+        // refuses a write ends the run with the firmware's status.
+        let printed = drain_and_print(emu.debug_port().take_output()).and_then(|()| {
+            drain_and_print(emu.serial(0).expect("COM1 is always modelled").take_output())
+        });
+        if let Err(e) = printed {
+            error!("console write failed at {}M: {:?}", total / 1_000_000, e);
+            return e.status();
         }
-        drain_and_print(emu.device_manager.drain_serial_tx(0));
 
-        if shutdown {
+        // Every terminal cause, not just the CPU shutdown state: a guest that
+        // powers off through ACPI S5 leaves the CPU perfectly healthy, so
+        // testing the CPU alone would keep stepping a machine that asked to be
+        // off until this loop hit its own instruction cap.
+        if outcome.is_terminal() {
             info!(
-                "SHUTDOWN at {}k instr, RIP={:#x}",
+                "STOP ({:?}) at {}k instr, RIP={:#x}",
+                outcome.stop,
                 total / 1000,
                 emu.cpu().rip()
             );
             break;
         }
 
-
-
-        // Auto-login after kernel boots
+        // `root` + Enter once 50 million instructions have run, one tap per
+        // key, stopping at the first key the keyboard does not take whole so
+        // no later key lands after a lost one.
         if !login_sent && total > 50_000_000 {
             login_sent = true;
-            for &sc in &[0x13u8, 0x93, 0x18, 0x98, 0x18, 0x98, 0x14, 0x94, 0x1C, 0x9C] {
-                emu.send_scancode(sc);
+            const LOGIN: [BxKey; 5] = [BxKey::R, BxKey::O, BxKey::O, BxKey::T, BxKey::Enter];
+            let typed = LOGIN.iter().take_while(|&&key| emu.keyboard().tap(key)).count();
+            if typed != LOGIN.len() {
+                warn!(
+                    "the keyboard refused part of login key {} of {}; the rest were not sent",
+                    typed + 1,
+                    LOGIN.len()
+                );
             }
         }
 
         #[cfg(feature = "verbose")]
         if total % 500_000 < batch {
             info!(
-                "  {}k instr, RIP={:#x}, batch={}, IF={}",
+                "  {}k instr, RIP={:#x}, batch={:?}, IF={}",
                 total / 1000,
                 emu.cpu().rip(),
-                n,
+                outcome.progress,
                 emu.cpu().interrupts_enabled()
             );
         }

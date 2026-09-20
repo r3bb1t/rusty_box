@@ -9,7 +9,7 @@
 //!
 //! All operations use the AES reduction polynomial x^8 + x^4 + x^3 + x + 1 (0x11B).
 
-use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, xmm::BxPackedXmmRegister};
+use super::{decoder::Instruction, xmm::BxPackedXmmRegister};
 
 // ============================================================================
 // GF(2^8) Inverse table (from Bochs gf2.cc)
@@ -202,7 +202,7 @@ fn gf2p8mul(a: u8, b: u8) -> u8 {
 // Instruction handlers
 // ============================================================================
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// GF2P8AFFINEQB VdqWdqIb -- 66 0F 3A CE
     ///
     /// Galois Field Affine Transformation.

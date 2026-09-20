@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use bitflags::bitflags;
 
-use super::{decoder::BX_ISA_EXTENSIONS_ARRAY_SIZE, BxCpuC, Result};
+use super::{decoder::BX_ISA_EXTENSIONS_ARRAY_SIZE, Result};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CpuIdError {}
@@ -59,6 +59,10 @@ impl CpuidLeaf {
 }
 
 pub trait BxCpuIdTrait: core::fmt::Debug {
+    /// Const-constructible power-on state of the model. This is what static
+    /// (`.bss`) placement uses; `new()` must return the same value.
+    const INIT: Self;
+
     fn get_name(&self) -> &'static str;
 
     fn init(&mut self) {}
@@ -149,31 +153,6 @@ bitflags! {
         const MbeControl = 1 << 26;
         /// Virtualize MSR IA32_SPEC_CTR;
         const SpecCtrlVirtualization = 1 << 27;
-    }
-}
-
-// TODO: remove self reference
-
-pub(crate) struct BxCpuId<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> {
-    cpu: &'c BxCpuC<'c, I, T>,
-    nprocessors: u32,
-    ncores: u32,
-    nthreads: u32,
-
-    ia_extensions_bitmask: [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE],
-}
-
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuId<'c, I, T> {
-    pub fn new(cpu: &'c BxCpuC<'c, I, T>, nprocessors: u32, ncores: u32, nthreads: u32) -> Self {
-        let ia_extensions_bitmask = [0; BX_ISA_EXTENSIONS_ARRAY_SIZE];
-
-        Self {
-            cpu,
-            nprocessors,
-            ncores,
-            nthreads,
-            ia_extensions_bitmask,
-        }
     }
 }
 

@@ -11,12 +11,10 @@
 use tracing::{debug, error, info};
 
 use crate::config::BxPhyAddress;
-#[cfg(feature = "std")]
-use std::io::{self, Read, Write};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
 };
 
 
@@ -49,9 +47,26 @@ const APIC_ID_MASK_XAPIC: u32 = 0xFF;
 
 /// APIC ID mask for legacy mode (4-bit ID)
 const APIC_ID_MASK_LEGACY: u32 = 0x0F;
-/// Bochs sets `simulate_xapic = true` for APIC builds and uses this global
-/// bus mask for broadcast detection, independent of each LAPIC's version ID.
-const APIC_BUS_ID_MASK: u32 = APIC_ID_MASK_XAPIC;
+
+/// Which APIC model every processor of this build simulates.
+///
+/// Bochs' `simulate_xapic` global (main.cc), which `bx_begin_simulation` sets
+/// true for every BX_SUPPORT_APIC build before any CPU is constructed: the
+/// legacy 4-bit-ID APIC is not reachable there, and each `bx_local_apic_c`
+/// takes its `xapic` from it (apic.cc constructor).
+const SIMULATE_XAPIC: bool = true;
+
+/// Bus-wide APIC ID mask used for broadcast detection, independent of any one
+/// LAPIC's version ID. Bochs main.cc: `apic_id_mask = simulate_xapic ? 0xFF : 0xF`.
+const APIC_BUS_ID_MASK: u32 = if SIMULATE_XAPIC {
+    APIC_ID_MASK_XAPIC
+} else {
+    APIC_ID_MASK_LEGACY
+};
+
+/// Extended-xAPIC support bit of the version register, set by
+/// `enable_xapic_extensions` (Bochs apic.cc) and by nothing else.
+const APIC_VERSION_XAPIC_EXT: u32 = 0x8000_0000;
 
 /// APIC error status constants (Bochs: apic.h)
 const APIC_ERR_ILLEGAL_ADDR: u32 = 0x80;
@@ -95,6 +110,14 @@ bitflags::bitflags! {
         const MASKED            = 0x0001_0000;
         /// Bits 17-18: timer mode (timer LVT only; 0=oneshot, 1=periodic, 2=tsc-deadline)
         const TIMER_MODE        = 0x0006_0000;
+        /// Bit 17: a timer that reaches zero reloads its initial count. Tested
+        /// alone, so mode 3 reloads too (Bochs apic.cc `periodic`,
+        /// `timervec & 0x20000`).
+        const TIMER_PERIODIC    = 0x0002_0000;
+        /// Bit 18: the timer is armed through `IA32_TSC_DEADLINE`, and the
+        /// initial and current count registers are inert. Tested alone, so
+        /// mode 3 is TSC-deadline too (Bochs apic.cc `timervec & 0x40000`).
+        const TIMER_TSC_DEADLINE = 0x0004_0000;
     }
 }
 
@@ -115,6 +138,24 @@ impl LvtBits {
     #[inline(always)]
     pub fn timer_mode_field(self) -> u32 {
         (self.bits() >> 17) & 0x3
+    }
+
+    /// Get the delivery mode field (bits 8-10).
+    ///
+    /// The field is three bits wide and every encoding names a mode, so the
+    /// answer is the mode itself rather than a number a caller has to decode.
+    #[inline(always)]
+    pub fn delivery_mode(self) -> ApicDeliveryMode {
+        match (self.bits() >> 8) & 0x7 {
+            0 => ApicDeliveryMode::Fixed,
+            1 => ApicDeliveryMode::LowPriority,
+            2 => ApicDeliveryMode::Smi,
+            3 => ApicDeliveryMode::Reserved,
+            4 => ApicDeliveryMode::Nmi,
+            5 => ApicDeliveryMode::Init,
+            6 => ApicDeliveryMode::Sipi,
+            _ => ApicDeliveryMode::ExtInt,
+        }
     }
 }
 
@@ -524,7 +565,7 @@ impl Default for BxLocalApic {
         Self {
             base_addr: BX_LAPIC_BASE_ADDR,
             mode: ApicMode::GloballyDisabled,
-            xapic: false,
+            xapic: SIMULATE_XAPIC,
             xapic_ext: 0,
             apic_id: 0,
             bus_cpu_count: 1,
@@ -670,6 +711,80 @@ impl BxLocalApic {
         if self.mode == ApicMode::X2apicMode {
             self.ldr = ((self.apic_id & 0xFFFF_FFF0) << 16) | (1 << (self.apic_id & 0xF));
         }
+        // The identity decides who holds the virtual wire, so it is re-derived
+        // whenever the identity changes: a processor built before its id was
+        // assigned would otherwise keep the bootstrap processor's entry.
+        self.preset_lint0();
+    }
+
+    /// Give the bootstrap processor the legacy virtual wire, and no one else.
+    ///
+    /// **A deliberate deviation from the architecture, and the same one KVM and
+    /// QEMU make.** The SDM resets every LVT entry masked ("The LVT register is
+    /// reset to 0s except for the mask bits; these are set to 1s"), leaving
+    /// firmware to program LINT0 into ExtINT for virtual wire mode. Production
+    /// firmware does — EDK2/OVMF, coreboot and SeaBIOS all write it during POST
+    /// — but the BIOS this port ships with does not: the only local-APIC writes
+    /// in Bochs's `bios/` are `APIC_SVR` and `APIC_ICR_LOW`, and `bios/rombios.h`
+    /// does not even name offset 0x350. A processor that honoured a masked
+    /// LINT0 under that firmware would take no legacy interrupt for the whole
+    /// life of the guest.
+    ///
+    /// So the entry is preset here instead, exactly as KVM's
+    /// `KVM_X86_QUIRK_LINT0_REENABLED` does (enabled by default, and
+    /// self-described as a spec deviation for this reason) and as QEMU's
+    /// `apic_reset_common` did with the same literal `0x700` until 2015 —
+    /// removing it there broke coreboot within days.
+    ///
+    /// Only the bootstrap processor gets it: the SDM says one processor at most
+    /// should carry an ExtINT LVT entry, and Linux's `setup_local_APIC` masks
+    /// LINT0 on every application processor for that reason.
+    ///
+    /// The preset only survives because `reset` clears `software_enabled`
+    /// directly instead of writing SVR: a software disable masks every LVT
+    /// entry (`write_spurious_interrupt_register`), so routing reset's disable
+    /// through that writer would close the wire again. KVM's `kvm_lapic_reset`
+    /// takes the same care: the masking lives in its `kvm_lapic_reg_write`
+    /// `APIC_SPIV` arm, and reset calls `apic_set_spiv` directly, bypassing it.
+    fn preset_lint0(&mut self) {
+        /// Unmasked, delivery mode 0b111 (ExtINT). QEMU spelled the same
+        /// constant `0x700` in `apic_reset_common`.
+        const VIRTUAL_WIRE: u32 = 0x0000_0700;
+        self.lvt[LocalVectorTableEntry::Lint0 as usize] = if self.apic_id == 0 {
+            LvtBits::from_raw(VIRTUAL_WIRE)
+        } else {
+            LvtBits::MASKED
+        };
+    }
+
+    /// Whether an 8259 INTR assertion on LINT0 reaches this processor.
+    ///
+    /// The architectural gate on the legacy wire, and the same predicate KVM
+    /// applies in `kvm_apic_accept_pic_intr`: a local APIC that is hardware
+    /// disabled has no LVT to consult at all — the SDM says LINT0 and LINT1
+    /// then behave as the INTR and NMI pins of a processor with no APIC — and
+    /// an enabled one admits the line only through an unmasked LVT0 in ExtINT
+    /// delivery mode.
+    ///
+    /// A software disable needs no term of its own: it masks every LVT entry
+    /// where it happens (`write_spurious_interrupt_register`), so the mask bit
+    /// already carries it.
+    ///
+    /// The engine backends ask the same question of whoever owns LVT0 in their
+    /// topology; when the local APIC is the hypervisor's, that is the shadow
+    /// the fabric keeps (`IrqFabric::lint0_admits_ext_int`).
+    pub(crate) fn lint0_admits_ext_int(&self) -> bool {
+        match self.mode {
+            // Both have IA32_APIC_BASE.EN clear — `StateInvalid` is the
+            // illegal EXTD-without-EN encoding — so the pins bypass the APIC
+            // entirely and there is no LVT to consult.
+            ApicMode::GloballyDisabled | ApicMode::StateInvalid => true,
+            ApicMode::XapicMode | ApicMode::X2apicMode => {
+                let lvt0 = self.lvt[LocalVectorTableEntry::Lint0 as usize];
+                !lvt0.contains(LvtBits::MASKED)
+                    && lvt0.delivery_mode() == ApicDeliveryMode::ExtInt
+            }
+        }
     }
 
     /// Set the APIC bus CPU count from the emulator topology.
@@ -755,6 +870,31 @@ impl BxLocalApic {
         self.xapic
     }
 
+    /// Take the APIC model this build simulates — the `xapic = simulate_xapic`
+    /// line of Bochs' `bx_local_apic_c` constructor (apic.cc).
+    ///
+    /// A processor is built over a zeroed allocation rather than from
+    /// [`Default`], so the model has to be written here for the same reason
+    /// Bochs writes it in the constructor: [`Self::reset`] reads it to choose
+    /// the version register, and every reset afterwards reads it again.
+    #[inline]
+    pub(crate) fn set_simulated_apic_model(&mut self) {
+        self.xapic = SIMULATE_XAPIC;
+    }
+
+    /// Whether this processor implements the AMD extended xAPIC registers.
+    ///
+    /// Bochs asks the CPU at every access (apic.cc read_aligned/write_aligned:
+    /// `cpu->is_cpu_extension_supported(BX_ISA_XAPIC_EXT)`). The answer is
+    /// recorded here in the version register's bit 31, which
+    /// [`Self::enable_xapic_extensions`] sets and nothing else does: the
+    /// register is read-only to the guest and compared on snapshot restore,
+    /// so the bit cannot drift from the model that was built.
+    #[inline]
+    fn xapic_ext_supported(&self) -> bool {
+        self.apic_version_id & APIC_VERSION_XAPIC_EXT != 0
+    }
+
     /// Get current mode.
     #[inline]
     pub(crate) fn get_mode(&self) -> ApicMode {
@@ -785,12 +925,29 @@ impl BxLocalApic {
 
     // ─── Register read ───────────────────────────────────────────────────
 
+    /// The register an APIC MMIO offset selects, or an encoding no arm
+    /// matches when the model has no such register.
+    ///
+    /// Bochs apic.cc read_aligned/write_aligned both open with this: the
+    /// 0x400 block is the AMD extended xAPIC, so a processor without
+    /// `BX_ISA_XAPIC_EXT` is given "some obviously invalid register" and
+    /// falls into the illegal-address arm, exactly as an unimplemented
+    /// offset does.
+    #[inline]
+    fn decode_register(&self, addr: BxPhyAddress) -> u32 {
+        let apic_reg = (addr & 0xFF0) as u32;
+        if apic_reg >= 0x400 && !self.xapic_ext_supported() {
+            return u32::MAX;
+        }
+        apic_reg
+    }
+
     /// Read from a 16-byte-aligned APIC register.
     /// Bochs: read_aligned (apic.cc)
     pub(crate) fn read_aligned(&self, addr: BxPhyAddress, cpu_ticks: u64) -> u32 {
         debug_assert!((addr & 0xF) == 0);
         let mut data: u32 = 0;
-        let apic_reg = (addr & 0xFF0) as u32;
+        let apic_reg = self.decode_register(addr);
 
         match apic_reg {
             // Local APIC ID (apic.cc)
@@ -880,7 +1037,7 @@ impl BxLocalApic {
             // within CPU batches (critical for kernel timer calibration loops).
             0x390 => {
                 let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
-                if timervec.timer_mode_field() == 2 {
+                if timervec.contains(LvtBits::TIMER_TSC_DEADLINE) {
                     // TSC-deadline mode: current count always reads 0
                     data = 0;
                 } else if self.timer_active && self.timer_divide_factor > 0 {
@@ -937,7 +1094,7 @@ impl BxLocalApic {
         value: u32,
         current_ticks: u64,
     ) {
-        let apic_reg = (addr & 0xFF0) as u32;
+        let apic_reg = self.decode_register(addr);
 
         match apic_reg {
             // TPR (apic.cc)
@@ -1114,10 +1271,12 @@ impl BxLocalApic {
 
         match index {
             // Full 64-bit ICR write: high dword is the x2APIC destination.
+            // x2APIC has no delivery-status bit to force idle, so both dwords
+            // are kept as written (Bochs apic.cc `write_x2apic`).
             0x300 => {
-                self.icr_lo = value_lo & !(1 << 12);
+                self.icr_lo = value_lo;
                 self.icr_hi = value_hi;
-                self.send_ipi(value_hi, self.icr_lo);
+                self.send_ipi(value_hi, value_lo);
                 true
             }
             // x2APIC self-IPI MSR.
@@ -1810,7 +1969,7 @@ impl BxLocalApic {
         }
 
         // Check timer mode (apic.cc)
-        if timervec.timer_mode_field() == 1 {
+        if timervec.contains(LvtBits::TIMER_PERIODIC) {
             // Periodic mode — reload timer values
             self.timer_current = self.timer_initial;
             self.timer_active = true;
@@ -1860,7 +2019,7 @@ impl BxLocalApic {
             self.diag_set_initial_count);
 
         // In TSC-deadline mode, writes to initial time count are ignored (apic.cc)
-        if timervec.timer_mode_field() == 2 {
+        if timervec.contains(LvtBits::TIMER_TSC_DEADLINE) {
             return;
         }
 
@@ -1904,7 +2063,7 @@ impl BxLocalApic {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
 
         // In TSC-deadline mode, current timer count always reads 0 (apic.cc)
-        if timervec.timer_mode_field() == 2 {
+        if timervec.contains(LvtBits::TIMER_TSC_DEADLINE) {
             return 0;
         }
 
@@ -1940,11 +2099,6 @@ impl BxLocalApic {
         }
     }
 
-    /// Check if the timer is in periodic mode (LVT timer bit 17 set).
-    pub(crate) fn timer_is_periodic(&self) -> bool {
-        self.lvt[LocalVectorTableEntry::Timer as usize].timer_mode_field() == 1
-    }
-
     /// Diagnostic: return timer state for HLT debugging.
     /// Returns (timer_active, timer_initial, period_ticks, timer_vector, activate_pending, deactivate_pending)
     /// Check if a specific vector has IRR or ISR bits set.
@@ -1973,8 +2127,7 @@ impl BxLocalApic {
     /// Set the TSC-Deadline timer value.
     /// Bochs: set_tsc_deadline (apic.cc)
     pub(crate) fn set_tsc_deadline(&mut self, deadline: u64, _current_ticks: u64) {
-        let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
-        if timervec.timer_mode_field() != 2 {
+        if !self.tsc_deadline_mode() {
             error!("APIC: TSC-Deadline timer is disabled");
             return;
         }
@@ -2001,11 +2154,18 @@ impl BxLocalApic {
     /// Bochs: get_tsc_deadline (apic.cc)
     #[allow(dead_code)]
     pub(crate) fn get_tsc_deadline(&self) -> u64 {
-        let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
-        if timervec.timer_mode_field() != 2 {
+        if !self.tsc_deadline_mode() {
             return 0;
         }
         self.ticks_initial
+    }
+
+    /// Whether the timer's LVT entry selects TSC-deadline mode — the one mode
+    /// in which `IA32_TSC_DEADLINE` means anything. Outside it, a write is
+    /// ignored and a read answers zero (Bochs apic.cc `set_tsc_deadline`,
+    /// `get_tsc_deadline`).
+    pub(crate) fn tsc_deadline_mode(&self) -> bool {
+        self.lvt[LocalVectorTableEntry::Timer as usize].contains(LvtBits::TIMER_TSC_DEADLINE)
     }
 
     // ─── Initialization and reset ────────────────────────────────────────
@@ -2040,7 +2200,7 @@ impl BxLocalApic {
     /// Enables XAPIC extensions (IER and SEOI support).
     /// Bochs: enable_xapic_extensions (apic.cc)
     pub(super) fn enable_xapic_extensions(&mut self) {
-        self.apic_version_id |= 0x80000000;
+        self.apic_version_id |= APIC_VERSION_XAPIC_EXT;
         self.xapic_ext = BX_XAPIC_EXT_SUPPORT_IER | BX_XAPIC_EXT_SUPPORT_SEOI;
     }
 
@@ -2079,6 +2239,8 @@ impl BxLocalApic {
         for i in 0..LVT_ENTRY_COUNT {
             self.lvt[i] = LvtBits::MASKED; // all masked
         }
+        // …except LINT0 on the bootstrap processor. See `preset_lint0`.
+        self.preset_lint0();
 
         self.spurious_vector = 0xFF;
         self.software_enabled = false;
@@ -2260,7 +2422,7 @@ impl BxLocalApic {
 
 #[cfg(feature = "std")]
 impl BxLocalApic {
-    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+    pub(crate) fn snapshot_v3_body_len(&self) -> SnapResult<u64> {
         if self.pending_ipi_len > PENDING_IPI_CAPACITY
             || self.pending_ipi_head >= PENDING_IPI_CAPACITY
             || self.pending_cpu_event_len > PENDING_CPU_EVENT_CAPACITY
@@ -2305,7 +2467,7 @@ impl BxLocalApic {
         checked_snapshot_len_add(len, 1)
     }
 
-    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.snapshot_v3_body_len()?;
         writer.write_u64(self.base_addr)?;
         writer.write_u8(self.mode as u8)?;
@@ -2403,10 +2565,10 @@ impl BxLocalApic {
         writer.write_bool(self.timer_deactivate_request)
     }
 
-    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+    pub(crate) fn restore_snapshot_v3_body<R: SnapRead>(
         &mut self,
-        reader: &mut SnapshotReader<R>,
-    ) -> io::Result<LocalApicSnapshotRestore> {
+        reader: &mut R,
+    ) -> SnapResult<LocalApicSnapshotRestore> {
         let base_addr = reader.read_u64()?;
         if base_addr & 0xfff != 0 {
             return Err(Self::snapshot_invalid("LAPIC base is not page aligned"));
@@ -2465,8 +2627,9 @@ impl BxLocalApic {
         let error_status = reader.read_u32()?;
         let shadow_error_status = reader.read_u32()?;
         let icr_hi = reader.read_u32()?;
+        // Any ICR value is one a guest can leave: an x2APIC write keeps both
+        // dwords as written (Bochs apic.cc `write_x2apic`).
         let icr_lo = reader.read_u32()?;
-        Self::validate_snapshot_icr(icr_lo)?;
         let mut lvt = [LvtBits::empty(); LVT_ENTRY_COUNT];
         for (index, entry) in lvt.iter_mut().enumerate() {
             let raw = reader.read_u32()?;
@@ -2492,6 +2655,15 @@ impl BxLocalApic {
         }
         if reader.read_bool()? != self.tsc_deadline_supported {
             return Err(Self::snapshot_invalid("LAPIC TSC deadline capability mismatch"));
+        }
+        // Without the capability a timer write clears bit 18 (Bochs apic.cc
+        // `set_lvt_entry`), so no such machine holds it set.
+        if !self.tsc_deadline_supported
+            && lvt[LocalVectorTableEntry::Timer as usize].contains(LvtBits::TIMER_TSC_DEADLINE)
+        {
+            return Err(Self::snapshot_invalid(
+                "LAPIC timer selects TSC-deadline mode the CPU does not support",
+            ));
         }
         let timer_active = reader.read_bool()?;
         let timer_handle = Self::read_snapshot_handle(reader)?;
@@ -2558,43 +2730,43 @@ impl BxLocalApic {
                 "LAPIC timer cannot activate and deactivate simultaneously",
             ));
         }
-        let timer_mode = lvt[LocalVectorTableEntry::Timer as usize].timer_mode_field();
+        let tsc_deadline =
+            lvt[LocalVectorTableEntry::Timer as usize].contains(LvtBits::TIMER_TSC_DEADLINE);
         if let Some(request) = timer_activate_request {
             if !timer_active {
                 return Err(Self::snapshot_invalid(
                     "LAPIC activation request has no active timer",
                 ));
             }
-            match timer_mode {
-                0 | 1 => {
-                    let deadline = ticks_initial.saturating_add(
-                        u64::from(timer_initial) * u64::from(timer_divide_factor),
-                    );
-                    if timer_initial == 0
-                        || !request.update_ticks_initial
-                        || request.deadline_ticks != deadline
-                    {
-                        return Err(Self::snapshot_invalid(
-                            "LAPIC timer activation disagrees with its programming epoch",
-                        ));
-                    }
+            if request.update_ticks_initial {
+                // Armed by a count: an initial-count write, which arms only
+                // outside TSC-deadline mode and only with a nonzero count, or
+                // a periodic reload, which in mode 3 reloads whatever count
+                // the register holds (Bochs apic.cc `set_initial_timer_count`,
+                // `periodic`). Only a bit-18 change disarms, so the mode the
+                // count was armed in is the mode seen here.
+                let deadline = ticks_initial.saturating_add(
+                    u64::from(timer_initial) * u64::from(timer_divide_factor),
+                );
+                if request.deadline_ticks != deadline || (timer_initial == 0 && !tsc_deadline) {
+                    return Err(Self::snapshot_invalid(
+                        "LAPIC timer activation disagrees with its programming epoch",
+                    ));
                 }
-                2 => {
-                    if request.update_ticks_initial
-                        || request.deadline_ticks == 0
-                        || request.deadline_ticks != ticks_initial
-                    {
-                        return Err(Self::snapshot_invalid(
-                            "LAPIC TSC-deadline activation is incoherent",
-                        ));
-                    }
-                }
-                _ => unreachable!("validated LAPIC timer mode"),
+            } else if !tsc_deadline
+                || request.deadline_ticks == 0
+                || request.deadline_ticks != ticks_initial
+            {
+                // Armed through IA32_TSC_DEADLINE, which only TSC-deadline
+                // mode accepts (Bochs apic.cc `set_tsc_deadline`).
+                return Err(Self::snapshot_invalid(
+                    "LAPIC TSC-deadline activation is incoherent",
+                ));
             }
         }
-        if (timer_active && (timer_handle.is_none() || timer_initial == 0 && timer_mode != 2))
+        if (timer_active && (timer_handle.is_none() || timer_initial == 0 && !tsc_deadline))
             || mwaitx_timer_active
-            || (timer_current > timer_initial && timer_mode != 2)
+            || (timer_current > timer_initial && !tsc_deadline)
         {
             return Err(Self::snapshot_invalid("LAPIC timer state is inconsistent"));
         }
@@ -2675,7 +2847,7 @@ impl BxLocalApic {
         Ok(restore)
     }
 
-    fn write_snapshot_handle<W: Write>(writer: &mut W, handle: Option<usize>) -> io::Result<()> {
+    fn write_snapshot_handle<W: SnapWrite>(writer: &mut W, handle: Option<usize>) -> SnapResult<()> {
         writer.write_bool(handle.is_some())?;
         if let Some(handle) = handle {
             writer.write_u64(u64::try_from(handle)
@@ -2684,7 +2856,7 @@ impl BxLocalApic {
         Ok(())
     }
 
-    fn read_snapshot_handle<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Option<usize>> {
+    fn read_snapshot_handle<R: SnapRead>(reader: &mut R) -> SnapResult<Option<usize>> {
         if !reader.read_bool()? {
             return Ok(None);
         }
@@ -2693,7 +2865,7 @@ impl BxLocalApic {
             .map_err(|_| Self::snapshot_invalid("LAPIC timer handle does not fit host"))
     }
 
-    fn read_snapshot_mode(raw: u8) -> io::Result<ApicMode> {
+    fn read_snapshot_mode(raw: u8) -> SnapResult<ApicMode> {
         match raw {
             0 => Ok(ApicMode::GloballyDisabled),
             1 => Ok(ApicMode::StateInvalid),
@@ -2708,26 +2880,20 @@ impl BxLocalApic {
         if combined == 7 { 1 } else { 2 << combined }
     }
 
-    fn validate_snapshot_lvt(index: usize, raw: u32) -> io::Result<()> {
+    /// An LVT entry holds whatever a guest write left inside the entry's
+    /// write mask — timer mode 3 and a reserved delivery mode included, as
+    /// `set_lvt_entry` stores them (Bochs apic.cc `set_lvt_entry`, `lvt_mask`)
+    /// — so only a bit outside the mask marks an image no machine produced.
+    fn validate_snapshot_lvt(index: usize, raw: u32) -> SnapResult<()> {
         let mask = *LVT_MASKS.get(index)
             .ok_or_else(|| Self::snapshot_invalid("LAPIC LVT index is invalid"))?;
-        if raw & !mask != 0 || (index == LocalVectorTableEntry::Timer as usize && (raw >> 17) & 3 == 3) {
+        if raw & !mask != 0 {
             return Err(Self::snapshot_invalid("LAPIC LVT has invalid reserved state"));
         }
-        if ((raw >> 8) & 7) == ApicDeliveryMode::Reserved as u32 {
-            return Err(Self::snapshot_invalid("LAPIC LVT delivery mode is reserved"));
-        }
         Ok(())
     }
 
-    fn validate_snapshot_icr(icr_lo: u32) -> io::Result<()> {
-        if icr_lo & !0x000c_dfff != 0 || ((icr_lo >> 8) & 7) == ApicDeliveryMode::Reserved as u32 {
-            return Err(Self::snapshot_invalid("LAPIC ICR encoding is invalid"));
-        }
-        Ok(())
-    }
-
-    fn validate_snapshot_ipi(ipi: PendingIpi, bus_cpu_count: u32) -> io::Result<()> {
+    fn validate_snapshot_ipi(ipi: PendingIpi, bus_cpu_count: u32) -> SnapResult<()> {
         let wire_shorthand = ((ipi.lo_cmd >> 18) & 3) as u8;
         if ipi.shorthand > 3
             || ((ipi.lo_cmd >> 8) & 7) == ApicDeliveryMode::Reserved as u32
@@ -2745,8 +2911,8 @@ impl BxLocalApic {
         Ok(())
     }
 
-    fn snapshot_invalid(message: &'static str) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, message)
+    fn snapshot_invalid(message: &'static str) -> SnapError {
+        SnapError::Invalid(message)
     }
 }
 
@@ -2768,24 +2934,25 @@ mod tests {
     const INIT_VECTOR: u8 = 0;
     const NO_DESTINATION_SHORTHAND: u8 = 0;
 
-    use std::io::Cursor;
 
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::CpuModel;
+    use crate::cpu::ResetReason;
     use crate::snapshot::SnapshotReader;
 
     use super::*;
 
     fn make_lapic() -> BxLocalApic {
         let mut lapic = BxLocalApic::default();
-        lapic.xapic = true;
         lapic.set_tsc_deadline_supported(true);
         lapic.reset(0);
         lapic
     }
 
-    fn restore_v3(source: &BxLocalApic, target: &mut BxLocalApic) -> std::io::Result<()> {
+    fn restore_v3(source: &BxLocalApic, target: &mut BxLocalApic) -> SnapResult<()> {
         let mut bytes = Vec::new();
         source.save_snapshot_v3_body(&mut bytes)?;
-        let mut reader = SnapshotReader::new(Cursor::new(bytes.clone()), bytes.len() as u64)?;
+        let mut reader = SnapshotReader::new(bytes.as_slice(), bytes.len() as u64)?;
         target.restore_snapshot_v3_body(&mut reader)?;
         reader.finish_exact()
     }
@@ -2817,8 +2984,81 @@ mod tests {
             assert_eq!(lapic.ier[i], 0xFFFFFFFF);
         }
         for i in 0..LVT_ENTRY_COUNT {
+            if i == LocalVectorTableEntry::Lint0 as usize {
+                continue; // the virtual wire — see `preset_lint0`
+            }
             assert_eq!(lapic.lvt[i], LvtBits::MASKED); // all masked
         }
+    }
+
+    /// The bootstrap processor comes out of reset holding the legacy virtual
+    /// wire, and no application processor does. Without this the BIOS shipped
+    /// with this port — which never writes offset 0x350 — would leave every
+    /// guest deaf to the 8259 for its whole life.
+    #[test]
+    fn reset_leaves_the_virtual_wire_on_the_bootstrap_processor_alone() {
+        let bsp = make_lapic();
+        assert_eq!(
+            bsp.lvt[LocalVectorTableEntry::Lint0 as usize],
+            LvtBits::from_raw(0x0000_0700),
+            "the bootstrap processor's LINT0 is unmasked ExtINT"
+        );
+        assert!(bsp.lint0_admits_ext_int());
+
+        let mut ap = BxLocalApic::default();
+        ap.set_id(1);
+        ap.reset(0);
+        assert_eq!(
+            ap.lvt[LocalVectorTableEntry::Lint0 as usize],
+            LvtBits::MASKED,
+            "an application processor's LINT0 stays masked"
+        );
+        assert!(!ap.lint0_admits_ext_int());
+    }
+
+    /// The predicate the legacy wire is gated on, over the states a guest can
+    /// actually put LVT0 in. Matches KVM's `kvm_apic_accept_pic_intr`.
+    #[test]
+    fn lint0_admits_ext_int_only_through_an_unmasked_ext_int_entry() {
+        let mut lapic = make_lapic();
+        let lint0 = LocalVectorTableEntry::Lint0 as usize;
+
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0000_0700);
+        assert!(lapic.lint0_admits_ext_int(), "unmasked ExtINT admits");
+
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0001_0700);
+        assert!(!lapic.lint0_admits_ext_int(), "the mask bit refuses");
+
+        // What Linux's `check_timer()` writes when it wants the tick to stop.
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0001_0000);
+        assert!(!lapic.lint0_admits_ext_int(), "masked fixed refuses");
+
+        // A fixed vector on LINT0 is a different interrupt, not the 8259's.
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0000_0031);
+        assert!(!lapic.lint0_admits_ext_int(), "unmasked fixed refuses");
+
+        // Hardware disabled: the pins bypass the APIC, mask bit and all.
+        lapic.lvt[lint0] = LvtBits::from_raw(0x0001_0000);
+        lapic.mode = ApicMode::GloballyDisabled;
+        assert!(lapic.lint0_admits_ext_int(), "a disabled APIC gates nothing");
+    }
+
+    /// A software disable masks every LVT entry, so it closes the legacy wire
+    /// without the predicate needing a term of its own — and reset must not
+    /// reach that masking, or the preset above would never survive.
+    #[test]
+    fn a_software_disable_closes_the_wire_but_reset_does_not() {
+        let mut lapic = make_lapic();
+        assert!(!lapic.software_enabled, "reset leaves the APIC disabled");
+        assert!(
+            lapic.lint0_admits_ext_int(),
+            "reset's disable does not run through the register writer"
+        );
+
+        lapic.write_spurious_interrupt_register(0x1FF); // enable
+        assert!(lapic.software_enabled);
+        lapic.write_spurious_interrupt_register(0x0FF); // disable
+        assert!(!lapic.lint0_admits_ext_int());
     }
 
     #[test]
@@ -3152,6 +3392,9 @@ mod tests {
         assert!(!lapic.timer_active);
     }
 
+    // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
+    // (or a `debug_assert!`), which do not exist in a release build.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "LAPIC timer current count overdue")]
     fn current_timer_count_panics_when_active_timer_is_overdue() {
@@ -3177,6 +3420,50 @@ mod tests {
 
         assert_eq!(lapic.timer_activate_request, None);
         assert!(lapic.timer_deactivate_request);
+    }
+
+    /// Bochs apic.cc tests the timer mode a bit at a time: bit 18 alone makes
+    /// the count registers inert and `IA32_TSC_DEADLINE` live, bit 17 alone
+    /// makes a fire reload. Mode 3 sets both, so it behaves as both.
+    #[test]
+    fn a_mode_3_timer_is_tsc_deadline_and_reloads_when_it_fires() {
+        const CURRENT_TICKS: u64 = 100;
+        const DEADLINE_TICKS: u64 = 500;
+
+        let mut lapic = make_lapic();
+        lapic.write_spurious_interrupt_register(0x1FF);
+        lapic.set_lvt_entry(0x320, 0x0006_0030);
+
+        lapic.set_initial_timer_count(7, CURRENT_TICKS);
+        assert_eq!(lapic.timer_initial, 0, "mode 3 ignores an initial-count write");
+        assert!(!lapic.timer_active);
+        assert_eq!(lapic.get_current_timer_count(CURRENT_TICKS), 0);
+
+        lapic.set_tsc_deadline(DEADLINE_TICKS, CURRENT_TICKS);
+        assert_eq!(lapic.get_tsc_deadline(), DEADLINE_TICKS);
+
+        lapic.periodic(DEADLINE_TICKS);
+        assert!(lapic.timer_active, "bit 17 reloads the timer that fired");
+        assert_eq!(
+            lapic.timer_activate_request,
+            Some(LocalApicTimerActivation::at_ticks(DEADLINE_TICKS, true))
+        );
+    }
+
+    /// An x2APIC ICR write has no delivery-status bit to force idle, so the
+    /// guest reads back both dwords as it wrote them (Bochs apic.cc
+    /// `write_x2apic`).
+    #[test]
+    fn an_x2apic_icr_write_reads_back_as_written() {
+        let mut lapic = make_lapic();
+        lapic.write_spurious_interrupt_register(0x1FF);
+        // Self shorthand, fixed delivery, vector 0x40, bit 12 set.
+        let icr = 0x0000_0000_0004_1040u64;
+
+        assert!(lapic.write_x2apic(0x300, icr, 0));
+
+        assert_eq!(lapic.icr_lo, 0x0004_1040);
+        assert!(BxLocalApic::get_vector(&lapic.irr, 0x40), "the self-IPI was sent");
     }
 
     #[test]
@@ -3359,15 +3646,63 @@ mod tests {
     }
 
     #[test]
-    fn v3_snapshot_rejects_tsc_deadline_activation_that_rebases_epoch() {
+    fn v3_snapshot_rejects_tsc_deadline_activation_away_from_its_deadline() {
         let mut source = make_lapic();
         source.lvt[LocalVectorTableEntry::Timer as usize] = LvtBits::from_raw(0x0004_0030);
         source.timer_handle = Some(1);
         source.timer_active = true;
         source.ticks_initial = 500;
-        source.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(500, true));
+        source.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(600, false));
 
         assert!(restore_v3(&source, &mut make_lapic()).is_err());
+    }
+
+    /// Only a TSC-deadline timer takes `IA32_TSC_DEADLINE`, and leaving the
+    /// mode disarms it, so no one-shot timer holds such an activation.
+    #[test]
+    fn v3_snapshot_rejects_tsc_deadline_activation_outside_tsc_deadline_mode() {
+        let mut source = make_lapic();
+        source.lvt[LocalVectorTableEntry::Timer as usize] = LvtBits::from_raw(0x0000_0030);
+        source.timer_handle = Some(1);
+        source.timer_active = true;
+        source.ticks_initial = 500;
+        source.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(500, false));
+
+        assert!(restore_v3(&source, &mut make_lapic()).is_err());
+    }
+
+    /// Without the capability a timer write clears bit 18, so an image that
+    /// holds it set was not made by this CPU.
+    #[test]
+    fn v3_snapshot_rejects_tsc_deadline_mode_without_the_capability() {
+        let mut source = make_lapic();
+        source.set_tsc_deadline_supported(false);
+        source.lvt[LocalVectorTableEntry::Timer as usize] = LvtBits::from_raw(0x0004_0030);
+        let mut target = make_lapic();
+        target.set_tsc_deadline_supported(false);
+
+        assert!(restore_v3(&source, &mut target).is_err());
+    }
+
+    /// Every register state a guest write can leave restores: a mode-3 timer
+    /// reloaded by its fire and then moved to mode 2 (only a bit-18 change
+    /// disarms), a reserved delivery mode in LINT0 and an ICR kept as written.
+    #[test]
+    fn v3_snapshot_accepts_every_register_state_a_guest_can_leave() {
+        let mut source = make_lapic();
+        // `Emulator::reset` consumes the reset's own disarm with the machine.
+        source.timer_deactivate_request = false;
+        source.write_spurious_interrupt_register(0x1FF);
+        source.timer_handle = Some(1);
+        source.set_lvt_entry(0x320, 0x0006_0030);
+        source.set_tsc_deadline(500, 100);
+        source.periodic(500);
+        source.set_lvt_entry(0x320, 0x0004_0030);
+        assert!(source.timer_activate_request.is_some(), "mode 2 kept the reload armed");
+        source.set_lvt_entry(0x350, 0x0000_0330);
+        assert!(source.write_x2apic(0x300, 0x0000_0000_0004_1040, 0));
+
+        restore_v3(&source, &mut make_lapic()).unwrap();
     }
 
     #[test]
@@ -3388,5 +3723,97 @@ mod tests {
         source.vmx_timer_active = true;
 
         assert!(restore_v3(&source, &mut make_lapic()).is_ok());
+    }
+
+    /// The local APIC a *built* processor carries is the xAPIC one, because
+    /// that is the only one Bochs builds: `bx_local_apic_c`'s constructor
+    /// takes `xapic = simulate_xapic` (apic.cc) and `bx_begin_simulation`
+    /// sets `simulate_xapic = true` unconditionally for every BX_SUPPORT_APIC
+    /// build (main.cc). Guest-visible consequences, all read here through the
+    /// MMIO window a guest uses: the version register reports P4's six LVT
+    /// entries, and the logical destination register keeps the full eight
+    /// xAPIC ID bits (Bochs apic.cc `ldr & apic_id_mask`, the global mask
+    /// being 0xff).
+    #[test]
+    fn a_built_processor_carries_the_xapic_local_apic_bochs_builds() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+
+        assert!(
+            cpu.lapic.is_xapic(),
+            "every Bochs APIC build simulates the xAPIC model"
+        );
+        assert_eq!(
+            cpu.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x030, 0),
+            0x0005_0014,
+            "the version register reports the P4 xAPIC's six LVT entries"
+        );
+
+        cpu.lapic
+            .write_aligned(BX_LAPIC_BASE_ADDR | 0x0D0, 0xFF00_0000, 0);
+        assert_eq!(
+            cpu.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x0D0, 0),
+            0xFF00_0000,
+            "an xAPIC logical destination is eight bits wide, not four"
+        );
+    }
+
+    /// All eight vector bits of the spurious-interrupt register are the
+    /// guest's on an xAPIC (Bochs apic.cc write_spurious_interrupt_register
+    /// hardwires the low nibble only for the legacy APIC), so a guest can
+    /// program vector 0 and an acknowledge with nothing deliverable can
+    /// answer it.
+    #[test]
+    fn the_xapic_spurious_vector_keeps_every_bit_the_guest_writes() {
+        let mut cpu = BxCpuBuilder::new().build().expect("a processor");
+        cpu.reset(ResetReason::Hardware);
+
+        cpu.lapic.write_aligned(BX_LAPIC_BASE_ADDR | 0x0F0, 0x100, 0);
+
+        assert_eq!(
+            cpu.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x0F0, 0) & 0xFF,
+            0x00,
+            "the xAPIC's spurious vector is not forced to 0x0f"
+        );
+    }
+
+    /// The AMD extended xAPIC registers answer only on a model whose CPUID
+    /// claims them. Bochs gates both the capability bit and the whole 0x400
+    /// register block on `BX_ISA_XAPIC_EXT` (init.cc `enable_xapic_extensions`
+    /// call site; apic.cc read_aligned/write_aligned), which its cpudb enables
+    /// for Ryzen and not for any Intel model.
+    #[test]
+    fn only_a_model_with_extended_xapic_answers_its_registers() {
+        let mut intel = BxCpuBuilder::new_with_model(CpuModel::corei7_skylake_x())
+            .build()
+            .expect("a processor");
+        intel.reset(ResetReason::Hardware);
+
+        assert_eq!(
+            intel.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x030, 0),
+            0x0005_0014,
+            "a model without extended xAPIC does not set the version's bit 31"
+        );
+        assert_eq!(
+            intel.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x400, 0),
+            0,
+            "the extended feature register is not a register on this model"
+        );
+
+        let mut amd = BxCpuBuilder::new_with_model(CpuModel::amd_ryzen())
+            .build()
+            .expect("a processor");
+        amd.reset(ResetReason::Hardware);
+
+        assert_eq!(
+            amd.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x030, 0),
+            0x8005_0014,
+            "extended xAPIC is advertised in the version register's bit 31"
+        );
+        assert_eq!(
+            amd.lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x400, 0),
+            BX_XAPIC_EXT_SUPPORT_IER | BX_XAPIC_EXT_SUPPORT_SEOI,
+            "the extended feature register reports IER and SEOI"
+        );
     }
 }

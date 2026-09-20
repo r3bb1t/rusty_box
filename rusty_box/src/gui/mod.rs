@@ -4,6 +4,8 @@ pub mod keymap;
 pub mod nogui;
 pub mod shared_display;
 mod siminterface;
+#[cfg(feature = "gui-egui")]
+pub mod touchpad;
 pub mod vga_font;
 
 pub use gui_trait::{BxGui, DisplayMode, VgaTextModeInfo};
@@ -22,7 +24,7 @@ pub use egui_gui::{BridgeGui, EguiGui};
 #[cfg(all(feature = "gui-egui", feature = "std"))]
 pub mod eframe_app;
 #[cfg(all(feature = "gui-egui", feature = "std"))]
-pub use eframe_app::RustyBoxApp;
+pub use eframe_app::{ConsolePlaceholder, DisplayScale, PointerMode, RustyBoxApp};
 
 #[cfg(feature = "std")]
 pub mod term;

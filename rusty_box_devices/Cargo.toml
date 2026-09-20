@@ -1,0 +1,25 @@
+[package]
+name = "rusty_box_devices"
+description = "Device models for the rusty_box emulator, depending on no host and no execution engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+# The only in-workspace dependency, and the boundary this crate exists to
+# prove: a device model may name the architecture-neutral foundations and
+# nothing else — not the CPU, not the emulator, not a host.
+rusty_box_core = { workspace = true }
+tracing = { workspace = true, optional = true }
+
+[features]
+default = []
+# Additive, exactly as in core: a model's shape does not change with them.
+alloc = ["dep:tracing", "rusty_box_core/alloc"]
+std = ["alloc", "tracing/std", "rusty_box_core/std"]
+
+[lints]
+workspace = true

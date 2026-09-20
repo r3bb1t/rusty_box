@@ -17,13 +17,11 @@
 //! Legacy SSE (non-VEX) preserves upper bits: uses `write_xmm_reg_lo128`.
 
 use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedXmmRegister,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // MOVUPS / MOVUPD — Unaligned packed single/double (0F 10, 0F 11)
     // MOVDQU          — Unaligned packed integer (F3 0F 6F, F3 0F 7F)

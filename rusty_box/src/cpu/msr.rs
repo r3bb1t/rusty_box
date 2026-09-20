@@ -1,8 +1,8 @@
-#![allow(dead_code)]
 // MSR (Model Specific Register) constants and initialization
 // Mirrors Bochs cpu/msr.h
 
-use crate::cpu::{cpuid::BxCpuIdTrait, BxCpuC};
+use crate::cpu::decoder::features::X86Feature;
+use crate::cpu::BxCpuC;
 
 // =========================================================================
 // MSR Register Addresses — matching Bochs msr.h
@@ -20,8 +20,27 @@ pub const BX_MSR_APICBASE: u32 = 0x01B;
 /// IA32_TSC_ADJUST
 pub const BX_MSR_TSC_ADJUST: u32 = 0x03B;
 
-/// IA32_BIOS_SIGN_ID (microcode revision)
-pub const BX_MSR_BIOS_SIGN_ID: u32 = 0x08B;
+/// IA32_USER_MSR_CTL — the URDMSR/UWRMSR permission bitmap's base.
+pub const BX_MSR_IA32_USER_MSR_CTL: u32 = 0x01C;
+
+/// An artificial MSR Bochs uses to serialize RDMSRLIST/WRMSRLIST.
+pub const BX_MSR_IA32_BARRIER: u32 = 0x02F;
+
+/// IA32_SPEC_CTRL — speculation-control enables (IBRS/STIBP/SSBD).
+pub const BX_MSR_IA32_SPEC_CTRL: u32 = 0x048;
+
+/// IA32_PRED_CMD — write-only indirect-branch prediction barrier.
+pub const BX_MSR_IA32_PRED_CMD: u32 = 0x049;
+
+/// IA32_ARCH_CAPABILITIES — read-only enumeration of the SCA mitigations
+/// this processor does not need.
+pub const BX_MSR_IA32_ARCH_CAPABILITIES: u32 = 0x10A;
+
+/// IA32_FLUSH_CMD — write-only L1 data-cache flush command.
+pub const BX_MSR_IA32_FLUSH_CMD: u32 = 0x10B;
+
+/// IA32_XSS — the supervisor state components XSAVES may save.
+pub const BX_MSR_XSS: u32 = 0xDA0;
 
 /// IA32_APERF (Actual Performance Frequency Clock Count)
 pub const BX_MSR_IA32_APERF: u32 = 0x0E7;
@@ -35,10 +54,6 @@ pub const BX_MSR_IA32_UMWAIT_CONTROL: u32 = 0x0E1;
 
 /// MTRR Capability register
 pub const BX_MSR_MTRRCAP: u32 = 0x0FE;
-
-/// IA32_PMC0..7 (Performance Monitoring Counters)
-pub const BX_MSR_PMC0: u32 = 0x0C1;
-pub const BX_MSR_PMC7: u32 = 0x0C8;
 
 /// IA32_PERFEVTSEL0..7 (Performance Event Select)
 pub const BX_MSR_PERFEVTSEL0: u32 = 0x186;
@@ -183,13 +198,135 @@ pub const BX_MSR_KERNELGSBASE: u32 = 0xC000_0102;
 /// TSC_AUX — auxiliary TSC value (returned by RDTSCP in ECX)
 pub const BX_MSR_TSC_AUX: u32 = 0xC000_0103;
 
-/// Default APICBASE value when APIC support is disabled
-pub const BX_MSR_APICBASE_DEFAULT: u64 = 0xFEE00900;
-
 /// Default MTRRCAP value (WC + 8 variable ranges)
 pub const BX_MSR_MTRRCAP_DEFAULT: u64 = 0x0508;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+/// The highest MSR index the descriptor table covers. Bochs `cpu.h`
+/// `BX_MSR_MAX_INDEX`: above it an MSR carries its own gate instead.
+pub const BX_MSR_MAX_INDEX: u32 = 0x1000;
+
+/// What an MSR below [`BX_MSR_MAX_INDEX`] is called, and the ISA extension a
+/// CPU must have for it to exist at all.
+///
+/// Bochs msr.cc builds these as a heap array of `MSR_Descriptor*` in
+/// `init_MSRs()` and frees them in `destroy_MSRs()`; here the same table is a
+/// match the compiler lowers to a jump table, so a CPU has no MSR bring-up
+/// step and no per-machine allocation to get wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MsrDescriptor {
+    /// The architectural name, for the log line a refusal prints.
+    pub name: &'static str,
+    /// The extension whose absence makes this MSR nonexistent.
+    pub feature: X86Feature,
+}
+
+impl MsrDescriptor {
+    const fn new(name: &'static str, feature: X86Feature) -> Self {
+        Self { name, feature }
+    }
+}
+
+/// The MSR at `index`, if this architecture defines one there.
+///
+/// Bochs msr.cc `init_MSRs()`, entry for entry. `None` is its `msr_desc[index]
+/// == NULL`: an index with no descriptor is not an architectural MSR, which
+/// sends it to the unknown-MSR policy rather than to a refusal.
+pub const fn msr_descriptor(index: u32) -> Option<MsrDescriptor> {
+    use X86Feature as F;
+    let descriptor = match index {
+        BX_MSR_TSC => MsrDescriptor::new("BX_IA32_TSC", F::IsaPentium),
+        BX_MSR_PLATFORM_ID => MsrDescriptor::new("MSR_PLATFORM_ID", F::IsaPentium),
+        BX_MSR_APICBASE => MsrDescriptor::new("MSR_APICBASE", F::IsaPentium),
+        BX_MSR_IA32_USER_MSR_CTL => MsrDescriptor::new("MSR_IA32_USER_MSR_CTL", F::IsaUserMsr),
+        BX_MSR_IA32_APERF => MsrDescriptor::new("MSR_IA32_APERF", F::IsaPentium),
+        BX_MSR_IA32_MPERF => MsrDescriptor::new("MSR_IA32_MPERF", F::IsaPentium),
+
+        BX_MSR_SYSENTER_CS => MsrDescriptor::new("MSR_IA32_SYSENTER_CS", F::IsaSysenterSysexit),
+        BX_MSR_SYSENTER_ESP => MsrDescriptor::new("MSR_IA32_SYSENTER_ESP", F::IsaSysenterSysexit),
+        BX_MSR_SYSENTER_EIP => MsrDescriptor::new("MSR_IA32_SYSENTER_EIP", F::IsaSysenterSysexit),
+
+        BX_MSR_MTRRCAP => MsrDescriptor::new("MSR_IA32_MTRR_CAP", F::IsaMtrr),
+        BX_MSR_MTRRPHYSBASE0..=BX_MSR_MTRRPHYSMASK7 => {
+            MsrDescriptor::new("MSR_IA32_MTRRPHYS", F::IsaMtrr)
+        }
+        BX_MSR_MTRRFIX64K_00000 => MsrDescriptor::new("MSR_IA32_MTRRFIX64K_00000", F::IsaMtrr),
+        BX_MSR_MTRRFIX16K_80000..=BX_MSR_MTRRFIX16K_A0000 => {
+            MsrDescriptor::new("MSR_IA32_MTRRFIX16K", F::IsaMtrr)
+        }
+        BX_MSR_MTRRFIX4K_C0000..=BX_MSR_MTRRFIX4K_F8000 => {
+            MsrDescriptor::new("MSR_IA32_MTRRFIX4K", F::IsaMtrr)
+        }
+        BX_MSR_MTRR_DEFTYPE => MsrDescriptor::new("MSR_IA32_MTRR_DEFTYPE", F::IsaMtrr),
+        BX_MSR_PAT => MsrDescriptor::new("BX_IA32_PAT", F::IsaPat),
+
+        BX_MSR_TSC_ADJUST => MsrDescriptor::new("BX_IA32_TSC_ADJUST", F::IsaTscAdjust),
+        BX_MSR_IA32_UMWAIT_CONTROL => {
+            MsrDescriptor::new("MSR_IA32_UMWAIT_CONTROL", F::IsaWaitpkg)
+        }
+        BX_MSR_XSS => MsrDescriptor::new("MSR_IA32_XSS", F::IsaXsaves),
+
+        BX_MSR_IA32_U_CET => MsrDescriptor::new("MSR_IA32_U_CET", F::IsaCet),
+        BX_MSR_IA32_S_CET => MsrDescriptor::new("MSR_IA32_S_CET", F::IsaCet),
+        BX_MSR_IA32_PL0_SSP..=BX_MSR_IA32_PL3_SSP => {
+            MsrDescriptor::new("MSR_IA32_PLx_SSP", F::IsaCet)
+        }
+        BX_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR => {
+            MsrDescriptor::new("MSR_IA32_INTERRUPT_SSP_TABLE_ADDR", F::IsaCet)
+        }
+
+        BX_MSR_IA32_UINTR_RR => MsrDescriptor::new("MSR_IA32_UINTR_RR", F::IsaUintr),
+        BX_MSR_IA32_UINTR_HANDLER => MsrDescriptor::new("MSR_IA32_UINTR_HANDLER", F::IsaUintr),
+        BX_MSR_IA32_UINTR_STACKADJUST => {
+            MsrDescriptor::new("MSR_IA32_UINTR_STACKADJUST", F::IsaUintr)
+        }
+        BX_MSR_IA32_UINTR_MISC => MsrDescriptor::new("MSR_IA32_UINTR_MISC", F::IsaUintr),
+        BX_MSR_IA32_UINTR_PD => MsrDescriptor::new("MSR_IA32_UINTR_PD", F::IsaUintr),
+        BX_MSR_IA32_UINTR_TT => MsrDescriptor::new("MSR_IA32_UINTR_TT", F::IsaUintr),
+
+        BX_MSR_IA32_PKRS => MsrDescriptor::new("MSR_IA32_PKRS", F::IsaPks),
+
+        BX_MSR_IA32_FRED_RSP0..=BX_MSR_IA32_FRED_RSP3 => {
+            MsrDescriptor::new("MSR_IA32_FRED_RSPx", F::IsaFred)
+        }
+        BX_MSR_IA32_FRED_STKLVLS => MsrDescriptor::new("MSR_IA32_FRED_STKLVLS", F::IsaFred),
+        BX_MSR_IA32_FRED_SSP1..=BX_MSR_IA32_FRED_SSP3 => {
+            MsrDescriptor::new("MSR_IA32_FRED_SSPx", F::IsaFred)
+        }
+        BX_MSR_IA32_FRED_CONFIG => MsrDescriptor::new("BX_MSR_IA32_FRED_CONFIG", F::IsaFred),
+
+        BX_MSR_TSC_DEADLINE => MsrDescriptor::new("MSR_TSC_DEADLINE", F::IsaTscDeadline),
+        BX_MSR_IA32_BARRIER => MsrDescriptor::new("BX_MSR_IA32_BARRIER", F::IsaMsrlist),
+
+        BX_MSR_IA32_ARCH_CAPABILITIES => {
+            MsrDescriptor::new("MSR_IA32_ARCH_CAPABILITIES", F::IsaScaMitigations)
+        }
+        BX_MSR_IA32_SPEC_CTRL => MsrDescriptor::new("MSR_IA32_SPEC_CTRL", F::IsaScaMitigations),
+        BX_MSR_IA32_PRED_CMD => MsrDescriptor::new("MSR_IA32_PRED_CMD", F::IsaScaMitigations),
+        BX_MSR_IA32_FLUSH_CMD => MsrDescriptor::new("MSR_IA32_FLUSH_CMD", F::IsaScaMitigations),
+
+        BX_MSR_IA32_FEATURE_CONTROL => {
+            MsrDescriptor::new("MSR_IA32_FEATURE_CONTROL", F::IsaVmx)
+        }
+        // 0x480..=0x493 is the whole VMX capability block, contiguous in
+        // Bochs's table and complete: BASIC, the four control pairs, MISC, the
+        // CR0/CR4 fixed values, VMCS_ENUM, the secondary and tertiary
+        // controls, EPT/VPID capabilities, the TRUE_ variants and VMFUNC.
+        BX_MSR_VMX_BASIC..=BX_MSR_VMX_VMEXIT_CTRLS2 => {
+            MsrDescriptor::new("MSR_VMX_CAPABILITY", F::IsaVmx)
+        }
+
+        // Bochs registers the performance-event selectors under the Pentium
+        // feature and then answers them from the unknown-MSR policy.
+        BX_MSR_PERFEVTSEL0..=BX_MSR_PERFEVTSEL7 => {
+            MsrDescriptor::new("MSR_IA32_PERFEVTSEL", F::IsaPentium)
+        }
+
+        _ => return None,
+    };
+    Some(descriptor)
+}
+
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Initialize MSR infrastructure before reset.
     /// Bochs init.cc: zeros configurable MSR array.
     /// Actual MSR default values are set in reset() matching Bochs init.cc.

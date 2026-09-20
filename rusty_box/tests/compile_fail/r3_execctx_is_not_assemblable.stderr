@@ -1,0 +1,24 @@
+error[E0603]: module `exec_ctx` is private
+ --> tests/compile_fail/r3_execctx_is_not_assemblable.rs:6:29
+  |
+6 |     let _ = rusty_box::cpu::exec_ctx::ExecCtx::new;
+  |                             ^^^^^^^^  ------- struct `ExecCtx` is not publicly re-exported
+  |                             |
+  |                             private module
+  |
+note: the module `exec_ctx` is defined here
+ --> src/cpu/mod.rs
+  |
+  | pub(crate) mod exec_ctx;
+  | ^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0624]: associated function `new` is private
+ --> tests/compile_fail/r3_execctx_is_not_assemblable.rs:6:48
+  |
+6 |     let _ = rusty_box::cpu::exec_ctx::ExecCtx::new;
+  |                                                ^^^ private associated function
+  |
+ ::: src/cpu/exec_ctx.rs
+  |
+  |     pub(crate) fn new(cpu: &'a mut BxCpuC<T>, io: PcIo<'a>) -> Self {
+  |     --------------------------------------------------------------- private associated function defined here

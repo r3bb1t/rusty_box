@@ -1,0 +1,5 @@
+error[E0599]: no method named `execute_instruction` found for struct `Box<BxCpuC>` in the current scope
+ --> tests/compile_fail/r2_bare_cpu_cannot_execute.rs:7:17
+  |
+7 |     let _ = cpu.execute_instruction(&instr);
+  |                 ^^^^^^^^^^^^^^^^^^^ method not found in `Box<BxCpuC>`

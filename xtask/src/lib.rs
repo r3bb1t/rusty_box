@@ -12,6 +12,8 @@ use std::{
 use adb_client::{server::ADBServer, server_device::ADBServerDevice, ADBDeviceExt};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
+pub mod ci;
+
 const CMDLINE_TOOLS_VERSION: &str = "14742923";
 const ANDROID_PLATFORM: &str = "android-34";
 const BUILD_TOOLS_VERSION: &str = "35.0.0";
@@ -21,7 +23,24 @@ const ANDROID_PACKAGE: &str = "com.rustybox.android";
 const LOCAL_SIGNING_PASSWORD: &str = "android";
 const ANDROID_COMPONENT: &str = "com.rustybox.android/android.app.NativeActivity";
 const APK_NAME: &str = "RustyBoxAndroid.apk";
-const ALPINE_ISO_NAME: &str = "alpine-virt-3.23.3-x86_64.iso";
+
+/// The cargo profile the APK builds with, `[profile.android]` in the
+/// workspace manifest; cargo-apk writes the APK under `target/<profile>/apk`.
+const ANDROID_PROFILE: &str = "android";
+/// The signing variables cargo-apk reads for [`ANDROID_PROFILE`]: it names
+/// them `CARGO_APK_<PROFILE>_KEYSTORE` and `…_KEYSTORE_PASSWORD`.
+const SIGNING_KEYSTORE_ENV: &str = "CARGO_APK_ANDROID_KEYSTORE";
+const SIGNING_PASSWORD_ENV: &str = "CARGO_APK_ANDROID_KEYSTORE_PASSWORD";
+
+/// Code generation for the phone's Snapdragon 8 Gen 2, tuned for its
+/// Cortex-X3 prime core. Its Cortex-A715, A710 and A510 cores share the X3's
+/// feature set apart from SPE, a profiler extension codegen never emits, so
+/// the binary may run on any of them. SVE and SVE2 stay off: they execute only
+/// where the kernel enables them, and at this chip's 128-bit vector length
+/// they are no wider than NEON. The APK therefore needs an ARMv9.0-A CPU with
+/// the X3's extensions; a caller's own rustflags follow these, so
+/// `RUSTFLAGS=-Ctarget-cpu=generic` builds one for any 64-bit ARM phone.
+const ANDROID_CODEGEN_FLAGS: [&str; 2] = ["-Ctarget-cpu=cortex-x3", "-Ctarget-feature=-sve"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostOs {
@@ -61,7 +80,6 @@ pub enum AndroidAction {
 pub struct AndroidCommand {
     pub action: AndroidAction,
     pub sdk: Option<PathBuf>,
-    pub iso: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
     pub skip_sdk: bool,
 }
@@ -69,6 +87,8 @@ pub struct AndroidCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XtaskCommand {
     Android(AndroidCommand),
+    Ci(ci::CiCommand),
+    PerfBaseline(ci::PerfBaselineCommand),
 }
 
 struct AndroidContext {
@@ -121,12 +141,13 @@ impl AndroidContext {
     fn apk_path(&self) -> PathBuf {
         self.repo
             .join("target")
-            .join("release")
+            .join(ANDROID_PROFILE)
             .join("apk")
+            .join("examples")
             .join(APK_NAME)
     }
 
-    fn release_keystore(&self) -> PathBuf {
+    fn signing_keystore(&self) -> PathBuf {
         self.home
             .join(".android")
             .join("rusty_box_android_xtask_debug.keystore")
@@ -150,10 +171,12 @@ where
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
         return Err(usage());
     }
-    if args[0] != "android" {
-        return Err(format!("unknown xtask command {:?}\n{}", args[0], usage()));
+    match args[0].as_str() {
+        "android" => parse_android_args(&args[1..]).map(XtaskCommand::Android),
+        "ci" => ci::parse_ci_args(&args[1..]).map(XtaskCommand::Ci),
+        "perf-baseline" => Ok(XtaskCommand::PerfBaseline(ci::PerfBaselineCommand::default())),
+        _ => Err(format!("unknown xtask command {:?}\n{}", args[0], usage())),
     }
-    parse_android_args(&args[1..]).map(XtaskCommand::Android)
 }
 
 pub fn command_line_tools_url(os: HostOs) -> &'static str {
@@ -183,14 +206,8 @@ pub fn sdkmanager_path(sdk: &Path, os: HostOs) -> PathBuf {
 
 pub fn cargo_apk_signing_env(keystore: &Path, password: &str) -> Vec<(String, String)> {
     vec![
-        (
-            "CARGO_APK_RELEASE_KEYSTORE".to_string(),
-            path_for_env(keystore),
-        ),
-        (
-            "CARGO_APK_RELEASE_KEYSTORE_PASSWORD".to_string(),
-            password.to_string(),
-        ),
+        (SIGNING_KEYSTORE_ENV.to_string(), path_for_env(keystore)),
+        (SIGNING_PASSWORD_ENV.to_string(), password.to_string()),
     ]
 }
 
@@ -199,12 +216,49 @@ pub fn cargo_apk_build_args() -> Vec<&'static str> {
         "apk",
         "build",
         "-p",
-        "rusty_box_android",
-        "--lib",
-        "--release",
-        "--features",
-        "embedded-alpine",
+        "rusty_box_gui",
+        "--example",
+        "rusty_box_gui_android",
+        "--profile",
+        ANDROID_PROFILE,
     ]
+}
+
+/// The rustflags variable to hand cargo-apk: [`ANDROID_CODEGEN_FLAGS`]
+/// followed by the caller's own flags, in whichever of the two variables the
+/// caller set. cargo-apk (ndk-build `cargo_ndk`) rebuilds
+/// `CARGO_ENCODED_RUSTFLAGS` from that one variable and rejects both at once,
+/// and `CARGO_ENCODED_RUSTFLAGS` outranks every `rustflags` entry in
+/// `.cargo/config.toml`, so the environment is the only route to the build.
+fn android_rustflags_env(
+    caller_encoded: Option<&str>,
+    caller_plain: Option<&str>,
+) -> Result<(String, String), String> {
+    match (caller_encoded, caller_plain) {
+        (Some(_), Some(_)) => Err(
+            "both CARGO_ENCODED_RUSTFLAGS and RUSTFLAGS are set; cargo-apk accepts only one"
+                .to_string(),
+        ),
+        (Some(encoded), None) => {
+            let mut flags = ANDROID_CODEGEN_FLAGS.to_vec();
+            flags.extend(encoded.split('\x1f').filter(|flag| !flag.is_empty()));
+            Ok(("CARGO_ENCODED_RUSTFLAGS".to_string(), flags.join("\x1f")))
+        }
+        (None, plain) => {
+            let mut flags = ANDROID_CODEGEN_FLAGS.to_vec();
+            flags.extend(plain.unwrap_or_default().split_whitespace());
+            Ok(("RUSTFLAGS".to_string(), flags.join(" ")))
+        }
+    }
+}
+
+/// The caller's value of the environment variable `name`, `None` when unset.
+fn caller_env(name: &str) -> Result<Option<String>, String> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid Unicode")),
+    }
 }
 
 pub fn adb_start_args() -> Vec<&'static str> {
@@ -214,6 +268,8 @@ pub fn adb_start_args() -> Vec<&'static str> {
 fn execute(command: XtaskCommand) -> Result<(), String> {
     match command {
         XtaskCommand::Android(command) => execute_android(command),
+        XtaskCommand::Ci(command) => ci::execute_ci(command),
+        XtaskCommand::PerfBaseline(command) => ci::execute_perf_baseline(command),
     }
 }
 
@@ -235,7 +291,6 @@ fn parse_android_args(args: &[String]) -> Result<AndroidCommand, String> {
     };
 
     let mut sdk = None;
-    let mut iso = None;
     let mut screenshot = None;
     let mut skip_sdk = false;
     let mut index = 1;
@@ -247,13 +302,6 @@ fn parse_android_args(args: &[String]) -> Result<AndroidCommand, String> {
                     .get(index)
                     .ok_or_else(|| "--sdk requires a path".to_string())?;
                 sdk = Some(PathBuf::from(value));
-            }
-            "--iso" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| "--iso requires a path".to_string())?;
-                iso = Some(PathBuf::from(value));
             }
             "--screenshot" => {
                 index += 1;
@@ -283,7 +331,6 @@ fn parse_android_args(args: &[String]) -> Result<AndroidCommand, String> {
     Ok(AndroidCommand {
         action,
         sdk,
-        iso,
         screenshot,
         skip_sdk,
     })
@@ -294,12 +341,12 @@ fn execute_android(command: AndroidCommand) -> Result<(), String> {
 
     match command.action {
         AndroidAction::Build => {
-            prepare_android_build(&context, &command)?;
-            build_apk(&context)?;
+            let signing_env = prepare_android_build(&context, &command)?;
+            build_apk(&context, signing_env)?;
         }
         AndroidAction::Run => {
-            prepare_android_build(&context, &command)?;
-            build_apk(&context)?;
+            let signing_env = prepare_android_build(&context, &command)?;
+            build_apk(&context, signing_env)?;
             install_and_launch(&context)?;
             if let Some(path) = command.screenshot.as_deref() {
                 thread::sleep(Duration::from_secs(10));
@@ -321,14 +368,17 @@ fn execute_android(command: AndroidCommand) -> Result<(), String> {
     Ok(())
 }
 
-fn prepare_android_build(context: &AndroidContext, command: &AndroidCommand) -> Result<(), String> {
+/// Readies the SDK, the Rust tools and the signing keystore, and returns the
+/// signing variables the build hands cargo-apk.
+fn prepare_android_build(
+    context: &AndroidContext,
+    command: &AndroidCommand,
+) -> Result<Vec<(String, String)>, String> {
     if !command.skip_sdk {
         ensure_android_sdk(context)?;
     }
-    copy_alpine_iso(context, command.iso.as_deref())?;
     ensure_rust_tools(context)?;
-    ensure_release_keystore(context)?;
-    Ok(())
+    ensure_signing_keystore(context)
 }
 
 fn ensure_android_sdk(context: &AndroidContext) -> Result<(), String> {
@@ -468,65 +518,6 @@ fn sdk_package_marker(context: &AndroidContext, package: &str) -> Option<PathBuf
     }
 }
 
-fn copy_alpine_iso(context: &AndroidContext, explicit_iso: Option<&Path>) -> Result<(), String> {
-    step("Copying Alpine ISO asset");
-    let destination = context
-        .repo
-        .join("rusty_box_android")
-        .join("assets")
-        .join("alpine.iso");
-    let source = match explicit_iso {
-        Some(source) if source.exists() => Some(source.to_path_buf()),
-        Some(source) => {
-            return Err(format!(
-                "explicit Alpine ISO path does not exist: {}",
-                source.display()
-            ));
-        }
-        None => {
-            let downloads = context.home.join("Downloads").join(ALPINE_ISO_NAME);
-            if downloads.exists() {
-                Some(downloads)
-            } else {
-                let fallback = context
-                    .repo
-                    .join("examples")
-                    .join("rusty_box_uefi")
-                    .join("alpine.iso");
-                fallback.exists().then_some(fallback)
-            }
-        }
-    };
-
-    match source {
-        Some(source) => {
-            if source != destination {
-                if let Some(parent) = destination.parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|error| format!("create {}: {error}", parent.display()))?;
-                }
-                fs::copy(&source, &destination).map_err(|error| {
-                    format!(
-                        "copy Alpine ISO from {} to {}: {error}",
-                        source.display(),
-                        destination.display()
-                    )
-                })?;
-            }
-            println!("Copied {}", destination.display());
-            Ok(())
-        }
-        None if destination.exists() => {
-            println!("Using existing {}", destination.display());
-            Ok(())
-        }
-        None => Err(format!(
-            "missing Alpine ISO; pass --iso PATH or place {ALPINE_ISO_NAME} in {}",
-            context.home.join("Downloads").display()
-        )),
-    }
-}
-
 fn ensure_rust_tools(context: &AndroidContext) -> Result<(), String> {
     step("Installing Rust Android target and cargo-apk");
     run_program(
@@ -560,18 +551,18 @@ fn ensure_rust_tools(context: &AndroidContext) -> Result<(), String> {
     )
 }
 
-fn ensure_release_keystore(context: &AndroidContext) -> Result<Vec<(String, String)>, String> {
+fn ensure_signing_keystore(context: &AndroidContext) -> Result<Vec<(String, String)>, String> {
     if let (Ok(keystore), Ok(password)) = (
-        env::var("CARGO_APK_RELEASE_KEYSTORE"),
-        env::var("CARGO_APK_RELEASE_KEYSTORE_PASSWORD"),
+        env::var(SIGNING_KEYSTORE_ENV),
+        env::var(SIGNING_PASSWORD_ENV),
     ) {
         if !password.is_empty() {
-            step("Using CARGO_APK_RELEASE_KEYSTORE from environment");
+            step(&format!("Using {SIGNING_KEYSTORE_ENV} from environment"));
             return Ok(cargo_apk_signing_env(Path::new(&keystore), &password));
         }
     }
 
-    let keystore = context.release_keystore();
+    let keystore = context.signing_keystore();
     let password = LOCAL_SIGNING_PASSWORD.to_string();
     if keystore.exists() {
         step(&format!(
@@ -616,8 +607,12 @@ fn ensure_release_keystore(context: &AndroidContext) -> Result<Vec<(String, Stri
     Ok(cargo_apk_signing_env(&keystore, &password))
 }
 
-fn build_apk(context: &AndroidContext) -> Result<(), String> {
-    let signing_env = ensure_release_keystore(context)?;
+fn build_apk(context: &AndroidContext, signing_env: Vec<(String, String)>) -> Result<(), String> {
+    let mut build_env = signing_env;
+    build_env.push(android_rustflags_env(
+        caller_env("CARGO_ENCODED_RUSTFLAGS")?.as_deref(),
+        caller_env("RUSTFLAGS")?.as_deref(),
+    )?);
     step("Building Rusty Box Android APK");
     run_program(
         OsStr::new("cargo"),
@@ -626,7 +621,7 @@ fn build_apk(context: &AndroidContext) -> Result<(), String> {
             .map(str::to_string)
             .collect::<Vec<_>>(),
         context,
-        &signing_env,
+        &build_env,
         "build Rusty Box Android APK",
     )
 }
@@ -874,7 +869,7 @@ fn keytool_program(host: HostOs) -> PathBuf {
 
 fn usage() -> String {
     format!(
-        "Usage:\n  cargo xtask android build [--sdk PATH] [--iso PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--iso PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]"
+        "Usage:\n  cargo xtask android build [--sdk PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline"
     )
 }
 
@@ -931,7 +926,6 @@ mod tests {
             XtaskCommand::Android(AndroidCommand {
                 action: AndroidAction::Run,
                 sdk: None,
-                iso: None,
                 screenshot: Some(PathBuf::from("screen.png")),
                 skip_sdk: false,
             })
@@ -945,11 +939,11 @@ mod tests {
             env,
             vec![
                 (
-                    "CARGO_APK_RELEASE_KEYSTORE".to_string(),
+                    "CARGO_APK_ANDROID_KEYSTORE".to_string(),
                     "keystore.jks".to_string(),
                 ),
                 (
-                    "CARGO_APK_RELEASE_KEYSTORE_PASSWORD".to_string(),
+                    "CARGO_APK_ANDROID_KEYSTORE_PASSWORD".to_string(),
                     "test-value".to_string(),
                 ),
             ]
@@ -957,18 +951,76 @@ mod tests {
     }
 
     #[test]
-    fn apk_build_args_are_release_embedded_alpine() {
+    fn signing_env_names_are_the_ones_cargo_apk_reads_for_the_profile() {
+        // cargo-apk apk.rs names them after the profile the same way.
+        let keystore = format!(
+            "CARGO_APK_{}_KEYSTORE",
+            ANDROID_PROFILE.to_uppercase().replace('-', "_")
+        );
+        assert_eq!(SIGNING_KEYSTORE_ENV, keystore);
+        assert_eq!(SIGNING_PASSWORD_ENV, format!("{keystore}_PASSWORD"));
+    }
+
+    #[test]
+    fn android_rustflags_are_the_phone_cpu_alone_when_the_caller_sets_none() {
+        assert_eq!(
+            android_rustflags_env(None, None),
+            Ok((
+                "RUSTFLAGS".to_string(),
+                "-Ctarget-cpu=cortex-x3 -Ctarget-feature=-sve".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn android_rustflags_put_the_callers_plain_flags_last() {
+        assert_eq!(
+            android_rustflags_env(None, Some("  -Ctarget-cpu=generic   -Cdebuginfo=1 ")),
+            Ok((
+                "RUSTFLAGS".to_string(),
+                "-Ctarget-cpu=cortex-x3 -Ctarget-feature=-sve -Ctarget-cpu=generic -Cdebuginfo=1"
+                    .to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn android_rustflags_keep_the_callers_encoded_variable() {
+        assert_eq!(
+            android_rustflags_env(Some("-Ctarget-cpu=generic\x1f-Cdebuginfo=1"), None),
+            Ok((
+                "CARGO_ENCODED_RUSTFLAGS".to_string(),
+                "-Ctarget-cpu=cortex-x3\x1f-Ctarget-feature=-sve\x1f-Ctarget-cpu=generic\x1f-Cdebuginfo=1"
+                    .to_string(),
+            ))
+        );
+        assert_eq!(
+            android_rustflags_env(Some(""), None),
+            Ok((
+                "CARGO_ENCODED_RUSTFLAGS".to_string(),
+                "-Ctarget-cpu=cortex-x3\x1f-Ctarget-feature=-sve".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn android_rustflags_reject_both_caller_variables() {
+        assert!(android_rustflags_env(Some("-Cdebuginfo=1"), Some("-Cdebuginfo=1")).is_err());
+    }
+
+    #[test]
+    fn apk_build_args_use_the_android_profile_with_no_feature() {
         assert_eq!(
             cargo_apk_build_args(),
             vec![
                 "apk",
                 "build",
                 "-p",
-                "rusty_box_android",
-                "--lib",
-                "--release",
-                "--features",
-                "embedded-alpine",
+                "rusty_box_gui",
+                "--example",
+                "rusty_box_gui_android",
+                "--profile",
+                "android",
             ]
         );
         assert_eq!(
@@ -981,56 +1033,5 @@ mod tests {
                 "com.rustybox.android/android.app.NativeActivity",
             ]
         );
-    }
-    #[test]
-    fn copy_alpine_iso_rejects_missing_explicit_path_without_fallback() {
-        let root = std::env::temp_dir().join(format!(
-            "rusty_box_xtask_iso_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time before Unix epoch")
-                .as_nanos()
-        ));
-        let repo = root.join("repo");
-        let home = root.join("home");
-        let fallback = repo
-            .join("examples")
-            .join("rusty_box_uefi")
-            .join("alpine.iso");
-        let destination = repo
-            .join("rusty_box_android")
-            .join("assets")
-            .join("alpine.iso");
-        fs::create_dir_all(fallback.parent().expect("fallback parent"))
-            .expect("create fallback dir");
-        fs::write(&fallback, b"fallback").expect("write fallback ISO");
-        fs::create_dir_all(destination.parent().expect("destination parent"))
-            .expect("create destination dir");
-        fs::write(&destination, b"existing").expect("write existing destination ISO");
-
-        let explicit = root.join("missing").join("explicit.iso");
-        let context = AndroidContext {
-            host: HostOs::Linux,
-            repo,
-            home,
-            sdk: root.join("sdk"),
-            ndk: root.join("ndk"),
-            path: std::ffi::OsString::new(),
-        };
-
-        let error = copy_alpine_iso(&context, Some(&explicit))
-            .expect_err("missing explicit ISO should not use fallback or destination");
-
-        assert!(
-            error.contains(&explicit.display().to_string()),
-            "error {error:?} did not mention explicit path {}",
-            explicit.display()
-        );
-        assert_eq!(
-            fs::read(&destination).expect("read destination ISO"),
-            b"existing".to_vec()
-        );
-        fs::remove_dir_all(&root).expect("clean up test directory");
     }
 }

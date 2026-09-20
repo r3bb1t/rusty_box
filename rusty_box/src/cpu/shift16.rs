@@ -5,12 +5,10 @@
 //! Implements SHL, SHR, SAR, ROL, ROR for 16-bit operands
 
 use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ---- 16-bit read/write helpers for shift instructions ----
     fn shift_read16(&mut self, instr: &Instruction) -> super::Result<(u16, Option<()>)> {
         if instr.mod_c0() {

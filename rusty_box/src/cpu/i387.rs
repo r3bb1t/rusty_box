@@ -211,14 +211,17 @@ impl BxPackedRegister {
         self.bytes = v.to_le_bytes();
     }
 
+    /// Dword `i` of the register, little-endian.
+    ///
+    /// Chunking the fixed array gives dwords directly, so the only thing that
+    /// can go wrong is `i` naming a dword that does not exist — which is the
+    /// real precondition. Slicing `bytes[s..s + 4]` and converting expressed
+    /// the same thing as two failures, one of which could not happen and was
+    /// asserted anyway.
     #[inline(always)]
     pub fn U32(&self, i: usize) -> u32 {
-        let s = i * 4;
-        u32::from_le_bytes(
-            self.bytes[s..s + 4]
-                .try_into()
-                .expect("4-byte slice converts to [u8; 4]"),
-        )
+        let (dwords, _) = self.bytes.as_chunks::<4>();
+        u32::from_le_bytes(dwords[i])
     }
     #[inline(always)]
     pub fn set_U32(&mut self, i: usize, v: u32) {
@@ -226,14 +229,11 @@ impl BxPackedRegister {
         self.bytes[s..s + 4].copy_from_slice(&v.to_le_bytes());
     }
 
+    /// Word `i` of the register, little-endian.
     #[inline(always)]
     pub fn U16(&self, i: usize) -> u16 {
-        let s = i * 2;
-        u16::from_le_bytes(
-            self.bytes[s..s + 2]
-                .try_into()
-                .expect("2-byte slice converts to [u8; 2]"),
-        )
+        let (words, _) = self.bytes.as_chunks::<2>();
+        u16::from_le_bytes(words[i])
     }
     #[inline(always)]
     pub fn set_U16(&mut self, i: usize, v: u16) {

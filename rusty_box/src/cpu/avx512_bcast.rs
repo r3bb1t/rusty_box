@@ -11,7 +11,6 @@
 use super::avx512_load::cut_opmask_to;
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedZmmRegister,
 };
@@ -58,8 +57,8 @@ fn vl_bytes(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -73,16 +72,16 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register with dword masking granularity, zeroing upper bits beyond VL
-fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -106,8 +105,8 @@ fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// Write ZMM register with qword masking granularity
-fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -130,8 +129,8 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 }
 
 /// Write ZMM register with word masking granularity
-fn write_zmm_masked_w<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_w<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -154,8 +153,8 @@ fn write_zmm_masked_w<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 }
 
 /// Write ZMM register with byte masking granularity
-fn write_zmm_masked_b<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_b<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -178,8 +177,8 @@ fn write_zmm_masked_b<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 }
 
 /// Read 128-bit (16-byte) block from memory into a raw byte array.
-fn read_mem_128<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_mem_128<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     seg: BxSegregs,
     laddr: u64,
 ) -> super::Result<[u8; 16]> {
@@ -193,8 +192,8 @@ fn read_mem_128<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// Read 256-bit (32-byte) block from memory into a raw byte array.
-fn read_mem_256<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_mem_256<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     seg: BxSegregs,
     laddr: u64,
 ) -> super::Result<[u8; 32]> {
@@ -207,7 +206,7 @@ fn read_mem_256<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
     Ok(buf)
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
     // VBROADCASTSS — Broadcast single-precision float
     // ========================================================================
