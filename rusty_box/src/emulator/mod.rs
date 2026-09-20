@@ -546,11 +546,15 @@ pub struct Emulator<T: Instrumentation = (), E = SoftwareEngine> {
     /// Exit addresses for emu_start.
     pub(crate) exit_set: ExitSet,
     /// Handle of the VGA vertical-retrace timer (Bochs vgacore.cc
-    /// `vga_vtimer_id`). Re-armed whenever the retrace period changes.
+    /// `vga_vtimer_id`). It wakes the machine at the deadline below; the
+    /// deadline itself is what decides a retrace, because the card may keep a
+    /// clock this wheel does not run on.
     pub(crate) vga_vertical_timer_handle: Option<usize>,
-    /// Vertical period currently programmed into that timer, so it is only
-    /// re-armed when the guest actually changes the display timing.
-    pub(crate) vga_vertical_period_usec: u32,
+    /// When the VGA's vertical timer next fires, in the clock the card keeps —
+    /// host microseconds under `clock: sync=realtime` (Bochs vgacore.cc
+    /// `vsync_realtime`), emulated microseconds otherwise. `None` until the
+    /// retrace timing gives an interval to wait out.
+    pub(crate) vga_vertical_deadline_usec: Option<u64>,
     /// Shared stop flag: when set to true by another thread (typically a GUI
     /// thread), the `run_interactive`, `step` and `emu_start` loops exit.
     /// Crate-private (doctrine R3): external consumers share it through
@@ -637,7 +641,7 @@ fn every_machine_field_is_accounted_for<T: Instrumentation>(machine: Emulator<T>
             bios_output_file: _,
         exit_set: _,
         vga_vertical_timer_handle: _,
-        vga_vertical_period_usec: _,
+        vga_vertical_deadline_usec: _,
         stop_flag: _,
         stop_cause: _,
         pic_pin_published: _,
@@ -1216,7 +1220,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             core::ptr::addr_of_mut!((*ptr).bios_output_file).write(None);
             core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
             core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
-            core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_deadline_usec).write(None);
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(Arc::new(AtomicBool::new(false)));
             core::ptr::addr_of_mut!((*ptr).stop_cause).write(StopCause::default());
             core::ptr::addr_of_mut!((*ptr).pic_pin_published).write(false);
@@ -1291,7 +1295,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             core::ptr::addr_of_mut!((*ptr).snapshot_restore_failed).write(false);
             core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
             core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
-            core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_deadline_usec).write(None);
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
             core::ptr::addr_of_mut!((*ptr).stop_cause).write(StopCause::default());
             core::ptr::addr_of_mut!((*ptr).pic_pin_published).write(false);
@@ -1793,9 +1797,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// it is handed at every access. The PIT and the VGA are told the clock's
     /// rate here: the VGA derives Input Status 1 from the clock only once it
     /// has been, and both check the rate when a snapshot is restored. The
-    /// ACPI PM timer needs nothing. Under `sync=realtime` the PIT and the PM
-    /// timer are anchored to host time here, once, and no reset moves either
-    /// anchor; the VGA retrace stays on the machine clock.
+    /// ACPI PM timer needs nothing. Under `sync=realtime` all three are
+    /// anchored to host time here, once, and no reset moves an anchor.
     fn put_device_clocks_on_the_machine_clock(&mut self) {
         let rate = self.pc_system.ips();
         let now = self.pc_system.time_ticks();
@@ -1805,6 +1808,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         if self.config.sync_realtime {
             self.device_manager.pit.enable_realtime_sync();
             self.device_manager.acpi.enable_realtime_sync();
+            self.device_manager.enable_vga_realtime_sync();
         }
     }
 

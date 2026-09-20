@@ -1,7 +1,10 @@
 # rusty_box examples
 
 These are developer harnesses for the `rusty_box` library: boot tests, tracing
-demos and benchmarks. The launcher meant for users is `rusty_box_gui`.
+demos and benchmarks. To drive a guest from your own program instead — boot it
+headless, read the screen, type at it — see
+[docs/automation.md](../../docs/automation.md). The launcher meant for users is
+`rusty_box_gui`.
 `cargo run --release -p rusty_box_gui` opens its VMware-style egui shell, which
 takes typed CLI flags, an optional `rusty_box.toml`, and a choice of engine:
 `--engine interpreter` (the default) or `--engine whp`. See

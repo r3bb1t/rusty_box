@@ -1495,6 +1495,19 @@ impl DeviceManager {
         self.vga_realtime.map(|clock| clock.usec())
     }
 
+    /// The VGA's clock now, in microseconds: host time under
+    /// `clock: sync=realtime`, and `machine_usec` — the machine's own reading,
+    /// which only a caller holding the scheduler can take — otherwise. Bochs
+    /// vgacore.cc reads `bx_virt_timer.time_usec(vsync_realtime)` for both the
+    /// retrace waveform and its vertical timer, so both go through here.
+    pub(crate) fn vga_clock_usec(&self, machine_usec: u64) -> u64 {
+        match self.access_clock_for(DevSlot::VGA) {
+            wiring::AccessClock::Machine => machine_usec,
+            #[cfg(feature = "std")]
+            wiring::AccessClock::HostMicros(usec) => usec,
+        }
+    }
+
     /// The clock an access to `slot` reads: the VGA's own host-time reading
     /// under `sync=realtime`, and the machine's for everything else.
     pub(crate) fn access_clock_for(&self, slot: DevSlot) -> wiring::AccessClock {

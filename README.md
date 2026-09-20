@@ -420,6 +420,7 @@ It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wa
 **Using Rusty Box**
 
 - [docs/getting-started.md](docs/getting-started.md) -- using the GUI: config file, pacing, CPU topology, disks, display
+- [docs/automation.md](docs/automation.md) -- driving a guest from Rust: boot it headless, read the screen, type at it, watch what it does
 - [rusty_box_gui/README.md](rusty_box_gui/README.md) -- the shell: the VM library, pages, engines, disk images, Android, browser
 - [docs/whp-guest-capabilities.md](docs/whp-guest-capabilities.md) -- what a machine on the hypervisor may advertise to its guest
 

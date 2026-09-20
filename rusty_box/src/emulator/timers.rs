@@ -359,17 +359,12 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             match owners[entry] {
                 TimerOwner::NullTimer => {}
                 TimerOwner::VgaVertical => {
-                    // Bochs vgacore.cc vertical_timer(): latch the start address
-                    // for the frame and re-anchor the retrace phase. Coalesced —
-                    // only the newest retrace matters.
-                    let now_usec = if ips > 0 {
-                        (current_ticks as u128 * 1_000_000 / ips as u128) as u64
-                    } else {
-                        0
-                    };
-                    self.device_manager
-                        .vga
-                        .vertical_timer(now_usec, current_ticks);
+                    // The wheel entry is the wake-up, not the retrace: the
+                    // deadline it wakes for is kept in the clock the card
+                    // itself runs on, which under `clock: sync=realtime` is
+                    // host time and not this wheel's. Every fire is serviced by
+                    // `sync_vga_vertical_timer` at the boundary that follows,
+                    // against that clock.
                 }
                 TimerOwner::PciIdeCh0 => {
                     for _ in 0..counts[entry] {
@@ -515,22 +510,71 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
     }
 
-    /// Keep the VGA vertical-retrace timer armed at the current display period.
+    /// Run the VGA's vertical timer up to the present, and keep the wheel
+    /// waking the machine for its next half-period.
     ///
-    /// Bochs vgacore.cc re-activates `vga_vtimer_id` from
-    /// `start_vertical_timer()` whenever `calculate_retrace_timing()` produces a
-    /// new `vtotal_usec`. Here the period is polled at the scheduler boundary,
-    /// which covers every path that can change the CRTC timing registers.
+    /// Bochs arms `vga_vtimer_id` on `bx_virt_timer`, which owns two clocks and
+    /// picks the one `clock: sync=` gave the card at registration. This wheel
+    /// runs on emulated time alone, so the deadline is held in the card's own
+    /// clock — host microseconds under `sync=realtime` — and the wheel entry
+    /// only wakes the machine to look at it. Polled at every scheduler
+    /// boundary, which is also every path that can reprogram the CRTC timing.
     pub(super) fn sync_vga_vertical_timer(&mut self) {
+        /// Phases replayed in one boundary before the waveform is re-anchored
+        /// at the present instead. A machine that stood still longer than a
+        /// frame — a host pause under `sync=realtime`, a restore — has no
+        /// missed retraces worth replaying, only a phase to pick up again;
+        /// Bochs's realtime timer service clamps its own catch-up the same way.
+        const MAX_PHASES_PER_BOUNDARY: u32 = 2;
+
         let Some(handle) = self.vga_vertical_timer_handle else {
             return;
         };
-        let period = self.device_manager.vga.vertical_period_usec();
-        if period == 0 || period == self.vga_vertical_period_usec {
+        let ticks = self.pc_system.time_ticks();
+        let ips = self.config.ips.per_second_u64();
+        let machine_usec = if ips > 0 {
+            (u128::from(ticks) * 1_000_000 / u128::from(ips)) as u64
+        } else {
+            0
+        };
+        let now = self.device_manager.vga_clock_usec(machine_usec);
+
+        // Bochs `calculate_retrace_timing()` ends in `start_vertical_timer()`:
+        // a guest that reprogrammed the display timing restarts the waveform.
+        if let Some(interval) = self.device_manager.vga.take_vertical_timer_restart() {
+            self.vga_vertical_deadline_usec = Some(now.saturating_add(u64::from(interval)));
+        }
+
+        let was = self.vga_vertical_deadline_usec;
+        let mut deadline = was;
+        for _ in 0..MAX_PHASES_PER_BOUNDARY {
+            let Some(due) = deadline.filter(|due| now >= *due) else {
+                break;
+            };
+            // The deadline, not the reading, anchors the next half-period:
+            // Bochs's timer service reports the time the deadline fell on, so
+            // the waveform never drifts by however late the boundary came.
+            let tick = self.device_manager.vga.vertical_timer(due, ticks);
+            deadline = tick.next_usec.map(|next| due.saturating_add(u64::from(next)));
+        }
+        if deadline.is_some_and(|due| now >= due) {
+            deadline = self
+                .device_manager
+                .vga
+                .vertical_interval_usec()
+                .map(|interval| now.saturating_add(u64::from(interval)));
+        }
+        self.vga_vertical_deadline_usec = deadline;
+
+        let Some(deadline) = deadline else {
+            return;
+        };
+        if was == Some(deadline) && self.pc_system.timer_is_active(handle) {
             return;
         }
-        match self.pc_system.activate_timer_usec(handle, period, true) {
-            Ok(()) => self.vga_vertical_period_usec = period,
+        let wait = u32::try_from(deadline.saturating_sub(now)).unwrap_or(u32::MAX).max(1);
+        match self.pc_system.activate_timer_usec(handle, wait, false) {
+            Ok(()) => {}
             Err(error) => {
                 tracing::warn!("failed to arm the VGA vertical timer: {error:?}");
             }

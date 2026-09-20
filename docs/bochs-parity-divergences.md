@@ -1057,6 +1057,71 @@ closing it needs the boot gates as well as unit tests.
 
 **Status:** open — awaiting the owner's ruling.
 
+## D16 — The host can read the BIOS POST codes, which Bochs does not collect
+
+**Bochs:** `iodev/dma.cc` claims ports 0x0080–0x008F. Four of them per
+controller are the DMA page registers; the rest — 0x80, 0x84, 0x85, 0x86,
+0x88, 0x8C, 0x8D, 0x8E — are "extra page registers", kept in `ext_page_reg[]`
+and readable back, used by nothing. Firmware writes its progress code to 0x80
+for exactly that reason. Bochs keeps no record of what went past.
+
+**rusty_box:** `BxDevicesC::watch_post_code` (`iodev/mod.rs`) copies every
+one-byte write to 0x80 or 0x84 into a bounded host-side ring, drained through
+`Emulator::post_codes`. It sits at the top of `BxDevicesC::outp`, the one place
+every guest port write passes (R5), and it does not consume the write: the DMA
+device receives it and answers a later read from `ext_page_reg[]` exactly as
+upstream.
+
+### What the guest observes
+
+Nothing. The port is claimed by the same device, the same handler runs, and the
+value reads back. Draining the stream is a host act with no guest-visible side
+effect, and a host that never drains loses the oldest codes rather than
+stalling the guest.
+
+### What justifies it
+
+A POST code is how firmware says where a boot stopped, and reading them is the
+first question asked of a machine that hangs before any console exists. The
+facility costs one comparison per port write and cannot be observed from
+inside the guest, so the parity argument does not apply to it (R7: declared
+provenance for a facility Bochs lacks).
+
+The stream is part of the snapshot, so a restored machine keeps codes the guest
+wrote before it was saved.
+
+---
+
+## D17 — Port 0xE9 answers as though Bochs's debug console were switched on
+
+**Bochs:** `iodev/unmapped.cc` gates port 0xE9 on `port_e9_hack`, whose default
+in `config.cc` is **off**. With it off a read of 0xE9 returns `0xFFFFFFFF` and a
+write is dropped. With it on, a read returns `0xE9` — the documented way for
+guest code to detect that the console is there — and a write goes to the host's
+stdout.
+
+**rusty_box:** `BxDevicesC::default_read_handler` always answers `0xE9`, and
+`default_write_handler` always captures the byte into the stream
+`Emulator::debug_port` drains. There is no parameter to turn it off.
+
+### What the guest observes
+
+The detection channel: guest code that reads port 0xE9 sees `0xE9` here and
+`0xFF` on a default-configured Bochs, so it concludes a debug console exists
+and writes to it. Nothing else changes — the writes are dropped either way as
+far as the guest can tell.
+
+### What justifies it
+
+Not ruled on. The examples and the GUI read this stream, so turning it off by
+default would silence them; making it configurable is the obvious alternative
+and was never weighed. Found 2026-09-20 while wiring the POST-code tap (D16),
+which is the same family of host-side observation.
+
+**Status:** open — awaiting the owner's ruling.
+
+---
+
 # Hypervisor-engine divergences (`H<n>`)
 
 A machine running its guest on `rusty_box_whp_engine` executes on the host's

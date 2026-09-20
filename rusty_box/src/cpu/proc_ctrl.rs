@@ -1084,12 +1084,44 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
+    /// An index this architecture does not define — Bochs msr.cc
+    /// `handle_unknown_rdmsr`. Reads as zero, or #GPs, by the machine's
+    /// `ignore_bad_msrs` policy.
+    ///
+    /// Bochs first offers the index to the CPU model and then to its
+    /// build-time configurable MSR array. No model in `cpu/cpudb` implements
+    /// an MSR of its own, and the configurable array is a Bochs build option
+    /// this port does not carry, so the policy is the whole of it.
+    fn handle_unknown_rdmsr(&mut self, msr: u32) -> crate::cpu::Result<u64> {
+        tracing::debug!("RDMSR: unknown register {msr:#010x}");
+        if !self.ignore_bad_msrs {
+            self.exception(super::cpu::Exception::Gp, 0)?;
+        }
+        Ok(0)
+    }
+
+    /// The read dispatch's last resort. An index the descriptor table names
+    /// but the dispatch has no arm for is a hole in this port — Bochs BX_PANICs
+    /// on exactly that — so it is reported rather than quietly answered.
+    fn missing_or_unknown_rdmsr(&mut self, msr: u32) -> crate::cpu::Result<u64> {
+        if msr < super::msr::BX_MSR_MAX_INDEX && super::msr::msr_descriptor(msr).is_some() {
+            tracing::error!("RDMSR: missing MSR handling for MSR {msr:#010x}");
+        }
+        self.handle_unknown_rdmsr(msr)
+    }
+
     /// MSR-table dispatch for read — Bochs msr.cc switch body. Does not
     /// perform CPL or VMX/SVM intercept checks; callers (`rdmsr` and the
     /// VMX MSR-store list helper) own those gates.
     pub(super) fn rdmsr_value(&mut self, msr: u32) -> crate::cpu::Result<u64> {
+        use super::decoder::features::X86Feature;
         use super::msr::*;
-        if (0x800..=0x8FF).contains(&msr) {
+        // Bochs msr.cc reserves 0x800..=0x8FF for the x2APIC only on a model
+        // that has one; without the extension the range is ordinary MSR space
+        // and the table below answers it.
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaX2apic)
+            && (0x800..=0x8FF).contains(&msr)
+        {
             if self.lapic.get_mode() != super::apic::ApicMode::X2apicMode {
                 self.exception(super::cpu::Exception::Gp, 0)?;
                 return Ok(0);
@@ -1111,6 +1143,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             self.exception(super::cpu::Exception::Gp, 0)?;
             return Ok(0);
+        }
+        if msr < BX_MSR_MAX_INDEX {
+            let Some(descriptor) = msr_descriptor(msr) else {
+                return self.handle_unknown_rdmsr(msr);
+            };
+            if !self.bx_cpuid_support_isa_extension(descriptor.feature) {
+                // Bochs msr.cc: an architectural MSR whose feature the model
+                // does not have does NOT exist, and #GPs whatever the
+                // unknown-MSR policy says — that policy only covers indices
+                // this architecture never defined.
+                tracing::debug!(
+                    "RDMSR {}: {:?} not enabled in the cpu model, #GP(0)",
+                    descriptor.name,
+                    descriptor.feature
+                );
+                self.exception(super::cpu::Exception::Gp, 0)?;
+                return Ok(0);
+            }
         }
         let val: u64 = match msr {
             BX_MSR_TSC => self.get_virtual_tsc(self.system_ticks()),
@@ -1143,10 +1193,33 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // Bochs msr.cc IA32_FEATURE_CONTROL read — carries the VMX enable
             // and LOCK bits firmware programs before VMXON.
             BX_MSR_IA32_FEATURE_CONTROL => self.msr.ia32_feature_ctrl as u64,
-            BX_MSR_BIOS_SIGN_ID => 0x02000065, // Skylake-X microcode revision
             BX_MSR_MTRRCAP => BX_MSR_MTRRCAP_DEFAULT,
-            BX_MSR_PMC0..=BX_MSR_PMC7 => 0, // Performance counters — return 0
-            BX_MSR_PERFEVTSEL0..=BX_MSR_PERFEVTSEL7 => 0, // Perf event selects — return 0
+            // Bochs msr.cc logs the selector read and hands it to the
+            // unknown-MSR policy: the counters themselves are not modelled.
+            BX_MSR_PERFEVTSEL0..=BX_MSR_PERFEVTSEL7 => {
+                tracing::debug!(
+                    "RDMSR: read of MSR_IA32_PERFEVTSEL{}",
+                    msr - BX_MSR_PERFEVTSEL0
+                );
+                return self.handle_unknown_rdmsr(msr);
+            }
+            // Bochs msr.cc: the TSC offset a guest may program directly.
+            BX_MSR_TSC_ADJUST => self.tsc_adjust as u64,
+            // Bochs msr.cc: the supervisor state components XSAVES may save.
+            BX_MSR_XSS => self.msr.ia32_xss,
+            // Bochs msr.cc: the MSRLIST serialization barrier reads as zero.
+            BX_MSR_IA32_BARRIER => 0,
+            // Bochs msr.cc IA32_ARCH_CAPABILITIES — bits [4:0] set:
+            //   [0] RDCL_NO, [1] IBRS_ALL, [2] RSBA,
+            //   [3] SKIP_L1DFL_VMENTRY, [4] SSB_NO.
+            BX_MSR_IA32_ARCH_CAPABILITIES => 0x1F,
+            BX_MSR_IA32_SPEC_CTRL => self.msr.ia32_spec_ctrl as u64,
+            // Bochs msr.cc: write-only MSRs, so a read is a #GP.
+            BX_MSR_IA32_PRED_CMD | BX_MSR_IA32_FLUSH_CMD => {
+                tracing::debug!("RDMSR: MSR {msr:#010x} is write only, #GP(0)");
+                self.exception(super::cpu::Exception::Gp, 0)?;
+                return Ok(0);
+            }
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr as u64,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr,
             BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr,
@@ -1165,16 +1238,48 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let idx = (msr - BX_MSR_MTRRFIX4K_C0000) as usize;
                 self.msr.mtrrfix4k[idx].U64()
             }
-            // Long-mode MSRs (Bochs msr.cc)
-            BX_MSR_EFER => self.efer.get32() as u64,
-            BX_MSR_STAR => self.msr.star,
-            BX_MSR_LSTAR => self.msr.lstar,
-            BX_MSR_CSTAR => self.msr.cstar,
-            BX_MSR_FMASK => self.msr.fmask as u64,
-            BX_MSR_FSBASE => self.get_segment_base(super::decoder::BxSegregs::Fs),
-            BX_MSR_GSBASE => self.get_segment_base(super::decoder::BxSegregs::Gs),
-            BX_MSR_KERNELGSBASE => self.msr.kernelgsbase,
-            BX_MSR_TSC_AUX => self.msr.tsc_aux as u64,
+            // Long-mode MSRs (Bochs msr.cc). Above BX_MSR_MAX_INDEX there is no
+            // descriptor to gate on, so each carries the gate Bochs writes into
+            // its own case.
+            BX_MSR_EFER => {
+                if self.efer_suppmask == 0 {
+                    tracing::debug!("RDMSR MSR_EFER: EFER is not supported");
+                    return self.handle_unknown_rdmsr(msr);
+                }
+                self.efer.get32() as u64
+            }
+            BX_MSR_STAR => {
+                if (self.efer_suppmask & super::crregs::BxEfer::SCE.bits()) == 0 {
+                    tracing::debug!("RDMSR MSR_STAR: SYSCALL/SYSRET not enabled in the cpu model");
+                    self.exception(super::cpu::Exception::Gp, 0)?;
+                    return Ok(0);
+                }
+                self.msr.star
+            }
+            BX_MSR_LSTAR | BX_MSR_CSTAR | BX_MSR_FMASK | BX_MSR_FSBASE | BX_MSR_GSBASE
+            | BX_MSR_KERNELGSBASE => {
+                if !self.bx_cpuid_support_isa_extension(X86Feature::IsaLongMode) {
+                    tracing::debug!("RDMSR {msr:#010x}: long mode not enabled in the cpu model");
+                    self.exception(super::cpu::Exception::Gp, 0)?;
+                    return Ok(0);
+                }
+                match msr {
+                    BX_MSR_LSTAR => self.msr.lstar,
+                    BX_MSR_CSTAR => self.msr.cstar,
+                    BX_MSR_FMASK => self.msr.fmask as u64,
+                    BX_MSR_FSBASE => self.get_segment_base(super::decoder::BxSegregs::Fs),
+                    BX_MSR_GSBASE => self.get_segment_base(super::decoder::BxSegregs::Gs),
+                    _ => self.msr.kernelgsbase,
+                }
+            }
+            BX_MSR_TSC_AUX => {
+                if !self.bx_cpuid_support_isa_extension(X86Feature::IsaRdtscp) {
+                    tracing::debug!("RDMSR MSR_TSC_AUX: RDTSCP not enabled in the cpu model");
+                    self.exception(super::cpu::Exception::Gp, 0)?;
+                    return Ok(0);
+                }
+                self.msr.tsc_aux as u64
+            }
             // VMX capability MSRs (Bochs msr.cc)
             // Return Bochs-compatible default values so kernel VMX probing doesn't #GP
             // FRED MSRs
@@ -1188,7 +1293,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.msr.ia32_fred_ssp[idx]
             }
             BX_MSR_IA32_FRED_CONFIG => self.msr.ia32_fred_cfg,
-            0x480 => {
+            BX_MSR_VMX_BASIC => {
                 // IA32_VMX_BASIC: VMCS revision=1, VMCS size=4096, memory type=WB(6)
                 // Bits 48=1 (true controls supported), bit 55=1 (INS/OUTS exit info)
                 0x0001_0006_0000_0001u64
@@ -1197,31 +1302,33 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // (must-be-1) in the low half, and MUST equal the matching
             // constants in vmx.rs — a guest reads the MSR to decide what it
             // may set, and VMENTRY then validates against the constant.
-            0x481 => vmx_ctls_msr(
+            BX_MSR_VMX_PINBASED_CTRLS => vmx_ctls_msr(
                 super::vmx::VMX_PINBASED_CTLS_ALLOWED_0,
                 super::vmx::VMX_PINBASED_CTLS_ALLOWED_1,
-            ), // IA32_VMX_PINBASED_CTLS
-            0x482 => vmx_ctls_msr(
+            ),
+            BX_MSR_VMX_PROCBASED_CTRLS => vmx_ctls_msr(
                 super::vmx::VMX_PROCBASED_CTLS_ALLOWED_0,
                 super::vmx::VMX_PROCBASED_CTLS_ALLOWED_1,
-            ), // IA32_VMX_PROCBASED_CTLS
-            0x483 => vmx_ctls_msr(
+            ),
+            BX_MSR_VMX_VMEXIT_CTRLS => vmx_ctls_msr(
                 super::vmx::VMX_EXIT_CTLS_ALLOWED_0,
                 super::vmx::VMX_EXIT_CTLS_ALLOWED_1,
-            ), // IA32_VMX_EXIT_CTLS
-            0x484 => 0x0000_FFFF_0000_0011u64, // IA32_VMX_ENTRY_CTLS
-            0x485 => 0x0000_0000_0000_0000u64, // IA32_VMX_MISC
-            0x486 => 0x0000_0000_8000_0000u64, // IA32_VMX_CR0_FIXED0
-            0x487 => 0x0000_0000_FFFF_FFFFu64, // IA32_VMX_CR0_FIXED1
-            0x488 => 0x0000_0000_0000_2000u64, // IA32_VMX_CR4_FIXED0
-            0x489 => 0x0000_0000_003F_27FFu64, // IA32_VMX_CR4_FIXED1
-            0x48A => 0x0000_002C_0000_0000u64, // IA32_VMX_VMCS_ENUM
+            ),
+            BX_MSR_VMX_VMENTRY_CTRLS => 0x0000_FFFF_0000_0011u64,
+            BX_MSR_VMX_MISC => 0x0000_0000_0000_0000u64,
+            BX_MSR_VMX_CR0_FIXED0 => 0x0000_0000_8000_0000u64,
+            BX_MSR_VMX_CR0_FIXED1 => 0x0000_0000_FFFF_FFFFu64,
+            BX_MSR_VMX_CR4_FIXED0 => 0x0000_0000_0000_2000u64,
+            BX_MSR_VMX_CR4_FIXED1 => 0x0000_0000_003F_27FFu64,
+            BX_MSR_VMX_VMCS_ENUM => 0x0000_002C_0000_0000u64,
             // IA32_VMX_PROCBASED_CTLS2 — no secondary control is required, so
             // allowed-0 is zero and only the allowed-1 half carries anything.
             // Read from the same constant VMENTRY validates against: a guest
             // discovers the feature set here and would never set a bit this
             // MSR does not advertise.
-            0x48B => vmx_ctls_msr(0, super::vmx::VMX_PROCBASED_CTLS2_ALLOWED_1),
+            BX_MSR_VMX_PROCBASED_CTRLS2 => {
+                vmx_ctls_msr(0, super::vmx::VMX_PROCBASED_CTLS2_ALLOWED_1)
+            }
             // IA32_VMX_EPT_VPID_CAP — Bochs vmcs.cc `init_ept_vpid_capabilities`
             // composes this from what the EPT walker and the invalidation
             // instructions actually implement:
@@ -1234,38 +1341,48 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             //   [25:24] INVEPT single-context and all-context types
             //   [32]    INVVPID supported
             //   [43:40] INVVPID individual/single/all/single-non-global types
-            0x48C => {
+            BX_MSR_VMX_EPT_VPID_CAP => {
                 const EPT_CAPS: u64 = 0x0611_4141;
                 const VPID_CAPS: u64 = 0x0000_0F01 << 32;
                 EPT_CAPS | VPID_CAPS
             }
-            0x48D => vmx_ctls_msr(
+            BX_MSR_VMX_TRUE_PINBASED_CTRLS => vmx_ctls_msr(
                 super::vmx::VMX_PINBASED_CTLS_ALLOWED_0,
                 super::vmx::VMX_PINBASED_CTLS_ALLOWED_1,
-            ), // IA32_VMX_TRUE_PINBASED_CTLS
-            0x48E => vmx_ctls_msr(
+            ),
+            BX_MSR_VMX_TRUE_PROCBASED_CTRLS => vmx_ctls_msr(
                 super::vmx::VMX_PROCBASED_CTLS_ALLOWED_0,
                 super::vmx::VMX_PROCBASED_CTLS_ALLOWED_1,
-            ), // IA32_VMX_TRUE_PROCBASED_CTLS
-            0x48F => vmx_ctls_msr(
+            ),
+            BX_MSR_VMX_TRUE_VMEXIT_CTRLS => vmx_ctls_msr(
                 super::vmx::VMX_EXIT_CTLS_ALLOWED_0,
                 super::vmx::VMX_EXIT_CTLS_ALLOWED_1,
-            ), // IA32_VMX_TRUE_EXIT_CTLS
-            0x490 => 0x0000_FFFF_0000_0011u64, // IA32_VMX_TRUE_ENTRY_CTLS
-            0x491 => 0x0000_0000_0000_0000u64, // IA32_VMX_VMFUNC
-            // SVM MSRs
-            super::svm::BX_SVM_VM_CR_MSR => self.msr.svm_vm_cr as u64,
-            super::svm::BX_SVM_IGNNE_MSR => 0, // IGNNE not supported
-            super::svm::BX_SVM_SMM_CTL_MSR => 0, // SMM_CTL not supported
-            super::svm::BX_SVM_VM_HSAVE_PA_MSR => self.msr.svm_hsave_pa,
-            _ => {
-                // Bochs msr.cc: unknown MSRs raise #GP(0).
-                if !self.ignore_bad_msrs {
-                    tracing::trace!("RDMSR: unknown MSR={:#010x}, #GP(0)", msr);
-                    self.exception(super::cpu::Exception::Gp, 0)?;
-                }
-                0
+            ),
+            BX_MSR_VMX_TRUE_VMENTRY_CTRLS => 0x0000_FFFF_0000_0011u64,
+            BX_MSR_VMX_VMFUNC => 0x0000_0000_0000_0000u64,
+            // IA32_VMX_PROCBASED_CTLS3 and IA32_VMX_EXIT_CTLS2. Bochs msr.cc
+            // answers each only while its `vmx_cap` has supported bits for it
+            // and #GPs otherwise; this port implements no tertiary execution
+            // control and no secondary exit control, so neither exists.
+            BX_MSR_VMX_PROCBASED_CTRLS3 | BX_MSR_VMX_VMEXIT_CTRLS2 => {
+                tracing::debug!("RDMSR: MSR {msr:#010x} has no supported bits, #GP(0)");
+                self.exception(super::cpu::Exception::Gp, 0)?;
+                return Ok(0);
             }
+            // SVM MSRs (Bochs msr.cc, each gated on the SVM extension).
+            super::svm::BX_SVM_VM_CR_MSR | super::svm::BX_SVM_VM_HSAVE_PA_MSR => {
+                if !self.bx_cpuid_support_isa_extension(X86Feature::IsaSvm) {
+                    tracing::debug!("RDMSR {msr:#010x}: SVM not enabled in the cpu model");
+                    self.exception(super::cpu::Exception::Gp, 0)?;
+                    return Ok(0);
+                }
+                if msr == super::svm::BX_SVM_VM_CR_MSR {
+                    self.msr.svm_vm_cr as u64
+                } else {
+                    self.msr.svm_hsave_pa
+                }
+            }
+            _ => return self.missing_or_unknown_rdmsr(msr),
         };
         Ok(val)
     }
@@ -1304,11 +1421,56 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
+    /// An index this architecture does not define — Bochs msr.cc
+    /// `handle_unknown_wrmsr`, the write counterpart of
+    /// [`Self::handle_unknown_rdmsr`]: the value is dropped, or the write
+    /// #GPs, by the machine's `ignore_bad_msrs` policy.
+    fn handle_unknown_wrmsr(&mut self, msr: u32) -> crate::cpu::Result<()> {
+        tracing::debug!("WRMSR: unknown register {msr:#010x}");
+        if !self.ignore_bad_msrs {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        Ok(())
+    }
+
+    /// The write dispatch's last resort; [`Self::missing_or_unknown_rdmsr`]
+    /// for writes.
+    fn missing_or_unknown_wrmsr(&mut self, msr: u32) -> crate::cpu::Result<()> {
+        if msr < super::msr::BX_MSR_MAX_INDEX && super::msr::msr_descriptor(msr).is_some() {
+            tracing::error!("WRMSR: missing MSR handling for MSR {msr:#010x}");
+        }
+        self.handle_unknown_wrmsr(msr)
+    }
+
+    /// The gate Bochs msr.cc writes into each of the long-mode MSRs' cases:
+    /// without BX_ISA_LONG_MODE the register does not exist. Above
+    /// `BX_MSR_MAX_INDEX` there is no descriptor to carry it.
+    fn require_long_mode_for_msr(&mut self, msr: u32) -> crate::cpu::Result<()> {
+        if self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaLongMode) {
+            return Ok(());
+        }
+        tracing::debug!("WRMSR {msr:#010x}: long mode not enabled in the cpu model");
+        self.exception(super::cpu::Exception::Gp, 0)
+    }
+
+    /// The same gate for the two SVM MSRs (Bochs msr.cc `BX_ISA_SVM`).
+    fn require_svm_for_msr(&mut self, msr: u32) -> crate::cpu::Result<()> {
+        if self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaSvm) {
+            return Ok(());
+        }
+        tracing::debug!("WRMSR {msr:#010x}: SVM not enabled in the cpu model");
+        self.exception(super::cpu::Exception::Gp, 0)
+    }
+
     /// MSR-table dispatch for write — Bochs msr.cc switch body. Does not
     /// perform CPL or VMX/SVM intercept checks; callers own those gates.
     pub(super) fn wrmsr_value(&mut self, msr: u32, val: u64) -> crate::cpu::Result<()> {
+        use super::decoder::features::X86Feature;
         use super::msr::*;
-        if (0x800..=0x8FF).contains(&msr) {
+        // The read's rule, for the same reason (Bochs msr.cc).
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaX2apic)
+            && (0x800..=0x8FF).contains(&msr)
+        {
             if self.lapic.get_mode() != super::apic::ApicMode::X2apicMode {
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
@@ -1329,6 +1491,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 return Ok(());
             }
             return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        if msr < BX_MSR_MAX_INDEX {
+            let Some(descriptor) = msr_descriptor(msr) else {
+                return self.handle_unknown_wrmsr(msr);
+            };
+            if !self.bx_cpuid_support_isa_extension(descriptor.feature) {
+                tracing::debug!(
+                    "WRMSR {}: {:?} not enabled in the cpu model, #GP(0)",
+                    descriptor.name,
+                    descriptor.feature
+                );
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
         }
         match msr {
             BX_MSR_TSC => {
@@ -1442,6 +1617,59 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 tracing::trace!("WRMSR: VMX capability MSR {:#x} is read-only, #GP(0)", msr);
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
+            // Bochs msr.cc logs the write and hands it to the unknown-MSR
+            // policy: no performance counter is modelled behind a selector.
+            BX_MSR_PERFEVTSEL0..=BX_MSR_PERFEVTSEL7 => {
+                tracing::debug!(
+                    "WRMSR: write into MSR_IA32_PERFEVTSEL{}: {val:#018x}",
+                    msr - BX_MSR_PERFEVTSEL0
+                );
+                return self.handle_unknown_wrmsr(msr);
+            }
+            // Bochs msr.cc: the guest's own TSC offset, taken whole.
+            BX_MSR_TSC_ADJUST => self.tsc_adjust = val as i64,
+            // Bochs msr.cc: only the supervisor state components this CPU
+            // actually offers may be enabled.
+            BX_MSR_XSS => {
+                let allowed = u64::from(self.get_ia32_xss_allow_mask());
+                if (val & !allowed) != 0 {
+                    tracing::debug!(
+                        "WRMSR: reserved or unsupported bit in MSR_IA32_XSS: {val:#018x}"
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.ia32_xss = val;
+            }
+            // Bochs msr.cc: the MSRLIST barrier accepts anything and keeps
+            // nothing — writing it is the serialization.
+            BX_MSR_IA32_BARRIER => {}
+            BX_MSR_IA32_ARCH_CAPABILITIES => {
+                tracing::debug!("WRMSR: IA32_ARCH_CAPABILITIES is a read only MSR");
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            // Bochs msr.cc `isValidMSR_IA32_SPEC_CTRL`: bits [10,8:0] except
+            // bit 9 — IBRS, STIBP, SSBD, IPRED_DIS_U/S, RRSBA_DIS_U/S, PSFD,
+            // DDPD_U and BHI_DIS_S.
+            BX_MSR_IA32_SPEC_CTRL => {
+                const VALID: u64 = 0x5FF;
+                if (val & !VALID) != 0 {
+                    tracing::debug!(
+                        "WRMSR: attempt to set reserved bits of IA32_SPEC_CTRL: {val:#018x}"
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.ia32_spec_ctrl = val as u32;
+            }
+            // Bochs msr.cc: IBPB and the L1D flush are commands, not state —
+            // only bit 0 is defined and nothing is remembered.
+            BX_MSR_IA32_PRED_CMD | BX_MSR_IA32_FLUSH_CMD => {
+                if (val & !1) != 0 {
+                    tracing::debug!(
+                        "WRMSR: attempt to set reserved bits of MSR {msr:#010x}: {val:#018x}"
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+            }
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,
             BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr = val,
@@ -1517,8 +1745,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 );
                 self.efer = new_efer;
             }
-            BX_MSR_STAR => self.msr.star = val,
+            BX_MSR_STAR => {
+                if (self.efer_suppmask & super::crregs::BxEfer::SCE.bits()) == 0 {
+                    tracing::debug!("WRMSR MSR_STAR: SYSCALL/SYSRET not enabled in the cpu model");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.star = val;
+            }
             BX_MSR_LSTAR => {
+                self.require_long_mode_for_msr(msr)?;
                 if !self.is_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_LSTAR, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
@@ -1526,14 +1761,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.msr.lstar = val;
             }
             BX_MSR_CSTAR => {
+                self.require_long_mode_for_msr(msr)?;
                 if !self.is_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_CSTAR, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.msr.cstar = val;
             }
-            BX_MSR_FMASK => self.msr.fmask = val as u32,
+            BX_MSR_FMASK => {
+                self.require_long_mode_for_msr(msr)?;
+                self.msr.fmask = val as u32;
+            }
             BX_MSR_FSBASE => {
+                self.require_long_mode_for_msr(msr)?;
                 if !self.is_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_FSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
@@ -1541,6 +1781,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.set_segment_base(super::decoder::BxSegregs::Fs, val);
             }
             BX_MSR_GSBASE => {
+                self.require_long_mode_for_msr(msr)?;
                 if !self.is_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_GSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
@@ -1548,13 +1789,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.set_segment_base(super::decoder::BxSegregs::Gs, val);
             }
             BX_MSR_KERNELGSBASE => {
+                self.require_long_mode_for_msr(msr)?;
                 if !self.is_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_KERNELGSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.msr.kernelgsbase = val;
             }
-            BX_MSR_TSC_AUX => self.msr.tsc_aux = val as u32,
+            BX_MSR_TSC_AUX => {
+                if !self.bx_cpuid_support_isa_extension(
+                    super::decoder::features::X86Feature::IsaRdtscp,
+                ) {
+                    tracing::debug!("WRMSR MSR_TSC_AUX: RDTSCP not enabled in the cpu model");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.tsc_aux = val as u32;
+            }
             // FRED MSRs
             BX_MSR_IA32_FRED_RSP0..=BX_MSR_IA32_FRED_RSP3 => {
                 let idx = (msr - BX_MSR_IA32_FRED_RSP0) as usize;
@@ -1566,22 +1816,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.msr.ia32_fred_ssp[idx] = val;
             }
             BX_MSR_IA32_FRED_CONFIG => self.msr.ia32_fred_cfg = val,
-            // SVM MSRs
+            // SVM MSRs (Bochs msr.cc, each gated on the SVM extension).
             super::svm::BX_SVM_VM_CR_MSR => {
+                self.require_svm_for_msr(msr)?;
                 self.svm_update_vm_cr_msr(val)?;
             }
-            super::svm::BX_SVM_IGNNE_MSR => { /* IGNNE: ignore write */ }
-            super::svm::BX_SVM_SMM_CTL_MSR => { /* SMM_CTL: ignore write */ }
             super::svm::BX_SVM_VM_HSAVE_PA_MSR => {
-                self.msr.svm_hsave_pa = val;
-            }
-            _ => {
-                // Bochs: unknown MSRs raise #GP(0)
-                if !self.ignore_bad_msrs {
-                    tracing::trace!("WRMSR: unknown MSR={:#010x}, #GP(0)", msr);
+                self.require_svm_for_msr(msr)?;
+                if !super::vmx::is_valid_page_aligned_phy_addr(val) {
+                    tracing::debug!(
+                        "WRMSR SVM_HSAVE_PA_MSR: invalid or not page aligned physical address"
+                    );
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
+                self.msr.svm_hsave_pa = val;
             }
+            _ => return self.missing_or_unknown_wrmsr(msr),
         }
         tracing::trace!("WRMSR: MSR={:#010x} = {:#018x}", msr, val);
         Ok(())
@@ -4263,8 +4513,10 @@ mod tests {
     use crate::cpu::crregs::BxEfer;
     use crate::cpu::decoder::Instruction;
     use crate::cpu::msr::{
-        BX_MSR_APICBASE, BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_FEATURE_CONTROL,
-        BX_MSR_IA32_MPERF, BX_MSR_TSC, BX_MSR_TSC_DEADLINE,
+        BX_MSR_APICBASE, BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_ARCH_CAPABILITIES,
+        BX_MSR_IA32_FEATURE_CONTROL, BX_MSR_IA32_FLUSH_CMD, BX_MSR_IA32_MPERF,
+        BX_MSR_IA32_PRED_CMD, BX_MSR_IA32_SPEC_CTRL, BX_MSR_KERNELGSBASE, BX_MSR_LSTAR,
+        BX_MSR_TSC, BX_MSR_TSC_AUX, BX_MSR_TSC_DEADLINE,
     };
     use crate::cpu::svm::BX_VM_CR_MSR_SVMDIS_MASK;
     use crate::params::BxParams;
@@ -4457,6 +4709,141 @@ mod tests {
         assert_eq!(
             cpu.rdmsr_value(BX_MSR_IA32_MPERF).unwrap(),
             expected_physical
+        );
+    }
+
+    /// Turn one ISA extension on or off for a CPU under test — the bitmask a
+    /// CPU model fills at init, which every feature gate reads.
+    fn set_cpu_feature<T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
+        feature: super::super::decoder::features::X86Feature,
+        on: bool,
+    ) {
+        let index = feature as usize;
+        let (word, bit) = (index / 32, 1u32 << (index % 32));
+        if on {
+            cpu.ia_extensions_bitmask[word] |= bit;
+        } else {
+            cpu.ia_extensions_bitmask[word] &= !bit;
+        }
+    }
+
+    /// An architectural MSR whose feature the CPU model does not have does not
+    /// exist, and reading it faults — Bochs msr.cc looks the index up in
+    /// `msr_desc[]` and refuses before the dispatch switch. An index the
+    /// architecture never defined is a different thing: `handle_unknown_rdmsr`
+    /// answers it under the machine's `ignore_bad_msrs` policy, which is how a
+    /// guest can tell "this processor has no such register" from "nothing is
+    /// there". The two answers must not be the same, or the gate is not wired.
+    #[test]
+    fn an_msr_the_model_lacks_faults_where_an_undefined_index_reads_zero() {
+        use super::super::decoder::features::X86Feature;
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        assert!(
+            cpu.ignore_bad_msrs,
+            "this test distinguishes the two refusals under the permissive policy"
+        );
+
+        set_cpu_feature(&mut cpu, X86Feature::IsaTscDeadline, true);
+        cpu.rdmsr_value(BX_MSR_TSC_DEADLINE)
+            .expect("a model with the TSC-deadline timer has the MSR");
+
+        set_cpu_feature(&mut cpu, X86Feature::IsaTscDeadline, false);
+        assert!(
+            cpu.rdmsr_value(BX_MSR_TSC_DEADLINE).is_err(),
+            "RDMSR of an MSR whose feature is off must #GP(0)"
+        );
+        assert!(
+            cpu.wrmsr_value(BX_MSR_TSC_DEADLINE, 0).is_err(),
+            "WRMSR of an MSR whose feature is off must #GP(0)"
+        );
+        assert!(
+            cpu.read_msr_for_api(BX_MSR_TSC_DEADLINE).is_err(),
+            "a host has no value to read for an MSR this processor does not have"
+        );
+
+        // 0x234 is inside the table's range and has no descriptor — it falls
+        // between the variable-range MTRRs and the fixed ones — so it is not
+        // an MSR at all and the permissive policy answers it.
+        const NO_MSR_LIVES_HERE: u32 = 0x234;
+        assert!(NO_MSR_LIVES_HERE < super::super::msr::BX_MSR_MAX_INDEX);
+        assert_eq!(
+            cpu.rdmsr_value(NO_MSR_LIVES_HERE).expect("ignored, not faulted"),
+            0
+        );
+        cpu.wrmsr_value(NO_MSR_LIVES_HERE, 0xDEAD)
+            .expect("ignored, not faulted");
+    }
+
+    /// The MSRs above the descriptor table carry their gate in their own case
+    /// (Bochs msr.cc): TSC_AUX exists only with RDTSCP, and the SYSCALL and
+    /// long-mode registers only with what enables them. Their refusal is a
+    /// #GP either way — the unknown-MSR policy does not cover a register the
+    /// architecture defines.
+    #[test]
+    fn the_long_mode_msrs_answer_only_where_their_feature_is_on() {
+        use super::super::decoder::features::X86Feature;
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+
+        set_cpu_feature(&mut cpu, X86Feature::IsaRdtscp, false);
+        assert!(
+            cpu.rdmsr_value(BX_MSR_TSC_AUX).is_err(),
+            "RDMSR MSR_TSC_AUX without RDTSCP must #GP(0)"
+        );
+        assert!(
+            cpu.wrmsr_value(BX_MSR_TSC_AUX, 7).is_err(),
+            "WRMSR MSR_TSC_AUX without RDTSCP must #GP(0)"
+        );
+        set_cpu_feature(&mut cpu, X86Feature::IsaRdtscp, true);
+        cpu.wrmsr_value(BX_MSR_TSC_AUX, 7).expect("RDTSCP is on");
+        assert_eq!(cpu.rdmsr_value(BX_MSR_TSC_AUX).unwrap(), 7);
+
+        set_cpu_feature(&mut cpu, X86Feature::IsaLongMode, false);
+        assert!(
+            cpu.rdmsr_value(BX_MSR_LSTAR).is_err(),
+            "RDMSR MSR_LSTAR without long mode must #GP(0)"
+        );
+        assert!(
+            cpu.wrmsr_value(BX_MSR_KERNELGSBASE, 0).is_err(),
+            "WRMSR MSR_KERNELGSBASE without long mode must #GP(0)"
+        );
+    }
+
+    /// The SCA-mitigation MSRs Bochs answers and this port did not reach at
+    /// all: IA32_SPEC_CTRL kept its reserved bits, IA32_ARCH_CAPABILITIES
+    /// enumerated the mitigations, and the two command MSRs are write-only.
+    #[test]
+    fn the_sca_mitigation_msrs_read_write_and_refuse_as_the_architecture_says() {
+        use super::super::decoder::features::X86Feature;
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        set_cpu_feature(&mut cpu, X86Feature::IsaScaMitigations, true);
+
+        cpu.wrmsr_value(BX_MSR_IA32_SPEC_CTRL, 0x5FF)
+            .expect("every defined IA32_SPEC_CTRL bit");
+        assert_eq!(cpu.rdmsr_value(BX_MSR_IA32_SPEC_CTRL).unwrap(), 0x5FF);
+        assert!(
+            cpu.wrmsr_value(BX_MSR_IA32_SPEC_CTRL, 0x200).is_err(),
+            "bit 9 of IA32_SPEC_CTRL is reserved"
+        );
+
+        assert_eq!(cpu.rdmsr_value(BX_MSR_IA32_ARCH_CAPABILITIES).unwrap(), 0x1F);
+        assert!(
+            cpu.wrmsr_value(BX_MSR_IA32_ARCH_CAPABILITIES, 0).is_err(),
+            "IA32_ARCH_CAPABILITIES is read only"
+        );
+
+        cpu.wrmsr_value(BX_MSR_IA32_PRED_CMD, 1)
+            .expect("IBPB is bit 0");
+        assert!(
+            cpu.wrmsr_value(BX_MSR_IA32_FLUSH_CMD, 2).is_err(),
+            "only bit 0 of IA32_FLUSH_CMD is defined"
+        );
+        assert!(
+            cpu.rdmsr_value(BX_MSR_IA32_PRED_CMD).is_err(),
+            "IA32_PRED_CMD is write only"
         );
     }
 

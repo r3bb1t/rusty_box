@@ -7612,6 +7612,217 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
+    /// Put `'A'` on the first cell of the text page and `'B'` on the first
+    /// cell of its second row, then point the CRTC start address at that
+    /// second row and spin. The screen keeps showing `'A'` until the vertical
+    /// timer latches the new start address, which is the instant this program
+    /// exists to date.
+    const MOVE_THE_TEXT_PAGE_DOWN_A_ROW: [u8; 39] = [
+        0xB8, 0x00, 0xB8, // mov ax, 0xB800
+        0x8E, 0xC0, // mov es, ax
+        0x26, 0xC7, 0x06, 0x00, 0x00, 0x41, 0x07, // mov word [es:0x0000], 'A' | grey
+        0x26, 0xC7, 0x06, 0xA0, 0x00, 0x42, 0x07, // mov word [es:0x00A0], 'B' | grey
+        0xBA, 0xD4, 0x03, // mov dx, 0x3D4
+        0xB0, 0x0C, // mov al, 0x0C — start address high
+        0xEE,       // out dx, al
+        0x42,       // inc dx
+        0xB0, 0x00, // mov al, 0
+        0xEE,       // out dx, al
+        0x4A,       // dec dx
+        0xB0, 0x0D, // mov al, 0x0D — start address low
+        0xEE,       // out dx, al
+        0x42,       // inc dx
+        0xB0, 0x50, // mov al, 80 — one row of cells into the page
+        0xEE,       // out dx, al
+        0xEB, 0xFE, // spin: jmp spin
+    ];
+
+    /// The character the guest sees in the top-left cell of its screen.
+    fn top_left_character(machine: &mut Emulator) -> char {
+        machine
+            .display()
+            .text()
+            .expect("the adapter is in a text mode")
+            .row_chars(0)
+            .next()
+            .expect("the grid has a first cell")
+    }
+
+    /// A machine running [`MOVE_THE_TEXT_PAGE_DOWN_A_ROW`], already past the
+    /// program and spinning, with the vertical timer still counting out the
+    /// first half of its first frame.
+    fn machine_moving_its_text_page(config: EmulatorConfig) -> Box<Emulator> {
+        let mut machine = machine_running(&MOVE_THE_TEXT_PAGE_DOWN_A_ROW, config);
+        machine.display().init_text_mode3();
+        run_guest_for(&mut machine, 20_000);
+        assert_eq!(
+            top_left_character(&mut machine),
+            'A',
+            "the start address must not take effect before a retrace ends"
+        );
+        machine
+    }
+
+    /// Step until the machine's clock has reached `tick`.
+    fn run_guest_until_tick(machine: &mut Emulator, tick: u64) {
+        for _ in 0..1_000 {
+            let now = machine.pc_system.time_ticks();
+            if now >= tick {
+                return;
+            }
+            run_guest_for(machine, tick - now);
+        }
+        panic!("the guest never reached tick {tick}");
+    }
+
+    /// Microseconds of this machine's own clock, as instruction ticks.
+    fn ticks_of(machine: &Emulator, usec: u64) -> u64 {
+        u128::from(usec)
+            .saturating_mul(u128::from(machine.config.ips.per_second_u64()))
+            .div_euclid(1_000_000)
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+
+    /// The CRTC start address takes effect where the vertical retrace ends,
+    /// not where the frame does: Bochs `bx_vgacore_c::vertical_timer` latches
+    /// `s.CRTC.start_addr` on the `vtimer_toggle == 1` half of the period,
+    /// which runs from the frame's start to `vrend_usec` — a third of a
+    /// millisecond before `vtotal_usec` on a 70 Hz text mode.
+    #[test]
+    fn a_new_frame_start_address_takes_effect_when_the_retrace_ends() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut machine = machine_moving_its_text_page(clock_test_config());
+                let retrace_end_usec = u64::from(
+                    machine
+                        .device_manager
+                        .vga
+                        .vertical_interval_usec()
+                        .expect("the adapter has retrace timing"),
+                );
+                let frame_usec = u64::from(machine.device_manager.vga.frame_period_usec());
+                assert!(
+                    retrace_end_usec + 500 < frame_usec,
+                    "the retrace must end inside the frame and not at its edge, or the two \
+                     halves of the period are one: {retrace_end_usec} µs of {frame_usec} µs"
+                );
+
+                let before_the_retrace_ends = ticks_of(&machine, retrace_end_usec * 9 / 10);
+                run_guest_until_tick(&mut machine, before_the_retrace_ends);
+                assert_eq!(
+                    top_left_character(&mut machine),
+                    'A',
+                    "the start address must hold until the retrace ends"
+                );
+
+                let after_the_retrace_ends = ticks_of(&machine, retrace_end_usec + 500);
+                run_guest_until_tick(&mut machine, after_the_retrace_ends);
+                assert_eq!(
+                    top_left_character(&mut machine),
+                    'B',
+                    "the retrace's end must latch the start address the guest programmed"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Under `clock: sync=realtime` the vertical timer counts the host's
+    /// microseconds, so a frame passes while a guest that has barely executed
+    /// stands still — Bochs vgacore.cc registers `vga vsync` with
+    /// `vsync_realtime` and reads `bx_virt_timer.time_usec(vsync_realtime)`.
+    /// The default `sync=none` is the control: the same host pause moves
+    /// nothing, because that machine's retrace counts only what the guest ran.
+    #[test]
+    fn a_machine_built_for_realtime_sync_runs_its_vga_retrace_on_host_time() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                // Longer than one 70 Hz frame, so the retrace it spans has
+                // ended by the boundary that follows.
+                const HOST_PAUSE: std::time::Duration = std::time::Duration::from_millis(30);
+
+                for (sync_realtime, expected) in [(true, 'B'), (false, 'A')] {
+                    let mut machine = machine_moving_its_text_page(EmulatorConfig {
+                        sync_realtime,
+                        ..clock_test_config()
+                    });
+
+                    std::thread::sleep(HOST_PAUSE);
+                    run_guest_for(&mut machine, 1_000);
+
+                    assert_eq!(
+                        top_left_character(&mut machine),
+                        expected,
+                        "sync_realtime={sync_realtime}: the host pause must move the retrace \
+                         exactly when the card keeps host time"
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// POST codes the firmware writes reach the host, and the register they
+    /// are written to still reads back what the guest put there.
+    ///
+    /// Ports 0x80 and 0x84 belong to the extra DMA page registers (Bochs
+    /// dma.cc `ext_page_reg`), which is exactly why firmware can use 0x80 as
+    /// a scratch POST port. Watching them must not take them: the guest still
+    /// writes and reads its own value, and the host still sees every code in
+    /// write order.
+    #[test]
+    fn post_codes_reach_the_host_without_taking_the_dma_page_register() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let first = GUEST_READINGS.to_le_bytes();
+                let second = (GUEST_READINGS + 1).to_le_bytes();
+                let program = [
+                    0xB0, 0x11, // mov al, 0x11
+                    0xE6, 0x80, // out 0x80, al
+                    0xB0, 0x22, // mov al, 0x22
+                    0xE6, 0x84, // out 0x84, al
+                    0xE4, 0x80, // in al, 0x80
+                    0x88, 0xC3, // mov bl, al
+                    0xE4, 0x84, // in al, 0x84
+                    0x88, 0xC7, // mov bh, al
+                    0x88, 0x1E, first[0], first[1], // mov [GUEST_READINGS], bl
+                    0x88, 0x3E, second[0], second[1], // mov [GUEST_READINGS + 1], bh
+                    0xF4, // hlt
+                ];
+                let mut machine = machine_running(&program, clock_test_config());
+
+                run_guest_until_it_halts(&mut machine);
+
+                let codes: Vec<u8> = machine.post_codes().take_output().collect();
+                assert!(
+                    codes.ends_with(&[0x11, 0x22]),
+                    "the guest's POST codes must reach the host in write order: {codes:02x?}"
+                );
+                assert!(
+                    machine.post_codes().take_output().next().is_none(),
+                    "draining the POST stream is destructive"
+                );
+
+                let read_back = machine
+                    .mem_read_vec(u64::from(GUEST_READINGS), 2)
+                    .expect("guest RAM");
+                assert_eq!(
+                    read_back,
+                    vec![0x11, 0x22],
+                    "the DMA extra page registers must still answer the guest"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     /// A zeroed IDT pointer in guest RAM, for a guest that wants no exception
     /// to be deliverable.
     const GUEST_ZERO_IDT: u16 = 0x0700;

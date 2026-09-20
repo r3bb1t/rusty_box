@@ -23,8 +23,8 @@ use crate::emulator::{Emulator, SliceEngine};
 #[cfg(feature = "alloc")]
 use crate::emulator::EmulatorConfig;
 use crate::iodev::devices::DeviceManager;
-use crate::iodev::serial::{SerialTxDrain, SERIAL_PORT_COUNT};
-use crate::iodev::{BxDevicesC, DebugconDrain};
+use crate::iodev::serial::SerialTxDrain;
+use crate::iodev::{BxDevicesC, DebugconDrain, Port80Drain};
 use crate::{Error, Result};
 
 // ─────────────────────────── StopHandle ───────────────────────────
@@ -106,12 +106,43 @@ impl DebugPort<'_> {
     }
 }
 
+/// Transient borrow of the BIOS POST-code stream, from
+/// [`Emulator::post_codes`].
+///
+/// Firmware reports how far it has got by writing a code to port 0x80, and
+/// some BIOSes to 0x84 as well. Both are extra DMA page registers (Bochs
+/// dma.cc), which is what makes them free for firmware to scribble on; the
+/// guest keeps them, and this only reads what went past. Bochs has no such
+/// stream — it is a host observation this port adds (R7), registered as D16
+/// in `docs/bochs-parity-divergences.md`.
+pub struct PostCodes<'m> {
+    devices: &'m mut BxDevicesC,
+}
+
+impl PostCodes<'_> {
+    /// Drain the codes the firmware has written, in write order.
+    ///
+    /// The buffer is bounded: a host that never drains loses the oldest codes
+    /// rather than growing without limit.
+    #[inline]
+    pub fn take_output(&mut self) -> Port80Drain<'_> {
+        self.devices.drain_port80_output()
+    }
+}
+
 impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
-    /// Borrow UART `port` (0-based; COM1 is 0). `None` when the index is
-    /// outside the modelled set.
+    /// Borrow UART `port` (0-based; COM1 is 0). `None` unless this machine
+    /// built that port.
+    ///
+    /// How many exist is the machine's, not the architecture's: Bochs
+    /// serial.cc `init` builds a UART per `com<n>: enabled=` and registers I/O
+    /// handlers for those alone, so an index past them answers nothing at
+    /// 0x2F8/0x3E8/0x2E8 and has no transmit buffer to drain. A handle for one
+    /// would be indistinguishable from a port the guest has simply not written
+    /// to.
     #[inline]
     pub fn serial(&mut self, port: usize) -> Option<Serial<'_>> {
-        (port < SERIAL_PORT_COUNT).then(|| Serial {
+        (port < self.device_manager.serial.configured_port_count()).then(|| Serial {
             devices: &mut self.device_manager,
             port,
         })
@@ -122,6 +153,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
     #[inline]
     pub fn debug_port(&mut self) -> DebugPort<'_> {
         DebugPort {
+            devices: &mut self.devices,
+        }
+    }
+
+    /// Borrow the BIOS POST-code stream (ports 0x80 and 0x84). Present on
+    /// every profile, for the same reason as [`Emulator::debug_port`]: it
+    /// watches a chipset register every machine has.
+    #[inline]
+    pub fn post_codes(&mut self) -> PostCodes<'_> {
+        PostCodes {
             devices: &mut self.devices,
         }
     }
@@ -1223,6 +1264,7 @@ fn flat_descriptor(access: u8, size: SegmentSize, byte_limit: u32) -> u64 {
 mod tests {
     use super::*;
     use crate::emulator::MemorySize;
+    use crate::iodev::serial::SERIAL_PORT_COUNT;
 
     /// Reg read/write round-trip on a fresh emulator.
     #[test]
@@ -1524,22 +1566,34 @@ mod tests {
         assert!(!pp.check(0x1000, MemPerms::EXEC));
     }
 
-    /// Every modelled UART is reachable and nothing past the set is.
+    /// A UART handle exists for exactly the ports this machine built.
     ///
-    /// The index bound is the only real logic in `serial()` — everything else
-    /// delegates — so this is where an off-by-one would land, and an
-    /// out-of-range index used to panic on a slice index instead of answering
-    /// `None`.
+    /// The architecture has four COM ports and this machine builds one, as
+    /// Bochs does with only `com1: enabled=1`. A handle for one of the other
+    /// three would drain an empty buffer for ever and read as "the guest has
+    /// sent nothing", which is not what a host asked.
     #[test]
-    fn serial_handle_covers_exactly_the_modelled_ports() {
+    fn serial_handle_covers_exactly_the_ports_this_machine_built() {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
-                for port in 0..SERIAL_PORT_COUNT {
+                let built = emu.device_manager.serial.configured_port_count();
+                assert!(
+                    (1..=SERIAL_PORT_COUNT).contains(&built),
+                    "a PC has at least COM1 and at most four UARTs, not {built}"
+                );
+                for port in 0..built {
                     assert!(
                         emu.serial(port).is_some(),
-                        "COM{} is modelled and must be reachable",
+                        "COM{} is built and must be reachable",
+                        port + 1
+                    );
+                }
+                for port in built..SERIAL_PORT_COUNT {
+                    assert!(
+                        emu.serial(port).is_none(),
+                        "COM{} was not built and must not hand out a handle",
                         port + 1
                     );
                 }

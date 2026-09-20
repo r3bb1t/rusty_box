@@ -657,7 +657,7 @@ pub(super) const VMX_VMEXIT_CTRL2_SAVE_GUEST_FRED: u64 = 1 << 0;
 
 /// Bochs `IsValidPageAlignedPhyAddr` — page-aligned and within the
 /// emulator's physical address width (see [`BX_PHY_ADDRESS_WIDTH`]).
-fn is_valid_page_aligned_phy_addr(paddr: u64) -> bool {
+pub(super) fn is_valid_page_aligned_phy_addr(paddr: u64) -> bool {
     paddr & 0xFFF == 0 && (paddr >> BX_PHY_ADDRESS_WIDTH) == 0
 }
 

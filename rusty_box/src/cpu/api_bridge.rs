@@ -509,17 +509,59 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     // ── Generic MSR bridge ────────────────────────────────────────────
 
+    /// Whether this processor has an MSR at `index` at all.
+    ///
+    /// Every MSR in Bochs is gated on a CPU feature: below
+    /// [`BX_MSR_MAX_INDEX`](super::msr::BX_MSR_MAX_INDEX) by the descriptor
+    /// table (msr.cc `init_MSRs`), and above it by a test written into each of
+    /// the EFER, SYSCALL, long-mode, RDTSCP and SVM cases. A guest reading one
+    /// its model does not have takes a #GP; the answer for a host is that
+    /// there is no value to report.
+    pub(crate) fn has_msr(&self, index: u32) -> bool {
+        use super::decoder::features::X86Feature as F;
+        use super::msr::*;
+        if index < BX_MSR_MAX_INDEX {
+            return match msr_descriptor(index) {
+                Some(descriptor) => self.bx_cpuid_support_isa_extension(descriptor.feature),
+                None => false,
+            };
+        }
+        match index {
+            BX_MSR_EFER => self.efer_suppmask != 0,
+            BX_MSR_STAR => (self.efer_suppmask & super::crregs::BxEfer::SCE.bits()) != 0,
+            BX_MSR_LSTAR | BX_MSR_CSTAR | BX_MSR_FMASK | BX_MSR_FSBASE | BX_MSR_GSBASE
+            | BX_MSR_KERNELGSBASE => self.bx_cpuid_support_isa_extension(F::IsaLongMode),
+            BX_MSR_TSC_AUX => self.bx_cpuid_support_isa_extension(F::IsaRdtscp),
+            super::svm::BX_SVM_VM_CR_MSR | super::svm::BX_SVM_VM_HSAVE_PA_MSR => {
+                self.bx_cpuid_support_isa_extension(F::IsaSvm)
+            }
+            _ => false,
+        }
+    }
+
+    /// The refusal a host gets for an MSR this processor's model does not
+    /// have. Shared by the read and the write so both say the same thing.
+    fn msr_absent_for_api<R>() -> super::Result<R> {
+        Err(super::CpuError::UnsupportedCpuOperation {
+            operation: "this processor's CPU model does not have that MSR",
+        })
+    }
+
     /// Read an MSR by index, as `Emulator::msr_read` does for the boot
     /// processor: the TSC, APIC base, platform ID, APERF/MPERF, TSC deadline,
     /// the SYSENTER trio, STAR/LSTAR/CSTAR/FMASK, KERNEL_GS_BASE, TSC_AUX,
     /// EFER and the FS/GS bases. `Err(UnimplementedInstruction)` for any
-    /// other.
+    /// other, and `Err(UnsupportedCpuOperation)` for one this processor's
+    /// model does not have.
     ///
     /// Public, with [`Self::write_msr_for_api`], so an engine can read and
     /// put back the MSRs of any processor it runs — not only the one the
     /// machine's API reaches.
     pub fn read_msr_for_api(&self, msr: u32) -> super::Result<u64> {
         use super::msr::*;
+        if !self.has_msr(msr) {
+            return Self::msr_absent_for_api();
+        }
         let apicbase = self.msr.apicbase as u64;
         let v = match msr {
             BX_MSR_TSC => self.get_virtual_tsc(self.cpu_local_ticks()),
@@ -553,6 +595,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// local APIC's timer is not in TSC-deadline mode.
     pub fn write_msr_for_api(&mut self, msr: u32, val: u64) -> super::Result<()> {
         use super::msr::*;
+        if !self.has_msr(msr) {
+            return Self::msr_absent_for_api();
+        }
         match msr {
             BX_MSR_TSC => {
                 let t = self.cpu_local_ticks();

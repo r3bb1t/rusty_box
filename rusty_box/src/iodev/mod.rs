@@ -785,6 +785,7 @@ impl BxDevicesC {
         mem: &mut crate::memory::BxMemC,
     ) {
         self.diag_io_writes += 1;
+        self.watch_post_code(port, value, io_len);
         let entry = &self.write_handlers[port as usize];
         let slot = entry.slot;
         let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
@@ -982,15 +983,33 @@ impl BxDevicesC {
         }
     }
 
-    /// Default write handler - ignores writes to unhandled ports
-    fn default_write_handler(&mut self, address: u16, value: u32, io_len: u8) {
-        // Bochs-style BIOS POST code port (0x80). Some BIOSes also use 0x84.
+    /// Record a byte a POST code carries, on its way to the device that owns
+    /// the port.
+    ///
+    /// Ports 0x80 and 0x84 are the PC's extra DMA page registers, and Bochs
+    /// dma.cc keeps them as `ext_page_reg[]` — a guest writes one and reads
+    /// the value back. Firmware also uses 0x80 as the POST-code port, which
+    /// costs it nothing precisely because the register is otherwise unused.
+    ///
+    /// So this only watches the write go past; the DMA device still receives
+    /// it and still answers reads. It sits at the top of [`Self::outp`]
+    /// because that is the one place every guest port write passes (R5) — a
+    /// tap in the default handler saw none of them, the page registers being
+    /// claimed.
+    ///
+    /// Provenance (R7): Bochs has no POST-code stream. This is a host
+    /// observation this port adds, registered as D16 in
+    /// `docs/bochs-parity-divergences.md`; the guest cannot tell it is there.
+    #[inline]
+    fn watch_post_code(&mut self, address: u16, value: u32, io_len: u8) {
         if io_len == 1 && matches!(address, 0x0080 | 0x0084) {
             tracing::trace!("BIOS POST code port {:#06x}: {:#04x}", address, value as u8);
             self.port80_output.push_back(value as u8);
-            return;
         }
+    }
 
+    /// Default write handler - ignores writes to unhandled ports
+    fn default_write_handler(&mut self, address: u16, value: u32, io_len: u8) {
         // Bochs port-0xE9 debug console (unmapped.cc port_e9_hack; optional
         // in upstream, always-on here): bytes go to the host-drainable stream.
         if io_len == 1 && address == 0x00E9 {
