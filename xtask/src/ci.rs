@@ -268,7 +268,10 @@ const UNSAFE_IMPL_SEND_BASELINE: usize = 0;
 // the deleted pin sidecar, a 4 KiB never-read `apic_scratch` buffer, and a
 // forwarder with no callers.
 const BLANKET_DEAD_CODE_BASELINES: &[(&str, usize)] = &[
-    ("rusty_box/src", 68),
+    // 68 -> 67: `cpu/msr.rs` no longer hides its own dead code. The MSR
+    // descriptor table names every constant the dispatch answers, and the
+    // three with no remaining caller are gone.
+    ("rusty_box/src", 67),
     // `decoder/tables.rs` names `dead_code`; the three opcode maps (`opmap.rs`,
     // `opmap_0f38.rs`, `opmap_0f3a.rs`) switch it off through `unused`.
     ("rusty_box_decoder/src", 4),

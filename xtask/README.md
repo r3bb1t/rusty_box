@@ -36,7 +36,7 @@ This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in
 
 ### Step 1: doctrine ratchets
 
-This step is an in-process text scan, not a cargo command. It enforces the Safety Doctrine counts (`docs/safety-doctrine.md`) over seven source trees: `rusty_box`, `rusty_box_decoder`, `rusty_box_core`, `rusty_box_devices`, `rusty_box_whp_sys`, `rusty_box_whp` and `rusty_box_whp_engine`. It checks four counts:
+This step is an in-process text scan, not a cargo command. It enforces the Safety Doctrine counts (`docs/safety-doctrine.md`) over eight source trees: `rusty_box`, `rusty_box_decoder`, `rusty_box_core`, `rusty_box_devices`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine` and `rusty_box_gui`. It checks four counts:
 
 - **`unsafe` tokens per crate (R1)**, with comment lines stripped, against `UNSAFE_TOKEN_BASELINES`. A count above its baseline fails the step. A count below it passes, but prints a reminder to lower the baseline in the same commit.
 - **`unsafe impl … Send` / `Sync` lines in `rusty_box/src` (R6).** Baseline zero.
@@ -80,6 +80,7 @@ Every step is `--release` except the debug-assertions check, which exists to com
 Notes on specific steps:
 
 - **WHP steps (9 to 12)** need no hypervisor. The sys and wrapper tests cover layouts and arithmetic. Engine tests that need hardware skip themselves on a host without it. `--all-targets` on step 12 also compiles the engine's example harnesses.
+- **Doc examples (step 21)** compile the crate's doc comments and the Rust blocks of [`docs/automation.md`](../docs/automation.md), which `rusty_box/src/lib.rs` includes behind `#[cfg(doctest)]`. An example in that guide that names a signature the crate does not have fails here.
 - **Compile-fail fixtures (step 22)** are the doctrine's trybuild tests. Their goldens are rustc's rendered diagnostics, so they change when the quoted code or the toolchain changes. Once you have confirmed the rule still holds, regenerate them with `TRYBUILD=overwrite cargo test --release -p rusty_box --features std --test compile_fail`.
 
 ### `--full`: two more steps

@@ -277,8 +277,9 @@ third-party build of it) and took about 20 minutes to reach the picker.
   [The emulated PC](../README.md#the-emulated-pc) for its extensions and the
   device list.
 - **The devices** are a PS/2 keyboard and mouse, IDE disks and an ATAPI
-  CD-ROM with bus-master DMA, serial ports, VGA with the Bochs VBE extensions,
-  and the PCI, ACPI, HPET and APIC chipset around them.
+  CD-ROM with bus-master DMA, one serial port (COM1 — there is no COM2 to
+  COM4), VGA with the Bochs VBE extensions, and the PCI, ACPI, HPET and APIC
+  chipset around them.
 - **There is no network adapter, no sound card, no USB controller and no
   floppy controller.** No guest has networking; the mouse is a PS/2 mouse,
   never a USB tablet; and a floppy image the Images page creates cannot be
@@ -552,7 +553,7 @@ VM, and leaves it out when the name is blank.
 | `ips` | `4000000` | Guest-clock calibration. **Not a speed limit.** See [Pacing](#pacing-ips-sync-slowdown-max-instructions). |
 | `pci` | `true` | The PCI bus (i440FX/PIIX3). Required for IDE bus-master DMA (fast disk and CD I/O) and for `pci_vga`. Leave it `true`. |
 | `sync_slowdown` | `false` | Throttle emulation so guest time roughly matches real time. See [Pacing](#pacing-ips-sync-slowdown-max-instructions). |
-| `sync_realtime` | `false` | Advance the PIT and ACPI timers on wall-clock time (Bochs `clock: sync=realtime`). When off, timers follow emulated time. |
+| `sync_realtime` | `false` | Run the devices that keep their own clock on wall-clock time (Bochs `clock: sync=realtime`): the PIT, the ACPI power-management timer, and the VGA's vertical retrace, which is what a guest polls port 0x3DA for. When off, all three follow emulated time. |
 | `smp_quantum` | `16` | Instructions each CPU runs before the next one gets its turn (Bochs `cpu: quantum=`). Must be 1–32. |
 | `cpuid_freq` | `"none"` | How CPUID frequency leaves `0x15`/`0x16` are reported (Bochs `cpu: cpuid_freq=`): `"none"`, `"hardware"` or `"ips"`. |
 | `max_instructions` | no limit | Stops the VM after exactly that many instructions. Useful for benchmarks and CI; **looks like a freeze** if you set it by accident. Leave the key out for no limit. |
@@ -813,6 +814,15 @@ interactive sessions where wall-clock timing matters (cursor blink rates,
 media, games). Leave it off for installs and boots, which you want to run as
 fast as possible.
 
+**`sync_realtime`** is a different question from `sync_slowdown`: not how fast
+the emulator runs, but which clock the devices that keep one read. With it on,
+the PIT, the ACPI power-management timer and the VGA's vertical retrace count
+the host's microseconds instead of the guest's instructions, so a guest that
+polls port 0x3DA for the retrace, or times a loop against the PIT, sees real
+time pass whatever `ips` says. Leave it off unless a guest needs that: with it
+off, a boot is reproducible, because the same instruction count always produces
+the same guest time.
+
 **`max_instructions`**: leave it out for normal use. A limit silently stops
 the VM when it runs out; it is a benchmarking and CI feature.
 
@@ -958,7 +968,7 @@ add the memory and IPS target the guest needs (see
 | `--max-instructions <N>` | `emulator.max_instructions` | Instruction limit (taken literally) |
 | `--smp-quantum <N>` | `emulator.smp_quantum` | Instructions per CPU per turn, 1–32 |
 | `--cpuid-freq <MODE>` | `emulator.cpuid_freq` | `hardware`, `none` or `ips` |
-| `--sync-realtime` | `emulator.sync_realtime` | PIT and ACPI timers on wall-clock time |
+| `--sync-realtime` | `emulator.sync_realtime` | PIT, ACPI timer and VGA retrace on wall-clock time |
 | `--cpus <N>` | `emulator.cpus` | Flat CPU count (conflicts with the three below) |
 | `--cpu-sockets <N>` / `--cpu-cores <N>` / `--cpu-threads <N>` | `emulator.cpu_sockets` / `cpu_cores` / `cpu_threads` | Explicit topology |
 | `--pci` / `--no-pci` | `emulator.pci` | PCI bus on or off |
