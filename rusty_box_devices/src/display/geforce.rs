@@ -14,9 +14,9 @@ use alloc::vec;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::api::WindowOffset;
-use crate::display::card::{MemCtx, PortCtx, ResetCtx, VgaExtension, Written};
+use crate::display::card::{MemCtx, PortCtx, ResetCtx, TimingCtx, VgaExtension, Written};
 use crate::display::ddc::BxDdcC;
-use crate::display::vga::VgaWindow;
+use crate::display::vga::{VerticalPhase, VgaWindow};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -4208,10 +4208,16 @@ impl BxGeForceC {
         self.time_nsec = nsec;
     }
 
-    /// Vertical timer callback - handle vsync interrupts.
-    pub fn vertical_timer(&mut self) {
-        self.crtc_intr |= 0x0000_0001;
-        self.update_irq_level();
+    /// One half of the vertical period, after the core has taken its own.
+    ///
+    /// Bochs `bx_geforce_c::vertical_timer` (geforce.cc): the CRTC vertical
+    /// interrupt is raised only where the retrace ends, while a FIFO parked on
+    /// an acquire is released on either half.
+    pub fn vertical_timer(&mut self, phase: VerticalPhase) {
+        if phase == VerticalPhase::RetraceEnd {
+            self.crtc_intr |= 0x0000_0001;
+            self.update_irq_level();
+        }
         if self.fifo_wait_acquire {
             self.fifo_wait_acquire = false;
             self.update_fifo_wait();
@@ -4338,6 +4344,12 @@ impl VgaExtension for BxGeForceC {
     /// reset itself by the time this runs.
     fn vga_reset(&mut self, _cx: &mut ResetCtx<'_>) {
         self.reset();
+    }
+
+    /// Bochs `bx_geforce_c::vertical_timer` runs after `bx_vgacore_c`'s, which
+    /// is what this hook's position already expresses.
+    fn vga_vertical_timer(&mut self, cx: &mut TimingCtx<'_>) {
+        self.vertical_timer(cx.phase());
     }
 }
 

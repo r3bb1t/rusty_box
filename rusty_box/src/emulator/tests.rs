@@ -5530,7 +5530,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     ///
     /// The guest's ring is 16 bytes and every character costs at least two
     /// scancodes, so a long string cannot fit in one go. Bochs and QEMU both
-    /// drop the overflow silently; the count is what turns that into
+    /// drop the overflow silently; the outcome is what turns that into
     /// backpressure. It counts CHARACTERS delivered whole — a byte count would
     /// let a caller resume mid-key and hand the guest a prefix with no code.
     #[test]
@@ -5547,23 +5547,25 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let text = "the quick brown fox jumps over the lazy dog";
                 let typed = emu.keyboard().type_text(text);
 
+                let delivered = match typed {
+                    crate::emulator::Typed::Refused { delivered } => delivered,
+                    other => panic!(
+                        "a 16-byte ring cannot swallow {} characters — {other:?} \
+                         would mean the overflow was silently dropped",
+                        text.chars().count()
+                    ),
+                };
                 assert!(
-                    typed < text.chars().count(),
-                    "a 16-byte ring cannot swallow {} characters — a full count \
-                     would mean the overflow was silently dropped",
-                    text.chars().count()
-                );
-                assert!(
-                    typed > 0,
+                    delivered > 0,
                     "an empty ring must accept at least the first character"
                 );
 
                 // The count is a resume point: asking again delivers nothing
                 // more while the ring stays full, rather than pretending.
-                let again: String = text.chars().skip(typed).collect();
+                let again: String = text.chars().skip(delivered).collect();
                 assert_eq!(
                     emu.keyboard().type_text(&again),
-                    0,
+                    crate::emulator::Typed::Refused { delivered: 0 },
                     "a still-full ring must keep reporting zero, not silently drop"
                 );
             })
@@ -6814,4 +6816,1305 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             VALUE,
             "the guest must read back the CRTC value its own OUT installed"
         );
+    }
+
+    // ── Host input the guest is not ready for ────────────────────────────────
+
+    /// A `BxGui` that offers the machine exactly what it was handed, once.
+    ///
+    /// The desktop and browser shells queue host input on one thread and let
+    /// the machine drain it on another; this is that queue with the windowing
+    /// removed, so a test can state what the host offered and then look at
+    /// what the guest actually received.
+    #[derive(Default)]
+    struct QueuedInputGui {
+        scancodes: Vec<u8>,
+        keys: Vec<(crate::iodev::scancodes::BxKey, bool)>,
+        serial: Vec<u8>,
+    }
+
+    impl crate::gui::BxGui for QueuedInputGui {
+        fn specific_init(&mut self, _argc: i32, _argv: &[&str], _header_bar_y: u32) {}
+        fn text_update(
+            &mut self,
+            _old_text: &[u8],
+            _new_text: &[u8],
+            _cursor_x: u32,
+            _cursor_y: u32,
+            _tm_info: &crate::gui::gui_trait::VgaTextModeInfo,
+        ) {
+        }
+        fn graphics_tile_update(&mut self, _tile: &[u8], _x: u32, _y: u32) {}
+        fn handle_events(&mut self) {}
+        fn flush(&mut self) {}
+        fn clear_screen(&mut self) {}
+        fn palette_change(&mut self, _index: u8, _red: u8, _green: u8, _blue: u8) -> bool {
+            true
+        }
+        fn dimension_update(&mut self, _x: u32, _y: u32, _fh: u32, _fw: u32, _bpp: u32) {}
+        fn create_bitmap(&mut self, _bmap: &[u8], _xdim: u32, _ydim: u32) -> u32 {
+            0
+        }
+        fn headerbar_bitmap(&mut self, _bmap: u32, _align: u32, _cb: Box<dyn Fn()>) -> u32 {
+            0
+        }
+        fn replace_bitmap(&mut self, _hbar_id: u32, _bmap_id: u32) {}
+        fn show_headerbar(&mut self) {}
+        fn get_clipboard_text(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+        fn set_clipboard_text(&mut self, _text: &str) -> bool {
+            false
+        }
+        fn mouse_enabled_changed_specific(&mut self, _val: bool) {}
+        fn exit(&mut self) {}
+        fn get_pending_scancodes(&mut self) -> Vec<u8> {
+            core::mem::take(&mut self.scancodes)
+        }
+        fn get_pending_keys(&mut self) -> Vec<(crate::iodev::scancodes::BxKey, bool)> {
+            core::mem::take(&mut self.keys)
+        }
+        fn get_pending_serial_input(&mut self) -> Vec<u8> {
+            core::mem::take(&mut self.serial)
+        }
+    }
+
+    /// A machine with its devices up and its 8042 in raw mode, so a scancode
+    /// the host sends is the byte the guest reads.
+    fn machine_with_untranslated_keyboard() -> Box<Emulator> {
+        use crate::iodev::keyboard::{KBD_COMMAND_PORT, KBD_DATA_PORT};
+
+        let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+        emu.init_memory_and_pc_system().unwrap();
+        emu.init_cpu_and_devices().unwrap();
+        // CCB with bit 6 clear: no set-2-to-set-1 translation, both ports
+        // enabled, no interrupts — this test polls, as BIOS does.
+        emu.device_manager
+            .keyboard
+            .write(KBD_COMMAND_PORT, 0x60, 1);
+        emu.device_manager.keyboard.write(KBD_DATA_PORT, 0x00, 1);
+        emu
+    }
+
+    /// Read one byte out of the i8042 the way a guest does: tick the
+    /// serial-delay timer that moves a queued scancode into the output
+    /// buffer, watch OBF in the status port, then read the data port.
+    fn poll_one_scancode(emu: &mut Emulator) -> Option<u8> {
+        use crate::iodev::keyboard::{KBD_DATA_PORT, KBD_STATUS_PORT};
+
+        let kbd = &mut emu.device_manager.keyboard;
+        for _ in 0..4 {
+            let _irq_mask = kbd.timer_callback();
+            if kbd.read(KBD_STATUS_PORT, 1) as u8 & 0x01 != 0 {
+                return Some(kbd.read(KBD_DATA_PORT, 1) as u8);
+            }
+        }
+        None
+    }
+
+    /// Host keystrokes past the 16-byte i8042 ring must wait for the guest to
+    /// drain it, not vanish.
+    ///
+    /// The GUI hands the machine a whole frame's typing at once — an
+    /// inspection harness's `type_text`, the Android key pad's line, a pasted
+    /// command — and the ring holds 16 bytes. Dropping the rest is invisible
+    /// to the host, which is what makes it worth a test: the assertion is on
+    /// the bytes the guest read back, in order.
+    #[test]
+    fn keystrokes_past_the_keyboard_ring_wait_for_the_guest_to_drain_it() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut emu = machine_with_untranslated_keyboard();
+
+                // Far past the ring's 16, and no byte is 0xF0, so nothing is
+                // consumed as a break prefix.
+                let offered: Vec<u8> = (0..40u8).map(|i| 0x10 + i).collect();
+                emu.set_boxed_gui(Box::new(QueuedInputGui {
+                    scancodes: offered.clone(),
+                    ..Default::default()
+                }));
+
+                let mut received: Vec<u8> = Vec::new();
+                for _ in 0..200 {
+                    emu.pump_gui_input();
+                    while let Some(byte) = poll_one_scancode(&mut emu) {
+                        received.push(byte);
+                    }
+                    if received.len() == offered.len() {
+                        break;
+                    }
+                }
+
+                assert_eq!(
+                    received, offered,
+                    "every byte the host offered must reach the guest, in order"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A key the pump holds back is sent again whole, so a key that did not
+    /// fit must have left nothing behind. The Up arrow is `E0 75` in raw set
+    /// 2; with the ring one slot short of full, an `E0` left in it would reach
+    /// the guest twice.
+    #[test]
+    fn a_key_the_pump_holds_reaches_the_guest_exactly_once() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                use crate::iodev::scancodes::BxKey;
+
+                let mut emu = machine_with_untranslated_keyboard();
+                // Fifteen raw bytes first, with nothing draining them, so the
+                // key arrives with one slot of sixteen free.
+                let raw: Vec<u8> = (0..15u8).map(|i| 0x10 + i).collect();
+                emu.set_boxed_gui(Box::new(QueuedInputGui {
+                    scancodes: raw.clone(),
+                    ..Default::default()
+                }));
+                emu.pump_gui_input();
+                emu.set_boxed_gui(Box::new(QueuedInputGui {
+                    keys: vec![(BxKey::Up, true)],
+                    ..Default::default()
+                }));
+
+                let mut received: Vec<u8> = Vec::new();
+                for _ in 0..200 {
+                    emu.pump_gui_input();
+                    while let Some(byte) = poll_one_scancode(&mut emu) {
+                        received.push(byte);
+                    }
+                }
+
+                let mut expected = raw;
+                expected.extend([0xE0, 0x75]);
+                assert_eq!(
+                    received, expected,
+                    "the raw bytes, then the arrow once and whole"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// The browser shell hands a frame's keyboard input straight to the
+    /// machine through its `HostInputSink`, with no front-end queue in
+    /// between. Input past the 16-byte ring must be held for the guest there
+    /// too, not refused and lost.
+    #[test]
+    fn keyboard_input_pushed_straight_into_the_machine_waits_for_the_guest() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                use crate::gui::{HostInputEvent, HostInputSink};
+
+                let mut emu = machine_with_untranslated_keyboard();
+                let offered: Vec<u8> = (0..40u8).map(|i| 0x10 + i).collect();
+                for &byte in &offered {
+                    assert!(
+                        emu.push(HostInputEvent::Scancode(byte)),
+                        "the machine holds what its ring cannot take yet"
+                    );
+                }
+
+                let mut received: Vec<u8> = Vec::new();
+                for _ in 0..200 {
+                    emu.pump_gui_input();
+                    while let Some(byte) = poll_one_scancode(&mut emu) {
+                        received.push(byte);
+                    }
+                    if received.len() == offered.len() {
+                        break;
+                    }
+                }
+                assert_eq!(received, offered, "every byte, in order");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A booted guest writes the PCI configuration-address register (port
+    /// 0xCF8) all the time, so a snapshot taken right after such a write must
+    /// restore, carrying the address the guest wrote.
+    #[test]
+    fn a_snapshot_taken_after_a_pci_config_address_write_restores() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                use std::io::Cursor;
+                // Enable, bus 0, device 1, function 0, register 0x58.
+                const CONFIG_ADDRESS: u32 = 0x8000_0858;
+
+                let build = || {
+                    let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                    emu.initialize().unwrap();
+                    emu.reset(ResetReason::Hardware).unwrap();
+                    emu
+                };
+                let mut source = build();
+                let ticks = source.pc_system.time_ticks();
+                source.devices.outp(
+                    0x0CF8,
+                    CONFIG_ADDRESS,
+                    4,
+                    ticks,
+                    &mut source.pc_system,
+                    &mut source.device_manager,
+                    &mut source.memory,
+                );
+                let mut saved = Vec::new();
+                source.save_snapshot(&mut saved).unwrap();
+
+                let mut restored = build();
+                restored
+                    .restore_snapshot(&mut Cursor::new(&saved))
+                    .expect("a snapshot taken after a 0xCF8 write restores");
+                assert_eq!(
+                    restored.device_manager.pci_conf_addr, CONFIG_ADDRESS,
+                    "the guest's configuration address comes back"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Keyboard input still waiting when the machine takes a hardware reset is
+    /// stopped as Bochs stops a paste (`bx_devices_c::reset`, `paste.stop`),
+    /// so the guest that comes up does not receive it.
+    #[test]
+    fn a_hardware_reset_drops_keyboard_input_held_for_the_guest_before_it() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                use crate::gui::{HostInputEvent, HostInputSink};
+                use crate::iodev::keyboard::{KBD_COMMAND_PORT, KBD_DATA_PORT};
+
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                emu.initialize().unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                for byte in 0x10..0x30u8 {
+                    assert!(emu.push(HostInputEvent::Scancode(byte)));
+                }
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.device_manager.keyboard.write(KBD_COMMAND_PORT, 0x60, 1);
+                emu.device_manager.keyboard.write(KBD_DATA_PORT, 0x00, 1);
+
+                let mut received: Vec<u8> = Vec::new();
+                for _ in 0..50 {
+                    emu.pump_gui_input();
+                    while let Some(byte) = poll_one_scancode(&mut emu) {
+                        received.push(byte);
+                    }
+                }
+                assert!(
+                    received.is_empty(),
+                    "the guest after the reset was never typed at, yet read {received:02x?}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A software reset reaches the processors only (Bochs pc_system.cc
+    /// `bx_pc_system_c::Reset` calls `DEV_reset_devices` for a hardware one),
+    /// so a paste in progress carries on: held keyboard input still reaches
+    /// the guest, in order.
+    #[test]
+    fn a_software_reset_keeps_keyboard_input_held_for_the_guest() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                use crate::gui::{HostInputEvent, HostInputSink};
+                use crate::iodev::keyboard::{KBD_COMMAND_PORT, KBD_DATA_PORT};
+
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                emu.initialize().unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.device_manager.keyboard.write(KBD_COMMAND_PORT, 0x60, 1);
+                emu.device_manager.keyboard.write(KBD_DATA_PORT, 0x00, 1);
+                let typed: Vec<u8> = (0x10..0x30u8).collect();
+                for &byte in &typed {
+                    assert!(emu.push(HostInputEvent::Scancode(byte)));
+                }
+                emu.reset(ResetReason::Software).unwrap();
+
+                let mut received: Vec<u8> = Vec::new();
+                for _ in 0..50 {
+                    emu.pump_gui_input();
+                    while let Some(byte) = poll_one_scancode(&mut emu) {
+                        received.push(byte);
+                    }
+                }
+                assert_eq!(
+                    received, typed,
+                    "a software reset must not stop the input the host typed"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Held host serial bytes stand in for the port's backend (divergence
+    /// D11), and Bochs's backend is untouched by any reset, so the bytes
+    /// reach the UART of the guest that comes up.
+    #[test]
+    fn a_hardware_reset_keeps_serial_input_held_for_the_guest() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                const COM1_RBR: u16 = 0x03F8;
+                const COM1_LSR: u16 = 0x03FD;
+
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                emu.initialize().unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                let offered: Vec<u8> = b"root\n".to_vec();
+                emu.host_input.push_serial(offered.clone());
+                emu.reset(ResetReason::Hardware).unwrap();
+
+                let mut received: Vec<u8> = Vec::new();
+                for _ in 0..50 {
+                    emu.pump_gui_input();
+                    while emu.device_manager.serial.read(COM1_LSR, 1) & 0x01 != 0 {
+                        received.push(emu.device_manager.serial.read(COM1_RBR, 1) as u8);
+                    }
+                }
+                assert_eq!(
+                    received, offered,
+                    "a reset must not discard what the host sent the serial port"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Host input still waiting when a snapshot is restored was typed for the
+    /// guest the restore replaced, so it must not replay into the restored
+    /// one — as it does not after a reset.
+    #[test]
+    fn a_restore_drops_host_input_held_for_the_guest_it_replaced() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                use crate::gui::{HostInputEvent, HostInputSink};
+                use crate::iodev::keyboard::{KBD_COMMAND_PORT, KBD_DATA_PORT};
+                use std::io::Cursor;
+
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                emu.initialize().unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.device_manager.keyboard.write(KBD_COMMAND_PORT, 0x60, 1);
+                emu.device_manager.keyboard.write(KBD_DATA_PORT, 0x00, 1);
+                let mut saved = Vec::new();
+                emu.save_snapshot(&mut saved).unwrap();
+
+                for byte in 0x10..0x30u8 {
+                    assert!(emu.push(HostInputEvent::Scancode(byte)));
+                }
+                emu.restore_snapshot(&mut Cursor::new(&saved)).unwrap();
+
+                let mut received: Vec<u8> = Vec::new();
+                for _ in 0..50 {
+                    emu.pump_gui_input();
+                    while let Some(byte) = poll_one_scancode(&mut emu) {
+                        received.push(byte);
+                    }
+                }
+                assert!(
+                    received.is_empty(),
+                    "the restored guest was never typed at, yet read {received:02x?}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A serial line longer than the 16550's receive FIFO must reach the guest
+    /// whole.
+    ///
+    /// The GUI's serial pane sends a typed line in one go. Bochs's
+    /// `bx_serial_c::rx_timer` never does that — it offers the UART one host
+    /// byte at a time and only while the receiver has room — so a burst that
+    /// overruns the FIFO is this port's own loss, and the guest reads a line
+    /// with its middle missing.
+    #[test]
+    fn a_serial_line_longer_than_the_receive_fifo_reaches_the_guest_whole() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                const COM1_RBR: u16 = 0x03F8;
+                const COM1_FCR: u16 = 0x03FA;
+                const COM1_LSR: u16 = 0x03FD;
+
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                emu.init_memory_and_pc_system().unwrap();
+                emu.init_cpu_and_devices().unwrap();
+                // The guest enables the receive FIFO, as a 16550 driver does.
+                emu.device_manager.serial.write(COM1_FCR, 0x01, 1);
+
+                let offered: Vec<u8> =
+                    b"a login line rather longer than sixteen bytes\n".to_vec();
+                emu.set_boxed_gui(Box::new(QueuedInputGui {
+                    serial: offered.clone(),
+                    ..Default::default()
+                }));
+
+                let mut received: Vec<u8> = Vec::new();
+                for _ in 0..200 {
+                    emu.pump_gui_input();
+                    while emu.device_manager.serial.read(COM1_LSR, 1) & 0x01 != 0 {
+                        received.push(emu.device_manager.serial.read(COM1_RBR, 1) as u8);
+                    }
+                    if received.len() == offered.len() {
+                        break;
+                    }
+                }
+
+                assert_eq!(
+                    received, offered,
+                    "every byte of the line must reach the guest, in order"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    // ─── The clocks a guest reads, on a machine as `build()` returns it ─────
+
+    /// The PM I/O base the programs below give the PIIX4 (its PMBA).
+    const GUEST_PM_BASE: u16 = 0xB000;
+    /// Where the programs below leave what they read, in guest RAM.
+    const GUEST_READINGS: u16 = 0x0500;
+    /// A pass counter in guest RAM. A reset does not clear RAM, so the run
+    /// through the reset vector that follows a reboot knows it is the second.
+    const GUEST_PASS: u16 = 0x0600;
+
+    /// Real-mode code that brings up the PIIX4 power-management function the
+    /// way firmware does — PMREGMISC (config 0x80) bit 0 to decode the PM
+    /// block, PMBA (config 0x40) = [`GUEST_PM_BASE`] — leaves DX on the PM
+    /// timer (`PMBA + 8`), then runs `tail`. Bus 0, device 1, function 3:
+    /// Bochs acpi.cc `BX_PCI_DEVICE(1, 3)` on the i440FX.
+    fn pm_timer_program(tail: &[u8]) -> Vec<u8> {
+        let pmba = u32::from(GUEST_PM_BASE) | 0x01; // the I/O-space indicator
+        let timer = GUEST_PM_BASE + 0x08;
+        let mut code = Vec::new();
+        // mov dx, 0xCF8; mov eax, <config 0x80 of 00:01.3>; out dx, eax
+        code.extend([0xBA, 0xF8, 0x0C, 0x66, 0xB8]);
+        code.extend(0x8000_0B80u32.to_le_bytes());
+        code.extend([0x66, 0xEF]);
+        // mov dx, 0xCFC; mov al, 1; out dx, al
+        code.extend([0xBA, 0xFC, 0x0C, 0xB0, 0x01, 0xEE]);
+        // mov dx, 0xCF8; mov eax, <config 0x40 of 00:01.3>; out dx, eax
+        code.extend([0xBA, 0xF8, 0x0C, 0x66, 0xB8]);
+        code.extend(0x8000_0B40u32.to_le_bytes());
+        code.extend([0x66, 0xEF]);
+        // mov dx, 0xCFC; mov eax, pmba; out dx, eax
+        code.extend([0xBA, 0xFC, 0x0C, 0x66, 0xB8]);
+        code.extend(pmba.to_le_bytes());
+        code.extend([0x66, 0xEF]);
+        // mov dx, <PM timer>
+        code.push(0xBA);
+        code.extend(timer.to_le_bytes());
+        code.extend_from_slice(tail);
+        code
+    }
+
+    /// Read the PM timer forever, leaving the latest reading at
+    /// [`GUEST_READINGS`].
+    fn watch_the_pm_timer() -> Vec<u8> {
+        let slot = GUEST_READINGS.to_le_bytes();
+        pm_timer_program(&[
+            0x66, 0xED, // in eax, dx
+            0x66, 0xA3, slot[0], slot[1], // mov [GUEST_READINGS], eax
+            0xEB, 0xF8, // jmp back to the `in`
+        ])
+    }
+
+    /// Read the PM timer, work, read it again, and store the pair; then reboot
+    /// the machine the way a guest does — PIIX3 reset control, 0xCF9 = 0x06, a
+    /// hardware reset (Bochs pci2isa.cc) — and do it all again from the reset
+    /// vector. The second pass halts. The four readings land at
+    /// [`GUEST_READINGS`] in order.
+    fn read_the_pm_timer_around_a_reboot() -> Vec<u8> {
+        let first = GUEST_READINGS.to_le_bytes();
+        let second = (GUEST_READINGS + 4).to_le_bytes();
+        let pass = GUEST_PASS.to_le_bytes();
+        pm_timer_program(&[
+            0x66, 0xED, // in eax, dx
+            0x66, 0x89, 0xC3, // mov ebx, eax
+            0xB9, 0x00, 0x10, // mov cx, 0x1000
+            0xE2, 0xFE, // loop $ — the work between the two readings
+            0x66, 0xED, // in eax, dx
+            0x8B, 0x36, pass[0], pass[1], // mov si, [GUEST_PASS]
+            0xC1, 0xE6, 0x03, // shl si, 3
+            0x66, 0x89, 0x9C, first[0], first[1], // mov [si+GUEST_READINGS], ebx
+            0x66, 0x89, 0x84, second[0], second[1], // mov [si+GUEST_READINGS+4], eax
+            0xFF, 0x06, pass[0], pass[1], // inc word [GUEST_PASS]
+            0x83, 0x3E, pass[0], pass[1], 0x02, // cmp word [GUEST_PASS], 2
+            0x73, 0x08, // jae done
+            0xBA, 0xF9, 0x0C, // mov dx, 0xCF9
+            0xB0, 0x06, // mov al, 0x06 — SYS_RST | RST_CPU
+            0xEE, // out dx, al
+            0xEB, 0xFE, // jmp $ — the reset lands before this runs
+            0xF4, // done: hlt
+            0xEB, 0xFD, // jmp done
+        ])
+    }
+
+    /// A 64 KiB firmware image that runs `program` from its reset vector.
+    ///
+    /// F000:FFF0 holds a near jump to offset 0: IP wraps inside the segment
+    /// (Bochs ctrl_xfer16.cc `JMP_Jw` masks to 16 bits), so the program runs
+    /// from the bottom of the image with CS still based at 0xFFFF0000.
+    fn firmware_running(program: &[u8]) -> Vec<u8> {
+        let mut rom = vec![0xF4u8; 0x10000];
+        rom[..program.len()].copy_from_slice(program);
+        rom[0xFFF0..0xFFF3].copy_from_slice(&[0xE9, 0x0D, 0x00]);
+        rom
+    }
+
+    fn clock_test_config() -> EmulatorConfig {
+        EmulatorConfig {
+            memory: MemorySize::bytes(4 * 1024 * 1024),
+            ..EmulatorConfig::default()
+        }
+    }
+
+    /// A machine exactly as `MachineBuilder::build` hands it over, running
+    /// `program` as its firmware.
+    fn machine_running(program: &[u8], config: EmulatorConfig) -> Box<Emulator> {
+        let rom = firmware_running(program);
+        crate::emulator::MachineBuilder::new(config)
+            .bios(&rom)
+            .build()
+            .expect("build")
+    }
+
+    /// Step until the guest has retired `instructions`.
+    fn run_guest_for(machine: &mut Emulator, instructions: u64) {
+        let mut retired = 0;
+        while retired < instructions {
+            let outcome = machine
+                .step(crate::emulator::RunBudget::Instructions(instructions - retired))
+                .expect("step");
+            assert!(!outcome.is_terminal(), "the guest stopped: {:?}", outcome.stop);
+            assert!(!outcome.progress.stalled(), "the guest made no progress");
+            retired += outcome.progress.count();
+        }
+    }
+
+    /// Step until the guest halts.
+    fn run_guest_until_it_halts(machine: &mut Emulator) {
+        for _ in 0..1_000 {
+            let outcome = machine
+                .step(crate::emulator::RunBudget::Instructions(10_000))
+                .expect("step");
+            if outcome.stop == crate::emulator::StopReason::Halted {
+                return;
+            }
+            assert!(!outcome.is_terminal(), "the guest stopped: {:?}", outcome.stop);
+        }
+        panic!("the guest never halted");
+    }
+
+    fn guest_reading(machine: &mut Emulator, index: u16) -> u32 {
+        machine
+            .mem_read_u32_le(u64::from(GUEST_READINGS + 4 * index))
+            .expect("guest RAM")
+    }
+
+    /// The PM timer a machine hands its guest runs from the moment `build()`
+    /// returns — no further call brings the clocks up.
+    #[test]
+    fn a_built_machine_hands_its_guest_a_running_pm_timer() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut machine = machine_running(&watch_the_pm_timer(), clock_test_config());
+
+                run_guest_for(&mut machine, 10_000);
+                let first = guest_reading(&mut machine, 0);
+                run_guest_for(&mut machine, 10_000);
+                let second = guest_reading(&mut machine, 0);
+
+                assert!(first > 0, "the PM timer must have counted the guest's first work");
+                assert!(
+                    second > first,
+                    "the PM timer must advance while the guest runs: read {second} after {first}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// The PIT a machine hands its guest counts from the moment `build()`
+    /// returns: a counter the guest programs and latches twice, with work
+    /// between the two, has counted down.
+    #[test]
+    fn a_built_machine_hands_its_guest_a_counting_pit() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let readings = GUEST_READINGS.to_le_bytes();
+                let second = (GUEST_READINGS + 2).to_le_bytes();
+                let program = [
+                    0xB0, 0x34, // mov al, 0x34 — channel 0, low then high byte, mode 2
+                    0xE6, 0x43, // out 0x43, al
+                    0xB0, 0xFF, // mov al, 0xFF
+                    0xE6, 0x40, // out 0x40, al
+                    0xE6, 0x40, // out 0x40, al — count 0xFFFF
+                    0xB0, 0x00, // mov al, 0x00 — latch channel 0
+                    0xE6, 0x43, // out 0x43, al
+                    0xE4, 0x40, // in al, 0x40
+                    0x88, 0xC3, // mov bl, al
+                    0xE4, 0x40, // in al, 0x40
+                    0x88, 0xC7, // mov bh, al
+                    0xB9, 0x00, 0x40, // mov cx, 0x4000
+                    0xE2, 0xFE, // loop $ — some guest work
+                    0xB0, 0x00, // mov al, 0x00 — latch channel 0 again
+                    0xE6, 0x43, // out 0x43, al
+                    0xE4, 0x40, // in al, 0x40
+                    0x88, 0xC1, // mov cl, al
+                    0xE4, 0x40, // in al, 0x40
+                    0x88, 0xC5, // mov ch, al
+                    0x89, 0x1E, readings[0], readings[1], // mov [GUEST_READINGS], bx
+                    0x89, 0x0E, second[0], second[1], // mov [GUEST_READINGS + 2], cx
+                    0xF4, // hlt
+                ];
+                let mut machine = machine_running(&program, clock_test_config());
+
+                run_guest_until_it_halts(&mut machine);
+                let bytes = machine
+                    .mem_read_vec(u64::from(GUEST_READINGS), 4)
+                    .expect("guest RAM");
+                let first = u16::from_le_bytes([bytes[0], bytes[1]]);
+                let later = u16::from_le_bytes([bytes[2], bytes[3]]);
+
+                assert!(
+                    later < first,
+                    "the PIT must count down while the guest works: read {later:#06x} after \
+                     {first:#06x}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A machine configured for `clock: sync=realtime` runs its PM timer on
+    /// host time from the moment `build()` returns (Bochs acpi.cc reads
+    /// `bx_virt_timer.time_usec(is_realtime)`).
+    #[test]
+    fn a_machine_built_for_realtime_sync_runs_its_pm_timer_on_host_time() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                const HOST_PAUSE: std::time::Duration = std::time::Duration::from_millis(30);
+                let config = EmulatorConfig {
+                    sync_realtime: true,
+                    ..clock_test_config()
+                };
+                let mut machine = machine_running(&watch_the_pm_timer(), config);
+
+                run_guest_for(&mut machine, 2_000);
+                let before = guest_reading(&mut machine, 0);
+                std::thread::sleep(HOST_PAUSE);
+                run_guest_for(&mut machine, 2_000);
+                let after = guest_reading(&mut machine, 0);
+
+                // 4,000 instructions are 80 µs at 50 MIPS; the pause alone is
+                // 30 ms. Two-thirds of it is past anything emulated time
+                // could account for.
+                let elapsed = after.wrapping_sub(before) & 0xFF_FFFF;
+                let two_thirds_of_the_pause = 3_579_545 / 50;
+                assert!(
+                    elapsed >= two_thirds_of_the_pause,
+                    "the PM timer must count the host's time: {elapsed} ticks across a 30 ms pause"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Input Status 1 reports where the beam is, which moves with time rather
+    /// than with the number of reads (Bochs vgacore.cc `read` derives 0x3DA
+    /// from `bx_virt_timer.time_usec`). Two reads with nothing between them see
+    /// the same point of the frame, and a guest that keeps reading sees the
+    /// vertical retrace bit change once a frame has gone by — which a reading
+    /// stuck at one value never shows, and one that flips per read fails the
+    /// first check.
+    #[test]
+    fn a_built_machine_reports_the_vga_retrace_from_the_clock() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let first = GUEST_READINGS.to_le_bytes();
+                let second = (GUEST_READINGS + 1).to_le_bytes();
+                let changed = (GUEST_READINGS + 2).to_le_bytes();
+                let program = [
+                    0xBA, 0xC2, 0x03, // mov dx, 0x3C2
+                    0xB0, 0x67, // mov al, 0x67 — colour emulation, so 0x3DA answers
+                    0xEE, // out dx, al — Bochs recomputes the retrace timing here
+                    0xBA, 0xDA, 0x03, // mov dx, 0x3DA
+                    0xEC, // in al, dx
+                    0x88, 0xC3, // mov bl, al
+                    0xEC, // in al, dx
+                    0x88, 0xC7, // mov bh, al
+                    // mov ecx, 0x100000 — about six 60 Hz frames of reads at the
+                    // default 50 MIPS
+                    0x66, 0xB9, 0x00, 0x00, 0x10, 0x00,
+                    0xC6, 0x06, changed[0], changed[1], 0x00, // mov byte [changed], 0
+                    // poll:
+                    0xEC, // in al, dx
+                    0x30, 0xD8, // xor al, bl
+                    0xA8, 0x08, // test al, 0x08 — the vertical retrace bit
+                    0x75, 0x05, // jnz flipped
+                    0x67, 0xE2, 0xF6, // loop poll, counting in ecx
+                    0xEB, 0x05, // jmp done
+                    // flipped:
+                    0xC6, 0x06, changed[0], changed[1], 0x01, // mov byte [changed], 1
+                    // done:
+                    0x88, 0x1E, first[0], first[1], // mov [GUEST_READINGS], bl
+                    0x88, 0x3E, second[0], second[1], // mov [GUEST_READINGS + 1], bh
+                    0xF4, // hlt
+                ];
+                let mut machine = machine_running(&program, clock_test_config());
+
+                run_guest_until_it_halts(&mut machine);
+                let reads = machine
+                    .mem_read_vec(u64::from(GUEST_READINGS), 3)
+                    .expect("guest RAM");
+
+                assert_eq!(
+                    reads[0], reads[1],
+                    "back-to-back reads of Input Status 1 must see the same point of the frame"
+                );
+                assert_eq!(
+                    reads[2], 1,
+                    "the vertical retrace bit must change as the guest's time passes"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Put `'A'` on the first cell of the text page and `'B'` on the first
+    /// cell of its second row, then point the CRTC start address at that
+    /// second row and spin. The screen keeps showing `'A'` until the vertical
+    /// timer latches the new start address, which is the instant this program
+    /// exists to date.
+    const MOVE_THE_TEXT_PAGE_DOWN_A_ROW: [u8; 39] = [
+        0xB8, 0x00, 0xB8, // mov ax, 0xB800
+        0x8E, 0xC0, // mov es, ax
+        0x26, 0xC7, 0x06, 0x00, 0x00, 0x41, 0x07, // mov word [es:0x0000], 'A' | grey
+        0x26, 0xC7, 0x06, 0xA0, 0x00, 0x42, 0x07, // mov word [es:0x00A0], 'B' | grey
+        0xBA, 0xD4, 0x03, // mov dx, 0x3D4
+        0xB0, 0x0C, // mov al, 0x0C — start address high
+        0xEE,       // out dx, al
+        0x42,       // inc dx
+        0xB0, 0x00, // mov al, 0
+        0xEE,       // out dx, al
+        0x4A,       // dec dx
+        0xB0, 0x0D, // mov al, 0x0D — start address low
+        0xEE,       // out dx, al
+        0x42,       // inc dx
+        0xB0, 0x50, // mov al, 80 — one row of cells into the page
+        0xEE,       // out dx, al
+        0xEB, 0xFE, // spin: jmp spin
+    ];
+
+    /// The character the guest sees in the top-left cell of its screen.
+    fn top_left_character(machine: &mut Emulator) -> char {
+        machine
+            .display()
+            .text()
+            .expect("the adapter is in a text mode")
+            .row_chars(0)
+            .next()
+            .expect("the grid has a first cell")
+    }
+
+    /// A machine running [`MOVE_THE_TEXT_PAGE_DOWN_A_ROW`], already past the
+    /// program and spinning, with the vertical timer still counting out the
+    /// first half of its first frame.
+    fn machine_moving_its_text_page(config: EmulatorConfig) -> Box<Emulator> {
+        let mut machine = machine_running(&MOVE_THE_TEXT_PAGE_DOWN_A_ROW, config);
+        machine.display().init_text_mode3();
+        run_guest_for(&mut machine, 20_000);
+        assert_eq!(
+            top_left_character(&mut machine),
+            'A',
+            "the start address must not take effect before a retrace ends"
+        );
+        machine
+    }
+
+    /// Step until the machine's clock has reached `tick`.
+    fn run_guest_until_tick(machine: &mut Emulator, tick: u64) {
+        for _ in 0..1_000 {
+            let now = machine.pc_system.time_ticks();
+            if now >= tick {
+                return;
+            }
+            run_guest_for(machine, tick - now);
+        }
+        panic!("the guest never reached tick {tick}");
+    }
+
+    /// Microseconds of this machine's own clock, as instruction ticks.
+    fn ticks_of(machine: &Emulator, usec: u64) -> u64 {
+        u128::from(usec)
+            .saturating_mul(u128::from(machine.config.ips.per_second_u64()))
+            .div_euclid(1_000_000)
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+
+    /// The CRTC start address takes effect where the vertical retrace ends,
+    /// not where the frame does: Bochs `bx_vgacore_c::vertical_timer` latches
+    /// `s.CRTC.start_addr` on the `vtimer_toggle == 1` half of the period,
+    /// which runs from the frame's start to `vrend_usec` — a third of a
+    /// millisecond before `vtotal_usec` on a 70 Hz text mode.
+    #[test]
+    fn a_new_frame_start_address_takes_effect_when_the_retrace_ends() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut machine = machine_moving_its_text_page(clock_test_config());
+                let retrace_end_usec = u64::from(
+                    machine
+                        .device_manager
+                        .vga
+                        .vertical_interval_usec()
+                        .expect("the adapter has retrace timing"),
+                );
+                let frame_usec = u64::from(machine.device_manager.vga.frame_period_usec());
+                assert!(
+                    retrace_end_usec + 500 < frame_usec,
+                    "the retrace must end inside the frame and not at its edge, or the two \
+                     halves of the period are one: {retrace_end_usec} µs of {frame_usec} µs"
+                );
+
+                let before_the_retrace_ends = ticks_of(&machine, retrace_end_usec * 9 / 10);
+                run_guest_until_tick(&mut machine, before_the_retrace_ends);
+                assert_eq!(
+                    top_left_character(&mut machine),
+                    'A',
+                    "the start address must hold until the retrace ends"
+                );
+
+                let after_the_retrace_ends = ticks_of(&machine, retrace_end_usec + 500);
+                run_guest_until_tick(&mut machine, after_the_retrace_ends);
+                assert_eq!(
+                    top_left_character(&mut machine),
+                    'B',
+                    "the retrace's end must latch the start address the guest programmed"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Under `clock: sync=realtime` the vertical timer counts the host's
+    /// microseconds, so a frame passes while a guest that has barely executed
+    /// stands still — Bochs vgacore.cc registers `vga vsync` with
+    /// `vsync_realtime` and reads `bx_virt_timer.time_usec(vsync_realtime)`.
+    /// The default `sync=none` is the control: the same host pause moves
+    /// nothing, because that machine's retrace counts only what the guest ran.
+    #[test]
+    fn a_machine_built_for_realtime_sync_runs_its_vga_retrace_on_host_time() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                // Longer than one 70 Hz frame, so the retrace it spans has
+                // ended by the boundary that follows.
+                const HOST_PAUSE: std::time::Duration = std::time::Duration::from_millis(30);
+
+                for (sync_realtime, expected) in [(true, 'B'), (false, 'A')] {
+                    let mut machine = machine_moving_its_text_page(EmulatorConfig {
+                        sync_realtime,
+                        ..clock_test_config()
+                    });
+
+                    std::thread::sleep(HOST_PAUSE);
+                    run_guest_for(&mut machine, 1_000);
+
+                    assert_eq!(
+                        top_left_character(&mut machine),
+                        expected,
+                        "sync_realtime={sync_realtime}: the host pause must move the retrace \
+                         exactly when the card keeps host time"
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// POST codes the firmware writes reach the host, and the register they
+    /// are written to still reads back what the guest put there.
+    ///
+    /// Ports 0x80 and 0x84 belong to the extra DMA page registers (Bochs
+    /// dma.cc `ext_page_reg`), which is exactly why firmware can use 0x80 as
+    /// a scratch POST port. Watching them must not take them: the guest still
+    /// writes and reads its own value, and the host still sees every code in
+    /// write order.
+    #[test]
+    fn post_codes_reach_the_host_without_taking_the_dma_page_register() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let first = GUEST_READINGS.to_le_bytes();
+                let second = (GUEST_READINGS + 1).to_le_bytes();
+                let program = [
+                    0xB0, 0x11, // mov al, 0x11
+                    0xE6, 0x80, // out 0x80, al
+                    0xB0, 0x22, // mov al, 0x22
+                    0xE6, 0x84, // out 0x84, al
+                    0xE4, 0x80, // in al, 0x80
+                    0x88, 0xC3, // mov bl, al
+                    0xE4, 0x84, // in al, 0x84
+                    0x88, 0xC7, // mov bh, al
+                    0x88, 0x1E, first[0], first[1], // mov [GUEST_READINGS], bl
+                    0x88, 0x3E, second[0], second[1], // mov [GUEST_READINGS + 1], bh
+                    0xF4, // hlt
+                ];
+                let mut machine = machine_running(&program, clock_test_config());
+
+                run_guest_until_it_halts(&mut machine);
+
+                let codes: Vec<u8> = machine.post_codes().take_output().collect();
+                assert!(
+                    codes.ends_with(&[0x11, 0x22]),
+                    "the guest's POST codes must reach the host in write order: {codes:02x?}"
+                );
+                assert!(
+                    machine.post_codes().take_output().next().is_none(),
+                    "draining the POST stream is destructive"
+                );
+
+                let read_back = machine
+                    .mem_read_vec(u64::from(GUEST_READINGS), 2)
+                    .expect("guest RAM");
+                assert_eq!(
+                    read_back,
+                    vec![0x11, 0x22],
+                    "the DMA extra page registers must still answer the guest"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A zeroed IDT pointer in guest RAM, for a guest that wants no exception
+    /// to be deliverable.
+    const GUEST_ZERO_IDT: u16 = 0x0700;
+
+    /// Count a pass at [`GUEST_PASS`]; on the first, load an IDT with limit 0
+    /// and execute `INT3`, which cannot be delivered, nor can the #GP that
+    /// raises, nor the #DF after it — a triple fault (Bochs exception.cc,
+    /// real-mode `interrupt` checks the vector against the IDT limit). Any
+    /// later pass halts.
+    fn triple_fault_on_the_first_pass() -> Vec<u8> {
+        let pass = GUEST_PASS.to_le_bytes();
+        let idt = GUEST_ZERO_IDT.to_le_bytes();
+        vec![
+            0xFF, 0x06, pass[0], pass[1], // inc word [GUEST_PASS]
+            0x83, 0x3E, pass[0], pass[1], 0x02, // cmp word [GUEST_PASS], 2
+            0x73, 0x06, // jae done
+            0x0F, 0x01, 0x1E, idt[0], idt[1], // lidt [GUEST_ZERO_IDT]
+            0xCC, // int3
+            0xF4, // done: hlt
+            0xEB, 0xFD, // jmp done
+        ]
+    }
+
+    /// A triple fault resets the machine by default, as Bochs's does
+    /// (`cpu: reset_on_triple_fault=1`, exception.cc
+    /// `bx_pc_system.Reset(BX_RESET_HARDWARE)`): the guest comes back through
+    /// its reset vector, and RAM, which no reset clears, counts both passes.
+    #[test]
+    fn a_triple_fault_reboots_the_machine() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut machine =
+                    machine_running(&triple_fault_on_the_first_pass(), clock_test_config());
+
+                run_guest_until_it_halts(&mut machine);
+
+                let passes = machine
+                    .mem_read_u16_le(u64::from(GUEST_PASS))
+                    .expect("guest RAM");
+                assert_eq!(passes, 2, "the triple fault must reboot the guest into a second pass");
+                assert!(!machine.cpu_ref(0).is_in_shutdown());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// With `OnTripleFault::ShutDown` the same fault leaves the processor in
+    /// the shutdown state and the machine reports it, having run once.
+    #[test]
+    fn a_triple_fault_can_shut_the_processor_down_instead() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let config = EmulatorConfig {
+                    cpu_params: crate::params::BxParams::default()
+                        .on_triple_fault(crate::params::OnTripleFault::ShutDown),
+                    ..clock_test_config()
+                };
+                let mut machine = machine_running(&triple_fault_on_the_first_pass(), config);
+
+                let mut stop = None;
+                for _ in 0..100 {
+                    let outcome = machine
+                        .step(crate::emulator::RunBudget::Instructions(10_000))
+                        .expect("step");
+                    if outcome.is_terminal() {
+                        stop = Some(outcome.stop);
+                        break;
+                    }
+                }
+
+                assert_eq!(stop, Some(crate::emulator::StopReason::CpuShutdown));
+                assert!(machine.cpu_ref(0).is_in_shutdown());
+                let passes = machine
+                    .mem_read_u16_le(u64::from(GUEST_PASS))
+                    .expect("guest RAM");
+                assert_eq!(passes, 1, "a processor that shut down must not run the guest again");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// On its first pass, program the VGA (sequencer map mask, CRTC start
+    /// address high, the VBE X resolution) and COM1 (line control, scratch),
+    /// send one character, and reboot through 0xCF9 at once. On its second,
+    /// read those five registers back into [`GUEST_READINGS`] and halt.
+    fn program_the_vga_and_uart_then_reboot() -> Vec<u8> {
+        let pass = GUEST_PASS.to_le_bytes();
+        let reading = |offset: u16| (GUEST_READINGS + offset).to_le_bytes();
+        let first_pass: Vec<u8> = vec![
+            0xBA, 0xC4, 0x03, 0xB0, 0x02, 0xEE, // SR index 2, the map mask
+            0x42, 0xB0, 0x0B, 0xEE, //            = 0x0B
+            0xBA, 0xD4, 0x03, 0xB0, 0x0C, 0xEE, // CRTC index 0x0C
+            0x42, 0xB0, 0x12, 0xEE, //            = 0x12
+            0xBA, 0xCE, 0x01, 0xB8, 0x01, 0x00, 0xEF, // DISPI index 1, XRES
+            0x42, 0xB8, 0x20, 0x03, 0xEF, //      = 800
+            0xBA, 0xFB, 0x03, 0xB0, 0x03, 0xEE, // COM1 LCR = 8N1
+            0xBA, 0xFF, 0x03, 0xB0, 0x5A, 0xEE, // COM1 SCR = 0x5A
+            0xBA, 0xF8, 0x03, 0xB0, b'A', 0xEE, // COM1 THR = 'A'
+            0xBA, 0xF9, 0x0C, 0xB0, 0x06, 0xEE, // 0xCF9 = SYS_RST | RST_CPU
+            0xEB, 0xFE, //                        jmp $ — the reset lands first
+        ];
+        let [r0, r1, r2, r4, r5] = [reading(0), reading(1), reading(2), reading(4), reading(5)];
+        let second_pass: Vec<u8> = vec![
+            0xBA, 0xC4, 0x03, 0xB0, 0x02, 0xEE, 0x42, 0xEC, 0xA2, r0[0], r0[1], // SR2
+            0xBA, 0xD4, 0x03, 0xB0, 0x0C, 0xEE, 0x42, 0xEC, 0xA2, r1[0], r1[1], // CRTC 0x0C
+            0xBA, 0xCE, 0x01, 0xB8, 0x01, 0x00, 0xEF, 0x42, 0xED, 0xA3, r2[0], r2[1], // XRES
+            0xBA, 0xFB, 0x03, 0xEC, 0xA2, r4[0], r4[1], // LCR
+            0xBA, 0xFF, 0x03, 0xEC, 0xA2, r5[0], r5[1], // SCR
+            0xF4, 0xEB, 0xFD, // hlt; jmp hlt
+        ];
+        let mut code = vec![
+            0xFF, 0x06, pass[0], pass[1], // inc word [GUEST_PASS]
+            0x83, 0x3E, pass[0], pass[1], 0x02, // cmp word [GUEST_PASS], 2
+            0x73, u8::try_from(first_pass.len()).expect("a short first pass"), // jae second
+        ];
+        code.extend(first_pass);
+        code.extend(second_pass);
+        code
+    }
+
+    /// A hardware reset leaves the VGA and the UARTs as the guest programmed
+    /// them, as Bochs's does: `bx_vgacore_c::reset` and `bx_serial_c::reset`
+    /// are empty, and `bx_vga_c::reset` touches only the PCI command and
+    /// status registers. So does a character the guest sent just before the
+    /// reset: the UART's transmit timer runs on, and the host still gets it.
+    #[test]
+    fn a_hardware_reset_leaves_the_vga_and_the_uarts_as_the_guest_left_them() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut machine =
+                    machine_running(&program_the_vga_and_uart_then_reboot(), clock_test_config());
+
+                run_guest_until_it_halts(&mut machine);
+                let passes = machine
+                    .mem_read_u16_le(u64::from(GUEST_PASS))
+                    .expect("guest RAM");
+                assert_eq!(passes, 2, "the guest must run, reboot through 0xCF9, and run again");
+                for _ in 0..10 {
+                    let outcome = machine
+                        .step(crate::emulator::RunBudget::Instructions(10_000))
+                        .expect("step");
+                    assert!(!outcome.is_terminal(), "the guest stopped: {:?}", outcome.stop);
+                }
+
+                let readings = machine
+                    .mem_read_vec(u64::from(GUEST_READINGS), 6)
+                    .expect("guest RAM");
+                assert_eq!(readings[0], 0x0B, "the sequencer map mask survives the reset");
+                assert_eq!(readings[1], 0x12, "so does the CRTC start address");
+                assert_eq!(
+                    u16::from_le_bytes([readings[2], readings[3]]),
+                    800,
+                    "and the VBE X resolution (bx_vga_c::reset leaves VBE alone)"
+                );
+                assert_eq!(readings[4], 0x03, "the UART's line control survives the reset");
+                assert_eq!(readings[5], 0x5A, "and its scratch register");
+                let sent: Vec<u8> = machine.device_manager.serial.drain_tx_output(0).collect();
+                assert_eq!(sent, b"A", "the character sent before the reset still leaves");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A guest reboot resets the ACPI controller, and the PM timer keeps
+    /// counting through it: Bochs acpi.cc `reset` leaves the timer alone,
+    /// because `get_pmtmr` reads `bx_virt_timer.time_usec`, which no reset
+    /// touches.
+    #[test]
+    fn the_pm_timer_keeps_counting_across_a_guest_reboot() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut machine =
+                    machine_running(&read_the_pm_timer_around_a_reboot(), clock_test_config());
+
+                run_guest_until_it_halts(&mut machine);
+                let passes = machine
+                    .mem_read_u16_le(u64::from(GUEST_PASS))
+                    .expect("guest RAM");
+                assert_eq!(passes, 2, "the guest must run, reboot through 0xCF9, and run again");
+                let before = [guest_reading(&mut machine, 0), guest_reading(&mut machine, 1)];
+                let after = [guest_reading(&mut machine, 2), guest_reading(&mut machine, 3)];
+
+                assert!(
+                    before[1] > before[0],
+                    "the PM timer must advance before the reboot: {before:?}"
+                );
+                // The reboot and the prologue that follows it take a few dozen
+                // instructions, under a microsecond, so the first reading after
+                // it may share the last one's microsecond; a timer that
+                // restarted would read near zero instead.
+                assert!(
+                    after[0] >= before[1],
+                    "the PM timer must keep counting through the reboot, not restart: \
+                     read {} after {}",
+                    after[0],
+                    before[1]
+                );
+                assert!(
+                    after[1] > after[0],
+                    "the PM timer must advance after the reboot: {after:?}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A restored guest reads its PM timer from where the snapshot left it,
+    /// and it keeps counting — the timer is machine time, and the snapshot
+    /// carries machine time.
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_pm_timer_continues_from_where_a_snapshot_left_it() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let program = watch_the_pm_timer();
+                let mut source = machine_running(&program, clock_test_config());
+                run_guest_for(&mut source, 20_000);
+                let at_save = guest_reading(&mut source, 0);
+                assert!(at_save > 0, "the source's PM timer must be running");
+                let mut snapshot = Vec::new();
+                source.save_snapshot(&mut snapshot).expect("save");
+
+                let mut restored = machine_running(&program, clock_test_config());
+                restored
+                    .restore_snapshot(&mut std::io::Cursor::new(snapshot))
+                    .expect("restore");
+                run_guest_for(&mut restored, 5_000);
+                let after_restore = guest_reading(&mut restored, 0);
+                run_guest_for(&mut restored, 5_000);
+                let later = guest_reading(&mut restored, 0);
+
+                assert!(
+                    after_restore > at_save,
+                    "the restored PM timer must continue from the snapshot's time: \
+                     read {after_restore} after {at_save}"
+                );
+                assert!(
+                    later > after_restore,
+                    "the restored PM timer must keep counting: read {later} after {after_restore}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Under `clock: sync=realtime` the PM timer is host time, which no other
+    /// part of a snapshot carries: a restored guest reads it from where the
+    /// save left it, not from when the restoring machine was built.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_realtime_pm_timer_continues_from_where_a_snapshot_left_it() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let config = EmulatorConfig {
+                    sync_realtime: true,
+                    ..clock_test_config()
+                };
+                let program = watch_the_pm_timer();
+                let mut source = machine_running(&program, config.clone());
+                // Long enough that the restoring machine, built after it, has a
+                // realtime clock of its own well behind the source's.
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                run_guest_for(&mut source, 2_000);
+                let at_save = guest_reading(&mut source, 0);
+                let mut snapshot = Vec::new();
+                source.save_snapshot(&mut snapshot).expect("save");
+
+                let mut restored = machine_running(&program, config);
+                restored
+                    .restore_snapshot(&mut std::io::Cursor::new(snapshot))
+                    .expect("restore");
+                run_guest_for(&mut restored, 2_000);
+                let after_restore = guest_reading(&mut restored, 0);
+
+                assert!(
+                    after_restore >= at_save,
+                    "the restored realtime PM timer must continue from the save: \
+                     read {after_restore} after {at_save}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }

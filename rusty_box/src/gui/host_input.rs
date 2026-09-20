@@ -9,6 +9,7 @@
 //! across targets. Deliberately alloc-friendly and NOT `Send + Sync`: a sink is
 //! only ever touched from the frontend context.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 #[cfg(feature = "gui-egui")]
@@ -455,14 +456,143 @@ impl HostInputSink for super::shared_display::SharedDisplay {
 impl<'a, T: crate::cpu::instrumentation::Instrumentation> HostInputSink
     for crate::emulator::Emulator<T>
 {
+    /// Keyboard input joins the machine's own backlog, which every pump offers
+    /// the guest as its 16-byte ring drains, so a frame's typing larger than
+    /// the ring is paced rather than cut. `false` only when that backlog is
+    /// full — a guest that has stopped taking keys.
     fn push(&mut self, event: HostInputEvent) -> bool {
         match event {
-            HostInputEvent::Scancode(sc) => self.keyboard().scancodes(&[sc]) == 1,
-            HostInputEvent::Key(key, pressed) => self.keyboard().key(key, pressed),
+            HostInputEvent::Scancode(sc) => {
+                self.hold_keyboard_input(HostKeyboardInput::Scancode(sc))
+            }
+            HostInputEvent::Key(key, pressed) => {
+                self.hold_keyboard_input(HostKeyboardInput::Key(key, pressed))
+            }
             HostInputEvent::Mouse(mouse) => {
                 self.mouse().motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons)
             }
         }
+    }
+}
+
+/// One piece of host keyboard input a machine has still to place.
+///
+/// The two spellings a front end can offer — a guest key, which the 8042
+/// renders through the scancode set the guest selected, and a raw byte for a
+/// caller that genuinely has bytes — kept in one queue so their order across a
+/// frame survives (R2: the distinction is the type, not a flag beside it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostKeyboardInput {
+    Key(crate::iodev::scancodes::BxKey, bool),
+    Scancode(u8),
+}
+
+/// Host input a machine holds because the guest's own buffers had no room.
+///
+/// The i8042 ring is 16 bytes and the 16550's receive FIFO is 16; one frame of
+/// typing, one pasted command or one line in the serial pane is routinely
+/// larger than either. Bochs's front ends hand each keystroke straight to
+/// `bx_keyb_c::gen_scancode` and lose whatever the ring refuses, and
+/// `bx_serial_c::rx_timer` never has that problem because it offers the UART
+/// one byte at a time and only while the receiver has room. This is the second
+/// shape applied to both: what the guest would not take stays here, in order,
+/// and is offered again at the next pump, so host input is paced by the
+/// guest's own draining instead of being truncated.
+///
+/// Bounded, and the bound is a back-pressure point rather than a drop: when a
+/// queue is at capacity the machine stops taking from the front end, whose own
+/// queue then holds the rest in order. Capacity is reached only by a guest
+/// that has stopped draining its keyboard altogether — a POST that has not
+/// enabled the port yet, or a wedged one.
+#[derive(Debug, Default)]
+pub(crate) struct HostInputBacklog {
+    keyboard: VecDeque<HostKeyboardInput>,
+    serial: VecDeque<u8>,
+}
+
+impl HostInputBacklog {
+    /// Keyboard events held before the machine stops taking more from the
+    /// front end. One frame of typing is a few dozen, so this is roughly a
+    /// minute of fast typing into a guest that is taking none of it.
+    const KEYBOARD_CAPACITY: usize = 1024;
+
+    /// Host serial bytes held on the same terms — a few screens of pasted
+    /// text into a guest whose UART receiver never drains.
+    const SERIAL_CAPACITY: usize = 4096;
+
+    /// Whether the machine should take another batch of keyboard input from
+    /// the front end. False means the guest has stopped accepting keys, and
+    /// the front end keeps the rest.
+    pub(crate) fn wants_keyboard_input(&self) -> bool {
+        self.keyboard.len() < Self::KEYBOARD_CAPACITY
+    }
+
+    /// The same for host serial input.
+    pub(crate) fn wants_serial_input(&self) -> bool {
+        self.serial.len() < Self::SERIAL_CAPACITY
+    }
+
+    pub(crate) fn push_keys(&mut self, keys: Vec<(crate::iodev::scancodes::BxKey, bool)>) {
+        self.keyboard
+            .extend(keys.into_iter().map(|(key, pressed)| HostKeyboardInput::Key(key, pressed)));
+    }
+
+    pub(crate) fn push_scancodes(&mut self, scancodes: Vec<u8>) {
+        self.keyboard
+            .extend(scancodes.into_iter().map(HostKeyboardInput::Scancode));
+    }
+
+    /// Hold one keyboard event, for a caller with no queue of its own to keep
+    /// it in. `false` at capacity: the guest has stopped taking keys, and the
+    /// caller learns that rather than having the event vanish here.
+    #[must_use = "a refused event is not held"]
+    pub(crate) fn push_keyboard(&mut self, input: HostKeyboardInput) -> bool {
+        if !self.wants_keyboard_input() {
+            return false;
+        }
+        self.keyboard.push_back(input);
+        true
+    }
+
+    pub(crate) fn push_serial(&mut self, bytes: Vec<u8>) {
+        self.serial.extend(bytes);
+    }
+
+    /// The next keyboard event to offer the guest, left in place until the
+    /// 8042 has taken it.
+    pub(crate) fn next_keyboard(&self) -> Option<HostKeyboardInput> {
+        self.keyboard.front().copied()
+    }
+
+    /// Retire the event [`Self::next_keyboard`] returned, the guest having
+    /// taken it.
+    pub(crate) fn accept_keyboard(&mut self) {
+        let _taken = self.keyboard.pop_front();
+    }
+
+    /// The next host byte to offer a UART, left in place until it is taken.
+    pub(crate) fn next_serial(&self) -> Option<u8> {
+        self.serial.front().copied()
+    }
+
+    /// Retire the byte [`Self::next_serial`] returned.
+    pub(crate) fn accept_serial(&mut self) {
+        let _taken = self.serial.pop_front();
+    }
+
+    /// Drop the keyboard input held, as a hardware reset stops a paste in
+    /// progress (Bochs devices.cc `bx_devices_c::reset`, `paste.stop`). Held
+    /// serial bytes stand in for the port's backend, which no reset touches,
+    /// so they stay.
+    pub(crate) fn stop_keyboard_input(&mut self) {
+        self.keyboard.clear();
+    }
+
+    /// Drop everything held: a restored snapshot replaces the guest this
+    /// input was typed for.
+    pub(crate) fn clear(&mut self) {
+        self.keyboard.clear();
+        self.serial.clear();
     }
 }
 

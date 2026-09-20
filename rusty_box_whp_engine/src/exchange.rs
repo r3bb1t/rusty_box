@@ -18,6 +18,13 @@
 //! written back. The shadow's copy of it is stale — the guest has been running
 //! on hardware — and writing that copy over the partition's live value is the
 //! one thing a partial exchange must not do.
+//!
+//! A pause is the one time the shadow is read whole without an exit to
+//! service: a caller reaching into a paused machine reads the processor there,
+//! so [`Exchange::import_at_park`] brings every group home, and what the caller
+//! writes goes back through [`Exchange::export_owed`] before the processor next
+//! enters the partition. That export compares before it writes, so a pause
+//! nobody wrote through costs the partition nothing.
 
 use rusty_box::cpu::arch_state::{ArchGroups, ExitHeader, VcpuArchState};
 use rusty_box::cpu::{cpu::BxCpuC, instrumentation::Instrumentation, Result};
@@ -35,12 +42,13 @@ use crate::xsave::XsaveArea;
 /// to service has to say what it needs rather than inherit a catch-all, and
 /// the catch-all that would be inherited is [`ExitClass::Full`] — correct and
 /// the most expensive thing here.
+///
+/// A single `IN` or `OUT` the platform decoded for the host is not a class:
+/// the port, the direction and the value arrive with the exit, nothing
+/// retires on the shadow, and `service_port_access` writes `RIP` and `RAX`
+/// back as two words without asking the exchange for anything.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ExitClass {
-    /// A single `IN` or `OUT` the platform decoded for the host: the port, the
-    /// direction and the value all arrive with the exit, and `RIP` and `RAX`
-    /// go back as two words.
-    PlainPort,
     /// A string or repeated port access, which the interpreter executes.
     StringPort,
     /// An access to memory no partition window backs.
@@ -60,17 +68,12 @@ pub(crate) enum ExitClass {
 /// nothing beyond it. `Mmio` carries the segments because the operand is
 /// `seg:offset`, and the tables because a fault it raises walks them.
 ///
-/// Every class that retires an instruction on the shadow carries
+/// Every class retires an instruction on the shadow, so every class carries
 /// `CONTROL_REGS` and `MSRS` whatever else it needs, because those hold the
 /// mode the retirement is measured in — `CR0.PE` and `EFER.LMA` decide how far
-/// `RIP` advances. `PlainPort` is the one class that carries nothing, and it
-/// can because it retires nothing: the platform decoded the access and `RIP`
-/// and `RAX` go back as two words.
+/// `RIP` advances.
 pub(crate) const fn needs(class: ExitClass) -> ArchGroups {
     match class {
-        // Nothing: `service_port_access` writes `RIP` and `RAX` as two words,
-        // which is cheaper than any group.
-        ExitClass::PlainPort => ArchGroups::empty(),
         // Every class below runs the interpreter over the faulting
         // instruction, and the interpreter delivers a fault ITSELF rather than
         // handing it back: `cpu_loop_n_slice` walks the IDT through `idtr` and
@@ -140,14 +143,44 @@ pub(crate) const fn needs(class: ExitClass) -> ArchGroups {
     }
 }
 
+/// The groups a park brings home: every group this exchange carries except the
+/// interrupt state.
+///
+/// The interrupt shadow and the NMI mask stay with the partition across a
+/// pause. They describe where the guest stopped rather than what it holds, the
+/// machine's API names neither, and importing them would oblige the next entry
+/// to write back the shadow bit the import lapses on the interpreter's side —
+/// ending an `STI` window the guest never finished.
+const AT_PARK: ArchGroups = ArchGroups::all().difference(ArchGroups::INTERRUPT_STATE);
+
+/// What a hand-back wrote, and what it cost (R0).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Handback {
+    /// The groups written into the partition. A group a park read and nothing
+    /// wrote since is not among them: the partition already holds it.
+    pub(crate) written: ArchGroups,
+    /// Platform calls made, for the census.
+    pub(crate) calls: usize,
+}
+
 /// One processor's account of where its architectural state lives.
 pub(crate) struct Exchange {
     /// The groups the PARTITION holds the live value of. A set bit means the
     /// shadow's copy is stale and must not be written back.
     externalised: ArchGroups,
-    /// What was read for the exit being serviced, and so exactly what may be
-    /// written when it is finished.
+    /// The groups the shadow holds the live value of and owes the partition:
+    /// read for the exit being serviced, read at a park, or never handed to
+    /// the partition at all. Exactly what the next export writes, less what
+    /// [`Self::read_at_park`] finds unchanged.
     imported_this_exit: ArchGroups,
+    /// The groups the last park read out of the partition, which the next
+    /// export compares against [`Self::at_park`] rather than writing whole.
+    /// Empty outside a pause.
+    read_at_park: ArchGroups,
+    /// The shadow's own export of [`Self::read_at_park`] the moment the park
+    /// read it — the partition's values as a write-back would carry them, and
+    /// so what a caller's write is told apart from.
+    at_park: VcpuArchState,
     /// The buffer both directions move through, held for the life of the
     /// processor rather than built per exit: a [`VcpuArchState`] carries the
     /// whole vector file, and zeroing two and a half kilobytes at every exit
@@ -163,13 +196,149 @@ pub(crate) struct Exchange {
 
 impl Exchange {
     /// A processor the shadow has never read: everything is the partition's.
+    ///
+    /// What the exchange's own tests start from. A running engine starts from
+    /// [`Self::installing`], because the machine it adopts already has a
+    /// processor of its own.
+    #[cfg(test)]
     pub(crate) fn at_reset() -> Self {
         Self {
             externalised: ArchGroups::all(),
             imported_this_exit: ArchGroups::empty(),
+            read_at_park: ArchGroups::empty(),
+            at_park: VcpuArchState::default(),
             scratch: VcpuArchState::default(),
             held_interrupt_state: InterruptStateWord::AT_RESET,
         }
+    }
+
+    /// A processor the machine built and the partition has never held: every
+    /// group but the interrupt state is the shadow's, and the first export
+    /// writes all of it.
+    ///
+    /// What adoption is. The machine was reset, set up or restored before the
+    /// partition existed, and a processor the platform creates afterwards
+    /// stands at the platform's own reset state — `F000:FFF0`, whatever the
+    /// machine said. Installing the machine's processor whole before the
+    /// first entry is what makes the guest start where the machine left it.
+    /// The interrupt state is the one group left with the partition: a fresh
+    /// processor holds no shadow and no NMI mask, and neither does a machine
+    /// the interpreter has not run.
+    pub(crate) fn installing() -> Self {
+        Self {
+            externalised: ArchGroups::INTERRUPT_STATE,
+            imported_this_exit: AT_PARK,
+            read_at_park: ArchGroups::empty(),
+            at_park: VcpuArchState::default(),
+            scratch: VcpuArchState::default(),
+            held_interrupt_state: InterruptStateWord::AT_RESET,
+        }
+    }
+
+    /// The machine was reset: the shadow holds the reset processor, and the
+    /// partition still holds the old guest's.
+    ///
+    /// Every group becomes the shadow's again, as at adoption
+    /// ([`Self::installing`]), so the next export writes the reset processor
+    /// whole. The interrupt state is the one group an adoption leaves with the
+    /// partition, and a reset cannot: the old guest may have left an interrupt
+    /// shadow standing or NMIs masked, and a reset clears both (Bochs
+    /// `BX_CPU_C::reset`). No architectural register carries the NMI mask for
+    /// an export to compare against, so the reset word is written here.
+    ///
+    /// # Errors
+    /// The platform's refusal of the interrupt-state write. The exchange is
+    /// left as it was, so nothing it records is untrue.
+    pub(crate) fn reinstall_after_reset<V: VpRegisters>(&mut self, vp: &V) -> Result<()> {
+        vp.write_words(&[Reg::InterruptState], &[InterruptStateWord::AT_RESET.encode()])
+            .map_err(platform_failed)?;
+        *self = Self::installing();
+        Ok(())
+    }
+
+    /// Bring every group the partition still holds into the shadow, and the
+    /// time-stamp counter with them, for a caller that will reach into the
+    /// paused machine.
+    ///
+    /// The groups [`AT_PARK`] names, less what the shadow already holds —
+    /// an exit that could not finish, an adoption not yet installed, or an
+    /// earlier park with no entry since — which stays owed to the partition
+    /// as it was. What is read is also remembered as it stands, so
+    /// [`Self::export_owed`] can tell a caller's write from the partition's
+    /// own value. An earlier park's record is kept, not replaced: a second
+    /// park before any entry reads nothing, and the partition still holds
+    /// exactly what the first one recorded.
+    ///
+    /// The counter is read on its own and never written back: the hardware
+    /// owns it on this engine (`state::IMPORTED_MSRS`), so the shadow is told
+    /// the guest's value only so that a read through the machine answers it.
+    ///
+    /// # Errors
+    /// A register the platform would not give up, or a state this port
+    /// refuses.
+    pub(crate) fn import_at_park<V: VpRegisters, T: Instrumentation>(
+        &mut self,
+        vp: &V,
+        cpu: &mut BxCpuC<T>,
+        xsave: &mut XsaveArea,
+    ) -> Result<()> {
+        let owed = self.imported_this_exit;
+        self.import_groups(vp, cpu, AT_PARK, xsave)?;
+        let read_now = self.imported_this_exit.difference(owed);
+        cpu.export_arch_groups(&mut self.at_park, read_now);
+        self.read_at_park.insert(read_now);
+        let mut tsc = [0u64; 1];
+        vp.read_words(&[Reg::Tsc], &mut tsc).map_err(platform_failed)?;
+        cpu.take_time_stamp_counter(tsc[0]);
+        Ok(())
+    }
+
+    /// Whether the shadow holds anything the partition must be given before
+    /// the processor next enters it.
+    ///
+    /// Asked without the machine's lock, which the answer needs only when it
+    /// is yes — after a park, or before a processor's first entry. After an
+    /// ordinary exit the errand has already written back what it read.
+    pub(crate) fn owes_the_partition(&self) -> bool {
+        !self.imported_this_exit.is_empty()
+    }
+
+    /// Hand the partition every group the shadow holds, before the processor
+    /// next enters it.
+    ///
+    /// The one place the shadow reaches the partition outside an exit's own
+    /// write-back (R5): after a park, where a paused caller may have written
+    /// registers, and before a processor's first entry, where the machine's
+    /// processor is installed. A group the park read and nothing wrote since
+    /// goes back unwritten — the partition's copy IS that value, so a pause
+    /// nobody wrote through makes no platform call. Everything else the shadow
+    /// holds goes through [`Self::export_imported`], the path every exit's
+    /// write-back takes.
+    ///
+    /// # Errors
+    /// As [`Self::export_imported`]. The groups not yet written stay owed, so
+    /// the next attempt writes them again.
+    pub(crate) fn export_owed<V: VpRegisters, T: Instrumentation>(
+        &mut self,
+        vp: &V,
+        cpu: &mut BxCpuC<T>,
+        xsave: &mut XsaveArea,
+    ) -> Result<Handback> {
+        let compared = self.read_at_park;
+        cpu.export_arch_groups(&mut self.scratch, compared);
+        let mut changed = state::groups_that_differ(&self.scratch, &self.at_park, compared);
+        if compared.contains(ArchGroups::VECTOR)
+            && crate::xsave::vector_file_differs(&self.scratch, &self.at_park)
+        {
+            changed.insert(ArchGroups::VECTOR);
+        }
+        let unchanged = compared.difference(changed);
+        self.imported_this_exit.remove(unchanged);
+        self.externalised.insert(unchanged);
+        self.read_at_park = ArchGroups::empty();
+        let written = self.imported_this_exit;
+        let calls = self.export_imported(vp, cpu, xsave)?;
+        Ok(Handback { written, calls })
     }
 
     /// Copy the exit header's own fields into the shadow.
@@ -429,7 +598,7 @@ impl Exchange {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::machine_running;
+    use crate::fixtures::{machine_running, CODE};
     use crate::state::test_vp::Recorder;
     use crate::xsave::{HostComponents, XsaveArea};
     use rusty_box::cpu::arch_state::{ArchGroups, VcpuArchState};
@@ -446,14 +615,12 @@ mod tests {
     /// What each class costs, stated once so a change to the table is a change
     /// to a test rather than to a boot.
     ///
-    /// The two ends are the point: a plain port access moves nothing at all,
-    /// and only a whole-processor transfer moves everything. Every class in
-    /// between names the state the interpreter reads and no more — and none of
-    /// them but [`ExitClass::Exception`] names the interruptibility, which the
+    /// Only a whole-processor transfer moves everything. Every other class
+    /// names the state the interpreter reads and no more — and none of them
+    /// but [`ExitClass::Exception`] names the interruptibility, which the
     /// partition is told about only where a delivery makes it matter.
     #[test]
     fn each_exit_class_asks_for_the_state_it_reads_and_no_more() {
-        assert_eq!(needs(ExitClass::PlainPort), ArchGroups::empty());
         assert_eq!(needs(ExitClass::Full), ArchGroups::all());
 
         assert_eq!(
@@ -519,7 +686,6 @@ mod tests {
         );
 
         for class in [
-            ExitClass::PlainPort,
             ExitClass::StringPort,
             ExitClass::Mmio,
             ExitClass::Cpuid,
@@ -534,15 +700,12 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_port_exit_moves_nothing_and_a_cpuid_exit_moves_only_what_cpuid_can_change() {
+    fn a_cpuid_exit_moves_only_what_cpuid_can_change() {
         let vp = recorder_with_an_area();
         let mut machine = machine_running(&[]);
-        let cpu = machine.processor(0).cpu;
+        let cpu = machine.processor(0).into_cpu();
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         let mut ex = Exchange::at_reset();
-
-        ex.import_for(&vp, cpu, ExitClass::PlainPort, &[0xE6, 0xE9], &mut xs).unwrap();
-        assert_eq!(vp.total_reads(), 0);
 
         ex.import_for(&vp, cpu, ExitClass::Cpuid, &[0x0F, 0xA2], &mut xs).unwrap();
         assert!(
@@ -566,7 +729,7 @@ mod tests {
     fn an_imported_group_is_not_read_twice_until_it_is_exported() {
         let vp = recorder_with_an_area();
         let mut machine = machine_running(&[]);
-        let cpu = machine.processor(0).cpu;
+        let cpu = machine.processor(0).into_cpu();
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         let mut ex = Exchange::at_reset();
 
@@ -582,7 +745,7 @@ mod tests {
     fn a_group_that_was_not_imported_is_not_written_back() {
         let vp = recorder_with_an_area();
         let mut machine = machine_running(&[]);
-        let cpu = machine.processor(0).cpu;
+        let cpu = machine.processor(0).into_cpu();
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         vp.seed(Reg::Cr3, 0x0000_1000);
         vp.seed(Reg::Dr7, 0x0000_0400);
@@ -629,7 +792,7 @@ mod tests {
     fn the_tsc_is_never_written_and_the_xsave_area_crosses_only_for_vector_state() {
         let vp = recorder_with_an_area();
         let mut machine = machine_running(&[]);
-        let cpu = machine.processor(0).cpu;
+        let cpu = machine.processor(0).into_cpu();
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
 
         let mut ex = Exchange::at_reset();
@@ -670,7 +833,7 @@ mod tests {
         // hardware's record of a guest inside its own NMI handler.
         vp.seed(Reg::InterruptState, 0b10);
         let mut machine = machine_running(&[]);
-        let cpu = machine.processor(0).cpu;
+        let cpu = machine.processor(0).into_cpu();
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         let mut ex = Exchange::at_reset();
 
@@ -725,7 +888,7 @@ mod tests {
         // The shadow starts in real mode, which is the stale mode that would
         // decode those bytes as something that touches nothing.
         let mut machine = machine_running(&[]);
-        let cpu = machine.processor(0).cpu;
+        let cpu = machine.processor(0).into_cpu();
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         let mut ex = Exchange::at_reset();
 
@@ -743,14 +906,15 @@ mod tests {
     }
 
     /// An exit that carries no instruction bytes imports the vector file
-    /// unconditionally, and can therefore import it with nothing beside it.
+    /// unconditionally.
     ///
-    /// A read-only window write is the exit that carries none, and the file
-    /// names no register — so this is the one import that moves state without
-    /// a register batch, and asserting on the value in the shadow is what says
-    /// the area actually crossed rather than the mask merely saying it did.
+    /// A string port access is serviced with none — the platform decoded it
+    /// and reported no bytes — and so is a trapped fault; nothing then says
+    /// the instruction leaves the file alone. The file names no register, so
+    /// asserting on the value in the shadow is what says the area actually
+    /// crossed rather than the mask merely saying it did.
     #[test]
-    fn an_exit_with_no_instruction_bytes_imports_the_vector_file_on_its_own() {
+    fn an_exit_with_no_instruction_bytes_imports_the_vector_file() {
         let vp = Recorder::default();
         // A standard-form area at the architecture's own offsets: `XSTATE_BV`
         // at 512 marking x87 and SSE live, `XMM0` at 160 holding a value
@@ -761,12 +925,11 @@ mod tests {
         area[161] = 0x5A;
         vp.seed_xsave(&area);
         let mut machine = machine_running(&[]);
-        let cpu = machine.processor(0).cpu;
+        let cpu = machine.processor(0).into_cpu();
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         let mut ex = Exchange::at_reset();
 
-        ex.import_for(&vp, cpu, ExitClass::PlainPort, &[], &mut xs).unwrap();
-        assert_eq!(vp.total_reads(), 0, "the vector file names no register");
+        ex.import_for(&vp, cpu, ExitClass::StringPort, &[], &mut xs).unwrap();
 
         let mut shadow = VcpuArchState::default();
         cpu.export_arch_groups(&mut shadow, ArchGroups::VECTOR);
@@ -777,15 +940,193 @@ mod tests {
         );
 
         let calls = ex.export_imported(&vp, cpu, &mut xs).unwrap();
-        assert_eq!(calls, 1, "the area, and no register batch beside it");
+        assert_eq!(calls, 2, "the class's register batch, and the area beside it");
         assert_eq!(vp.xsave_writes(), 1);
+    }
+
+    /// A pause writes back only what the caller changed.
+    ///
+    /// The park reads every group; the caller then writes one general
+    /// register. Only that group crosses back — the control registers, the
+    /// segments and the vector file the park read are the partition's own
+    /// values, and writing them again would be a platform call to say nothing.
+    /// A second pause whose caller writes the vector file moves that and
+    /// nothing else.
+    #[test]
+    fn a_pause_writes_back_only_the_groups_the_caller_changed() {
+        let vp = recorder_with_an_area();
+        vp.seed(Reg::Rbx, 0x1111);
+        vp.seed(Reg::Cr3, 0x3000);
+        let mut machine = machine_running(&[]);
+        let cpu = machine.processor(0).into_cpu();
+        let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
+        let mut ex = Exchange::at_reset();
+
+        ex.import_at_park(&vp, cpu, &mut xs).unwrap();
+        let mut state = VcpuArchState::default();
+        cpu.export_arch_groups(&mut state, ArchGroups::GPRS);
+        assert_eq!(state.gprs[3], 0x1111, "the park read the partition's RBX");
+        state.gprs[3] = 0x5A;
+        cpu.import_arch_groups(&state, ArchGroups::GPRS).unwrap();
+
+        let handback = ex.export_owed(&vp, cpu, &mut xs).unwrap();
+        assert_eq!(handback.written, ArchGroups::GPRS);
+        assert_eq!(handback.calls, 1, "one batched register write");
+        assert_eq!(vp.value_of(Reg::Rbx), 0x5A, "the caller's RBX reached the partition");
+        assert_eq!(vp.writes_of(Reg::Cr3), 0, "a control register nobody wrote goes back unwritten");
+        assert_eq!(vp.writes_of(Reg::Es), 0, "and so does a segment");
+        assert_eq!(vp.xsave_writes(), 0, "and the vector file");
+        assert!(!ex.owes_the_partition());
+
+        ex.import_at_park(&vp, cpu, &mut xs).unwrap();
+        cpu.export_arch_groups(&mut state, ArchGroups::VECTOR);
+        state.vector[0][0] = 0x99;
+        cpu.import_arch_groups(&state, ArchGroups::VECTOR).unwrap();
+        let handback = ex.export_owed(&vp, cpu, &mut xs).unwrap();
+        assert_eq!(handback.written, ArchGroups::VECTOR);
+        assert_eq!(vp.xsave_writes(), 1, "a changed vector file crosses as its area");
+        assert_eq!(vp.writes_of(Reg::Rbx), 1, "and the registers do not cross again");
+    }
+
+    /// A second park before any entry keeps what the first one read.
+    ///
+    /// A resume that lands and is withdrawn by the next pause before the
+    /// thread reaches its hand-back parks the processor twice with no entry
+    /// between. The second park reads nothing — every group is still the
+    /// shadow's — and must not forget what the first one read, or the next
+    /// hand-back writes every group whole for a caller who wrote one.
+    #[test]
+    fn a_second_park_before_any_entry_keeps_what_the_first_one_read() {
+        let vp = recorder_with_an_area();
+        vp.seed(Reg::Rbx, 0x1111);
+        let mut machine = machine_running(&[]);
+        let cpu = machine.processor(0).into_cpu();
+        let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
+        let mut ex = Exchange::at_reset();
+
+        ex.import_at_park(&vp, cpu, &mut xs).unwrap();
+        ex.import_at_park(&vp, cpu, &mut xs).unwrap();
+        let mut state = VcpuArchState::default();
+        cpu.export_arch_groups(&mut state, ArchGroups::GPRS);
+        state.gprs[3] = 0x5A;
+        cpu.import_arch_groups(&state, ArchGroups::GPRS).unwrap();
+
+        let handback = ex.export_owed(&vp, cpu, &mut xs).unwrap();
+        assert_eq!(
+            handback.written,
+            ArchGroups::GPRS,
+            "only the group the caller wrote crosses back"
+        );
+        assert_eq!(vp.value_of(Reg::Rbx), 0x5A);
+        assert_eq!(vp.xsave_writes(), 0);
+    }
+
+    /// A pause nobody writes through makes no platform write at all.
+    #[test]
+    fn a_pause_nobody_writes_through_writes_nothing() {
+        let vp = recorder_with_an_area();
+        let mut machine = machine_running(&[]);
+        let cpu = machine.processor(0).into_cpu();
+        let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
+        let mut ex = Exchange::at_reset();
+
+        ex.import_at_park(&vp, cpu, &mut xs).unwrap();
+        assert!(ex.owes_the_partition(), "the park took every group");
+        let handback = ex.export_owed(&vp, cpu, &mut xs).unwrap();
+        assert_eq!(handback.written, ArchGroups::empty());
+        assert_eq!(handback.calls, 0);
+        assert_eq!(vp.writes_of(Reg::Rip), 0);
+        assert_eq!(vp.xsave_writes(), 0);
+        assert!(!ex.owes_the_partition(), "and every group is the partition's again");
+    }
+
+    /// Adoption installs the machine's processor whole before its first
+    /// entry — everything but the counter the hardware owns and the interrupt
+    /// state a fresh processor already holds.
+    ///
+    /// The partition a machine is adopted into was created after the machine
+    /// was, and holds the platform's reset state; the machine's own processor
+    /// stands wherever the machine left it.
+    #[test]
+    fn an_adopted_processor_is_installed_whole_before_its_first_entry() {
+        let vp = recorder_with_an_area();
+        let mut machine = machine_running(&[]);
+        let cpu = machine.processor(0).into_cpu();
+        let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
+        let mut ex = Exchange::installing();
+        assert!(ex.owes_the_partition(), "the machine's processor is owed before any entry");
+
+        // A park before the first entry reads nothing: the machine's
+        // processor is the one owed, not the platform's reset state.
+        ex.import_at_park(&vp, cpu, &mut xs).unwrap();
+        assert_eq!(vp.reads_of(Reg::Rip), 0, "an install is not overwritten by the partition");
+
+        let handback = ex.export_owed(&vp, cpu, &mut xs).unwrap();
+        assert_eq!(
+            handback.written,
+            ArchGroups::all().difference(ArchGroups::INTERRUPT_STATE)
+        );
+        assert_eq!(vp.value_of(Reg::Rip), CODE, "the partition starts where the machine stood");
+        for reg in [Reg::Rax, Reg::Rip, Reg::Cr0, Reg::Dr7, Reg::Efer, Reg::Es, Reg::Gdtr] {
+            assert_eq!(vp.writes_of(reg), 1, "{reg:?} is installed");
+        }
+        assert_eq!(vp.xsave_writes(), 1, "and the vector file");
+        assert_eq!(vp.writes_of(Reg::Tsc), 0, "never the counter the hardware owns");
+        assert_eq!(vp.writes_of(Reg::InterruptState), 0);
+        assert!(!ex.owes_the_partition());
+    }
+
+    /// A pause leaves the interrupt shadow and the NMI mask with the
+    /// partition, however the caller writes the flags.
+    ///
+    /// Reading them home would oblige the next entry to write back the shadow
+    /// bit the import lapses, ending an `STI` window the guest never finished.
+    #[test]
+    fn a_pause_leaves_the_interrupt_state_with_the_partition() {
+        let vp = recorder_with_an_area();
+        // An STI window, and NMIs masked.
+        vp.seed(Reg::InterruptState, 0b11);
+        let mut machine = machine_running(&[]);
+        let cpu = machine.processor(0).into_cpu();
+        let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
+        let mut ex = Exchange::at_reset();
+
+        ex.import_at_park(&vp, cpu, &mut xs).unwrap();
+        assert_eq!(vp.reads_of(Reg::InterruptState), 0);
+        let mut state = VcpuArchState::default();
+        cpu.export_arch_groups(&mut state, ArchGroups::RIP_RFLAGS);
+        state.rflags = 0x0202;
+        cpu.import_arch_groups(&state, ArchGroups::RIP_RFLAGS).unwrap();
+
+        let handback = ex.export_owed(&vp, cpu, &mut xs).unwrap();
+        assert_eq!(handback.written, ArchGroups::RIP_RFLAGS);
+        assert_eq!(vp.value_of(Reg::Rflags), 0x0202);
+        assert_eq!(vp.writes_of(Reg::InterruptState), 0);
+        assert_eq!(vp.value_of(Reg::InterruptState), 0b11);
+    }
+
+    /// The counter a pause reads is the one the machine answers with, and
+    /// nothing writes it back.
+    #[test]
+    fn the_counter_a_pause_reads_is_the_one_the_machine_answers_with() {
+        let vp = recorder_with_an_area();
+        vp.seed(Reg::Tsc, 0x1234_5678_9ABC);
+        let mut machine = machine_running(&[]);
+        let cpu = machine.processor(0).into_cpu();
+        let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
+        let mut ex = Exchange::at_reset();
+
+        ex.import_at_park(&vp, cpu, &mut xs).unwrap();
+        assert_eq!(cpu.time_stamp_counter(), 0x1234_5678_9ABC);
+        ex.export_owed(&vp, cpu, &mut xs).unwrap();
+        assert_eq!(vp.writes_of(Reg::Tsc), 0);
     }
 
     #[test]
     fn the_header_copy_costs_no_platform_call_and_lands_in_the_shadow() {
         let vp = recorder_with_an_area();
         let mut machine = machine_running(&[]);
-        let cpu = machine.processor(0).cpu;
+        let cpu = machine.processor(0).into_cpu();
         let mut inject = InjectState::at_reset();
         let mut ex = Exchange::at_reset();
 
@@ -831,11 +1172,11 @@ mod tests {
     /// instruction, and the census said `cpuid 1`.
     ///
     /// Stated over the closed set rather than against a list of known-good
-    /// classes, so a class added later has to answer it too. `PlainPort` is the
-    /// one exemption and it is exempt for a reason the type system cannot
-    /// state: it retires nothing on the shadow at all — the platform decoded
-    /// the access and `service_port_access` writes `RIP` and `RAX` back as two
-    /// words — so no mode of any kind is consulted.
+    /// classes, so a class added later has to answer it too. A plain port
+    /// access is not among them because it is not a class: it retires nothing
+    /// on the shadow — the platform decoded the access and
+    /// `service_port_access` writes `RIP` and `RAX` back as two words — so no
+    /// mode of any kind is consulted.
     #[test]
     fn every_class_that_retires_on_the_shadow_imports_what_its_mode_derives_from() {
         // `CR0` for real-versus-protected, `EFER` for long: the two groups the
@@ -859,10 +1200,5 @@ mod tests {
                 mode_inputs.difference(needs(class))
             );
         }
-        assert_eq!(
-            needs(ExitClass::PlainPort),
-            ArchGroups::empty(),
-            "the one class that retires nothing on the shadow imports nothing"
-        );
     }
 }

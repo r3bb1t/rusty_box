@@ -33,7 +33,7 @@ use rusty_box_core::time::VmClock;
 
 use crate::api::{Declared, WindowDecls, WindowOffset};
 use crate::display::sink::{DisplaySink, Refreshed};
-use crate::display::vga::{VgaCore, VgaWindow};
+use crate::display::vga::{VerticalPhase, VerticalTick, VgaCore, VgaWindow};
 
 /// What an extension did with a memory write it was offered first.
 ///
@@ -261,15 +261,27 @@ impl<'a> CoreRef<'a> {
 pub struct TimingCtx<'a> {
     core: &'a mut VgaCore,
     icount: u64,
+    phase: VerticalPhase,
 }
 
 impl<'a> TimingCtx<'a> {
-    pub(crate) fn new(core: &'a mut VgaCore, icount: u64) -> Self {
-        Self { core, icount }
+    pub(crate) fn new(core: &'a mut VgaCore, icount: u64, phase: VerticalPhase) -> Self {
+        Self {
+            core,
+            icount,
+            phase,
+        }
     }
 
     pub fn core(&mut self) -> &mut VgaCore {
         self.core
+    }
+
+    /// Which half of the vertical period just elapsed. A card that raises a
+    /// vsync interrupt raises it on one of them: Bochs `bx_geforce_c::
+    /// vertical_timer` tests `vtimer_toggle` before setting its CRTC interrupt.
+    pub fn phase(&self) -> VerticalPhase {
+        self.phase
     }
 
     /// Retired instructions at the retrace — the machine's clock as this port
@@ -634,27 +646,24 @@ impl<E: VgaExtension> VgaCard<E> {
         drawn
     }
 
-    /// Reset the card — core first, exactly as a C++ destructor-ordered base
-    /// call would, then the extension over the state that leaves.
+    /// A hardware reset of the card: only what the card's own Bochs reset
+    /// does. Bochs `bx_vgacore_c::reset` is empty (vgacore.h), so the standard
+    /// VGA keeps its registers and its VRAM, and the guest's firmware
+    /// reprograms them.
     pub fn reset(&mut self) {
-        self.core.reset();
-        // The core's reset rebuilds it from scratch, including a dirty-tile grid
-        // sized for a plain VGA. The grid follows the card's largest mode, so it
-        // is re-sized here for the same reason it is sized at construction.
-        let (max_xres, max_yres) = self.ext.vga_max_resolution();
-        self.core.size_tile_grid_for(max_xres, max_yres);
-        self.core.size_vram(self.ext.vga_vram_bytes());
         self.ext.vga_reset(&mut ResetCtx::new(&mut self.core));
     }
 
-    /// One vertical retrace. Bochs `bx_vgacore_c::vertical_timer` latches the
-    /// frame's start address and re-anchors the retrace waveform; a card is
-    /// offered the tick afterwards.
-    pub fn vertical_timer(&mut self, now_usec: u64, icount: u64) -> bool {
-        let retrace = self.core.vertical_timer(now_usec);
+    /// One half of the vertical period. Bochs `bx_vgacore_c::vertical_timer`
+    /// latches the frame's start address at the end of the retrace and
+    /// re-anchors the waveform at the start of the next frame; a card is
+    /// offered the tick afterwards, either way — `bx_geforce_c` overrides this
+    /// virtual, calls the base first and then acts on the phase.
+    pub fn vertical_timer(&mut self, now_usec: u64, icount: u64) -> VerticalTick {
+        let tick = self.core.vertical_timer(now_usec);
         self.ext
-            .vga_vertical_timer(&mut TimingCtx::new(&mut self.core, icount));
-        retrace
+            .vga_vertical_timer(&mut TimingCtx::new(&mut self.core, icount, tick.phase));
+        tick
     }
 }
 
@@ -712,8 +721,23 @@ impl<E: VgaExtension> VgaCard<E> {
         self.core.force_initial_update();
     }
 
-    pub fn vertical_period_usec(&self) -> u32 {
-        self.core.vertical_period_usec()
+    /// One whole frame in microseconds, which the two halves the vertical
+    /// timer counts out add up to.
+    pub fn frame_period_usec(&self) -> u32 {
+        self.core.frame_period_usec()
+    }
+
+    /// Microseconds from the phase the vertical timer last completed to the
+    /// next one, in the clock this card keeps.
+    pub fn vertical_interval_usec(&self) -> Option<u32> {
+        self.core.vertical_interval_usec()
+    }
+
+    /// The interval to re-arm the vertical timer at after the guest reprogrammed
+    /// the retrace timing — Bochs `start_vertical_timer()`, whose arming this
+    /// card's machine owns.
+    pub fn take_vertical_timer_restart(&mut self) -> Option<u32> {
+        self.core.take_vertical_timer_restart()
     }
 
 

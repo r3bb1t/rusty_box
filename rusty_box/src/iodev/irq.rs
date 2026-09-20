@@ -381,6 +381,14 @@ impl IrqFabric {
         self.lint0 = value;
     }
 
+    /// Return the LINT0 record to the virtual wire a hardware reset leaves —
+    /// the state a guest that has not written LVT0 is in, which this
+    /// machine's own local APIC presets as well (`BxLocalApic::preset_lint0`,
+    /// divergence D6).
+    pub(crate) fn reset_bsp_lint0(&mut self) {
+        self.lint0 = LINT0_VIRTUAL_WIRE;
+    }
+
     /// Whether the guest's LINT0 still admits the 8259's INTR.
     ///
     /// Unmasked AND in ExtINT delivery mode: a guest that masked the entry

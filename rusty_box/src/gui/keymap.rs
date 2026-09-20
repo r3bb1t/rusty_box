@@ -167,6 +167,7 @@ pub fn ascii_to_bx_key(ch: char) -> Option<(BxKey, bool)> {
         '\n' | '\r' => unshifted(BxKey::Enter),
         '\t' => unshifted(BxKey::Tab),
         '\u{8}' => unshifted(BxKey::Backspace),
+        '\u{1B}' => unshifted(BxKey::Esc),
         '-' => unshifted(BxKey::Minus),
         '_' => shifted(BxKey::Minus),
         '=' => unshifted(BxKey::Equals),

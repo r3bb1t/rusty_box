@@ -15,7 +15,7 @@
 
 use crate::android_support::{
     content_rect_in_points, list_directory, needs_first_vm, seed_first_vm, stage_file,
-    CarriedMachine, DirectoryEntry, EntryKind, FileFilter, PixelRect,
+    CarriedMachine, DirectoryEntry, EntryKind, FileFilter, MachineActivity, PixelRect,
 };
 use crate::app::{BrowseRequest, BrowseTarget, NativeEmulatorCommand, NativeShellApp};
 use crate::library::VmLibrary;
@@ -56,6 +56,12 @@ const PERMISSION_GRANTED: i32 = 0;
 /// browser reads the grant again when the app regains focus.
 const STORAGE_REQUEST_CODE: i32 = 1_001;
 
+/// The smallest height a control may have on a phone, points: a thumb's
+/// target rather than a pointer's.
+const TOUCH_TARGET: f32 = 40.0;
+/// The room kept between a focused text field and the soft keyboard, points.
+const KEYBOARD_GAP: f32 = 12.0;
+
 /// The keys a soft keyboard does not offer, each sent as a press and release.
 const KEYPAD_KEYS: [(&str, BxKey); 8] = [
     ("Esc", BxKey::Esc),
@@ -67,6 +73,78 @@ const KEYPAD_KEYS: [(&str, BxKey); 8] = [
     ("Down", BxKey::Down),
     ("Right", BxKey::Right),
 ];
+
+/// Where the emulator's `tracing` events go on a phone. Android discards a
+/// native process's stdout, so the subscriber `runner::init_tracing` installs
+/// writes each formatted event here instead, and the event reaches logcat as
+/// one record at its own level, tagged with the module that raised it:
+/// `android_logger` takes a record's tag from its module path, which for a
+/// `tracing` event is the event's target.
+pub(crate) struct Logcat;
+
+/// One formatted event on its way to logcat, sent when the subscriber has
+/// written it and drops the writer.
+pub(crate) struct LogcatRecord {
+    level: log::Level,
+    target: String,
+    text: Vec<u8>,
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logcat {
+    type Writer = LogcatRecord;
+
+    fn make_writer(&'a self) -> LogcatRecord {
+        LogcatRecord {
+            level: log::Level::Info,
+            target: String::from("rusty_box"),
+            text: Vec::new(),
+        }
+    }
+
+    fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> LogcatRecord {
+        let level = match *meta.level() {
+            tracing::Level::ERROR => log::Level::Error,
+            tracing::Level::WARN => log::Level::Warn,
+            tracing::Level::INFO => log::Level::Info,
+            tracing::Level::DEBUG => log::Level::Debug,
+            tracing::Level::TRACE => log::Level::Trace,
+        };
+        LogcatRecord {
+            level,
+            target: meta.target().to_owned(),
+            text: Vec::new(),
+        }
+    }
+}
+
+impl std::io::Write for LogcatRecord {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.text.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for LogcatRecord {
+    fn drop(&mut self) {
+        let text = String::from_utf8_lossy(&self.text);
+        let line = text.trim_end();
+        if line.is_empty() {
+            return;
+        }
+        log::logger().log(
+            &log::Record::builder()
+                .args(format_args!("{line}"))
+                .level(self.level)
+                .target(&self.target)
+                .module_path(Some(&self.target))
+                .build(),
+        );
+    }
+}
 
 /// Runs the shell for `app`, the activity NativeActivity handed this process,
 /// until the activity ends, and logs how the run finished.
@@ -145,6 +223,24 @@ pub(crate) struct AndroidShellApp {
     app: AndroidApp,
     browser: Option<FileBrowser>,
     keypad: Option<Keypad>,
+    /// The window's screen hold as last applied; `None` before the first
+    /// frame applies it.
+    screen_hold: Option<ScreenHold>,
+    /// Whether the window had the input focus last frame, so a return to the
+    /// app is seen the frame it happens.
+    focused: bool,
+    /// How far the shell is raised, points, to keep the focused text field
+    /// above the soft keyboard; zero while no keyboard is up.
+    pan: f32,
+}
+
+/// Whether the window holds the screen on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScreenHold {
+    /// The phone's sleep timeout applies.
+    Released,
+    /// The screen stays on while the window is shown.
+    Held,
 }
 
 impl AndroidShellApp {
@@ -156,13 +252,49 @@ impl AndroidShellApp {
         app: AndroidApp,
     ) -> Self {
         let shell = NativeShellApp::new(cc, Arc::clone(&shared), command_tx, start);
+        // A finger needs a larger target than a pointer: every control is at
+        // least TOUCH_TARGET points tall, with room around its caption.
+        // On a touch screen a press on text is a tap on what holds it, and a
+        // drag across text scrolls: text is not selectable on a phone.
+        cc.egui_ctx.style_mut_of(egui::Theme::Dark, |style| {
+            style.spacing.interact_size.y = TOUCH_TARGET;
+            style.spacing.button_padding = egui::vec2(14.0, 10.0);
+            style.interaction.selectable_labels = false;
+        });
         Self {
             shell,
             shared,
             app,
             browser: None,
             keypad: None,
+            screen_hold: None,
+            focused: false,
+            pan: 0.0,
         }
+    }
+
+    /// Puts the window in the state a game's has: no status bar, and the
+    /// screen held on while a machine starts or runs. Applied whenever the
+    /// hold changes and whenever the window regains the focus, because
+    /// Android may rebuild the window when the app comes back.
+    ///
+    /// The window belongs to Android's UI thread, and this frame runs inside
+    /// android-activity's event poll, which holds the lock that
+    /// `AndroidApp::set_window_flags` would take for writing. So the change is
+    /// posted to the UI thread and made there.
+    fn apply_window_flags(&mut self, hold: ScreenHold) {
+        let (add, clear) = match hold {
+            ScreenHold::Held => (FLAG_FULLSCREEN | FLAG_KEEP_SCREEN_ON, 0),
+            ScreenHold::Released => (FLAG_FULLSCREEN, FLAG_KEEP_SCREEN_ON),
+        };
+        let app = self.app.clone();
+        self.app.run_on_java_main_thread(Box::new(move || {
+            match apply_game_window(&app, add, clear) {
+                Ok(()) => log::info!("game window applied: screen {hold:?}, system bars hidden"),
+                Err(error) => log::warn!("the game window could not be applied: {error}"),
+            }
+        }));
+        self.screen_hold = Some(hold);
     }
 
     /// The part of the window the system bars leave uncovered, in points; the
@@ -182,22 +314,46 @@ impl AndroidShellApp {
         .unwrap_or_else(|| ctx.content_rect())
     }
 
-    fn draw_keypad(&mut self, ctx: &egui::Context, safe_rect: egui::Rect) {
-        egui::Area::new(egui::Id::new("android_keypad_toggle"))
-            .constrain_to(safe_rect)
-            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -36.0))
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                if ui.button("Keys").clicked() {
-                    self.keypad = match self.keypad.take() {
-                        Some(_) => None,
-                        None => Some(Keypad {
-                            text: String::new(),
-                        }),
-                    };
-                }
+    /// Where the shell is laid out: the whole safe area as if no keyboard
+    /// were up, raised just far enough that the focused text field sits
+    /// above the keyboard while one is — what Android's `adjustPan` does for
+    /// a view-based app. `visible` is the safe area above the keyboard.
+    ///
+    /// egui asks for the keyboard only while the focused field is on screen
+    /// (`TextEdit` requests the IME only when its rect is visible), so a
+    /// layout squeezed into the space above the keyboard would push the field
+    /// off screen and close the keyboard the field had just opened.
+    ///
+    /// Only typing does this: with no text field taking keys, the shell is laid
+    /// out in `visible` itself, unraised, whatever the platform reports below
+    /// it.
+    fn shell_rect(&mut self, ctx: &egui::Context, visible: egui::Rect) -> egui::Rect {
+        let layout = egui::Rect::from_min_max(
+            visible.min,
+            egui::pos2(visible.max.x, ctx.viewport_rect().max.y.max(visible.max.y)),
+        );
+        let keyboard_top = visible.max.y;
+        let keyboard_up = keyboard_top < layout.max.y;
+        if !(keyboard_up && ctx.egui_wants_keyboard_input()) {
+            self.pan = 0.0;
+            return visible;
+        }
+        // A field that takes keys is focused, so its rect is known; for the
+        // one frame it might not be, the raise in force holds.
+        self.pan = ctx
+            .memory(|memory| memory.focused())
+            .and_then(|id| ctx.read_response(id))
+            .map_or(self.pan, |field| {
+                // The field was drawn at the raise in force then; take it off.
+                let field_bottom = field.rect.max.y + self.pan;
+                (field_bottom + KEYBOARD_GAP - keyboard_top).clamp(0.0, layout.height())
             });
+        layout.translate(egui::vec2(0.0, -self.pan))
+    }
 
+    /// The key pad, while the full-screen menu has it open. Its window's close
+    /// button puts it away.
+    fn draw_keypad(&mut self, ctx: &egui::Context, safe_rect: egui::Rect) {
         let Some(keypad) = &mut self.keypad else {
             return;
         };
@@ -250,14 +406,35 @@ impl AndroidShellApp {
 impl eframe::App for AndroidShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let activity = MachineActivity::of(&crate::app::status_snapshot(&self.shared));
+        let hold = if activity.keeps_screen_on() {
+            ScreenHold::Held
+        } else {
+            ScreenHold::Released
+        };
+        let focused = ctx.input(|input| input.focused);
+        let regained_focus = focused && !self.focused;
+        self.focused = focused;
+        if regained_focus || self.screen_hold != Some(hold) {
+            self.apply_window_flags(hold);
+        }
+
+        // The platform's content rect ends at the top of the soft keyboard
+        // while one is up; the shell is laid out as if it were not.
         let safe_rect = self.safe_rect(&ctx);
+        let shell_rect = self.shell_rect(&ctx, safe_rect);
         let mut safe_ui = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(safe_rect)
+                .max_rect(shell_rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         safe_ui.set_clip_rect(safe_rect);
         eframe::App::ui(&mut self.shell, &mut safe_ui, frame);
+        if self.shell.take_keypad_request() {
+            self.keypad = Some(Keypad {
+                text: String::new(),
+            });
+        }
 
         // A Browse pressed while a browser is open is dropped: the open
         // browser, and whatever was typed in it, stays.
@@ -384,10 +561,10 @@ impl FileBrowser {
     fn open(request: BrowseRequest, app: &AndroidApp) -> Self {
         let filter = match request.target {
             BrowseTarget::Cdrom => FileFilter::Extension("iso"),
-            BrowseTarget::HardDisk
-            | BrowseTarget::Bios
-            | BrowseTarget::VgaBios
-            | BrowseTarget::NewImage => FileFilter::Any,
+            BrowseTarget::HardDisk | BrowseTarget::NewDisk | BrowseTarget::NewFloppy => {
+                FileFilter::Extension("img")
+            }
+            BrowseTarget::Bios | BrowseTarget::VgaBios => FileFilter::Any,
         };
         let dir = request
             .current
@@ -654,6 +831,98 @@ where
             env.exception_clear();
         }
         result
+    })
+}
+
+/// `WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON`.
+const FLAG_KEEP_SCREEN_ON: i32 = 0x0000_0080;
+/// `WindowManager.LayoutParams.FLAG_FULLSCREEN`.
+const FLAG_FULLSCREEN: i32 = 0x0000_0400;
+/// `WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE`: a swipe
+/// from the edge shows the hidden bars for a moment, then they hide again.
+const BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE: i32 = 2;
+/// Before Android 11, the same through `View.setSystemUiVisibility`:
+/// IMMERSIVE_STICKY | LAYOUT_FULLSCREEN | LAYOUT_HIDE_NAVIGATION |
+/// LAYOUT_STABLE | FULLSCREEN | HIDE_NAVIGATION.
+const IMMERSIVE_STICKY_UI: i32 = 0x1000 | 0x0400 | 0x0200 | 0x0100 | 0x0004 | 0x0002;
+
+/// Makes the activity's window a game's: adds `add` to its flags, clears
+/// `clear`, and hides the status and navigation bars until a swipe from the
+/// edge shows them for a moment. Runs on Android's UI thread, which owns the
+/// window.
+fn apply_game_window(app: &AndroidApp, add: i32, clear: i32) -> jni::errors::Result<()> {
+    with_activity(app, |env, activity| {
+        let window = env
+            .call_method(
+                activity,
+                jni::jni_str!("getWindow"),
+                jni::jni_sig!("()Landroid/view/Window;"),
+                &[],
+            )?
+            .l()?;
+        env.call_method(
+            &window,
+            jni::jni_str!("addFlags"),
+            jni::jni_sig!("(I)V"),
+            &[jni::objects::JValue::Int(add)],
+        )?
+        .v()?;
+        env.call_method(
+            &window,
+            jni::jni_str!("clearFlags"),
+            jni::jni_sig!("(I)V"),
+            &[jni::objects::JValue::Int(clear)],
+        )?
+        .v()?;
+        if sdk_level(env)? >= ANDROID_11 {
+            let controller = env
+                .call_method(
+                    &window,
+                    jni::jni_str!("getInsetsController"),
+                    jni::jni_sig!("()Landroid/view/WindowInsetsController;"),
+                    &[],
+                )?
+                .l()?;
+            env.call_method(
+                &controller,
+                jni::jni_str!("setSystemBarsBehavior"),
+                jni::jni_sig!("(I)V"),
+                &[jni::objects::JValue::Int(BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE)],
+            )?
+            .v()?;
+            let types = env.find_class(jni::jni_str!("android/view/WindowInsets$Type"))?;
+            let system_bars = env
+                .call_static_method(
+                    types,
+                    jni::jni_str!("systemBars"),
+                    jni::jni_sig!("()I"),
+                    &[],
+                )?
+                .i()?;
+            env.call_method(
+                &controller,
+                jni::jni_str!("hide"),
+                jni::jni_sig!("(I)V"),
+                &[jni::objects::JValue::Int(system_bars)],
+            )?
+            .v()
+        } else {
+            let decor = env
+                .call_method(
+                    &window,
+                    jni::jni_str!("getDecorView"),
+                    jni::jni_sig!("()Landroid/view/View;"),
+                    &[],
+                )?
+                .l()?;
+            env.call_method(
+                &decor,
+                jni::jni_str!("setSystemUiVisibility"),
+                jni::jni_sig!("(I)V"),
+                &[jni::objects::JValue::Int(IMMERSIVE_STICKY_UI)],
+            )?
+            .v()
+        }
     })
 }
 

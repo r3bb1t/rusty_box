@@ -709,22 +709,40 @@ programmed baud rate and word length. Without a FIFO it takes a byte only while
 is set, and polls an empty backend again after 100 ms. Each fire hands
 `rx_fifo_enq` at most one byte.
 
-**rusty_box:** `Emulator::pump_gui_input` (`emulator/run.rs`) passes every byte
-the front end has queued (`BxGui::get_pending_serial_input`) to
-`BxSerialC::receive_byte` (`iodev/serial.rs`) in one pass, and each goes
-straight to `rx_fifo_enq`. From there the receive path — FIFO trigger levels,
-the character timeout, overrun, LSR — is Bochs's.
+**rusty_box:** `Emulator::pump_gui_input` (`emulator/run.rs`) is what stands in
+for that one-shot. It offers `BxSerialC::receive_byte` (`iodev/serial.rs`) one
+held byte at a time, gated by `rx_has_room`, and a refused byte stays in the
+machine's host-input backlog to be offered again at the next pump. Two things
+differ:
+
+- **The rate.** The pump runs per scheduler slice and per idle wait, not once
+  per `databyte_usec`, so a receiver with room takes bytes back to back until
+  it is full.
+- **A full FIFO.** With the FIFO off, `rx_has_room` is `rx_timer`'s own gate:
+  a byte waits while `rxdata_ready` is set. With the FIFO on, `rx_timer` reads
+  its backend regardless, and `rx_fifo_enq` drops a byte that finds all 16
+  entries full, setting the overrun bit and raising RXLSTAT. Here that byte is
+  held until the guest reads one out.
+
+In loopback mode a host byte is taken and discarded, as `rx_timer` discards it
+while `modem_cntl.local_loopback` is set; that is Bochs's behaviour, not a
+difference. Held bytes survive a reset of either kind, as bytes waiting in a
+Bochs backend do; only a snapshot restore drops them.
 
 ### What the guest observes
 
-Bytes arrive back to back, and a burst larger than the receiver holds loses
-bytes. With the FIFO enabled, bytes queue until it holds 16 (`FIFO_SIZE`), and
-each byte after that sets the overrun error and is dropped. Without a FIFO,
-every byte after the first overwrites RBR and sets the overrun error. Under
-Bochs the backend keeps what the receiver has no room for: without a FIFO
-nothing is taken while `rxdata_ready` is set, and with one a byte arrives only
-once per character time, so a guest that reads its UART promptly loses nothing.
-A guest timing the gap between characters sees none here.
+Nothing is lost, and host input never sets the overrun bit. A line longer than
+the receiver holds arrives in full and in order. Under Bochs a guest that reads
+its UART does not lose host input either, because bytes arrive one character
+time apart; a guest that leaves a full FIFO unread for a character time loses
+the byte and sees OE in LSR, which here it never does. The overrun path in
+`rx_fifo_enq` is untouched and still Bochs's for the guest's own loopback
+writes.
+
+What remains observable is timing: a guest that measures the gap between
+characters, or that watches the FIFO fill between two reads, sees host input
+arrive faster than the programmed baud rate would allow. Bochs delivers at most
+one character per `databyte_usec`.
 
 ### What justifies it
 
@@ -732,17 +750,34 @@ The owner's ruling, recorded when the transmit side was paced to the baud rate:
 commit `db43214` states that RX byte arrival "intentionally stays immediate".
 No measurement stands behind the ruling. The structural difference it rests on
 is real: this port has no backend for a timer to poll. Its only serial source is
-the front end's queue, which host input fills, so pacing it means holding bytes
-in the device rather than in the host.
+the front end's queue, which host input fills — so the queue Bochs keeps in its
+backend is kept in the machine instead, and the pump's own cadence is what
+drains it.
+
+The two differences are coupled. Bytes that arrive faster than the baud rate
+fill a FIFO that paced arrival would not have filled, so dropping them at a
+full FIFO, as `rx_fifo_enq` does, would lose input Bochs never loses from a
+guest that is reading. Holding them is what keeps that guest's view the same.
+The owner ruled silent host-input loss a defect to fix before the automation
+guide (2026-09-17).
 
 ### Price of closing it
 
-A per-port queue of host bytes, drained by a receive one-shot at
-`databyte_usec` as Bochs's `rx_timer` is, built the way the transmit one-shot
-already is (`TimerOwner::SerialTx`, `pc_system.rs`), and carried in the serial
-snapshot section.
+Only the clock is missing now that the queue and the gate exist: a receive
+one-shot per port at `databyte_usec`, built the way the transmit one-shot
+already is (`TimerOwner::SerialTx`, `pc_system.rs`), taking one byte from the
+backlog per fire. With arrival paced, a full FIFO can then drop and set OE as
+`rx_fifo_enq` does, because it would fill only when it fills under Bochs. It
+needs no snapshot change, since the backlog belongs to the machine's host-input
+path rather than to the device's saved state.
 
-**Status:** open and deliberate.
+**Status:** open and deliberate — the rate and the full-FIFO hold. Proved by
+`a_serial_line_longer_than_the_receive_fifo_reaches_the_guest_whole` and
+`a_hardware_reset_keeps_serial_input_held_for_the_guest`
+(`emulator/tests.rs`),
+`a_full_receive_fifo_refuses_a_host_byte_rather_than_overrunning`, which also
+reads LSR for OE, and `host_input_is_discarded_while_the_guest_loops_back`
+(`iodev/serial.rs`).
 
 ---
 
@@ -891,6 +926,201 @@ Nothing to buy.
 rule. They pin the read side only; no test writes past either end.
 
 **Status:** open and deliberate; the ported-ahead GeForce model only.
+
+---
+
+## D14 — A keystroke the 8042's ring will not take is held, not dropped
+
+**Bochs:** a front end calls `iodev/keyboard.cc bx_keyb_c::gen_scancode` once
+per key event, straight from the windowing layer's event handler (`gui/win32.cc`
+and `gui/sdl2.cc` map a host keycode to `BX_KEY_*` and call it). `gen_scancode`
+enqueues each byte of the key through `kbd_enq`, which logs
+`"internal keyboard buffer full, ignoring scancode"` and returns when
+`num_elements >= BX_KBD_ELEMENTS` (16, `iodev/iodev.h`). The keystroke is gone;
+nothing above is told, and nothing re-offers it.
+
+**rusty_box:** `Emulator::pump_gui_input` (`emulator/run.rs`) offers the 8042
+one held event at a time and stops at the first the ring refuses. What was not
+taken stays in the machine's host-input backlog
+(`gui/host_input.rs HostInputBacklog`) and is offered again at the next pump,
+in order. The machine's own `HostInputSink`, which the browser shell types
+through, holds its keyboard input in the same backlog.
+
+A key reaches the ring whole or not at all: `gen_scancode` counts the bytes the
+key renders in the guest's set before queueing any, and refuses the key when
+they do not all fit, where Bochs queues the ones that fit and drops the rest.
+`send_scancode` still queues one raw byte and refuses exactly when `kbd_enq`
+would. `Keyboard::type_text` and `Keyboard::tap` start a character only while
+fewer than eight bytes wait (`service_paste_buf`'s threshold, below), which
+leaves room for all of it.
+
+### What the guest observes
+
+A guest that is draining its keyboard sees no difference: the ring has room, so
+every event is taken on the pump that carries it, as in Bochs.
+
+A guest that is NOT draining sees keystrokes it would have lost arrive later
+instead. A frame of typing larger than 16 bytes — an inspection harness's
+`type_text`, the Android key pad's line, a pasted command — reaches the guest
+across several pumps rather than being truncated at the sixteenth byte. A guest
+that holds the keyboard clock low or disables scanning for a stretch (BIOS POST
+does both) receives the held keystrokes once it re-enables it; Bochs would have
+dropped them. It never reads a torn key — an `E0` with no code after it — from
+host input, which a full ring gives a Bochs guest.
+
+Held keyboard input does not survive a hardware reset: `Emulator::reset` drops
+it where `bx_devices_c::reset` stops a paste (`paste.stop`). A software reset
+keeps it, as it keeps a Bochs paste, because `bx_pc_system_c::Reset` resets the
+devices only for a hardware one. The 8042's ring itself survives both, as in
+Bochs, whose `bx_keyb_c::reset` clears only the LED state. `restore_snapshot`
+drops all held input, keyboard and serial, because the guest it was typed for
+is gone.
+
+### What justifies it
+
+The dropped keystroke is invisible to the host. This port's automation surface
+exists to be driven by a script, and a script that types `root\n` into a busy
+guest and is told nothing cannot tell a delivered password from a truncated
+one. Bochs's answer for a front end's key events — a log line on the emulator's
+own stderr — is not available to a caller in another process, and the
+API-level counts (`Keyboard::scancodes`, `Keyboard::type_text`) can only report
+what a caller handed in directly, not what a front end queued.
+
+Bochs itself holds host text this way when it pastes: `iodev/devices.cc
+bx_devices_c::paste_bytes` keeps the text, and `service_paste_buf` feeds it to
+`gen_scancode` one whole character at a time, only while
+`kbd_get_elements()` is below its `fill_threshold` of 8, until the paste is done
+or `bx_devices_c::reset` stops it. That is the precedent this entry extends to
+every host key, and where the whole-character rule comes from.
+
+The bound is a back-pressure point rather than a second place to drop: at
+capacity (1024 events) the pump stops taking from the front end, whose own
+queue then holds the rest in order.
+
+### Price of closing it
+
+Nothing to buy; closing it would mean re-introducing the loss. Pinned by
+`keystrokes_past_the_keyboard_ring_wait_for_the_guest_to_drain_it` (forty bytes
+offered through a `BxGui`, all forty read back out of the data port in order),
+`keyboard_input_pushed_straight_into_the_machine_waits_for_the_guest`,
+`a_key_the_pump_holds_reaches_the_guest_exactly_once`,
+`a_hardware_reset_drops_keyboard_input_held_for_the_guest_before_it`,
+`a_software_reset_keeps_keyboard_input_held_for_the_guest` and
+`a_restore_drops_host_input_held_for_the_guest_it_replaced`
+(`emulator/tests.rs`), and by
+`a_key_that_does_not_fit_leaves_none_of_its_bytes_in_the_ring`,
+`typed_text_waits_for_room_for_a_whole_character` and
+`a_tap_that_cannot_finish_sends_nothing` (`iodev/keyboard.rs`).
+
+**Status:** open and deliberate.
+
+---
+
+## D15 — System reads and writes walk the page tables without the TLB
+
+**Bochs:** `cpu/access.cc system_read_dword` and its byte, word and qword
+siblings are the CPL-0 reads exception delivery makes of the IDT, GDT, LDT and
+TSS. Each looks up the DTLB first and, on a miss, calls `access_read_linear`,
+which translates through `translate_linear`: the walk sets the accessed bit of
+each paging entry it uses, fills the TLB, and reports its entry reads to
+`phy_access`. The `system_write_*` family takes the same TLB-first route.
+
+**rusty_box:** `translate_linear_system_read` (`cpu/paging.rs`) walks through
+the read-only `page_walk_read_*_ro` helpers in every paging mode: no TLB lookup
+or fill, no accessed-bit update, nothing reported. `translate_linear_system_write`
+walks the tables on every access, with no TLB lookup; it sets accessed and dirty
+bits as a walk does and reports each entry it touches.
+
+### What the guest observes
+
+A paging entry reached only through exception delivery's reads of the IDT,
+GDT, LDT or TSS is never marked accessed here, where Bochs marks it the first
+time delivery reads through it. An OS that ages pages by their accessed bits
+sees those pages as unused. Entries reached by any other access are marked as
+under Bochs.
+
+A `phy_access` tracer sees no walk for a system read, where Bochs reports one
+per TLB miss, and a full walk for every system write, where Bochs reports one
+only on a miss.
+
+### What justifies it
+
+Nothing yet. The automation-API review of `phy_access` (2026-09-18) found the
+reporting gap, and tracing it to `system_read_dword` (2026-09-19) found the
+accessed-bit difference beneath it. Not ruled on.
+
+### Price of closing it
+
+Route system reads and writes through the DTLB and the executing walker at CPL
+0, as Bochs does. That path runs on every exception a paged guest takes, so
+closing it needs the boot gates as well as unit tests.
+
+**Status:** open — awaiting the owner's ruling.
+
+## D16 — The host can read the BIOS POST codes, which Bochs does not collect
+
+**Bochs:** `iodev/dma.cc` claims ports 0x0080–0x008F. Four of them per
+controller are the DMA page registers; the rest — 0x80, 0x84, 0x85, 0x86,
+0x88, 0x8C, 0x8D, 0x8E — are "extra page registers", kept in `ext_page_reg[]`
+and readable back, used by nothing. Firmware writes its progress code to 0x80
+for exactly that reason. Bochs keeps no record of what went past.
+
+**rusty_box:** `BxDevicesC::watch_post_code` (`iodev/mod.rs`) copies every
+one-byte write to 0x80 or 0x84 into a bounded host-side ring, drained through
+`Emulator::post_codes`. It sits at the top of `BxDevicesC::outp`, the one place
+every guest port write passes (R5), and it does not consume the write: the DMA
+device receives it and answers a later read from `ext_page_reg[]` exactly as
+upstream.
+
+### What the guest observes
+
+Nothing. The port is claimed by the same device, the same handler runs, and the
+value reads back. Draining the stream is a host act with no guest-visible side
+effect, and a host that never drains loses the oldest codes rather than
+stalling the guest.
+
+### What justifies it
+
+A POST code is how firmware says where a boot stopped, and reading them is the
+first question asked of a machine that hangs before any console exists. The
+facility costs one comparison per port write and cannot be observed from
+inside the guest, so the parity argument does not apply to it (R7: declared
+provenance for a facility Bochs lacks).
+
+The stream is part of the snapshot, so a restored machine keeps codes the guest
+wrote before it was saved.
+
+---
+
+## D17 — Port 0xE9 answers as though Bochs's debug console were switched on
+
+**Bochs:** `iodev/unmapped.cc` gates port 0xE9 on `port_e9_hack`, whose default
+in `config.cc` is **off**. With it off a read of 0xE9 returns `0xFFFFFFFF` and a
+write is dropped. With it on, a read returns `0xE9` — the documented way for
+guest code to detect that the console is there — and a write goes to the host's
+stdout.
+
+**rusty_box:** `BxDevicesC::default_read_handler` always answers `0xE9`, and
+`default_write_handler` always captures the byte into the stream
+`Emulator::debug_port` drains. There is no parameter to turn it off.
+
+### What the guest observes
+
+The detection channel: guest code that reads port 0xE9 sees `0xE9` here and
+`0xFF` on a default-configured Bochs, so it concludes a debug console exists
+and writes to it. Nothing else changes — the writes are dropped either way as
+far as the guest can tell.
+
+### What justifies it
+
+Not ruled on. The examples and the GUI read this stream, so turning it off by
+default would silence them; making it configurable is the obvious alternative
+and was never weighed. Found 2026-09-20 while wiring the POST-code tap (D16),
+which is the same family of host-side observation.
+
+**Status:** open — awaiting the owner's ruling.
+
+---
 
 # Hypervisor-engine divergences (`H<n>`)
 
@@ -1193,7 +1423,7 @@ Every guest-visible clock must be a fixed-ratio function of ONE monotonic time
 base. On this engine two of them are settled before the device clock gets a
 vote: the TSC is the host's (H2) and the LAPIC timer is the hypervisor's. Putting
 the device clock on any other base is the two-clocks failure, enumerated in
-`docs/research/whp-2026-09-03/05-guest-timekeeping.md` §4 — Linux's `check_timer`
+`docs/internal/records/whp-research-2026-09-03/05-guest-timekeeping.md` §4 — Linux's `check_timer`
 panics with "IO-APIC + timer doesn't work!" when the PIT lags TSC-time;
 `pit_hpet_ptimer_calibrate_cpu` reports "PIT calibration deviates" and keeps a
 `tsc_khz` that is wrong by the PIT/TSC ratio, which then scales `udelay`,
@@ -1276,7 +1506,7 @@ write the timer this way; on a host clock it is a thread that has to be woken.
 
 **The cost of one such wake is not measured here.** No figure in this tree
 covers it — the ≈ 4 µs in
-`docs/research/whp-2026-09-03/05-guest-timekeeping.md` is the cost of a halt exit
+`docs/internal/records/whp-research-2026-09-03/05-guest-timekeeping.md` is the cost of a halt exit
 to the VMM and does not transfer to a device-thread wake — so this entry rests on
 the structural claim above and on nothing numeric. A measured wake cost, or a
 wake count observed over a boot, would settle it permanently; until one exists,
@@ -1446,7 +1676,7 @@ is the same `service` the fabric already runs on every other request.
 `ioapic_eoi_broadcast` is not a bare re-service: it defers roughly 10 ms
 (`timer_mod_anticipate`) once about ten thousand successive interrupts have
 arrived on the same vector (`SUCCESSIVE_IRQ_MAX_COUNT`), recorded in
-`docs/research/whp-2026-09-03/02-qemu-whpx.md`. This port borrows the function
+`docs/internal/records/whp-research-2026-09-03/02-qemu-whpx.md`. This port borrows the function
 without that back-off, and that omission is deliberate rather than overlooked, so
 its consequence belongs here: a level line that the handler cannot quiesce
 becomes an EOI → re-deliver loop with nothing damping it, where the Bochs rule

@@ -274,8 +274,6 @@ fn run() -> Status {
         Err(e) => bail!("Machine build failed: {:?}", e),
     };
 
-    emu.prepare_run();
-
     info!("Starting BIOS boot...");
     // An F1 tap before POST, rendered in the guest's active scancode set.
     if !emu.keyboard().tap(BxKey::F1) {

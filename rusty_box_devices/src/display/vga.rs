@@ -675,27 +675,19 @@ impl crate::display::card::VgaExtension for StdVga {
         }
     }
 
-    /// Bochs `bx_vga_c::reset` runs after `bx_vgacore_c::reset`, keeping the
-    /// BARs and the committed framebuffer base: they describe where the machine
-    /// mapped the card, which a guest reset does not undo.
-    fn vga_reset(&mut self, cx: &mut crate::display::card::ResetCtx<'_>) {
-        let pci_enabled = self.pci_enabled;
-        let pci_conf = self.pci_conf;
-        let mmio_base = self.mmio_base;
-        let lfb_base = self.vbe.base_address;
-        *self = Self::new();
-        self.pci_enabled = pci_enabled;
-        if pci_enabled {
-            self.pci_conf = pci_conf;
-            self.mmio_base = mmio_base;
-            self.vbe.base_address = lfb_base;
+    /// Bochs `bx_vga_c::reset`: the PCI command and status registers go back
+    /// to their reset values, and nothing else moves — the VBE registers, the
+    /// BARs and the framebuffer base stay as they were. Its `ddc.init()`
+    /// returns at once on a DDC already initialised (ddc.cc `init_done`),
+    /// which this one is from construction.
+    fn vga_reset(&mut self, _cx: &mut crate::display::card::ResetCtx<'_>) {
+        if self.pci_enabled {
             // Bochs reset_vals: command = io+mem enable, status = devsel medium.
             self.pci_conf[0x04] = 0x03;
             self.pci_conf[0x05] = 0x00;
             self.pci_conf[0x06] = 0x00;
             self.pci_conf[0x07] = 0x02;
         }
-        self.apply_preferred_mode(cx.core());
     }
 }
 
@@ -839,6 +831,44 @@ impl From<&VbeState> for VgaSnapshotVbeState {
             ddc_enabled: vbe.ddc_enabled,
         }
     }
+}
+
+/// Which half of the vertical period a retrace-timer fire completed.
+///
+/// Bochs keeps it as `bx_vgacore_c::vtimer_toggle` and indexes
+/// `vtimer_interval[]` with it, so the discriminants are that index: the
+/// interval stored under a phase is the wait from it to the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum VerticalPhase {
+    /// A frame began here; the 0x3DA waveform is anchored at this instant and
+    /// the next fire is the end of its retrace. Bochs `vtimer_toggle == 0`.
+    FrameStart = 0,
+    /// The frame's vertical retrace ended here; the CRTC start address is
+    /// latched and the next fire begins the following frame. Bochs
+    /// `vtimer_toggle == 1`.
+    RetraceEnd = 1,
+}
+
+impl VerticalPhase {
+    /// The phase the next fire completes — Bochs `vtimer_toggle ^= 1`.
+    #[inline]
+    const fn next(self) -> Self {
+        match self {
+            Self::FrameStart => Self::RetraceEnd,
+            Self::RetraceEnd => Self::FrameStart,
+        }
+    }
+}
+
+/// What one vertical-timer fire did, and when the next one is due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerticalTick {
+    /// The half of the period this fire completed.
+    pub phase: VerticalPhase,
+    /// Microseconds from here to the next fire, in the clock the card keeps;
+    /// `None` while the retrace timing yields no interval to wait out.
+    pub next_usec: Option<u32>,
 }
 
 /// VGA controller state.
@@ -1040,6 +1070,19 @@ pub struct VgaCore {
     /// Vertical retrace end in microseconds (Bochs s.vrend_usec)
     vrend_usec: u32,
 
+    /// Which half of the vertical period the retrace timer is counting out.
+    /// Bochs `bx_vgacore_c::vtimer_toggle` (vgacore.cc).
+    vtimer_phase: VerticalPhase,
+    /// The two halves of the vertical period, in the clock this card keeps:
+    /// `[0]` runs from the frame's start to the end of its retrace, `[1]` from
+    /// there to the next frame. Bochs `bx_vgacore_c::vtimer_interval[2]`.
+    vtimer_interval: [u32; 2],
+    /// Set when the retrace timing changed and the vertical timer restarted,
+    /// so the machine re-arms it — Bochs calls `start_vertical_timer()`, which
+    /// reaches the timer directly. Taken by
+    /// [`VgaCore::take_vertical_timer_restart`].
+    vtimer_restarted: bool,
+
     /// Whether icount-based timing has been initialized.
     /// When false, falls back to toggle behavior for retrace.
     has_icount_sync: bool,
@@ -1232,6 +1275,12 @@ impl VgaCore {
             vrstart_usec: 13000,
             vrend_usec: 13155,
 
+            // Filled in from the retrace timing by `start_vertical_timer()`
+            // below, which is where Bochs's own `init` leaves the timer.
+            vtimer_phase: VerticalPhase::FrameStart,
+            vtimer_interval: [0; 2],
+            vtimer_restarted: false,
+
             has_icount_sync: false,
             ips: 15_000_000, // Default 15 MIPS
 
@@ -1288,6 +1337,8 @@ impl VgaCore {
         vga.attr_regs[ATTR_REG_COLOR_PLANE_EN] = 0x0F;
         // attr_regs[0x11, 0x13, 0x14] stay 0 from array init
 
+        // Bochs `init_systemtimer()` ends its bring-up in start_vertical_timer().
+        vga.start_vertical_timer();
         vga
     }
 
@@ -1345,23 +1396,9 @@ impl VgaCore {
     }
 
 
-    /// Reset the standard VGA — Bochs `bx_vgacore_c::reset`, which the card's
-    /// own reset calls before doing its half.
-    pub(crate) fn reset(&mut self) {
-        // Configuration survives a reset; it describes the machine, not the
-        // adapter's programming.
-        let has_icount_sync = self.has_icount_sync;
-        let ips = self.ips;
-        let preferred_mode = self.preferred_mode;
-        *self = Self::new();
-        self.has_icount_sync = has_icount_sync;
-        self.ips = ips;
-        self.preferred_mode = preferred_mode;
-    }
-
     /// Set the pre-boot VBE mode: raise the DISPI capability ceiling so the guest
     /// may select up to this resolution, and seed the power-on dimensions.
-    /// Preserved across `reset()`. Mirrors the DISPI MAX_XRES/MAX_YRES/MAX_BPP
+    /// Mirrors the DISPI MAX_XRES/MAX_YRES/MAX_BPP
     /// capability registers Bochs exposes (vga.cc). Reallocates the dirty-tile
     /// grid when the ceiling grows.
     pub(crate) fn set_preferred_mode(&mut self, xres: u16, yres: u16, bpp: u16) {
@@ -1460,6 +1497,10 @@ impl VgaCore {
         if self.vrend_usec < 7000 {
             self.vrend_usec = self.vtotal_usec.saturating_sub(1113);
         }
+
+        // Bochs calculate_retrace_timing() ends by restarting the vertical
+        // timer on the new period.
+        self.start_vertical_timer();
     }
 
     /// Emulated microseconds at the access, for the retrace computation.
@@ -2602,34 +2643,90 @@ impl VgaCore {
     }
 
 
-    /// Vertical retrace: latch the frame's start address and re-anchor the
-    /// 0x3DA phase.
+    /// Restart the vertical timer at the head of a frame.
     ///
-    /// Bochs `bx_vgacore_c::vertical_timer()` (vgacore.cc):
-    ///   prev = s.CRTC.start_addr;
-    ///   s.CRTC.start_addr = (CRTC.reg[0x0c] << 8) | CRTC.reg[0x0d];
-    ///   if changed -> redraw (graphics: vga_redraw_area, text: vga_mem_updated |= 1)
-    ///   s.display_start_usec = current time
-    ///
-    /// Returns whether the start address moved, so the caller can force the
-    /// redraw Bochs performs for the graphics path.
-    pub(crate) fn vertical_timer(&mut self, now_usec: u64) -> bool {
-        let previous = self.crtc_start_addr;
-        self.crtc_start_addr = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
-            | self.crtc_regs[CRTC_START_ADDR_LOW] as u16;
-        let changed = self.crtc_start_addr != previous;
-        if changed {
-            self.vga_mem_updated |= 1;
-            self.text_buffer_update = true;
-        }
-        self.display_start_usec = now_usec;
-        changed
+    /// Bochs `bx_vgacore_c::start_vertical_timer()` (vgacore.cc): toggle back
+    /// to 0, recompute both halves of the period from the retrace timing, and
+    /// arm the first. The arming itself belongs to the machine — the card's
+    /// crate has no timer wheel — so this records the request and
+    /// [`VgaCore::take_vertical_timer_restart`] hands it over.
+    fn start_vertical_timer(&mut self) {
+        self.vtimer_phase = VerticalPhase::FrameStart;
+        self.vtimer_interval = [
+            self.vrend_usec,
+            self.vtotal_usec.saturating_sub(self.vrend_usec),
+        ];
+        self.vtimer_restarted = true;
     }
 
-    /// Period of the vertical retrace in microseconds, for arming the vertical
-    /// timer (Bochs `s.vtotal_usec`). Zero before the retrace timing is known.
-    pub(crate) fn vertical_period_usec(&self) -> u32 {
+    /// The interval the machine must arm the vertical timer at, once, after
+    /// the retrace timing changed; `None` while the running timer still
+    /// matches the programmed mode.
+    pub(crate) fn take_vertical_timer_restart(&mut self) -> Option<u32> {
+        self.vtimer_restarted
+            .then(|| {
+                self.vtimer_restarted = false;
+                self.vertical_interval_usec()
+            })
+            .flatten()
+    }
+
+    /// One whole frame in microseconds — Bochs `s.vtotal_usec`, the period its
+    /// `set_update_timer` paces a vsync-driven screen refresh at. The two
+    /// halves the vertical timer counts out add up to exactly this.
+    pub(crate) fn frame_period_usec(&self) -> u32 {
         self.vtotal_usec
+    }
+
+    /// Microseconds from the phase the timer last completed to the next one,
+    /// in the clock this card keeps. `None` until the retrace timing yields a
+    /// non-zero interval, which is the point Bochs's timer would spin.
+    pub(crate) fn vertical_interval_usec(&self) -> Option<u32> {
+        let interval = self.vtimer_interval[self.vtimer_phase as usize];
+        (interval > 0).then_some(interval)
+    }
+
+    /// One half of the vertical period elapsed: latch the frame's start
+    /// address at the end of the retrace, re-anchor the 0x3DA waveform at the
+    /// start of the next frame.
+    ///
+    /// Bochs `bx_vgacore_c::vertical_timer()` (vgacore.cc):
+    ///   vtimer_toggle ^= 1; activate_timer(vtimer_interval[vtimer_toggle]);
+    ///   if (vtimer_toggle) { prev = s.CRTC.start_addr;
+    ///     s.CRTC.start_addr = (CRTC.reg[0x0c] << 8) | CRTC.reg[0x0d];
+    ///     if changed -> graphics: vga_redraw_area(0, 0, last_xres, last_yres),
+    ///                   text:     s.vga_mem_updated |= 1; }
+    ///   else s.display_start_usec = bx_virt_timer.time_usec(vsync_realtime);
+    pub(crate) fn vertical_timer(&mut self, now_usec: u64) -> VerticalTick {
+        self.vtimer_phase = self.vtimer_phase.next();
+        match self.vtimer_phase {
+            VerticalPhase::RetraceEnd => {
+                let previous = self.crtc_start_addr;
+                self.crtc_start_addr = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
+                    | self.crtc_regs[CRTC_START_ADDR_LOW] as u16;
+                if self.crtc_start_addr != previous {
+                    if (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0 {
+                        // Bochs marks every tile of the frame. A build without
+                        // an allocator has no tile grid to mark, and the frame
+                        // flag alone is what a whole-frame redraw leaves behind.
+                        #[cfg(feature = "alloc")]
+                        self.redraw_area(0, 0, self.last_xres, self.last_yres);
+                        #[cfg(not(feature = "alloc"))]
+                        {
+                            self.vga_mem_updated |= 1;
+                        }
+                    } else {
+                        self.vga_mem_updated |= 1;
+                        self.text_buffer_update = true;
+                    }
+                }
+            }
+            VerticalPhase::FrameStart => self.display_start_usec = now_usec,
+        }
+        VerticalTick {
+            phase: self.vtimer_phase,
+            next_usec: self.vertical_interval_usec(),
+        }
     }
 
     /// Whether this frame's screen update must be skipped.

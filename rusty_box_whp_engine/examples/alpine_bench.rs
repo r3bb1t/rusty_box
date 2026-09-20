@@ -164,7 +164,14 @@ fn boot_fast(machine: &mut FastMachine<()>, label: &str) -> Reached {
                 break;
             }
         };
-        if let Some(screen) = fast_screen(machine) {
+        let seen = match fast_screen(machine) {
+            Ok(seen) => seen,
+            Err(refused) => {
+                eprintln!("  {label}: the paused machine could not be read: {refused}");
+                break;
+            }
+        };
+        if let Some(screen) = seen {
             if !panicked && screen.contains("Kernel panic") {
                 panicked = true;
                 tracing::info!(target: "vec", "GUEST PANICKED");
@@ -189,6 +196,10 @@ fn boot_fast(machine: &mut FastMachine<()>, label: &str) -> Reached {
                 eprintln!("  {label}: the guest turned the machine off");
                 break;
             }
+            StepStop::CpuShutdown => {
+                eprintln!("  {label}: the processor shut down after a triple fault");
+                break;
+            }
             StepStop::Faulted(fault) => {
                 eprintln!("  {label}: a processor could not carry on: {fault}");
                 break;
@@ -205,8 +216,13 @@ fn boot_fast(machine: &mut FastMachine<()>, label: &str) -> Reached {
     Reached { milestones: reached, took: began.elapsed(), at, wedged }
 }
 
-/// The guest's text screen as it stands between two steps.
-fn fast_screen(machine: &mut FastMachine<()>) -> Option<String> {
+/// The guest's text screen as it stands between two steps, or `None` when the
+/// display is not in a text mode.
+///
+/// # Errors
+/// Whatever the machine said about being read — it refuses a machine that is
+/// not paused.
+fn fast_screen(machine: &mut FastMachine<()>) -> Result<Option<String>, FastMachineFault> {
     machine.with_machine(|m| m.display().text().map(|text| text.to_text()))
 }
 
@@ -221,9 +237,14 @@ where
 
 /// The same, for a machine on hardware.
 fn fast_dump(machine: &mut FastMachine<()>, label: &str) {
-    println!("\n  {label}: RIP = {:#x}", machine.with_machine(|m| m.rip()));
-    let screen = fast_screen(machine);
-    show(screen, label);
+    match machine.with_machine(|m| m.rip()) {
+        Ok(rip) => println!("\n  {label}: RIP = {rip:#x}"),
+        Err(refused) => println!("\n  {label}: RIP unread: {refused}"),
+    }
+    match fast_screen(machine) {
+        Ok(screen) => show(screen, label),
+        Err(refused) => println!("  {label}: the screen is unread: {refused}"),
+    }
 }
 
 /// Print a scraped screen, or say why there is none.

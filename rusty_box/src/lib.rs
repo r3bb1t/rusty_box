@@ -138,7 +138,13 @@ pub use emulator_api::StopHandle;
 /// Device role handles. Transient `&mut` borrows of one role, obtained from
 /// the machine — the supported path to device state now that machine parts are
 /// crate-private (doctrine R3).
-pub use emulator_api::{DebugPort, Serial};
+pub use emulator_api::{DebugPort, PostCodes, Serial};
+
+/// The automation guide's Rust blocks are compiled by `cargo test --doc`, so
+/// the guide cannot promise a signature the crate does not have.
+#[cfg(doctest)]
+#[doc = include_str!("../../docs/automation.md")]
+struct AutomationGuide;
 #[cfg(feature = "alloc")]
 pub mod gui;
 pub mod iodev;

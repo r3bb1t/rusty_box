@@ -9,19 +9,17 @@ pub(crate) enum ShellPage {
     Home,
     Console,
     Hardware,
-    Images,
 }
 
 impl ShellPage {
     /// The pages a VM node lists, in the order the tree draws them.
-    pub(crate) const ALL: [Self; 4] = [Self::Home, Self::Console, Self::Hardware, Self::Images];
+    pub(crate) const ALL: [Self; 3] = [Self::Home, Self::Console, Self::Hardware];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Home => "Summary",
             Self::Console => "Console",
             Self::Hardware => "Hardware",
-            Self::Images => "Images",
         }
     }
 }
@@ -102,8 +100,13 @@ pub(crate) enum VmBarAction {
     ToggleSerial,
     ToggleMouseCapture,
     SendCtrlAltDel,
+    /// Open the floppy maker.
+    CreateFloppy,
     ShowAbout,
     Quit,
+    /// A phone's page tab: the bar carries the pages a desktop's tree lists.
+    #[cfg(target_os = "android")]
+    GoTo(ShellPage),
 }
 
 #[cfg(test)]
@@ -126,8 +129,8 @@ mod tests {
     fn selecting_a_page_keeps_the_vm() {
         let at = Destination::new(2, ShellPage::Home);
         assert_eq!(
-            at.select_page(ShellPage::Images),
-            Destination::new(2, ShellPage::Images)
+            at.select_page(ShellPage::Hardware),
+            Destination::new(2, ShellPage::Hardware)
         );
     }
 
@@ -162,7 +165,7 @@ mod tests {
     fn every_page_the_tree_lists_carries_a_label() {
         assert_eq!(
             ShellPage::ALL.map(ShellPage::label),
-            ["Summary", "Console", "Hardware", "Images"]
+            ["Summary", "Console", "Hardware"]
         );
     }
 }

@@ -5,7 +5,7 @@
 use super::apic::LapicRegister;
 use super::cpu::Exception;
 use super::decoder::{BxSegregs, Instruction};
-use super::instrumentation::Instrumentation;
+use super::instrumentation::{Instrumentation, MemAccessRW};
 use super::{BxCpuC, Result};
 
 // Bochs vmx.h BX_IA32_FEATURE_CONTROL_* bits.
@@ -18,12 +18,12 @@ pub const BX_IA32_FEATURE_CONTROL_BITS: u32 =
 /// Bochs uses 1 — kernels treat any value the host returns as authoritative.
 pub const BX_VMCS_REVISION_ID: u32 = 1;
 
-/// Fixed offset within the 4 KiB VMCS region where we store the launch-state
-/// flag. Bochs picks an implementation-specific offset via its `vmcs_map`;
-/// since our table is not ported yet, pin launch-state to bytes 4..8 (right
-/// after the revision ID dword at offset 0). This is invisible to guests —
-/// they only touch this byte via VMCLEAR / VMLAUNCH / VMRESUME semantics.
-pub const VMCS_LAUNCH_STATE_OFFSET: u64 = 4;
+/// Offset of the VMX-abort indicator in the VMCS region — Bochs vmcs.cc
+/// `VMCS_VMX_ABORT_FIELD_ADDR`, the SDM's bytes 4..8 after the revision ID.
+pub const VMCS_VMX_ABORT_OFFSET: u64 = 4;
+/// Offset of the launch-state dword in the VMCS region — Bochs vmcs.cc
+/// `VMCS_LAUNCH_STATE_FIELD_ADDR`.
+pub const VMCS_LAUNCH_STATE_OFFSET: u64 = 8;
 /// Physical-address width used for VMX paddr-validity checks.
 ///
 /// `BX_PHY_ADDRESS_WIDTH=40` is the universal lower bound for x86_64
@@ -657,7 +657,7 @@ pub(super) const VMX_VMEXIT_CTRL2_SAVE_GUEST_FRED: u64 = 1 << 0;
 
 /// Bochs `IsValidPageAlignedPhyAddr` — page-aligned and within the
 /// emulator's physical address width (see [`BX_PHY_ADDRESS_WIDTH`]).
-fn is_valid_page_aligned_phy_addr(paddr: u64) -> bool {
+pub(super) fn is_valid_page_aligned_phy_addr(paddr: u64) -> bool {
     paddr & 0xFFF == 0 && (paddr >> BX_PHY_ADDRESS_WIDTH) == 0
 }
 
@@ -1355,8 +1355,16 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(());
         }
 
-        // Clear the VMCS launch-state flag in guest-physical memory.
-        self.mem_write_dword(paddr + VMCS_LAUNCH_STATE_OFFSET, VMCS_STATE_CLEAR);
+        // Clear the VMCS launch-state flag in guest-physical memory — Bochs
+        // vmx.cc `VMCLEAR` writes it through `write_physical_dword`, which
+        // reports the access.
+        let launch_state = paddr + VMCS_LAUNCH_STATE_OFFSET;
+        self.mem_write_dword(launch_state, VMCS_STATE_CLEAR);
+        self.on_phy_access(
+            launch_state,
+            &VMCS_STATE_CLEAR.to_le_bytes(),
+            MemAccessRW::Write,
+        );
 
         // If we were using this VMCS as the current one, drop it.
         if paddr == self.vmcsptr {
@@ -1650,64 +1658,91 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         true
     }
 
+    /// A shadow-VMCS field read — Bochs vmx.cc `VMread16_Shadow`, which reads
+    /// through `read_physical_word` and so reports the access to
+    /// `phy_access`. The other widths below follow it.
     fn read_phys_word(&mut self, paddr: u64) -> u16 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 2];
-        if let Err(e) = self.read_physical_routed(policy, paddr, 2, &mut data) {
-            tracing::warn!("read_phys_word({:#018x}) failed: {:?}", paddr, e);
-            return 0xffff;
-        }
-        u16::from_le_bytes(data)
+        let val = match self.read_physical_routed(policy, paddr, 2, &mut data) {
+            Ok(()) => u16::from_le_bytes(data),
+            Err(e) => {
+                tracing::warn!("read_phys_word({:#018x}) failed: {:?}", paddr, e);
+                return 0xffff;
+            }
+        };
+        self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Read);
+        val
     }
 
     fn read_phys_dword(&mut self, paddr: u64) -> u32 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 4];
-        if let Err(e) = self.read_physical_routed(policy, paddr, 4, &mut data) {
-            tracing::warn!("read_phys_dword({:#018x}) failed: {:?}", paddr, e);
-            return 0xffff_ffff;
-        }
-        u32::from_le_bytes(data)
+        let val = match self.read_physical_routed(policy, paddr, 4, &mut data) {
+            Ok(()) => u32::from_le_bytes(data),
+            Err(e) => {
+                tracing::warn!("read_phys_dword({:#018x}) failed: {:?}", paddr, e);
+                return 0xffff_ffff;
+            }
+        };
+        self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Read);
+        val
     }
 
     fn read_phys_qword(&mut self, paddr: u64) -> u64 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 8];
-        if let Err(e) = self.read_physical_routed(policy, paddr, 8, &mut data) {
-            tracing::warn!("read_phys_qword({:#018x}) failed: {:?}", paddr, e);
-            return u64::MAX;
-        }
-        u64::from_le_bytes(data)
+        let val = match self.read_physical_routed(policy, paddr, 8, &mut data) {
+            Ok(()) => u64::from_le_bytes(data),
+            Err(e) => {
+                tracing::warn!("read_phys_qword({:#018x}) failed: {:?}", paddr, e);
+                return u64::MAX;
+            }
+        };
+        self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Read);
+        val
     }
 
+    /// A shadow-VMCS field write — Bochs vmx.cc `VMwrite16_Shadow`, through
+    /// `write_physical_word`, reported to `phy_access`. The other widths below
+    /// follow it.
     fn write_phys_word(&mut self, paddr: u64, val: u16) {
         let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
-        if let Err(e) = self.write_physical_routed(policy, paddr, 2, &mut data) {
-            tracing::warn!("write_phys_word({:#018x}) failed: {:?}", paddr, e);
-        }
+        let stored = self.write_physical_routed(policy, paddr, 2, &mut data);
         // Bochs handleSMC flushes the writer synchronously at the store.
         self.smc_sync_after_phys_write();
+        if let Err(e) = stored {
+            tracing::warn!("write_phys_word({:#018x}) failed: {:?}", paddr, e);
+            return;
+        }
+        self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Write);
     }
 
     fn write_phys_dword(&mut self, paddr: u64, val: u32) {
         let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
-        if let Err(e) = self.write_physical_routed(policy, paddr, 4, &mut data) {
-            tracing::warn!("write_phys_dword({:#018x}) failed: {:?}", paddr, e);
-        }
+        let stored = self.write_physical_routed(policy, paddr, 4, &mut data);
         // Bochs handleSMC flushes the writer synchronously at the store.
         self.smc_sync_after_phys_write();
+        if let Err(e) = stored {
+            tracing::warn!("write_phys_dword({:#018x}) failed: {:?}", paddr, e);
+            return;
+        }
+        self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Write);
     }
 
     fn write_phys_qword(&mut self, paddr: u64, val: u64) {
         let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
-        if let Err(e) = self.write_physical_routed(policy, paddr, 8, &mut data) {
-            tracing::warn!("write_phys_qword({:#018x}) failed: {:?}", paddr, e);
-        }
+        let stored = self.write_physical_routed(policy, paddr, 8, &mut data);
         // Bochs handleSMC flushes the writer synchronously at the store.
         self.smc_sync_after_phys_write();
+        if let Err(e) = stored {
+            tracing::warn!("write_phys_qword({:#018x}) failed: {:?}", paddr, e);
+            return;
+        }
+        self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Write);
     }
 
     /// Dispatch a VMCS field encoding → named field in `self.vmcs`.
@@ -2253,6 +2288,22 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             self.signal_event(BxCpuC::<T>::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING);
         }
 
+        // Bochs vmx.cc `VMenterLoadCheckGuestState` ends with the context
+        // switch tail — the TLB flush and every mode recompute for the guest's
+        // CR0/CR4/EFER/CS — and then the guest's activity state, entered
+        // through `enter_sleep_state` so the loop sees a sleeping guest. An
+        // entry that injects an event enters ACTIVE: the event wakes it. The
+        // guest-state checks admit only the four SDM values.
+        self.finish_context_switch();
+        if self.vmcs.vm_entry_intr_info & (1u32 << 31) == 0 {
+            match self.vmcs.guest_activity_state {
+                1 => self.enter_sleep_state(super::cpu::CpuActivityState::Hlt),
+                2 => self.enter_sleep_state(super::cpu::CpuActivityState::Shutdown),
+                3 => self.enter_sleep_state(super::cpu::CpuActivityState::WaitForSipi),
+                _ => {}
+            }
+        }
+
         // Bochs vmx.cc step 5: walk the VM-entry MSR-load list and write
         // each (msr, value) pair into the guest. A non-zero failing index
         // is a VMENTRY-failure VMEXIT with reason VMX_VMEXIT_VMENTRY_
@@ -2366,17 +2417,8 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     return self.vmx_vmexit(VmxVmexitReason::Vmfunc, 0);
                 }
                 let paddr = self.vmcs.eptp_list_address.wrapping_add(ecx * 8);
-                let bytes = [
-                    self.read_physical_byte(paddr),
-                    self.read_physical_byte(paddr + 1),
-                    self.read_physical_byte(paddr + 2),
-                    self.read_physical_byte(paddr + 3),
-                    self.read_physical_byte(paddr + 4),
-                    self.read_physical_byte(paddr + 5),
-                    self.read_physical_byte(paddr + 6),
-                    self.read_physical_byte(paddr + 7),
-                ];
-                let new_eptp = u64::from_le_bytes(bytes);
+                // Bochs vmfunc.cc reads the entry with one `read_physical_qword`.
+                let new_eptp = u64::from_le_bytes(self.read_physical_bytes(paddr));
                 if !self.is_eptptr_valid(new_eptp) {
                     return self.vmx_vmexit(VmxVmexitReason::Vmfunc, 0);
                 }
@@ -2429,12 +2471,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // ignore a legal configuration. Every caller runs inside a guest whose
         // entry already validated this field.
         let paddr = self.vmcs.virtual_apic_page_addr + u64::from(offset);
-        u32::from_le_bytes([
-            self.read_physical_byte(paddr),
-            self.read_physical_byte(paddr + 1),
-            self.read_physical_byte(paddr + 2),
-            self.read_physical_byte(paddr + 3),
-        ])
+        u32::from_le_bytes(self.read_physical_bytes(paddr))
     }
 
     /// One 32-bit virtual-APIC register. Bochs vapic.cc
@@ -2442,9 +2479,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     pub(super) fn vmx_write_virtual_apic(&mut self, offset: u32, value: u32) {
         // See `vmx_read_virtual_apic` on why a zero page address is not special.
         let paddr = self.vmcs.virtual_apic_page_addr + u64::from(offset);
-        for (i, byte) in value.to_le_bytes().into_iter().enumerate() {
-            self.write_physical_byte(paddr + i as u64, byte);
-        }
+        self.write_physical_bytes(paddr, value.to_le_bytes());
     }
 
     /// Set one bit in a 256-bit virtual-APIC bitmap (VIRR or VISR).
@@ -2740,20 +2775,15 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.lapic.receive_eoi(0);
         self.sync_lapic_events();
 
+        // Bochs vapic.cc: the whole 256-bit PIR is read and cleared as one
+        // 32-byte access each, then folded into the virtual IRR dword by dword.
+        let pir: [u8; 32] = self.read_physical_bytes(pid);
+        self.write_physical_bytes(pid, [0u8; 32]);
         let mut virr = [0u32; 8];
         for (n, slot) in virr.iter_mut().enumerate() {
-            let pir_addr = pid + 4 * n as u64;
-            let pir = u32::from_le_bytes([
-                self.read_physical_byte(pir_addr),
-                self.read_physical_byte(pir_addr + 1),
-                self.read_physical_byte(pir_addr + 2),
-                self.read_physical_byte(pir_addr + 3),
-            ]);
-            for byte in 0..4u64 {
-                self.write_physical_byte(pir_addr + byte, 0);
-            }
+            let pir_n = u32::from_le_bytes([pir[4 * n], pir[4 * n + 1], pir[4 * n + 2], pir[4 * n + 3]]);
             let offset = LapicRegister::Irr1 as u32 + 16 * n as u32;
-            let merged = self.vmx_read_virtual_apic(offset) | pir;
+            let merged = self.vmx_read_virtual_apic(offset) | pir_n;
             self.vmx_write_virtual_apic(offset, merged);
             *slot = merged;
         }
@@ -2796,6 +2826,14 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Err(super::error::CpuError::VmxInternalError {
                 reason: VmxInternalReason::VmexitOutsideGuestMode,
             });
+        }
+
+        // Bochs vmx.cc `BX_CPU_C::VMexit` fires BX_INSTR_VMEXIT here, ahead of
+        // every step below, so a tracer sees the exit with the guest state
+        // still in the registers.
+        if self.instrumentation.active.has_vmexit() {
+            self.instrumentation
+                .fire_vmexit(reason as u32, qualification);
         }
 
         // ── Bochs `BX_CPU_C::VMexit` STEP 0 ──────────────────────────
@@ -3029,7 +3067,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     Ok(0) => {}
                     Ok(failing) => {
                         tracing::error!("VMABORT: error saving guest MSR number {failing}");
-                        return Err(self.vmx_abort(VmxAbortCode::SavingGuestMsrsFailure));
+                        return self.vmx_abort(VmxAbortCode::SavingGuestMsrsFailure);
                     }
                     Err(e) => return Err(e),
                 }
@@ -3070,7 +3108,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 Ok(0) => {}
                 Ok(failing) => {
                     tracing::error!("VMABORT: error loading host MSR number {failing}");
-                    return Err(self.vmx_abort(VmxAbortCode::LoadingHostMsrs));
+                    return self.vmx_abort(VmxAbortCode::LoadingHostMsrs);
                 }
                 Err(e) => return Err(e),
             }
@@ -3100,15 +3138,18 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
     /// Bochs vmx.cc `BX_CPU_C::VMabort`. Architecturally fatal — the
     /// VMM's state has lost integrity. Bochs writes the abort code to
-    /// the VMCS abort-indicator field, deactivates the preemption
-    /// timer, then `shutdown()`s the CPU. We mirror the timer disarm
-    /// and surface the abort as `CpuError::VmxAbort` so the cpu loop
-    /// can terminate the emulated CPU — silently swallowing the error
-    /// would mask a serious VMM bug.
-    pub(super) fn vmx_abort(&mut self, code: VmxAbortCode) -> super::error::CpuError {
-        self.lapic.deactivate_vmx_preemption_timer();
+    /// the current VMCS's abort indicator, where the VMM can read it after
+    /// a reset, disarms the preemption timer and shuts the processor down.
+    pub(super) fn vmx_abort(&mut self, code: VmxAbortCode) -> Result<()> {
         tracing::error!("VMX abort (Bochs VMabort): code={code:?}");
-        super::error::CpuError::VmxAbort { code }
+        // Bochs `VMwrite32(VMCS_VMX_ABORT_FIELD_ENCODING, code)`: a physical
+        // write into the VMCS region, reported as one.
+        let indicator = self.vmcsptr + VMCS_VMX_ABORT_OFFSET;
+        let value = code as u32;
+        self.mem_write_dword(indicator, value);
+        self.on_phy_access(indicator, &value.to_le_bytes(), MemAccessRW::Write);
+        self.lapic.deactivate_vmx_preemption_timer();
+        self.shutdown()
     }
 
     /// VMENTRY-failure VMEXIT — Bochs `BX_CPU_C::VMexit` with bit 31 of
@@ -3130,13 +3171,23 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         reason: VmxVmexitReason,
         qualification: u64,
     ) -> Result<()> {
+        // Bochs vmx.cc reaches a VMENTRY failure through the same
+        // `BX_CPU_C::VMexit` as every other exit, with bit 31 set in the
+        // reason — so BX_INSTR_VMEXIT sees the same reason word the host
+        // will read out of the VMCS.
+        let entry_failure_reason = (reason as u32) | 0x8000_0000;
+        if self.instrumentation.active.has_vmexit() {
+            self.instrumentation
+                .fire_vmexit(entry_failure_reason, qualification);
+        }
+
         // ── Bochs `BX_CPU_C::VMexit` STEP 0 ──────────────────────────
         // Disarm preemption timer (idempotent — we never armed it for
         // this VMENTRY since failure happens before step 6); record
         // reason + qualification with bit 31 set; write the
         // VMEXIT_INSTRUCTION_LENGTH field; clear nmi_unblocking_iret.
         self.vmexit_disarm_preemption_timer();
-        self.vmcs.exit_reason = (reason as u32) | 0x8000_0000;
+        self.vmcs.exit_reason = entry_failure_reason;
         self.vmcs.exit_qualification = qualification;
         self.vmcs.exit_instruction_length = ((self.rip().wrapping_sub(self.prev_rip)) & 0xF) as u32;
         self.nmi_unblocking_iret = false;
@@ -3174,7 +3225,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     tracing::error!(
                         "VMENTRY-failure VMEXIT: host MSR-load list rejected entry {failing}"
                     );
-                    return Err(self.vmx_abort(VmxAbortCode::LoadingHostMsrs));
+                    return self.vmx_abort(VmxAbortCode::LoadingHostMsrs);
                 }
                 Err(e) => return Err(e),
             }
@@ -4534,14 +4585,16 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.msr.sysenter_eip_msr = self.vmcs.host_sysenter_eip;
 
         // Bochs VMexitLoadHostState: DR7 reset, RFLAGS to reserved-bit only,
-        // debug/inhibit/activity reset, monitor disarmed. inhibit_mask
-        // tracks STI / MOV-SS shadow + NMI block; the host comes back fresh.
+        // debug/inhibit/activity reset, then the context switch tail — the TLB
+        // flush and every mode recompute for the host's CR0/CR4/EFER/CS, the
+        // monitor disarmed, and the hook. inhibit_mask tracks STI / MOV-SS
+        // shadow + NMI block; the host comes back fresh.
         self.dr7 = super::crregs::BxDr7::from_bits_retain(0x400);
         self.write_eflags(0x2, 0x003F_FFFF);
         self.debug_trap = 0;
         self.inhibit_mask = 0;
         self.activity_state = super::cpu::CpuActivityState::Active;
-        self.monitor.reset_monitor();
+        self.finish_context_switch();
         Ok(())
     }
 
@@ -4657,20 +4710,9 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.msr.sysenter_esp_msr = self.vmcs.guest_ia32_sysenter_esp;
         self.msr.sysenter_eip_msr = self.vmcs.guest_ia32_sysenter_eip;
 
-        // Activity state (Bochs vmx.cc maps the 4 SDM values into the
-        // CpuActivityState enum; unsupported codes fall back to Active).
-        self.activity_state = match self.vmcs.guest_activity_state {
-            0 => super::cpu::CpuActivityState::Active,
-            1 => super::cpu::CpuActivityState::Hlt,
-            2 => super::cpu::CpuActivityState::Shutdown,
-            3 => super::cpu::CpuActivityState::WaitForSipi,
-            other => {
-                tracing::warn!("VMENTRY: unsupported guest activity_state {other}");
-                super::cpu::CpuActivityState::Active
-            }
-        };
-
-        // GDTR / IDTR.
+        // GDTR / IDTR. The guest's activity state is entered last, after the
+        // context switch tail (`vmlaunch_vmresume`), as Bochs vmx.cc
+        // `VMenterLoadCheckGuestState` ends.
         self.gdtr.base = self.vmcs.guest_gdtr_base;
         self.gdtr.limit = self.vmcs.guest_gdtr_limit as u16;
         self.idtr.base = self.vmcs.guest_idtr_base;
@@ -4860,9 +4902,12 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
 
     /// Read the VMCS revision ID (first 4 bytes of a VMCS / VMXON region) from
-    /// guest-physical memory. Bochs vmx.cc VMXReadRevisionID.
+    /// guest-physical memory. Bochs vmx.cc VMXReadRevisionID, which reads it
+    /// through `read_physical_dword` and so reports the access.
     fn vmx_read_revision_id(&mut self, paddr: u64) -> u32 {
-        self.mem_read_dword(paddr)
+        let revision = self.mem_read_dword(paddr);
+        self.on_phy_access(paddr, &revision.to_le_bytes(), MemAccessRW::Read);
+        revision
     }
 
     /// Bochs cpu.h long_compat_mode — 32-bit compatibility sub-mode of long mode.
@@ -4961,15 +5006,61 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     fn write_physical_byte(&mut self, paddr: u64, val: u8) {
         let policy = self.access_policy(paddr);
         let mut data = [val];
-        if let Err(e) = self.write_physical_routed(policy, paddr, 1, &mut data) {
-            tracing::warn!(
+        match self.write_physical_routed(policy, paddr, 1, &mut data) {
+            Ok(()) => self.on_phy_access(
+                paddr,
+                &data,
+                crate::cpu::instrumentation::MemAccessRW::Write,
+            ),
+            Err(e) => tracing::warn!(
                 "write_physical_byte({:#018x}) failed: {:?}; byte dropped",
                 paddr,
                 e
-            );
+            ),
         }
         // Bochs handleSMC flushes the writer synchronously at the store.
         self.smc_sync_after_phys_write();
+    }
+
+    /// Read `N` bytes of guest-physical memory as one access, reported to
+    /// `phy_access` once at its full width — as Bochs reports a virtual-APIC
+    /// register (vapic.cc `VMX_Read_Virtual_APIC`, 4 bytes), the PIR (32) and
+    /// an EPTP-list entry (vmfunc.cc, 8). A failed read is logged and reads as
+    /// all ones, what [`Self::read_physical_byte`] gives each byte.
+    fn read_physical_bytes<const N: usize>(&mut self, paddr: u64) -> [u8; N] {
+        let policy = self.access_policy(paddr);
+        let mut data = [0u8; N];
+        match self.read_physical_routed(policy, paddr, N, &mut data) {
+            Ok(()) => {
+                self.on_phy_access(paddr, &data, MemAccessRW::Read);
+                data
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "read_physical_bytes({:#018x}, {N}) failed: {:?}; defaulting to all ones",
+                    paddr,
+                    e
+                );
+                [0xff; N]
+            }
+        }
+    }
+
+    /// Write `N` bytes of guest-physical memory as one access, reported once at
+    /// its full width, as [`Self::read_physical_bytes`] reads them.
+    fn write_physical_bytes<const N: usize>(&mut self, paddr: u64, mut data: [u8; N]) {
+        let policy = self.access_policy(paddr);
+        let stored = self.write_physical_routed(policy, paddr, N, &mut data);
+        // Bochs handleSMC flushes the writer synchronously at the store.
+        self.smc_sync_after_phys_write();
+        match stored {
+            Ok(()) => self.on_phy_access(paddr, &data, MemAccessRW::Write),
+            Err(e) => tracing::warn!(
+                "write_physical_bytes({:#018x}, {N}) failed: {:?}; bytes dropped",
+                paddr,
+                e
+            ),
+        }
     }
 
     /// VM-entry / VM-exit MSR load helper — Bochs vmx.cc LoadMSRs.
@@ -4990,8 +5081,12 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     pub(super) fn vmx_load_msrs(&mut self, count: u32, phys_addr: u64) -> Result<u32> {
         let mut paddr = phys_addr;
         for msr in 1..=count {
+            // Bochs vmx.cc LoadMSRs reads each entry through
+            // `read_physical_qword`, which reports both halves.
             let lo = self.mem_read_qword(paddr);
+            self.on_phy_access(paddr, &lo.to_le_bytes(), MemAccessRW::Read);
             let value = self.mem_read_qword(paddr + 8);
+            self.on_phy_access(paddr + 8, &value.to_le_bytes(), MemAccessRW::Read);
             paddr = paddr.wrapping_add(16);
             if (lo >> 32) != 0 {
                 tracing::warn!("VMX LoadMSRs[{msr}]: broken msr index {:#018x}", lo);
@@ -5023,7 +5118,10 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     pub(super) fn vmx_store_msrs(&mut self, count: u32, phys_addr: u64) -> Result<u32> {
         let mut paddr = phys_addr;
         for msr in 1..=count {
+            // Bochs vmx.cc StoreMSRs reads the index and writes the value
+            // through the physical-access helpers, which report both.
             let lo = self.mem_read_qword(paddr);
+            self.on_phy_access(paddr, &lo.to_le_bytes(), MemAccessRW::Read);
             if (lo >> 32) != 0 {
                 tracing::warn!("VMX StoreMSRs[{msr}]: broken msr index {:#018x}", lo);
                 return Ok(msr);
@@ -5035,6 +5133,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             }
             let value = self.rdmsr_value(index)?;
             self.mem_write_qword(paddr + 8, value);
+            self.on_phy_access(paddr + 8, &value.to_le_bytes(), MemAccessRW::Write);
             paddr = paddr.wrapping_add(16);
         }
         Ok(0)
@@ -5606,6 +5705,13 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             let level = leaf as u32;
             entry_addr[leaf as usize] = ppf + ((guest_paddr >> (9 + 9 * level)) & 0xFF8);
             entry[leaf as usize] = self.mem_read_qword(entry_addr[leaf as usize]);
+            // Bochs paging.cc `translate_guest_physical` reads each EPT entry
+            // through `read_physical_qword`, which reports it.
+            self.on_phy_access(
+                entry_addr[leaf as usize],
+                &entry[leaf as usize].to_le_bytes(),
+                MemAccessRW::Read,
+            );
             offset_mask >>= 9;
             let curr = entry[leaf as usize];
             // Bochs paging.cc: per-entry access bits are R/W/X plus the
@@ -5832,11 +5938,18 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         leaf: usize,
         write: bool,
     ) {
+        // Each A/D store is reported, as Bochs paging.cc
+        // `update_ept_access_dirty` makes it through `write_physical_qword`.
         // Non-leaf levels (PML4 down to just above leaf): set A bit.
         for level in ((leaf + 1)..4).rev() {
             if entry[level] & 0x100 == 0 {
                 entry[level] |= 0x100;
                 self.mem_write_qword(entry_addr[level], entry[level]);
+                self.on_phy_access(
+                    entry_addr[level],
+                    &entry[level].to_le_bytes(),
+                    MemAccessRW::Write,
+                );
             }
         }
         // Leaf: set A, plus D if this was a write access.
@@ -5844,6 +5957,11 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         if (entry[leaf] & needed) != needed {
             entry[leaf] |= needed;
             self.mem_write_qword(entry_addr[leaf], entry[leaf]);
+            self.on_phy_access(
+                entry_addr[leaf],
+                &entry[leaf].to_le_bytes(),
+                MemAccessRW::Write,
+            );
         }
     }
 

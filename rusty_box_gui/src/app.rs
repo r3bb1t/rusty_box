@@ -15,18 +15,16 @@ use crate::shell::destination::{SidebarAction, VmBarAction};
 use crate::shell::destination::{Destination, ShellPage};
 use crate::shell::sidebar::VmLibraryEntry;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::theme::{SPACE_ITEM, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_DISPLAY};
+use crate::shell::theme::{SPACE_PAGE, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_DISPLAY};
 use crate::shell::theme::{
     configure_shell_style, shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED,
-    BG_BASE, BG_PANEL, SPACE_GROUP, SPACE_PAGE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
-    TEXT_TITLE,
+    BG_BASE, BG_PANEL, SPACE_GROUP, SPACE_ITEM, TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY,
+    TEXT_SECONDARY, TEXT_TITLE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::vm_bar::VmBarState;
 #[cfg(target_arch = "wasm32")]
 use crate::shell::widgets::disabled_tile;
-#[cfg(target_os = "android")]
-use crate::shell::widgets::hairline_below;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::{
     action_tile_enabled, hairline_above, home_fact, path_field_width, selection_row, status_text,
@@ -39,8 +37,6 @@ use crate::shell::widgets::{
 #[cfg(target_arch = "wasm32")]
 use egui::Color32;
 use egui::RichText;
-#[cfg(target_os = "android")]
-use egui::Stroke;
 // The wasm build drives the machine directly from the frame loop below; the
 // native build hands it to a runner thread instead.
 #[cfg(target_arch = "wasm32")]
@@ -49,12 +45,11 @@ use rusty_box::params::{
     BxParams, BX_CPU_CORES_LIMIT, BX_CPU_HT_THREADS_LIMIT, BX_CPU_PROCESSORS_LIMIT,
     BX_MAX_SMP_THREADS_SUPPORTED,
 };
-use rusty_box_bximage::{
-    calculate_hard_disk_geometry, CreatedImage as BxCreatedImage, FloppyFormat, ImageSize,
-    SectorSize,
-};
+use rusty_box_bximage::{calculate_hard_disk_geometry, FloppyFormat, SectorSize};
+#[cfg(target_arch = "wasm32")]
+use rusty_box_bximage::{CreatedImage as BxCreatedImage, ImageSize};
 #[cfg(not(target_arch = "wasm32"))]
-use rusty_box_bximage::{create_flat_hard_disk, create_floppy, ExistingFilePolicy};
+use rusty_box_bximage::{create_floppy, ExistingFilePolicy};
 
 /// Common pre-boot VBE resolutions offered by the Display panel picker.
 const VGA_MODE_PRESETS: &[(u16, u16)] = &[
@@ -97,8 +92,10 @@ pub(crate) enum BrowseTarget {
     Bios,
     /// The VGA BIOS ROM.
     VgaBios,
-    /// Where the Images page creates its next image.
-    NewImage,
+    /// The folder and name the new-disk sheet saves its disk under.
+    NewDisk,
+    /// Where the floppy maker writes its next image.
+    NewFloppy,
 }
 
 /// A Browse press the Android host answers with a file browser of its own.
@@ -171,7 +168,7 @@ fn pick_native_file() -> Option<PathBuf> {
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-fn save_native_file(default_name: &'static str) -> Option<PathBuf> {
+fn save_native_file(default_name: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_file_name(default_name)
         .save_file()
@@ -181,7 +178,11 @@ fn save_native_file(default_name: &'static str) -> Option<PathBuf> {
 pub struct NativeShellApp {
     emulator: rusty_box::gui::RustyBoxApp,
     chrome: ShellChrome,
-    disk_creator: DiskCreatorPanel,
+    floppy_maker: FloppyMaker,
+    /// The floppy maker's window is open.
+    floppy_maker_open: bool,
+    /// The Hard disk page's new-disk sheet, while it is open.
+    new_disk: Option<NewDiskDraft>,
     profiles: Vec<NativeVmProfile>,
     config: crate::config::ResolvedConfig,
     settings: NativeVmSettings,
@@ -209,7 +210,25 @@ pub struct NativeShellApp {
     /// A Browse press the Android host has yet to answer.
     #[cfg(target_os = "android")]
     browse_request: Option<BrowseTarget>,
+    /// The full-screen console's menu is open.
+    #[cfg(target_os = "android")]
+    full_screen_menu_open: bool,
+    /// The full-screen menu asked the Android host for its key pad.
+    #[cfg(target_os = "android")]
+    keypad_requested: bool,
 }
+
+/// The full-screen console's menu button: a glyph the VM bar already draws,
+/// so the default fonts are known to hold it.
+#[cfg(target_os = "android")]
+const FULL_SCREEN_MENU: &str = "☰";
+/// The menu button's side, points: a comfortable thumb target.
+#[cfg(target_os = "android")]
+const FULL_SCREEN_BUTTON_SIZE: f32 = 40.0;
+/// The menu button's fill over the guest: dark enough to find, light enough
+/// to leave the guest's corner readable under it.
+#[cfg(target_os = "android")]
+const FULL_SCREEN_BUTTON_ALPHA: u8 = 110;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
@@ -285,6 +304,11 @@ struct NativeVmSettings {
     vga_mode: Option<crate::config::VgaMode>,
     /// Register the VGA on PCI (experimental KMS / bochs-drm path).
     pci_vga: bool,
+    /// The phone's full-screen console fills the screen instead of keeping
+    /// the guest's shape.
+    console_stretch: bool,
+    /// The phone trackpad's cursor speed.
+    pointer_speed: crate::config::PointerSpeed,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -334,6 +358,8 @@ impl NativeVmSettings {
             cdrom_drive: cdrom.map_or(0, |cdrom| cdrom.drive),
             vga_mode: config.vga_mode,
             pci_vga: config.pci_vga,
+            console_stretch: config.console_stretch,
+            pointer_speed: config.pointer_speed,
         }
     }
 
@@ -425,6 +451,8 @@ impl NativeVmSettings {
 
         config.vga_mode = self.vga_mode;
         config.pci_vga = self.pci_vga;
+        config.console_stretch = self.console_stretch;
+        config.pointer_speed = self.pointer_speed;
 
         config.boot_order = self.boot_order_for_attached_media();
         Ok(())
@@ -907,12 +935,6 @@ pub(crate) struct ShellStatus {
     pub start_pending: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CreatorKind {
-    HardDisk,
-    Floppy,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CreatedImage {
     path: std::path::PathBuf,
@@ -921,20 +943,22 @@ struct CreatedImage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CreatedImageKind {
+    /// A native shell attaches a hard disk it made; a browser downloads it.
+    #[cfg(not(target_arch = "wasm32"))]
     HardDisk,
     Floppy,
 }
 
+/// The floppy maker: a standalone floppy image, made from the `…` menu. The
+/// shell cannot attach a floppy to a VM yet, so the maker only writes one.
 #[derive(Debug)]
-struct DiskCreatorPanel {
-    kind: CreatorKind,
+struct FloppyMaker {
     path: String,
-    hard_disk_size: String,
     floppy_format: FloppyFormat,
     #[cfg(not(target_arch = "wasm32"))]
     overwrite: bool,
     status: Option<CreatorStatus>,
-    /// The page's Browse was pressed; the shell answers it, since only the
+    /// The maker's Browse was pressed; the shell answers it, since only the
     /// shell can reach the platform's file chooser.
     #[cfg(not(target_arch = "wasm32"))]
     browse_requested: bool,
@@ -946,12 +970,10 @@ enum CreatorStatus {
     Error(String),
 }
 
-impl Default for DiskCreatorPanel {
+impl Default for FloppyMaker {
     fn default() -> Self {
         Self {
-            kind: CreatorKind::HardDisk,
-            path: default_image_path().to_owned(),
-            hard_disk_size: default_hard_disk_size().to_owned(),
+            path: FLOPPY_FILE_NAME.to_owned(),
             floppy_format: FloppyFormat::M1_44,
             #[cfg(not(target_arch = "wasm32"))]
             overwrite: false,
@@ -962,19 +984,224 @@ impl Default for DiskCreatorPanel {
     }
 }
 
-fn default_image_path() -> &'static str {
-    if cfg!(target_arch = "wasm32") {
-        "rusty-box.img"
-    } else {
-        "c.img"
+/// The file name a new floppy image is offered under.
+const FLOPPY_FILE_NAME: &str = "floppy.img";
+
+/// A hard disk not yet created: what the Hard disk page's new-disk sheet
+/// holds while it is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NewDiskDraft {
+    /// The file name, offered from the VM's name.
+    name: String,
+    size: crate::hard_disk::DiskSize,
+    /// The number the Custom chip carries, in `DiskSize::CUSTOM_UNIT`s.
+    custom: u32,
+    /// Where the disk is saved; a browser downloads it instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    folder: DiskFolder,
+    /// The draft names a file that exists: the sheet asks whether to replace
+    /// it or save under this free name.
+    #[cfg(not(target_arch = "wasm32"))]
+    conflict: Option<String>,
+    error: Option<String>,
+}
+
+impl NewDiskDraft {
+    /// A draft for the VM called `vm_name`: its name, the default size, the
+    /// Documents folder.
+    fn for_vm(vm_name: &str) -> Self {
+        let size = crate::hard_disk::DiskSize::DEFAULT;
+        Self {
+            name: crate::hard_disk::default_disk_name(vm_name),
+            size,
+            custom: size_in_custom_units(size),
+            #[cfg(not(target_arch = "wasm32"))]
+            folder: DiskFolder::Documents,
+            #[cfg(not(target_arch = "wasm32"))]
+            conflict: None,
+            error: None,
+        }
     }
 }
 
-fn default_hard_disk_size() -> &'static str {
-    if cfg!(target_arch = "wasm32") {
-        "10M"
-    } else {
-        "20G"
+/// What the new-disk sheet was asked to do this frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NewDiskAction {
+    None,
+    /// Create the disk, stopping at a file of the same name.
+    Create,
+    /// Create it over the file of the same name.
+    #[cfg(not(target_arch = "wasm32"))]
+    Replace,
+    /// Create it under this free name.
+    #[cfg(not(target_arch = "wasm32"))]
+    SaveAs(String),
+    /// Choose where to save it.
+    #[cfg(not(target_arch = "wasm32"))]
+    OtherFolder,
+    /// Put the sheet away.
+    Cancel,
+}
+
+/// The new-disk sheet's form over `draft`: the name, the size chips, where
+/// the disk is saved (a browser downloads it instead), and the verbs. Reports
+/// the verb pressed.
+#[cfg(feature = "gui-egui")]
+fn draw_new_disk_form(ui: &mut egui::Ui, draft: &mut NewDiskDraft) -> NewDiskAction {
+    use crate::hard_disk::DiskSize;
+    let mut action = NewDiskAction::None;
+    shell_card_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new("New disk").size(TEXT_BODY).strong().color(TEXT_PRIMARY));
+        ui.add_space(SPACE_ITEM);
+        field_row(ui, "Name", |ui| {
+            if ui
+                .add(egui::TextEdit::singleline(&mut draft.name).desired_width(240.0))
+                .changed()
+            {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    draft.conflict = None;
+                }
+                draft.error = None;
+            }
+        });
+        field_row(ui, "Size", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for preset in DiskSize::PRESETS {
+                    if ui.selectable_label(draft.size == preset, preset.label()).clicked() {
+                        draft.size = preset;
+                    }
+                }
+                let custom = !DiskSize::PRESETS.contains(&draft.size);
+                if ui.selectable_label(custom, "Custom").clicked() {
+                    draft.size = DiskSize::custom(draft.custom);
+                }
+                if custom
+                    && ui
+                        .add(
+                            egui::DragValue::new(&mut draft.custom)
+                                .range(DiskSize::CUSTOM_RANGE)
+                                .suffix(format!(" {}", DiskSize::CUSTOM_UNIT)),
+                        )
+                        .changed()
+                {
+                    draft.size = DiskSize::custom(draft.custom);
+                }
+            });
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        field_row(ui, "", |ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new("Linux 2 GB+ · Windows 7 16 GB+ · Windows 10 32 GB+")
+                        .size(TEXT_SECONDARY)
+                        .color(TEXT_MUTED),
+                );
+                ui.label(
+                    RichText::new("The file grows as the guest fills it.")
+                        .size(TEXT_SECONDARY)
+                        .color(TEXT_MUTED),
+                );
+            });
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        field_row(ui, "Save to", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let in_documents = draft.folder == DiskFolder::Documents;
+                if ui
+                    .selectable_label(in_documents, DiskFolder::Documents.label())
+                    .clicked()
+                {
+                    draft.folder = DiskFolder::Documents;
+                    draft.conflict = None;
+                }
+                if !in_documents {
+                    // The chosen folder shows as the selected chip.
+                    drop(ui.selectable_label(true, draft.folder.label()));
+                }
+                if ui.button("Other folder…").clicked() {
+                    action = NewDiskAction::OtherFolder;
+                }
+            });
+        });
+        ui.add_space(SPACE_GROUP);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(free) = draft.conflict.clone() {
+            ui.label(
+                RichText::new(format!("{} is already in this folder.", draft.name.trim()))
+                    .color(ACCENT_AMBER),
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Replace it").clicked() {
+                    action = NewDiskAction::Replace;
+                }
+                if ui.button(format!("Save as {free}")).clicked() {
+                    action = NewDiskAction::SaveAs(free.clone());
+                }
+                if ui.button("Cancel").clicked() {
+                    action = NewDiskAction::Cancel;
+                }
+            });
+            return;
+        }
+        let create = if cfg!(target_arch = "wasm32") {
+            "Download disk image"
+        } else {
+            "Create and attach"
+        };
+        ui.horizontal(|ui| {
+            if ui.add(primary_button(create)).clicked() {
+                action = NewDiskAction::Create;
+            }
+            if ui.button("Cancel").clicked() {
+                action = NewDiskAction::Cancel;
+            }
+        });
+        if let Some(error) = &draft.error {
+            ui.colored_label(ACCENT_RED, error);
+        }
+    });
+    action
+}
+
+/// `size` counted in `DiskSize::CUSTOM_UNIT`s, for the Custom chip to start from.
+fn size_in_custom_units(size: crate::hard_disk::DiskSize) -> u32 {
+    let mib = size.image_size().bytes() / (1024 * 1024);
+    u32::try_from(mib / u64::from(crate::hard_disk::DiskSize::CUSTOM_UNIT_MIB)).unwrap_or(u32::MAX)
+}
+
+/// The folder a new disk is saved in.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiskFolder {
+    /// `Rusty Box` under the user's Documents folder.
+    Documents,
+    /// A folder the user chose.
+    Chosen(PathBuf),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DiskFolder {
+    /// The folder on disk, or why there is none.
+    fn resolve(&self) -> Result<PathBuf, String> {
+        match self {
+            Self::Documents => crate::hard_disk::documents_base()
+                .map(|base| crate::hard_disk::documents_folder_under(&base))
+                .ok_or_else(|| {
+                    "This system does not say where Documents is; choose another folder."
+                        .to_owned()
+                }),
+            Self::Chosen(folder) => Ok(folder.clone()),
+        }
+    }
+
+    /// The chip's caption.
+    fn label(&self) -> String {
+        match self {
+            Self::Documents => "Documents/Rusty Box".to_owned(),
+            Self::Chosen(folder) => folder.display().to_string(),
+        }
     }
 }
 
@@ -1112,7 +1339,10 @@ impl NativeShellApp {
         #[cfg(target_os = "android")]
         let emulator = {
             let mut emulator = emulator;
-            emulator.set_fit_to_available(true);
+            emulator.set_display_scale(rusty_box::gui::DisplayScale::Fit);
+            // A finger is not a mouse: on a phone the guest's image is a
+            // trackpad with its own left and right buttons.
+            emulator.set_pointer_mode(rusty_box::gui::PointerMode::Touchpad);
             emulator
         };
         Self::with_emulator(emulator, shared, command_tx, start)
@@ -1147,7 +1377,9 @@ impl NativeShellApp {
         Self {
             emulator,
             chrome,
-            disk_creator: DiskCreatorPanel::default(),
+            floppy_maker: FloppyMaker::default(),
+            floppy_maker_open: false,
+            new_disk: None,
             profiles: opening.profiles,
             config,
             settings,
@@ -1162,6 +1394,10 @@ impl NativeShellApp {
             gravest_raised: None,
             #[cfg(target_os = "android")]
             browse_request: None,
+            #[cfg(target_os = "android")]
+            full_screen_menu_open: false,
+            #[cfg(target_os = "android")]
+            keypad_requested: false,
         }
     }
 
@@ -1229,25 +1465,23 @@ impl NativeShellApp {
         }
     }
 
+    /// A file dropped on the window while Hardware › Hard disk is shown
+    /// becomes the VM's hard disk, as its Use a disk file would make it.
     #[cfg(not(target_arch = "wasm32"))]
     fn handle_native_dropped_files(&mut self, ctx: &egui::Context) {
-        if self.chrome.page() != ShellPage::Images {
+        if self.chrome.page() != ShellPage::Hardware
+            || self.chrome.selected_hardware != HardwareDevice::HardDisk
+        {
             return;
         }
-
         let dropped = ctx.input(|input| input.raw.dropped_files.clone());
         let Some(file) = dropped.first() else {
             return;
         };
-
-        match &file.path {
-            Some(path) => {
-                self.disk_creator.path = path.display().to_string();
-            }
-            None => {
-                self.disk_creator.status = Some(CreatorStatus::Error(
-                    "dropped file has no host path".to_owned(),
-                ));
+        // A native drop always carries the file's absolute path.
+        if self.set_browsed_path(BrowseTarget::HardDisk, file.path().to_path_buf()) {
+            if let Err(message) = self.apply_pending_settings() {
+                self.notify(ShellNotice::error(message));
             }
         }
     }
@@ -1262,7 +1496,10 @@ impl NativeShellApp {
             ui,
             VmBarState {
                 name: &self.vm_info.name,
+                #[cfg(not(target_os = "android"))]
                 badge: shell_state_badge(&status, self.has_error_notice()),
+                #[cfg(target_os = "android")]
+                page: self.chrome.page(),
                 running: status.running,
                 start_pending: status.start_pending,
                 on_console: self.chrome.page() == ShellPage::Console,
@@ -1283,10 +1520,13 @@ impl NativeShellApp {
             }
             Some(VmBarAction::ToggleMouseCapture) => self.emulator.toggle_mouse_capture(),
             Some(VmBarAction::SendCtrlAltDel) => self.emulator.send_ctrl_alt_del(),
+            Some(VmBarAction::CreateFloppy) => self.floppy_maker_open = true,
             Some(VmBarAction::ShowAbout) => self.chrome.show_about = true,
             Some(VmBarAction::Quit) => {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            #[cfg(target_os = "android")]
+            Some(VmBarAction::GoTo(page)) => self.chrome.go_to(page),
         }
     }
 
@@ -1401,43 +1641,14 @@ impl NativeShellApp {
         hairline_above(ui, strip.response.rect);
     }
 
-    /// The phone form factor's page navigation. Android hides the sidebar, so
-    /// on a phone the pages are reached from this strip drawn directly above
-    /// them: the current one carries the text weight and an accent rule, the
-    /// rest sit muted.
-    #[cfg(target_os = "android")]
-    fn draw_android_tab_strip(&mut self, ui: &mut egui::Ui) {
-        let strip = egui::Panel::top("vm_tab_strip")
-            .exact_size(36.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG_PANEL)
-                    .inner_margin(egui::Margin::symmetric(12, 0)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    self.nav_button(ui, ShellPage::Home, "Home");
-                    self.nav_button(ui, ShellPage::Console, "Console");
-                    self.nav_button(ui, ShellPage::Hardware, "Hardware");
-                    self.nav_button(ui, ShellPage::Images, "Images");
-                });
-            });
-        hairline_below(ui, strip.response.rect);
-    }
-
     fn draw_central(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.take_runtime_error_notice();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG_BASE))
             .show(ui, |ui| {
-                #[cfg(target_os = "android")]
-                self.draw_android_tab_strip(ui);
                 match self.chrome.page() {
                     ShellPage::Home => self.draw_home_page(ui),
                     ShellPage::Console => self.draw_console_page(ui, frame),
                     ShellPage::Hardware => self.draw_hardware_page(ui),
-                    ShellPage::Images => self.draw_images_page(ui),
                 }
             });
     }
@@ -1466,11 +1677,11 @@ impl NativeShellApp {
                         // is a verb, so the two shortcuts rest on the hairline.
                         action_tile(
                             &mut columns[1],
-                            "Create Disk Image",
-                            "Build bximage-compatible hard disks and floppies.",
+                            "New Hard Disk",
+                            "Create a disk and attach it to this VM.",
                             STROKE_HAIRLINE,
                             ActionTileWeight::Secondary,
-                            || self.chrome.go_to(ShellPage::Images),
+                            || self.open_new_disk_sheet(),
                         );
                         action_tile(
                             &mut columns[2],
@@ -1902,95 +2113,17 @@ impl NativeShellApp {
                 detail_row(ui, "Effective boot order", &self.vm_info.boot);
             }
             HardwareDevice::HardDisk => {
-                page_header(
-                    ui,
-                    "Hard disk",
-                    "Attach or detach hard disk media for the next launch.",
-                );
-                ui.add_enabled_ui(editable, |ui| {
-                    changed |= field_row(ui, "", |ui| {
-                        ui.checkbox(&mut self.settings.disk_enabled, "Enable hard disk")
-                            .changed()
-                    });
-                    field_row(ui, "Disk path", |ui| {
-                        changed |= ui
-                            .add(
-                                egui::TextEdit::singleline(&mut self.settings.disk_path)
-                                    .desired_width(path_field_width(ui)),
-                            )
-                            .changed();
-                        if ui.button(BROWSE).clicked() {
-                            changed |= self.browse(BrowseTarget::HardDisk);
-                        }
-                    });
-                    field_row(ui, "ATA channel", |ui| {
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut self.settings.disk_channel).range(0..=1))
-                            .changed();
-                        ui.label(RichText::new("drive").color(TEXT_MUTED));
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut self.settings.disk_drive).range(0..=1))
-                            .changed();
-                    });
-
-                    let mut override_enabled = self.settings.disk_chs_override.is_some();
-                    field_row(ui, "", |ui| {
-                        if ui
-                            .checkbox(&mut override_enabled, "Override CHS geometry")
-                            .on_hover_text(
-                                "Force a specific cylinders/heads/sectors geometry instead of \
-                                 auto-detecting it from the image size.",
-                            )
-                            .changed()
-                        {
-                            self.settings.disk_chs_override = override_enabled.then(|| {
-                                self.config.disk.as_ref().map_or(
-                                    crate::args::DiskGeometry {
-                                        cylinders: 16_383,
-                                        heads: 16,
-                                        sectors_per_track: 63,
-                                    },
-                                    |disk| disk.geometry,
-                                )
-                            });
-                            changed = true;
-                        }
-                    });
-                    if let Some(chs) = &mut self.settings.disk_chs_override {
-                        field_row(ui, "Cylinders", |ui| {
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut chs.cylinders)
-                                        .range(1..=(rusty_box_bximage::BOCHS_MAX_CYLINDERS - 1) as u32),
-                                )
-                                .changed();
-                            ui.label(RichText::new("heads").color(TEXT_MUTED));
-                            changed |= ui
-                                .add(egui::DragValue::new(&mut chs.heads).range(1..=u8::MAX))
-                                .changed();
-                            ui.label(RichText::new("sectors").color(TEXT_MUTED));
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut chs.sectors_per_track)
-                                        .range(1..=u8::MAX),
-                                )
-                                .changed();
-                        });
-                    }
-                });
-                if let Some(disk) = &self.config.disk {
-                    detail_row(ui, "Detected CHS", &disk.geometry.to_string());
-                    detail_row(
-                        ui,
-                        "Controller",
-                        &format!("ATA {}:{}", disk.channel, disk.drive),
+                page_header(ui, "Hard disk", "The disk the VM installs to and boots from.");
+                if !editable {
+                    ui.label(
+                        RichText::new("Power the VM off to change its disk.")
+                            .size(TEXT_SECONDARY)
+                            .color(TEXT_MUTED),
                     );
-                } else {
-                    detail_row(ui, "Attached disk", "None");
                 }
-                if ui.button("Create disk image").clicked() {
-                    self.chrome.go_to(ShellPage::Images);
-                }
+                ui.add_enabled_ui(editable, |ui| {
+                    changed |= self.draw_hard_disk(ui);
+                });
             }
             HardwareDevice::CdDvd => {
                 page_header(
@@ -2192,17 +2325,251 @@ impl NativeShellApp {
         }
     }
 
-    fn draw_images_page(&mut self, ui: &mut egui::Ui) {
-        self.draw_shell_notice(ui);
-        if let Some(created) = self.disk_creator.ui_page(ui) {
+    /// The floppy maker's window while it is open, and its Browse.
+    fn draw_floppy_maker(&mut self, ctx: &egui::Context) {
+        if !self.floppy_maker_open {
+            return;
+        }
+        let mut open = true;
+        if let Some(created) = self.floppy_maker.ui_window(ctx, &mut open) {
             self.handle_created_image(created);
         }
-        if std::mem::take(&mut self.disk_creator.browse_requested)
-            && self.browse(BrowseTarget::NewImage)
+        self.floppy_maker_open = open;
+        if std::mem::take(&mut self.floppy_maker.browse_requested)
+            && self.browse(BrowseTarget::NewFloppy)
         {
             if let Err(message) = self.apply_pending_settings() {
                 self.notify(ShellNotice::error(message));
             }
+        }
+    }
+
+    /// Opens Hardware › Hard disk with a new-disk sheet for the selected VM.
+    fn open_new_disk_sheet(&mut self) {
+        self.chrome.go_to(ShellPage::Hardware);
+        self.chrome.selected_hardware = HardwareDevice::HardDisk;
+        self.new_disk = Some(NewDiskDraft::for_vm(&self.vm_info.name));
+    }
+
+    /// The Hard disk page's body: the new-disk sheet while it is open;
+    /// otherwise a choice between a new disk and a file when the VM has no
+    /// disk, or the disk it has. Returns whether the VM's settings changed.
+    fn draw_hard_disk(&mut self, ui: &mut egui::Ui) -> bool {
+        if self.new_disk.is_some() {
+            self.draw_new_disk_sheet(ui);
+            return false;
+        }
+        let mut changed = false;
+        let mut open_sheet = false;
+        match crate::hard_disk::HardDiskState::of(
+            self.settings.disk_enabled,
+            &self.settings.disk_path,
+        ) {
+            crate::hard_disk::HardDiskState::Empty => {
+                ui.columns(2, |columns| {
+                    action_tile(
+                        &mut columns[0],
+                        "+ New disk",
+                        "Pick a size, then create it.",
+                        ACCENT_CYAN,
+                        ActionTileWeight::Primary,
+                        || open_sheet = true,
+                    );
+                    action_tile(
+                        &mut columns[1],
+                        "Use a disk file",
+                        "Choose an image you already have.",
+                        STROKE_HAIRLINE,
+                        ActionTileWeight::Secondary,
+                        || changed = self.browse(BrowseTarget::HardDisk),
+                    );
+                });
+            }
+            crate::hard_disk::HardDiskState::Attached { path } => {
+                shell_card_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let name = path.file_name().map_or_else(
+                        || path.display().to_string(),
+                        |name| name.to_string_lossy().into_owned(),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(name).size(TEXT_BODY).strong().color(TEXT_PRIMARY));
+                        match std::fs::metadata(&path) {
+                            Ok(metadata) => ui.label(
+                                RichText::new(format!(
+                                    "· {}",
+                                    crate::hard_disk::format_disk_bytes(metadata.len())
+                                ))
+                                .color(TEXT_MUTED),
+                            ),
+                            Err(_) => ui.label(
+                                RichText::new("· the file is missing").color(ACCENT_RED),
+                            ),
+                        };
+                    });
+                    if let Some(folder) = path.parent() {
+                        ui.label(
+                            RichText::new(folder.display().to_string())
+                                .size(TEXT_SECONDARY)
+                                .color(TEXT_MUTED),
+                        );
+                    }
+                    ui.add_space(SPACE_ITEM);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Change").clicked() {
+                            changed |= self.browse(BrowseTarget::HardDisk);
+                        }
+                        if ui.button("Detach").clicked() {
+                            self.settings.disk_enabled = false;
+                            changed = true;
+                        }
+                        if ui.button("+ New disk").clicked() {
+                            open_sheet = true;
+                        }
+                    });
+                });
+                ui.add_space(SPACE_ITEM);
+                egui::CollapsingHeader::new("Advanced")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        changed |= self.draw_disk_advanced(ui);
+                    });
+            }
+        }
+        if open_sheet {
+            self.open_new_disk_sheet();
+        }
+        changed
+    }
+
+    /// The disk's controller slot and geometry, which rarely need changing.
+    /// Returns whether the VM's settings changed.
+    fn draw_disk_advanced(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut changed = false;
+        field_row(ui, "ATA channel", |ui| {
+            changed |= ui
+                .add(egui::DragValue::new(&mut self.settings.disk_channel).range(0..=1))
+                .changed();
+            ui.label(RichText::new("drive").color(TEXT_MUTED));
+            changed |= ui
+                .add(egui::DragValue::new(&mut self.settings.disk_drive).range(0..=1))
+                .changed();
+        });
+        let mut override_enabled = self.settings.disk_chs_override.is_some();
+        field_row(ui, "", |ui| {
+            if ui
+                .checkbox(&mut override_enabled, "Override CHS geometry")
+                .on_hover_text(
+                    "Force a specific cylinders/heads/sectors geometry instead of \
+                     auto-detecting it from the image size.",
+                )
+                .changed()
+            {
+                self.settings.disk_chs_override = override_enabled.then(|| {
+                    self.config.disk.as_ref().map_or(
+                        crate::args::DiskGeometry {
+                            cylinders: 16_383,
+                            heads: 16,
+                            sectors_per_track: 63,
+                        },
+                        |disk| disk.geometry,
+                    )
+                });
+                changed = true;
+            }
+        });
+        if let Some(chs) = &mut self.settings.disk_chs_override {
+            field_row(ui, "Cylinders", |ui| {
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut chs.cylinders)
+                            .range(1..=(rusty_box_bximage::BOCHS_MAX_CYLINDERS - 1) as u32),
+                    )
+                    .changed();
+                ui.label(RichText::new("heads").color(TEXT_MUTED));
+                changed |= ui
+                    .add(egui::DragValue::new(&mut chs.heads).range(1..=u8::MAX))
+                    .changed();
+                ui.label(RichText::new("sectors").color(TEXT_MUTED));
+                changed |= ui
+                    .add(egui::DragValue::new(&mut chs.sectors_per_track).range(1..=u8::MAX))
+                    .changed();
+            });
+        }
+        if let Some(disk) = &self.config.disk {
+            detail_row(ui, "Detected CHS", &disk.geometry.to_string());
+            detail_row(ui, "Controller", &format!("ATA {}:{}", disk.channel, disk.drive));
+        }
+        changed
+    }
+
+    /// The new-disk sheet: its name, size and folder, and the verbs that
+    /// create it or put it away.
+    fn draw_new_disk_sheet(&mut self, ui: &mut egui::Ui) {
+        let Some(draft) = self.new_disk.as_mut() else {
+            return;
+        };
+        let action = draw_new_disk_form(ui, draft);
+        match action {
+            NewDiskAction::None => {}
+            NewDiskAction::Create => self.create_new_disk(ExistingFilePolicy::CreateNew),
+            NewDiskAction::Replace => self.create_new_disk(ExistingFilePolicy::Truncate),
+            NewDiskAction::SaveAs(name) => {
+                if let Some(draft) = self.new_disk.as_mut() {
+                    draft.name = name;
+                }
+                self.create_new_disk(ExistingFilePolicy::CreateNew);
+            }
+            NewDiskAction::OtherFolder => {
+                // The folder is the sheet's, not the VM's settings: the answer
+                // never changes them.
+                if self.browse(BrowseTarget::NewDisk) {
+                    if let Err(message) = self.apply_pending_settings() {
+                        self.notify(ShellNotice::error(message));
+                    }
+                }
+            }
+            NewDiskAction::Cancel => self.new_disk = None,
+        }
+    }
+
+    /// Creates the sheet's disk and attaches it to the VM. A file of the same
+    /// name stops a plain create: the sheet then asks whether to replace it
+    /// or save under the first free name.
+    fn create_new_disk(&mut self, existing: ExistingFilePolicy) {
+        let Some(draft) = self.new_disk.as_mut() else {
+            return;
+        };
+        draft.error = None;
+        let name = draft.name.trim().to_owned();
+        if name.is_empty() {
+            draft.error = Some("Give the disk a name.".to_owned());
+            return;
+        }
+        let folder = match draft.folder.resolve() {
+            Ok(folder) => folder,
+            Err(message) => {
+                draft.error = Some(message);
+                return;
+            }
+        };
+        let path = folder.join(&name);
+        if existing == ExistingFilePolicy::CreateNew && path.exists() {
+            draft.conflict = Some(crate::hard_disk::first_free_name(&name, |candidate| {
+                folder.join(candidate).exists()
+            }));
+            return;
+        }
+        draft.conflict = None;
+        match crate::hard_disk::create_disk(&path, draft.size, existing) {
+            Ok(_) => {
+                self.new_disk = None;
+                self.handle_created_image(CreatedImage {
+                    path,
+                    kind: CreatedImageKind::HardDisk,
+                });
+            }
+            Err(message) => draft.error = Some(message),
         }
     }
 
@@ -2240,33 +2607,6 @@ impl NativeShellApp {
             Err(message) => {
                 self.notify(ShellNotice::error(message));
             }
-        }
-    }
-
-    /// The phone form factor's navigation. Android hides the sidebar, so on a
-    /// phone this strip is the only way off the page it is drawn on.
-    #[cfg(target_os = "android")]
-    fn nav_button(&mut self, ui: &mut egui::Ui, page: ShellPage, label: &str) {
-        let selected = self.chrome.page() == page;
-        let text = RichText::new(label)
-            .size(14.0)
-            .color(if selected { TEXT_PRIMARY } else { TEXT_MUTED });
-        let text = if selected { text.strong() } else { text };
-        let response = ui.add(
-            egui::Button::new(text)
-                .frame_when_inactive(false)
-                .min_size(egui::vec2(0.0, ui.available_height())),
-        );
-        if selected {
-            let rect = response.rect;
-            ui.painter().hline(
-                rect.x_range(),
-                rect.bottom() - 1.0,
-                Stroke::new(2.0_f32, ACCENT_CYAN),
-            );
-        }
-        if response.clicked() {
-            self.chrome.go_to(page);
         }
     }
 
@@ -2762,100 +3102,132 @@ impl NativeShellApp {
         }
     }
 
+    /// How the phone draws this frame: see `android_support::console_view`.
+    /// Only a notice the phone shows holds the shell's bars.
     #[cfg(target_os = "android")]
-    fn draw_android_console_header(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("android_console_header")
-            .exact_size(32.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
-                    .inner_margin(egui::Margin::symmetric(12, 4)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let status = self.runtime_status();
-                    let running = status.running;
-                    let start_blocked = running || status.start_pending;
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Home").clicked() {
-                            self.chrome.go_to(ShellPage::Home);
-                            ui.close();
-                        }
-                        if ui.button("Create Disk Image").clicked() {
-                            self.chrome.go_to(ShellPage::Images);
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button("Quit").clicked() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.menu_button("VM", |ui| {
-                        if ui
-                            .add_enabled(!start_blocked, egui::Button::new("Power On"))
-                            .clicked()
-                        {
-                            self.start_vm();
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(running, egui::Button::new("Power Off"))
-                            .clicked()
-                        {
-                            self.request_power_off();
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(running, egui::Button::new("Restart VM"))
-                            .clicked()
-                        {
-                            self.request_reset();
-                            ui.close();
-                        }
-                    });
-                    ui.separator();
-                    let state = if running {
-                        "Running"
-                    } else if status.start_pending {
-                        "Starting"
-                    } else {
-                        "Stopped"
-                    };
-                    ui.label(
-                        RichText::new(state)
-                            .monospace()
-                            .size(11.0)
-                            .color(TEXT_PRIMARY),
-                    );
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format_ips_u32(status.ips))
-                            .monospace()
-                            .size(11.0)
-                            .color(ACCENT_BLUE),
-                    );
-                    ui.separator();
-                    self.nav_button(ui, ShellPage::Home, "Home");
-                    self.nav_button(ui, ShellPage::Console, "Console");
-                    self.nav_button(ui, ShellPage::Hardware, "Hardware");
-                    self.nav_button(ui, ShellPage::Images, "Images");
-                    if ui
-                        .add_enabled(!start_blocked, egui::Button::new("Power On"))
-                        .clicked()
-                    {
-                        self.start_vm();
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(&self.vm_info.name)
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                    });
+    fn console_view(&self) -> crate::android_support::ConsoleView {
+        use crate::android_support::{console_view, MachineActivity, NoticeWaiting};
+        let notice = match &self.shell_notice {
+            Some(notice) if phone_shows_notice(notice.kind) => NoticeWaiting::Shown,
+            Some(_) | None => NoticeWaiting::None,
+        };
+        console_view(
+            self.chrome.page(),
+            MachineActivity::of(&self.runtime_status()),
+            notice,
+        )
+    }
+
+    /// The guest alone on the phone's screen, fitted or stretched as the VM
+    /// is set, under a corner button that opens the console's menu.
+    #[cfg(target_os = "android")]
+    fn draw_full_screen_console(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let scale = if self.settings.console_stretch {
+            rusty_box::gui::DisplayScale::Stretch
+        } else {
+            rusty_box::gui::DisplayScale::Fit
+        };
+        self.emulator.set_display_scale(scale);
+        let area = ui.max_rect();
+        self.emulator.ui_embedded_with_serial(ui, frame, false, None);
+
+        let ctx = ui.ctx().clone();
+        egui::Area::new(egui::Id::new("full_screen_menu_button"))
+            .fixed_pos(area.left_top() + egui::vec2(SPACE_GROUP, SPACE_GROUP))
+            .order(egui::Order::Foreground)
+            .show(&ctx, |ui| {
+                let button = egui::Button::new(RichText::new(FULL_SCREEN_MENU).color(TEXT_PRIMARY))
+                    .fill(egui::Color32::from_black_alpha(FULL_SCREEN_BUTTON_ALPHA))
+                    .corner_radius(FULL_SCREEN_BUTTON_SIZE / 2.0)
+                    .min_size(egui::vec2(FULL_SCREEN_BUTTON_SIZE, FULL_SCREEN_BUTTON_SIZE));
+                if ui.add(button).clicked() {
+                    self.full_screen_menu_open = !self.full_screen_menu_open;
+                }
+            });
+        if self.full_screen_menu_open {
+            self.draw_full_screen_menu(&ctx, area);
+        }
+    }
+
+    /// The full-screen console's menu: the machine's state and rate, the key
+    /// pad, the verbs that act on the guest, the fit or stretch choice, and
+    /// the way back to the shell with the machine left running.
+    #[cfg(target_os = "android")]
+    fn draw_full_screen_menu(&mut self, ctx: &egui::Context, area: egui::Rect) {
+        let status = self.runtime_status();
+        let badge = shell_state_badge(&status, self.has_error_notice());
+        let below_button = SPACE_GROUP + FULL_SCREEN_BUTTON_SIZE + SPACE_ITEM;
+        egui::Window::new("full_screen_menu")
+            .title_bar(false)
+            .resizable(false)
+            .collapsible(false)
+            .fixed_pos(area.left_top() + egui::vec2(SPACE_GROUP, below_button))
+            .constrain_to(area)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    status_dot(ui, badge.color);
+                    ui.label(status_text(badge.label).color(badge.color));
+                    ui.label(status_text("·").color(TEXT_MUTED));
+                    ui.label(status_text(engine_label(self.settings.engine)).color(TEXT_PRIMARY));
+                    ui.label(status_text("·").color(TEXT_MUTED));
+                    ui.label(status_text(format_ips_u32(status.ips)).color(ACCENT_BLUE));
                 });
+                ui.separator();
+                if ui.button("Keys").clicked() {
+                    self.keypad_requested = true;
+                    self.full_screen_menu_open = false;
+                }
+                if ui
+                    .add_enabled(status.running, egui::Button::new("Ctrl+Alt+Del"))
+                    .clicked()
+                {
+                    self.emulator.send_ctrl_alt_del();
+                }
+                let mut stretch = self.settings.console_stretch;
+                if ui.checkbox(&mut stretch, "Stretch to fill").changed() {
+                    self.settings.console_stretch = stretch;
+                    if let Err(message) = self.apply_pending_settings() {
+                        self.notify(ShellNotice::error(message));
+                    }
+                }
+                let mut speed = self.settings.pointer_speed.percent();
+                let slider = egui::Slider::new(&mut speed, crate::config::PointerSpeed::RANGE_PERCENT)
+                    .text("Pointer speed")
+                    .suffix(" %");
+                if ui.add(slider).changed() {
+                    self.settings.pointer_speed = crate::config::PointerSpeed::from_percent(speed);
+                    if let Err(message) = self.apply_pending_settings() {
+                        self.notify(ShellNotice::error(message));
+                    }
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(status.running, egui::Button::new("■ Power off"))
+                    .clicked()
+                {
+                    self.request_power_off();
+                    self.full_screen_menu_open = false;
+                }
+                if ui
+                    .add_enabled(status.running, egui::Button::new("↻ Restart"))
+                    .clicked()
+                {
+                    self.request_reset();
+                    self.full_screen_menu_open = false;
+                }
+                if ui.button("Exit to shell").clicked() {
+                    self.chrome.go_to(ShellPage::Home);
+                    self.full_screen_menu_open = false;
+                }
             });
     }
+
+    /// Whether the full-screen menu asked for the key pad since the last call.
+    #[cfg(target_os = "android")]
+    pub(crate) fn take_keypad_request(&mut self) -> bool {
+        core::mem::take(&mut self.keypad_requested)
+    }
+
     fn request_reset(&mut self) {
         if !self.is_vm_running() {
             return;
@@ -2873,7 +3245,14 @@ impl NativeShellApp {
     #[cfg(not(target_os = "android"))]
     fn browse(&mut self, target: BrowseTarget) -> bool {
         let chosen = match target {
-            BrowseTarget::NewImage => save_native_file(self.disk_creator.default_image_filename()),
+            BrowseTarget::NewDisk => {
+                let name = self
+                    .new_disk
+                    .as_ref()
+                    .map_or_else(|| "disk.img".to_owned(), |draft| draft.name.clone());
+                save_native_file(&name)
+            }
+            BrowseTarget::NewFloppy => save_native_file(FLOPPY_FILE_NAME),
             BrowseTarget::HardDisk
             | BrowseTarget::Cdrom
             | BrowseTarget::Bios
@@ -2915,8 +3294,21 @@ impl NativeShellApp {
                 self.settings.vga_bios_path = text;
                 true
             }
-            BrowseTarget::NewImage => {
-                self.disk_creator.path = text;
+            BrowseTarget::NewDisk => {
+                if let Some(draft) = self.new_disk.as_mut() {
+                    if let Some(folder) = path.parent() {
+                        draft.folder = DiskFolder::Chosen(folder.to_path_buf());
+                    }
+                    if let Some(name) = path.file_name() {
+                        draft.name = name.to_string_lossy().into_owned();
+                    }
+                    draft.conflict = None;
+                    draft.error = None;
+                }
+                false
+            }
+            BrowseTarget::NewFloppy => {
+                self.floppy_maker.path = text;
                 false
             }
         }
@@ -2928,18 +3320,29 @@ impl NativeShellApp {
     pub(crate) fn take_browse_request(&mut self) -> Option<BrowseRequest> {
         let target = self.browse_request.take()?;
         let (current, save_name) = match target {
-            BrowseTarget::HardDisk => (&self.settings.disk_path, None),
-            BrowseTarget::Cdrom => (&self.settings.cdrom_path, None),
-            BrowseTarget::Bios => (&self.settings.bios_path, None),
-            BrowseTarget::VgaBios => (&self.settings.vga_bios_path, None),
-            BrowseTarget::NewImage => (
-                &self.disk_creator.path,
-                Some(self.disk_creator.default_image_filename()),
+            BrowseTarget::HardDisk => (PathBuf::from(self.settings.disk_path.trim()), None),
+            BrowseTarget::Cdrom => (PathBuf::from(self.settings.cdrom_path.trim()), None),
+            BrowseTarget::Bios => (PathBuf::from(self.settings.bios_path.trim()), None),
+            BrowseTarget::VgaBios => (PathBuf::from(self.settings.vga_bios_path.trim()), None),
+            BrowseTarget::NewDisk => {
+                // The browser opens in the sheet's folder, offering its name.
+                let current = self.new_disk.as_ref().map_or_else(PathBuf::new, |draft| {
+                    draft
+                        .folder
+                        .resolve()
+                        .unwrap_or_default()
+                        .join(draft.name.trim())
+                });
+                (current, Some("disk.img"))
+            }
+            BrowseTarget::NewFloppy => (
+                PathBuf::from(self.floppy_maker.path.trim()),
+                Some(FLOPPY_FILE_NAME),
             ),
         };
         Some(BrowseRequest {
             target,
-            current: PathBuf::from(current.trim()),
+            current,
             save_name,
         })
     }
@@ -2958,17 +3361,23 @@ impl NativeShellApp {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeShellApp {
-    /// One frame of the shell: on Android the console page stands alone under
-    /// its own header; everywhere else the VM bar, the tree, the status strip
-    /// and the page.
+    /// One frame of the shell: the VM bar, the tree, the status strip and the
+    /// page — or, on a phone whose console shows a live machine, the guest
+    /// alone under its corner menu. A runtime error is taken first, so the
+    /// frame that raises it already shows it.
     fn draw_shell(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.take_runtime_error_notice();
         #[cfg(target_os = "android")]
-        if self.chrome.page() == ShellPage::Console {
-            self.draw_android_console_header(ui);
-            self.draw_status_strip(ui);
-            self.draw_central(ui, frame);
-            draw_about_window(ui.ctx(), &mut self.chrome);
-            return;
+        {
+            self.emulator
+                .set_pointer_speed(self.settings.pointer_speed.factor());
+            if self.console_view() == crate::android_support::ConsoleView::FullScreen {
+                self.draw_full_screen_console(ui, frame);
+                return;
+            }
+            self.full_screen_menu_open = false;
+            self.emulator
+                .set_display_scale(rusty_box::gui::DisplayScale::Fit);
         }
 
         self.draw_vm_bar(ui);
@@ -2977,6 +3386,7 @@ impl NativeShellApp {
         }
         self.draw_status_strip(ui);
         self.draw_central(ui, frame);
+        self.draw_floppy_maker(ui.ctx());
         draw_about_window(ui.ctx(), &mut self.chrome);
     }
 }
@@ -3021,114 +3431,75 @@ impl eframe::App for NativeShellApp {
     }
 }
 
-impl DiskCreatorPanel {
+impl FloppyMaker {
+    /// The floppy maker's window, while `open`. Returns the image it made.
     #[cfg(feature = "gui-egui")]
-    fn ui_page(&mut self, ui: &mut egui::Ui) -> Option<CreatedImage> {
+    fn ui_window(&mut self, ctx: &egui::Context, open: &mut bool) -> Option<CreatedImage> {
         let mut created_image = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Frame::new()
-                .inner_margin(egui::Margin::same(SPACE_PAGE))
-                .show(ui, |ui| {
-                    page_header(
-                        ui,
-                        "Disk images",
-                        "Create flat hard disks and floppy images with the bximage backend.",
-                    );
-                    shell_card_frame().show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        field_row(ui, "Kind", |ui| {
-                            ui.radio_value(&mut self.kind, CreatorKind::HardDisk, "Hard disk");
-                            ui.radio_value(&mut self.kind, CreatorKind::Floppy, "Floppy");
-                        });
-
-                        #[cfg(not(target_arch = "wasm32"))]
-                        field_row(ui, "Path", |ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.path)
-                                    .desired_width(path_field_width(ui)),
-                            );
-                            if ui.button(BROWSE).clicked() {
-                                self.browse_requested = true;
+        egui::Window::new("Create floppy image")
+            .open(open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("A VM cannot use a floppy yet; the image is only written.")
+                        .size(TEXT_SECONDARY)
+                        .color(TEXT_MUTED),
+                );
+                field_row(ui, "Format", |ui| {
+                    egui::ComboBox::from_id_salt("Floppy format")
+                        .selected_text(self.floppy_format.friendly_label())
+                        .show_ui(ui, |ui| {
+                            for format in FloppyFormat::ALL {
+                                ui.selectable_value(
+                                    &mut self.floppy_format,
+                                    format,
+                                    format.friendly_label(),
+                                );
                             }
                         });
-
-                        #[cfg(target_arch = "wasm32")]
-                        field_row(ui, "Filename", |ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.path)
-                                    .desired_width(320.0),
-                            );
-                        });
-
-                        match self.kind {
-                            CreatorKind::HardDisk => {
-                                field_row(ui, "Size", |ui| {
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.hard_disk_size)
-                                            .hint_text("20G")
-                                            .desired_width(120.0),
-                                    );
-                                    ui.label(
-                                        RichText::new("Examples: 10M, 512M, 20G, 512")
-                                            .size(TEXT_SECONDARY)
-                                            .color(TEXT_MUTED),
-                                    );
-                                });
-                            }
-                            CreatorKind::Floppy => {
-                                field_row(ui, "Floppy format", |ui| {
-                                    egui::ComboBox::from_id_salt("Floppy format")
-                                        .selected_text(self.floppy_format.friendly_label())
-                                        .show_ui(ui, |ui| {
-                                            for format in FloppyFormat::ALL {
-                                                ui.selectable_value(
-                                                    &mut self.floppy_format,
-                                                    format,
-                                                    format.friendly_label(),
-                                                );
-                                            }
-                                        });
-                                });
-                            }
-                        }
-
-                        #[cfg(not(target_arch = "wasm32"))]
-                        field_row(ui, "", |ui| {
-                            ui.checkbox(&mut self.overwrite, "Overwrite existing file");
-                        });
-
-                        ui.add_space(SPACE_GROUP);
-                        let action = if cfg!(target_arch = "wasm32") {
-                            "Download image"
-                        } else {
-                            "Create image"
-                        };
-                        if ui.add(primary_button(action)).clicked() {
-                            created_image = self.create_image();
-                        }
-
-                        if let Some(status) = &self.status {
-                            match status {
-                                CreatorStatus::Success(message) => {
-                                    ui.colored_label(ACCENT_CYAN, message);
-                                }
-                                CreatorStatus::Error(message) => {
-                                    ui.colored_label(ACCENT_RED, message);
-                                }
-                            }
-                        }
-                    });
                 });
-        });
-        created_image
-    }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn default_image_filename(&self) -> &'static str {
-        match self.kind {
-            CreatorKind::HardDisk => "c.img",
-            CreatorKind::Floppy => "floppy.img",
-        }
+                #[cfg(not(target_arch = "wasm32"))]
+                field_row(ui, "Save as", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.path)
+                            .desired_width(path_field_width(ui)),
+                    );
+                    if ui.button(BROWSE).clicked() {
+                        self.browse_requested = true;
+                    }
+                });
+                #[cfg(target_arch = "wasm32")]
+                field_row(ui, "File name", |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(240.0));
+                });
+                #[cfg(not(target_arch = "wasm32"))]
+                field_row(ui, "", |ui| {
+                    ui.checkbox(&mut self.overwrite, "Replace an existing file");
+                });
+
+                ui.add_space(SPACE_ITEM);
+                let action = if cfg!(target_arch = "wasm32") {
+                    "Download floppy image"
+                } else {
+                    "Create floppy image"
+                };
+                if ui.add(primary_button(action)).clicked() {
+                    created_image = self.create_image();
+                }
+                if let Some(status) = &self.status {
+                    match status {
+                        CreatorStatus::Success(message) => {
+                            ui.colored_label(ACCENT_CYAN, message);
+                        }
+                        CreatorStatus::Error(message) => {
+                            ui.colored_label(ACCENT_RED, message);
+                        }
+                    }
+                }
+            });
+        created_image
     }
 
     fn create_image(&mut self) -> Option<CreatedImage> {
@@ -3145,29 +3516,16 @@ impl DiskCreatorPanel {
             } else {
                 ExistingFilePolicy::CreateNew
             };
-            match self.kind {
-                CreatorKind::HardDisk => self.create_hard_disk(&path, policy),
-                CreatorKind::Floppy => create_floppy(&path, self.floppy_format, policy)
-                    .map_err(|error| error.to_string()),
-            }
+            create_floppy(&path, self.floppy_format, policy).map_err(|error| error.to_string())
         };
 
         #[cfg(target_arch = "wasm32")]
-        let result = match self.kind {
-            CreatorKind::HardDisk => ImageSize::parse(&self.hard_disk_size)
-                .map_err(|error| error.to_string())
-                .and_then(|size| create_browser_hard_disk_bytes(&path, size))
-                .and_then(|(bytes, created)| {
-                    download_bytes(&path, bytes)?;
-                    Ok(created)
-                }),
-            CreatorKind::Floppy => create_browser_floppy_bytes(&path, self.floppy_format).and_then(
-                |(bytes, created)| {
-                    download_bytes(&path, bytes)?;
-                    Ok(created)
-                },
-            ),
-        };
+        let result = create_browser_floppy_bytes(&path, self.floppy_format).and_then(
+            |(bytes, created)| {
+                download_bytes(&path, bytes)?;
+                Ok(created)
+            },
+        );
 
         match result {
             Ok(created) => {
@@ -3176,10 +3534,7 @@ impl DiskCreatorPanel {
                 ));
                 Some(CreatedImage {
                     path: std::path::PathBuf::from(path),
-                    kind: match self.kind {
-                        CreatorKind::HardDisk => CreatedImageKind::HardDisk,
-                        CreatorKind::Floppy => CreatedImageKind::Floppy,
-                    },
+                    kind: CreatedImageKind::Floppy,
                 })
             }
             Err(error) => {
@@ -3187,22 +3542,6 @@ impl DiskCreatorPanel {
                 None
             }
         }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn create_hard_disk(
-        &self,
-        path: &str,
-        policy: ExistingFilePolicy,
-    ) -> Result<BxCreatedImage, String> {
-        let size = ImageSize::parse(&self.hard_disk_size).map_err(|error| error.to_string())?;
-        // Reject sizes whose physical geometry exceeds the emulator's cylinder limit
-        // (BOCHS_MAX_CYLINDERS, 2^24) *before* touching the filesystem. Everything below
-        // that — including 32 GiB+ — is a valid disk.
-        calculate_hard_disk_geometry(size, SectorSize::Bytes512).map_err(|error| error.to_string())?;
-
-        create_flat_hard_disk(path, size, SectorSize::Bytes512, policy)
-            .map_err(|error| error.to_string())
     }
 }
 
@@ -3213,7 +3552,11 @@ type WebEmulator =
 #[cfg(target_arch = "wasm32")]
 pub struct WebShellApp {
     chrome: ShellChrome,
-    disk_creator: DiskCreatorPanel,
+    floppy_maker: FloppyMaker,
+    /// The floppy maker's window is open.
+    floppy_maker_open: bool,
+    /// The Hard disk page's new-disk sheet, while it is open.
+    new_disk: Option<NewDiskDraft>,
     boot_mode: WebBootMode,
     emulator: Option<WebEmulator>,
     display: rusty_box::gui::shared_display::SharedDisplay,
@@ -3472,7 +3815,9 @@ impl WebShellApp {
         )]);
         Self {
             chrome,
-            disk_creator: DiskCreatorPanel::default(),
+            floppy_maker: FloppyMaker::default(),
+            floppy_maker_open: false,
+            new_disk: None,
             boot_mode: WebBootMode::Launcher,
             emulator: None,
             display: rusty_box::gui::shared_display::SharedDisplay::new(),
@@ -3843,8 +4188,12 @@ impl WebShellApp {
                             self.open_file_picker();
                             ui.close();
                         }
-                        if ui.button("Create Disk Image").clicked() {
-                            self.chrome.go_to(ShellPage::Images);
+                        if ui.button("New Hard Disk…").clicked() {
+                            self.open_new_disk_sheet();
+                            ui.close();
+                        }
+                        if ui.button("Create floppy image…").clicked() {
+                            self.floppy_maker_open = true;
                             ui.close();
                         }
                     });
@@ -3873,7 +4222,6 @@ impl WebShellApp {
                     self.nav_button(ui, ShellPage::Home, "Home");
                     self.nav_button(ui, ShellPage::Console, "Console");
                     self.nav_button(ui, ShellPage::Hardware, "Hardware");
-                    self.nav_button(ui, ShellPage::Images, "Images");
                 });
             });
     }
@@ -3901,8 +4249,8 @@ impl WebShellApp {
                     if ui.button("▣ Hardware").clicked() {
                         self.chrome.go_to(ShellPage::Hardware);
                     }
-                    if ui.button("+ New Image").clicked() {
-                        self.chrome.go_to(ShellPage::Images);
+                    if ui.button("+ New Disk").clicked() {
+                        self.open_new_disk_sheet();
                     }
                     ui.checkbox(&mut self.chrome.show_library, "Library");
                     ui.checkbox(&mut self.chrome.show_serial, "Serial");
@@ -4011,10 +4359,39 @@ impl WebShellApp {
                 ShellPage::Home => self.draw_web_home_page(ui),
                 ShellPage::Console => self.draw_web_console_page(ui),
                 ShellPage::Hardware => self.draw_web_hardware_page(ui),
-                ShellPage::Images => {
-                    drop(self.disk_creator.ui_page(ui));
-                }
             });
+        if self.floppy_maker_open {
+            let mut open = true;
+            // The browser saves the floppy as a download; the shell has
+            // nothing to attach it to.
+            drop(self.floppy_maker.ui_window(ui.ctx(), &mut open));
+            self.floppy_maker_open = open;
+        }
+    }
+
+    /// Opens Hardware › Hard disk with a new-disk sheet.
+    fn open_new_disk_sheet(&mut self) {
+        self.chrome.go_to(ShellPage::Hardware);
+        self.chrome.selected_hardware = HardwareDevice::HardDisk;
+        self.new_disk = Some(NewDiskDraft::for_vm("Rusty Box"));
+    }
+
+    /// Builds the sheet's disk image in memory and saves it as a download.
+    fn download_new_disk(&mut self) {
+        let Some(draft) = self.new_disk.as_mut() else {
+            return;
+        };
+        let name = draft.name.trim().to_owned();
+        if name.is_empty() {
+            draft.error = Some("Give the disk a name.".to_owned());
+            return;
+        }
+        let downloaded = create_browser_hard_disk_bytes(&name, draft.size.image_size())
+            .and_then(|(bytes, _created)| download_bytes(&name, bytes));
+        match downloaded {
+            Ok(()) => self.new_disk = None,
+            Err(message) => draft.error = Some(message),
+        }
     }
 
     fn draw_web_home_page(&mut self, ui: &mut egui::Ui) {
@@ -4049,11 +4426,11 @@ impl WebShellApp {
                 );
                 action_tile(
                     &mut columns[2],
-                    "Create Disk Image",
-                    "Download bximage-compatible zero-filled images.",
+                    "New Hard Disk",
+                    "Download a blank disk image to keep.",
                     ACCENT_CYAN,
                     ActionTileWeight::Secondary,
-                    || self.chrome.go_to(ShellPage::Images),
+                    || self.open_new_disk_sheet(),
                 );
             });
         });
@@ -4282,11 +4659,23 @@ impl WebShellApp {
             HardwareDevice::HardDisk => {
                 page_header(
                     ui,
-                    "Browser disk images",
-                    "The browser does not attach host disks. Use Images to download flat disk or floppy images.",
+                    "Hard disk",
+                    "The browser cannot attach a disk yet; a new disk downloads for you to keep.",
                 );
                 detail_row(ui, "Attached disk", "None");
-                detail_row(ui, "Disk images", "Download from Images page");
+                ui.add_space(SPACE_GROUP);
+                match self.new_disk.as_mut() {
+                    Some(draft) => match draw_new_disk_form(ui, draft) {
+                        NewDiskAction::None => {}
+                        NewDiskAction::Create => self.download_new_disk(),
+                        NewDiskAction::Cancel => self.new_disk = None,
+                    },
+                    None => {
+                        if ui.add(primary_button("+ New disk")).clicked() {
+                            self.open_new_disk_sheet();
+                        }
+                    }
+                }
             }
             HardwareDevice::CdDvd => {
                 let attached_media = match (&self.uploaded_media_name, self.uploaded_media_bytes) {
@@ -4775,6 +5164,8 @@ mod tests {
             log_level: crate::args::LogLevel::Warn,
             vga_mode: None,
             pci_vga: false,
+            console_stretch: false,
+            pointer_speed: crate::config::PointerSpeed::DEFAULT,
         }
     }
 
@@ -6695,7 +7086,7 @@ mod tests {
     fn native_start_vm_reports_disconnected_worker_on_shell() {
         let (mut app, command_rx, _library) = native_test_app();
         drop(command_rx);
-        app.disk_creator.status = Some(CreatorStatus::Success("existing status".to_owned()));
+        app.floppy_maker.status = Some(CreatorStatus::Success("existing status".to_owned()));
 
         app.start_vm();
 
@@ -6706,7 +7097,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            app.disk_creator.status,
+            app.floppy_maker.status,
             Some(CreatorStatus::Success("existing status".to_owned()))
         );
         assert!(!app.shared.lock().unwrap().start_pending);
@@ -6953,67 +7344,14 @@ mod tests {
     }
 
     #[test]
-    fn disk_creator_default_filenames_match_kind() {
-        let mut panel = DiskCreatorPanel::default();
-        panel.kind = CreatorKind::HardDisk;
-        assert_eq!(panel.default_image_filename(), "c.img");
-        panel.kind = CreatorKind::Floppy;
-        assert_eq!(panel.default_image_filename(), "floppy.img");
+    fn the_floppy_maker_offers_floppy_img() {
+        assert_eq!(FloppyMaker::default().path, "floppy.img");
     }
 
     #[test]
-    fn hard_disk_panel_creates_vmware_like_default() {
-        let path = unique_temp_path("rusty-box-gui-panel-hard-disk");
-        let mut panel = DiskCreatorPanel::default();
-        panel.path = path.display().to_string();
-        panel.hard_disk_size = "10M".to_owned();
-
-        panel.create_image();
-
-        assert_eq!(fs::metadata(&path).unwrap().len(), 10_321_920);
-        assert!(matches!(panel.status, Some(CreatorStatus::Success(_))));
-        remove_test_file(&path);
-    }
-
-    #[test]
-    fn hard_disk_panel_rejects_non_integer_size() {
-        let mut panel = DiskCreatorPanel::default();
-        panel.hard_disk_size = "ten".to_owned();
-
-        panel.create_image();
-
-        assert_eq!(
-            panel.status,
-            Some(CreatorStatus::Error(
-                "invalid disk size 'ten'; use whole-number sizes like 20G or 512M".to_owned()
-            ))
-        );
-    }
-
-    #[test]
-    fn hard_disk_panel_rejects_beyond_bochs_cylinder_limit() {
-        // 32 GiB is now accepted; only sizes whose physical geometry exceeds
-        // BOCHS_MAX_CYLINDERS (2^24, ~8063 GiB with 16h/63s/512b) are rejected — and
-        // rejected before any file is written, so this stays cheap.
-        let path = unique_temp_path("rusty-box-gui-panel-huge-disk");
-        let mut panel = DiskCreatorPanel::default();
-        panel.path = path.display().to_string();
-        panel.hard_disk_size = "9000G".to_owned();
-
-        panel.create_image();
-
-        assert!(matches!(
-            &panel.status,
-            Some(CreatorStatus::Error(message)) if message.contains("exceeds Bochs limit")
-        ));
-        assert!(fs::metadata(&path).is_err());
-    }
-
-    #[test]
-    fn floppy_panel_creates_144m_image() {
+    fn floppy_maker_creates_144m_image() {
         let path = unique_temp_path("rusty-box-gui-panel-floppy");
-        let mut panel = DiskCreatorPanel::default();
-        panel.kind = CreatorKind::Floppy;
+        let mut panel = FloppyMaker::default();
         panel.path = path.display().to_string();
         panel.floppy_format = FloppyFormat::M1_44;
 
@@ -7025,37 +7363,10 @@ mod tests {
     }
 
     #[test]
-    fn hard_disk_panel_accepts_human_size_suffix() {
-        let path = unique_temp_path("rusty-box-gui-human-size");
-        let mut panel = DiskCreatorPanel::default();
-        panel.path = path.display().to_string();
-        panel.hard_disk_size = "10M".to_owned();
-        panel.create_image();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 10_321_920);
-        remove_test_file(&path);
-    }
-
-    #[test]
-    fn hard_disk_panel_rejects_existing_without_overwrite() {
-        let path = unique_temp_path("rusty-box-gui-existing");
-        std::fs::write(&path, b"already here").unwrap();
-        let mut panel = DiskCreatorPanel::default();
-        panel.path = path.display().to_string();
-        panel.hard_disk_size = "10M".to_owned();
-        panel.overwrite = false;
-        panel.create_image();
-        assert!(
-            matches!(&panel.status, Some(CreatorStatus::Error(msg)) if msg.contains("already exists"))
-        );
-        remove_test_file(&path);
-    }
-
-    #[test]
-    fn floppy_panel_rejects_existing_without_overwrite() {
+    fn floppy_maker_rejects_existing_without_overwrite() {
         let path = unique_temp_path("rusty-box-gui-existing-floppy");
         std::fs::write(&path, b"already here").unwrap();
-        let mut panel = DiskCreatorPanel::default();
-        panel.kind = CreatorKind::Floppy;
+        let mut panel = FloppyMaker::default();
         panel.path = path.display().to_string();
         panel.overwrite = false;
         panel.create_image();

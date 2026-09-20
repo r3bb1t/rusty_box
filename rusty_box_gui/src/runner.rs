@@ -324,23 +324,18 @@ fn arrange_for_boot<E>(
     if let Some(stop_flag) = stop_flag {
         emu.set_stop_flag(stop_flag);
     }
-    // Apply the pre-boot VBE mode after reset (reset re-defaults the VGA, and
-    // VgaCore::set_preferred_mode persists it across any later guest-triggered
-    // reset). Raises the DISPI caps so the guest may select this resolution.
+    // Apply the pre-boot VBE mode: raises the DISPI caps so the guest may
+    // select this resolution. A later guest-triggered reset leaves them, as
+    // Bochs's VGA reset leaves its VBE registers.
     if let Some(mode) = config.vga_mode {
         emu.display()
             .set_preferred_mode(mode.width, mode.height, mode.bpp);
     }
-    // The last step of the machine's own bring-up: anchors the PIT, the ACPI
-    // timer and the VGA retrace to the instruction rate the BIOS's calibration
-    // loops read. Idempotent, so `run_interactive` repeating it changes
-    // nothing.
-    emu.prepare_run();
     if should_prequeue_boot_enter(&config.boot_order) {
         // The keystroke a CD-ROM boot loader's prompt waits for. A refused
         // keystroke is a boot that sits at that prompt, so it is said rather
         // than assumed.
-        if emu.keyboard().type_text("\n") == 0 {
+        if !emu.keyboard().type_text("\n").is_complete() {
             tracing::warn!(
                 "the boot keystroke was not accepted; the boot prompt may wait for a key"
             );
@@ -430,16 +425,18 @@ fn drive_on_the_hypervisor(
     // thread that wakes at their deadlines; nothing runs until a step says so.
     let mut machine =
         FastMachine::adopt(emu).map_err(|source| RunError::Hypervisor { source })?;
-    machine.with_machine(|m| {
-        // The status bar shows an instruction rate, and this machine has none
-        // to show: told zero it reads `---`, rather than the last rate of a run
-        // on the other engine.
-        if let Some(gui) = m.gui_mut() {
-            gui.show_ips(0);
-        }
-        m.display().force_update();
-        m.update_gui();
-    });
+    machine
+        .with_machine(|m| {
+            // The status bar shows an instruction rate, and this machine has
+            // none to show: told zero it reads `---`, rather than the last
+            // rate of a run on the other engine.
+            if let Some(gui) = m.gui_mut() {
+                gui.show_ips(0);
+            }
+            m.display().force_update();
+            m.update_gui();
+        })
+        .map_err(|source| RunError::Hypervisor { source })?;
 
     let mut last_frame = std::time::Instant::now();
     loop {
@@ -450,8 +447,9 @@ fn drive_on_the_hypervisor(
             .step(step)
             .map_err(|source| RunError::Hypervisor { source })?;
         // Between steps the machine is paused, which is the only time its
-        // shadow processor and its devices can be read coherently.
-        machine.with_machine(|m| {
+        // processor and its devices can be read coherently — and the only
+        // time the machine lets them be.
+        let presented = machine.with_machine(|m| {
             m.pump_gui_input();
             m.present_console_output();
             if last_frame.elapsed() >= FRAME_INTERVAL {
@@ -459,15 +457,22 @@ fn drive_on_the_hypervisor(
                 last_frame = std::time::Instant::now();
             }
         });
-        match outcome.stop {
-            StepStop::BudgetSpent => {}
-            // The guest asked to be off. Its last frame was drawn above.
-            StepStop::GuestPowerOff => break,
-            StepStop::Faulted(fault) => {
+        match (outcome.stop, presented) {
+            // The step's own fault first: a processor that faulted may also
+            // have parked without its registers, and the refusal that follows
+            // is that fault's consequence, not its cause.
+            (StepStop::Faulted(fault), _) => {
                 return Err(RunError::Hypervisor {
                     source: FastMachineFault::Engine(fault),
                 });
             }
+            (_, Err(source)) => return Err(RunError::Hypervisor { source }),
+            // The guest asked to be off, or its processor shut down after a
+            // triple fault and only a reset would bring it back — the same
+            // end `run_interactive` gives a shut-down processor. Its last
+            // frame was drawn above.
+            (StepStop::GuestPowerOff | StepStop::CpuShutdown, Ok(())) => break,
+            (StepStop::BudgetSpent, Ok(())) => {}
         }
     }
 
@@ -1009,12 +1014,18 @@ fn init_tracing(log_level: LogLevel) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level.to_string()));
 
-    match tracing_subscriber::fmt()
+    let subscriber = tracing_subscriber::fmt()
         .without_time()
         .with_target(false)
-        .with_env_filter(filter)
-        .try_init()
-    {
+        .with_env_filter(filter);
+    // A phone discards the process's stdout; its events go to logcat, which
+    // shows the level itself and has no use for terminal colours.
+    #[cfg(target_os = "android")]
+    let subscriber = subscriber
+        .with_ansi(false)
+        .with_level(false)
+        .with_writer(crate::android::Logcat);
+    match subscriber.try_init() {
         Ok(()) => {}
         Err(error) => {
             tracing::debug!(?error, "tracing subscriber already initialized");
@@ -1205,6 +1216,8 @@ mod tests {
             log_level: LogLevel::Warn,
             vga_mode: None,
             pci_vga: false,
+            console_stretch: false,
+            pointer_speed: crate::config::PointerSpeed::DEFAULT,
         })
         .unwrap_err();
 
@@ -1271,6 +1284,8 @@ mod tests {
             log_level: LogLevel::Warn,
             vga_mode: None,
             pci_vga: false,
+            console_stretch: false,
+            pointer_speed: crate::config::PointerSpeed::DEFAULT,
         }
     }
 
@@ -1778,6 +1793,8 @@ mod tests {
                 log_level: LogLevel::Warn,
                 vga_mode: None,
                 pci_vga: false,
+                console_stretch: false,
+                pointer_speed: crate::config::PointerSpeed::DEFAULT,
             }))
             .unwrap();
         drop(command_tx);

@@ -217,18 +217,28 @@ trait Arm {
     /// What this arm's progress counter is denominated in.
     const PROGRESS_UNIT: ProgressUnit;
 
-    /// Arm the machine's timers and queue the runner's Enter, and say how many
-    /// keys went in.
-    fn prepare(&mut self) -> usize;
+    /// Queue the runner's Enter, and say how many keys went in.
+    ///
+    /// # Errors
+    /// A machine on hardware that refused to be reached — only a paused one
+    /// may be. The interpreter's arm never refuses.
+    fn queue_boot_enter(&mut self) -> Result<usize, FastMachineFault>;
 
     /// Run the guest for one slice.
     fn advance(&mut self) -> Advance;
 
-    /// The guest's text screen as it stands between two slices.
-    fn screen(&mut self) -> Option<String>;
+    /// The guest's text screen as it stands between two slices, or `None`
+    /// when the display is not in a text mode.
+    ///
+    /// # Errors
+    /// As [`Arm::queue_boot_enter`].
+    fn screen(&mut self) -> Result<Option<String>, FastMachineFault>;
 
     /// Where the processor is.
-    fn rip(&mut self) -> u64;
+    ///
+    /// # Errors
+    /// As [`Arm::queue_boot_enter`].
+    fn rip(&mut self) -> Result<u64, FastMachineFault>;
 
     /// This arm's own part of the ten-second progress line. Empty from an arm
     /// that keeps no census, so the line closes up rather than leaving a gap.
@@ -248,9 +258,8 @@ struct Stepped<E: SliceEngine<()>>(Box<Emulator<(), E>>);
 impl<E: SliceEngine<()>> Arm for Stepped<E> {
     const PROGRESS_UNIT: ProgressUnit = E::PROGRESS_UNIT;
 
-    fn prepare(&mut self) -> usize {
-        self.0.prepare_run();
-        self.0.keyboard().type_text("\n")
+    fn queue_boot_enter(&mut self) -> Result<usize, FastMachineFault> {
+        Ok(self.0.keyboard().type_text("\n").delivered())
     }
 
     fn advance(&mut self) -> Advance {
@@ -274,12 +283,12 @@ impl<E: SliceEngine<()>> Arm for Stepped<E> {
         Advance { progress, ending }
     }
 
-    fn screen(&mut self) -> Option<String> {
-        self.0.display().text().map(|text| text.to_text())
+    fn screen(&mut self) -> Result<Option<String>, FastMachineFault> {
+        Ok(self.0.display().text().map(|text| text.to_text()))
     }
 
-    fn rip(&mut self) -> u64 {
-        self.0.rip()
+    fn rip(&mut self) -> Result<u64, FastMachineFault> {
+        Ok(self.0.rip())
     }
 
     /// An interpreter never leaves the guest, so it has no census to report.
@@ -305,11 +314,9 @@ impl Arm for Adopted {
     /// progress is the guest's own time.
     const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Ticks;
 
-    fn prepare(&mut self) -> usize {
-        self.0.with_machine(|machine| {
-            machine.prepare_run();
-            machine.keyboard().type_text("\n")
-        })
+    fn queue_boot_enter(&mut self) -> Result<usize, FastMachineFault> {
+        self.0
+            .with_machine(|machine| machine.keyboard().type_text("\n").delivered())
     }
 
     fn advance(&mut self) -> Advance {
@@ -333,6 +340,9 @@ impl Arm for Adopted {
             StepStop::GuestPowerOff => {
                 Some(Ending::Said { why: "guest stopped: GuestPowerOff".into() })
             }
+            StepStop::CpuShutdown => {
+                Some(Ending::Said { why: "guest stopped: CpuShutdown after a triple fault".into() })
+            }
             StepStop::Faulted(fault) => {
                 Some(Ending::Said { why: format!("guest stopped: {fault}") })
             }
@@ -340,11 +350,11 @@ impl Arm for Adopted {
         Advance { progress: outcome.ticks, ending }
     }
 
-    fn screen(&mut self) -> Option<String> {
+    fn screen(&mut self) -> Result<Option<String>, FastMachineFault> {
         self.0.with_machine(|machine| machine.display().text().map(|text| text.to_text()))
     }
 
-    fn rip(&mut self) -> u64 {
+    fn rip(&mut self) -> Result<u64, FastMachineFault> {
         self.0.with_machine(|machine| machine.rip())
     }
 
@@ -565,7 +575,13 @@ fn probe() -> i32 {
 /// did not come back — the one outcome that is not a measurement at all.
 fn measure<A: Arm>(arm: &mut A, iso: &str) -> i32 {
     // The runner queues one Enter for a CD-first boot order; so does this.
-    let typed = arm.prepare();
+    let typed = match arm.queue_boot_enter() {
+        Ok(typed) => typed,
+        Err(refused) => {
+            eprintln!("probe: the boot key could not be queued: {refused}");
+            return 1;
+        }
+    };
     println!("probe: iso={iso} patience={:?} prequeued_keys={typed}", patience());
 
     let outcome = drive(arm, patience());
@@ -611,15 +627,22 @@ fn measure<A: Arm>(arm: &mut A, iso: &str) -> i32 {
         println!("RESULT wedged waited={waited:.1}");
     }
     arm.results();
-    println!("RIP = {:#x}", arm.rip());
-    if let Some(screen) = arm.screen() {
-        println!("screen:");
-        for line in screen.lines() {
-            let line = line.trim_end();
-            if !line.is_empty() {
-                println!("  | {line}");
+    match arm.rip() {
+        Ok(rip) => println!("RIP = {rip:#x}"),
+        Err(refused) => println!("RIP unread: {refused}"),
+    }
+    match arm.screen() {
+        Ok(Some(screen)) => {
+            println!("screen:");
+            for line in screen.lines() {
+                let line = line.trim_end();
+                if !line.is_empty() {
+                    println!("  | {line}");
+                }
             }
         }
+        Ok(None) => {}
+        Err(refused) => println!("screen unread: {refused}"),
     }
     if outcome.wedged.is_some() {
         1
@@ -705,7 +728,14 @@ fn drive<A: Arm>(arm: &mut A, limit: Duration) -> Outcome {
         ticks = ticks.saturating_add(advance.progress);
         let wall = began.elapsed().as_secs_f64();
 
-        if let Some(screen) = arm.screen() {
+        let screen = match arm.screen() {
+            Ok(screen) => screen,
+            Err(refused) => {
+                ending = format!("the paused machine could not be read: {refused}");
+                break;
+            }
+        };
+        if let Some(screen) = screen {
             // Both accounts of the hardware are read at most once a slice, and
             // only when a milestone was actually hit: the read locks the
             // machine, and a boot takes tens of thousands of slices.

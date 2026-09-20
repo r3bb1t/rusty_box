@@ -3,7 +3,7 @@ use crate::{
         apic::{LocalApicCpuEvent, LocalApicTimerActivation, PendingIpi},
         cpu::CpuActivityState,
         instrumentation::Instrumentation,
-        BxCpuC, CpuError, Result as CpuResult,
+        BxCpuC, CpuError, ResetReason, Result as CpuResult,
     },
     Result,
 };
@@ -509,12 +509,22 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 }
 
 impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
-    /// Check for pending reset requests (keyboard 0xFE, port 92h, PCI CF9).
-    /// If a reset is pending, clears the request flags and performs that reset type.
+    /// Check for pending reset requests — the chipset's (keyboard 0xFE, port
+    /// 92h, PCI CF9, ACPI S3) and a processor's (a triple fault, Bochs
+    /// exception.cc `bx_pc_system.Reset`). If a reset is pending, clears every
+    /// request and performs one reset, hardware if any source asked for one.
     /// Returns true if a reset was performed.
     pub fn check_and_handle_resets(&mut self) -> Result<bool> {
-        let Some(reset_type) = self.device_manager.take_reset_request() else {
-            return Ok(false);
+        let chipset = self.device_manager.take_reset_request();
+        let processor = self.pc_system.take_reset_request();
+        let reset_type = match (chipset, processor) {
+            (Some(ResetReason::Hardware), _) | (_, Some(ResetReason::Hardware)) => {
+                ResetReason::Hardware
+            }
+            (Some(ResetReason::Software), _) | (_, Some(ResetReason::Software)) => {
+                ResetReason::Software
+            }
+            (None, None) => return Ok(false),
         };
         self.reset(reset_type)?;
         Ok(true)
@@ -981,6 +991,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             || self.device_manager.dma.has_hrq_request()
             // A20, PAM/SMRAM/BAR re-registration, and reset requests.
             || self.device_manager.has_pending_machine_boundary()
+            // A reset a processor asked for (a triple fault).
+            || self.pc_system.has_reset_request()
             // IOAPIC deliveries deferred until the LAPIC bus is reachable
             // (sync_final_event_levels): enqueued by mid-slice I/O without
             // setting any request flag, so they must be checked directly.

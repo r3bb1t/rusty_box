@@ -132,7 +132,7 @@ name = "android.permission.MANAGE_EXTERNAL_STORAGE"
 
 [package.metadata.android.application]
 label = "Rusty Box"
-theme = "@android:style/Theme.DeviceDefault.NoActionBar"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
 
 [package.metadata.android.application.activity]
 config_changes = "orientation|keyboardHidden|screenSize|screenLayout"

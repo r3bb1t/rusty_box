@@ -274,7 +274,6 @@ fn run_alpine() -> Result<()> {
 
         emu = builder.build()?;
         println!("  CD-ROM attached: {}", iso_path);
-        emu.prepare_run();
 
         println!("  Boot: BIOS POST → ISOLINUX → kernel");
     } else {
@@ -363,7 +362,9 @@ fn run_alpine() -> Result<()> {
                 "[{}M] Pressing Enter at ISOLINUX boot prompt",
                 total_executed / 1_000_000
             );
-            let _typed = emu.keyboard().type_text("\n");
+            if !emu.keyboard().type_text("\n").is_complete() {
+                println!("  (the keystroke was refused; the prompt may still be waiting)");
+            }
             enter_injected = true;
         }
 

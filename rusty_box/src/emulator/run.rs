@@ -60,8 +60,8 @@ pub enum PowerState {
     /// `SLP_TYP` = S5, or the port-0x8900 shutdown protocol. The CPU is
     /// perfectly healthy; it is the machine that is finished.
     PoweredOff,
-    /// The boot CPU is in the architectural shutdown state, a triple fault
-    /// being the usual way in.
+    /// The boot CPU is in the architectural shutdown state — see
+    /// [`StopReason::CpuShutdown`] for the ways in.
     CpuShutdown,
 }
 
@@ -81,11 +81,14 @@ impl<T: Instrumentation, E: SliceEngine<T>> Power<'_, T, E> {
     /// enabled `PWRBTN_EN`, or that chooses to ignore it, keeps running — as
     /// it would on real hardware.
     pub fn press_power_button(&mut self) {
-        let ticks = self.machine.pc_system.time_ticks();
+        let clock = self
+            .machine
+            .pc_system
+            .clock_at(self.machine.pc_system.time_ticks());
         self.machine
             .device_manager
             .acpi
-            .press_power_button(ticks);
+            .press_power_button(clock);
     }
 
     /// Reset the machine. Unlike the power button this is not negotiable with
@@ -128,24 +131,35 @@ pub struct Keyboard<'m> {
     keyboard: &'m mut crate::iodev::keyboard::BxKeyboardC,
 }
 
+/// Bytes that may already wait in the keyboard ring when host text starts a
+/// character: Bochs devices.cc `service_paste_buf`'s `fill_threshold`. Eight
+/// free slots hold any character — make, break and a Shift around them — in
+/// every scancode set, so one that starts always finishes.
+const PASTE_FILL_THRESHOLD: usize = 8;
+
 impl<'m> Keyboard<'m> {
     pub(crate) fn new(keyboard: &'m mut crate::iodev::keyboard::BxKeyboardC) -> Self {
         Self { keyboard }
     }
 
     /// Press or release a key, rendered through the guest's active scancode
-    /// set. Returns whether the whole sequence reached the guest — see
-    /// `BxKeyboardC::gen_scancode` for why a key can be partly delivered.
+    /// set. Returns whether the key reached the guest, which it does whole or
+    /// not at all (`BxKeyboardC::gen_scancode`).
     #[must_use = "a refused key never reached the guest"]
     pub fn key(&mut self, key: crate::iodev::scancodes::BxKey, pressed: bool) -> bool {
         self.keyboard.gen_scancode(key, pressed)
     }
 
-    /// Press and release a key. `false` if either half was not delivered
-    /// intact — including the case where the press landed and the release did
-    /// not, which a guest sees as a stuck key.
-    #[must_use = "a half-delivered tap leaves the guest holding the key down"]
+    /// Press and release a key, whole. A tap is a one-key character, so it
+    /// starts under the same rule [`Keyboard::type_text`] follows — only
+    /// while the ring has room for both halves — and a press never lands
+    /// without its release. `false` means nothing was sent: the ring is too
+    /// full, or the guest disabled the keyboard.
+    #[must_use = "a refused tap never reached the guest"]
     pub fn tap(&mut self, key: crate::iodev::scancodes::BxKey) -> bool {
+        if self.keyboard.get_elements() >= PASTE_FILL_THRESHOLD {
+            return false;
+        }
         let down = self.key(key, true);
         let up = self.key(key, false);
         down && up
@@ -155,6 +169,16 @@ impl<'m> Keyboard<'m> {
     ///
     /// Stops at the first byte the ring refuses, so the count is also the
     /// resume point: `bytes[accepted..]` is exactly what still has to be sent.
+    ///
+    /// **The bytes are PS/2 SET 2, whatever set the guest has selected.** This
+    /// is the keyboard's wire format, not the guest's: the 8042 translates set
+    /// 2 to set 1 when the guest asked it to (CCB bit 6) and otherwise passes
+    /// bytes through untouched, so a guest that selected set 1 or set 3 with
+    /// the 0xF0 command and turned translation off reads back whatever is sent
+    /// here as though it were its own set. Only set 2 is produced. Use
+    /// [`Keyboard::key`] or [`Keyboard::type_text`], which render through
+    /// `scancodes[key][set]` (Bochs keyboard.cc `gen_scancode`), unless the
+    /// bytes are what you actually have.
     #[must_use = "a short count means the guest did not receive the rest"]
     pub fn scancodes(&mut self, bytes: &[u8]) -> usize {
         let mut accepted = 0;
@@ -167,26 +191,93 @@ impl<'m> Keyboard<'m> {
         accepted
     }
 
-    /// Type text, returning how many CHARACTERS were delivered whole.
+    /// Type text on the guest's keyboard, one key at a time, Shift included.
     ///
-    /// Characters, not bytes: one character can be several scancodes, and a
-    /// count of bytes would let a caller resume mid-key and hand the guest a
-    /// prefix with no code. Resume from `text[..].chars().skip(n)`.
+    /// Each character is spelled as the US-layout keys that produce it and
+    /// rendered through the scancode set the guest selected, exactly as
+    /// [`Keyboard::key`] does — so a guest in set 1 or set 3 reads its own
+    /// set's bytes, which raw [`Keyboard::scancodes`] cannot give it.
+    ///
+    /// The outcome says what stopped it, because the two ways it can are not
+    /// the same problem: see [`Typed`].
     #[cfg(feature = "alloc")]
-    #[must_use = "a short count means the guest did not receive the rest of the text"]
-    pub fn type_text(&mut self, text: &str) -> usize {
-        let mut typed = 0;
+    pub fn type_text(&mut self, text: &str) -> Typed {
+        let mut delivered = 0;
         for ch in text.chars() {
-            let scancodes = crate::gui::keymap::char_to_scancode_sequence(ch);
-            // A character is delivered or it is not; a partly-sent one is the
-            // corruption this count exists to prevent, so stop at the first
-            // refusal rather than pushing the remaining bytes in after it.
-            if self.scancodes(&scancodes) != scancodes.len() {
-                break;
+            let sequence = crate::gui::keymap::char_to_bx_key_sequence(ch);
+            if sequence.is_empty() {
+                return Typed::Unmappable { delivered, ch };
             }
-            typed += 1;
+            // A character starts only while the ring has room for all of it,
+            // so none is cut part-way and then sent again from its start.
+            if self.keyboard.get_elements() >= PASTE_FILL_THRESHOLD {
+                return Typed::Refused { delivered };
+            }
+            // With the room proved, a refusal here is a keyboard the guest
+            // disabled, which refuses the character's first key.
+            for (key, pressed) in sequence {
+                if !self.key(key, pressed) {
+                    return Typed::Refused { delivered };
+                }
+            }
+            delivered += 1;
         }
-        typed
+        Typed::All { delivered }
+    }
+}
+
+/// What became of a [`Keyboard::type_text`] call.
+///
+/// A bare count cannot say why typing stopped, and the two reasons need
+/// opposite responses (R2): a guest that is not draining its 16-byte keyboard
+/// ring will take the rest once it has, while a character the modelled US
+/// keyboard has no key for will never be typed however often it is offered. A
+/// caller that resumed from a count alone would retry such a character
+/// forever.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "text that did not reach the guest is lost unless the caller resumes it"]
+pub enum Typed {
+    /// Every character reached the guest.
+    All {
+        /// How many characters that was.
+        delivered: usize,
+    },
+    /// The guest's keyboard took no more. Step the machine so it drains its
+    /// ring, then resume with `text.chars().skip(delivered)`.
+    ///
+    /// Nothing of the character this stopped on reached the guest: one starts
+    /// only while its whole key sequence fits (Bochs devices.cc
+    /// `service_paste_buf`), so resuming sends each character exactly once.
+    Refused {
+        /// Characters delivered whole before the refusal.
+        delivered: usize,
+    },
+    /// `ch` has no key on the modelled US keyboard, so neither it nor
+    /// anything after it was sent. Resume past it with
+    /// `text.chars().skip(delivered + 1)`.
+    Unmappable {
+        /// Characters delivered whole before this one.
+        delivered: usize,
+        /// The character that cannot be typed.
+        ch: char,
+    },
+}
+
+#[cfg(feature = "alloc")]
+impl Typed {
+    /// How many characters the guest received in full.
+    pub fn delivered(self) -> usize {
+        match self {
+            Self::All { delivered }
+            | Self::Refused { delivered }
+            | Self::Unmappable { delivered, .. } => delivered,
+        }
+    }
+
+    /// Whether the whole text arrived.
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::All { .. })
     }
 }
 
@@ -243,9 +334,12 @@ pub enum StopReason {
     /// The host asked, through `StopHandle::stop`, `Emulator::emu_stop`, or a
     /// shared stop flag installed with `set_stop_flag`.
     StopRequested,
-    /// The boot CPU is in the architectural shutdown state. A triple fault is
-    /// the usual way in; `RSM` with an inconsistent SMRAM image and a VMX entry
-    /// carrying guest activity state 2 reach the same state, and the CPU
+    /// The boot CPU is in the architectural shutdown state. The ways in are
+    /// a triple fault on a machine set to shut down on one
+    /// ([`OnTripleFault`](crate::params::OnTripleFault) — by default a machine
+    /// that boots firmware resets instead), `RSM` with an inconsistent SMRAM
+    /// image, a VMX abort, a `#VMEXIT` to an SVM host whose PDPTEs are
+    /// invalid, and a VMX entry carrying guest activity state 2. The CPU
     /// records no cause, so this variant does not claim to know which.
     CpuShutdown,
     /// The boot CPU is halted (`HLT`/`MWAIT`) or waiting for a `SIPI`, and no
@@ -521,8 +615,23 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             .refresh(&mut sink, rusty_box_devices::display::card::Dirt::SelfTracked);
     }
 
-    /// Drain pending host input (keyboard scancodes, mouse, serial) from the GUI
-    /// into the device layer.
+    /// Offer pending host input (keyboard keys and scancodes, mouse, serial)
+    /// to the device layer, holding back whatever the guest has no room for.
+    ///
+    /// Keyboard and serial input are PACED, not truncated. The i8042 ring and
+    /// the 16550 receive FIFO hold 16 entries each, and one frame of typing or
+    /// one line in the serial pane is routinely larger; what a device refuses
+    /// stays in this machine's host-input backlog and is offered again here,
+    /// so a guest that is draining slowly receives everything, in order,
+    /// rather than a burst with its middle missing. Mouse motion is not held:
+    /// PS/2 deltas are relative, so a refused packet folds into the next one.
+    ///
+    /// Bochs's front ends call `bx_keyb_c::gen_scancode` per keystroke and
+    /// lose what the ring refuses; the serial half is Bochs's own shape, since
+    /// `bx_serial_c::rx_timer` offers the UART one host byte at a time and
+    /// only while the receiver has room. Registered as divergences D14
+    /// (keyboard) and D11 (the serial rate that is still not paced) in
+    /// `docs/bochs-parity-divergences.md`.
     ///
     /// Called from the active step loop AND from inside the HLT/MWAIT idle waits.
     /// The idle path is the important one: a tickless (NO_HZ) guest raises no
@@ -540,40 +649,106 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Without alloc there is no GUI (`Emulator::gui` requires `Box<dyn
     /// BxGui>`), so host-input pumping is a no-op; `step` and the HLT/MWAIT
     /// waits stay callable from no-alloc hosts like the UEFI example.
+    /// Hold one piece of host keyboard input for the guest, to be offered by
+    /// the next [`Self::pump_gui_input`] as its ring drains. `false` when the
+    /// backlog is full.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn hold_keyboard_input(
+        &mut self,
+        input: crate::gui::host_input::HostKeyboardInput,
+    ) -> bool {
+        self.host_input.push_keyboard(input)
+    }
+
+    /// Forget host input still waiting for room, because the guest it was
+    /// typed for is gone — replaced by a restored snapshot. A hardware reset
+    /// drops the keyboard part of it inside [`Emulator::reset`].
+    #[cfg(feature = "std")]
+    pub(crate) fn drop_held_host_input(&mut self) {
+        self.host_input.clear();
+    }
+
     #[cfg(not(feature = "alloc"))]
     #[inline]
     pub fn pump_gui_input(&mut self) {}
 
     #[cfg(feature = "alloc")]
     pub fn pump_gui_input(&mut self) {
+        use crate::gui::host_input::HostKeyboardInput;
+
         let mut scancodes_to_send = Vec::new();
         let mut mouse_to_send = Vec::new();
         let mut serial_input = Vec::new();
         let mut keys_to_send: Vec<(crate::iodev::scancodes::BxKey, bool)> = Vec::new();
+        // A backlog at capacity is a guest that has stopped taking input
+        // altogether. Nothing is taken from the front end while that lasts, so
+        // its own queue holds the rest in order and the loss the cap would
+        // otherwise be becomes back-pressure the host can see.
+        let take_keyboard = self.host_input.wants_keyboard_input();
+        let take_serial = self.host_input.wants_serial_input();
         if let Some(gui) = &mut self.gui {
             gui.handle_events();
-            scancodes_to_send = gui.get_pending_scancodes();
-            keys_to_send = gui.get_pending_keys();
+            if take_keyboard {
+                scancodes_to_send = gui.get_pending_scancodes();
+                keys_to_send = gui.get_pending_keys();
+            }
             mouse_to_send = gui.get_pending_mouse();
-            serial_input = gui.get_pending_serial_input();
+            if take_serial {
+                serial_input = gui.get_pending_serial_input();
+            }
         }
-        let keyboard_changed = !scancodes_to_send.is_empty()
-            || !keys_to_send.is_empty()
-            || !mouse_to_send.is_empty();
-        let serial_changed = !serial_input.is_empty();
-        for (key, pressed) in keys_to_send {
-            self.device_manager.keyboard.gen_scancode(key, pressed);
-        }
-        for scancode in scancodes_to_send {
-            self.device_manager.keyboard.send_scancode(scancode);
+        // Keys before raw bytes, the order this pump has always used.
+        self.host_input.push_keys(keys_to_send);
+        self.host_input.push_scancodes(scancodes_to_send);
+        self.host_input.push_serial(serial_input);
+
+        // Offer held keyboard input until the 8042 refuses one, and stop there
+        // rather than skipping past it, so input reaches the guest in the
+        // order the host made it. A refused key left nothing in the ring —
+        // `gen_scancode` takes a key whole or not at all — so offering it
+        // again later delivers it once.
+        let mut keyboard_changed = false;
+        while let Some(event) = self.host_input.next_keyboard() {
+            let accepted = match event {
+                HostKeyboardInput::Key(key, pressed) => {
+                    self.device_manager.keyboard.gen_scancode(key, pressed)
+                }
+                HostKeyboardInput::Scancode(scancode) => {
+                    self.device_manager.keyboard.send_scancode(scancode)
+                }
+            };
+            if !accepted {
+                break;
+            }
+            self.host_input.accept_keyboard();
+            keyboard_changed = true;
         }
         for mouse in mouse_to_send {
-            self.device_manager
+            if self
+                .device_manager
                 .keyboard
-                .mouse_motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons);
+                .mouse_motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons)
+            {
+                keyboard_changed = true;
+            } else {
+                // Usually not back-pressure: the guest may have the mouse in
+                // remote mode or reporting disabled. Relative motion folds
+                // into the next packet, so it is said rather than held.
+                tracing::debug!(
+                    "PS/2 mouse packet refused (buttons {:#04x})",
+                    mouse.buttons
+                );
+            }
         }
-        for byte in serial_input {
-            self.device_manager.serial.receive_byte(0, byte);
+        // The same gate Bochs's `rx_timer` applies before reading a host byte:
+        // one at a time, and only while the receiver has room for it.
+        let mut serial_changed = false;
+        while let Some(byte) = self.host_input.next_serial() {
+            if !self.device_manager.serial.receive_byte(0, byte) {
+                break;
+            }
+            self.host_input.accept_serial();
+            serial_changed = true;
         }
         if !keyboard_changed && !serial_changed {
             return;

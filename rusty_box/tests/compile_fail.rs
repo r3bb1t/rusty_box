@@ -15,6 +15,9 @@ fn doctrine_fixtures() {
     // R3: an ExecCtx cannot be assembled outside the crate — machine parts
     // have no loose currency; the module itself is not reachable.
     t.compile_fail("tests/compile_fail/r3_execctx_is_not_assemblable.rs");
+    // R3: the parts a machine lends run no processor of their own choosing —
+    // one machine's parts cannot be handed another machine's processor.
+    t.compile_fail("tests/compile_fail/r3_parts_run_no_foreign_processor.rs");
     // R2: a bare CPU cannot execute an instruction — execution requires the
     // machine context, so "CPU wired to nothing" is unrepresentable.
     t.compile_fail("tests/compile_fail/r2_bare_cpu_cannot_execute.rs");

@@ -1172,6 +1172,13 @@ impl BxKeyboardC {
         }
     }
 
+    /// How many bytes wait in the internal keyboard ring — Bochs keyboard.cc
+    /// `get_elements`, which the host's paced text reads before each
+    /// character (devices.cc `service_paste_buf`).
+    pub fn get_elements(&self) -> usize {
+        self.kbd_internal_buffer.num_elements
+    }
+
     /// Queue a scancode in the internal keyboard ring — Bochs keyboard.cc.
     /// Returns whether it fit; a full ring drops the byte, as upstream does.
     ///
@@ -2027,32 +2034,21 @@ impl BxKeyboardC {
     // External API
     // =========================================================================
 
-    /// Send a scancode from external input (GUI).
+    /// Emit the scancode sequence for a host key press or release.
     ///
-    /// Input scancodes are expected in Set 2 format (the PS/2 default).
-    /// When the 8042 controller's `scancodes_translate` flag is true (CCB bit 6),
-    /// bytes are translated to Set 1 using the `TRANSLATION_8042` table before
-    /// being enqueued. The 0xF0 prefix (Set 2 break) is consumed and ORed as
-    /// 0x80 onto the next translated byte.
+    /// Port of Bochs `bx_keyb_c::gen_scancode` (keyboard.cc): the bytes come
+    /// from `scancodes[key][current_scancodes_set]`, so selecting set 1 or 3
+    /// with the 0xF0 command changes what the guest sees. When the 8042 is
+    /// translating (CCB bit 6) each byte goes through `translation8042`, with a
+    /// 0xF0 break prefix folded into bit 7 of the following byte instead of
+    /// being emitted.
     ///
-    /// Matches Bochs gen_scancode() translation logic (keyboard.cc).
-    /// Emit the scancode sequence for a guest key press or release.
-    ///
-    /// Word-for-word port of Bochs `bx_keyb_c::gen_scancode` (keyboard.cc): the
-    /// bytes come from `scancodes[key][current_scancodes_set]`, so selecting set
-    /// 1 or 3 with the 0xF0 command actually changes what the guest sees. When
-    /// the 8042 is translating (CCB bit 6) each byte goes through
-    /// `translation8042`, with a 0xF0 break prefix folded into bit 7 of the
-    /// following byte instead of being emitted.
-    /// Returns whether EVERY byte of the sequence reached the ring.
-    ///
-    /// A key can be several bytes, and Bochs enqueues them one at a time, so a
-    /// ring that fills mid-sequence leaves the guest an `E0` prefix with no
-    /// code after it — a corrupted keystroke rather than a lost one. That
-    /// truncation is upstream's behaviour and is kept; what is new is saying so,
-    /// which is the only way a host injecting keys can know to slow down.
-    /// `false` also covers a keyboard whose clock is low or whose scanning the
-    /// guest disabled: in every case the key did not get through intact.
+    /// Returns whether the key reached the ring, which it does whole or not at
+    /// all. Bochs enqueues byte by byte, so a ring that fills mid-sequence
+    /// leaves the guest a prefix with no code after it; here the key is refused
+    /// before any byte is queued, so a host that holds it and sends it again
+    /// never delivers a prefix twice (divergence D14). `false` also covers a
+    /// keyboard whose clock is low or whose scanning the guest disabled.
     pub fn gen_scancode(&mut self, key: super::scancodes::BxKey, pressed: bool) -> bool {
         // Ignore scancode if the keyboard clock is driven low.
         if !self.kbd_controller.kbd_clock_enabled {
@@ -2067,9 +2063,22 @@ impl BxKeyboardC {
         let entry = &super::scancodes::SCANCODES[key.index()][set];
         let bytes: &'static [u8] = if pressed { entry.make } else { entry.brek };
 
-        // Every byte is attempted even after one is refused, because Bochs
-        // checks the ring per byte and so must this; the verdict accumulates
-        // rather than short-circuiting.
+        // A host key reaches the guest whole or not at all (divergence D14).
+        // Bochs enqueues the bytes that fit and drops the rest; a host that
+        // holds a refused key and sends it again would then hand the guest
+        // the prefix twice. Under translation a `0xF0` folds into the next
+        // byte and takes no slot.
+        let rendered = if self.kbd_controller.scancodes_translate {
+            bytes.iter().filter(|&&byte| byte != 0xF0).count()
+        } else {
+            bytes.len()
+        };
+        if BX_KBD_ELEMENTS - self.get_elements() < rendered {
+            return false;
+        }
+
+        // Each byte is still checked as Bochs checks it; with the room proved
+        // above, none is refused.
         let mut delivered_intact = true;
         if self.kbd_controller.scancodes_translate {
             let mut escaped = 0x00u8;
@@ -2089,9 +2098,15 @@ impl BxKeyboardC {
         delivered_intact
     }
 
-    /// Returns whether the byte reached the ring. See `gen_scancode`; a `0xF0`
-    /// break prefix under translation enqueues nothing by design and so always
-    /// reports success.
+    /// Send one raw scancode byte from the host.
+    ///
+    /// The byte is set 2, the PS/2 default. When the 8042 is translating (CCB
+    /// bit 6) it is translated to set 1 through `TRANSLATION_8042` before being
+    /// queued, and a 0xF0 break prefix is consumed and ORed as 0x80 onto the
+    /// next translated byte — Bochs keyboard.cc's translation.
+    ///
+    /// Returns whether the byte reached the ring. A `0xF0` break prefix under
+    /// translation enqueues nothing by design and so always reports success.
     pub fn send_scancode(&mut self, scancode: u8) -> bool {
         if !self.kbd_controller.kbd_clock_enabled || !self.kbd_internal_buffer.scanning_enabled {
             return false;
@@ -3274,5 +3289,190 @@ mod tests {
             (0xFA, false),
             "keyboard enable must ACK from the keyboard buffer"
         );
+    }
+
+    /// Bochs keyboard.cc `gen_scancode` renders a key through
+    /// `scancodes[key][current_scancodes_set]`, so a guest that selected set 1
+    /// with the 0xF0 command reads set-1 bytes. Text typed by a host has to
+    /// take the same route: sending set-2 bytes to a set-1 guest hands it a
+    /// different key, not a lost one.
+    #[test]
+    fn typed_text_uses_the_scancode_set_the_guest_selected() {
+        use crate::emulator::Keyboard;
+
+        let mut kbd = BxKeyboardC::new();
+        kbd.init();
+
+        // The guest turns 8042 translation off (CCB bit 6 clear) with both
+        // ports enabled, so what it reads back is the keyboard's own set.
+        kbd.write(KBD_COMMAND_PORT, 0x60, 1);
+        kbd.write(KBD_DATA_PORT, 0x00, 1);
+
+        // ... and selects set 1: the 0xF0 command, then the set number.
+        kbd.write(KBD_DATA_PORT, 0xF0, 1);
+        assert_eq!(wait_read(&mut kbd).0, 0xFA, "0xF0 is ACKed");
+        kbd.write(KBD_DATA_PORT, 0x01, 1);
+        assert_eq!(wait_read(&mut kbd).0, 0xFA, "the set number is ACKed");
+
+        let typed = Keyboard::new(&mut kbd).type_text("a");
+        assert_eq!(
+            typed,
+            crate::emulator::Typed::All { delivered: 1 },
+            "one character, and the ring is empty"
+        );
+
+        // Set 1: 'a' makes 0x1E and breaks with bit 7 set. Set 2 would spell
+        // the same key 0x1C, 0xF0, 0x1C.
+        assert_eq!(wait_read(&mut kbd).0, 0x1E, "set-1 make for 'a'");
+        assert_eq!(wait_read(&mut kbd).0, 0x9E, "set-1 break for 'a'");
+    }
+
+    /// The same route for set 3, through a key whose code differs in every
+    /// set: Esc is 0x76 in set 2 and 0x08 in set 3.
+    #[test]
+    fn typed_text_reaches_a_set_3_guest_in_set_3() {
+        use crate::emulator::Keyboard;
+
+        let mut kbd = BxKeyboardC::new();
+        kbd.init();
+        kbd.write(KBD_COMMAND_PORT, 0x60, 1);
+        kbd.write(KBD_DATA_PORT, 0x00, 1);
+        kbd.write(KBD_DATA_PORT, 0xF0, 1);
+        assert_eq!(wait_read(&mut kbd).0, 0xFA, "0xF0 is ACKed");
+        kbd.write(KBD_DATA_PORT, 0x03, 1);
+        assert_eq!(wait_read(&mut kbd).0, 0xFA, "the set number is ACKed");
+
+        assert!(Keyboard::new(&mut kbd).type_text("\u{1B}").is_complete());
+
+        assert_eq!(drain(&mut kbd), [0x08, 0xF0, 0x08], "set-3 make and break for Esc");
+    }
+
+    /// A character with no key on the modelled US keyboard is not typed, and
+    /// must not be counted as though it had been. Naming it is what lets a
+    /// caller resume PAST it; a bare count would have it retried forever.
+    #[test]
+    fn typing_a_character_the_keyboard_cannot_produce_is_reported() {
+        use crate::emulator::{Keyboard, Typed};
+
+        let mut kbd = BxKeyboardC::new();
+        kbd.init();
+
+        let typed = Keyboard::new(&mut kbd).type_text("ab\u{20AC}cd");
+
+        assert_eq!(
+            typed,
+            Typed::Unmappable {
+                delivered: 2,
+                ch: '\u{20AC}'
+            },
+            "only 'a' and 'b' can be typed; the euro sign has no key, so it \
+             and everything after it did not reach the guest"
+        );
+        assert_eq!(typed.delivered(), 2);
+        assert!(!typed.is_complete());
+
+        // The caller skips the character it was told about and the rest types.
+        let rest = Keyboard::new(&mut kbd).type_text("cd");
+        assert_eq!(rest, Typed::All { delivered: 2 });
+    }
+
+    /// Everything the guest can read from port 0x60 right now, in order.
+    fn drain(kbd: &mut BxKeyboardC) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        'next: loop {
+            for _ in 0..100 {
+                let _irq_mask = kbd.timer_callback();
+                if kbd.read(KBD_STATUS_PORT, 1) as u8 & 0x01 != 0 {
+                    bytes.push(kbd.read(KBD_DATA_PORT, 1) as u8);
+                    continue 'next;
+                }
+            }
+            return bytes;
+        }
+    }
+
+    /// A host key reaches the guest whole or not at all. The Up arrow is two
+    /// bytes, `E0 48` under translation; with one slot free it is refused, and
+    /// its `E0` must not be left behind, or the host's retry hands the guest
+    /// `E0 E0 48`.
+    #[test]
+    fn a_key_that_does_not_fit_leaves_none_of_its_bytes_in_the_ring() {
+        use super::super::scancodes::BxKey;
+        use crate::emulator::Keyboard;
+
+        let mut kbd = BxKeyboardC::new();
+        kbd.init();
+        // Fifteen one-byte makes: one slot of sixteen left.
+        for _ in 0..15 {
+            assert!(Keyboard::new(&mut kbd).key(BxKey::A, true));
+        }
+
+        assert!(
+            !Keyboard::new(&mut kbd).key(BxKey::Up, true),
+            "two bytes do not fit in one slot"
+        );
+        assert_eq!(
+            drain(&mut kbd),
+            [0x1E; 15],
+            "the guest reads the fifteen makes and nothing of the refused key"
+        );
+
+        assert!(Keyboard::new(&mut kbd).key(BxKey::Up, true));
+        assert_eq!(drain(&mut kbd), [0xE0, 0x48], "offered again, it arrives once");
+    }
+
+    /// Bochs devices.cc `service_paste_buf` types a character only while fewer
+    /// than eight bytes wait in the ring, and eight bytes hold any character,
+    /// Shift included, so none is ever cut. A character cut after its make
+    /// would reach the guest twice once the host sends it again: "root"
+    /// becomes "rroot".
+    #[test]
+    fn typed_text_waits_for_room_for_a_whole_character() {
+        use super::super::scancodes::BxKey;
+        use crate::emulator::{Keyboard, Typed};
+
+        let mut kbd = BxKeyboardC::new();
+        kbd.init();
+        for _ in 0..8 {
+            assert!(Keyboard::new(&mut kbd).key(BxKey::A, true));
+        }
+
+        assert_eq!(
+            Keyboard::new(&mut kbd).type_text("ab"),
+            Typed::Refused { delivered: 0 },
+            "eight bytes wait, so no character starts"
+        );
+        assert_eq!(drain(&mut kbd), [0x1E; 8], "no part of 'a' reached the guest");
+
+        assert_eq!(
+            Keyboard::new(&mut kbd).type_text("ab"),
+            Typed::All { delivered: 2 }
+        );
+        assert_eq!(
+            drain(&mut kbd),
+            [0x1E, 0x9E, 0x30, 0xB0],
+            "exactly one 'a' and one 'b'"
+        );
+    }
+
+    /// A tap is a one-key character: it starts under the same rule, so a press
+    /// never lands without its release, and a refused tap sent again arrives
+    /// once.
+    #[test]
+    fn a_tap_that_cannot_finish_sends_nothing() {
+        use super::super::scancodes::BxKey;
+        use crate::emulator::Keyboard;
+
+        let mut kbd = BxKeyboardC::new();
+        kbd.init();
+        for _ in 0..8 {
+            assert!(Keyboard::new(&mut kbd).key(BxKey::A, true));
+        }
+
+        assert!(!Keyboard::new(&mut kbd).tap(BxKey::B));
+        assert_eq!(drain(&mut kbd), [0x1E; 8], "no press without its release");
+
+        assert!(Keyboard::new(&mut kbd).tap(BxKey::B));
+        assert_eq!(drain(&mut kbd), [0x30, 0xB0], "the tap arrives once, whole");
     }
 }

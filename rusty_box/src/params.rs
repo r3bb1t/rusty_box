@@ -116,6 +116,31 @@ impl Default for FeatureList {
     }
 }
 
+/// What a triple fault does to the machine — Bochs `cpu: reset_on_triple_fault`.
+///
+/// Whichever is chosen, a processor running a VMX guest takes a triple-fault
+/// VM exit first, and one running an SVM guest that intercepts `SHUTDOWN`
+/// takes that exit; only a fault that reaches the host processor gets here.
+///
+/// Left unchosen ([`BxParams::on_triple_fault`] never called), a machine that
+/// boots firmware resets, as Bochs does, and a machine set up without
+/// firmware — [`Emulator::new_with_mode`](crate::emulator::Emulator::new_with_mode)
+/// and [`Emulator::setup_cpu_mode`](crate::emulator::Emulator::setup_cpu_mode)
+/// — shuts the processor down, because a reset would start it at a reset
+/// vector nothing was loaded at. Bochs always boots firmware, so the second
+/// default is this port's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum OnTripleFault {
+    /// Reset the whole machine, processors and devices, as a hardware reset
+    /// does. Bochs's default (`reset_on_triple_fault=1`), and what a guest
+    /// that reboots by triple-faulting relies on.
+    ResetTheMachine = 0,
+    /// Leave the processor in the shutdown state, where only NMI, SMI and
+    /// INIT reach it.
+    ShutDown = 1,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BxParams {
     pub(crate) cpu_nthreads: u32,
@@ -124,6 +149,10 @@ pub struct BxParams {
 
     pub(crate) cpu_include_features: FeatureList,
     pub(crate) cpu_exclude_features: FeatureList,
+
+    /// `None` until a caller chooses; see [`OnTripleFault`] for what the
+    /// machine does then.
+    pub(crate) cpu_on_triple_fault: Option<OnTripleFault>,
 }
 
 impl Default for BxParams {
@@ -134,6 +163,7 @@ impl Default for BxParams {
             cpu_nprocessors: 1,
             cpu_include_features: FeatureList::new(),
             cpu_exclude_features: FeatureList::new(),
+            cpu_on_triple_fault: None,
         }
     }
 }
@@ -187,6 +217,26 @@ impl BxParams {
     pub fn including(mut self, feature: X86Feature) -> Self {
         self.cpu_include_features.push(feature);
         self
+    }
+
+    /// Choose what a triple fault does — Bochs `cpu: reset_on_triple_fault`.
+    /// See [`OnTripleFault`] for what happens when nothing is chosen.
+    #[must_use]
+    pub fn on_triple_fault(mut self, action: OnTripleFault) -> Self {
+        self.cpu_on_triple_fault = Some(action);
+        self
+    }
+
+    /// What a triple fault does on a machine that boots firmware: the
+    /// caller's choice, or Bochs's default reset.
+    pub(crate) fn on_triple_fault_with_firmware(&self) -> OnTripleFault {
+        self.cpu_on_triple_fault.unwrap_or(OnTripleFault::ResetTheMachine)
+    }
+
+    /// What a triple fault does on a machine set up without firmware: the
+    /// caller's choice, or shutdown, since nothing waits at its reset vector.
+    pub(crate) fn on_triple_fault_without_firmware(&self) -> OnTripleFault {
+        self.cpu_on_triple_fault.unwrap_or(OnTripleFault::ShutDown)
     }
 
     pub fn cpu_topology(&self) -> CpuTopology {

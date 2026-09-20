@@ -372,11 +372,33 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     self.cr0.get32(), self.cr3, self.cr2, self.idtr.base, self.idtr.limit);
                 tracing::error!("TRIPLE FAULT: RIP={:#x} CS={:#06x} vector={:?} error_code={:#x} icount={} CR2={:#x}",
                     rip, cs, vector, error_code, self.icount, self.cr2);
-                self.debug_puts(b"[TRIPLE_FAULT]\n");
-                // Bochs exception.cc reaches shutdown through proc_ctrl.cc
-                // `shutdown()` -> `enter_sleep_state`.
-                self.enter_sleep_state(super::cpu::CpuActivityState::Shutdown);
-                return Err(super::error::CpuError::CpuLoopRestart);
+                // Bochs vmexit.cc `VMexit_TripleFault`: a VMX guest's triple
+                // fault is its host's, and an exit it causes directly is not
+                // one that occurred during event delivery.
+                if self.in_vmx_guest {
+                    self.in_event = false;
+                    self.vmx_vmexit(super::vmx::VmxVmexitReason::TripleFault, 0)?;
+                    return Err(super::error::CpuError::CpuLoopRestart);
+                }
+                if self.in_svm_guest
+                    && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_SHUTDOWN)
+                {
+                    return self.svm_vmexit(super::svm::SvmVmexit::Shutdown as i32, 0, 0);
+                }
+                return match self.on_triple_fault {
+                    // Bochs `bx_pc_system.Reset(BX_RESET_HARDWARE)`, taken at
+                    // the boundary this processor now ends its slice for.
+                    crate::params::OnTripleFault::ResetTheMachine => {
+                        tracing::error!("3rd exception with no resolution — resetting the machine");
+                        self.pc_system.request_reset(super::ResetReason::Hardware);
+                        self.request_scheduler_boundary();
+                        Err(super::error::CpuError::CpuLoopRestart)
+                    }
+                    crate::params::OnTripleFault::ShutDown => {
+                        tracing::warn!("3rd exception with no resolution — shutdown");
+                        self.shutdown()
+                    }
+                };
             }
         }
 
@@ -458,10 +480,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // VMX exception intercept — Bochs vmexit.cc VMexit_Event. Consults
         // the exception bitmap (with PF mask/match for #PF) and, if the bit
         // is set, takes a VMEXIT with interruption info populated.
+        // The exit ends the faulting instruction, as Bochs `VMexit`'s longjmp
+        // does: a caller that raised this fault mid-instruction must not go on
+        // to finish it against the host state the exit just loaded.
         if self.in_vmx_guest
             && self.vmexit_check_exception(vector as u32, u32::from(error_code), push_error)?
         {
-            return Ok(());
+            return Err(super::error::CpuError::CpuLoopRestart);
         }
 
         // SVM exception intercept

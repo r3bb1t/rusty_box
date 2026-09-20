@@ -87,6 +87,12 @@ pub enum Reg {
     /// whether an offloaded APIC accepts a write to one of its registers; the
     /// answer is the platform's, and asking is the only way to have it.
     ApicTpr,
+    /// `WHvX64RegisterTscAux` (0x207B) — `IA32_TSC_AUX`, which the platform
+    /// answers `RDTSCP` and `RDPID` from itself.
+    TscAux,
+    /// `WHvX64RegisterTscDeadline` (0x2095) — `IA32_TSC_DEADLINE` of the
+    /// partition's own local APIC.
+    TscDeadline,
 }
 
 impl Reg {
@@ -463,7 +469,7 @@ impl ApicVector {
 ///
 /// - The order of the two remaining bitmaps is **measured**, by the platform
 ///   probe's P9 (`whp_probe.rs`, `q18_in_service_versus_trigger_mode`;
-///   recorded in `docs/whp-platform-probe-2026-09-03.md`). A symmetric test
+///   recorded in `docs/internal/records/whp-platform-probe-2026-09-03.md`). A symmetric test
 ///   cannot settle it — a conversion that reads and writes through one wrong
 ///   mapping agrees with itself — so the probe took two observations in which
 ///   the platform treats the two fields differently, and both select this
@@ -853,9 +859,11 @@ impl Exit {
 /// [`Reg::PendingEvent`] is 128 bits wide, and a word transfer would keep its
 /// low half and drop the rest; [`Reg::ApicTpr`] belongs to an APIC the
 /// hypervisor may be emulating, so whether it is even writable is the
-/// platform's answer rather than this port's assumption. Both are reached one
-/// at a time, deliberately.
-pub const UNEXCHANGED_REGS: &[Reg] = &[Reg::PendingEvent, Reg::ApicTpr];
+/// platform's answer rather than this port's assumption. [`Reg::TscAux`] and
+/// [`Reg::TscDeadline`] are the platform's to answer from, and only a machine
+/// reset writes them. All four are reached one at a time, deliberately.
+pub const UNEXCHANGED_REGS: &[Reg] =
+    &[Reg::PendingEvent, Reg::ApicTpr, Reg::TscAux, Reg::TscDeadline];
 
 /// Every register this port exchanges, in one list.
 ///
@@ -907,7 +915,7 @@ mod tests {
                 | Reg::InterruptState
                 | Reg::InternalActivityState
                 | Reg::DeliverabilityNotifications => {}
-                Reg::PendingEvent | Reg::ApicTpr => assert!(
+                Reg::PendingEvent | Reg::ApicTpr | Reg::TscAux | Reg::TscDeadline => assert!(
                     !ALL_REGS.contains(reg),
                     "{reg:?} is reached one at a time, not through the whole-state exchange"
                 ),

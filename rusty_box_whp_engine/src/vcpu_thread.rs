@@ -52,11 +52,15 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use rusty_box::cpu::{cpu::BxCpuC, instrumentation::Instrumentation, CpuError, Result};
-use rusty_box::emulator::{Emulator, PcIo, Processor, StopReason};
+use rusty_box::cpu::arch_state::ArchGroups;
+use rusty_box::cpu::{
+    cpu::BxCpuC, instrumentation::Instrumentation, CpuError, ResetReason, Result,
+};
+use rusty_box::emulator::{DeviceTime, Emulator, PcIo, Processor, ProcessorParts, StopReason};
+use rusty_box::params::OnTripleFault;
 use rusty_box_core::{EngineFault, EngineFaultKind};
 use rusty_box_whp::{
-    ApicWriteType, Canceller, Exit, ExitReason, InternalActivity, IoPortAccess,
+    ApicStatePage, ApicWriteType, Canceller, Exit, ExitReason, InternalActivity, IoPortAccess,
     PendingExtIntEvent, Reg, Vcpu, WhpError, WhpResult,
 };
 
@@ -92,6 +96,10 @@ pub(crate) enum Parked {
     GuestPowerOff,
     /// Something the thread could not service or could not survive.
     Fault(EngineFault),
+    /// The processor is in the shutdown state: it triple-faulted on a machine
+    /// set to shut down on one (`OnTripleFault::ShutDown`). Only NMI, SMI,
+    /// INIT or a reset reach it.
+    CpuShutdown,
     /// The thread has left its run loop for good and will not answer a resume.
     ///
     /// Distinct from [`Self::Paused`] because a caller waiting on a park has to
@@ -116,14 +124,14 @@ impl Parked {
             StopReason::GuestPowerOff => Self::GuestPowerOff,
             // The host asked and means to give the machine back.
             StopReason::StopRequested => Self::Paused,
-            // A guest that triple-faulted, an engine that refused work the
-            // machine cannot do without, or a machine reporting a batch
-            // vocabulary no fast machine runs — `Halted` and `BudgetExhausted`
-            // describe a stepping loop this machine does not have, so a
-            // boundary that reports one is describing a machine in a state its
-            // driver cannot explain.
-            StopReason::CpuShutdown
-            | StopReason::EngineFault
+            // The boot processor is in the shutdown state, and says so.
+            StopReason::CpuShutdown => Self::CpuShutdown,
+            // An engine that refused work the machine cannot do without, or a
+            // machine reporting a batch vocabulary no fast machine runs —
+            // `Halted` and `BudgetExhausted` describe a stepping loop this
+            // machine does not have, so a boundary that reports one is
+            // describing a machine in a state its driver cannot explain.
+            StopReason::EngineFault
             | StopReason::Halted
             | StopReason::BudgetExhausted => Self::Fault(EngineFault::new(
                 EngineFaultKind::Host,
@@ -158,6 +166,14 @@ pub struct VcpuCensus {
     /// class whose count here climbs faster than its exit count is a class
     /// asking for more state than it reads.
     pub export_calls: u64,
+    /// Platform calls made handing the machine's processor to the partition
+    /// outside any exit: installing it before the first entry, and writing
+    /// back what a caller changed while the machine was paused.
+    ///
+    /// Apart from [`Self::export_calls`] so that neither hides the other: a
+    /// pause nobody wrote through adds nothing here, and an exit's cost is
+    /// not inflated by the writes a caller made.
+    pub handback_calls: u64,
     /// The hypervisor's own accounting as of the last park, or `None` if the
     /// thread has not parked yet.
     ///
@@ -179,6 +195,7 @@ struct SharedCensus {
     runs: AtomicU64,
     in_run_nanos: AtomicU64,
     export_calls: AtomicU64,
+    handback_calls: AtomicU64,
     exits: SharedExits,
     /// Written only at a park, which is rare, and read only by a census. A lock
     /// is the honest shape for a value this size; the exit path never touches
@@ -254,11 +271,37 @@ impl SharedExits {
     }
 }
 
+/// Where a parked processor's registers are (R2).
+///
+/// Published with the park, because a caller reaching into a paused machine
+/// reads the processor there, and must be able to tell a copy that is the
+/// guest's from one the platform would not hand over.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RegistersAtPark {
+    /// Every register group, and the time-stamp counter, is in the machine:
+    /// read out of the partition at this park, or still the machine's own
+    /// because the partition has not been given them yet.
+    InTheMachine {
+        /// An ExtINT this engine placed that the platform still holds, and the
+        /// guest takes at its next entry — or `None`.
+        ///
+        /// The staging acknowledged it at the 8259 on positive evidence that
+        /// the guest could take it, and the platform refuses an entry that
+        /// would carry it into a guest that cannot. So while one stands, a
+        /// caller may not clear `IF`.
+        placed: Option<u8>,
+    },
+    /// The platform would not give them up, so the machine's copy of this
+    /// processor is not the guest's.
+    WithThePartition,
+}
+
 /// Where a park is asked for, published and waited on.
 ///
-/// One mutex for the three, because they are three readings of one question —
-/// is this thread running? — and a waiter that saw two of them from different
-/// instants could conclude a thread had parked when it had only been asked to.
+/// One mutex for the four, because they are four readings of one question —
+/// is this thread running, and what did it leave behind? — and a waiter that
+/// saw two of them from different instants could conclude a thread had parked
+/// when it had only been asked to.
 #[derive(Default)]
 struct ParkSlot {
     /// What the next park should report. Set by [`VcpuControl::request_park`]
@@ -267,6 +310,8 @@ struct ParkSlot {
     requested: Option<Parked>,
     /// What the thread reported when it parked; `None` while it runs.
     parked: Option<Parked>,
+    /// Where the parked processor's registers are; `None` while it runs.
+    registers: Option<RegistersAtPark>,
     /// The thread should leave its run loop rather than wait for a resume.
     stop: bool,
 }
@@ -316,6 +361,14 @@ pub(crate) struct VcpuControl {
     /// it — a masked LINT0 leaves it clear, because a guest that masked its own
     /// line is not waiting for anything and unmasking it traps anyway.
     ext_int_blocked: Arc<AtomicBool>,
+    /// The machine was reset, and the partition still holds the processor it
+    /// replaced.
+    ///
+    /// Set by [`Self::machine_was_reset`] under the machine's lock, taken by
+    /// the thread before its next entry, which installs the reset processor
+    /// first. Read again under `in_run` the way `ext_int_pending` is, because
+    /// the two are raised by the same kind of thread against the same run.
+    reset_owed: Arc<AtomicBool>,
     canceller: Canceller,
     park: Arc<(Mutex<ParkSlot>, Condvar)>,
     census: Arc<SharedCensus>,
@@ -386,7 +439,7 @@ pub(crate) fn park_request(
 /// `blocked`, and while that stands every request cancels again rather than
 /// returning early. The reason is measured: `WHvX64RegisterDeliverabilityNotifications`
 /// never produces an interrupt-window exit under an emulated local APIC
-/// (`docs/whp-interrupt-window-2026-09-06.md`, probe P10 — the same guest under
+/// (`docs/internal/records/whp-interrupt-window-2026-09-06.md`, probe P10 — the same guest under
 /// `LocalApicEmulationMode::None` takes the window exit on its own), so nothing
 /// tells this engine that a blocked guest became ready. A guest that clears its
 /// own `IF` for a handler and returns with `IRET` — which is no exit at all —
@@ -474,6 +527,37 @@ impl VcpuControl {
         )
     }
 
+    /// The machine was just reset; the processor in the partition is the old
+    /// guest's.
+    ///
+    /// Called by the engine from `Emulator::reset`, under the machine's lock.
+    /// A vector owed to the old guest is forgotten here rather than by the
+    /// thread, so a pin the reset machine raises after this — under the same
+    /// lock, later — is not forgotten with it. Then the flag, then a cancel
+    /// for a processor inside a run, in the order [`ext_int_request`] keeps:
+    /// one between runs installs the reset before it enters, and one inside a
+    /// run is fetched out of it.
+    ///
+    /// # Errors
+    /// Whatever the platform said about the cancel. The flag is left set, so
+    /// the thread installs the reset at its next entry regardless.
+    pub(crate) fn machine_was_reset(&self) -> WhpResult<()> {
+        self.ext_int_pending.store(false, Ordering::SeqCst);
+        self.ext_int_blocked.store(false, Ordering::SeqCst);
+        self.reset_owed.store(true, Ordering::SeqCst);
+        if self.in_run.load(Ordering::SeqCst) {
+            return self.canceller.cancel();
+        }
+        Ok(())
+    }
+
+    /// Whether the machine was reset and this thread has not yet installed
+    /// the reset processor. While it stands, the machine's processor is the
+    /// authority and the partition's is the old guest's.
+    pub(crate) fn reset_is_owed(&self) -> bool {
+        self.reset_owed.load(Ordering::SeqCst)
+    }
+
     /// Wait for the thread to park, answering what it parked for.
     ///
     /// `None` if it has not within `within` — a bound rather than a wait,
@@ -488,6 +572,14 @@ impl VcpuControl {
         guard.parked
     }
 
+    /// Where the parked processor's registers are, or `None` while it runs.
+    ///
+    /// Published under the same lock as the park itself, so a caller that has
+    /// seen the park also sees what it left behind.
+    pub(crate) fn registers_at_park(&self) -> Option<RegistersAtPark> {
+        self.slot().registers
+    }
+
     /// Let a parked thread run again.
     ///
     /// Clears the flag before the park slot, in the mirror image of
@@ -498,6 +590,7 @@ impl VcpuControl {
         let mut slot = self.slot();
         slot.requested = None;
         slot.parked = None;
+        slot.registers = None;
         drop(slot);
         self.park.1.notify_all();
     }
@@ -529,6 +622,7 @@ impl VcpuControl {
             in_run_nanos: self.census.in_run_nanos.load(Ordering::Acquire),
             exits: self.census.exits.snapshot(),
             export_calls: self.census.export_calls.load(Ordering::Acquire),
+            handback_calls: self.census.handback_calls.load(Ordering::Acquire),
             platform_at_last_park: *self
                 .census
                 .platform_at_last_park
@@ -605,6 +699,14 @@ pub(crate) struct VcpuThread<T: Instrumentation + Send> {
     xsave: XsaveArea,
     inject: InjectState,
     control: VcpuControl,
+    /// The partition's local APIC as it stood before the guest first ran —
+    /// its power-on state, which a machine reset puts back
+    /// ([`Self::install_the_reset`]). The platform offers no reset of an
+    /// offloaded APIC, and names none of its registers, so the whole page is
+    /// what there is to restore. `None` for a partition with no APIC of its
+    /// own: there the guest's local APIC is the machine's, which the machine's
+    /// own reset resets.
+    apic_at_power_on: Option<ApicStatePage>,
 }
 
 impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
@@ -615,14 +717,23 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
     /// the processor handle carries — it names a partition the machine destroys
     /// when it drops, so the thread must be gone before the machine is.
     ///
-    /// The thread starts RUNNING. A caller that wants it paused asks for a park
-    /// straight away; nothing here can start it paused without leaving a window
-    /// in which the processor is neither running nor parked.
+    /// The thread is born PARKED: a pause is already asked for when it begins
+    /// — the flag set and the reason recorded, and no cancel issued, because
+    /// there is no run yet to fetch it out of — so nothing enters the
+    /// partition until [`VcpuControl::resume`]. A caller that wants the
+    /// processor paused waits for that park with
+    /// [`VcpuControl::wait_parked_by`]; one that wants it running resumes it,
+    /// and the park protocol answers a resume that lands before the park as a
+    /// withdrawn request.
+    ///
+    /// The machine's processor is installed in the partition before the first
+    /// entry ([`Exchange::installing`]): a partition created after the machine
+    /// holds the platform's reset state, not the machine's.
     ///
     /// # Errors
     /// The processor's extended-state area, which is read once here so every
     /// later exchange patches the platform's own bytes rather than inventing
-    /// them.
+    /// them, and its local APIC's power-on page, kept for a machine reset.
     pub(crate) fn spawn(
         vcpu: Vcpu,
         index: usize,
@@ -631,13 +742,32 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
     ) -> Result<(JoinHandle<()>, VcpuControl)> {
         let xsave = XsaveArea::read_from(&vcpu, xsave::HostComponents::of_this_host())
             .map_err(platform_failed)?;
+        let hypervisor_apic = machine
+            .lock()
+            .map_err(|_| {
+                CpuError::EngineFault(EngineFault::new(
+                    EngineFaultKind::Host,
+                    "machine lock poisoned by a panicking peer thread",
+                ))
+            })?
+            .engine()
+            .has_hypervisor_apic();
+        let apic_at_power_on = if hypervisor_apic {
+            let mut page = ApicStatePage::zeroed();
+            vcpu.read_apic_state(&mut page).map_err(platform_failed)?;
+            Some(page)
+        } else {
+            None
+        };
+        let slot = ParkSlot { requested: Some(Parked::Paused), ..ParkSlot::default() };
         let control = VcpuControl {
-            exit_requested: Arc::new(AtomicBool::new(false)),
+            exit_requested: Arc::new(AtomicBool::new(true)),
             ext_int_pending: Arc::new(AtomicBool::new(false)),
             ext_int_blocked: Arc::new(AtomicBool::new(false)),
+            reset_owed: Arc::new(AtomicBool::new(false)),
             in_run: Arc::new(AtomicBool::new(false)),
             canceller: vcpu.canceller(),
-            park: Arc::new((Mutex::new(ParkSlot::default()), Condvar::new())),
+            park: Arc::new((Mutex::new(slot), Condvar::new())),
             census: Arc::new(SharedCensus::default()),
         };
         let thread = Self {
@@ -645,10 +775,11 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             index,
             machine,
             clock,
-            exchange: Exchange::at_reset(),
+            exchange: Exchange::installing(),
             xsave,
             inject: InjectState::at_reset(),
             control: control.clone(),
+            apic_at_power_on,
         };
         let join = std::thread::Builder::new()
             .name(std::format!("rusty_box vcpu {index}"))
@@ -680,6 +811,26 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
                 }
                 continue;
             }
+            // A machine reset replaces the whole processor, so it goes in
+            // before the hand-back that follows writes the reset registers.
+            if self.control.reset_owed.swap(false, Ordering::SeqCst) {
+                if let Err(fault) = self.install_the_reset() {
+                    if self.park(Parked::Fault(fault)) == Woke::ToStop {
+                        return;
+                    }
+                    continue;
+                }
+            }
+            // What the shadow holds reaches the partition before anything
+            // else about this entry is decided: the staging below reads `IF`,
+            // and a caller that wrote the flags while the machine was paused
+            // has just changed it.
+            if let Err(fault) = self.hand_the_shadow_back() {
+                if self.park(Parked::Fault(fault)) == Woke::ToStop {
+                    return;
+                }
+                continue;
+            }
             // The 8259's INTR, if one is owed and the guest can take it. Here
             // rather than after an exit because this is the only moment the
             // answer is about the processor the NEXT entry runs — which is the
@@ -702,6 +853,13 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             // execute its way to either. Enter only with nothing newly owed;
             // otherwise go round and stage it.
             if staged == Staged::Clear && self.control.ext_int_pending.load(Ordering::SeqCst) {
+                self.control.in_run.store(false, Ordering::SeqCst);
+                continue;
+            }
+            // The same window for a reset: one that landed after the check at
+            // the top of the loop may have found `in_run` false and cancelled
+            // nothing, and entering now would run the old guest.
+            if self.control.reset_owed.load(Ordering::SeqCst) {
                 self.control.in_run.store(false, Ordering::SeqCst);
                 continue;
             }
@@ -764,8 +922,8 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
                 )))
             }
         };
-        let Processor { cpu, mut io, engine } = guard.processor(*index);
-        if !io.device_manager().irq().lint0_admits_ext_int() {
+        let mut processor = guard.processor(*index);
+        if !processor.io().device_manager().irq().lint0_admits_ext_int() {
             // The guest masked its own legacy line, or gave LINT0 a fixed
             // vector instead. Nothing is acknowledged, and the flag stays up so
             // the vector is still owed the moment the guest unmasks — the
@@ -781,7 +939,8 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             // ready. `WHvX64RegisterDeliverabilityNotifications` is accepted
             // and read back under an emulated APIC and never produces an
             // interrupt-window exit — measured against a working control in
-            // `None` mode (probe P10, docs/whp-interrupt-window-2026-09-06.md).
+            // `None` mode (probe P10,
+            // docs/internal/records/whp-interrupt-window-2026-09-06.md).
             // With this set, every later republication of the pin cancels the
             // run again instead of being deduplicated away, which is what
             // catches the ordinary case: a guest that took one interrupt, is
@@ -799,7 +958,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         // the interpreter acknowledges through, so the LAPIC-before-8259 order,
         // the fabric's counted acknowledge, the spurious vectors and the
         // deasserted-pin reconcile are one behaviour across both engines.
-        let Some(vector) = io.pop_deliverable_vector(cpu) else {
+        let Some(vector) = processor.pop_deliverable_vector() else {
             // Nothing was deliverable after all, and the acknowledge attempt
             // reconciled the stale pin. The edge is spent.
             control.ext_int_pending.store(false, Ordering::SeqCst);
@@ -827,14 +986,14 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         // The platform holds a delivery now; the next exit's header will say so
         // itself, and until one arrives this is the record.
         inject.note_placed_event();
-        let census = engine.inject_census_mut();
+        let census = processor.engine_mut().inject_census_mut();
         census.injected += 1;
         census.injected_per_vector[usize::from(vector)] =
             census.injected_per_vector[usize::from(vector)].saturating_add(1);
         control.ext_int_pending.store(false, Ordering::SeqCst);
         // The acknowledge changed the controllers' lines; the processor's
         // latched copy follows before anything asks.
-        io.sync_io_events(cpu);
+        processor.sync_io_events();
         tracing::debug!(target: "irq", "CPU: ExtINT vector {vector:#04x} placed for the partition");
         Staged::Clear
     }
@@ -854,7 +1013,8 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         // Destructured so the machine's lock borrows one field rather than the
         // whole thread: everything else the servicer needs is a sibling field,
         // and the guard lives across the call that uses them.
-        let Self { vcpu, index, machine, clock, exchange, xsave, inject, control } = self;
+        let Self { vcpu, index, machine, clock, exchange, xsave, inject, control, apic_at_power_on: _ } =
+            self;
         let mut guard = match machine.lock() {
             Ok(guard) => guard,
             // A peer thread panicked while holding the machine. Under the
@@ -869,6 +1029,13 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
                 )))
             }
         };
+        // The machine was reset after this exit was taken: it belongs to a
+        // guest that no longer exists, and servicing it would read that guest
+        // into the reset processor. Checked under the lock the reset itself
+        // is made under, so no reset can land between this and the errand.
+        if control.reset_is_owed() {
+            return Continue::Run;
+        }
         // The one exit whose answer is the MACHINE's own boundary rather than a
         // processor's, so it is answered here, where the machine is still
         // undivided. An EOI at a local APIC the hypervisor owns has to reach
@@ -876,17 +1043,20 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         // again, and only the machine's boundary can route what the resample
         // queues back through `route_ioapic_delivery`.
         if let ExitReason::ApicEoi { vector } = exit.reason {
-            let queued = {
-                let Processor { mut io, .. } = guard.processor(*index);
-                io.device_manager().irq_mut().resample_on_eoi(vector as u8)
-            };
+            let queued = guard
+                .processor(*index)
+                .io()
+                .device_manager()
+                .irq_mut()
+                .resample_on_eoi(vector as u8);
             if queued {
                 match guard.service_device_time(0) {
-                    // The guest asked to be powered off while this EOI was
-                    // being routed. Nothing the processor does afterwards is
-                    // wanted, so it leaves rather than running on.
-                    Ok(time) if time.stop.is_some() => {
-                        return Continue::Park(Parked::GuestPowerOff)
+                    // The machine stopped while this EOI was being routed —
+                    // the guest asked to be powered off, say. Nothing the
+                    // processor does afterwards is wanted, so it leaves rather
+                    // than running on.
+                    Ok(DeviceTime { stop: Some(reason), .. }) => {
+                        return Continue::Park(Parked::from_stop(reason))
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -909,22 +1079,64 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         {
             let clock = clock.lock().unwrap_or_else(PoisonError::into_inner);
             match crate::device_thread::service_once(&mut guard, &clock) {
-                // A power-off found here is the machine's, not this exit's,
-                // and the processor has no business running on after it.
-                Ok(time) if time.stop.is_some() => {
-                    return Continue::Park(Parked::GuestPowerOff)
+                // A stop found here is the machine's, not this exit's, and the
+                // processor has no business running on after it.
+                Ok(DeviceTime { stop: Some(reason), .. }) => {
+                    return Continue::Park(Parked::from_stop(reason))
                 }
                 Ok(_) => {}
                 Err(error) => return Continue::Park(Parked::Fault(refused_service(&error))),
             }
         }
-        let Processor { cpu, mut io, engine } = guard.processor(*index);
-        engine.history.record(exit.vp.rip, history_mark(exit.reason));
-        let mut servicer = Servicer { vcpu, index: *index, exchange, xsave, inject, control };
-        match servicer.answer(exit, cpu, &mut io, engine) {
-            Ok(carry_on) => carry_on,
-            Err(error) => Continue::Park(Parked::Fault(refused_service(&error))),
+        // A triple fault the hardware took. The machine's choice decides it,
+        // as Bochs exception.cc's `reset_on_triple_fault` does: a reset here
+        // and now — Bochs resets inside the faulting instruction — after which
+        // the thread installs the reset processor before it enters again; or
+        // the shutdown state, which only a reset leaves.
+        if exit.reason == ExitReason::UnrecoverableException {
+            let action = guard.processor(*index).cpu_mut().take_hardware_triple_fault();
+            return match action {
+                OnTripleFault::ResetTheMachine => match guard.reset(ResetReason::Hardware) {
+                    Ok(()) => Continue::Run,
+                    Err(error) => Continue::Park(Parked::Fault(refused_reset(&error))),
+                },
+                OnTripleFault::ShutDown => Continue::Park(Parked::CpuShutdown),
+            };
         }
+        let mut processor = guard.processor(*index);
+        processor
+            .engine_mut()
+            .history
+            .record(exit.vp.rip, history_mark(exit.reason));
+        let mut servicer = Servicer { vcpu, index: *index, exchange, xsave, inject, control };
+        let carry_on = match servicer.answer(exit, &mut processor) {
+            Ok(carry_on) => carry_on,
+            Err(error) => return Continue::Park(Parked::Fault(refused_service(&error))),
+        };
+        // An errand finishes its instruction on the shadow, and a fault that
+        // raises there can triple-fault there — a trapped #GP through an IDT
+        // that cannot deliver it. On a machine that shuts down on one the
+        // shadow is now in the shutdown state, and the partition must not run
+        // on as if it were not.
+        if processor.cpu().is_in_shutdown() {
+            return Continue::Park(Parked::CpuShutdown);
+        }
+        // A reset this errand's instruction asked for — 0xCF9, port 92h, the
+        // 8042's reset pulse, ACPI S3 — is taken before the lock is let go, so
+        // the processor runs nothing more of the old guest: Bochs resets
+        // inside the instruction that asked. The reset tells this thread to
+        // install the reset processor at its next entry.
+        if guard.reset_is_pending() {
+            let clock = clock.lock().unwrap_or_else(PoisonError::into_inner);
+            match crate::device_thread::service_once(&mut guard, &clock) {
+                Ok(DeviceTime { stop: Some(reason), .. }) => {
+                    return Continue::Park(Parked::from_stop(reason))
+                }
+                Ok(_) => {}
+                Err(error) => return Continue::Park(Parked::Fault(refused_service(&error))),
+            }
+        }
+        carry_on
     }
 
     /// Publish `why`, then wait for a resume or a stop.
@@ -934,11 +1146,18 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
     /// counter read from anywhere else would be a platform call against a
     /// processor another thread is inside.
     ///
+    /// The processor's registers are brought into the machine BEFORE the park
+    /// is published ([`Self::bring_the_shadow_home`]), so a caller that has
+    /// seen the park reads the guest's registers rather than whatever the
+    /// shadow last held. What the caller writes goes back at the next entry,
+    /// through [`Self::hand_the_shadow_back`].
+    ///
     /// Called only with the machine's lock released — it is dropped when
     /// [`Self::service`] returns — because this blocks, and a thread blocking
     /// on a condition variable while holding the machine would stop the machine
-    /// with it.
+    /// with it. The import takes that lock and releases it before the wait.
     fn park(&mut self, why: Parked) -> Woke {
+        let registers = self.bring_the_shadow_home();
         match self.vcpu.counters().intercept_counters().and_then(|intercepts| {
             self.vcpu
                 .counters()
@@ -971,6 +1190,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             return Woke::ToRun;
         }
         guard.parked = Some(why);
+        guard.registers = Some(registers);
         woken.notify_all();
         while !guard.stop && guard.parked.is_some() {
             guard = woken.wait(guard).unwrap_or_else(PoisonError::into_inner);
@@ -985,6 +1205,154 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         } else {
             Woke::ToRun
         }
+    }
+
+    /// Read the processor's registers out of the partition into the machine,
+    /// for a park.
+    ///
+    /// The one place a pause imports (R5). This thread is the only holder of
+    /// the processor, so it is the only thread that can read it — a caller
+    /// reaching into the machine cannot ask the partition itself. Answers
+    /// where the registers ended up rather than failing the park: a processor
+    /// whose registers the platform would not give up still parks, and says
+    /// so, so the machine refuses a read of it instead of answering from a
+    /// copy the guest is not using.
+    ///
+    /// The pending-event slot is read with them, because an ExtINT this
+    /// engine placed can still stand there: a pause's cancel can end the
+    /// entry that would have delivered it before the guest ran anything. What
+    /// it holds limits what a caller may write — see
+    /// [`RegistersAtPark::InTheMachine`].
+    fn bring_the_shadow_home(&mut self) -> RegistersAtPark {
+        // A reset not yet installed made the machine's processor the
+        // authority: the partition still holds the old guest, and reading it
+        // home would put the old guest back over the reset one.
+        if self.control.reset_is_owed() {
+            return RegistersAtPark::InTheMachine { placed: None };
+        }
+        let Self { vcpu, index, machine, exchange, xsave, .. } = self;
+        let mut guard = match machine.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::error!(
+                    "vCPU {index} parks with its registers in the partition: a peer thread \
+                     panicked holding the machine"
+                );
+                return RegistersAtPark::WithThePartition;
+            }
+        };
+        let mut processor = guard.processor(*index);
+        if let Err(error) = exchange.import_at_park(vcpu, processor.cpu_mut(), xsave) {
+            tracing::error!(
+                "vCPU {index} parks with its registers in the partition, which would not give \
+                 them up: {error}"
+            );
+            return RegistersAtPark::WithThePartition;
+        }
+        match vcpu.read_words128(Reg::PendingEvent) {
+            Ok(words) => RegistersAtPark::InTheMachine {
+                placed: PendingExtIntEvent::from_words(words).map(|event| event.vector),
+            },
+            // Without the slot, nobody can say whether an IF write is safe to
+            // hand back, so the machine cannot vouch for this processor.
+            Err(error) => {
+                tracing::error!(
+                    "vCPU {index} parks unreadable: the platform would not report its \
+                     pending-event slot: {error}"
+                );
+                RegistersAtPark::WithThePartition
+            }
+        }
+    }
+
+    /// Give the partition whatever the shadow holds, before the next entry.
+    ///
+    /// The one place a pause's writes, and an adoption's processor, reach the
+    /// partition (R5). Costs nothing at all on the ordinary path: whether
+    /// anything is owed is the exchange's own answer, read before the
+    /// machine's lock is taken, and after an ordinary exit the errand has
+    /// already written back what it read.
+    ///
+    /// A write of the flags republishes `IF` for the staging that follows,
+    /// which would otherwise decide on the exit header's copy and could place
+    /// a vector into a guest the write just closed to interrupts.
+    ///
+    /// # Errors
+    /// A register the platform would not take. Nothing that was not written
+    /// is forgotten: it stays owed, and the next entry tries again.
+    fn hand_the_shadow_back(&mut self) -> core::result::Result<(), EngineFault> {
+        if !self.exchange.owes_the_partition() {
+            return Ok(());
+        }
+        let Self { vcpu, index, machine, exchange, xsave, inject, control, .. } = self;
+        let mut guard = machine.lock().map_err(|_| {
+            EngineFault::new(
+                EngineFaultKind::Host,
+                "machine lock poisoned by a panicking peer thread",
+            )
+        })?;
+        let mut processor = guard.processor(*index);
+        let cpu = processor.cpu_mut();
+        let handback = exchange
+            .export_owed(vcpu, cpu, xsave)
+            .map_err(|error| refused_service(&error))?;
+        if handback.written.contains(ArchGroups::RIP_RFLAGS) {
+            inject.republish_if(cpu.interrupts_enabled());
+        }
+        control
+            .census
+            .handback_calls
+            .fetch_add(u64::try_from(handback.calls).unwrap_or(u64::MAX), Ordering::Release);
+        Ok(())
+    }
+
+    /// Put the machine's reset processor where the old guest's was, after a
+    /// machine reset (`SliceEngine::machine_was_reset`).
+    ///
+    /// Every register group becomes the shadow's again, as at adoption, and
+    /// the hand-back that follows writes it whole. The rest of what Bochs's
+    /// hardware reset clears lives only in the partition, so it is written
+    /// here: the local APIC, back to its power-on page; the pending-event
+    /// slot, which may still hold a vector the old guest was owed; the pending
+    /// interruption, where the platform keeps a delivery a trapped fault
+    /// interrupted — measured: a triple fault taken on the shadow during an
+    /// `INT3` left one there, and the reset guest took it through its fresh
+    /// IVT; any interrupt-window request; the interrupt shadow and NMI mask;
+    /// the time-stamp counter and `IA32_TSC_AUX`, which Bochs
+    /// `BX_CPU_C::reset` zeroes for a hardware reset (`set_TSC(0)`,
+    /// `msr.tsc_aux = 0`); and `IA32_TSC_DEADLINE`, which a reset local APIC
+    /// reads as zero (apic.cc `reset`, `ticksInitial = 0`).
+    ///
+    /// # Errors
+    /// A write the platform refused. The partition then holds part of each
+    /// processor, so the thread parks with the fault rather than run it.
+    fn install_the_reset(&mut self) -> core::result::Result<(), EngineFault> {
+        if let Some(page) = &self.apic_at_power_on {
+            self.vcpu
+                .write_apic_state(page)
+                .map_err(|error| refused_register(&error))?;
+        }
+        self.vcpu
+            .write_words128(Reg::PendingEvent, [0, 0])
+            .map_err(|error| refused_register(&error))?;
+        self.vcpu
+            .write_words(
+                &[
+                    Reg::PendingInterruption,
+                    Reg::DeliverabilityNotifications,
+                    Reg::Tsc,
+                    Reg::TscAux,
+                    Reg::TscDeadline,
+                ],
+                &[0, 0, 0, 0, 0],
+            )
+            .map_err(|error| refused_register(&error))?;
+        self.exchange
+            .reinstall_after_reset(&self.vcpu)
+            .map_err(|error| refused_service(&error))?;
+        self.inject = InjectState::at_reset();
+        tracing::debug!("vCPU {} installed the machine's reset processor", self.index);
+        Ok(())
     }
 
     /// Record what an entry cost in host time.
@@ -1034,15 +1402,14 @@ impl Servicer<'_> {
     fn answer<T: Instrumentation>(
         &mut self,
         exit: &Exit,
-        cpu: &mut BxCpuC<T>,
-        io: &mut PcIo<'_>,
-        engine: &mut WhpEngine,
+        processor: &mut Processor<'_, T, WhpEngine>,
     ) -> Result<Continue> {
         // The free half of an exchange: `RIP`, `RFLAGS`, `CS` and `CR8` arrive
         // with the exit, so every arm below — and the injection gate after it —
         // runs against a shadow whose most volatile fields are already current.
-        self.exchange.take_header(cpu, &exit.vp, self.inject)?;
-        let carry_on = self.dispatch(exit, cpu, io, engine)?;
+        self.exchange
+            .take_header(processor.cpu_mut(), &exit.vp, self.inject)?;
+        let carry_on = self.dispatch(exit, processor)?;
         // A device that answered this exit may have latched something on the
         // bus — an interrupt line, a hold request, a machine boundary to
         // service. The interpreter drains those at its own next instruction
@@ -1051,7 +1418,7 @@ impl Servicer<'_> {
         // reached a device, because the machine's other threads latch on the
         // same bus and a line nobody moved onto the processor is a line the
         // guest never sees.
-        io.sync_io_events(cpu);
+        processor.sync_io_events();
         // A chipset SMI is signalled onto this shadow by the machine's boundary
         // (`emulator/scheduler.rs` drains `acpi.smi_request_pending`), and a
         // guest running inside the partition never consults that word — so this
@@ -1068,8 +1435,10 @@ impl Servicer<'_> {
         // handleAsyncEvent`, "Priority 3: External Hardware Interventions"),
         // and taking it here — before the entry stages a legacy vector — is
         // that order.
-        if matches!(carry_on, Continue::Run) && cpu.owes_a_system_management_interrupt() {
-            let calls = take_the_signalled_smi(self.vcpu, self.exchange, self.xsave, cpu, io)?;
+        if matches!(carry_on, Continue::Run)
+            && processor.cpu().owes_a_system_management_interrupt()
+        {
+            let calls = take_the_signalled_smi(self.vcpu, self.exchange, self.xsave, processor)?;
             self.control
                 .census
                 .export_calls
@@ -1085,9 +1454,7 @@ impl Servicer<'_> {
     fn dispatch<T: Instrumentation>(
         &mut self,
         exit: &Exit,
-        cpu: &mut BxCpuC<T>,
-        io: &mut PcIo<'_>,
-        engine: &mut WhpEngine,
+        processor: &mut Processor<'_, T, WhpEngine>,
     ) -> Result<Continue> {
         match exit.reason {
             // The one exit the platform pre-decodes: port, width, direction and
@@ -1114,10 +1481,10 @@ impl Servicer<'_> {
                     // to deliver it. The shadow retires it and its tail takes
                     // the trap. TF is read from the exit header, already
                     // here, so a guest that is not stepping pays nothing.
-                    self.import(cpu, ExitClass::StringPort, NO_BYTES)?;
-                    self.finish_the_errand(cpu, io, Trapped::Access)?;
+                    self.import(processor.cpu_mut(), ExitClass::StringPort, NO_BYTES)?;
+                    self.finish_the_errand(processor, Trapped::Access)?;
                 } else {
-                    service_port_access(self.vcpu, io, exit, access)?;
+                    service_port_access(self.vcpu, &mut processor.io(), exit, access)?;
                 }
                 Ok(Continue::Run)
             }
@@ -1131,8 +1498,12 @@ impl Servicer<'_> {
                     access.gpa
                 );
                 let bytes = usize::from(access.instruction_byte_count).min(16);
-                self.import(cpu, ExitClass::Mmio, &access.instruction_bytes[..bytes])?;
-                self.finish_the_errand(cpu, io, Trapped::Access)?;
+                self.import(
+                    processor.cpu_mut(),
+                    ExitClass::Mmio,
+                    &access.instruction_bytes[..bytes],
+                )?;
+                self.finish_the_errand(processor, Trapped::Access)?;
                 Ok(Continue::Run)
             }
             // What the guest asked about the processor. Answered by executing
@@ -1140,13 +1511,17 @@ impl Servicer<'_> {
             // model rather than the host's silicon.
             ExitReason::Cpuid(access) => {
                 let leaf = access.rax as u32;
-                self.import(cpu, ExitClass::Cpuid, CPUID)?;
-                self.finish_the_errand(cpu, io, Trapped::Cpuid { leaf })?;
+                self.import(processor.cpu_mut(), ExitClass::Cpuid, CPUID)?;
+                self.finish_the_errand(processor, Trapped::Cpuid { leaf })?;
                 Ok(Continue::Run)
             }
             ExitReason::MsrAccess(access) => {
-                self.import(cpu, ExitClass::Msr, if access.is_write { WRMSR } else { RDMSR })?;
-                self.finish_the_errand(cpu, io, Trapped::Access)?;
+                self.import(
+                    processor.cpu_mut(),
+                    ExitClass::Msr,
+                    if access.is_write { WRMSR } else { RDMSR },
+                )?;
+                self.finish_the_errand(processor, Trapped::Access)?;
                 Ok(Continue::Run)
             }
             ExitReason::Exception => {
@@ -1159,11 +1534,12 @@ impl Servicer<'_> {
                 // enters the guest's own handler. Either way the guest sees
                 // what the interpreter would have shown it, which is the same
                 // treatment an MMIO access, a `CPUID` and a port access get.
-                self.import(cpu, ExitClass::Exception, NO_BYTES)?;
+                self.import(processor.cpu_mut(), ExitClass::Exception, NO_BYTES)?;
                 if reports_each_fault() {
-                    describe_the_fault(self.vcpu, cpu, io, exit, &engine.history);
+                    let ProcessorParts { cpu, mut io, engine } = processor.parts();
+                    describe_the_fault(self.vcpu, cpu, &mut io, exit, &engine.history);
                 }
-                self.finish_the_errand(cpu, io, Trapped::Access)?;
+                self.finish_the_errand(processor, Trapped::Access)?;
                 Ok(Continue::Run)
             }
             // The platform's answer to a notification the injection path armed:
@@ -1220,7 +1596,7 @@ impl Servicer<'_> {
             // processor reads.
             ExitReason::ApicWriteTrap { register: ApicWriteType::Lint0, value } => {
                 if self.index == BOOT_PROCESSOR {
-                    io.device_manager().irq_mut().set_bsp_lint0(value);
+                    processor.io().device_manager().irq_mut().set_bsp_lint0(value);
                 }
                 Ok(Continue::Run)
             }
@@ -1233,6 +1609,7 @@ impl Servicer<'_> {
             // reported whole — segments first, because the architecture's entry
             // checks put most of their rules on segments.
             ExitReason::InvalidVpRegisterValue => {
+                let cpu = processor.cpu_mut();
                 match self.exchange.import_everything(self.vcpu, cpu, self.xsave) {
                     Ok(()) => {
                         let mut state = rusty_box::cpu::arch_state::VcpuArchState::default();
@@ -1269,16 +1646,19 @@ impl Servicer<'_> {
             // half-way into system-management mode, which has no equivalent
             // there.
             ExitReason::ApicSmiTrap => {
-                io.deliver_smi(cpu);
-                let calls = take_the_signalled_smi(self.vcpu, self.exchange, self.xsave, cpu, io)?;
+                processor.deliver_smi();
+                let calls = take_the_signalled_smi(self.vcpu, self.exchange, self.xsave, processor)?;
                 self.control
                     .census
                     .export_calls
                     .fetch_add(u64::try_from(calls).unwrap_or(u64::MAX), Ordering::Release);
                 Ok(Continue::Run)
             }
+            // A triple fault is the machine's to answer — a reset or the
+            // shutdown state — so `VcpuThread::service` takes it before any
+            // errand runs, and an errand is never handed one.
+            ExitReason::UnrecoverableException => Ok(Continue::Park(unserviced(exit))),
             ExitReason::None
-            | ExitReason::UnrecoverableException
             | ExitReason::UnsupportedFeature { .. }
             | ExitReason::SynicSintDeliverable
             | ExitReason::Rdtsc
@@ -1321,16 +1701,16 @@ impl Servicer<'_> {
     /// take back.
     fn finish_the_errand<T: Instrumentation>(
         &mut self,
-        cpu: &mut BxCpuC<T>,
-        io: &mut PcIo<'_>,
+        processor: &mut Processor<'_, T, WhpEngine>,
         trapped: Trapped,
     ) -> Result<()> {
         // The trapped instruction, whole, on the machine's own dispatch path.
         // Whatever it does — completes the access, moves a sector, or raises a
         // fault and enters a handler — the processor it leaves behind is the
         // one the platform must continue from.
-        io.finish_the_instruction(cpu)?;
-        io.deliver_the_trap_owed(cpu)?;
+        processor.finish_the_instruction()?;
+        processor.deliver_the_trap_owed()?;
+        let cpu = processor.cpu_mut();
         self.inject.refresh_from_shadow(cpu.interrupts_enabled(), cpu.in_interrupt_shadow());
         // Withheld on the shadow ITSELF, before the export, so that what the
         // partition receives and what the shadow keeps are one processor.
@@ -1446,16 +1826,15 @@ fn take_the_signalled_smi<T: Instrumentation>(
     vcpu: &Vcpu,
     exchange: &mut Exchange,
     xsave: &mut XsaveArea,
-    cpu: &mut BxCpuC<T>,
-    io: &mut PcIo<'_>,
+    processor: &mut Processor<'_, T, WhpEngine>,
 ) -> Result<usize> {
-    exchange.import_everything(vcpu, cpu, xsave)?;
+    exchange.import_everything(vcpu, processor.cpu_mut(), xsave)?;
     // Signalled, not yet taken: the event is processed when the processor next
     // runs, exactly as Bochs decides it.
-    io.emulate_one(cpu)?;
-    io.sync_io_events(cpu);
-    run_the_shadow_out_of_smm(cpu, io)?;
-    exchange.export_imported(vcpu, cpu, xsave)
+    processor.emulate_one()?;
+    processor.sync_io_events();
+    run_the_shadow_out_of_smm(processor)?;
+    exchange.export_imported(vcpu, processor.cpu_mut(), xsave)
 }
 
 /// The fault a register write the staging made parks with.
@@ -1487,6 +1866,18 @@ fn refused_service(error: &CpuError) -> EngineFault {
         other => {
             tracing::error!("servicing an exit on the vCPU thread failed: {other}");
             EngineFault::new(EngineFaultKind::Host, "servicing an exit on the vCPU thread")
+        }
+    }
+}
+
+/// The fault a machine reset the vCPU thread asked for parks with: the
+/// engine's own refusal whole, anything else named for what failed.
+fn refused_reset(error: &rusty_box::Error) -> EngineFault {
+    match error {
+        rusty_box::Error::Cpu(CpuError::EngineFault(fault)) => *fault,
+        other => {
+            tracing::error!("resetting the machine after a triple fault failed: {other}");
+            EngineFault::new(EngineFaultKind::Host, "resetting the machine after a triple fault")
         }
     }
 }

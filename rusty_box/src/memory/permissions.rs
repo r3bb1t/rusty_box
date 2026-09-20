@@ -1,8 +1,8 @@
 //! Page-level memory permissions bitmap.
 //!
-//! Tracks per-page READ/WRITE/EXEC permissions, checked on TLB hit
-//! when the `instrumentation` feature is enabled. Zero overhead when
-//! disabled — the bitmap doesn't exist.
+//! Tracks per-page READ/WRITE/EXEC permissions, checked on TLB hit once a
+//! caller has set any: `Emulator::mem_protect` creates the bitmap on its
+//! first call, so a machine that never calls it has none and pays nothing.
 
 use crate::config::MAX_PERM_PAGES;
 use crate::cpu::instrumentation::MemPerms;

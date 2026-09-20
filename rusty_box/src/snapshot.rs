@@ -28,8 +28,15 @@ const SNAPSHOT_MAGIC: &[u8; 8] = b"RBXSNAP1";
 /// Version 7 adds the per-UART serial TX shift timer (Bochs serial.cc tx_timer):
 /// the `SerialTx` timer owner plus each port's `tx_timer_handle` /
 /// `tx_timer_delay_usec` / `tx_timer_request_pending` in the SERIAL section.
+///
+/// Version 9: the ACPI section carries no PM-timer count and no instruction
+/// rate. The PM timer is read from the machine clock the PC-SYSTEM section
+/// carries (Bochs acpi.cc `get_pmtmr`), and that section checks the rate; a
+/// realtime PM clock alone travels here, as a flag and its reading at the save.
+/// The I/O-bus part of the PLATFORM section carries no PCI configuration-address
+/// latch: the device manager's, in the same section, is the machine's only one.
 #[cfg(feature = "std")]
-pub(crate) const SNAPSHOT_V3_VERSION: u32 = 8;
+pub(crate) const SNAPSHOT_V3_VERSION: u32 = 9;
 #[cfg(feature = "std")]
 pub(crate) const SNAPSHOT_SECTION_VERSION: u32 = 1;
 
@@ -495,6 +502,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
         let result = source.prefer_host(result);
         if result.is_err() {
             self.mark_snapshot_restore_failed();
+        } else {
+            // Host input still waiting was typed for the guest this restore
+            // replaced; the restored guest never asked for it.
+            self.drop_held_host_input();
         }
         result
     }
@@ -512,7 +523,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
         let live_vga = self.device_manager.vga.snapshot_v3_committed_mapping_target();
         let mut expected = 0usize;
         let mut platform = None;
-        let mut io_platform = None;
+        let mut io_platform_decoded = false;
         // The 8259 section restores before the I/O APIC one, so edges an older
         // image left unforwarded have to wait until both have landed.
         let mut deferred_edges = None;
@@ -560,16 +571,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
                                     format!("fw_cfg platform state is invalid: {error}"),
                                 )
                             })?;
-                        io_platform = Some(
-                            self.devices
-                                .restore_snapshot_v3_body(&mut section)
-                                .map_err(|error| {
-                                    snapshot_io_error_because(
-                                        error,
-                                        format!("I/O platform state is invalid: {error}"),
-                                    )
-                                })?,
-                        );
+                        self.devices
+                            .restore_snapshot_v3_body(&mut section)
+                            .map_err(|error| {
+                                snapshot_io_error_because(
+                                    error,
+                                    format!("I/O platform state is invalid: {error}"),
+                                )
+                            })?;
+                        io_platform_decoded = true;
                         platform = Some(
                             self.device_manager
                                 .restore_snapshot_v3_body(&mut section)
@@ -668,10 +678,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
         let acpi = acpi.ok_or_else(|| invalid_snapshot("snapshot ACPI section was not decoded"))?;
         let pci = pci.ok_or_else(|| invalid_snapshot("snapshot PCI section was not decoded"))?;
         let vga = vga.ok_or_else(|| invalid_snapshot("snapshot VGA section was not decoded"))?;
-        let io_platform = io_platform.ok_or_else(|| invalid_snapshot("snapshot I/O platform state was not decoded"))?;
-        if io_platform.pci_conf_addr != platform.pci_conf_addr {
-            return Err(invalid_snapshot("snapshot PCI config latches disagree"));
-        }
+        if !io_platform_decoded { return Err(invalid_snapshot("snapshot I/O platform state was not decoded")); }
         for index in 0..self.cpu_count() {
             let cpu = self.cpu_ref(index);
             if cpu.snapshot_a20_mask() != self.pc_system.a20_mask() {
@@ -1628,17 +1635,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 .find(|section| section.id == SEC_PLATFORM)
                 .unwrap();
             let pci_enabled = platform.payload + 4 + fw_cfg_len;
-            let devices_len =
-                usize::try_from(source.devices.snapshot_v3_body_len().unwrap()).unwrap();
-            let port92_len = usize::try_from(
-                source
-                    .device_manager
-                    .port92
-                    .snapshot_v3_body_len()
-                    .unwrap(),
-            )
-            .unwrap();
-            let manager = platform.payload + 4 + fw_cfg_len + devices_len;
             let mut pci_enable_mismatch = saved.clone();
             pci_enable_mismatch[pci_enabled] ^= 1;
             assert_restore_error(
@@ -1647,22 +1643,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 "PCI enablement does not match",
             );
 
-            let mut pci_latch_mismatch = saved.clone();
-            let saved_latch = u32::from_le_bytes(
-                pci_latch_mismatch[manager + port92_len..manager + port92_len + 4]
-                    .try_into()
-                    .unwrap(),
-            );
-            write_u32_at(
-                &mut pci_latch_mismatch,
-                manager + port92_len,
-                saved_latch ^ 0x8000_0000,
-            );
-            assert_restore_error(
-                &pci_latch_mismatch,
-                io::ErrorKind::InvalidData,
-                "PCI config latches disagree",
-            );
             assert!(saved[pci_enabled] <= 1);
             saved[pci_enabled] = 2;
             assert_restore_error(

@@ -268,6 +268,8 @@ const fn register_name(reg: Reg) -> WHV_REGISTER_NAME {
         Reg::DeliverabilityNotifications => WHvX64RegisterDeliverabilityNotifications,
         Reg::PendingEvent => WHvRegisterPendingEvent,
         Reg::ApicTpr => WHvX64RegisterApicTpr,
+        Reg::TscAux => WHvX64RegisterTscAux,
+        Reg::TscDeadline => WHvX64RegisterTscDeadline,
     }
 }
 

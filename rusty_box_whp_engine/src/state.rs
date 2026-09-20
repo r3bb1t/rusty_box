@@ -526,6 +526,30 @@ pub(crate) fn write_groups(
     Ok(1)
 }
 
+/// The groups among `within` whose registers, as [`write_groups`] would write
+/// them, differ between `now` and `then`.
+///
+/// Asked position by position over the list the exchange writes, with the
+/// time-stamp counter left out exactly as [`Transfer::Write`] leaves it — so a
+/// group counts as changed precisely when writing it would tell the processor
+/// something it does not already hold. The named groups only: the vector file
+/// crosses as an XSAVE area, and [`crate::xsave`] says when that changed.
+pub(crate) fn groups_that_differ(
+    now: &VcpuArchState,
+    then: &VcpuArchState,
+    within: ArchGroups,
+) -> ArchGroups {
+    let mut positions = [0usize; WHOLE_STATE];
+    let named = positions_of(within, Transfer::Write, &mut positions);
+    let mut differ = ArchGroups::empty();
+    for index in &positions[..named] {
+        if value_at(now, *index) != value_at(then, *index) {
+            differ.insert(group_at(*index));
+        }
+    }
+    differ
+}
+
 /// Take a word from a value the platform returned, or zero if it is not one.
 ///
 /// A mismatch means [`whole_state_regs`] and the offsets above have drifted

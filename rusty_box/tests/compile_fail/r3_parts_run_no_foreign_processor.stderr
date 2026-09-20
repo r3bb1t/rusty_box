@@ -1,0 +1,13 @@
+error[E0624]: method `emulate_one` is private
+  --> tests/compile_fail/r3_parts_run_no_foreign_processor.rs:12:33
+   |
+12 |       let _ = a.processor(0).io().emulate_one(foreign);
+   |                                   ^^^^^^^^^^^ private method
+   |
+  ::: src/emulator/io.rs
+   |
+   | /     pub(crate) fn emulate_one<T: Instrumentation>(
+   | |         &mut self,
+   | |         cpu: &mut BxCpuC<T>,
+   | |     ) -> crate::cpu::Result<()> {
+   | |_______________________________- private method defined here

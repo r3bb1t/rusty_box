@@ -2,7 +2,7 @@
 //!
 //! ## Why a shadow processor is not an optimisation
 //!
-//! Measured on this host (`docs/whp-platform-probe-2026-08-27.md`): a memory
+//! Measured on this host (`docs/internal/records/whp-platform-probe-2026-08-27.md`): a memory
 //! exit reports `InstructionLength = 0`, does not advance `RIP`, and for a
 //! write to a read-only window carries no instruction bytes either. There is
 //! therefore no way to finish a trapped access by stepping over it, and no
@@ -29,8 +29,8 @@ use super::xsave;
 use rusty_box::cpu::arch_state::VcpuArchState;
 use rusty_box::cpu::{cpu::BxCpuC, instrumentation::Instrumentation, CpuError, Result};
 use rusty_box::emulator::{
-    DeliveryRoute, DeviceClock, Emulator, EventDelivery, PcIo, Processor, Progress, ProgressUnit,
-    SliceEngine, SliceRequest,
+    DeliveryRoute, DeviceClock, Emulator, EventDelivery, PcIo, Processor, ProcessorParts, Progress,
+    ProgressUnit, SliceEngine, SliceRequest,
 };
 use rusty_box::iodev::ioapic::IoApicDeliveryMode;
 use rusty_box::iodev::irq::{IoApicDelivery, IoApicDestinationMode, IoApicTrigger};
@@ -441,6 +441,20 @@ impl InjectState {
         self.shadowed = shadow_inhibit;
     }
 
+    /// Republish `IF` alone, after the shadow's flags were written into the
+    /// partition outside an errand — the hand-back that follows a pause, where
+    /// a paused caller may have changed them.
+    ///
+    /// Only `IF`. That hand-back leaves the partition's interrupt state where
+    /// it was, so the shadow bit this cache took from the last exit header
+    /// still describes the processor the next entry runs; the interpreter's
+    /// own inhibit, which [`Self::refresh_from_shadow`] would publish instead,
+    /// was lapsed when the pause read the processor back and describes
+    /// nothing.
+    pub(crate) fn republish_if(&mut self, shadow_if: bool) {
+        self.if_flag = shadow_if;
+    }
+
     /// Whether the processor the next VM entry runs can take an external
     /// interrupt right now.
     ///
@@ -816,6 +830,14 @@ impl WhpEngine {
         self.controls.push(control);
     }
 
+    /// Whether the started partition's local APIC is the hypervisor's rather
+    /// than this machine's own model. `false` before the partition starts.
+    pub(crate) fn has_hypervisor_apic(&self) -> bool {
+        self.started
+            .as_ref()
+            .is_some_and(|started| started.apic_mode != LocalApicMode::None)
+    }
+
     /// The threads running this machine's processors, in processor order.
     ///
     /// Test-facing: the production paths reach `self.controls` directly. What
@@ -1118,7 +1140,8 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
 pub(crate) fn bring_up<T: Instrumentation>(
     machine: &mut Emulator<T, WhpEngine>,
 ) -> Result<Vcpu> {
-    let Processor { mut io, engine, .. } = machine.processor(BOOT_VP as usize);
+    let mut processor = machine.processor(BOOT_VP as usize);
+    let ProcessorParts { mut io, engine, .. } = processor.parts();
     let started = start(&mut engine.started, &mut io)?;
     started.vcpu.take().ok_or(CpuError::UnsupportedCpuOperation {
         operation: "the processor was already taken by a thread",
@@ -1347,11 +1370,7 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
     /// restored in — and a no-op while the partition has no APIC, where this
     /// machine's own model holds the pin and the slice head delivers from it.
     fn pic_pin_changed(&mut self, asserted: bool) -> core::result::Result<(), EngineFault> {
-        let hypervisor_apic = self
-            .started
-            .as_ref()
-            .is_some_and(|started| started.apic_mode != LocalApicMode::None);
-        if !hypervisor_apic {
+        if !self.has_hypervisor_apic() {
             return Ok(());
         }
         match (asserted, self.controls.first()) {
@@ -1365,6 +1384,26 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
             }),
             _ => Ok(()),
         }
+    }
+
+    /// Every processor's thread is told the machine was reset, and installs
+    /// the reset processor before it next enters the partition.
+    ///
+    /// A no-op while no thread runs this machine's processors: a machine reset
+    /// before adoption is the machine an adoption installs.
+    fn machine_was_reset(&mut self) -> core::result::Result<(), EngineFault> {
+        let mut refused = None;
+        for control in &self.controls {
+            if let Err(error) = control.machine_was_reset() {
+                tracing::error!("a processor could not be fetched out of its run: {error}");
+                refused.get_or_insert(EngineFault::with_code(
+                    EngineFaultKind::Vcpu,
+                    "WHvCancelRunVirtualProcessor",
+                    error.hresult(),
+                ));
+            }
+        }
+        refused.map_or(Ok(()), Err)
     }
 
     /// Refused: a machine on the hypervisor is driven by `FastMachine`.
@@ -1457,12 +1496,11 @@ const SMM_HANDLER_CEILING: u64 = 1_000_000;
 ///
 /// # Errors
 /// A fault the shadow could not take, or a handler that never returns.
-pub(crate) fn run_the_shadow_out_of_smm<T: Instrumentation>(
-    cpu: &mut BxCpuC<T>,
-    io: &mut PcIo<'_>,
+pub(crate) fn run_the_shadow_out_of_smm<T: Instrumentation, E>(
+    processor: &mut Processor<'_, T, E>,
 ) -> Result<()> {
     let mut executed = 0u64;
-    while cpu.is_in_smm() {
+    while processor.cpu().is_in_smm() {
         if executed >= SMM_HANDLER_CEILING {
             tracing::error!(
                 "a system-management handler has run {SMM_HANDLER_CEILING} instructions \
@@ -1472,7 +1510,7 @@ pub(crate) fn run_the_shadow_out_of_smm<T: Instrumentation>(
                 operation: "a system-management handler did not return",
             });
         }
-        io.emulate_one(cpu)?;
+        processor.emulate_one()?;
         executed += 1;
     }
     Ok(())

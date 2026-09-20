@@ -60,9 +60,12 @@ cargo install --git https://github.com/rerun-io/kittest_inspector egui_mcp  # in
 claude mcp add egui egui-mcp   # register the stdio MCP server (needs a session reload to expose mcp__egui__* tools)
 ```
 
-Launch the GUI with inspection enabled (the app then listens on `127.0.0.1:5719`):
+Launch the GUI with inspection enabled. `EGUI_INSPECTION=1` listens on the default
+`127.0.0.1:5719`, which another egui app on this machine may already hold — a bare
+`attach` then lands on *that* app. Name a port instead and check the window label
+before driving anything:
 ```bash
-EGUI_INSPECTION=1 cargo run --release -p rusty_box_gui -- --no-config --display egui \
+EGUI_INSPECTION=127.0.0.1:5731 cargo run --release -p rusty_box_gui -- --no-config --display egui \
   --bios cpp_orig/bochs/bochs/bios/BIOS-bochs-latest \
   --vga-bios cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin \
   --cdrom <image.iso> --boot cdrom --memory-mib 256 --host-memory-mib 256 --ips 300000000
@@ -87,7 +90,7 @@ Emulator<T: Instrumentation = (), E = SoftwareEngine>   (no lifetime params; E i
 +-- BxCpuC<T>         CPU core state (registers, TLBs as OFFSETS into the allocation, icache)
 +-- BxMemC            Memory subsystem (block-based, supports >4GB; owns its RAM as Box<[GuestPage]>)
 +-- BxDevicesC        I/O port handler manager (65536 ports, fixed arrays)
-+-- DeviceManager     Hardware devices (PIC, PIT, CMOS, DMA, VGA, Keyboard, IDE, Serial)
++-- DeviceManager     Hardware devices (PIC, IOAPIC, PIT, HPET, CMOS, DMA, VGA, Keyboard, IDE, Serial, PCI, ACPI, fw_cfg)
 +-- BxPcSystemC       Timers and A20 line control
 +-- GUI               Display (NoGui, TermGui, or EguiGui) [alloc only]
 ```
@@ -121,10 +124,19 @@ Emulator::init_at(emu_ptr, cpu, mem_stub, config)   // Emulator at raw pointer
 
 ## Workspace Structure
 
-- **rusty_box/** -- Main emulator library
+- **rusty_box/** -- Main emulator library: CPU, memory, the machine and the devices still bound to it
+- **rusty_box_core/** -- Architecture-neutral foundations shared by the library, the device models and the engines (`VmClock`, `RingBuffer`, `forbid(unsafe)`)
+- **rusty_box_devices/** -- Device models that depend on no host and no execution engine
 - **rusty_box_decoder/** -- Separate crate for x86 instruction decoding
+- **rusty_box_whp_sys/** -- The Windows Hypervisor Platform seam: host FFI and its ABI vocabulary
+- **rusty_box_whp/** -- Safe WHP backing over that seam
+- **rusty_box_whp_engine/** -- Runs a machine's guest on WHP (`WhpEngine`, the device thread, `FastMachine`)
+- **rusty_box_gui/** -- The front end: VM library, typed CLI flags and TOML configuration (desktop, Android, web)
+- **rusty_box_bximage/** -- Bochs `bximage`-compatible disk image creation
+- **xtask/** -- `cargo xtask ci`, the gate suite, and the Android build/run tasks
 - **examples/rusty_box_web/** -- WASM web frontend
 - **examples/rusty_box_uefi/** -- UEFI bootable emulator application (no allocator)
+- **examples/no_alloc_smoke/** -- The smallest no_std + no_alloc consumer, so that build stays honest
 - **cpp_orig/bochs/** -- Original C++ Bochs source for reference
 
 ## Key Files for Common Tasks
@@ -132,10 +144,10 @@ Emulator::init_at(emu_ptr, cpu, mem_stub, config)   // Emulator at raw pointer
 | Task | Files |
 |------|-------|
 | Add new instruction | `rusty_box_decoder/src/fetchdecode*.rs`, `rusty_box/src/cpu/<category>/` |
-| Add new I/O device | `rusty_box/src/iodev/` (new file), `iodev/devices.rs` (registration) |
+| Add new I/O device | `rusty_box_devices/src/` for a model with no machine dependency, else `rusty_box/src/iodev/` (new file); `iodev/devices.rs` (registration either way) |
 | Modify memory mapping | `rusty_box/src/memory/misc_mem.rs`, `memory/mod.rs` |
 | Add/modify FPU instruction | `rusty_box/src/cpu/fpu/` (handlers), `cpu/softfloat3e/` (math) |
-| Ring buffer (replaces VecDeque) | `rusty_box/src/ring_buffer.rs` |
+| Ring buffer (replaces VecDeque) | `rusty_box_core/src/ring_buffer.rs`, re-exported as `rusty_box::ring_buffer` |
 
 ## Feature Flags
 

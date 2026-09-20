@@ -101,8 +101,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     ///
     /// Returns the number of instructions executed, or an error.
     pub fn run_interactive(&mut self, max_instructions: u64) -> Result<u64> {
-        self.prepare_run();
-
         // Verify VGA BIOS and IPL diagnostic ranges through block-aware RAM
         // copies; guest RAM is never borrowed as one flat slice.
         {

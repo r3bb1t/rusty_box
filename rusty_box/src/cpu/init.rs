@@ -59,6 +59,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
     }
 
+    /// Choose what a triple fault that reaches this processor does. Set by
+    /// `initialize` for a machine that boots firmware, and by
+    /// `Emulator::setup_cpu_mode` for one that does not.
+    pub(crate) fn set_on_triple_fault(&mut self, action: crate::params::OnTripleFault) {
+        self.on_triple_fault = action;
+    }
+
     pub fn initialize(&mut self, _config: BxParams) -> Result<()> {
         tracing::debug!("Initialized cpu model {}", self.cpuid.get_name());
 
@@ -88,6 +95,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // version register, ID width and spurious-vector layout.
         self.lapic.set_simulated_apic_model();
         self.cpu_topology = _config.cpu_topology();
+        self.on_triple_fault = _config.on_triple_fault_with_firmware();
 
         // Establish the per-pkey allow-mask invariant documented on `rd_pkey`
         // ("when no protection keys are enabled all bits should be set for all

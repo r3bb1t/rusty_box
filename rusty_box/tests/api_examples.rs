@@ -16,7 +16,7 @@
 use rusty_box::cpu::{CpuSetupMode, ResetReason, X86Reg};
 use rusty_box::emulator::{
     AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder,
-    MemorySize, PowerState, RunBudget, StopReason,
+    MemorySize, PowerState, RunBudget, StopReason, Typed,
 };
 use rusty_box::gui::NoGui;
 use rusty_box::{GpaPerms, GpaPlan, HostOffset, MemoryPlanError};
@@ -325,11 +325,17 @@ fn input_reports_what_the_guest_actually_received() {
         .expect("build");
 
     // The guest's ring is 16 bytes, so a long string is delivered short and
-    // the count is the resume point.
+    // the outcome carries the resume point.
     let text = "root\n";
-    let delivered = machine.keyboard().type_text(text);
-    assert!(delivered <= text.chars().count());
-    let _remaining: String = text.chars().skip(delivered).collect();
+    let typed = machine.keyboard().type_text(text);
+    assert!(typed.delivered() <= text.chars().count());
+    // Resuming past an untypable character, rather than at it, is the whole
+    // reason the outcome names one.
+    let _remaining: String = match typed {
+        Typed::All { .. } => String::new(),
+        Typed::Refused { delivered } => text.chars().skip(delivered).collect(),
+        Typed::Unmappable { delivered, .. } => text.chars().skip(delivered + 1).collect(),
+    };
 
     assert!(machine.keyboard().tap(BxKey::F1) || true, "tap reports delivery");
     let _held = machine.keyboard().key(BxKey::CtrlL, true);

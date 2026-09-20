@@ -1060,11 +1060,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs exception.cc: read new CS from IVT
         let new_cs = self.system_read_word(ivt_addr + 2)?;
 
-        // Boot diagnostic: if we ever vector to 0000:0000 in real mode, BIOS likely
-        // hit an unexpected exception/IRQ before IVT was initialized (or IVT reads are broken).
+        // Boot diagnostic, host-side only: a real-mode vector to 0000:0000 is
+        // logged once. The BIOS likely took an exception or IRQ before it
+        // initialised the IVT.
         if new_ip == 0 && new_cs == 0 && (self.boot_debug_flags & 0x02) == 0 {
             self.boot_debug_flags |= 0x02;
-            self.debug_puts(b"[IVT->0000:0000]\n");
+            tracing::warn!("real-mode vector {vector:#04x} through an IVT entry of 0000:0000");
         }
 
         // Bochs exception.cc: load CS:IP from IVT

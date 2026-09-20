@@ -102,6 +102,42 @@ pub struct DisplayToml {
     /// Register the VGA as a PCI device so Linux `bochs-drm` can bind for a KMS
     /// framebuffer. Off by default; experimental (needs a guest boot to verify).
     pub pci_vga: Option<bool>,
+    /// Stretch the console to fill the screen rather than keep the guest's
+    /// shape. The phone's full-screen console reads it. Default false.
+    pub stretch: Option<bool>,
+    /// The phone trackpad's cursor speed, percent of the finger's own travel
+    /// across the guest's image: 50 to 300. Default 100.
+    pub pointer_speed_percent: Option<u16>,
+}
+
+/// The phone trackpad's cursor speed, in percent of the finger's own travel
+/// across the guest's image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerSpeed {
+    percent: u16,
+}
+
+impl PointerSpeed {
+    /// The cursor keeps pace with the finger.
+    pub const DEFAULT: Self = Self { percent: 100 };
+    /// The slowest and fastest the trackpad offers.
+    pub const RANGE_PERCENT: core::ops::RangeInclusive<u16> = 50..=300;
+
+    /// `percent` held to [`Self::RANGE_PERCENT`].
+    pub fn from_percent(percent: u16) -> Self {
+        Self {
+            percent: percent.clamp(*Self::RANGE_PERCENT.start(), *Self::RANGE_PERCENT.end()),
+        }
+    }
+
+    pub fn percent(self) -> u16 {
+        self.percent
+    }
+
+    /// The multiplier over the finger's travel.
+    pub fn factor(self) -> f32 {
+        f32::from(self.percent) / 100.0
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -240,6 +276,11 @@ pub struct ResolvedConfig {
     pub vga_mode: Option<VgaMode>,
     /// Register the VGA on PCI (experimental KMS / `bochs-drm` path). Default off.
     pub pci_vga: bool,
+    /// The phone's full-screen console fills the screen instead of keeping the
+    /// guest's shape.
+    pub console_stretch: bool,
+    /// The phone trackpad's cursor speed.
+    pub pointer_speed: PointerSpeed,
 }
 
 /// A pre-boot VBE display mode.
@@ -319,6 +360,8 @@ pub fn blank_config() -> ResolvedConfig {
         log_level: DEFAULT_LOG_LEVEL,
         vga_mode: None,
         pci_vga: DEFAULT_PCI_VGA,
+        console_stretch: false,
+        pointer_speed: PointerSpeed::DEFAULT,
     }
 }
 
@@ -452,6 +495,11 @@ fn resolve_config_with_base(
     };
 
     let pci_vga = file.display.pci_vga.unwrap_or(DEFAULT_PCI_VGA);
+    let console_stretch = file.display.stretch.unwrap_or(false);
+    let pointer_speed = file
+        .display
+        .pointer_speed_percent
+        .map_or(PointerSpeed::DEFAULT, PointerSpeed::from_percent);
 
     let disk = resolve_disk(&file, args, config_dir)?;
     let cdrom = resolve_cdrom(&file, args, config_dir);
@@ -481,6 +529,8 @@ fn resolve_config_with_base(
         log_level,
         vga_mode,
         pci_vga,
+        console_stretch,
+        pointer_speed,
     })
 }
 
@@ -567,6 +617,11 @@ impl ResolvedConfig {
             height: self.vga_mode.map(|mode| mode.height),
             bpp: self.vga_mode.map(|mode| mode.bpp),
             pci_vga: (self.pci_vga != DEFAULT_PCI_VGA).then_some(self.pci_vga),
+            // Only persist a stretched console so existing configs stay stable.
+            stretch: self.console_stretch.then_some(true),
+            // Only persist a non-default speed so existing configs stay stable.
+            pointer_speed_percent: (self.pointer_speed != PointerSpeed::DEFAULT)
+                .then_some(self.pointer_speed.percent()),
         };
         let rom = RomToml {
             bios: Some(self.bios.clone()),
@@ -1751,6 +1806,45 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     }
 
     #[test]
+    fn console_stretch_is_read_from_the_display_section() {
+        let file = config(
+            r#"
+[display]
+stretch = true
+
+[rom]
+bios = "bios.bin"
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+"#,
+        );
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        assert!(resolved.console_stretch);
+        assert_eq!(resolved.to_file_config().display.stretch, Some(true));
+    }
+
+    #[test]
+    fn a_file_without_stretch_keeps_the_guest_shape_and_writes_no_key() {
+        let file = config(
+            r#"
+[rom]
+bios = "bios.bin"
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+"#,
+        );
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        assert!(!resolved.console_stretch);
+        assert_eq!(resolved.to_file_config().display.stretch, None);
+    }
+
+    #[test]
     fn vga_mode_requires_both_width_and_height() {
         let file = config(
             r#"
@@ -1926,6 +2020,8 @@ overwrite = false
                 bpp: 16,
             }),
             pci_vga: !DEFAULT_PCI_VGA,
+            console_stretch: true,
+            pointer_speed: PointerSpeed::from_percent(175),
         };
 
         let serialized = toml::to_string_pretty(&resolved.to_file_config()).unwrap();

@@ -1,5 +1,6 @@
-//! Public types shared by both the BOCHS-style trait API and the
-//! Unicorn-style closure-based hook API.
+//! Public types the [`Instrumentation`](super::Instrumentation) hooks carry:
+//! the hook mask, the event payloads, and the enums that replace BOCHS's raw
+//! `unsigned` codes.
 //!
 //! This module deliberately avoids any `#[repr(C)]` constraints: the
 //! exposed Rust API is the source of truth. C/Python/Lua wrappers will
@@ -459,7 +460,8 @@ pub struct LinAccess<'a> {
     pub rw: MemAccessRW,
 }
 
-/// Physical memory access event (e.g. page-table walks, INVLPG side effects).
+/// Physical memory access event: a page-table walk, a VMCB or VMCS field, a
+/// virtual-APIC register, SMRAM save and restore.
 /// Same shape as [`LinAccess`] but without a linear address.
 #[derive(Debug, Copy, Clone)]
 pub struct PhyAccess<'a> {
@@ -609,15 +611,18 @@ pub enum X86Reg {
     R13w,
     R14w,
     R15w,
-    // 8-bit low / high views
+    // 8-bit views (write replaces the named byte, all other bits preserved)
     Al,
     Cl,
     Dl,
     Bl,
+    // Legacy high bytes — bits 15:8 of RAX/RCX/RDX/RBX.
     Ah,
     Ch,
     Dh,
     Bh,
+    // REX-form low bytes — bits 7:0 of RSP/RBP/RSI/RDI. Distinct registers
+    // from AH/CH/DH/BH above, not aliases of them.
     Spl,
     Bpl,
     Sil,

@@ -13,7 +13,7 @@
 //!
 //! ## What the machine had to offer for this to live outside it
 //!
-//! One verb: [`rusty_box::emulator::PcIo::emulate_one`]. An engine running the
+//! One verb: [`rusty_box::emulator::Processor::emulate_one`]. An engine running the
 //! guest on real hardware still meets accesses the hardware will not finish,
 //! and finishing one means decoding it. The decoder belongs to the emulator, so
 //! the emulator offers a single instruction executed against its own parts —
@@ -140,6 +140,38 @@ pub(crate) mod fixtures {
         machine.mem_write(CODE, code).expect("load");
         machine.reg_write(X86Reg::Rip, CODE);
         machine
+    }
+
+    /// A 64 KiB firmware image that runs `program` from its reset vector.
+    ///
+    /// F000:FFF0 holds a near jump to offset 0: IP wraps inside the segment,
+    /// so `program` runs from the bottom of the image with CS still based at
+    /// 0xFFFF0000. Every other byte is `HLT`.
+    pub(crate) fn firmware_running(program: &[u8]) -> std::vec::Vec<u8> {
+        let mut rom = std::vec![0xF4u8; 0x10000];
+        rom[..program.len()].copy_from_slice(program);
+        rom[0xFFF0..0xFFF3].copy_from_slice(&[0xE9, 0x0D, 0x00]);
+        rom
+    }
+
+    /// A machine with the full device set that boots `program` as its
+    /// firmware, adopted and paused — the shape a guest that reboots needs,
+    /// because a reset starts it at its reset vector again.
+    pub(crate) fn fast_machine_booting(
+        program: &[u8],
+        cpu_params: rusty_box::params::BxParams,
+    ) -> crate::FastMachine<()> {
+        let config = EmulatorConfig {
+            memory: MemorySize::bytes(8 * 1024 * 1024),
+            device_clock: DeviceClock::HostTime,
+            cpu_params,
+            ..EmulatorConfig::default()
+        };
+        let machine = MachineBuilder::new(config)
+            .bios(&firmware_running(program))
+            .build_on::<WhpEngine>()
+            .expect("machine");
+        crate::FastMachine::adopt(machine).expect("a machine on hardware")
     }
 
     /// Where the interrupt handler of the protected-mode guests below lives.
@@ -453,6 +485,8 @@ pub(crate) mod fixtures {
                 .expect("the machine's lock")
                 .engine_mut()
                 .install_control(control.clone());
+            // Born parked; these tests want it running.
+            control.resume();
             Self { control, join: Some(join) }
         }
 
@@ -664,7 +698,8 @@ pub use rusty_box_whp::hypervisor_present;
 #[cfg(test)]
 mod tests {
     use crate::fixtures::{
-        a_turn_on_the_hardware, drive_on_a_thread, fast_machine_running, hypervisor_here,
+        a_turn_on_the_hardware, drive_on_a_thread, fast_machine_booting, fast_machine_running,
+        hypervisor_here,
         ioapic_edge_guest, load_the_protected_mode_tables, machine_running,
         machine_with_devices_on, masked_lvt0_guest, shared, wait_until, RunningVcpu, ThreadedRun,
         CODE, DEBUG_PORT, MARK,
@@ -705,7 +740,9 @@ mod tests {
             .expect("the hypervisor runs the guest");
 
         let written: std::vec::Vec<u8> =
-            machine.with_machine(|m| m.debug_port().take_output().collect());
+            machine
+                .with_machine(|m| m.debug_port().take_output().collect())
+                .expect("a stepped machine is paused");
         assert_eq!(
             written,
             std::vec![MARK],
@@ -744,7 +781,9 @@ mod tests {
             .expect("the hypervisor runs the guest and the shadow finishes its accesses");
 
         let written: std::vec::Vec<u8> =
-            machine.with_machine(|m| m.debug_port().take_output().collect());
+            machine
+                .with_machine(|m| m.debug_port().take_output().collect())
+                .expect("a stepped machine is paused");
         assert_eq!(
             written,
             std::vec![MARK],
@@ -815,7 +854,9 @@ mod tests {
             .step(RunBudget::Ticks(1_000_000))
             .expect("the hypervisor runs the guest");
         let by_the_hardware: std::vec::Vec<u8> =
-            on_hardware.with_machine(|m| m.debug_port().take_output().collect());
+            on_hardware
+                .with_machine(|m| m.debug_port().take_output().collect())
+                .expect("a stepped machine is paused");
 
         assert_eq!(
             by_the_interpreter.last(),
@@ -877,7 +918,9 @@ mod tests {
             .step(RunBudget::Ticks(1_000_000))
             .expect("the hypervisor runs the guest");
         let by_the_hardware: std::vec::Vec<u8> =
-            on_hardware.with_machine(|m| m.debug_port().take_output().collect());
+            on_hardware
+                .with_machine(|m| m.debug_port().take_output().collect())
+                .expect("a stepped machine is paused");
 
         assert_eq!(
             by_the_interpreter.len(),
@@ -918,7 +961,7 @@ mod tests {
     /// imposition writes the interpreter's own inhibit into that bit, and
     /// under `TF` that inhibit is clear by the time it is written: the
     /// errand's tail retires the instruction a `MOV SS` shadows and delivers
-    /// the owed step before imposing (`PcIo::deliver_the_trap_owed`), and
+    /// the owed step before imposing (`Processor::deliver_the_trap_owed`), and
     /// taking a trap ends any inhibit (Bochs exception.cc `interrupt`). So
     /// the word written after s3 carries no shadow, and s4 (trap frame IP
     /// 0x102B) — the first hardware-retired instruction after the
@@ -934,7 +977,7 @@ mod tests {
     /// The errand-retired instruction's OWN step (frame IP 0x102A) is part
     /// of the same equality. The interpreter latches it for a boundary a
     /// one-instruction errand never reaches, so the errand's tail takes that
-    /// boundary itself (`PcIo::deliver_the_trap_owed`), and the hardware
+    /// boundary itself (`Processor::deliver_the_trap_owed`), and the hardware
     /// trace carries the step exactly where the interpreter's does.
     #[test]
     fn a_single_step_trap_survives_the_imposed_inhibit() {
@@ -1079,7 +1122,7 @@ mod tests {
                     .step(RunBudget::Ticks(1_000_000))
                     .expect("the hypervisor runs the guest");
             }
-            machine.with_machine(read_trace)
+            machine.with_machine(read_trace).expect("a stepped machine is paused")
         };
         let (hw_err_count, hw_err, hw_err_memory_exits) = {
             let mut machine = fast_machine_running(with_errand);
@@ -1088,7 +1131,8 @@ mod tests {
                     .step(RunBudget::Ticks(1_000_000))
                     .expect("the hypervisor runs the guest");
             }
-            let (count, ips) = machine.with_machine(read_trace);
+            let (count, ips) =
+                machine.with_machine(read_trace).expect("a stepped machine is paused");
             (count, ips, machine.engine_census().exits.memory)
         };
 
@@ -1355,7 +1399,7 @@ mod tests {
             "the thread arms no deliverability window: the notification is measured inert \
              under an emulated APIC, and the retry is the guest's own next exit"
         );
-        let acknowledges = guard.processor(0).io.device_manager().irq().acknowledge_count();
+        let acknowledges = guard.processor(0).io().device_manager().irq().acknowledge_count();
         assert_eq!(
             acknowledges, census.injected,
             "one INTA cycle at this machine's own controllers per placed vector — a \
@@ -1575,7 +1619,7 @@ mod tests {
                 .lock()
                 .expect("the machine's lock")
                 .processor(0)
-                .io
+                .io()
                 .device_manager()
                 .has_interrupt(),
             "the 8259's pin must have risen and still be owed — without that this test \
@@ -1685,5 +1729,181 @@ mod tests {
         // is what discharges the obligation the `Vcpu` carries onto the thread:
         // the handle names a partition this machine is about to drop.
         running.stop_and_join();
+    }
+
+    // ── A machine reset reaches the hardware processor ──────────────────
+
+    /// A pass counter in guest RAM. A reset does not clear RAM, so the run
+    /// through the reset vector that follows a reboot knows it is the second.
+    const PASS: u16 = 0x0600;
+    /// A zeroed IDT pointer in guest RAM.
+    const ZERO_IDT: u16 = 0x0700;
+
+    /// Count a pass at [`PASS`]. On the first, run `first_pass`, which must not
+    /// fall through; on any later one, mark the debug port and halt.
+    fn a_guest_that_reboots(first_pass: &[u8]) -> std::vec::Vec<u8> {
+        let pass = PASS.to_le_bytes();
+        let mut code = std::vec![
+            0xFF, 0x06, pass[0], pass[1], // inc word [PASS]
+            0x83, 0x3E, pass[0], pass[1], 0x02, // cmp word [PASS], 2
+            0x73, u8::try_from(first_pass.len()).expect("a short first pass"), // jae done
+        ];
+        code.extend_from_slice(first_pass);
+        code.extend([
+            0xB0, MARK, // done: mov al, MARK
+            0xE6, DEBUG_PORT, // out 0xE9, al
+            0xF4, // hlt
+            0xEB, 0xFD, // jmp hlt
+        ]);
+        code
+    }
+
+    /// PIIX3 reset control, 0xCF9 = 0x06: a hardware reset (Bochs pci2isa.cc).
+    const RESET_THROUGH_THE_CHIPSET: [u8; 8] = [
+        0xBA, 0xF9, 0x0C, // mov dx, 0xCF9
+        0xB0, 0x06, // mov al, 0x06 — SYS_RST | RST_CPU
+        0xEE, // out dx, al
+        0xEB, 0xFE, // jmp $ — the reset lands before this runs
+    ];
+
+    /// An IDT with limit 0, then `INT3`: the vector is past the limit, so is
+    /// the #GP that raises, and so is the #DF after it — a triple fault.
+    fn triple_fault() -> [u8; 6] {
+        let idt = ZERO_IDT.to_le_bytes();
+        [
+            0x0F, 0x01, 0x1E, idt[0], idt[1], // lidt [ZERO_IDT]
+            0xCC, // int3
+        ]
+    }
+
+    /// How a run towards the guest's mark ended.
+    struct MarkedRun {
+        /// What ended the last step.
+        stop: crate::StepStop,
+        /// Every byte the guest wrote to the debug port on the way.
+        written: std::vec::Vec<u8>,
+    }
+
+    /// Step until the guest marks the debug port or a step ends for any other
+    /// reason, within a bound.
+    fn step_until_marked(machine: &mut crate::FastMachine<()>) -> MarkedRun {
+        let mut written = std::vec::Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let outcome = machine.step(RunBudget::Ticks(500_000)).expect("a step");
+            written.extend(
+                machine
+                    .with_machine(|m| m.debug_port().take_output().collect::<std::vec::Vec<u8>>())
+                    .expect("a stepped machine is paused"),
+            );
+            if written.contains(&MARK)
+                || outcome.stop != crate::StepStop::BudgetSpent
+                || std::time::Instant::now() > deadline
+            {
+                return MarkedRun { stop: outcome.stop, written };
+            }
+        }
+    }
+
+    fn passes(machine: &mut crate::FastMachine<()>) -> u16 {
+        machine
+            .with_machine(|m| m.mem_read_u16_le(u64::from(PASS)).expect("guest RAM"))
+            .expect("a stepped machine is paused")
+    }
+
+    /// A guest that reboots through the chipset comes back through its reset
+    /// vector on the hardware processor: the reset its `OUT` asked for is taken
+    /// before the processor runs on (Bochs resets inside the instruction), and
+    /// the partition is given the reset processor, local APIC and all.
+    #[test]
+    fn a_guest_reboots_through_the_chipset_on_the_hypervisor() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut machine = fast_machine_booting(
+            &a_guest_that_reboots(&RESET_THROUGH_THE_CHIPSET),
+            rusty_box::params::BxParams::default(),
+        );
+
+        let MarkedRun { stop, written } = step_until_marked(&mut machine);
+
+        assert_eq!(stop, crate::StepStop::BudgetSpent, "wrote {written:#04x?}");
+        assert!(written.contains(&MARK), "the second pass never ran: wrote {written:#04x?}");
+        assert_eq!(passes(&mut machine), 2, "the guest ran, rebooted, and ran again");
+    }
+
+    /// A reset the host makes while the machine is paused reaches the
+    /// hardware processor too: it runs from the reset vector when resumed.
+    #[test]
+    fn a_host_reset_reaches_the_hardware_processor() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let pass = PASS.to_le_bytes();
+        let mut machine = fast_machine_booting(
+            &[
+                0xFF, 0x06, pass[0], pass[1], // inc word [PASS]
+                0xB0, MARK, // mov al, MARK
+                0xE6, DEBUG_PORT, // out 0xE9, al
+                0xF4, // hlt
+                0xEB, 0xFD, // jmp hlt
+            ],
+            rusty_box::params::BxParams::default(),
+        );
+
+        let first = step_until_marked(&mut machine).written;
+        assert!(first.contains(&MARK), "the first pass never ran: wrote {first:#04x?}");
+        machine
+            .with_machine(|m| m.reset(rusty_box::cpu::ResetReason::Hardware))
+            .expect("a stepped machine is paused")
+            .expect("the reset");
+        let second = step_until_marked(&mut machine).written;
+
+        assert!(second.contains(&MARK), "the reset guest never ran: wrote {second:#04x?}");
+        assert_eq!(passes(&mut machine), 2, "the processor ran from the reset vector again");
+    }
+
+    /// A triple fault reboots a machine that boots firmware, as Bochs's does
+    /// (`reset_on_triple_fault=1`), on the hardware processor as on the
+    /// interpreter.
+    #[test]
+    fn a_triple_fault_reboots_the_machine_on_the_hypervisor() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut machine = fast_machine_booting(
+            &a_guest_that_reboots(&triple_fault()),
+            rusty_box::params::BxParams::default(),
+        );
+
+        let MarkedRun { stop, written } = step_until_marked(&mut machine);
+
+        assert_eq!(stop, crate::StepStop::BudgetSpent, "wrote {written:#04x?}");
+        assert!(written.contains(&MARK), "the second pass never ran: wrote {written:#04x?}");
+        assert_eq!(passes(&mut machine), 2, "the triple fault rebooted the guest");
+    }
+
+    /// With `OnTripleFault::ShutDown` the same fault stops the machine with its
+    /// processor in the shutdown state, having run once.
+    #[test]
+    fn a_triple_fault_can_shut_the_hardware_processor_down() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut machine = fast_machine_booting(
+            &a_guest_that_reboots(&triple_fault()),
+            rusty_box::params::BxParams::default()
+                .on_triple_fault(rusty_box::params::OnTripleFault::ShutDown),
+        );
+
+        let MarkedRun { stop, written } = step_until_marked(&mut machine);
+
+        assert_eq!(stop, crate::StepStop::CpuShutdown, "wrote {written:#04x?}");
+        assert!(!written.contains(&MARK), "a shut-down processor ran on: wrote {written:#04x?}");
+        assert_eq!(passes(&mut machine), 1);
     }
 }

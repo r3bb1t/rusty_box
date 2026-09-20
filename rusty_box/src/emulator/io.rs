@@ -98,7 +98,7 @@ impl<'a> PcIo<'a> {
     /// the interpreter's execution context: an engine running the guest on
     /// hardware answers a port exit out of these same devices, and a boundary
     /// request it dropped would strand a PAM flip or a relocated BAR.
-    pub fn sync_io_events<T: Instrumentation>(&mut self, cpu: &mut BxCpuC<T>) {
+    pub(crate) fn sync_io_events<T: Instrumentation>(&mut self, cpu: &mut BxCpuC<T>) {
         let pic_intr_level = self.devices.take_pic_intr_level();
         let hrq_level = self.devices.take_hrq_level();
         let scheduler_boundary_requested = self.devices.take_scheduler_boundary_requested();
@@ -141,7 +141,7 @@ impl<'a> PcIo<'a> {
     ///
     /// # Errors
     /// Whatever the instruction raised that the processor could not take.
-    pub fn emulate_one<T: Instrumentation>(
+    pub(crate) fn emulate_one<T: Instrumentation>(
         &mut self,
         cpu: &mut BxCpuC<T>,
     ) -> crate::cpu::Result<()> {
@@ -161,7 +161,7 @@ impl<'a> PcIo<'a> {
     /// engine about to inject an external interrupt into its partition pops
     /// the vector here; `None` says nothing was deliverable and the stale
     /// pin was reconciled.
-    pub fn pop_deliverable_vector<T: Instrumentation>(
+    pub(crate) fn pop_deliverable_vector<T: Instrumentation>(
         &mut self,
         cpu: &mut BxCpuC<T>,
     ) -> Option<u8> {
@@ -188,7 +188,7 @@ impl<'a> PcIo<'a> {
     ///
     /// # Errors
     /// Whatever the guest raised that the processor could not take.
-    pub fn emulate_batch<T: Instrumentation>(
+    pub(crate) fn emulate_batch<T: Instrumentation>(
         &mut self,
         cpu: &mut BxCpuC<T>,
         instructions: u64,
@@ -237,7 +237,7 @@ impl<'a> PcIo<'a> {
     ///
     /// # Errors
     /// Whatever the instruction raised that the processor could not take.
-    pub fn finish_the_instruction<T: Instrumentation>(
+    pub(crate) fn finish_the_instruction<T: Instrumentation>(
         &mut self,
         cpu: &mut BxCpuC<T>,
     ) -> crate::cpu::Result<()> {
@@ -317,7 +317,7 @@ impl<'a> PcIo<'a> {
     /// # Errors
     /// Whatever the delivery, or the one shadowed instruction, raised that
     /// the processor could not take.
-    pub fn deliver_the_trap_owed<T: Instrumentation>(
+    pub(crate) fn deliver_the_trap_owed<T: Instrumentation>(
         &mut self,
         cpu: &mut BxCpuC<T>,
     ) -> crate::cpu::Result<()> {
@@ -346,7 +346,7 @@ impl<'a> PcIo<'a> {
     /// caller runs the processor afterwards — one
     /// [`emulate_one`](Self::emulate_one) to enter the handler, then as many
     /// as the handler needs to leave it.
-    pub fn deliver_smi<T: Instrumentation>(&mut self, cpu: &mut BxCpuC<T>) {
+    pub(crate) fn deliver_smi<T: Instrumentation>(&mut self, cpu: &mut BxCpuC<T>) {
         cpu.deliver_smi();
     }
 

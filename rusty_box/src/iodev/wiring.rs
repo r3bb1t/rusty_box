@@ -28,7 +28,43 @@ pub(crate) fn with_device_ctx<R>(
     now_ticks: u64,
     f: impl FnOnce(&mut DeviceCtx<'_>) -> R,
 ) -> R {
-    let clock = pc_system.clock_at(now_ticks);
+    with_device_ctx_on(irq, pc_system, handles, now_ticks, AccessClock::Machine, f)
+}
+
+/// The clock a device's access reads.
+///
+/// Named rather than an optional reading beside the machine's (R2): which
+/// clock a device keeps is a property of how the machine was configured, and
+/// the two answer in different units until [`with_device_ctx_on`] turns
+/// either into the one [`DeviceCtx`] carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccessClock {
+    /// The machine's: emulated time at the access.
+    Machine,
+    /// Host time, for a device on `clock: sync=realtime` — Bochs
+    /// `bx_virt_timer.time_usec(true)` — as a reading in microseconds. A
+    /// build without `std` has no host clock to read.
+    #[cfg(feature = "std")]
+    HostMicros(u64),
+}
+
+/// [`with_device_ctx`] for a device that may keep its own clock: the
+/// context's clock reads what `clock` names, while timers still arm on the
+/// machine's wheel at `now_ticks`.
+#[inline]
+pub(crate) fn with_device_ctx_on<R>(
+    irq: &mut IrqFabric,
+    pc_system: &mut BxPcSystemC,
+    handles: TimerHandles,
+    now_ticks: u64,
+    clock: AccessClock,
+    f: impl FnOnce(&mut DeviceCtx<'_>) -> R,
+) -> R {
+    let clock = match clock {
+        AccessClock::Machine => pc_system.clock_at(now_ticks),
+        #[cfg(feature = "std")]
+        AccessClock::HostMicros(usec) => pc_system.clock_reading_micros(usec),
+    };
     let mut timers = WheelTimerService {
         pc_system,
         handles,

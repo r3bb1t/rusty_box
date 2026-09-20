@@ -720,6 +720,33 @@ impl<T: Instrumentation> BxCpuC<T> {
         self.inhibit_mask = 0;
     }
 
+    /// Stand this processor's time-stamp counter at `tsc`, the value an
+    /// engine read from the processor that actually ran the guest.
+    ///
+    /// For an engine whose guest runs on the host's own processor. There the
+    /// hardware owns the counter the guest reads, and this processor's own
+    /// model of it — derived from the instructions this interpreter retired —
+    /// says nothing about it. An engine that has the guest's value in hand
+    /// when it takes the processor back hands it over here, so a caller that
+    /// reads the counter through the machine reads the guest's. The same body
+    /// a write of `IA32_TIME_STAMP_COUNTER` through the machine's API takes
+    /// (Bochs proc_ctrl.cc `set_TSC`).
+    pub fn take_time_stamp_counter(&mut self, tsc: u64) {
+        self.set_tsc_for_api(tsc);
+    }
+
+    /// The time-stamp counter as a read through the machine's API answers it —
+    /// what [`Self::take_time_stamp_counter`] stands it at (Bochs
+    /// proc_ctrl.cc `get_Virtual_TSC`).
+    ///
+    /// For an engine that must tell whether a caller moved the counter: the
+    /// value depends on the ticks this processor retired, which do not move
+    /// while nothing runs it, so two reads that differ saw a write.
+    #[must_use]
+    pub fn time_stamp_counter(&self) -> u64 {
+        self.tsc_for_api()
+    }
+
     /// Whether this processor is inside system-management mode.
     ///
     /// An engine running the guest on the host's own processor has to ask,

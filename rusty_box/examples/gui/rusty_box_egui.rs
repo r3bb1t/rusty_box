@@ -277,9 +277,10 @@ fn run_emulator(
     // We just add console=ttyS0 for serial output visibility.
     // No PCI means no ata_piix/DMA — kernel uses legacy ISA IDE, matching Bochs.
     if matches!(profile, BootProfile::Alpine { .. }) {
-        emu.prepare_run();
         println!("Pre-queuing ISOLINUX boot: Enter (use ISO default config)");
-        let _typed = emu.keyboard().type_text("\n");
+        if !emu.keyboard().type_text("\n").is_complete() {
+            println!("  (the keystroke was refused; the prompt may still be waiting)");
+        }
     }
 
     println!("Emulator started (max {} instructions)", max_instructions);

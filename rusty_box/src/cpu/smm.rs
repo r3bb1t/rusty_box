@@ -11,10 +11,11 @@ use super::{
     descriptor::{
         SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
     },
+    instrumentation::{MemAccessRW, MemType},
     BxCpuC, CpuError, Result,
 };
 
-const SMM_SAVE_STATE_MAP_SIZE: u32 = 128;
+pub(super) const SMM_SAVE_STATE_MAP_SIZE: u32 = 128;
 
 /// Bochs smm.h `SMM_IO_INSTRUCTION_RESTART` / `SMM_SMBASE_RELOCATION` feature
 /// bits of the SMM revision identifier.
@@ -179,13 +180,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.in_smm = false;
 
         // Restore CPU state from saved SMRAM. Bochs RSM: an inconsistent
-        // image is a BX_PANIC + shutdown() — enter the shutdown state like
-        // the triple-fault path does.
+        // image is a BX_PANIC + shutdown().
         if !self.smram_restore_state(&saved_state) {
             tracing::error!("RSM: Incorrect state when restoring CPU state - shutdown !");
-            self.activity_state = super::cpu::CpuActivityState::Shutdown;
-            self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-            return Err(super::error::CpuError::CpuLoopRestart);
+            return self.shutdown();
         }
 
         // Bochs smm.cc RSM ends with BX_NEXT_TRACE(i): RSM is a serializing
@@ -329,11 +327,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.sregs[idx].cache.u.set_segment_l(false);
         }
 
-        // Bochs smm.cc enter_system_management_mode: handleCpuContextChange()
-        // (TLB flush + prefetch/stack-cache invalidation + the mode recompute
-        // for the PE clear) then the MONITOR reset (BX_SUPPORT_MONITOR_MWAIT).
-        self.handle_cpu_context_change();
-        self.monitor.reset_monitor();
+        // Bochs smm.cc enter_system_management_mode ends with the context
+        // switch tail: the TLB flush, prefetch/stack-cache invalidation and
+        // mode recompute for the PE clear, the MONITOR reset, and the hook.
+        self.finish_context_switch();
     }
 
     // ========================================================================
@@ -683,13 +680,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.smbase = smram_get!(SMRAM_FIELD_SMBASE_OFFSET);
         }
 
-        // Bochs resume_from_system_management_mode ends with
-        // handleCpuContextChange() (TLB flush + prefetch/stack-cache
-        // invalidation + every mode/mask recompute) followed by the MONITOR
-        // reset. Both run only on the success path — an inconsistent image
-        // returns above and the caller shuts the CPU down.
-        self.handle_cpu_context_change();
-        self.monitor.reset_monitor();
+        // Bochs resume_from_system_management_mode ends with the context
+        // switch tail — the TLB flush, prefetch/stack-cache invalidation,
+        // every mode/mask recompute, the MONITOR reset and the hook. Only on
+        // the success path: an inconsistent image returns above and the
+        // caller shuts the CPU down.
+        self.finish_context_switch();
 
         true
     }
@@ -739,34 +735,43 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // These bypass paging (SMRAM is always physical)
     // ========================================================================
 
+    /// Read one dword of the SMRAM state-save area for `RSM`, reported to
+    /// `phy_access` as Bochs smm.cc `resume_from_system_management_mode`
+    /// reports each one.
     fn smram_read_physical_dword(&mut self, paddr: u64) -> u32 {
-        {
-            let policy = self.access_policy(paddr);
-            let mut data = [0u8; 4];
-            if self
-                .read_physical_routed(policy, paddr as _, 4, &mut data)
-                .is_ok()
-            {
-                return u32::from_le_bytes(data);
+        let policy = self.access_policy(paddr);
+        let mut data = [0u8; 4];
+        let value = match self.read_physical_routed(policy, paddr as _, 4, &mut data) {
+            Ok(()) => u32::from_le_bytes(data),
+            Err(e) => {
+                // Bochs's access_read_physical cannot fail; ours reports a
+                // malformed address, and the restore reads zero in its place.
+                tracing::warn!("SMM state restore read from {:#x} failed: {:?}", paddr, e);
+                return 0;
             }
-        }
-        0 // Return 0 if memory not accessible
+        };
+        self.on_phy_access_as(paddr, &value.to_le_bytes(), MemAccessRW::Read, MemType::Wb);
+        value
     }
 
+    /// Write one dword of the SMRAM state-save area on SMI entry, reported as
+    /// Bochs smm.cc `enter_system_management_mode` reports each one through
+    /// `write_physical_dword`.
     fn smram_write_physical_dword(&mut self, paddr: u64, value: u32) {
-        {
-            let policy = self.access_policy(paddr);
-            let mut data = value.to_le_bytes();
-            if let Err(e) = self.write_physical_routed(policy, paddr as _, 4, &mut data) {
-                // The save area is what RSM restores from, so a dropped store
-                // here is state loss the guest sees on resume. Bochs's
-                // access_write_physical cannot fail; ours reports a malformed
-                // address, which is worth saying out loud.
-                tracing::warn!("SMM state save write to {:#x} failed: {:?}", paddr, e);
-            }
-            // Bochs handleSMC flushes the writer synchronously at the store.
-            self.smc_sync_after_phys_write();
+        let policy = self.access_policy(paddr);
+        let mut data = value.to_le_bytes();
+        let stored = self.write_physical_routed(policy, paddr as _, 4, &mut data);
+        // Bochs handleSMC flushes the writer synchronously at the store.
+        self.smc_sync_after_phys_write();
+        if let Err(e) = stored {
+            // The save area is what RSM restores from, so a dropped store
+            // here is state loss the guest sees on resume. Bochs's
+            // access_write_physical cannot fail; ours reports a malformed
+            // address, which is worth saying out loud.
+            tracing::warn!("SMM state save write to {:#x} failed: {:?}", paddr, e);
+            return;
         }
+        self.on_phy_access_as(paddr, &value.to_le_bytes(), MemAccessRW::Write, MemType::Wb);
     }
 }
 
