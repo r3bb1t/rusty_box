@@ -262,6 +262,8 @@ There is no network adapter, no sound card (not even the PC speaker), no USB con
 
 ## Using it as a library
 
+[docs/automation.md](docs/automation.md) is the task-based guide: boot a machine headless, read the screen, type at it, run and stop it, read and write its memory and registers, watch what it does, and what differs on the hypervisor engine. Its examples are compiled by the gate.
+
 - **Building a machine.** `MachineBuilder::new(config).build()` builds an interpreter machine, and `build_on::<WhpEngine>()` builds a hypervisor one. The engine is part of the machine's type.
 - **Instrumentation.** A machine's type parameter `T: Instrumentation` observes the CPU. `()` observes nothing, and its empty hook mask makes the CPU skip every dispatch. A hook such as `pre_syscall` sees each system call: `shellcode_trace` uses it to intercept a shellcode's syscalls, and `alpine_strace` to trace Alpine's.
 - **No allocator.** The core compiles without `alloc` (no_std, no heap) for bare-metal and UEFI targets. The [UEFI application](examples/rusty_box_uefi/) places the whole machine in caller-provided memory.

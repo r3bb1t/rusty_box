@@ -630,12 +630,15 @@ the frequency leaves: return zero in leaf 0xA and clear PDCM in every model
 whose counters are not implemented. Implementing the architectural counters is
 the other way out.
 
-**Rusty Box behavior**: reproduced. The default Skylake-X model inherits both
-declarations (`rusty_box/src/cpu/cpudb/intel/core_i7_skylake.rs`: leaf 0xA is
+**Rusty Box behavior**: reproduced, through the same path. The default
+Skylake-X model inherits both declarations
+(`rusty_box/src/cpu/cpudb/intel/core_i7_skylake.rs`: leaf 0xA is
 `(0x07300404, 0, 0, 0x603)`, and PDCM is in `LEAF1_ECX_BASE`). In
-`cpu/proc_ctrl.rs`, RDMSR returns 0 for `BX_MSR_PMC0..=BX_MSR_PMC7` and
-`BX_MSR_PERFEVTSEL0..=BX_MSR_PERFEVTSEL7`, and WRMSR sends both ranges to the
-unknown-MSR arm, which drops the write under the default `ignore_bad_msrs`. The
-same write-then-read-back probe therefore reads 0 here.
+`cpu/proc_ctrl.rs` the counters `BX_MSR_PMC0`–`BX_MSR_PMC7` have no descriptor,
+so both directions take the unknown-MSR policy; the selectors
+`BX_MSR_PERFEVTSEL0`–`7` have one, and the dispatch logs the access and hands it
+to that same policy, as `cpu/msr.cc` does. Under the default `ignore_bad_msrs` a
+read answers 0 and a write is dropped, so the write-then-read-back probe reads 0
+here too.
 
 **Filing status**: NOT FILED. One issue covers the whole class.

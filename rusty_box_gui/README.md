@@ -297,7 +297,7 @@ Every key, with its default and matching flag:
 | `emulator.ips` | Instructions-per-second target | `4000000` | `--ips` |
 | `emulator.pci` | PCI bus | `true` | `--pci` / `--no-pci` |
 | `emulator.sync_slowdown` | Sync-slowdown pacing | `false` | `--sync-slowdown` / `--no-sync-slowdown` |
-| `emulator.sync_realtime` | Advance PIT/ACPI timers on wall-clock time (Bochs `clock: sync=realtime`) | `false` | `--sync-realtime` |
+| `emulator.sync_realtime` | Run the PIT, the ACPI timer and the VGA's vertical retrace on wall-clock time (Bochs `clock: sync=realtime`) | `false` | `--sync-realtime` |
 | `emulator.smp_quantum` | SMP scheduling quantum, 1-32 (Bochs `cpu: quantum=`) | `16` | `--smp-quantum` |
 | `emulator.max_instructions` | Stop after this many instructions | unlimited | `--max-instructions` |
 | `emulator.cpuid_freq` | How CPUID leaves 0x15/0x16 report frequency: `"hardware"`, `"none"` or `"ips"` (Bochs `cpu: cpuid_freq=`) | `"none"` | `--cpuid-freq` |
@@ -394,7 +394,7 @@ The `args`, `config` and `error` modules are public, as are `library` and `runne
 
 ## Automation
 
-`eframe` is built with its `inspection` feature, except in the Android build. That feature, not this crate, reads `EGUI_INSPECTION`: setting it to `1` when launching the desktop shell exposes its UI to egui inspection clients such as `egui-mcp`, on `127.0.0.1:5719` by default, and setting it to a `host:port` value chooses the address instead (`egui_inspection` 0.35).
+`eframe` is built with its `inspection` feature, except in the Android build. That feature, not this crate, reads `EGUI_INSPECTION`: setting it to `1` when launching the desktop shell exposes its UI to egui inspection clients such as `egui-mcp`, on `127.0.0.1:5719` by default, and setting it to a `host:port` value chooses the address instead (`egui_inspection` 0.36). Name a port of your own when another egui application on the machine already holds the default: an inspection client that attaches to 5719 otherwise lands on that one.
 
 ## Verification
 

@@ -47,7 +47,7 @@ cargo test --release -p rusty_box --test compile_fail --features std  # doctrine
 ## Observing the egui GUI (agents: use this, not desktop screenshots)
 
 To see what the egui GUI is rendering (the VMware-style shell **and** the guest's
-VGA console) and to drive it, use egui 0.35's built-in **inspection protocol** via
+VGA console) and to drive it, use egui 0.36's built-in **inspection protocol** via
 the `egui_mcp` server — do NOT rely on OS-level desktop screenshots (they capture
 the wrong window, need the window foregrounded, and can't synthesize input into egui
 reliably). The inspection path attaches straight to the running app, reads its
