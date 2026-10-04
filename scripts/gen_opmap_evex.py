@@ -30,7 +30,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SRC = os.path.join(
-    ROOT, "cpp_orig", "bochs", "bench-src", "bochs", "cpu", "decoder",
+    ROOT, "cpp_orig", "bochs", "bochs", "cpu", "decoder",
     "fetchdecode_opmap_evex.cc",
 )
 ENUM = os.path.join(ROOT, "rusty_box_decoder", "src", "opcode.rs")
