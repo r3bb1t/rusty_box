@@ -572,10 +572,14 @@ pub(super) enum MsrExitReason {
     Rdmsr,
     /// RDMSR with the index in an immediate.
     RdmsrImm,
+    /// One MSR of an RDMSRLIST.
+    Rdmsrlist,
     Urdmsr,
     Wrmsr,
     /// WRMSRNS, either form.
     Wrmsrns,
+    /// One MSR of a WRMSRLIST.
+    Wrmsrlist,
     Uwrmsr,
 }
 
@@ -584,9 +588,11 @@ impl MsrExitReason {
         match self {
             Self::Rdmsr => VmxVmexitReason::Rdmsr,
             Self::RdmsrImm => VmxVmexitReason::RdmsrImm,
+            Self::Rdmsrlist => VmxVmexitReason::Rdmsrlist,
             Self::Urdmsr => VmxVmexitReason::Urdmsr,
             Self::Wrmsr => VmxVmexitReason::Wrmsr,
             Self::Wrmsrns => VmxVmexitReason::Wrmsrns,
+            Self::Wrmsrlist => VmxVmexitReason::Wrmsrlist,
             Self::Uwrmsr => VmxVmexitReason::Uwrmsr,
         }
     }
@@ -594,17 +600,19 @@ impl MsrExitReason {
     /// Bochs `readmsr`: whether the read half of the bitmap applies.
     const fn reads(self) -> bool {
         match self {
-            Self::Rdmsr | Self::RdmsrImm | Self::Urdmsr => true,
-            Self::Wrmsr | Self::Wrmsrns | Self::Uwrmsr => false,
+            Self::Rdmsr | Self::RdmsrImm | Self::Rdmsrlist | Self::Urdmsr => true,
+            Self::Wrmsr | Self::Wrmsrns | Self::Wrmsrlist | Self::Uwrmsr => false,
         }
     }
 
-    /// The qualification each instruction passes `VMexit_MSR`: Bochs msr.cc
-    /// `WRMSR` gives WRMSRNS 1 ("for WRMSR, the exit qualification is 0,
-    /// while for WRMSRNS it is 1") and every other caller passes 0.
-    const fn qualification(self) -> u64 {
+    /// The qualification each instruction passes `VMexit_MSR` for `msr`:
+    /// Bochs msr.cc `WRMSR` gives WRMSRNS 1 ("for WRMSR, the exit
+    /// qualification is 0, while for WRMSRNS it is 1"), RDMSRLIST and
+    /// WRMSRLIST pass the MSR's index, and every other caller passes 0.
+    const fn qualification(self, msr: u32) -> u64 {
         match self {
             Self::Wrmsrns => 1,
+            Self::Rdmsrlist | Self::Wrmsrlist => msr as u64,
             Self::Rdmsr | Self::RdmsrImm | Self::Urdmsr | Self::Wrmsr | Self::Uwrmsr => 0,
         }
     }
@@ -667,6 +675,8 @@ pub(super) const VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS: u32 = 1 << 31;
 pub(super) const VMX_VM_EXEC_CTRL1_TERTIARY_CONTROLS: u32 = 1 << 17;
 
 // Tertiary processor-based VM-execution controls (Bochs VmxVmexec3Controls).
+/// Lets a VMX guest execute RDMSRLIST and WRMSRLIST (Bochs vmx_ctrls.h).
+pub(super) const VMX_VM_EXEC_CTRL3_ENABLE_MSRLIST: u64 = 1 << 6;
 pub(super) const VMX_VM_EXEC_CTRL3_VIRTUALIZE_IA32_SPEC_CTRL: u64 = 1 << 7;
 
 // Secondary processor-based VM-execution controls (Bochs VmxVmexec2Controls).
@@ -6107,7 +6117,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(true);
         }
         if self.msr_bitmap_says_vmexit(msr, reason.reads()) {
-            self.vmx_vmexit(reason.exit_reason(), reason.qualification())?;
+            self.vmx_vmexit(reason.exit_reason(), reason.qualification(msr))?;
             return Ok(true);
         }
         Ok(false)

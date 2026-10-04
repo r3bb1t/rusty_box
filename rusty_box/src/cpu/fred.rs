@@ -321,9 +321,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(Exception::Ud, 0);
         }
 
-        // RSP_SPECULATIVE
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp();
+        // Bochs fred.cc ERETS: RSP_SPECULATIVE.
+        self.rsp_speculative();
 
         // Skip error code
         let rsp = self.rsp().wrapping_add(8);
@@ -373,8 +372,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         }
 
-        // RSP_COMMIT
-        self.speculative_rsp = false;
+        // Bochs fred.cc ERETS: RSP_COMMIT.
+        self.rsp_commit();
 
         self.set_rip(new_rip);
         self.set_eflags_internal(new_rflags as u32);
@@ -423,9 +422,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(Exception::Gp, 0);
         }
 
-        // RSP_SPECULATIVE
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp();
+        // Bochs fred.cc ERETU: RSP_SPECULATIVE.
+        self.rsp_speculative();
 
         // Skip error code
         let rsp = self.rsp().wrapping_add(8);
@@ -532,8 +530,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.load_null_selector(BxSegregs::Ss, raw_ss_selector);
             }
 
-            // RSP_COMMIT
-            self.speculative_rsp = false;
+            // Bochs fred.cc ERETU: RSP_COMMIT.
+            self.rsp_commit();
 
             self.set_rip(new_rip);
             self.set_eflags_internal(new_rflags as u32);
@@ -588,8 +586,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET);
         }
 
-        // RSP_COMMIT
-        self.speculative_rsp = false;
+        // Bochs fred.cc ERETU: RSP_COMMIT.
+        self.rsp_commit();
 
         self.set_rip(new_rip);
         self.set_eflags_internal(new_rflags as u32);

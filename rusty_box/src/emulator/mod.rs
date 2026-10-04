@@ -1402,6 +1402,22 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.memory.set_a20_mask(self.pc_system.a20_mask());
     }
 
+    /// Initialize every processor from the machine's CPU parameters — Bochs
+    /// main.cc `BX_CPU(i)->initialize()`, which is where `cpuid: <feature>=`
+    /// overrides edit the model's feature set.
+    ///
+    /// The one place a configured processor is made (R5): the firmware boot
+    /// path and the mode-setup constructors both come through here, so a
+    /// feature a caller added or held back is honoured however the machine
+    /// was built.
+    pub(crate) fn initialize_cpus_from_config(&mut self) -> Result<()> {
+        let cpu_params = self.config.cpu_params.clone();
+        for cpu_index in 0..self.cpu_count() {
+            self.cpu_mut_at(cpu_index).initialize(cpu_params.clone())?;
+        }
+        Ok(())
+    }
+
     /// Initialize CPU and devices (Step 6-11 of initialization)
     ///
     /// This is the second part of the initialization sequence from Bochs main.cc:
@@ -1425,10 +1441,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.smp_tick_remainder = 0;
         self.batch_advanced_pc_system = false;
 
-        let cpu_params = self.config.cpu_params.clone();
-        for cpu_index in 0..self.cpu_count() {
-            self.cpu_mut_at(cpu_index).initialize(cpu_params.clone())?;
-        }
+        self.initialize_cpus_from_config()?;
         tracing::trace!("CPUs initialized");
 
         // Step 7: CPU sanity checks (line 1338) - separate call to match original

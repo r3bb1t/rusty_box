@@ -909,8 +909,18 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // === Phase 4: Parse immediate ===
     // Pass nnn to distinguish Group 3a/3b variants (TEST vs NOT/NEG/etc)
+    let ib_ib2 = !is_vex
+        && super::tables::has_ib_ib2(
+            opcode_map,
+            (b1 & 0xFF) as u8,
+            sse_prefix,
+            (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0,
+            nnn,
+        );
     let imm_size = if is_vex {
         super::vex_shared::vex_immediate_size(opcode_map, (b1 & 0xFF) as u8)
+    } else if ib_ib2 {
+        2
     } else {
         get_immediate_size_64(b1, opcode_map, sse_prefix, metainfo1_bits, nnn)
     };
@@ -921,6 +931,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         }
 
         match imm_size {
+            // SSE4A EXTRQ/INSERTQ: Ib, then Ib2 where `ib2` reads it.
+            2 if ib_ib2 => {
+                instr.immediate = bytes[pos] as u32;
+                instr.displacement = bytes[pos + 1] as u32;
+                pos += 2;
+            }
             1 => {
                 let byte_val = bytes[pos];
                 // Sign-extend byte immediates that are used as 32-bit values via id():
@@ -1059,9 +1075,11 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     // ia_opcodes.def, so `assign_srcs` makes ModRM.rm their destination. The
     // byte rules above put rm in the source for these bytes, which is right
     // for their `Id, Eq` and `Gq, Eq` write counterparts and wrong for them.
+    // SSE4A's EXTRQ immediate form names its one register first too
+    // (`Wdq, Ib, Ib2`), where INSERTQ on the same byte names ModRM.reg.
     if matches!(
         instr.opcode,
-        Opcode::RdmsrEqId | Opcode::UrdmsrEqId | Opcode::UrdmsrEqGq
+        Opcode::RdmsrEqId | Opcode::UrdmsrEqId | Opcode::UrdmsrEqGq | Opcode::ExtrqUdqIbIb
     ) {
         instr.operands.dst = rm as u8;
         instr.operands.src1 = nnn as u8;

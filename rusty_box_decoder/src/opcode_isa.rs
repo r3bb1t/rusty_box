@@ -15,8 +15,8 @@ use crate::opcode::Opcode;
 /// Sentinel: this opcode is not gated on any CPUID feature.
 pub const ISA_ALWAYS: u16 = 0xFFFF;
 
-/// `X86Feature as u16` required by each opcode (2912 of 3683 are gated).
-pub static OPCODE_ISA: [u16; 3683] = [
+/// `X86Feature as u16` required by each opcode (2917 of 3682 are gated).
+pub static OPCODE_ISA: [u16; 3682] = [
     ISA_ALWAYS, // IaError
     ISA_ALWAYS, // InsertedOpcode
     ISA_ALWAYS, // Aaa
@@ -232,7 +232,7 @@ pub static OPCODE_ISA: [u16; 3683] = [
     ISA_ALWAYS, // IntIb
     ISA_ALWAYS, // INT1
     ISA_ALWAYS, // INT3
-    ISA_ALWAYS, // Int0
+    ISA_ALWAYS, // Into
     ISA_ALWAYS, // IretOp16
     ISA_ALWAYS, // IretOp32
     ISA_ALWAYS, // JmpEd
@@ -2284,7 +2284,6 @@ pub static OPCODE_ISA: [u16; 3683] = [
     93, // Tdpfp16psTnnnTrmTreg -> X86Feature::IsaAmxFp16
     95, // Tcmmrlfp16psTnnnTrmTreg -> X86Feature::IsaAmxComplex
     95, // Tcmmimfp16psTnnnTrmTreg -> X86Feature::IsaAmxComplex
-    ISA_ALWAYS, // Tmmultf32psTnnnTrmTreg
     94, // Tdpbf8psTnnnTrmTreg -> X86Feature::IsaAmxFp8
     94, // Tdphf8psTnnnTrmTreg -> X86Feature::IsaAmxFp8
     94, // Tdpbhf8psTnnnTrmTreg -> X86Feature::IsaAmxFp8
@@ -2757,7 +2756,6 @@ pub static OPCODE_ISA: [u16; 3683] = [
     83, // EvexVpmadd52luqVdqHdqWdqKmask -> X86Feature::IsaAvx512Ifma52
     83, // EvexVpmadd52huqVdqHdqWdq -> X86Feature::IsaAvx512Ifma52
     83, // EvexVpmadd52huqVdqHdqWdqKmask -> X86Feature::IsaAvx512Ifma52
-    ISA_ALWAYS, // EvexVpmultishiftqbVdqHdqWdq
     81, // EvexVpmultishiftqbVdqHdqWdqKmask -> X86Feature::IsaAvx512Vbmi
     81, // EvexVpermbVdqHdqWdqKmask -> X86Feature::IsaAvx512Vbmi
     79, // EvexVpermwVdqHdqWdqKmask -> X86Feature::IsaAvx512Bw
@@ -3561,10 +3559,10 @@ pub static OPCODE_ISA: [u16; 3683] = [
     99, // EvexVdivbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
     99, // EvexVmulbf16VphHphWph -> X86Feature::IsaAvx10_2
     99, // EvexVmulbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    ISA_ALWAYS, // EvexVminpbf16VphHphWph
-    ISA_ALWAYS, // EvexVminpbf16VphHphWphKmask
-    ISA_ALWAYS, // EvexVmaxpbf16VphHphWph
-    ISA_ALWAYS, // EvexVmaxpbf16VphHphWphKmask
+    99, // EvexVminbf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVminbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVmaxbf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVmaxbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
     99, // EvexVscalefpbf16VphHphWph -> X86Feature::IsaAvx10_2
     99, // EvexVscalefpbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
     99, // EvexVsqrtbf16VphWph -> X86Feature::IsaAvx10_2
@@ -3612,6 +3610,7 @@ pub static OPCODE_ISA: [u16; 3683] = [
     99, // EvexVminmaxphVphHphWphIbKmask -> X86Feature::IsaAvx10_2
     99, // EvexVminmaxshVshHphWshIbKmask -> X86Feature::IsaAvx10_2
     99, // EvexVminmaxbf16VphHphWphIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvt2ps2phxVphHpsWps -> X86Feature::IsaAvx10_2
     99, // EvexVcvt2ps2phxVphHpsWpsKmask -> X86Feature::IsaAvx10_2
     99, // EvexVcvttps2qqsVdqWps -> X86Feature::IsaAvx10_2
     99, // EvexVcvttps2qqsVdqWpsKmask -> X86Feature::IsaAvx10_2
@@ -3710,11 +3709,11 @@ pub fn opcode_isa_feature(opcode: Opcode) -> u16 {
 
 /// Number of opcodes carrying a real feature gate. Asserted by tests so
 /// that a silent regeneration drop is caught.
-pub const GATED_OPCODE_COUNT: usize = 2912;
+pub const GATED_OPCODE_COUNT: usize = 2917;
 
 /// Number of `Opcode` variants the table was generated against. A
 /// mismatch with the enum means the table needs regenerating.
-pub const OPCODE_VARIANT_COUNT: usize = 3683;
+pub const OPCODE_VARIANT_COUNT: usize = 3682;
 
 // EVEX encoding restrictions — Bochs cpu/decoder/fetchdecode.h.
 // `EVEX.b` means embedded broadcast on a memory operand and SAE /
@@ -3731,7 +3730,7 @@ pub const PREPARE_EVEX_NO_BROADCAST: u16 = 0x280;
 /// `bx_define_opcode`.
 // A `const` rather than a `static`: the EVEX decode path is a
 // `const fn`, and const evaluation may read consts but not statics.
-pub const OPCODE_EVEX_FLAGS: [u16; 3683] = [
+pub const OPCODE_EVEX_FLAGS: [u16; 3682] = [
     0x000, // IaError
     0x000, // InsertedOpcode
     0x000, // Aaa
@@ -3947,7 +3946,7 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3683] = [
     0x000, // IntIb
     0x000, // INT1
     0x000, // INT3
-    0x000, // Int0
+    0x000, // Into
     0x000, // IretOp16
     0x000, // IretOp32
     0x000, // JmpEd
@@ -5999,7 +5998,6 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3683] = [
     0x000, // Tdpfp16psTnnnTrmTreg
     0x000, // Tcmmrlfp16psTnnnTrmTreg
     0x000, // Tcmmimfp16psTnnnTrmTreg
-    0x000, // Tmmultf32psTnnnTrmTreg
     0x000, // Tdpbf8psTnnnTrmTreg
     0x000, // Tdphf8psTnnnTrmTreg
     0x000, // Tdpbhf8psTnnnTrmTreg
@@ -6472,7 +6470,6 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3683] = [
     0x180, // EvexVpmadd52luqVdqHdqWdqKmask
     0x180, // EvexVpmadd52huqVdqHdqWdq
     0x180, // EvexVpmadd52huqVdqHdqWdqKmask
-    0x000, // EvexVpmultishiftqbVdqHdqWdq
     0x180, // EvexVpmultishiftqbVdqHdqWdqKmask
     0x380, // EvexVpermbVdqHdqWdqKmask
     0x380, // EvexVpermwVdqHdqWdqKmask
@@ -7276,10 +7273,10 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3683] = [
     0x180, // EvexVdivbf16VphHphWphKmask
     0x180, // EvexVmulbf16VphHphWph
     0x180, // EvexVmulbf16VphHphWphKmask
-    0x000, // EvexVminpbf16VphHphWph
-    0x000, // EvexVminpbf16VphHphWphKmask
-    0x000, // EvexVmaxpbf16VphHphWph
-    0x000, // EvexVmaxpbf16VphHphWphKmask
+    0x180, // EvexVminbf16VphHphWph
+    0x180, // EvexVminbf16VphHphWphKmask
+    0x180, // EvexVmaxbf16VphHphWph
+    0x180, // EvexVmaxbf16VphHphWphKmask
     0x180, // EvexVscalefpbf16VphHphWph
     0x180, // EvexVscalefpbf16VphHphWphKmask
     0x180, // EvexVsqrtbf16VphWph
@@ -7327,6 +7324,7 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3683] = [
     0x080, // EvexVminmaxphVphHphWphIbKmask
     0x280, // EvexVminmaxshVshHphWshIbKmask
     0x180, // EvexVminmaxbf16VphHphWphIbKmask
+    0x080, // EvexVcvt2ps2phxVphHpsWps
     0x080, // EvexVcvt2ps2phxVphHpsWpsKmask
     0x080, // EvexVcvttps2qqsVdqWps
     0x080, // EvexVcvttps2qqsVdqWpsKmask
@@ -7424,7 +7422,7 @@ pub const fn opcode_evex_flags(opcode: Opcode) -> u16 {
 }
 
 /// Number of opcodes carrying EVEX prepare attributes, pinned by tests.
-pub const EVEX_FLAGGED_OPCODE_COUNT: usize = 1328;
+pub const EVEX_FLAGGED_OPCODE_COUNT: usize = 1333;
 
 /// The CPU state an instruction needs enabled before it may execute —
 /// the `BX_PREPARE_*` attribute of Bochs `bx_define_opcode`.
@@ -7458,7 +7456,7 @@ pub enum CpuState {
 
 /// CPU state each opcode requires, from field 10 of `bx_define_opcode`.
 // A `const` for the same reason as OPCODE_EVEX_FLAGS.
-pub const OPCODE_STATE: [CpuState; 3683] = [
+pub const OPCODE_STATE: [CpuState; 3682] = [
     CpuState::Base, // IaError
     CpuState::Base, // InsertedOpcode
     CpuState::Base, // Aaa
@@ -7674,7 +7672,7 @@ pub const OPCODE_STATE: [CpuState; 3683] = [
     CpuState::Base, // IntIb
     CpuState::Base, // INT1
     CpuState::Base, // INT3
-    CpuState::Base, // Int0
+    CpuState::Base, // Into
     CpuState::Base, // IretOp16
     CpuState::Base, // IretOp32
     CpuState::Base, // JmpEd
@@ -9726,7 +9724,6 @@ pub const OPCODE_STATE: [CpuState; 3683] = [
     CpuState::Amx, // Tdpfp16psTnnnTrmTreg
     CpuState::Amx, // Tcmmrlfp16psTnnnTrmTreg
     CpuState::Amx, // Tcmmimfp16psTnnnTrmTreg
-    CpuState::Base, // Tmmultf32psTnnnTrmTreg
     CpuState::Amx, // Tdpbf8psTnnnTrmTreg
     CpuState::Amx, // Tdphf8psTnnnTrmTreg
     CpuState::Amx, // Tdpbhf8psTnnnTrmTreg
@@ -10199,7 +10196,6 @@ pub const OPCODE_STATE: [CpuState; 3683] = [
     CpuState::Evex, // EvexVpmadd52luqVdqHdqWdqKmask
     CpuState::Evex, // EvexVpmadd52huqVdqHdqWdq
     CpuState::Evex, // EvexVpmadd52huqVdqHdqWdqKmask
-    CpuState::Evex, // EvexVpmultishiftqbVdqHdqWdq
     CpuState::Evex, // EvexVpmultishiftqbVdqHdqWdqKmask
     CpuState::Evex, // EvexVpermbVdqHdqWdqKmask
     CpuState::Evex, // EvexVpermwVdqHdqWdqKmask
@@ -11003,10 +10999,10 @@ pub const OPCODE_STATE: [CpuState; 3683] = [
     CpuState::Evex, // EvexVdivbf16VphHphWphKmask
     CpuState::Evex, // EvexVmulbf16VphHphWph
     CpuState::Evex, // EvexVmulbf16VphHphWphKmask
-    CpuState::Evex, // EvexVminpbf16VphHphWph
-    CpuState::Evex, // EvexVminpbf16VphHphWphKmask
-    CpuState::Evex, // EvexVmaxpbf16VphHphWph
-    CpuState::Evex, // EvexVmaxpbf16VphHphWphKmask
+    CpuState::Evex, // EvexVminbf16VphHphWph
+    CpuState::Evex, // EvexVminbf16VphHphWphKmask
+    CpuState::Evex, // EvexVmaxbf16VphHphWph
+    CpuState::Evex, // EvexVmaxbf16VphHphWphKmask
     CpuState::Evex, // EvexVscalefpbf16VphHphWph
     CpuState::Evex, // EvexVscalefpbf16VphHphWphKmask
     CpuState::Evex, // EvexVsqrtbf16VphWph
@@ -11054,6 +11050,7 @@ pub const OPCODE_STATE: [CpuState; 3683] = [
     CpuState::Evex, // EvexVminmaxphVphHphWphIbKmask
     CpuState::Evex, // EvexVminmaxshVshHphWshIbKmask
     CpuState::Evex, // EvexVminmaxbf16VphHphWphIbKmask
+    CpuState::Evex, // EvexVcvt2ps2phxVphHpsWps
     CpuState::Evex, // EvexVcvt2ps2phxVphHpsWpsKmask
     CpuState::Evex, // EvexVcvttps2qqsVdqWps
     CpuState::Evex, // EvexVcvttps2qqsVdqWpsKmask

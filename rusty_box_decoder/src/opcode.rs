@@ -299,7 +299,7 @@ back_to_enum! {
         IntIb,
         INT1,
         INT3,
-        Int0,
+        Into,
         IretOp16,
         IretOp32,
 
@@ -2666,7 +2666,6 @@ back_to_enum! {
         Tdpfp16psTnnnTrmTreg,
         Tcmmrlfp16psTnnnTrmTreg,
         Tcmmimfp16psTnnnTrmTreg,
-        Tmmultf32psTnnnTrmTreg,
         Tdpbf8psTnnnTrmTreg,
         Tdphf8psTnnnTrmTreg,
         Tdpbhf8psTnnnTrmTreg,
@@ -3252,7 +3251,6 @@ back_to_enum! {
         EvexVpmadd52huqVdqHdqWdq,
         EvexVpmadd52huqVdqHdqWdqKmask,
 
-        EvexVpmultishiftqbVdqHdqWdq,
         EvexVpmultishiftqbVdqHdqWdqKmask,
 
         EvexVpermbVdqHdqWdqKmask,
@@ -4236,10 +4234,10 @@ back_to_enum! {
         EvexVdivbf16VphHphWphKmask,
         EvexVmulbf16VphHphWph,
         EvexVmulbf16VphHphWphKmask,
-        EvexVminpbf16VphHphWph,
-        EvexVminpbf16VphHphWphKmask,
-        EvexVmaxpbf16VphHphWph,
-        EvexVmaxpbf16VphHphWphKmask,
+        EvexVminbf16VphHphWph,
+        EvexVminbf16VphHphWphKmask,
+        EvexVmaxbf16VphHphWph,
+        EvexVmaxbf16VphHphWphKmask,
         EvexVscalefpbf16VphHphWph,
         EvexVscalefpbf16VphHphWphKmask,
 
@@ -4295,6 +4293,7 @@ back_to_enum! {
         EvexVminmaxshVshHphWshIbKmask,
         EvexVminmaxbf16VphHphWphIbKmask,
 
+        EvexVcvt2ps2phxVphHpsWps,
         EvexVcvt2ps2phxVphHpsWpsKmask,
 
         EvexVcvttps2qqsVdqWps,

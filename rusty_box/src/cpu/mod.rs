@@ -128,6 +128,7 @@ pub mod snapshot;
 pub(super) mod soft_int;
 pub(super) mod simd_pfp;
 pub(super) mod softfloat3e;
+pub(super) mod simd_int;
 pub(super) mod sse;
 pub(super) mod sse_fp;
 pub(super) mod sse_move;

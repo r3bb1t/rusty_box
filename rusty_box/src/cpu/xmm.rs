@@ -625,12 +625,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emu.reg_write(X86Reg::Rsp, STACK_TOP);
         install_exception_gate(emu, Exception::Ud as u8, UD_HANDLER);
         install_exception_gate(emu, Exception::Nm as u8, NM_HANDLER);
-        // FlatLong64 seeds the live CS cache as 64-bit but deliberately leaves
-        // its minimal GDT's code descriptor 32-bit; exception delivery reloads
-        // CS through the GDT, so make the test gate's target a valid long code
-        // segment.
-        emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
-            .unwrap();
     }
 
     fn enable_guest_avx(emu: &mut Emulator) {

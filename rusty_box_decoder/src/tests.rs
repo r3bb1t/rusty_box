@@ -1085,6 +1085,68 @@ fn urdmsr_and_uwrmsr_register_forms_decode_in_64_bit_mode() {
     assert!(fetch_decode32(&[0xF2, 0x0F, 0x38, 0xF8, 0xC1], true).is_err());
 }
 
+/// What a decoded SSE4A immediate form names.
+#[derive(Debug, PartialEq, Eq)]
+struct Sse4aImmediateForm {
+    opcode: Opcode,
+    dst: u8,
+    src1: u8,
+    length: u8,
+    position: u8,
+    instruction_length: u8,
+}
+
+fn sse4a_immediate_form(instr: &Instruction) -> Sse4aImmediateForm {
+    Sse4aImmediateForm {
+        opcode: instr.get_ia_opcode(),
+        dst: instr.dst(),
+        src1: instr.src1(),
+        length: instr.ib(),
+        position: instr.ib2(),
+        instruction_length: instr.ilen(),
+    }
+}
+
+/// SSE4A's immediate forms carry two immediates, the field length and then
+/// its position (Bochs ia_opcodes.def `EXTRQ_UdqIbIb` and
+/// `INSERTQ_VdqUqIbIb`, `OP_Ib, OP_Ib2`). Both are fetched, so each is six
+/// bytes long, and the second lands where `ib2` reads it. EXTRQ's one
+/// register is ModRM.rm; INSERTQ writes ModRM.reg from ModRM.rm.
+#[test]
+fn sse4a_immediate_forms_fetch_both_immediates() {
+    // ModRM 0xC1: mod 11, reg = xmm0, rm = xmm1; length 4, position 8.
+    let extrq = [0x66, 0x0F, 0x78, 0xC1, 0x04, 0x08];
+    let insertq = [0xF2, 0x0F, 0x78, 0xC1, 0x04, 0x08];
+    for decoded in [fetch_decode64(&extrq).unwrap(), fetch_decode32(&extrq, true).unwrap()] {
+        assert_eq!(
+            sse4a_immediate_form(&decoded),
+            Sse4aImmediateForm {
+                opcode: Opcode::ExtrqUdqIbIb,
+                dst: 1,
+                src1: decoded.src1(),
+                length: 4,
+                position: 8,
+                instruction_length: 6,
+            }
+        );
+    }
+    for decoded in [fetch_decode64(&insertq).unwrap(), fetch_decode32(&insertq, true).unwrap()] {
+        assert_eq!(
+            sse4a_immediate_form(&decoded),
+            Sse4aImmediateForm {
+                opcode: Opcode::InsertqVdqUqIbIb,
+                dst: 0,
+                src1: 1,
+                length: 4,
+                position: 8,
+                instruction_length: 6,
+            }
+        );
+    }
+    // A memory operand is no SSE4A form, and fetches no immediate for one.
+    assert!(fetch_decode64(&[0x66, 0x0F, 0x78, 0x01]).is_err());
+}
+
 /// VEX map 7 holds the immediate-index forms of RDMSR, WRMSRNS, URDMSR and
 /// UWRMSR (Bochs fetchdecode_opmap_avx.cc `BxOpcodeGroup_VEX_MAP7_F6` and
 /// `_F8`). Each takes a 32-bit immediate and one register operand in
@@ -1952,11 +2014,28 @@ fn evex_master_table_has_every_slot_bochs_defines() {
     use crate::decoder::opmap_evex::EVEX_TABLE;
     let defined = EVEX_TABLE.iter().filter(|g| !g.is_empty()).count();
     assert_eq!(
-        defined, 389,
-        "BxOpcodeTableEVEX defines 389 non-ERR slots; regenerate with \
-         scripts/gen_opmap_evex.py if upstream changed"
+        defined, 385,
+        "BxOpcodeTableEVEX defines 385 non-ERR slots in the reference build \
+         (BX_SUPPORT_AMX 0); regenerate with scripts/gen_opmap_evex.py if \
+         upstream changed"
     );
     assert_eq!(EVEX_TABLE.len(), 256 * 5, "Bochs BxOpcodeTableEVEX[256*5]");
+}
+
+/// The reference Bochs build has BX_SUPPORT_AMX 0, so the EVEX tile-row
+/// encodings sit in `BxOpcodeGroup_ERR` slots and decode to #UD.
+#[test]
+fn evex_amx_encodings_are_undefined() {
+    // TCVTROWD2PS zmm0, tmm1, ecx: EVEX.512.F3.0F38.W0 4A /r, mod = 11.
+    let decoded =
+        crate::decoder::decode64::fetch_decode64(&[0x62, 0xF2, 0x7E, 0x48, 0x4A, 0xC1]);
+    assert!(
+        matches!(
+            decoded,
+            Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode))
+        ),
+        "expected an illegal opcode, got {decoded:?}"
+    );
 }
 
 #[test]
@@ -2132,9 +2211,9 @@ fn every_evex_map_entry_decodes() {
         // when indexing). Synthesise the mm the encoding must actually carry.
         let map = [1usize, 2, 3, 5, 6][idx / 256];
         let opcode = (idx % 256) as u8;
-        // An entry whose own opcode is IaError is an encoding rusty does not
-        // implement (the FP16/BF16 forms Skylake-X never advertises); #UD is
-        // the correct outcome for it. If such an entry comes first it also
+        // An entry whose own opcode is IaError names an opcode the enum lacks
+        // (the generator reports each one); #UD is the correct outcome for
+        // it. If such an entry comes first it also
         // shadows the rest of the group for any encoding it matches, so those
         // cannot be reached by synthesis either.
         let group_shadowed = group

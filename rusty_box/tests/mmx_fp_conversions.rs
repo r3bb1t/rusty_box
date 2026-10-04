@@ -34,10 +34,6 @@ fn sse_emulator() -> Box<Emulator> {
     emu.reg_write(X86Reg::IdtrBase, IDT);
     emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
     emu.reg_write(X86Reg::Rsp, STACK_TOP);
-    // FlatLong64's GDT code descriptor is 32-bit; delivery reloads CS from
-    // it, so make it a 64-bit code segment.
-    emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
-        .expect("gdt");
     let mut gate = [0u8; 16];
     gate[0..2].copy_from_slice(&(GP_HANDLER as u16).to_le_bytes());
     gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
@@ -177,7 +173,7 @@ fn cvtpi2ps_from_mmx_converts_and_enters_mmx_state() {
             [dwords(3.0f32.to_bits(), (-2.0f32).to_bits()), KEPT]
         );
         let view = x87_view(&mut emu);
-    assert!(view.is_mmx_state(), "not in MMX state: {view:?}");
+        assert!(view.is_mmx_state(), "not in MMX state: {view:?}");
     });
 }
 
@@ -224,7 +220,7 @@ fn cvtpi2pd_converts_both_integers_to_doubles() {
             [f64::from(i32::MIN).to_bits(), 5.0f64.to_bits()]
         );
         let view = x87_view(&mut emu);
-    assert!(view.is_mmx_state(), "not in MMX state: {view:?}");
+        assert!(view.is_mmx_state(), "not in MMX state: {view:?}");
     });
 }
 

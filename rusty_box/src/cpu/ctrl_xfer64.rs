@@ -18,7 +18,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn branch_near64(&mut self, instr: &Instruction) -> Result<()> {
         let new_rip = self.rip().wrapping_add(instr.id() as i32 as u64);
 
-        // Check canonical address (matching C++ line 33-36)
+        // Bochs ctrl_xfer64.cc branch_near64: #GP(0) on a non-canonical target.
         if !self.is_canonical(new_rip) {
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
@@ -26,7 +26,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         self.set_rip(new_rip);
 
-        // Matching C++ lines 40-43: Set STOP_TRACE when handlers chaining is disabled
+        // Bochs ctrl_xfer64.cc branch_near64: without handler chaining
+        // (BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS == 0) the trace stops here.
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -48,11 +49,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn call_jq(&mut self, instr: &Instruction) -> Result<()> {
         let new_rip = self.rip().wrapping_add(instr.id() as i32 as u64);
 
-        // RSP_SPECULATIVE (matching C++ line 112)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp();
-
-        // Push BEFORE canonical check (matching C++ line 115)
+        // Bochs ctrl_xfer64.cc CALL_Jq: RSP_SPECULATIVE, then the push before
+        // the canonical check, so a #GP puts RSP and SSP back.
+        self.rsp_speculative();
         self.push_64(self.rip())?;
         // Bochs ctrl_xfer64.cc CALL_Jq \u2014 shadow stack push only when displacement is non-zero.
         let cpl = self.cs_rpl();
@@ -62,17 +61,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         if !self.is_canonical(new_rip) {
-            let rsp = self.prev_rsp;
-            self.set_rsp(rsp);
-            self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
         }
 
         self.set_rip(new_rip);
-
-        // RSP_COMMIT (matching C++ line 128)
-        self.speculative_rsp = false;
+        self.rsp_commit();
         self.on_ucnear_branch(super::instrumentation::BranchType::Call, new_rip);
         Ok(())
     }
@@ -82,11 +76,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn call_eq_r(&mut self, instr: &Instruction) -> Result<()> {
         let new_rip = self.get_gpr64(instr.dst() as usize);
 
-        // RSP_SPECULATIVE (matching C++ line 143)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp();
-
-        // Push BEFORE canonical check (matching C++ line 146)
+        // Bochs ctrl_xfer64.cc CALL_EqR: RSP_SPECULATIVE, then the push before
+        // the canonical check, so a #GP puts RSP and SSP back.
+        self.rsp_speculative();
         self.push_64(self.rip())?;
         let cpl = self.cs_rpl();
         if self.shadow_stack_enabled(cpl) {
@@ -95,17 +87,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         if !self.is_canonical(new_rip) {
-            let rsp = self.prev_rsp;
-            self.set_rsp(rsp);
-            self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
         }
 
         self.set_rip(new_rip);
-
-        // RSP_COMMIT (matching C++ line 160)
-        self.speculative_rsp = false;
+        self.rsp_commit();
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
         self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, new_rip);
         Ok(())
@@ -114,14 +101,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Far call indirect (64-bit)
     /// Matching C++ ctrl_xfer64.cc CALL64_Ep
     pub fn call64_ep(&mut self, instr: &Instruction) -> Result<()> {
-        // Invalidate prefetch queue (matching C++ line 173)
+        // Bochs ctrl_xfer64.cc CALL64_Ep: invalidate_prefetch_q.
         self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // Resolve effective address
         let eaddr = self.resolve_addr64(instr);
 
-        // Read offset and segment from memory (matching C++ lines 184-185)
+        // Bochs ctrl_xfer64.cc CALL64_Ep: read the offset, then the selector.
         // pointer, segment address pair
         let seg = BxSegregs::from(instr.seg());
         let op1_64 = self.read_virtual_qword_64(seg, eaddr)?;
@@ -133,18 +120,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let cs_raw = self.read_virtual_word_64(seg, (eaddr.wrapping_add(8)) & asize_mask)?;
 
         // BX_ASSERT(protected_mode()) — in 64-bit mode we are always in protected mode
-        // (matching C++ line 187)
 
-        // RSP_SPECULATIVE (matching C++ line 189)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp();
-
-        // call_protected dispatches through the protected mode call mechanism
-        // (matching C++ line 191)
+        // Bochs ctrl_xfer64.cc CALL64_Ep: RSP_SPECULATIVE around call_protected.
+        self.rsp_speculative();
         self.call_protected_64(instr, cs_raw, op1_64)?;
-
-        // RSP_COMMIT (matching C++ line 193)
-        self.speculative_rsp = false;
+        self.rsp_commit();
 
         // Set STOP_TRACE to break trace loop
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -196,14 +176,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Far jump indirect (64-bit)
     /// Matching C++ ctrl_xfer64.cc JMP64_Ep
     pub fn jmp64_ep(&mut self, instr: &Instruction) -> Result<()> {
-        // Invalidate prefetch queue (matching C++ line 432)
+        // Bochs ctrl_xfer64.cc JMP64_Ep: invalidate_prefetch_q.
         self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // Resolve effective address
         let eaddr = self.resolve_addr64(instr);
 
-        // Read offset and segment from memory (matching C++ lines 438-439)
+        // Bochs ctrl_xfer64.cc JMP64_Ep: read the offset, then the selector.
         let seg = BxSegregs::from(instr.seg());
         let op1_64 = self.read_virtual_qword_64(seg, eaddr)?;
         let asize_mask = if instr.as64_l() != 0 {
@@ -213,11 +193,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
         let cs_raw = self.read_virtual_word_64(seg, (eaddr.wrapping_add(8)) & asize_mask)?;
 
-        // BX_ASSERT(protected_mode()) — in 64-bit mode we are always in protected mode
-        // (matching C++ line 441)
-
-        // jump_protected dispatches through the protected mode jump mechanism
-        // (matching C++ line 443)
+        // Bochs ctrl_xfer64.cc JMP64_Ep: BX_ASSERT(protected_mode()) — 64-bit
+        // mode is always protected mode — then jump_protected.
         self.jump_protected(cs_raw, op1_64)?;
 
         // Set STOP_TRACE to break trace loop
@@ -236,11 +213,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let new_rip = self.read_virtual_qword_64(seg, eaddr)?;
 
-        // RSP_SPECULATIVE \u2014 matching CALL_EqR pattern (C++ ctrl_xfer64.cc)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp();
-
-        // Push BEFORE canonical check \u2014 matching CALL_EqR (C++ ctrl_xfer64.cc)
+        // Bochs LOAD_Eq then CALL_EqR: the target is read first, then
+        // RSP_SPECULATIVE and the push before the canonical check.
+        self.rsp_speculative();
         self.push_64(self.rip())?;
         let cpl = self.cs_rpl();
         if self.shadow_stack_enabled(cpl) {
@@ -249,17 +224,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         if !self.is_canonical(new_rip) {
-            let rsp = self.prev_rsp;
-            self.set_rsp(rsp);
-            self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
         }
 
         self.set_rip(new_rip);
-
-        // RSP_COMMIT \u2014 matching CALL_EqR (C++ ctrl_xfer64.cc)
-        self.speculative_rsp = false;
+        self.rsp_commit();
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
         self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, new_rip);
         Ok(())
@@ -307,17 +277,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Near return with immediate (64-bit)
     /// Matching C++ ctrl_xfer64.cc RETnear64_Iw
     pub fn retnear64_iw(&mut self, instr: &Instruction) -> Result<()> {
-        // RSP_SPECULATIVE (matching C++ line 52)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp();
-
+        // Bochs ctrl_xfer64.cc RETnear64_Iw: the pop is speculative, so a #CP
+        // or #GP leaves the stack where it was.
+        self.rsp_speculative();
         let return_rip = self.pop_64()?;
+        let cpl = self.cs_rpl();
+        if self.shadow_stack_enabled(cpl) {
+            let shadow_rip = self.shadow_stack_pop_64()?;
+            if shadow_rip != return_rip {
+                return self.exception(
+                    Exception::Cp,
+                    super::cpu::CpExceptionErrorCode::NearRet as u16,
+                );
+            }
+        }
 
         if !self.is_canonical(return_rip) {
-            // Restore RSP before exception (RSP_SPECULATIVE rollback)
-            let rsp = self.prev_rsp;
-            self.set_rsp(rsp);
-            self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
         }
@@ -325,9 +300,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.set_rip(return_rip);
         let rsp = self.rsp().wrapping_add(instr.iw() as u64);
         self.set_rsp(rsp);
-
-        // RSP_COMMIT (matching C++ line 71)
-        self.speculative_rsp = false;
+        self.rsp_commit();
         self.on_ucnear_branch(super::instrumentation::BranchType::Ret, return_rip);
         Ok(())
     }
@@ -336,32 +309,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Matching C++ ctrl_xfer64.cc RETfar64_Iw
     /// Note: return_protected is RSP safe
     pub fn retfar64_iw(&mut self, instr: &Instruction) -> Result<()> {
-        // Invalidate prefetch queue (matching C++ line 80)
+        // Bochs ctrl_xfer64.cc RETfar64_Iw: invalidate_prefetch_q.
         self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
         // BX_ASSERT(protected_mode()) — in 64-bit mode we are always in protected mode
-        // (matching C++ line 88)
 
-        // RSP_SPECULATIVE (matching C++ line 90)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp();
-
-        // return_protected is RSP safe (matching C++ line 93)
+        // Bochs ctrl_xfer64.cc RETfar64_Iw: RSP_SPECULATIVE around return_protected.
+        self.rsp_speculative();
         self.return_protected_64(instr, instr.iw())?;
-
-        // RSP_COMMIT (matching C++ line 95)
-        self.speculative_rsp = false;
+        self.rsp_commit();
 
         // Set STOP_TRACE to break trace loop
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
-    }
-
-    /// Far return without immediate (64-bit)
-    pub fn retfar64(&mut self, instr: &Instruction) -> Result<()> {
-        // Same as RETfar64_Iw but without imm16
-        self.retfar64_iw(instr)
     }
 
     /// Interrupt return (64-bit)
@@ -375,25 +336,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
-        // VMX: nmi_unblocking_iret = true (matching C++ line 471)
+        // VMX: nmi_unblocking_iret = true (Bochs ctrl_xfer64.cc IRET64)
         // (We don't have VMX guest mode, but set for completeness)
 
-        // Unmask NMI (matching C++ line 478)
+        // Bochs ctrl_xfer64.cc IRET64: unmask_event(BX_EVENT_NMI).
         self.unmask_event(BxCpuC::<T>::BX_EVENT_NMI);
 
-        // BX_ASSERT(long_mode()) — matching C++ line 488
+        // Bochs ctrl_xfer64.cc IRET64: BX_ASSERT(long_mode()).
 
-        // RSP_SPECULATIVE (matching C++ line 490)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp();
-
-        // long_iret dispatches the long mode IRET (matching C++ line 492)
+        // Bochs ctrl_xfer64.cc IRET64: RSP_SPECULATIVE around long_iret.
+        self.rsp_speculative();
         self.long_iret(instr)?;
+        self.rsp_commit();
 
-        // RSP_COMMIT (matching C++ line 494)
-        self.speculative_rsp = false;
-
-        // VMX: nmi_unblocking_iret = false (matching C++ line 497, AFTER RSP_COMMIT)
+        // VMX: nmi_unblocking_iret = false, after RSP_COMMIT (Bochs
+        // ctrl_xfer64.cc IRET64).
         self.nmi_unblocking_iret = false;
 
         // Set STOP_TRACE to break trace loop

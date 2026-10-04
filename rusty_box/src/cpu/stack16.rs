@@ -64,10 +64,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// POP m16 - Pop into 16-bit memory location
     /// Based on Bochs stack16.cc POP_EwM
     pub fn pop_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        // Bochs stack16.cc POP_EwM: the pop is speculative, and the address is
+        // formed after it, so an SP-relative operand sees SP already advanced.
+        self.rsp_speculative();
         let value = self.pop_16()?;
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         self.v_write_word(seg, eaddr, value)?;
+        self.rsp_commit();
         Ok(())
     }
 
@@ -220,7 +224,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut change_mask: u32 =
             EFlags::OSZAPC.bits() | EFlags::TF.bits() | EFlags::DF.bits() | EFlags::NT.bits();
 
-        // RSP_SPECULATIVE (conceptual - we'll adjust ESP after)
+        // Bochs flag_ctrl.cc POPF_Fw: RSP_SPECULATIVE, so the #GP a
+        // virtual-8086 POPF raises leaves SP on the flags it would have popped.
+        self.rsp_speculative();
         let flags16 = self.pop_16()?;
 
         if self.protected_mode() {
@@ -249,6 +255,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                         flags32 |= EFlags::VIF.bits();
                     }
                     self.write_eflags(flags32, change_mask);
+                    self.rsp_commit();
                     return Ok(());
                 }
                 tracing::trace!("POPFW: #GP(0) in v8086 (no VME) mode");
@@ -261,6 +268,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         self.write_eflags(flags16 as u32, change_mask);
+        self.rsp_commit();
         Ok(())
     }
 
@@ -278,12 +286,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// POP Sw (16-bit opsize) - Pop into segment register from operands.dst
-    /// Used by the PopOp16Sw opcode
+    /// Used by the PopOp16Sw opcode. Bochs stack16.cc POP16_Sw: the pop is
+    /// speculative, so a selector the load refuses leaves SP where it was.
     pub fn pop_op16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.rsp_speculative();
         let selector_value = self.pop_16()?;
         let seg = super::decoder::BxSegregs::from(instr.dst());
 
         self.load_seg_reg(seg, selector_value)?;
+        self.rsp_commit();
 
         if seg == super::decoder::BxSegregs::Ss {
             self.inhibit_interrupts(BxCpuC::<T>::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
@@ -325,6 +336,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let imm16 = instr.iw();
         let mut level = instr.ib2() & 0x1F;
 
+        // Bochs stack16.cc ENTER16_IwIb: RSP_SPECULATIVE, so a fault in any
+        // push or in the final write check leaves the stack where it began.
+        self.rsp_speculative();
         let bp = self.bp();
         self.push_16(bp)?;
         let frame_ptr16 = self.sp();
@@ -388,6 +402,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         self.set_bp(frame_ptr16);
+        self.rsp_commit();
         Ok(())
     }
 

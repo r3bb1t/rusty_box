@@ -48,24 +48,18 @@ PREPARE_NAMES = {
 # quo, a wrong gate would #UD a working guest. Listed explicitly so that new
 # drift shows up as a diff rather than silently widening this set.
 KNOWN_UNMATCHED = {
-    # rusty-internal pseudo-opcodes with no Bochs BX_IA_* counterpart.
-    "IaError",
-    "InsertedOpcode",
-    "Int0",
     # Substituted by the icache fill path when the guest has not enabled the
     # CPU state the decoded instruction needs. Bochs expresses the same thing
     # as a handler swap to BxNoAVX / BxNoEVEX, so there is no BX_IA_* to match.
     "NoAvxState",
     "NoEvexState",
-    "Tmmultf32psTnnnTrmTreg",
-    # Bochs defines only the masked form BX_IA_EVEX_VPMULTISHIFTQB_..._Kmask;
-    # this unmasked variant is a rusty-side invention.
-    "EvexVpmultishiftqbVdqHdqWdq",
-    # No BX_IA_EVEX_VMINPBF16/VMAXPBF16 exist upstream under any suffix.
-    "EvexVminpbf16VphHphWph",
-    "EvexVminpbf16VphHphWphKmask",
-    "EvexVmaxpbf16VphHphWph",
-    "EvexVmaxpbf16VphHphWphKmask",
+}
+
+# Opcodes whose rusty name does not normalise to their Bochs name. Bochs's
+# BX_IA_ERROR loses its IA_ with the prefix every other name sheds, and rusty
+# keeps it, since a bare `Opcode::Error` would read as an error type.
+BOCHS_SPELLING = {
+    "IaError": "BX_IA_ERROR",
 }
 
 # An opcode with no Bochs counterpart gets no BX_PREPARE_* either, and
@@ -73,13 +67,7 @@ KNOWN_UNMATCHED = {
 # Every unmatched opcode that is nevertheless a real VEX/EVEX encoding needs its
 # class stated here. The invariant below makes forgetting one an error rather
 # than a silently ungated instruction.
-STATE_OVERRIDES = {
-    "EvexVpmultishiftqbVdqHdqWdq": STATE_EVEX,
-    "EvexVminpbf16VphHphWph": STATE_EVEX,
-    "EvexVminpbf16VphHphWphKmask": STATE_EVEX,
-    "EvexVmaxpbf16VphHphWph": STATE_EVEX,
-    "EvexVmaxpbf16VphHphWphKmask": STATE_EVEX,
-}
+STATE_OVERRIDES = {}
 
 
 def split_top(s):
@@ -101,6 +89,20 @@ def split_top(s):
 
 def norm(s):
     return s.replace("_", "").lower()
+
+
+def bochs_key(define):
+    """The match key of a Bochs opcode define: `BX_IA_INTO` and
+    `BX_INSERTED_OPCODE` alike lose their prefix before normalising."""
+    for prefix in ("BX_IA_", "BX_"):
+        if define.startswith(prefix):
+            return norm(define[len(prefix):])
+    return norm(define)
+
+
+def rusty_key(variant):
+    """The match key of a rusty `Opcode` variant."""
+    return bochs_key(BOCHS_SPELLING[variant]) if variant in BOCHS_SPELLING else norm(variant)
 
 
 def read(path):
@@ -127,7 +129,7 @@ def main():
             fields = split_top(m.group(1))
             if len(fields) < 6:
                 continue
-            bochs[norm(fields[0].replace("BX_IA_", ""))] = fields[5].split("/*")[0].strip()
+            bochs[bochs_key(fields[0])] = fields[5].split("/*")[0].strip()
             # Field 10 carries the BX_PREPARE_* attributes. Only the EVEX
             # encoding-restriction bits matter here; the rest are decode hints
             # rusty_box does not model.
@@ -139,7 +141,7 @@ def main():
                 flags |= 0x180
             if "BX_PREPARE_EVEX" in attrs:
                 flags |= 0x080
-            evex_flags[norm(fields[0].replace("BX_IA_", ""))] = flags
+            evex_flags[bochs_key(fields[0])] = flags
 
             # The same field also names the CPU state the instruction needs
             # enabled. Bochs turns this into a BxNo* handler substitution in
@@ -162,7 +164,7 @@ def main():
                 cls = STATE_FPU
             else:
                 cls = STATE_NONE
-            prepare_class[norm(fields[0].replace("BX_IA_", ""))] = cls
+            prepare_class[bochs_key(fields[0])] = cls
 
     # rusty X86Feature variants, declaration order == discriminant
     feat_src = read("rusty_box_decoder/src/features.rs")
@@ -198,7 +200,7 @@ def main():
 
     table, unmatched, missing_feature, gated = [], [], {}, 0
     for op in opcodes:
-        feature = bochs.get(norm(op))
+        feature = bochs.get(rusty_key(op))
         if feature is None:
             unmatched.append(op)
             table.append((op, ALWAYS, None))
@@ -292,7 +294,7 @@ def main():
     ]
     evex_gated = 0
     for op in opcodes:
-        flags = evex_flags.get(norm(op), 0)
+        flags = evex_flags.get(rusty_key(op), 0)
         if flags:
             evex_gated += 1
         lines.append(f"    {flags:#05x}, // {op}")
@@ -354,7 +356,7 @@ def main():
         op
         for op in opcodes
         if op.startswith(("Evex", "V128", "V256", "V512"))
-        and STATE_OVERRIDES.get(op, prepare_class.get(norm(op), STATE_NONE)) == STATE_NONE
+        and STATE_OVERRIDES.get(op, prepare_class.get(rusty_key(op), STATE_NONE)) == STATE_NONE
     ]
     if ungated_vector:
         print("ERROR: VEX/EVEX opcodes with no state class:", file=sys.stderr)
@@ -364,7 +366,7 @@ def main():
 
     prepare_counts = {}
     for op in opcodes:
-        cls = STATE_OVERRIDES.get(op, prepare_class.get(norm(op), STATE_NONE))
+        cls = STATE_OVERRIDES.get(op, prepare_class.get(rusty_key(op), STATE_NONE))
         prepare_counts[cls] = prepare_counts.get(cls, 0) + 1
         lines.append(f"    CpuState::{PREPARE_NAMES[cls]}, // {op}")
     lines += [

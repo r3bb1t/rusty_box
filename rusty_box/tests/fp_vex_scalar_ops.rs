@@ -1237,8 +1237,6 @@ fn vex_maskmov_suppresses_masked_off_elements() {
         gate[8..12].copy_from_slice(&((PF_HANDLER >> 32) as u32).to_le_bytes());
         emu.mem_write(IDT + 14 * 16, &gate).expect("write #PF gate");
         emu.mem_write(PF_HANDLER, &[0xF4]).expect("write handler");
-        emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
-            .expect("long code descriptor");
         emu.reg_write(X86Reg::IdtrBase, IDT);
         emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
         emu.reg_write(X86Reg::Rsp, STACK);
@@ -1486,8 +1484,6 @@ fn vex_vgather_is_restartable_after_a_page_fault() {
         gate[8..12].copy_from_slice(&((PF_HANDLER >> 32) as u32).to_le_bytes());
         emu.mem_write(IDT + 14 * 16, &gate).expect("write #PF gate");
         emu.mem_write(PF_HANDLER, &[0xF4]).expect("write handler");
-        emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
-            .expect("long code descriptor");
         emu.reg_write(X86Reg::IdtrBase, IDT);
         emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
         emu.reg_write(X86Reg::Rsp, STACK);

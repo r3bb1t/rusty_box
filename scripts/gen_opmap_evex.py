@@ -10,15 +10,14 @@ Bochs shape, reproduced exactly:
   * one `BxOpcodeGroup_EVEX_<name>[]` per (map, opcode byte) that has any
     encoding, each entry a `form_opcode(attrs, opcode)` with the last one
     marked by `last_opcode`;
-  * a master `BxOpcodeTableEVEX[256*5]` indexed `(map - 1) * 256 + opcode`,
+  * a master `BxOpcodeTableEVEX[256*5]` indexed `(block - 1) * 256 + opcode`,
     with `BxOpcodeGroup_ERR` wherever nothing is defined.
 
 Opcode names are matched to rusty's `Opcode` enum case-insensitively after
 dropping underscores: rusty renders `BX_IA_EVEX_VPADDD_VdqHdqWdq` as
 `EvexVpadddVdqHdqWdq`, and the two differ only in case, with no collisions.
-Names rusty does not have (FP16/BF16/FP8 forms, which Skylake-X does not
-advertise) become `Opcode::IaError`, i.e. a guest #UD — the same thing Bochs
-produces with those ISA bits off.
+A name the enum lacks becomes `Opcode::IaError` and is reported by the run,
+so a gap is visible rather than silent.
 
 Usage:  python scripts/gen_opmap_evex.py
 """
@@ -37,10 +36,12 @@ SRC = os.path.join(
 ENUM = os.path.join(ROOT, "rusty_box_decoder", "src", "opcode.rs")
 OUT = os.path.join(ROOT, "rusty_box_decoder", "src", "decoder", "opmap_evex.rs")
 
-# Bochs indexes the master table by (map - 1); map 1 = 0F, 2 = 0F38, 3 = 0F3A,
-# 5 = MAP5, 6 = MAP6. Slot 3 (map 4) is unused but present, so the table is 5
-# blocks of 256.
+# Bochs's master table holds 5 blocks of 256: 0F, 0F38, 0F3A, MAP5 and MAP6.
+# There is no EVEX map 4, so the decoder renumbers maps 5 and 6 down into
+# blocks 4 and 5 before indexing (Bochs fetchdecode64.cc decoder_evex64,
+# `if (evex_opc_map >= 4) evex_opc_map--`).
 MAPS = 5
+BLOCK_LABEL = {0: "0F", 1: "0F38", 2: "0F3A", 3: "MAP5", 4: "MAP6"}
 
 # Bochs attribute names that rusty's tables.rs spells differently.
 ATTR_RENAME = {
@@ -58,32 +59,48 @@ def strip_comments(text):
     return re.sub(r"//[^\n]*", "", text)
 
 
-def resolve_conditionals(text):
-    """Flatten `#if FEATURE / #else / #endif` by keeping the feature-on branch.
+# How the Bochs builds this port is checked against (cpp_orig/bochs/build-mingw
+# and build-bench-nosmp, both `--enable-evex` without `--enable-amx`) resolve
+# each preprocessor condition in the EVEX table file: True keeps the #if arm.
+REFERENCE_BUILD = {
+    "#if BX_SUPPORT_EVEX": True,
+    "#ifndef BX_STANDALONE_DECODER": True,
+    "#if BX_SUPPORT_AMX": False,
+}
 
-    The only conditionals inside these tables are `#if BX_SUPPORT_AMX`, where
-    the #else arm is `BxOpcodeGroup_ERR`. We keep the #if arm on purpose: in
-    rusty, gating an opcode a model does not advertise is the ISA gate's job
-    (it rewrites to IaError at icache fill), so the decoder table should carry
-    the encoding. Baking ERR in here instead would make the opcode
-    unreachable for any future cpudb model that does advertise AMX — the same
-    unreachable-handler bug this table exists to fix.
+
+def resolve_conditionals(text):
+    """Flatten `#if / #else / #endif` the way the reference build does.
+
+    Its BX_SUPPORT_AMX is 0, and rusty_box implements no AMX state, so an AMX
+    group is not emitted and its master-table slot is the #else arm's
+    `BxOpcodeGroup_ERR` — a guest #UD, as upstream. scripts/gen_vex_slots.py
+    resolves the VEX table the same way. A condition missing from
+    REFERENCE_BUILD stops the run rather than guess a branch, and so does an
+    `#elif`, whose arm a single REFERENCE_BUILD lookup cannot choose.
     """
-    out, skipping, depth = [], False, 0
+    out, skipping = [], []
     for line in text.splitlines():
         s = line.strip()
+        if s.startswith("#elif"):
+            sys.exit(f"unexpected conditional in the EVEX table: {s}")
         if s.startswith("#if"):
-            depth += 1
+            condition = s.split("//")[0].strip()
+            if condition not in REFERENCE_BUILD:
+                sys.exit(f"unexpected conditional in the EVEX table: {s}")
+            skipping.append(not REFERENCE_BUILD[condition])
             continue
-        if s.startswith("#else") and depth:
-            skipping = True
+        if s.startswith("#else"):
+            if not skipping:
+                sys.exit("#else outside any #if in the EVEX table")
+            skipping[-1] = not skipping[-1]
             continue
         if s.startswith("#endif"):
-            if depth:
-                depth -= 1
-                skipping = False
+            if not skipping:
+                sys.exit("#endif outside any #if in the EVEX table")
+            skipping.pop()
             continue
-        if not skipping:
+        if not any(skipping):
             out.append(line)
     return "\n".join(out)
 
@@ -170,12 +187,14 @@ def main():
     out.append("//! Transcribed from Bochs `cpu/decoder/fetchdecode_opmap_evex.cc`,")
     out.append("//! which is itself the table: one group per (map, opcode byte), each")
     out.append("//! entry a `form_opcode(attrs, opcode)`, selected by the same decmask")
-    out.append("//! machinery `tables.rs` already implements. The master table is")
-    out.append("//! indexed `(map - 1) * 256 + opcode`, matching `BxOpcodeTableEVEX`.")
+    out.append("//! machinery `tables.rs` already implements. Preprocessor conditions")
+    out.append("//! are resolved as the reference build resolves them: BX_SUPPORT_AMX")
+    out.append("//! is 0 there, so no AMX encoding is present. The master table is")
+    out.append("//! indexed `(block - 1) * 256 + opcode`, matching `BxOpcodeTableEVEX`.")
     out.append("//!")
-    out.append("//! Opcodes rusty does not implement (FP16/BF16/FP8 forms, which")
-    out.append("//! Skylake-X does not advertise) resolve to `Opcode::IaError`, i.e. a")
-    out.append("//! guest #UD — what Bochs produces with those ISA bits off.")
+    out.append("//! An opcode the CPU model does not advertise still decodes here; the")
+    out.append("//! ISA gate rewrites it to `Opcode::IaError` at icache fill, a guest")
+    out.append("//! #UD — what Bochs produces with that ISA bit off.")
     out.append("")
     out.append("use super::form_opcode;")
     out.append("use super::tables::OpcodeAttrs as A;")
@@ -203,19 +222,21 @@ def main():
         out.append("];")
         out.append("")
 
-    out.append("/// Master EVEX table, indexed `(map - 1) * 256 + opcode`.")
+    out.append("/// Master EVEX table, indexed `(block - 1) * 256 + opcode`.")
     out.append("///")
-    out.append("/// Bochs `BxOpcodeTableEVEX[256*5]`. Map 1 = 0F, 2 = 0F38, 3 = 0F3A,")
-    out.append("/// 5 = MAP5, 6 = MAP6; the map-4 block is unused but kept so the")
-    out.append("/// indexing matches upstream exactly.")
+    out.append("/// Bochs `BxOpcodeTableEVEX[256*5]`: blocks 1-5 hold 0F, 0F38, 0F3A,")
+    out.append("/// MAP5 and MAP6. There is no EVEX map 4, so maps 5 and 6 are blocks")
+    out.append("/// 4 and 5 (Bochs fetchdecode64.cc decoder_evex64).")
     out.append(f"pub(crate) static EVEX_TABLE: [&[u64]; {256 * MAPS}] = [")
-    map_label = {0: "0F", 1: "0F38", 2: "0F3A", 3: "unused", 4: "MAP5"}
     for i, g in enumerate(master):
         if i % 256 == 0:
-            out.append(f"    // ---- map {i // 256 + 1} ({map_label[i // 256]}) ----")
+            out.append(f"    // ---- block {i // 256 + 1} ({BLOCK_LABEL[i // 256]}) ----")
         ident = emitted.get(g, "EVEX_GROUP_ERR")
         out.append(f"    /* {i % 256:02X} */ {ident},")
     out.append("];")
+    out.append("")
+    out.append("/// Number of 256-byte blocks in [`EVEX_TABLE`] (Bochs `256*5`).")
+    out.append(f"pub(crate) const EVEX_MAPS: usize = {MAPS};")
     out.append("")
 
     with io.open(OUT, "w", encoding="utf-8", newline="\n") as f:

@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: r3bb1t <49586603+r3bb1t@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 12:00:00 +0000
+Subject: [PATCH] RETF imm16 in real mode must zero-extend the immediate on a
+ 32-bit stack
+
+RETfar16_Iw reads its immediate as Bit16s, so in real mode with a 32-bit
+stack (SS.B = 1, "big real mode") `ESP += imm16` sign-extends it:
+RETF 0x8000 lowers ESP by 0x7FFC instead of raising it by 0x8000.
+
+The immediate is a byte count and is unsigned:
+ - AMD64 APM vol. 3, RET (Far): "temp_IMM = word-sized immediate specified
+   in the instruction, zero-extended to 64 bits", then RSP.s = RSP + temp_IMM
+ - measured on an Intel Core i5-12450H, RETF 0x8000 with 16-bit operand
+   size on a B = 1 stack: from ESP = 0x20000 it leaves ESP = 0x28004, and
+   from ESP = 0x29000 it leaves 0x31004 — a 32-bit add of the zero-extended
+   immediate (sign extension gives 0x18004 and 0x21004; a 16-bit SP update
+   gives 0x28004 and 0x21004). Bochs today gives 0x18004 and 0x21004; with
+   this patch it gives 0x28004 and 0x31004.
+ - Bochs's other RET paths read it as Bit16u (RETnear16_Iw, RETnear32_Iw,
+   RETnear64_Iw, RETfar32_Iw, and RETfar64_Iw through return_protected),
+   and the protected-mode branch of this handler converts it back to Bit16u
+   for return_protected
+
+V86 stacks are always 16-bit, so only real mode with a 32-bit SS cache and
+imm16 >= 0x8000 is affected. The Bit16s dates back to the original 2000
+snapshot.
+---
+ bochs/cpu/HISTORY        | 1 +
+ bochs/cpu/ctrl_xfer16.cc | 2 +-
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/bochs/cpu/HISTORY b/bochs/cpu/HISTORY
+index 3493adc..2704108 100644
+--- a/bochs/cpu/HISTORY
++++ b/bochs/cpu/HISTORY
+@@ -10,6 +10,7 @@ Legend:
+ Changes after Bochs 3.1:
+
+ ! Implemented AI Compute Extensions (ACE) emulation according AI Compute Extensions (ACE) Specification rev1.16.2 from x86 Ecosystem Advisory Group
++- RETF imm16 with 16-bit operand size in real mode must zero-extend imm16 when releasing parameters from a 32-bit stack (was sign-extended)
+ - AMX: TILELOADD/TILESTORED must #UD if memory operand is encoded without SIB byte, use zero stride when SIB has no index register (was using RSP)
+ - AVX/AVX-512: VGATHER/VSCATTER instructions must #UD if memory operand is encoded without VSIB byte
+ + AMX-FP8: rewrite TDPBF8PS/TDPHF8PS/TDPBHF8PS/TDPHBF8PS to match SDM: they must accumulate FP8 products exactly in fixed point over the whole K dimension with single rounding to FP32
+diff --git a/bochs/cpu/ctrl_xfer16.cc b/bochs/cpu/ctrl_xfer16.cc
+index 1b4bda8..753660d 100644
+--- a/bochs/cpu/ctrl_xfer16.cc
++++ b/bochs/cpu/ctrl_xfer16.cc
+@@ -159,7 +159,7 @@ void BX_CPP_AttrRegparmN(1) BX_CPU_C::RETfar16_Iw(bxInstruction_c *i)
+   BX_CPU_THIS_PTR show_flag |= Flag_ret;
+ #endif
+
+-  Bit16s imm16 = (Bit16s) i->Iw();
++  Bit16u imm16 = i->Iw();
+
+   RSP_SPECULATIVE;
+

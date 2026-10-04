@@ -1042,6 +1042,7 @@ impl<'a, E: SliceEngine<()> + Default> Emulator<(), E> {
         // Minimal init: memory + CPU registers + async event flags. We skip
         // load_bios + pc_system.start etc. since the user will not run a BIOS.
         emu.init_memory_and_pc_system()?;
+        emu.initialize_cpus_from_config()?;
         // Bring every configured CPU to reset state before applying the mode to the BSP.
         emu.reset(ResetReason::Hardware)?;
         emu.setup_cpu_mode(mode)?;
@@ -1074,6 +1075,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     {
         let mut emu = Self::with_tracer(config, tracer)?;
         emu.init_memory_and_pc_system()?;
+        emu.initialize_cpus_from_config()?;
         emu.reset(crate::cpu::ResetReason::Hardware)?;
         emu.setup_cpu_mode(mode)?;
         Ok(emu)

@@ -4,6 +4,24 @@
 use crate::convert::u64_from_usize;
 use crate::cpu::BxCpuC;
 
+/// One entry of an RDMSRLIST/WRMSRLIST: the RCX bit (and table slot) it
+/// occupies, and the MSR its index-table slot names.
+#[derive(Clone, Copy, Debug)]
+struct MsrListEntry {
+    slot: u32,
+    msr: u32,
+}
+
+/// Whether an MSR list goes on after an entry, or stops for an event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "an interrupted list must stop so the event is delivered"]
+enum MsrListProgress {
+    Continue,
+    /// An event is waiting; RIP is back on the instruction, which resumes
+    /// with the entries RCX still names.
+    Interrupted,
+}
+
 /// Pack one `IA32_VMX_*_CTLS` capability MSR: allowed-1 (what a guest MAY set)
 /// in the high half, allowed-0 (what it MUST set) in the low half. Bochs
 /// vmx.cc reads these MSRs back through the same pair when validating VMENTRY.
@@ -1158,6 +1176,101 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         let val = self.get_gpr64(usize::from(instr.src()));
         self.wrmsr_value(msr, val)
+    }
+
+    /// The checks RDMSRLIST and WRMSRLIST share before their loop — Bochs
+    /// msr.cc: #UD in a VMX guest whose tertiary controls do not enable the
+    /// lists, #GP(0) outside 64-bit mode or above CPL 0, and #GP(0) unless
+    /// both table addresses are 8-byte aligned.
+    fn check_msr_list_preconditions(&mut self, name: &str) -> crate::cpu::Result<()> {
+        if self.in_vmx_guest
+            && self.proc_based_ctls3() & super::vmx::VMX_VM_EXEC_CTRL3_ENABLE_MSRLIST == 0
+        {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        if !self.long64_mode() || cpl != 0 {
+            tracing::trace!("{name}: not CPL 0 in 64-bit mode, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        if (self.esi() | self.edi()) & 0x7 != 0 {
+            tracing::trace!("{name}: RSI and RDI must be 8-byte aligned, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        Ok(())
+    }
+
+    /// The next entry of an MSR list: the lowest bit set in RCX names it, and
+    /// the table at RSI holds its index, whose bits 63:32 must be clear.
+    fn next_msr_list_entry(&mut self, name: &str) -> crate::cpu::Result<MsrListEntry> {
+        let slot = self.rcx().trailing_zeros();
+        let at = self.rsi().wrapping_add(u64::from(slot) * 8);
+        let address = self.read_linear_qword(super::decoder::BxSegregs::Ds, at)?;
+        if address >> 32 != 0 {
+            tracing::trace!("{name} index={slot}: reserved bits set in the MSR address table, #GP(0)");
+            self.exception(super::cpu::Exception::Gp, 0)?;
+        }
+        Ok(MsrListEntry { slot, msr: address as u32 })
+    }
+
+    /// End one entry: clear its bit in RCX, and stop with RIP back on the
+    /// instruction when an event is waiting, so it is delivered between
+    /// entries and the list resumes afterwards (Bochs msr.cc "allow delivery
+    /// of any pending interrupts or traps").
+    fn finish_msr_list_entry(&mut self, entry: MsrListEntry) -> MsrListProgress {
+        let rcx = self.rcx() & !(1u64 << entry.slot);
+        self.set_rcx(rcx);
+        if self.async_event != 0 {
+            let prev_rip = self.prev_rip;
+            self.set_rip(prev_rip);
+            return MsrListProgress::Interrupted;
+        }
+        MsrListProgress::Continue
+    }
+
+    /// RDMSRLIST — Bochs msr.cc `RDMSRLIST`: read the MSR each set bit of RCX
+    /// names, from the index table at RSI into the value table at RDI.
+    pub(super) fn rdmsrlist(&mut self) -> crate::cpu::Result<()> {
+        self.check_msr_list_preconditions("RDMSRLIST")?;
+        while self.rcx() != 0 {
+            let entry = self.next_msr_list_entry("RDMSRLIST")?;
+            if self.in_vmx_guest
+                && self.vmexit_check_msr(super::vmx::MsrExitReason::Rdmsrlist, entry.msr)?
+            {
+                return Ok(());
+            }
+            let value = self.rdmsr_value(entry.msr)?;
+            let destination = self.rdi().wrapping_add(u64::from(entry.slot) * 8);
+            self.write_linear_qword(super::decoder::BxSegregs::Ds, destination, value)?;
+            match self.finish_msr_list_entry(entry) {
+                MsrListProgress::Continue => {}
+                MsrListProgress::Interrupted => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// WRMSRLIST — Bochs msr.cc `WRMSRLIST`: write to the MSR each set bit of
+    /// RCX names the value at the same slot of the table at RDI.
+    pub(super) fn wrmsrlist(&mut self) -> crate::cpu::Result<()> {
+        self.check_msr_list_preconditions("WRMSRLIST")?;
+        self.invalidate_prefetch_q();
+        while self.rcx() != 0 {
+            let entry = self.next_msr_list_entry("WRMSRLIST")?;
+            let source = self.rdi().wrapping_add(u64::from(entry.slot) * 8);
+            let value = self.read_linear_qword(super::decoder::BxSegregs::Ds, source)?;
+            if self.in_vmx_guest
+                && self.vmexit_check_msr(super::vmx::MsrExitReason::Wrmsrlist, entry.msr)?
+            {
+                return Ok(());
+            }
+            self.wrmsr_value(entry.msr, value)?;
+            match self.finish_msr_list_entry(entry) {
+                MsrListProgress::Continue => {}
+                MsrListProgress::Interrupted => break,
+            }
+        }
+        Ok(())
     }
 
     /// An index this architecture does not define — Bochs msr.cc

@@ -181,6 +181,30 @@ pub enum SsePrefix {
     PrefixF2 = 3,
 }
 
+/// Whether a legacy-map instruction's immediate is two separate bytes, `Ib`
+/// then `Ib2` — Bochs fetchdecode's `BX_IMMB2`, which outside ENTER only the
+/// SSE4A immediate forms take: `EXTRQ_UdqIbIb` (66 0F 78 /0, mod 11) and
+/// `INSERTQ_VdqUqIbIb` (F2 0F 78, mod 11). The second byte lands where
+/// `Instruction::ib2` reads it.
+///
+/// The conditions are those opcodes' table entries, because the immediate is
+/// fetched before the opcode is looked up: Bochs fetches only for the opcode
+/// it found, so a form the table rejects — `66 0F 78` with a memory operand,
+/// say — takes #UD having fetched nothing.
+pub(crate) const fn has_ib_ib2(
+    opcode_map: u8,
+    opcode: u8,
+    sse_prefix: u8,
+    mod_c0: bool,
+    nnn: u32,
+) -> bool {
+    opcode_map == 1
+        && opcode == 0x78
+        && mod_c0
+        && ((sse_prefix == SsePrefix::Prefix66 as u8 && nnn & 7 == 0)
+            || sse_prefix == SsePrefix::PrefixF2 as u8)
+}
+
 // ============================================================================
 // BxDecodeError — matching Bochs bx_decode_error_t (fetchdecode.h lines 38-57)
 // ============================================================================

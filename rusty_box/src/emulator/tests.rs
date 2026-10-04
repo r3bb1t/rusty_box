@@ -810,13 +810,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.mem_write(11 * 16, &gate).expect("write #NP gate");
                 emu.mem_write(13 * 16, &gate).expect("write #GP gate");
                 emu.mem_write(HANDLER, &[0xEB, 0xFE]).expect("write handler");
-                // The FlatLong64 harness GDT (install_flat_gdt) holds a
-                // 32-bit code descriptor at selector 0x08 (the API loads
-                // descriptor CACHES directly); gate delivery reloads CS from
-                // the GDT and requires L=1 in long mode, so give it a real
-                // 64-bit code descriptor.
-                emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
-                    .expect("write 64-bit code descriptor");
                 emu.reg_write(X86Reg::Rsp, 0x0058_0000);
 
                 // SAFETY: memory-bus wiring invariants held by the emulator.

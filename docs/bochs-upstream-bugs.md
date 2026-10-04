@@ -10,7 +10,8 @@ from bug to bug. Where the architectural behaviour is the better side, the port
 implements it and registers the difference in `docs/bochs-parity-divergences.md`.
 Some bugs are reproduced bug-for-bug for parity instead: the mouse `0xE6`
 scaling, the HPET restore epoch, VRSQRT14's power-of-two case, the unreferenced
-EVEX groups, the unbacked PMU leaf and the stale IA32_SPEC_CTRL shadow.
+EVEX groups, the unbacked PMU leaf, the stale IA32_SPEC_CTRL shadow and, until
+it is ruled on, the sign-extended RETF immediate.
 
 Filed upstream:
 - https://github.com/bochs-emu/Bochs/issues/791 — the post-Skylake CPU models
@@ -747,3 +748,75 @@ Unreachable in this port: its only VMX model, Skylake-X, offers no tertiary
 control, as in Bochs.
 
 **Filing status**: NOT FILED.
+
+---
+
+## RETF imm16 in real mode sign-extends the immediate on a 32-bit stack
+
+**Severity**: Guest-visible, narrow. Real mode with a 32-bit stack (SS cached
+with B = 1, "big real mode") and an immediate of 0x8000 or more: the stack
+pointer lands 64 KiB lower than on hardware.
+
+**Location**: `cpu/ctrl_xfer16.cc` — `BX_CPU_C::RETfar16_Iw`.
+
+**Root cause**:
+
+```cpp
+// cpu/ctrl_xfer16.cc  RETfar16_Iw
+Bit16s imm16 = (Bit16s) i->Iw();   // <-- should be Bit16u
+...
+  if (BX_CPU_THIS_PTR sregs[BX_SEG_REG_SS].cache.u.segment.d_b)
+    ESP += imm16;                  // sign-extends
+  else
+     SP += imm16;
+```
+
+Every other RET path reads the immediate unsigned: `RETnear16_Iw`,
+`RETnear32_Iw` and `RETfar32_Iw` declare `Bit16u`, `RETnear64_Iw` adds
+`i->Iw()`, and `RETfar64_Iw` and this handler's own protected-mode branch pass
+it to `return_protected(bxInstruction_c *, Bit16u)`. The `Bit16s` is in the
+original 2000 snapshot. Upstream master `f87c5e226` (2026-10-03) still has it.
+
+**Architecture**: the immediate is a byte count. AMD's APM vol. 3, RET (Far),
+real and virtual-8086 mode: "temp_IMM = word-sized immediate specified in the
+instruction, zero-extended to 64 bits", then `RSP.s = RSP + temp_IMM`. Intel's
+SDM: "pop imm16 bytes from stack". Intel's real-mode far-return pseudocode
+writes the release as `SP := SP + (SRC AND FFFFH)`, a 16-bit-stack
+simplification that the measurement below rules out.
+
+**Measured** (2026-10-04) with a boot-sector probe that enters big real mode
+and executes `RETF 0x8000` and `RET 0x8000`, 16-bit operand size, from two
+starting ESP values. The second start is needed because from 0x20000 a
+zero-extended 32-bit add and a 16-bit SP update give the same ESP:
+
+| Start ESP | RETF: zext / sext / SP-only | Hardware | Bochs `f87c5e226` | Bochs + fix |
+|---|---|---|---|---|
+| 0x20000 | 0x28004 / 0x18004 / 0x28004 | 0x28004 | 0x18004 | 0x28004 |
+| 0x29000 | 0x31004 / 0x21004 / 0x21004 | 0x31004 | 0x21004 | 0x31004 |
+
+Near RET gives 0x28002 and 0x31002 on all three, so Bochs and hardware agree
+there. The hardware is an Intel Core i5-12450H (family 6, model 154,
+stepping 3), reached through the Windows Hypervisor Platform, which runs
+real-mode guest code natively; the probe image was loaded by a temporary
+`rusty_box_whp_engine` test (since deleted). The Bochs builds are master
+`f87c5e226` from a clean tarball, unpatched and patched.
+
+**Other implementations**: VirtualBox's IEM takes the count as
+`uint16_t cbPop` (`iemCImpl_retf`). QEMU's TCG reads every RET/RETF immediate
+as `int16_t` (`target/i386/tcg/emit.c.inc` `gen_RET` / `gen_RETF`), so it
+sign-extends on 32-bit stacks too.
+
+**Fix**: `Bit16u imm16 = i->Iw();` — prepared as
+`docs/bochs-retf16-imm16-fix.patch` (`git am`-ready, with a HISTORY line).
+
+**Reproduction**: `docs/bochs-retf16-imm16-probe.S`, a 512-byte boot sector
+built with GNU binutils alone; it prints ESP after each return to port 0xE9
+and the VGA screen, then writes `Shutdown` to port 0x8900.
+
+**Rusty Box behavior**: reproduced, for parity — `cpu/ctrl_xfer16.rs`
+`retfar16_iw` sign-extends (`imm16 as i16 as u32`) and prints the Bochs row.
+Taking the hardware behaviour would be a divergence entry, like D18; not yet
+decided.
+
+**Filing status**: NOT FILED. The PR body, filing steps and verification notes
+are in `docs/bochs-upstream-pr-retf16-imm16.md`.

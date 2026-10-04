@@ -603,7 +603,7 @@ fn is_trace_end_opcode(opcode: Opcode) -> bool {
         // JCXZ/JECXZ/JRCXZ
         Opcode::JcxzJbw | Opcode::JecxzJbd | Opcode::JrcxzJbq |
         // Software interrupts
-        Opcode::IntIb | Opcode::INT1 | Opcode::INT3 | Opcode::Int0 |
+        Opcode::IntIb | Opcode::INT1 | Opcode::INT3 | Opcode::Into |
         // Interrupt returns
         Opcode::IretOp16 | Opcode::IretOp32 | Opcode::IretOp64 |
         // Halt
@@ -1252,10 +1252,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     )
                     .unwrap();
 
-                    // FlatLong64's live CS is 64-bit, but exception delivery
-                    // reloads CS from the test GDT; make that descriptor long.
-                    emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
-                        .unwrap();
                     emu.reg_write(X86Reg::IdtrBase, IDT);
                     emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
                     emu.reg_write(X86Reg::Rsp, STACK_TOP);

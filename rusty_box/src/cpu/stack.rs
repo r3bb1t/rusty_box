@@ -11,6 +11,21 @@
 use super::decoder::BxSegregs;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
+    /// Bochs cpu.h `RSP_SPECULATIVE`: from here until [`Self::rsp_commit`], a
+    /// fault puts RSP and SSP back where they are now (`exception` restores
+    /// both from `prev_rsp`/`prev_ssp`), so an instruction that moved the
+    /// stack before faulting restarts on the stack it began with.
+    pub(super) fn rsp_speculative(&mut self) {
+        self.speculative_rsp = true;
+        self.prev_rsp = self.rsp();
+        self.prev_ssp = self.ssp();
+    }
+
+    /// Bochs cpu.h `RSP_COMMIT`: the stack the instruction moved to stands.
+    pub(super) fn rsp_commit(&mut self) {
+        self.speculative_rsp = false;
+    }
+
     // =========================================================================
     // Helper functions for stack operations
     // Based on Bochs stack.h and stack.cc
