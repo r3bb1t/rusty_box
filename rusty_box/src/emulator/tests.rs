@@ -3068,8 +3068,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 let reset_guest = |code: &[u8]| {
+                    // The marker is a write to the port-0xE9 console, which
+                    // has to be on for its absence to mean anything.
                     let mut emu = Emulator::new_with_mode(
-                        EmulatorConfig::default(),
+                        EmulatorConfig {
+                            port_e9_hack: crate::iodev::PortE9Hack::On,
+                            ..EmulatorConfig::default()
+                        },
                         CpuSetupMode::FlatProtected32,
                     )
                     .unwrap();
@@ -3269,8 +3274,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
+                // The marker is a write to the port-0xE9 console, which has to
+                // be on for its absence to mean anything.
                 let mut emu = Emulator::new_with_mode(
-                    EmulatorConfig::default(),
+                    EmulatorConfig {
+                        port_e9_hack: crate::iodev::PortE9Hack::On,
+                        ..EmulatorConfig::default()
+                    },
                     CpuSetupMode::FlatProtected32,
                 )
                 .unwrap();
@@ -6631,9 +6641,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const STAMP_COUNT: u8 = 16;
 
     fn stamp_machine(id: u8) -> Box<Emulator> {
-        let mut emu =
-            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
-                .unwrap();
+        // The stamps are written to the port-0xE9 console.
+        let config = EmulatorConfig {
+            port_e9_hack: crate::iodev::PortE9Hack::On,
+            ..EmulatorConfig::default()
+        };
+        let mut emu = Emulator::new_with_mode(config, CpuSetupMode::FlatProtected32).unwrap();
         // `new_with_mode` deliberately skips device registration.
         emu.devices.init(&mut emu.memory).unwrap();
         emu.device_manager
@@ -7177,7 +7190,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.initialize().unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
                 let offered: Vec<u8> = b"root\n".to_vec();
-                emu.host_input.push_serial(offered.clone());
+                assert_eq!(emu.serial(0).unwrap().send(&offered), offered.len());
                 emu.reset(ResetReason::Hardware).unwrap();
 
                 let mut received: Vec<u8> = Vec::new();

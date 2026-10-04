@@ -67,13 +67,14 @@ impl StopHandle {
 //
 // Transient `&mut` borrows of one device role, obtained from the machine and
 // dropped at the end of the expression. Machine internals stay crate-private
-// (doctrine R3) — this is the supported path to device state. Handles are
-// deliberately minimal in this first cut; the automation phase grows them
-// (input injection, display readback, serial `send`) without renaming.
+// (doctrine R3) — this is the supported path to device state.
 
 /// Transient borrow of one UART, from [`Emulator::serial`].
 pub struct Serial<'m> {
     devices: &'m mut DeviceManager,
+    /// Host bytes waiting for this port's receiver.
+    #[cfg(feature = "alloc")]
+    input: &'m mut crate::gui::host_input::HostInputBacklog,
     port: usize,
 }
 
@@ -86,13 +87,34 @@ impl Serial<'_> {
     pub fn take_output(&mut self) -> SerialTxDrain<'_> {
         self.devices.drain_serial_tx(self.port)
     }
+
+    /// Send bytes for the guest to receive on this port, returning how many
+    /// the machine took.
+    ///
+    /// The bytes stand where a Bochs serial backend's input does — a pipe, a
+    /// socket, a file: the UART reads them one at a time, and only while its
+    /// receiver has room (Bochs serial.cc `rx_timer`), at each input pump.
+    /// [`Emulator::step`] pumps after every batch; a driver that advances the
+    /// guest by other means calls [`Emulator::pump_gui_input`]. So a whole
+    /// line can be sent at once and the guest reads it at its own pace, with
+    /// nothing overrun.
+    ///
+    /// What the machine holds per port is bounded. A short count means the
+    /// guest has stopped reading this port, and `bytes[sent..]` is what to
+    /// send again once it has.
+    #[cfg(feature = "alloc")]
+    #[must_use = "a short count means the rest never reached the guest"]
+    pub fn send(&mut self, bytes: &[u8]) -> usize {
+        self.input.hold_serial(self.port, bytes)
+    }
 }
 
 /// Transient borrow of the port-0xE9 debug console, from
 /// [`Emulator::debug_port`].
 ///
-/// Bochs `unmapped.cc` `port_e9_hack` — optional upstream, always present
-/// here. BIOS/VGABIOS message ports (0x400-0x403, 0x500-0x503) are a separate
+/// Bochs `unmapped.cc` `port_e9_hack`, which a machine has only when its
+/// configuration turns it on ([`EmulatorConfig::port_e9_hack`]).
+/// BIOS/VGABIOS message ports (0x400-0x403, 0x500-0x503) are a separate
 /// stream and never appear on this one, matching `biosdev.cc`.
 pub struct DebugPort<'m> {
     devices: &'m mut BxDevicesC,
@@ -144,22 +166,28 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
     pub fn serial(&mut self, port: usize) -> Option<Serial<'_>> {
         (port < self.device_manager.serial.configured_port_count()).then(|| Serial {
             devices: &mut self.device_manager,
+            #[cfg(feature = "alloc")]
+            input: &mut self.host_input,
             port,
         })
     }
 
-    /// Borrow the port-0xE9 debug console. Present on every profile — it is a
-    /// chipset facility, not a device that can be left unattached.
+    /// Borrow the port-0xE9 debug console. `None` unless the machine was built
+    /// with [`EmulatorConfig::port_e9_hack`] on.
+    ///
+    /// With the console off, port 0xE9 is unclaimed as on a PC — a guest's
+    /// write goes nowhere — and a handle onto it would drain an empty stream
+    /// for ever, which a host cannot tell from a guest that wrote nothing.
     #[inline]
-    pub fn debug_port(&mut self) -> DebugPort<'_> {
-        DebugPort {
+    pub fn debug_port(&mut self) -> Option<DebugPort<'_>> {
+        self.devices.port_e9_hack().is_on().then(|| DebugPort {
             devices: &mut self.devices,
-        }
+        })
     }
 
     /// Borrow the BIOS POST-code stream (ports 0x80 and 0x84). Present on
-    /// every profile, for the same reason as [`Emulator::debug_port`]: it
-    /// watches a chipset register every machine has.
+    /// every machine: it watches a chipset register every machine has, so
+    /// unlike [`Emulator::debug_port`] there is nothing to turn on.
     #[inline]
     pub fn post_codes(&mut self) -> PostCodes<'_> {
         PostCodes {
@@ -1605,15 +1633,104 @@ mod tests {
             .unwrap();
     }
 
-    /// Bytes the guest writes to port 0xE9 come back out of the debug-port
-    /// handle, in write order.
-    ///
-    /// Asserts the guest-visible property (doctrine R9) rather than the
-    /// buffer that currently carries it: the guest executes real `OUT`
-    /// instructions and the host reads them through the public role handle,
-    /// so a mis-wired handle or a lost byte fails here.
+    const COM1_RBR: u16 = 0x03F8;
+    const COM1_FCR: u16 = 0x03FA;
+    const COM1_LSR: u16 = 0x03FD;
+    const LSR_DATA_READY: u32 = 0x01;
+    const LSR_OVERRUN: u32 = 0x02;
+
+    /// Read COM1 the way a guest's driver does, until the receiver is empty,
+    /// failing on an overrun.
+    fn read_com1(emu: &mut Emulator<()>, received: &mut Vec<u8>) {
+        loop {
+            let lsr = emu.device_manager.serial.read(COM1_LSR, 1);
+            assert_eq!(lsr & LSR_OVERRUN, 0, "host input overran the receiver");
+            if lsr & LSR_DATA_READY == 0 {
+                return;
+            }
+            received.push(emu.device_manager.serial.read(COM1_RBR, 1) as u8);
+        }
+    }
+
+    /// A line far longer than the 16-byte receive FIFO reaches the guest
+    /// whole, in order and without an overrun: the UART takes what it has
+    /// room for at each pump and the rest waits, as Bochs serial.cc
+    /// `rx_timer` reads its backend only while the receiver has room.
     #[test]
-    fn debug_port_handle_returns_guest_written_bytes() {
+    fn serial_send_is_paced_by_the_guest_reading_its_receiver() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                emu.initialize().unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                // FIFO on, as a 16550A driver sets it.
+                emu.device_manager.serial.write(COM1_FCR, 0x01, 1);
+                let line: Vec<u8> = (0..100u8).map(|i| b'a' + i % 26).collect();
+                let sent = emu.serial(0).expect("COM1 is built").send(&line);
+                assert_eq!(sent, line.len(), "an idle port takes a whole line");
+
+                let mut received = Vec::new();
+                read_com1(&mut emu, &mut received);
+                assert!(
+                    received.is_empty(),
+                    "bytes reach the UART at an input pump, not at the send"
+                );
+                emu.pump_gui_input();
+                read_com1(&mut emu, &mut received);
+                assert_eq!(received.len(), 16, "one pump fills the FIFO and no more");
+                for _ in 0..10 {
+                    emu.pump_gui_input();
+                    read_com1(&mut emu, &mut received);
+                }
+                assert_eq!(received, line);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A guest that stops reading makes `send` take less than it was given,
+    /// and the count is the resume point: sending the rest once the guest
+    /// has read delivers every byte exactly once, in order.
+    #[test]
+    fn a_short_serial_send_is_the_point_to_resume_from() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
+                emu.initialize().unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.device_manager.serial.write(COM1_FCR, 0x01, 1);
+                let burst: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+
+                let mut offset = 0;
+                let mut refusals = 0;
+                let mut received = Vec::new();
+                while received.len() < burst.len() {
+                    let sent = emu.serial(0).expect("COM1 is built").send(&burst[offset..]);
+                    if offset + sent < burst.len() {
+                        refusals += 1;
+                    }
+                    offset += sent;
+                    emu.pump_gui_input();
+                    read_com1(&mut emu, &mut received);
+                }
+                assert!(refusals > 0, "the burst never met the bound it exists to test");
+                assert_eq!(received, burst);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Port 0xE9 is unclaimed on a machine built with the defaults, as on a
+    /// Bochs machine whose configuration leaves `port_e9_hack` off: guest
+    /// code that reads it to find a console reads all ones, its writes go
+    /// nowhere, and the host is offered no handle onto a stream that would
+    /// never fill.
+    #[test]
+    fn the_debug_console_is_off_unless_the_machine_turns_it_on() {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
@@ -1622,19 +1739,81 @@ mod tests {
                         .unwrap();
                 let code_addr = 0x20_0000;
 
-                // mov al,'O'; out 0xe9,al; mov al,'K'; out 0xe9,al
-                emu.mem_write(
-                    code_addr,
-                    &[0xB0, b'O', 0xE6, 0xE9, 0xB0, b'K', 0xE6, 0xE9],
-                )
-                .unwrap();
+                // in al,0xe9; mov bl,al; mov al,'X'; out 0xe9,al
+                emu.mem_write(code_addr, &[0xE4, 0xE9, 0x88, 0xC3, 0xB0, b'X', 0xE6, 0xE9])
+                    .unwrap();
                 emu.emu_start(code_addr, None, None, Some(4)).unwrap();
 
-                let out: Vec<u8> = emu.debug_port().take_output().collect();
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rbx) & 0xFF,
+                    0xFF,
+                    "an unclaimed port reads all ones, so guest code finds no console"
+                );
+                assert!(
+                    emu.debug_port().is_none(),
+                    "there is no console to drain on a machine that has none"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// With the console on, guest code that reads port 0xE9 finds the
+    /// console — the read answers 0xE9, Bochs's detection convention — and
+    /// every byte it writes comes back out of the debug-port handle in write
+    /// order. A word write hands over its low byte, as Bochs's
+    /// `putchar(value)` does.
+    ///
+    /// Asserts the guest-visible property (doctrine R9) rather than the
+    /// buffer that carries it: the guest executes real `IN` and `OUT`
+    /// instructions and the host reads them through the public role handle,
+    /// so a mis-wired handle or a lost byte fails here.
+    #[test]
+    fn debug_port_handle_returns_guest_written_bytes() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig {
+                    port_e9_hack: crate::iodev::PortE9Hack::On,
+                    ..EmulatorConfig::default()
+                };
+                let mut emu = Emulator::new_with_mode(config, CpuSetupMode::FlatLong64).unwrap();
+                let code_addr = 0x20_0000;
+
+                emu.mem_write(
+                    code_addr,
+                    &[
+                        0xE4, 0xE9, // in al, 0xe9
+                        0x88, 0xC3, // mov bl, al
+                        0xB0, b'O', // mov al, 'O'
+                        0xE6, 0xE9, // out 0xe9, al
+                        0x66, 0xB8, b'K', b'!', // mov ax, '!K'
+                        0x66, 0xE7, 0xE9, // out 0xe9, ax
+                    ],
+                )
+                .unwrap();
+                emu.emu_start(code_addr, None, None, Some(6)).unwrap();
+
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rbx) & 0xFF,
+                    0xE9,
+                    "a guest that reads port 0xE9 must find the console"
+                );
+                let out: Vec<u8> = emu
+                    .debug_port()
+                    .expect("the console is on")
+                    .take_output()
+                    .collect();
                 assert_eq!(out, b"OK", "port-0xE9 writes must survive in order");
 
                 // Draining is destructive — a second read sees nothing new.
-                assert!(emu.debug_port().take_output().next().is_none());
+                assert!(emu
+                    .debug_port()
+                    .expect("the console is on")
+                    .take_output()
+                    .next()
+                    .is_none());
             })
             .unwrap()
             .join()

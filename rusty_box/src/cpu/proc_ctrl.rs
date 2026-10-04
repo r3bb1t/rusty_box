@@ -1532,14 +1532,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // Bochs msr.cc — CET writes validate canonical address +
             // CET-control bit-pattern, then store. Returns false (#GP) on bad value.
             BX_MSR_IA32_U_CET | BX_MSR_IA32_S_CET => {
-                if !self.is_canonical(val) || super::cet::is_invalid_cet_control(val) {
+                if !self.is_cpuid_canonical(val) || super::cet::is_invalid_cet_control(val) {
                     tracing::trace!("WRMSR: bad CET control value {:#x} for MSR {:#x}", val, msr);
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.msr.ia32_cet_control[usize::from(msr == BX_MSR_IA32_U_CET)] = val;
             }
             BX_MSR_IA32_PL0_SSP..=BX_MSR_IA32_PL3_SSP => {
-                if !self.is_canonical(val) {
+                if !self.is_cpuid_canonical(val) {
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 if val & 0x03 != 0 {
@@ -1548,7 +1548,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.msr.ia32_pl_ssp[(msr - BX_MSR_IA32_PL0_SSP) as usize] = val;
             }
             BX_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR => {
-                if !self.is_canonical(val) {
+                if !self.is_cpuid_canonical(val) {
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.msr.ia32_interrupt_ssp_table = val;
@@ -1559,13 +1559,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.uintr_uirr_update();
             }
             BX_MSR_IA32_UINTR_HANDLER => {
-                if !self.is_canonical(val) {
+                if !self.is_cpuid_canonical(val) {
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.uintr.ui_handler = val;
             }
             BX_MSR_IA32_UINTR_STACKADJUST => {
-                if !self.is_canonical(val) {
+                if !self.is_cpuid_canonical(val) {
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.uintr.stack_adjust = val;
@@ -1578,13 +1578,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.uintr.uinv = (val >> 32) as u32;
             }
             BX_MSR_IA32_UINTR_PD => {
-                if !self.is_canonical(val) || (val & 0x3F) != 0 {
+                if !self.is_cpuid_canonical(val) || (val & 0x3F) != 0 {
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.uintr.upid_addr = val;
             }
             BX_MSR_IA32_UINTR_TT => {
-                if !self.is_canonical(val) || (val & 0x0E) != 0 {
+                if !self.is_cpuid_canonical(val) || (val & 0x0E) != 0 {
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.uintr.uitt_addr = val;
@@ -1671,8 +1671,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 }
             }
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
-            BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,
-            BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr = val,
+            // Bochs msr.cc: the SYSENTER stack and entry point are addresses,
+            // so a non-canonical one is refused.
+            BX_MSR_SYSENTER_ESP | BX_MSR_SYSENTER_EIP => {
+                if !self.is_cpuid_canonical(val) {
+                    tracing::debug!("WRMSR: non-canonical value for MSR {msr:#x}: {val:#x}");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                if msr == BX_MSR_SYSENTER_ESP {
+                    self.msr.sysenter_esp_msr = val;
+                } else {
+                    self.msr.sysenter_eip_msr = val;
+                }
+            }
             BX_MSR_PAT => {
                 self.msr.pat.set_U64(val);
             }
@@ -1754,7 +1765,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             BX_MSR_LSTAR => {
                 self.require_long_mode_for_msr(msr)?;
-                if !self.is_canonical(val) {
+                if !self.is_cpuid_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_LSTAR, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
@@ -1762,7 +1773,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             BX_MSR_CSTAR => {
                 self.require_long_mode_for_msr(msr)?;
-                if !self.is_canonical(val) {
+                if !self.is_cpuid_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_CSTAR, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
@@ -1774,7 +1785,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             BX_MSR_FSBASE => {
                 self.require_long_mode_for_msr(msr)?;
-                if !self.is_canonical(val) {
+                if !self.is_cpuid_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_FSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
@@ -1782,7 +1793,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             BX_MSR_GSBASE => {
                 self.require_long_mode_for_msr(msr)?;
-                if !self.is_canonical(val) {
+                if !self.is_cpuid_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_GSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
@@ -1790,7 +1801,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             BX_MSR_KERNELGSBASE => {
                 self.require_long_mode_for_msr(msr)?;
-                if !self.is_canonical(val) {
+                if !self.is_cpuid_canonical(val) {
                     tracing::trace!("WRMSR: non-canonical value for MSR_KERNELGSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
@@ -1805,17 +1816,40 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 }
                 self.msr.tsc_aux = val as u32;
             }
-            // FRED MSRs
+            // Bochs msr.cc FRED writes: each stack pointer is a canonical
+            // address on its own alignment — 64 bytes for the RSPs, 8 for the
+            // shadow-stack pointers — and FRED_CONFIG has reserved bits.
             BX_MSR_IA32_FRED_RSP0..=BX_MSR_IA32_FRED_RSP3 => {
+                if !self.is_cpuid_canonical(val) || (val & 0x3F) != 0 {
+                    tracing::debug!(
+                        "WRMSR: non-canonical or non 64-byte aligned FRED_RSP{}: {val:#x}",
+                        msr - BX_MSR_IA32_FRED_RSP0
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
                 let idx = (msr - BX_MSR_IA32_FRED_RSP0) as usize;
                 self.msr.ia32_fred_rsp[idx] = val;
             }
             BX_MSR_IA32_FRED_STKLVLS => self.msr.ia32_fred_stack_levels = val,
             BX_MSR_IA32_FRED_SSP1..=BX_MSR_IA32_FRED_SSP3 => {
+                if !self.is_cpuid_canonical(val) || (val & 0x07) != 0 {
+                    tracing::debug!(
+                        "WRMSR: non-canonical or non 8-byte aligned FRED_SSP{}: {val:#x}",
+                        1 + msr - BX_MSR_IA32_FRED_SSP1
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
                 let idx = 1 + (msr - BX_MSR_IA32_FRED_SSP1) as usize;
                 self.msr.ia32_fred_ssp[idx] = val;
             }
-            BX_MSR_IA32_FRED_CONFIG => self.msr.ia32_fred_cfg = val,
+            BX_MSR_IA32_FRED_CONFIG => {
+                const RESERVED: u64 = 0x834;
+                if (val & RESERVED) != 0 {
+                    tracing::debug!("WRMSR: reserved bits of FRED_CONFIG set: {val:#x}");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.ia32_fred_cfg = val;
+            }
             // SVM MSRs (Bochs msr.cc, each gated on the SVM extension).
             super::svm::BX_SVM_VM_CR_MSR => {
                 self.require_svm_for_msr(msr)?;
@@ -4514,9 +4548,11 @@ mod tests {
     use crate::cpu::decoder::Instruction;
     use crate::cpu::msr::{
         BX_MSR_APICBASE, BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_ARCH_CAPABILITIES,
-        BX_MSR_IA32_FEATURE_CONTROL, BX_MSR_IA32_FLUSH_CMD, BX_MSR_IA32_MPERF,
+        BX_MSR_IA32_FEATURE_CONTROL, BX_MSR_IA32_FLUSH_CMD, BX_MSR_IA32_FRED_CONFIG,
+        BX_MSR_IA32_FRED_RSP0, BX_MSR_IA32_FRED_RSP3, BX_MSR_IA32_FRED_SSP1, BX_MSR_IA32_MPERF,
         BX_MSR_IA32_PRED_CMD, BX_MSR_IA32_SPEC_CTRL, BX_MSR_KERNELGSBASE, BX_MSR_LSTAR,
-        BX_MSR_TSC, BX_MSR_TSC_AUX, BX_MSR_TSC_DEADLINE,
+        BX_MSR_PAT, BX_MSR_PLATFORM_ID, BX_MSR_SYSENTER_EIP, BX_MSR_SYSENTER_ESP, BX_MSR_TSC,
+        BX_MSR_TSC_AUX, BX_MSR_TSC_DEADLINE,
     };
     use crate::cpu::svm::BX_VM_CR_MSR_SVMDIS_MASK;
     use crate::params::BxParams;
@@ -4844,6 +4880,110 @@ mod tests {
         assert!(
             cpu.rdmsr_value(BX_MSR_IA32_PRED_CMD).is_err(),
             "IA32_PRED_CMD is write only"
+        );
+    }
+
+    /// Each way a host MSR access can be refused has its own named reason, so
+    /// a host can tell "this processor has no such register" from "this API
+    /// does not carry it" — and from a value the guest's WRMSR would fault on.
+    #[test]
+    fn a_host_msr_refusal_says_why() {
+        use super::super::decoder::features::X86Feature;
+        use super::super::{CpuError, MsrRefusal};
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        let refusal = |result: crate::cpu::Result<()>| match result {
+            Err(CpuError::MsrRefused { reason, .. }) => Some(reason),
+            _ => None,
+        };
+
+        set_cpu_feature(&mut cpu, X86Feature::IsaTscDeadline, false);
+        assert_eq!(
+            refusal(cpu.read_msr_for_api(BX_MSR_TSC_DEADLINE).map(|_| ())),
+            Some(MsrRefusal::Absent),
+            "an MSR whose feature is off is not there to read"
+        );
+        assert_eq!(
+            refusal(cpu.read_msr_for_api(BX_MSR_PAT).map(|_| ())),
+            Some(MsrRefusal::NotCarried),
+            "IA32_PAT exists, but this API does not read it"
+        );
+        assert_eq!(
+            refusal(cpu.write_msr_for_api(BX_MSR_PLATFORM_ID, 0)),
+            Some(MsrRefusal::ReadOnly)
+        );
+        assert_eq!(
+            refusal(cpu.write_msr_for_api(BX_MSR_IA32_APERF, 0)),
+            Some(MsrRefusal::WriteIgnored)
+        );
+        assert_eq!(
+            refusal(cpu.write_msr_for_api(BX_MSR_LSTAR, 0x8000_0000_0000_0000)),
+            Some(MsrRefusal::InvalidValue),
+            "a non-canonical LSTAR is refused, as the guest's WRMSR #GPs"
+        );
+        assert_eq!(
+            refusal(cpu.write_msr_for_api(BX_MSR_SYSENTER_EIP, 0x0000_8000_0000_0000)),
+            Some(MsrRefusal::InvalidValue),
+            "so is a non-canonical SYSENTER_EIP"
+        );
+    }
+
+    /// Bochs msr.cc checks the SYSENTER stack and entry point like every other
+    /// address an MSR holds: a non-canonical one #GPs and leaves the register
+    /// as it was.
+    #[test]
+    fn wrmsr_of_a_non_canonical_sysenter_address_faults() {
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        const NON_CANONICAL: u64 = 0x0000_8000_0000_0000;
+        const CANONICAL: u64 = 0xFFFF_8000_0000_1000;
+
+        for msr in [BX_MSR_SYSENTER_ESP, BX_MSR_SYSENTER_EIP] {
+            cpu.wrmsr_value(msr, CANONICAL).expect("a canonical address is taken");
+            assert!(
+                cpu.wrmsr_value(msr, NON_CANONICAL).is_err(),
+                "MSR {msr:#x}: a non-canonical address must #GP(0)"
+            );
+            assert_eq!(
+                cpu.rdmsr_value(msr).unwrap(),
+                CANONICAL,
+                "MSR {msr:#x}: the refused write must leave the register as it was"
+            );
+        }
+    }
+
+    /// Bochs msr.cc FRED writes: the RSPs are 64-byte-aligned canonical
+    /// addresses, the shadow-stack pointers 8-byte-aligned ones, and
+    /// FRED_CONFIG has reserved bits (0x834).
+    #[test]
+    fn the_fred_msrs_refuse_what_bochs_refuses() {
+        use super::super::decoder::features::X86Feature;
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        set_cpu_feature(&mut cpu, X86Feature::IsaFred, true);
+
+        cpu.wrmsr_value(BX_MSR_IA32_FRED_RSP0, 0xFFFF_8000_0000_0040)
+            .expect("an aligned canonical RSP0 is taken");
+        assert!(
+            cpu.wrmsr_value(BX_MSR_IA32_FRED_RSP0, 0xFFFF_8000_0000_0020).is_err(),
+            "FRED_RSP0 must be 64-byte aligned"
+        );
+        assert!(
+            cpu.wrmsr_value(BX_MSR_IA32_FRED_RSP3, 0x0000_8000_0000_0000).is_err(),
+            "FRED_RSP3 must be canonical"
+        );
+
+        cpu.wrmsr_value(BX_MSR_IA32_FRED_SSP1, 0xFFFF_8000_0000_0008)
+            .expect("an aligned canonical SSP1 is taken");
+        assert!(
+            cpu.wrmsr_value(BX_MSR_IA32_FRED_SSP1, 0xFFFF_8000_0000_0004).is_err(),
+            "FRED_SSP1 must be 8-byte aligned"
+        );
+
+        cpu.wrmsr_value(BX_MSR_IA32_FRED_CONFIG, 0).expect("no reserved bit set");
+        assert!(
+            cpu.wrmsr_value(BX_MSR_IA32_FRED_CONFIG, 0x4).is_err(),
+            "bit 2 of FRED_CONFIG is reserved"
         );
     }
 

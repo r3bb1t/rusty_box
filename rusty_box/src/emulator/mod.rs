@@ -293,6 +293,10 @@ pub struct EmulatorConfig {
     pub rtc_time0: crate::iodev::cmos::RtcInitTime,
     /// Which clock this machine's devices run on. See [`DeviceClock`].
     pub device_clock: DeviceClock,
+    /// Whether port 0xE9 is a debug console — Bochs `port_e9_hack` (config.cc
+    /// BXPN_PORT_E9_HACK), off by default as upstream. See
+    /// [`PortE9Hack`](crate::iodev::PortE9Hack).
+    pub port_e9_hack: crate::iodev::PortE9Hack,
 }
 
 /// Which clock the machine's devices run on (R2).
@@ -326,6 +330,7 @@ impl Default for EmulatorConfig {
             cpuid_freq: CpuidFreq::default(),
             rtc_time0: crate::iodev::cmos::RtcInitTime::default(),
             device_clock: DeviceClock::Ticks,
+            port_e9_hack: crate::iodev::PortE9Hack::Off,
         }
     }
 }
@@ -533,11 +538,12 @@ pub struct Emulator<T: Instrumentation = (), E = SoftwareEngine> {
     #[cfg(feature = "alloc")]
     gui: Option<Box<dyn BxGui>>,
     /// Host input the guest's own buffers had no room for, held in order
-    /// until they do — see `gui::host_input::HostInputBacklog`. Drained by
-    /// `pump_gui_input`, which is the only thing that fills it, and emptied
-    /// by a reset.
+    /// until they do — see `gui::host_input::HostInputBacklog`. Filled from
+    /// the front end by `pump_gui_input`, by `HostInputSink::push` and by
+    /// `Serial::send`; drained by `pump_gui_input`. A reset drops the
+    /// keyboard part and a snapshot restore all of it.
     #[cfg(feature = "alloc")]
-    host_input: crate::gui::host_input::HostInputBacklog,
+    pub(crate) host_input: crate::gui::host_input::HostInputBacklog,
     /// Output file for the port-0xE9 debug console (std feature only). BIOS
     /// message ports 0x400-0x403/0x500-0x503 go to the log instead, exactly
     /// like Bochs biosdev.cc.
@@ -1187,7 +1193,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             config.memory_block_size,
         )?;
         let memory = BxMemC::new(mem_stub, config.pci_enabled);
-        let devices = BxDevicesC::new();
+        let mut devices = BxDevicesC::new();
+        devices.set_port_e9_hack(config.port_e9_hack);
         let device_manager = DeviceManager::new();
 
         // Emulator contains large fixed arrays. Allocate zeroed on heap
@@ -1261,7 +1268,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         }
 
         let memory = BxMemC::new_from_stub(mem_stub, config.pci_enabled);
-        let devices = BxDevicesC::new();
+        let mut devices = BxDevicesC::new();
+        devices.set_port_e9_hack(config.port_e9_hack);
         let device_manager = DeviceManager::new();
         let pc_system = BxPcSystemC::new();
         for (index, slot) in cpus.iter_mut().take(configured_cpu_count).enumerate() {

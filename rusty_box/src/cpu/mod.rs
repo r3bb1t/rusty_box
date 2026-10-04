@@ -20,7 +20,7 @@ pub use rusty_box_core::ResetReason;
 
 // Core CPU emulation modules (no alloc needed)
 pub mod error;
-pub use error::{CpuError, Result};
+pub use error::{CpuError, MsrRefusal, Result};
 
 pub(crate) mod api_bridge;
 pub mod arch_state;

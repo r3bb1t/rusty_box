@@ -1013,8 +1013,8 @@ impl FastMachineFault {
 mod tests {
     use super::*;
     use crate::fixtures::{
-        a_turn_on_the_hardware, fast_machine_running, hypervisor_here, machine_running_on,
-        machine_with_devices_on, CODE, DEBUG_PORT, MARK,
+        a_turn_on_the_hardware, console_output, fast_machine_running, hypervisor_here,
+        machine_running_on, machine_with_devices_on, CODE, DEBUG_PORT, MARK,
     };
     use rusty_box::cpu::instrumentation::X86Reg;
 
@@ -1206,7 +1206,7 @@ mod tests {
     /// Everything the guest has written to the debug port since the last look.
     fn debug_output(machine: &mut FastMachine) -> std::vec::Vec<u8> {
         machine
-            .with_machine(|m| m.debug_port().take_output().collect())
+            .with_machine(console_output)
             .expect("the machine is paused")
     }
 

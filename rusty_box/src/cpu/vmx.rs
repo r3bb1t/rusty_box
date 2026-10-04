@@ -859,6 +859,8 @@ pub(super) const VMX_VMEXIT_CTRL2_LOAD_HOST_IA32_SPEC_CTRL: u64 = 1 << 2;
 
 // VM-entry control bits — Bochs vmx_ctrls.h.
 pub(super) const VMX_VMENTRY_CTRL_X86_64_GUEST: u32 = 1 << 9;
+pub(super) const VMX_VMENTRY_CTRL_SMM_ENTER: u32 = 1 << 10;
+pub(super) const VMX_VMENTRY_CTRL_DEACTIVATE_DUAL_MONITOR_TREATMENT: u32 = 1 << 11;
 pub(super) const VMX_VMENTRY_CTRL_LOAD_GUEST_EFER_MSR: u32 = 1 << 15;
 pub(super) const VMX_VMENTRY_CTRL_LOAD_GUEST_PAT_MSR: u32 = 1 << 14;
 pub(super) const VMX_VMENTRY_CTRL_LOAD_DBG_CTRLS: u32 = 1 << 2;
@@ -921,7 +923,7 @@ pub struct BxVmcs {
     // successful VMLAUNCH; VMCLEAR resets it.
     pub launched: bool,
 
-    // ---- Host state (saved on successful VMENTRY, restored on VMEXIT) ----
+    // ---- Host state (written by the VMM, checked by VMENTRY, loaded on VMEXIT) ----
     pub host_cr0: u64,
     pub host_cr3: u64,
     pub host_cr4: u64,
@@ -2139,14 +2141,11 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     //
     // Bochs cpu/vmx.cc BX_CPU_C::VMLAUNCH + VMRESUME share a handler; the
     // launch-vs-resume bit controls which error code the preconditions
-    // report. Full VM-entry validation (Bochs VMenterLoadCheckVmControls /
-    // HostState / GuestState) would add ~1500 LOC of field-by-field sanity;
-    // in this pass we perform the architecturally-required launch-state
-    // check, then do a straightforward host/guest state swap covering the
-    // control registers, instruction pointer / stack pointer / RFLAGS and
-    // EFER / PAT MSRs. Segment descriptor reload, interruptibility state,
-    // and the ~60-field host-state-field integrity tests will grow in-place
-    // as real VMMs exercise them.
+    // report. The entry checks the controls, then the host-state area the
+    // VMM wrote (both VMfail on error), then the guest-state area (a failure
+    // VM exit), and only then loads the guest. The host-state area is left
+    // as the VMM wrote it: a VM exit loads it, so HOST_RIP is where the VMM
+    // resumes.
     // =========================================================================
 
     pub(super) fn vmlaunch(&mut self, instr: &Instruction) -> Result<()> {
@@ -2205,21 +2204,11 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             self.vmfail(err);
             return Ok(());
         }
-        // Bochs vmx.cc VMLAUNCH: guest-state failure is a VMEXIT with
-        // VMX_VMEXIT_VMENTRY_FAILURE_GUEST_STATE | (1<<31) and a per-check
-        // qualification — not a VMfail. The error code threaded out of
-        // vmenter_load_check_guest_state currently doubles as the qualification;
-        // wiring per-check qualifications (Bochs writes a non-zero VMENTER_ERR_*
-        // code at each failure site) is tracked separately.
-        if let Some(_err) = self.vmenter_load_check_guest_state() {
+        // Bochs vmx.cc VMLAUNCH: a guest-state failure is a VM exit with
+        // VMX_VMEXIT_VMENTRY_FAILURE_GUEST_STATE | (1<<31), not a VMfail.
+        if self.vmenter_load_check_guest_state().is_some() {
             return self.vmx_vmexit_vmentry_failure(VmxVmexitReason::VmentryFailureGuestState, 0);
         }
-
-        // Save host state from the running CPU. RIP is "the instruction after
-        // VMLAUNCH / VMRESUME"; Bochs stashes it so VMEXIT_LOAD_HOST_STATE can
-        // jump back. The prefetch queue already advanced past this insn, so
-        // `self.rip()` points at the next one.
-        self.vmenter_save_host_state();
 
         // Load full guest state from the VMCS — mirrors Bochs vmx.cc
         // VMenterLoadCheckGuestState (load step). Includes CRs, EFER,
@@ -3243,24 +3232,6 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         Ok(())
     }
 
-    /// Snapshot the running CPU's host context into the VMCS so VMEXIT can
-    /// later restore it — Bochs vmx.cc VMexit "host state" save split. Bochs
-    /// keeps these fields in the VMCS so the host can VMWRITE custom values
-    /// before VMLAUNCH; we mirror the live CPU at the VMENTRY boundary so any
-    /// fields the host did not explicitly write inherit reasonable defaults.
-    /// Validate VM-execution control fields — Bochs vmx.cc
-    /// `vmenter_load_check_vm_controls`. Returns `Some(error)` if the
-    /// VMENTRY must be aborted with VMfail; `None` if the controls are
-    /// internally consistent enough to proceed.
-    ///
-    /// Implemented checks (matches Bochs error returns):
-    ///   - CR3-target count ≤ 4.
-    ///   - Page-aligned, in-physical-range MSR bitmap (when MSR_BITMAPS).
-    ///   - Page-aligned, in-physical-range I/O bitmaps (when IO_BITMAPS).
-    ///   - UNRESTRICTED_GUEST requires EPT_ENABLE.
-    ///   - VPID_ENABLE requires non-zero VPID (VMCS_16BIT_CONTROL_VPID).
-    ///   - VM-entry interruption info: when valid bit set, vector + type
-    ///     fields must be sane (Bochs vmenter_inject_events preconditions).
     /// Bochs MSR-list address check (vmx.cc). Used for the
     /// VMEXIT-store / VMEXIT-load / VMENTRY-load lists. When `count`
     /// is non-zero the base address must be 16-byte aligned and
@@ -3302,6 +3273,9 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         false
     }
 
+    /// Validate the VM-execution, VM-exit and VM-entry control fields —
+    /// Bochs vmx.cc `VMenterLoadCheckVmControls`. `Some(error)` is the
+    /// VMfail code VMLAUNCH/VMRESUME reports; `None` lets the entry proceed.
     fn vmenter_load_check_vm_controls(&mut self) -> Option<VmxErr> {
         // Bochs vmx.cc — every control field must respect its
         // IA32_VMX_*_CTLS allowed-0 / allowed-1 mask: bits cleared in
@@ -3459,8 +3433,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
         // Bochs vmx.cc: DEACTIVATE_DUAL_MONITOR_TREATMENT VM-entry
         // control requires the CPU to be in SMM.
-        const VMX_VMENTRY_CTRL_DEACTIVATE_DUAL_MONITOR: u32 = 1 << 10;
-        if entry_ctls & VMX_VMENTRY_CTRL_DEACTIVATE_DUAL_MONITOR != 0 && !self.in_smm {
+        if entry_ctls & VMX_VMENTRY_CTRL_DEACTIVATE_DUAL_MONITOR_TREATMENT != 0 && !self.in_smm {
             tracing::warn!(
                 "VMENTRY check_vm_controls: DEACTIVATE_DUAL_MONITOR_TREATMENT outside SMM"
             );
@@ -3979,9 +3952,33 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
+        // Bochs vmx.cc: an entry to SMM must leave SMIs blocked and may not
+        // enter wait-for-SIPI, and SMIs can be blocked only inside SMM — so
+        // outside SMM an SMM entry fails one way or the other.
+        const BX_VMX_INTERRUPTS_BLOCKED_SMI_BLOCKED: u32 = 1 << 2;
+        const BX_ACTIVITY_STATE_WAIT_FOR_SIPI: u32 = 3;
+        let smi_blocked =
+            self.vmcs.guest_interruptibility_state & BX_VMX_INTERRUPTS_BLOCKED_SMI_BLOCKED != 0;
+        if entry_ctls & VMX_VMENTRY_CTRL_SMM_ENTER != 0 {
+            if !smi_blocked {
+                tracing::warn!("VMENTRY check_guest_state: SMM guest does not block SMI");
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            if self.vmcs.guest_activity_state == BX_ACTIVITY_STATE_WAIT_FOR_SIPI {
+                tracing::warn!("VMENTRY check_guest_state: SMM guest entering wait-for-SIPI");
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        }
+        if smi_blocked && !self.in_smm {
+            tracing::warn!("VMENTRY check_guest_state: SMI blocked outside SMM");
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
         // Per-segment validation (Bochs vmx.cc). The order
         // matters because CS/SS DPL/RPL relations consult both.
-        self.check_guest_segments(v8086_guest, x86_64_guest, unrestricted)?;
+        if let Some(err) = self.check_guest_segments(v8086_guest, x86_64_guest, unrestricted) {
+            return Some(err);
+        }
 
         // GDTR/IDTR — Bochs vmx.cc. Limit ≤ 0xFFFF and base
         // canonical (in long mode).
@@ -4223,9 +4220,11 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 continue;
             }
 
-            // SS=NULL allowed in 64-bit guest mode when CS.L=1 (long-
-            // mode kernel transition trick).
-            if matches!(seg, BxSegregs::Ss) && (selector & 3) == 0 && x86_64_guest && cs_l {
+            // A null SS is allowed for a 64-bit guest with CS.L=1. Bochs
+            // vmx.cc tests `selector & BX_SELECTOR_RPL_MASK`, which is
+            // 0xFFFC (descriptor.h): every bit but the RPL, so a null
+            // selector of any RPL.
+            if matches!(seg, BxSegregs::Ss) && (selector & 0xFFFC) == 0 && x86_64_guest && cs_l {
                 continue;
             }
 
@@ -4377,53 +4376,6 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
 
         None
-    }
-
-    fn vmenter_save_host_state(&mut self) {
-        self.vmcs.host_cr0 = u64::from(self.cr0.get32());
-        self.vmcs.host_cr3 = self.cr3;
-        self.vmcs.host_cr4 = self.cr4.get();
-        self.vmcs.host_rsp = self.rsp();
-        self.vmcs.host_rip = self.rip();
-        self.vmcs.host_ia32_efer = u64::from(self.efer.get32());
-        self.vmcs.host_ia32_pat = self.msr.pat.U64();
-
-        // Segment selectors (Bochs vmx.cc VMexitSaveHostState).
-        self.vmcs.host_es_selector = self.sregs[BxSegregs::Es as usize].selector.value;
-        self.vmcs.host_cs_selector = self.sregs[BxSegregs::Cs as usize].selector.value;
-        self.vmcs.host_ss_selector = self.sregs[BxSegregs::Ss as usize].selector.value;
-        self.vmcs.host_ds_selector = self.sregs[BxSegregs::Ds as usize].selector.value;
-        self.vmcs.host_fs_selector = self.sregs[BxSegregs::Fs as usize].selector.value;
-        self.vmcs.host_gs_selector = self.sregs[BxSegregs::Gs as usize].selector.value;
-        self.vmcs.host_tr_selector = self.tr.selector.value;
-        self.vmcs.host_fs_base = self.sregs[BxSegregs::Fs as usize].cache.u.segment_base();
-        self.vmcs.host_gs_base = self.sregs[BxSegregs::Gs as usize].cache.u.segment_base();
-        self.vmcs.host_tr_base = self.tr.cache.u.segment_base();
-
-        self.vmcs.host_gdtr_base = self.gdtr.base;
-        self.vmcs.host_idtr_base = self.idtr.base;
-
-        self.vmcs.host_sysenter_cs = self.msr.sysenter_cs_msr;
-        self.vmcs.host_sysenter_esp = self.msr.sysenter_esp_msr;
-        self.vmcs.host_sysenter_eip = self.msr.sysenter_eip_msr;
-
-        // Optional host MSR / CET / FRED / PKRS / SPEC_CTRL state. Bochs
-        // saves these unconditionally so VMEXIT can restore them when the
-        // matching LOAD_HOST_* bits are set; we mirror the snapshot here
-        // so the host state stays self-consistent across the VMENTRY/EXIT
-        // round trip.
-        self.vmcs.host_perf_global_ctrl = 0; // PMU not modelled in rusty_box
-        self.vmcs.host_pkrs = u64::from(self.pkrs);
-        self.vmcs.host_ia32_spec_ctrl = u64::from(self.msr.ia32_spec_ctrl);
-        self.vmcs.host_ia32_s_cet = self.msr.ia32_cet_control[0];
-        self.vmcs.host_ssp = self.msr.ia32_pl_ssp[3];
-        self.vmcs.host_interrupt_ssp_table_addr = self.msr.ia32_interrupt_ssp_table;
-        self.vmcs.host_fred_config = self.msr.ia32_fred_cfg;
-        for i in 0..4 {
-            self.vmcs.host_fred_rsp[i] = self.msr.ia32_fred_rsp[i];
-            self.vmcs.host_fred_ssp[i] = self.msr.ia32_fred_ssp[i];
-        }
-        self.vmcs.host_fred_stack_levels = self.msr.ia32_fred_stack_levels;
     }
 
     /// Restore host state on VMEXIT — Bochs vmx.cc VMexitLoadHostState.
@@ -6850,5 +6802,233 @@ mod tests {
             VMX_PROCBASED_CTLS2_ALLOWED_1 & VMX_VM_EXEC_CTRL2_VIRTUALIZE_APIC_ACCESSES,
             0
         );
+    }
+
+    // ── VM entry through VMLAUNCH ──────────────────────────────────────────
+    // A flat 64-bit host (`CpuSetupMode::FlatLong64`: 4 GiB identity-mapped
+    // through the tables at 0x1000) enters a 64-bit guest that shares its
+    // page tables and GDT. The VMCS is filled in directly — VMWRITE stores
+    // into the same structure — and everything after that runs as
+    // instructions: VMLAUNCH, the guest's CPUID, the VM exit.
+
+    use crate::cpu::instrumentation::{CpuSetupMode, X86Reg};
+    use crate::emulator::{Emulator, EmulatorConfig};
+
+    /// VMLAUNCH; whatever follows it runs only if the entry did not happen.
+    const HOST_CODE: u64 = 0x20_0000;
+    /// HOST_RIP — a HLT, so the host stops where the VM exit put it.
+    const HOST_EXIT_HANDLER: u64 = 0x20_1000;
+    const HOST_STACK: u64 = 0x20_4000;
+    /// GUEST_RIP — a CPUID, which exits unconditionally in non-root mode.
+    const GUEST_CODE: u64 = 0x20_2000;
+    const GUEST_STACK: u64 = 0x20_6000;
+    const GDT: u64 = 0x20_8000;
+    const TSS: u64 = 0x20_9000;
+    const CODE_SELECTOR: u16 = 0x08;
+    const DATA_SELECTOR: u16 = 0x10;
+    const TSS_SELECTOR: u16 = 0x18;
+    /// CR0.NE, which VMX operation requires and the flat setup leaves clear.
+    const CR0_NE: u64 = 1 << 5;
+    /// CR4.VMXE.
+    const CR4_VMXE: u64 = 1 << 13;
+    /// Access rights in the VMCS layout: a present DPL-0 64-bit code segment,
+    /// a present writable data segment with 4 KiB granularity, a busy TSS,
+    /// and the unusable bit.
+    const AR_CODE64: u32 = 0xA09B;
+    const AR_DATA: u32 = 0xC093;
+    const AR_BUSY_TSS: u32 = 0x8B;
+    const AR_UNUSABLE: u32 = 1 << 16;
+    /// VMCS exit reasons this fixture produces.
+    const EXIT_CPUID: u32 = VmxVmexitReason::Cpuid as u32;
+    const EXIT_ENTRY_FAILED_GUEST_STATE: u32 =
+        VmxVmexitReason::VmentryFailureGuestState as u32 | (1 << 31);
+
+    /// A 64-bit host in VMX root operation with a current VMCS that enters
+    /// cleanly. Each test spoils one field of it.
+    fn vmx_host() -> alloc::boxed::Box<Emulator> {
+        let mut emu =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64).unwrap();
+
+        // Null, 64-bit code, data, and a 16-byte busy TSS descriptor.
+        let tss_low = 0x67
+            | ((TSS & 0xFFFF) << 16)
+            | (((TSS >> 16) & 0xFF) << 32)
+            | (0x8B << 40)
+            | (((TSS >> 24) & 0xFF) << 56);
+        for (index, descriptor) in [
+            0u64,
+            0x00AF_9A00_0000_FFFF,
+            0x00CF_9200_0000_FFFF,
+            tss_low,
+            TSS >> 32,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            emu.mem_write(GDT + index as u64 * 8, &descriptor.to_le_bytes())
+                .unwrap();
+        }
+        emu.reg_write(X86Reg::GdtrBase, GDT);
+        emu.reg_write(X86Reg::GdtrLimit, 5 * 8 - 1);
+        emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | CR0_NE);
+        emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_VMXE);
+        emu.reg_write(X86Reg::Rsp, HOST_STACK);
+        emu.mem_write(HOST_CODE, &[0x0F, 0x01, 0xC2]).unwrap(); // VMLAUNCH
+        emu.mem_write(HOST_EXIT_HANDLER, &[0xF4]).unwrap(); // HLT
+        emu.mem_write(GUEST_CODE, &[0x0F, 0xA2]).unwrap(); // CPUID
+
+        let cr0 = emu.reg_read(X86Reg::Cr0);
+        let cr3 = emu.reg_read(X86Reg::Cr3);
+        let cr4 = emu.reg_read(X86Reg::Cr4);
+        let cpu = emu.cpu_mut();
+        cpu.in_vmx = true;
+        cpu.vmxonptr = 0x20_A000;
+        cpu.vmcsptr = 0x20_B000;
+        let v = &mut cpu.vmcs;
+        v.launched = false;
+        v.pin_based_ctls = VMX_PINBASED_CTLS_ALLOWED_0;
+        v.proc_based_ctls = VMX_PROCBASED_CTLS_ALLOWED_0;
+        v.vm_exit_ctls = VMX_EXIT_CTLS_ALLOWED_0 | VMX_VMEXIT_CTRL1_HOST_ADDR_SPACE_SIZE;
+        v.vm_entry_ctls = VMX_ENTRY_CTLS_ALLOWED_0 | VMX_VMENTRY_CTRL_X86_64_GUEST;
+        v.vmcs_link_pointer = BX_INVALID_VMCSPTR;
+
+        v.host_cr0 = cr0;
+        v.host_cr3 = cr3;
+        v.host_cr4 = cr4;
+        v.host_rip = HOST_EXIT_HANDLER;
+        v.host_rsp = HOST_STACK;
+        v.host_cs_selector = CODE_SELECTOR;
+        v.host_ss_selector = DATA_SELECTOR;
+        v.host_ds_selector = DATA_SELECTOR;
+        v.host_es_selector = DATA_SELECTOR;
+        v.host_fs_selector = DATA_SELECTOR;
+        v.host_gs_selector = DATA_SELECTOR;
+        v.host_tr_selector = TSS_SELECTOR;
+        v.host_tr_base = TSS;
+        v.host_gdtr_base = GDT;
+
+        v.guest_cr0 = cr0;
+        v.guest_cr3 = cr3;
+        v.guest_cr4 = cr4;
+        v.guest_rip = GUEST_CODE;
+        v.guest_rsp = GUEST_STACK;
+        v.guest_rflags = 0x2;
+        v.guest_cs_selector = CODE_SELECTOR;
+        v.guest_cs_limit = 0xFFFF_FFFF;
+        v.guest_cs_ar = AR_CODE64;
+        for (selector, limit, ar) in [
+            (&mut v.guest_ss_selector, &mut v.guest_ss_limit, &mut v.guest_ss_ar),
+            (&mut v.guest_ds_selector, &mut v.guest_ds_limit, &mut v.guest_ds_ar),
+            (&mut v.guest_es_selector, &mut v.guest_es_limit, &mut v.guest_es_ar),
+            (&mut v.guest_fs_selector, &mut v.guest_fs_limit, &mut v.guest_fs_ar),
+            (&mut v.guest_gs_selector, &mut v.guest_gs_limit, &mut v.guest_gs_ar),
+        ] {
+            *selector = DATA_SELECTOR;
+            *limit = 0xFFFF_FFFF;
+            *ar = AR_DATA;
+        }
+        v.guest_ldtr_ar = AR_UNUSABLE;
+        v.guest_tr_selector = TSS_SELECTOR;
+        v.guest_tr_base = TSS;
+        v.guest_tr_limit = 0x67;
+        v.guest_tr_ar = AR_BUSY_TSS;
+        v.guest_gdtr_base = GDT;
+        v.guest_gdtr_limit = 5 * 8 - 1;
+        emu
+    }
+
+    /// Run the host from its VMLAUNCH until it reaches the exit handler, or
+    /// for a few instructions if it never does.
+    fn launch(emu: &mut Emulator) {
+        emu.emu_start(HOST_CODE, Some(HOST_EXIT_HANDLER), None, Some(8))
+            .unwrap();
+    }
+
+    fn on_big_stack(test: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(test)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A VM exit resumes the host at the HOST_RIP and HOST_RSP the VMM wrote,
+    /// not after its VMLAUNCH: VM entry checks the host-state area and leaves
+    /// it as written (Bochs vmx.cc VMexitLoadHostState reads it back).
+    #[test]
+    fn a_vm_exit_resumes_the_host_where_the_vmm_said() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            launch(&mut emu);
+            assert_eq!(emu.cpu().vmcs.exit_reason, EXIT_CPUID);
+            assert_eq!(emu.cpu().rip(), HOST_EXIT_HANDLER);
+            assert_eq!(emu.reg_read(X86Reg::Rsp), HOST_STACK);
+            assert!(!emu.cpu().in_vmx_guest, "the exit returned to root operation");
+            assert_eq!(emu.cpu().vmcs.guest_rip, GUEST_CODE, "the guest exited at its CPUID");
+        });
+    }
+
+    /// Bochs vmx_ctrls.h: VM-entry control bit 11 is "deactivate dual-monitor
+    /// treatment", which VMenterLoadCheckVmControls refuses outside SMM with
+    /// a VMfail — the guest never runs and VMLAUNCH falls through.
+    #[test]
+    fn deactivating_dual_monitor_treatment_outside_smm_is_a_vmfail() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            emu.cpu_mut().vmcs.vm_entry_ctls |= VMX_VMENTRY_CTRL_DEACTIVATE_DUAL_MONITOR_TREATMENT;
+            emu.emu_start(HOST_CODE, Some(HOST_CODE + 3), None, Some(1))
+                .unwrap();
+            assert_eq!(
+                emu.cpu().vmcs.vm_instruction_error,
+                VmxErr::VmentryInvalidVmControlField as u32
+            );
+            assert_ne!(emu.reg_read(X86Reg::Rflags) & (1 << 6), 0, "VMfailValid sets ZF");
+            assert_eq!(emu.cpu().rip(), HOST_CODE + 3);
+            assert!(!emu.cpu().in_vmx_guest);
+        });
+    }
+
+    /// Bit 10 is "entry to SMM". It passes the control checks, and outside
+    /// SMM the guest-state checks refuse it whichever way the VMM sets the
+    /// SMI-blocking bit: an SMM guest must block SMIs, and SMIs can be
+    /// blocked only in SMM (Bochs vmx.cc VMenterLoadCheckGuestState). That is
+    /// a failed-entry VM exit to the host, not a VMfail.
+    #[test]
+    fn entry_to_smm_from_outside_smm_fails_on_guest_state() {
+        for interruptibility in [0, 1 << 2] {
+            on_big_stack(move || {
+                let mut emu = vmx_host();
+                let vmcs = &mut emu.cpu_mut().vmcs;
+                vmcs.vm_entry_ctls |= VMX_VMENTRY_CTRL_SMM_ENTER;
+                vmcs.guest_interruptibility_state = interruptibility;
+                launch(&mut emu);
+                assert_eq!(emu.cpu().vmcs.exit_reason, EXIT_ENTRY_FAILED_GUEST_STATE);
+                assert_eq!(emu.cpu().rip(), HOST_EXIT_HANDLER);
+            });
+        }
+    }
+
+    /// Every guest-state check counts, before and after the segment checks:
+    /// a bad SS type and an unusable TR each stop the entry. Bochs vmx.cc
+    /// VMenterLoadCheckGuestState checks the segment registers and then
+    /// GDTR/IDTR, LDTR, TR and the rest in one pass.
+    #[test]
+    fn a_bad_segment_or_task_register_stops_the_entry() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            // Type 1: read-only data, which SS may not be.
+            emu.cpu_mut().vmcs.guest_ss_ar = (AR_DATA & !0xF) | 0x1;
+            launch(&mut emu);
+            assert_eq!(emu.cpu().vmcs.exit_reason, EXIT_ENTRY_FAILED_GUEST_STATE);
+            assert_eq!(emu.cpu().rip(), HOST_EXIT_HANDLER);
+        });
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            emu.cpu_mut().vmcs.guest_tr_ar |= AR_UNUSABLE;
+            launch(&mut emu);
+            assert_eq!(emu.cpu().vmcs.exit_reason, EXIT_ENTRY_FAILED_GUEST_STATE);
+            assert_eq!(emu.cpu().rip(), HOST_EXIT_HANDLER);
+        });
     }
 }

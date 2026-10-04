@@ -123,7 +123,7 @@ are present.
 | `ALPINE_RAM_MB` | `alpine`, `alpine_direct`, `alpine_strace`, `rusty_box_egui` (Alpine) | Guest RAM in MB (default 256). |
 | `CMDLINE` | `alpine_direct`, `alpine_strace`, `rusty_box_egui` (`alpine-direct`) | The kernel command line for direct kernel boot, replacing the built-in one. |
 | `RUSTY_BOX_NOSYNC` | `rusty_box_egui`, `alpine_strace` | `1` turns off the wall-clock slowdown (`sync_slowdown`), which is on by default. |
-| `BIOS_OUTPUT_FILE` | `dlxlinux`, `alpine` | Write the BIOS's port-0xE9 debug output to this file. |
+| `BIOS_OUTPUT_FILE` | `dlxlinux`, `alpine` | Write the port-0xE9 debug console's output to this file. The console is Bochs's `port_e9_hack`, off by default: `dlxlinux` turns it on only when this is set, so the CI boot gate runs the default machine; `alpine`, `alpine_direct` and the UEFI application always turn it on, because they print what the console says. |
 | `BIOS_QUIET_MODE` | `dlxlinux` | Only prints a heading above the BIOS output section; changes nothing else. |
 | `RUSTY_BOX_DEBUG` | `alpine` | Headless only, and non-release builds only (`cfg(debug_assertions)`): prints boot diagnostics in each phase between 2.8M and 3.1M instructions. |
 | `STRACE_LOG` | `alpine_strace` | The syscall log file (default `strace.log`, in the current directory). |

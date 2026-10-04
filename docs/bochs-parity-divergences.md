@@ -712,8 +712,9 @@ is set, and polls an empty backend again after 100 ms. Each fire hands
 **rusty_box:** `Emulator::pump_gui_input` (`emulator/run.rs`) is what stands in
 for that one-shot. It offers `BxSerialC::receive_byte` (`iodev/serial.rs`) one
 held byte at a time, gated by `rx_has_room`, and a refused byte stays in the
-machine's host-input backlog to be offered again at the next pump. Two things
-differ:
+machine's host-input backlog to be offered again at the next pump. The backlog
+holds one queue per built UART, filled by the front end's serial pane (COM1)
+and by `Serial::send`; each queue is that port's backend. Two things differ:
 
 - **The rate.** The pump runs per scheduler slice and per idle wait, not once
   per `databyte_usec`, so a receiver with room takes bytes back to back until
@@ -1089,36 +1090,6 @@ provenance for a facility Bochs lacks).
 
 The stream is part of the snapshot, so a restored machine keeps codes the guest
 wrote before it was saved.
-
----
-
-## D17 — Port 0xE9 answers as though Bochs's debug console were switched on
-
-**Bochs:** `iodev/unmapped.cc` gates port 0xE9 on `port_e9_hack`, whose default
-in `config.cc` is **off**. With it off a read of 0xE9 returns `0xFFFFFFFF` and a
-write is dropped. With it on, a read returns `0xE9` — the documented way for
-guest code to detect that the console is there — and a write goes to the host's
-stdout.
-
-**rusty_box:** `BxDevicesC::default_read_handler` always answers `0xE9`, and
-`default_write_handler` always captures the byte into the stream
-`Emulator::debug_port` drains. There is no parameter to turn it off.
-
-### What the guest observes
-
-The detection channel: guest code that reads port 0xE9 sees `0xE9` here and
-`0xFF` on a default-configured Bochs, so it concludes a debug console exists
-and writes to it. Nothing else changes — the writes are dropped either way as
-far as the guest can tell.
-
-### What justifies it
-
-Not ruled on. The examples and the GUI read this stream, so turning it off by
-default would silence them; making it configurable is the obvious alternative
-and was never weighed. Found 2026-09-20 while wiring the POST-code tap (D16),
-which is the same family of host-side observation.
-
-**Status:** open — awaiting the owner's ruling.
 
 ---
 

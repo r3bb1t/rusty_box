@@ -90,6 +90,9 @@ fn guest() -> Vec<u8> {
 fn config() -> EmulatorConfig {
     EmulatorConfig {
         memory: MemorySize::bytes(8 * 1024 * 1024),
+        // The guest reports that it finished through Bochs's port-0xE9
+        // console, so the console is on.
+        port_e9_hack: rusty_box::iodev::PortE9Hack::On,
         ..EmulatorConfig::default()
     }
 }
@@ -143,7 +146,9 @@ fn reached_the_end<E>(machine: &mut Emulator<(), E>) -> bool
 where
     E: SliceEngine<()>,
 {
-    machine.debug_port().take_output().count() > 0
+    machine
+        .debug_port()
+        .is_some_and(|mut port| port.take_output().count() > 0)
 }
 
 /// Run the hardware guest until its port write leaves the partition, and
@@ -282,7 +287,7 @@ fn bench() -> std::process::ExitCode {
         };
         let took = time_until_the_port_write(&mut machine);
         let arrived =
-            match machine.with_machine(|m| m.debug_port().take_output().count() > 0) {
+            match machine.with_machine(reached_the_end) {
                 Ok(arrived) => arrived,
                 Err(refused) => {
                     eprintln!("the paused machine could not be read: {refused}");

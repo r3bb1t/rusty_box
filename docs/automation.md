@@ -138,7 +138,7 @@ screen rather than a wrong one. `resolution()` answers in both modes.
 
 ---
 
-## 3. Read serial, the debug console and POST codes
+## 3. Serial in and out, the debug console and POST codes
 
 Three byte streams come out of a machine, and each is drained the same way.
 
@@ -151,27 +151,67 @@ if let Some(mut com1) = machine.serial(0) {
     print!("{}", String::from_utf8_lossy(&bytes));
 }
 
-// Port 0xE9, the debug console firmware and kernels write to directly.
-let debug: Vec<u8> = machine.debug_port().take_output().collect();
-
 // BIOS POST codes: ports 0x80 and 0x84, in write order.
 let codes: Vec<u8> = machine.post_codes().take_output().collect();
 if let Some(last) = codes.last() {
     println!("firmware reached POST code {last:#04x}");
 }
-# let _ = debug;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 POST codes are the first thing to look at when a machine stops before any
 console exists: the last code is where the firmware got to.
 
-**Limits.** Every stream is a bounded ring. A host that never drains loses
-the oldest bytes rather than stalling the guest, so a long-running scrape
-drains on a schedule. Draining is destructive; the second read sees only what
-arrived since the first. A standard machine builds COM1 alone, so `serial(1)`
-and above are `None`. Sending bytes *into* a UART is not on this surface — the
-graphical runner does it, a program cannot yet.
+Port 0xE9 is Bochs's debug console, which firmware and kernels write to
+directly. Like Bochs's `port_e9_hack`, it is off unless the machine is built
+with it on — and while it is off, `debug_port()` is `None`:
+
+```rust,no_run
+use rusty_box::emulator::{EmulatorConfig, MachineBuilder};
+use rusty_box::iodev::PortE9Hack;
+
+let config = EmulatorConfig {
+    // `AllRings` also lets unprivileged code write it, as Bochs's `all_rings`.
+    port_e9_hack: PortE9Hack::On,
+    ..EmulatorConfig::default()
+};
+let mut machine = MachineBuilder::new(config).build()?;
+if let Some(mut console) = machine.debug_port() {
+    let bytes: Vec<u8> = console.take_output().collect();
+    print!("{}", String::from_utf8_lossy(&bytes));
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+With the console on, a guest that reads port 0xE9 gets `0xE9` back, which is
+how guest code detects it; with it off, the port reads all ones like any port
+nothing claims.
+
+A serial port also takes input. `send` hands the machine bytes the way a
+Bochs serial backend would — a pipe or a socket: the UART reads them as its
+receiver has room, after every `step`, so a whole command line goes in at
+once and the guest reads it at its own pace:
+
+```rust,no_run
+# use rusty_box::emulator::{EmulatorConfig, MachineBuilder, RunBudget};
+# let mut machine = MachineBuilder::new(EmulatorConfig::default()).build()?;
+let command = b"uname -a\n";
+let mut sent = 0;
+while sent < command.len() {
+    let Some(mut com1) = machine.serial(0) else { break };
+    sent += com1.send(&command[sent..]);
+    machine.step(RunBudget::Instructions(1_000_000))?;
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+**Limits.** Every output stream is a bounded ring. A host that never drains
+loses the oldest bytes rather than stalling the guest, so a long-running
+scrape drains on a schedule. Draining is destructive; the second read sees
+only what arrived since the first. Input is bounded too, but never lost:
+`send` returns how many bytes it took, and a short count means the guest has
+stopped reading — send the rest later. A standard machine builds COM1 alone,
+so `serial(1)` and above are `None`.
 
 ---
 
@@ -355,12 +395,34 @@ machine.msr_write(0xC000_0080, efer)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-**Limits.** An MSR is refused when this processor's CPU model does not have it
-— the same answer the guest gets, which is a fault rather than a zero. A write
-the processor would take and then ignore is refused too, rather than answered
-`Ok`: `IA32_APERF` and `IA32_MPERF` always, and `IA32_TSC_DEADLINE` while the
-local APIC's timer is not in TSC-deadline mode. A host cannot see "ignored" any
-other way.
+**Limits.** An MSR access the processor would not take is refused with
+`CpuError::MsrRefused`, whose `MsrRefusal` says why, so a host can tell the
+cases apart:
+
+```rust,no_run
+use rusty_box::cpu::{CpuError, MsrRefusal};
+# use rusty_box::cpu::CpuSetupMode;
+# use rusty_box::emulator::{Emulator, EmulatorConfig};
+# let mut machine = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)?;
+match machine.msr_write(0xC000_0082, 0x8000_0000_0000_0000) {
+    Ok(()) => {}
+    Err(rusty_box::Error::Cpu(CpuError::MsrRefused { msr, reason })) => match reason {
+        MsrRefusal::Absent => println!("{msr:#x}: this CPU model has no such MSR"),
+        MsrRefusal::NotCarried => println!("{msr:#x}: exists, but this API does not write it"),
+        MsrRefusal::ReadOnly => println!("{msr:#x}: read-only"),
+        MsrRefusal::InvalidValue => println!("{msr:#x}: the guest's WRMSR would #GP"),
+        MsrRefusal::WriteIgnored => println!("{msr:#x}: the processor would ignore it"),
+    },
+    Err(other) => return Err(other.into()),
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`Absent` is the answer the guest gets too — a fault rather than a zero.
+`InvalidValue` covers a reserved bit and an address that is not canonical.
+`WriteIgnored` stands for `IA32_APERF` and `IA32_MPERF` always, and for
+`IA32_TSC_DEADLINE` while the local APIC's timer is not in TSC-deadline mode,
+because a host cannot see "ignored" any other way.
 
 An exit address ends a run before its budget does:
 

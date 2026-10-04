@@ -34,6 +34,40 @@ const DEBUGCON_CAPACITY: usize = 65536;
 /// Bounded retention for BIOS POST codes (ports 0x80/0x84).
 const PORT80_CAPACITY: usize = 4096;
 
+/// Whether port 0xE9 is a debug console, and who may write to it — Bochs
+/// `port_e9_hack: enabled=…, all_rings=…` (config.cc), which is off unless a
+/// configuration turns it on.
+///
+/// Three states rather than Bochs's two booleans (R2): `all_rings` without
+/// `enabled` changes nothing upstream, because `allow_io` reads the pair as
+/// `enabled && all_rings`, so the fourth combination is not a state at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PortE9Hack {
+    /// The port is unclaimed, as on a PC: a read answers all ones and a write
+    /// goes nowhere. Bochs's default.
+    #[default]
+    Off,
+    /// A read answers 0xE9 — the documented way for guest code to find out a
+    /// console is there — and every byte written reaches the host. The
+    /// processor's I/O permission check applies as it does to any port.
+    On,
+    /// [`PortE9Hack::On`], and code at any privilege may write it: the
+    /// processor passes port 0xE9 whatever IOPL and the TSS I/O bitmap say
+    /// (Bochs io.cc `allow_io`, `port_e9_hack_all_rings`).
+    AllRings,
+}
+
+impl PortE9Hack {
+    /// Whether the port answers as a console at all.
+    #[inline]
+    pub const fn is_on(self) -> bool {
+        match self {
+            Self::Off => false,
+            Self::On | Self::AllRings => true,
+        }
+    }
+}
+
 /// Draining iterator over the port-0xE9 debug console.
 ///
 /// Named rather than `impl Iterator` (doctrine R0) so the machine's debug-port
@@ -412,11 +446,16 @@ pub struct BxDevicesC {
     /// PCI enabled flag
     pci_enabled: bool,
 
-    /// Bochs port-0xE9 debug console byte stream (unmapped.cc port_e9_hack;
-    /// optional in upstream, always-on here). Host code (examples/GUI) can
-    /// drain and print it. BIOS/VGABIOS message ports (0x400-0x403,
-    /// 0x500-0x503) do NOT land here — Bochs biosdev.cc routes those to the
-    /// log, never the guest-visible console (see `bios_message_byte`).
+    /// Whether port 0xE9 is a debug console — Bochs unmapped.cc
+    /// `s.port_e9_hack`, read from the machine's configuration. The processor
+    /// reads it too, for the `AllRings` I/O-permission pass (io.cc
+    /// `allow_io`), so this is the one place the setting lives.
+    port_e9_hack: PortE9Hack,
+
+    /// Bytes written to port 0xE9 while it is a debug console, for the host to
+    /// drain. BIOS/VGABIOS message ports (0x400-0x403, 0x500-0x503) do NOT
+    /// land here — Bochs biosdev.cc routes those to the log, never the
+    /// guest-visible console (see `bios_message_byte`).
     port_e9_output: RingBuffer<u8, DEBUGCON_CAPACITY>,
 
     /// Bochs BIOS POST codes (port 0x80, sometimes 0x84).
@@ -487,6 +526,7 @@ impl BxDevicesC {
             read_handlers,
             write_handlers,
             pci_enabled: false,
+            port_e9_hack: PortE9Hack::Off,
             port_e9_output: RingBuffer::new(),
             port80_output: RingBuffer::new(),
             bios_message: [0; BX_BIOS_MESSAGE_SIZE],
@@ -968,10 +1008,11 @@ impl BxDevicesC {
 
     /// Default read handler - returns 0xFFFFFFFF for unhandled ports
     fn default_read_handler(&self, address: u16, io_len: u8) -> u32 {
-        // Bochs port 0xE9 hack (mirrors `cpp_orig/bochs/iodev/unmapped.cc` behavior when enabled):
-        // - reading returns 0xE9 (casted to io_len)
+        // Bochs unmapped.cc `read`: port 0xE9 answers 0xE9 while the debug
+        // console is on, which is how guest code detects it, and all ones —
+        // like any port nothing claims — while it is off.
         let mut retval: u32 = 0xFFFF_FFFF;
-        if address == 0x00E9 {
+        if address == 0x00E9 && self.port_e9_hack.is_on() {
             retval = 0xE9;
         }
 
@@ -1010,10 +1051,13 @@ impl BxDevicesC {
 
     /// Default write handler - ignores writes to unhandled ports
     fn default_write_handler(&mut self, address: u16, value: u32, io_len: u8) {
-        // Bochs port-0xE9 debug console (unmapped.cc port_e9_hack; optional
-        // in upstream, always-on here): bytes go to the host-drainable stream.
-        if io_len == 1 && address == 0x00E9 {
-            self.port_e9_output.push_back(value as u8);
+        // Bochs unmapped.cc `write`: while the debug console is on, a write to
+        // port 0xE9 of any width hands its low byte to the host — upstream's
+        // `putchar(value)` — and while it is off the write goes nowhere.
+        if address == 0x00E9 {
+            if self.port_e9_hack.is_on() {
+                self.port_e9_output.push_back(value as u8);
+            }
             return;
         }
 
@@ -1163,6 +1207,19 @@ impl BxDevicesC {
     /// Set PCI enabled state
     pub fn set_pci_enabled(&mut self, enabled: bool) {
         self.pci_enabled = enabled;
+    }
+
+    /// Make port 0xE9 a debug console, or not — Bochs unmapped.cc `init`
+    /// reading `BXPN_PORT_E9_HACK`. Set once, from the machine's
+    /// configuration, before the guest runs.
+    pub(crate) fn set_port_e9_hack(&mut self, hack: PortE9Hack) {
+        self.port_e9_hack = hack;
+    }
+
+    /// Whether port 0xE9 is a debug console, and who may write it.
+    #[inline]
+    pub(crate) fn port_e9_hack(&self) -> PortE9Hack {
+        self.port_e9_hack
     }
 
     /// Drain and return bytes written to port 0xE9.
@@ -1521,6 +1578,7 @@ mod tests {
                 core::ptr::addr_of_mut!((*ptr).read_handlers[i]).write(IoHandlerEntry::default());
                 core::ptr::addr_of_mut!((*ptr).write_handlers[i]).write(IoHandlerEntry::default());
             }
+            core::ptr::addr_of_mut!((*ptr).port_e9_hack).write(PortE9Hack::Off);
             core::ptr::addr_of_mut!((*ptr).port_e9_output).write(RingBuffer::new());
             core::ptr::addr_of_mut!((*ptr).port80_output).write(RingBuffer::new());
             alloc::boxed::Box::from_raw(ptr)
@@ -1748,6 +1806,9 @@ mod tests {
     #[test]
     fn bios_message_ports_stay_out_of_the_e9_console_stream() {
         let mut devices = boxed_devices();
+        // The console has to be on for "the stream stays empty" to say
+        // anything: with it off, nothing would land in it either way.
+        devices.set_port_e9_hack(PortE9Hack::On);
         let mut pc_system = crate::pc_system::BxPcSystemC::new();
         let mut dm = devices::DeviceManager::new();
         let mut mem = crate::memory::test_ram();

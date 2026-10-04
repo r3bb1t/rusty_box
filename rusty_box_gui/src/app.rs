@@ -5149,6 +5149,7 @@ mod tests {
             sync_realtime: false,
             smp_quantum: 16,
             cpuid_freq: rusty_box::CpuidFreq::None,
+            port_e9_hack: rusty_box::iodev::PortE9Hack::Off,
             max_instructions: u64::MAX,
             display: crate::args::DisplayBackend::Egui,
             bios: std::path::PathBuf::from("bios.bin"),

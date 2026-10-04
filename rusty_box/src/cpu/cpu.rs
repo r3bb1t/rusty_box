@@ -1205,6 +1205,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Self::is_canonical_to_width(addr, self.linaddr_width.into())
     }
 
+    /// Canonical to the widest linear address this processor supports — 57
+    /// bits on a model with LA57, else 48 — whatever paging mode it is in
+    /// now. Bochs cpu.h `IsCpuidCanonical`, which every WRMSR of an address
+    /// checks: the register keeps its value across a paging-mode change, so
+    /// it is judged against the processor and not the current mode.
+    pub(crate) fn is_cpuid_canonical(&self, addr: BxAddress) -> bool {
+        let width = if self.bx_cpuid_support_isa_extension(X86Feature::IsaLa57) {
+            57
+        } else {
+            48
+        };
+        Self::is_canonical_to_width(addr, width)
+    }
+
     #[inline]
     pub fn is_canonical_to_width(addr: u64, width: u32) -> bool {
         // Reinterpret addr as signed, shift right (arithmetic shift),

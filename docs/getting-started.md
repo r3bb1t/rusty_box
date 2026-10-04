@@ -556,6 +556,7 @@ VM, and leaves it out when the name is blank.
 | `sync_realtime` | `false` | Run the devices that keep their own clock on wall-clock time (Bochs `clock: sync=realtime`): the PIT, the ACPI power-management timer, and the VGA's vertical retrace, which is what a guest polls port 0x3DA for. When off, all three follow emulated time. |
 | `smp_quantum` | `16` | Instructions each CPU runs before the next one gets its turn (Bochs `cpu: quantum=`). Must be 1–32. |
 | `cpuid_freq` | `"none"` | How CPUID frequency leaves `0x15`/`0x16` are reported (Bochs `cpu: cpuid_freq=`): `"none"`, `"hardware"` or `"ips"`. |
+| `port_e9_hack` | `"off"` | Bochs's port-0xE9 debug console (Bochs `port_e9_hack:`): `"off"`, `"on"`, or `"all-rings"`, which also lets unprivileged code write it. While it is on, a guest that reads the port gets `0xE9` back, and the bytes it writes go to the launcher's standard output. |
 | `max_instructions` | no limit | Stops the VM after exactly that many instructions. Useful for benchmarks and CI; **looks like a freeze** if you set it by accident. Leave the key out for no limit. |
 
 `max_instructions` needs care. A value in the file or on the command line is
@@ -667,7 +668,8 @@ VM file sets for each when it saves the VM:
 
 - `emulator.cpu_capabilities` (on WHP it is `host-shared` whatever the file
   says);
-- `emulator.sync_realtime`, `emulator.smp_quantum` and `emulator.cpuid_freq`;
+- `emulator.sync_realtime`, `emulator.smp_quantum`, `emulator.cpuid_freq` and
+  `emulator.port_e9_hack`;
 - `display.backend`, which decides whether `--config FILE` opens the shell or
   runs in the terminal or headless;
 - a `display.width` and `display.height` other than the five presets, or a
@@ -968,6 +970,7 @@ add the memory and IPS target the guest needs (see
 | `--max-instructions <N>` | `emulator.max_instructions` | Instruction limit (taken literally) |
 | `--smp-quantum <N>` | `emulator.smp_quantum` | Instructions per CPU per turn, 1–32 |
 | `--cpuid-freq <MODE>` | `emulator.cpuid_freq` | `hardware`, `none` or `ips` |
+| `--port-e9-hack <MODE>` | `emulator.port_e9_hack` | The port-0xE9 debug console: `off`, `on` or `all-rings` |
 | `--sync-realtime` | `emulator.sync_realtime` | PIT, ACPI timer and VGA retrace on wall-clock time |
 | `--cpus <N>` | `emulator.cpus` | Flat CPU count (conflicts with the three below) |
 | `--cpu-sockets <N>` / `--cpu-cores <N>` / `--cpu-threads <N>` | `emulator.cpu_sockets` / `cpu_cores` / `cpu_threads` | Explicit topology |

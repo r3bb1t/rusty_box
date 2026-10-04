@@ -241,6 +241,7 @@ where
         sync_realtime: config.sync_realtime,
         smp_quantum: config.smp_quantum,
         cpuid_freq: config.cpuid_freq,
+        port_e9_hack: config.port_e9_hack,
         cpu_params: cpu_params_for_engine(&config),
         // The engine decides who turns the device wheel, so it decides which
         // clock the wheel runs on.
@@ -1205,6 +1206,7 @@ mod tests {
             sync_realtime: false,
             smp_quantum: 16,
             cpuid_freq: rusty_box::CpuidFreq::None,
+            port_e9_hack: rusty_box::iodev::PortE9Hack::Off,
             max_instructions: 0,
             cpu_params: BxParams::default(),
             display: DisplayBackend::Headless,
@@ -1259,6 +1261,7 @@ mod tests {
             sync_realtime: false,
             smp_quantum: 16,
             cpuid_freq: rusty_box::CpuidFreq::None,
+            port_e9_hack: rusty_box::iodev::PortE9Hack::Off,
             max_instructions: 0,
             cpu_params: BxParams::default(),
             display: DisplayBackend::Headless,
@@ -1782,6 +1785,7 @@ mod tests {
                 sync_realtime: false,
                 smp_quantum: 16,
                 cpuid_freq: rusty_box::CpuidFreq::None,
+                port_e9_hack: rusty_box::iodev::PortE9Hack::Off,
                 max_instructions: 0,
                 cpu_params: BxParams::default(),
                 display: DisplayBackend::Egui,
