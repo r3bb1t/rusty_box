@@ -52,9 +52,9 @@ pub use error::{WhpError, WhpErrorKind, WhpResult};
 pub use vcpu::{
     AccessType, ApicRegister, ApicStatePage, ApicVector, ApicWriteType, CpuidAccess,
     DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind, InterruptRequest,
-    InterruptionType, IoPortAccess, MemoryAccess, MsrAccess, PendingExtIntEvent,
-    PendingInterruption, Reg, SegmentRegister, TableRegister, TriggerMode, VpContext, ALL_REGS,
-    UNEXCHANGED_REGS,
+    InterruptedDelivery, InterruptedKind, InterruptionType, IoPortAccess, MemoryAccess, MsrAccess,
+    PendingExtIntEvent, PendingInterruption, PendingInterruptionRead, Reg, SegmentRegister,
+    TableRegister, TriggerMode, VpContext, ALL_REGS, UNEXCHANGED_REGS,
 };
 
 #[cfg(windows)]

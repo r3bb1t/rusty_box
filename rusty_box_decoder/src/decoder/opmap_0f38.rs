@@ -698,7 +698,9 @@ pub const BxOpcodeTable0F38F6: [u64; 8] = [
 ];
 
 // opcode 0F 38 F8
-pub const BxOpcodeTable0F38F8: [u64; 2] = [
+pub const BxOpcodeTable0F38F8: [u64; 4] = [
+    form_opcode(attrs!(IS64 | MOD_REG | SSE_PREFIX_F2), Opcode::UrdmsrEqGq),
+    form_opcode(attrs!(IS64 | MOD_REG | SSE_PREFIX_F3), Opcode::UwrmsrGqEq),
     form_opcode(
         attrs!(OS64 | MOD_MEM | SSE_PREFIX_66),
         Opcode::Movdir64bGqMdq,

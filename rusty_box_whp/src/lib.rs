@@ -66,9 +66,9 @@ pub use rusty_box_whp_sys::{WhpError, WhpErrorKind, WhpResult};
 pub use rusty_box_whp_sys::{
     AccessType, ApicRegister, ApicStatePage, ApicVector, ApicWriteType, CpuidAccess,
     DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind, InterruptRequest,
-    InterruptionType, IoPortAccess, MemoryAccess, MsrAccess, PendingExtIntEvent,
-    PendingInterruption, Reg, SegmentRegister, TableRegister, TriggerMode, VpContext, ALL_REGS,
-    UNEXCHANGED_REGS,
+    InterruptedDelivery, InterruptedKind, InterruptionType, IoPortAccess, MemoryAccess, MsrAccess,
+    PendingExtIntEvent, PendingInterruption, PendingInterruptionRead, Reg, SegmentRegister,
+    TableRegister, TriggerMode, VpContext, ALL_REGS, UNEXCHANGED_REGS,
 };
 
 /// Re-exported so a caller mapping memory into a partition need not also name

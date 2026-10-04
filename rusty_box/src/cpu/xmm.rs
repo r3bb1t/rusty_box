@@ -305,6 +305,10 @@ bitflags::bitflags! {
         const RC1 = 1 << 14;
         /// Flush-to-Zero mode
         const FZ  = 1 << 15;
+        /// Misaligned SSE mode: 16-byte SSE memory operands need no
+        /// alignment. Writable only on a model with the misaligned-SSE
+        /// extension (Bochs xmm.h `MXCSR_MISALIGNED_EXCEPTION_MASK`).
+        const MM  = 1 << 17;
     }
 }
 
@@ -359,6 +363,12 @@ impl BxMxcsr {
     #[inline]
     pub fn daz(&self) -> bool {
         self.flags().contains(Mxcsr::DAZ)
+    }
+
+    /// Check if misaligned SSE mode is on (Bochs xmm.h `get_MM`).
+    #[inline]
+    pub fn misaligned_sse(&self) -> bool {
+        self.flags().contains(Mxcsr::MM)
     }
 
     /// Check if an exception is masked

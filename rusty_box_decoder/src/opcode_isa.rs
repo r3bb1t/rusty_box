@@ -15,8 +15,8 @@ use crate::opcode::Opcode;
 /// Sentinel: this opcode is not gated on any CPUID feature.
 pub const ISA_ALWAYS: u16 = 0xFFFF;
 
-/// `X86Feature as u16` required by each opcode (2908 of 3679 are gated).
-pub static OPCODE_ISA: [u16; 3679] = [
+/// `X86Feature as u16` required by each opcode (2912 of 3683 are gated).
+pub static OPCODE_ISA: [u16; 3683] = [
     ISA_ALWAYS, // IaError
     ISA_ALWAYS, // InsertedOpcode
     ISA_ALWAYS, // Aaa
@@ -206,7 +206,7 @@ pub static OPCODE_ISA: [u16; 3679] = [
     17, // Clflush -> X86Feature::IsaClflush
     18, // Clflushopt -> X86Feature::IsaClflushopt
     19, // Clwb -> X86Feature::IsaClwb
-    117, // Clzero -> X86Feature::IsaClzero
+    116, // Clzero -> X86Feature::IsaClzero
     ISA_ALWAYS, // EnterOp16IwIb
     ISA_ALWAYS, // EnterOp32IwIb
     ISA_ALWAYS, // LeaveOp16
@@ -1450,33 +1450,33 @@ pub static OPCODE_ISA: [u16; 3679] = [
     59, // Clgi -> X86Feature::IsaSvm
     59, // Skinit -> X86Feature::IsaSvm
     59, // Invlpga -> X86Feature::IsaSvm
-    119, // Incsspd -> X86Feature::IsaCet
-    119, // Incsspq -> X86Feature::IsaCet
+    118, // Incsspd -> X86Feature::IsaCet
+    118, // Incsspq -> X86Feature::IsaCet
     ISA_ALWAYS, // Rdsspd
     ISA_ALWAYS, // Rdsspq
-    119, // Saveprevssp -> X86Feature::IsaCet
-    119, // Rstorssp -> X86Feature::IsaCet
-    119, // Wrssd -> X86Feature::IsaCet
-    119, // Wrussd -> X86Feature::IsaCet
-    119, // Wrssq -> X86Feature::IsaCet
-    119, // Wrussq -> X86Feature::IsaCet
-    119, // Setssbsy -> X86Feature::IsaCet
-    119, // Clrssbsy -> X86Feature::IsaCet
+    118, // Saveprevssp -> X86Feature::IsaCet
+    118, // Rstorssp -> X86Feature::IsaCet
+    118, // Wrssd -> X86Feature::IsaCet
+    118, // Wrussd -> X86Feature::IsaCet
+    118, // Wrssq -> X86Feature::IsaCet
+    118, // Wrussq -> X86Feature::IsaCet
+    118, // Setssbsy -> X86Feature::IsaCet
+    118, // Clrssbsy -> X86Feature::IsaCet
     ISA_ALWAYS, // Endbranch32
     ISA_ALWAYS, // Endbranch64
-    106, // Invpcid -> X86Feature::IsaInvpcid
-    112, // Rdpkru -> X86Feature::IsaPku
-    112, // Wrpkru -> X86Feature::IsaPku
-    126, // Clui -> X86Feature::IsaUintr
-    126, // Stui -> X86Feature::IsaUintr
-    126, // Testui -> X86Feature::IsaUintr
-    126, // Uiret -> X86Feature::IsaUintr
-    126, // SenduipiEq -> X86Feature::IsaUintr
-    115, // RdpidEd -> X86Feature::IsaRdpid
-    123, // Serialize -> X86Feature::IsaSerialize
-    120, // Wrmsrns -> X86Feature::IsaWrmsrns
-    130, // Rdmsrlist -> X86Feature::IsaMsrlist
-    130, // Wrmsrlist -> X86Feature::IsaMsrlist
+    105, // Invpcid -> X86Feature::IsaInvpcid
+    111, // Rdpkru -> X86Feature::IsaPku
+    111, // Wrpkru -> X86Feature::IsaPku
+    125, // Clui -> X86Feature::IsaUintr
+    125, // Stui -> X86Feature::IsaUintr
+    125, // Testui -> X86Feature::IsaUintr
+    125, // Uiret -> X86Feature::IsaUintr
+    125, // SenduipiEq -> X86Feature::IsaUintr
+    114, // RdpidEd -> X86Feature::IsaRdpid
+    122, // Serialize -> X86Feature::IsaSerialize
+    119, // Wrmsrns -> X86Feature::IsaWrmsrns
+    129, // Rdmsrlist -> X86Feature::IsaMsrlist
+    129, // Wrmsrlist -> X86Feature::IsaMsrlist
     46, // Vzeroupper -> X86Feature::IsaAvx
     46, // Vzeroall -> X86Feature::IsaAvx
     46, // Vldmxcsr -> X86Feature::IsaAvx
@@ -2064,38 +2064,38 @@ pub static OPCODE_ISA: [u16; 3679] = [
     55, // PextGqBqEq -> X86Feature::IsaBmi2
     55, // PdepGdBdEd -> X86Feature::IsaBmi2
     55, // PdepGqBqEq -> X86Feature::IsaBmi2
-    122, // CmpbexaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpbexaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpbxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpbxaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmplexaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmplexaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmplxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmplxaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpnbexaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpnbexaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpnbxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpnbxaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpnlexaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpnlexaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpnlxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpnlxaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpnoxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpnoxaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpnpxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpnpxaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpnsxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpnsxaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpnzxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpnzxaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpoxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpoxaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmppxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmppxaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpsxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpsxaddEqGqBq -> X86Feature::IsaCmpccxadd
-    122, // CmpzxaddEdGdBd -> X86Feature::IsaCmpccxadd
-    122, // CmpzxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpbexaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpbexaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpbxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpbxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmplexaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmplexaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmplxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmplxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpnbexaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpnbexaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpnbxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpnbxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpnlexaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpnlexaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpnlxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpnlxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpnoxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpnoxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpnpxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpnpxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpnsxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpnsxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpnzxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpnzxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpoxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpoxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmppxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmppxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpsxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpsxaddEqGqBq -> X86Feature::IsaCmpccxadd
+    121, // CmpzxaddEdGdBd -> X86Feature::IsaCmpccxadd
+    121, // CmpzxaddEqGqBq -> X86Feature::IsaCmpccxadd
     56, // VfmaddsubpsVpsHpsVibWps -> X86Feature::IsaFma4
     56, // VfmaddsubpsVpsHpsWpsVib -> X86Feature::IsaFma4
     56, // VfmaddsubpdVpdHpdVibWpd -> X86Feature::IsaFma4
@@ -2255,24 +2255,24 @@ pub static OPCODE_ISA: [u16; 3679] = [
     63, // RdseedEw -> X86Feature::IsaRdseed
     63, // RdseedEd -> X86Feature::IsaRdseed
     63, // RdseedEq -> X86Feature::IsaRdseed
-    128, // MovdiriMdGd -> X86Feature::IsaMovdiri
-    128, // MovdiriMqGq -> X86Feature::IsaMovdiri
-    129, // Movdir64bGdMdq -> X86Feature::IsaMovdir64b
-    129, // Movdir64bGqMdq -> X86Feature::IsaMovdir64b
-    131, // AaddEdGd -> X86Feature::IsaRaoInt
-    131, // AandEdGd -> X86Feature::IsaRaoInt
-    131, // AorEdGd -> X86Feature::IsaRaoInt
-    131, // AxorEdGd -> X86Feature::IsaRaoInt
-    131, // AaddEqGq -> X86Feature::IsaRaoInt
-    131, // AandEqGq -> X86Feature::IsaRaoInt
-    131, // AorEqGq -> X86Feature::IsaRaoInt
-    131, // AxorEqGq -> X86Feature::IsaRaoInt
+    127, // MovdiriMdGd -> X86Feature::IsaMovdiri
+    127, // MovdiriMqGq -> X86Feature::IsaMovdiri
+    128, // Movdir64bGdMdq -> X86Feature::IsaMovdir64b
+    128, // Movdir64bGqMdq -> X86Feature::IsaMovdir64b
+    130, // AaddEdGd -> X86Feature::IsaRaoInt
+    130, // AandEdGd -> X86Feature::IsaRaoInt
+    130, // AorEdGd -> X86Feature::IsaRaoInt
+    130, // AxorEdGd -> X86Feature::IsaRaoInt
+    130, // AaddEqGq -> X86Feature::IsaRaoInt
+    130, // AandEqGq -> X86Feature::IsaRaoInt
+    130, // AorEqGq -> X86Feature::IsaRaoInt
+    130, // AxorEqGq -> X86Feature::IsaRaoInt
     90, // Ldtilecfg -> X86Feature::IsaAmx
     90, // Sttilecfg -> X86Feature::IsaAmx
     90, // TileloaddTnnnMdq -> X86Feature::IsaAmx
     90, // Tileloaddt1TnnnMdq -> X86Feature::IsaAmx
-    97, // TileloaddrsTnnnMdq -> X86Feature::IsaAmxMovrs
-    97, // Tileloaddrst1TnnnMdq -> X86Feature::IsaAmxMovrs
+    96, // TileloaddrsTnnnMdq -> X86Feature::IsaAmxMovrs
+    96, // Tileloaddrst1TnnnMdq -> X86Feature::IsaAmxMovrs
     90, // TilestoredMdqTnnn -> X86Feature::IsaAmx
     90, // Tilerelease -> X86Feature::IsaAmx
     90, // TilezeroTnnn -> X86Feature::IsaAmx
@@ -2282,13 +2282,13 @@ pub static OPCODE_ISA: [u16; 3679] = [
     91, // TdpbuudTnnnTrmTreg -> X86Feature::IsaAmxInt8
     92, // Tdpbf16psTnnnTrmTreg -> X86Feature::IsaAmxBf16
     93, // Tdpfp16psTnnnTrmTreg -> X86Feature::IsaAmxFp16
-    96, // Tcmmrlfp16psTnnnTrmTreg -> X86Feature::IsaAmxComplex
-    96, // Tcmmimfp16psTnnnTrmTreg -> X86Feature::IsaAmxComplex
+    95, // Tcmmrlfp16psTnnnTrmTreg -> X86Feature::IsaAmxComplex
+    95, // Tcmmimfp16psTnnnTrmTreg -> X86Feature::IsaAmxComplex
     ISA_ALWAYS, // Tmmultf32psTnnnTrmTreg
-    95, // Tdpbf8psTnnnTrmTreg -> X86Feature::IsaAmxFp8
-    95, // Tdphf8psTnnnTrmTreg -> X86Feature::IsaAmxFp8
-    95, // Tdpbhf8psTnnnTrmTreg -> X86Feature::IsaAmxFp8
-    95, // Tdphbf8psTnnnTrmTreg -> X86Feature::IsaAmxFp8
+    94, // Tdpbf8psTnnnTrmTreg -> X86Feature::IsaAmxFp8
+    94, // Tdphf8psTnnnTrmTreg -> X86Feature::IsaAmxFp8
+    94, // Tdpbhf8psTnnnTrmTreg -> X86Feature::IsaAmxFp8
+    94, // Tdphbf8psTnnnTrmTreg -> X86Feature::IsaAmxFp8
     78, // KaddwKgwKhwKew -> X86Feature::IsaAvx512Dq
     79, // KaddqKgqKhqKeq -> X86Feature::IsaAvx512Bw
     78, // KaddbKgbKhbKeb -> X86Feature::IsaAvx512Dq
@@ -2352,15 +2352,19 @@ pub static OPCODE_ISA: [u16; 3679] = [
     79, // KtestqKgqKeq -> X86Feature::IsaAvx512Bw
     78, // KtestbKgbKeb -> X86Feature::IsaAvx512Dq
     79, // KtestdKgdKed -> X86Feature::IsaAvx512Bw
-    121, // RdmsrEqId -> X86Feature::IsaMsrImm
-    121, // WrmsrnsIdEq -> X86Feature::IsaMsrImm
-    132, // MovrsGbEb -> X86Feature::IsaMovrs
-    132, // MovrsGwEw -> X86Feature::IsaMovrs
-    132, // MovrsGdEd -> X86Feature::IsaMovrs
-    132, // MovrsGqEq -> X86Feature::IsaMovrs
-    133, // Erets -> X86Feature::IsaFred
-    133, // Eretu -> X86Feature::IsaFred
-    133, // LkgsEw -> X86Feature::IsaFred
+    120, // RdmsrEqId -> X86Feature::IsaMsrImm
+    120, // WrmsrnsIdEq -> X86Feature::IsaMsrImm
+    133, // UrdmsrEqId -> X86Feature::IsaUserMsr
+    133, // UwrmsrIdEq -> X86Feature::IsaUserMsr
+    133, // UrdmsrEqGq -> X86Feature::IsaUserMsr
+    133, // UwrmsrGqEq -> X86Feature::IsaUserMsr
+    131, // MovrsGbEb -> X86Feature::IsaMovrs
+    131, // MovrsGwEw -> X86Feature::IsaMovrs
+    131, // MovrsGdEd -> X86Feature::IsaMovrs
+    131, // MovrsGqEq -> X86Feature::IsaMovrs
+    132, // Erets -> X86Feature::IsaFred
+    132, // Eretu -> X86Feature::IsaFred
+    132, // LkgsEw -> X86Feature::IsaFred
     77, // EvexVaddpsVpsHpsWps -> X86Feature::IsaAvx512
     77, // EvexVaddpdVpdHpdWpd -> X86Feature::IsaAvx512
     77, // EvexVaddssVssHpsWss -> X86Feature::IsaAvx512
@@ -3516,184 +3520,184 @@ pub static OPCODE_ISA: [u16; 3679] = [
     69, // EvexVgf2p8mulbVdqHdqWdqKmask -> X86Feature::IsaGfni
     71, // EvexVsm4key4VdqHdqWdq -> X86Feature::IsaSm4
     71, // EvexVsm4rnds4VdqHdqWdq -> X86Feature::IsaSm4
-    100, // EvexVucomxssVssWss -> X86Feature::IsaAvx10_2
-    100, // EvexVcomxssVssWss -> X86Feature::IsaAvx10_2
-    100, // EvexVucomxsdVsdWsd -> X86Feature::IsaAvx10_2
-    100, // EvexVcomxsdVsdWsd -> X86Feature::IsaAvx10_2
-    100, // EvexVucomxshVshWsh -> X86Feature::IsaAvx10_2
-    100, // EvexVcomxshVshWsh -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbssdVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbssdsVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbsudVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbsudsVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbuudVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbuudsVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbssdVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbssdsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbsudVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbsudsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbuudVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpbuudsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwsudVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwsudsVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwusdVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwusdsVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwuudVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwuudsVdqHdqWdq -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwsudVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwsudsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwusdVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwusdsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwuudVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVpdpwuudsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVmpsadbwVdqHdqWdqIb -> X86Feature::IsaAvx10_2
-    100, // EvexVmpsadbwVdqHdqWdqIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVdpphpsVpsHdqWdqKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVaddbf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVaddbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVsubbf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVsubbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVdivbf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVdivbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVmulbf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVmulbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVucomxssVssWss -> X86Feature::IsaAvx10_2
+    99, // EvexVcomxssVssWss -> X86Feature::IsaAvx10_2
+    99, // EvexVucomxsdVsdWsd -> X86Feature::IsaAvx10_2
+    99, // EvexVcomxsdVsdWsd -> X86Feature::IsaAvx10_2
+    99, // EvexVucomxshVshWsh -> X86Feature::IsaAvx10_2
+    99, // EvexVcomxshVshWsh -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbssdVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbssdsVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbsudVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbsudsVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbuudVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbuudsVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbssdVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbssdsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbsudVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbsudsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbuudVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpbuudsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwsudVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwsudsVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwusdVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwusdsVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwuudVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwuudsVdqHdqWdq -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwsudVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwsudsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwusdVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwusdsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwuudVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVpdpwuudsVdqHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVmpsadbwVdqHdqWdqIb -> X86Feature::IsaAvx10_2
+    99, // EvexVmpsadbwVdqHdqWdqIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVdpphpsVpsHdqWdqKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVaddbf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVaddbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVsubbf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVsubbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVdivbf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVdivbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVmulbf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVmulbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
     ISA_ALWAYS, // EvexVminpbf16VphHphWph
     ISA_ALWAYS, // EvexVminpbf16VphHphWphKmask
     ISA_ALWAYS, // EvexVmaxpbf16VphHphWph
     ISA_ALWAYS, // EvexVmaxpbf16VphHphWphKmask
-    100, // EvexVscalefpbf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVscalefpbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVsqrtbf16VphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVsqrtbf16VphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVgetexppbf16VphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVgetexppbf16VphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfmadd132bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfmadd132bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfmadd213bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfmadd213bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfmadd231bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfmadd231bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfmsub132bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfmsub132bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfmsub213bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfmsub213bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfmsub231bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfmsub231bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmadd132bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmadd132bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmadd213bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmadd213bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmadd231bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmadd231bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmsub132bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmsub132bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmsub213bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmsub213bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmsub231bf16VphHphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVfnmsub231bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVfpclasspbf16KgdWphIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcmppbf16KgdHphWphIb -> X86Feature::IsaAvx10_2
-    100, // EvexVcomisbf16VshWsh -> X86Feature::IsaAvx10_2
-    100, // EvexVgetmantpbf16VphWphIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVreducebf16VphWphIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVrndscalebf16VphWphIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVrcppbf16VphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVrcppbf16VphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVrsqrtpbf16VphWph -> X86Feature::IsaAvx10_2
-    100, // EvexVrsqrtpbf16VphWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVminmaxpsVpsHpsWpsIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVminmaxssVssHpsWssIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVminmaxpdVpdHpdWpdIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVminmaxsdVsdHpdWsdIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVminmaxphVphHphWphIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVminmaxshVshHphWshIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVminmaxbf16VphHphWphIbKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvt2ps2phxVphHpsWpsKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2qqsVdqWps -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2qqsVdqWpsKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttpd2qqsVdqWpd -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttpd2qqsVdqWpdKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2uqqsVdqWps -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2uqqsVdqWpsKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttpd2uqqsVdqWpd -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttpd2uqqsVdqWpdKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2dqsVdqWps -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2dqsVdqWpsKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttpd2dqsVdqWpd -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttpd2dqsVdqWpdKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2udqsVdqWps -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttpd2udqsVdqWpd -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2udqsVdqWpsKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttpd2udqsVdqWpdKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttss2sisGdWss -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttss2sisGqWss -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttsd2sisGdWsd -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttsd2sisGqWsd -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttss2usisGdWss -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttss2usisGqWss -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttsd2usisGdWsd -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttsd2usisGqWsd -> X86Feature::IsaAvx10_2
-    100, // EvexVmovwVshWsh -> X86Feature::IsaAvx10_2
-    100, // EvexVmovwWshVsh -> X86Feature::IsaAvx10_2
-    100, // EvexVmovdVdWd -> X86Feature::IsaAvx10_2
-    100, // EvexVmovdWdVd -> X86Feature::IsaAvx10_2
-    100, // EvexVcvthf82phVphWf8Kmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtph2bf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtph2bf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvt2ph2bf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvt2ph2bf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtbiasph2bf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtbiasph2bf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtph2hf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtph2hf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvt2ph2hf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvt2ph2hf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtbiasph2hf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtbiasph2hf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtbf162ibsV8bWph -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtbf162ibsV8bWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtbf162iubsV8bWph -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtbf162iubsV8bWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttbf162ibsV8bWph -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttbf162ibsV8bWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttbf162iubsV8bWph -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttbf162iubsV8bWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtph2ibsV8bWph -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtph2ibsV8bWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtph2iubsV8bWph -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtph2iubsV8bWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttph2ibsV8bWph -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttph2ibsV8bWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttph2iubsV8bWph -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttph2iubsV8bWphKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtps2ibsV8bWps -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtps2ibsV8bWpsKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtps2iubsV8bWps -> X86Feature::IsaAvx10_2
-    100, // EvexVcvtps2iubsV8bWpsKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2ibsV8bWps -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2ibsV8bWpsKmask -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2iubsV8bWps -> X86Feature::IsaAvx10_2
-    100, // EvexVcvttps2iubsV8bWpsKmask -> X86Feature::IsaAvx10_2
-    98, // EvexTilemovrowVdqTrmIb -> X86Feature::IsaAmxAvx512
-    98, // EvexTilemovrowVdqTrmBd -> X86Feature::IsaAmxAvx512
-    98, // EvexTcvtrowd2psVpsTrmIb -> X86Feature::IsaAmxAvx512
-    98, // EvexTcvtrowd2psVpsTrmBd -> X86Feature::IsaAmxAvx512
-    98, // EvexTcvtrowps2phlVphTrmIb -> X86Feature::IsaAmxAvx512
-    98, // EvexTcvtrowps2phlVphTrmBd -> X86Feature::IsaAmxAvx512
-    98, // EvexTcvtrowps2phhVphTrmIb -> X86Feature::IsaAmxAvx512
-    98, // EvexTcvtrowps2phhVphTrmBd -> X86Feature::IsaAmxAvx512
-    98, // EvexTcvtrowps2bf16lVphTrmIb -> X86Feature::IsaAmxAvx512
-    98, // EvexTcvtrowps2bf16lVphTrmBd -> X86Feature::IsaAmxAvx512
-    98, // EvexTcvtrowps2bf16hVphTrmIb -> X86Feature::IsaAmxAvx512
-    98, // EvexTcvtrowps2bf16hVphTrmBd -> X86Feature::IsaAmxAvx512
-    101, // EvexVmovrsbVdqWdq -> X86Feature::IsaAvx10_2Movrs
-    101, // EvexVmovrsbVdqWdqKmask -> X86Feature::IsaAvx10_2Movrs
-    101, // EvexVmovrswVdqWdq -> X86Feature::IsaAvx10_2Movrs
-    101, // EvexVmovrswVdqWdqKmask -> X86Feature::IsaAvx10_2Movrs
-    101, // EvexVmovrsdVdqWdq -> X86Feature::IsaAvx10_2Movrs
-    101, // EvexVmovrsdVdqWdqKmask -> X86Feature::IsaAvx10_2Movrs
-    101, // EvexVmovrsqVdqWdq -> X86Feature::IsaAvx10_2Movrs
-    101, // EvexVmovrsqVdqWdqKmask -> X86Feature::IsaAvx10_2Movrs
+    99, // EvexVscalefpbf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVscalefpbf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVsqrtbf16VphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVsqrtbf16VphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVgetexppbf16VphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVgetexppbf16VphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfmadd132bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfmadd132bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfmadd213bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfmadd213bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfmadd231bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfmadd231bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfmsub132bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfmsub132bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfmsub213bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfmsub213bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfmsub231bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfmsub231bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmadd132bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmadd132bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmadd213bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmadd213bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmadd231bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmadd231bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmsub132bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmsub132bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmsub213bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmsub213bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmsub231bf16VphHphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVfnmsub231bf16VphHphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVfpclasspbf16KgdWphIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcmppbf16KgdHphWphIb -> X86Feature::IsaAvx10_2
+    99, // EvexVcomisbf16VshWsh -> X86Feature::IsaAvx10_2
+    99, // EvexVgetmantpbf16VphWphIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVreducebf16VphWphIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVrndscalebf16VphWphIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVrcppbf16VphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVrcppbf16VphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVrsqrtpbf16VphWph -> X86Feature::IsaAvx10_2
+    99, // EvexVrsqrtpbf16VphWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVminmaxpsVpsHpsWpsIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVminmaxssVssHpsWssIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVminmaxpdVpdHpdWpdIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVminmaxsdVsdHpdWsdIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVminmaxphVphHphWphIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVminmaxshVshHphWshIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVminmaxbf16VphHphWphIbKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvt2ps2phxVphHpsWpsKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2qqsVdqWps -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2qqsVdqWpsKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttpd2qqsVdqWpd -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttpd2qqsVdqWpdKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2uqqsVdqWps -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2uqqsVdqWpsKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttpd2uqqsVdqWpd -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttpd2uqqsVdqWpdKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2dqsVdqWps -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2dqsVdqWpsKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttpd2dqsVdqWpd -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttpd2dqsVdqWpdKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2udqsVdqWps -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttpd2udqsVdqWpd -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2udqsVdqWpsKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttpd2udqsVdqWpdKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttss2sisGdWss -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttss2sisGqWss -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttsd2sisGdWsd -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttsd2sisGqWsd -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttss2usisGdWss -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttss2usisGqWss -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttsd2usisGdWsd -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttsd2usisGqWsd -> X86Feature::IsaAvx10_2
+    99, // EvexVmovwVshWsh -> X86Feature::IsaAvx10_2
+    99, // EvexVmovwWshVsh -> X86Feature::IsaAvx10_2
+    99, // EvexVmovdVdWd -> X86Feature::IsaAvx10_2
+    99, // EvexVmovdWdVd -> X86Feature::IsaAvx10_2
+    99, // EvexVcvthf82phVphWf8Kmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtph2bf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtph2bf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvt2ph2bf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvt2ph2bf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtbiasph2bf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtbiasph2bf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtph2hf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtph2hf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvt2ph2hf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvt2ph2hf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtbiasph2hf8Vf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtbiasph2hf8sVf8hdqWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtbf162ibsV8bWph -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtbf162ibsV8bWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtbf162iubsV8bWph -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtbf162iubsV8bWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttbf162ibsV8bWph -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttbf162ibsV8bWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttbf162iubsV8bWph -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttbf162iubsV8bWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtph2ibsV8bWph -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtph2ibsV8bWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtph2iubsV8bWph -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtph2iubsV8bWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttph2ibsV8bWph -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttph2ibsV8bWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttph2iubsV8bWph -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttph2iubsV8bWphKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtps2ibsV8bWps -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtps2ibsV8bWpsKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtps2iubsV8bWps -> X86Feature::IsaAvx10_2
+    99, // EvexVcvtps2iubsV8bWpsKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2ibsV8bWps -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2ibsV8bWpsKmask -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2iubsV8bWps -> X86Feature::IsaAvx10_2
+    99, // EvexVcvttps2iubsV8bWpsKmask -> X86Feature::IsaAvx10_2
+    97, // EvexTilemovrowVdqTrmIb -> X86Feature::IsaAmxAvx512
+    97, // EvexTilemovrowVdqTrmBd -> X86Feature::IsaAmxAvx512
+    97, // EvexTcvtrowd2psVpsTrmIb -> X86Feature::IsaAmxAvx512
+    97, // EvexTcvtrowd2psVpsTrmBd -> X86Feature::IsaAmxAvx512
+    97, // EvexTcvtrowps2phlVphTrmIb -> X86Feature::IsaAmxAvx512
+    97, // EvexTcvtrowps2phlVphTrmBd -> X86Feature::IsaAmxAvx512
+    97, // EvexTcvtrowps2phhVphTrmIb -> X86Feature::IsaAmxAvx512
+    97, // EvexTcvtrowps2phhVphTrmBd -> X86Feature::IsaAmxAvx512
+    97, // EvexTcvtrowps2bf16lVphTrmIb -> X86Feature::IsaAmxAvx512
+    97, // EvexTcvtrowps2bf16lVphTrmBd -> X86Feature::IsaAmxAvx512
+    97, // EvexTcvtrowps2bf16hVphTrmIb -> X86Feature::IsaAmxAvx512
+    97, // EvexTcvtrowps2bf16hVphTrmBd -> X86Feature::IsaAmxAvx512
+    100, // EvexVmovrsbVdqWdq -> X86Feature::IsaAvx10_2Movrs
+    100, // EvexVmovrsbVdqWdqKmask -> X86Feature::IsaAvx10_2Movrs
+    100, // EvexVmovrswVdqWdq -> X86Feature::IsaAvx10_2Movrs
+    100, // EvexVmovrswVdqWdqKmask -> X86Feature::IsaAvx10_2Movrs
+    100, // EvexVmovrsdVdqWdq -> X86Feature::IsaAvx10_2Movrs
+    100, // EvexVmovrsdVdqWdqKmask -> X86Feature::IsaAvx10_2Movrs
+    100, // EvexVmovrsqVdqWdq -> X86Feature::IsaAvx10_2Movrs
+    100, // EvexVmovrsqVdqWdqKmask -> X86Feature::IsaAvx10_2Movrs
     ISA_ALWAYS, // NoAvxState
     ISA_ALWAYS, // NoEvexState
 ];
@@ -3706,11 +3710,11 @@ pub fn opcode_isa_feature(opcode: Opcode) -> u16 {
 
 /// Number of opcodes carrying a real feature gate. Asserted by tests so
 /// that a silent regeneration drop is caught.
-pub const GATED_OPCODE_COUNT: usize = 2908;
+pub const GATED_OPCODE_COUNT: usize = 2912;
 
 /// Number of `Opcode` variants the table was generated against. A
 /// mismatch with the enum means the table needs regenerating.
-pub const OPCODE_VARIANT_COUNT: usize = 3679;
+pub const OPCODE_VARIANT_COUNT: usize = 3683;
 
 // EVEX encoding restrictions — Bochs cpu/decoder/fetchdecode.h.
 // `EVEX.b` means embedded broadcast on a memory operand and SAE /
@@ -3727,7 +3731,7 @@ pub const PREPARE_EVEX_NO_BROADCAST: u16 = 0x280;
 /// `bx_define_opcode`.
 // A `const` rather than a `static`: the EVEX decode path is a
 // `const fn`, and const evaluation may read consts but not statics.
-pub const OPCODE_EVEX_FLAGS: [u16; 3679] = [
+pub const OPCODE_EVEX_FLAGS: [u16; 3683] = [
     0x000, // IaError
     0x000, // InsertedOpcode
     0x000, // Aaa
@@ -6065,6 +6069,10 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3679] = [
     0x000, // KtestdKgdKed
     0x000, // RdmsrEqId
     0x000, // WrmsrnsIdEq
+    0x000, // UrdmsrEqId
+    0x000, // UwrmsrIdEq
+    0x000, // UrdmsrEqGq
+    0x000, // UwrmsrGqEq
     0x000, // MovrsGbEb
     0x000, // MovrsGwEw
     0x000, // MovrsGdEd
@@ -7450,7 +7458,7 @@ pub enum CpuState {
 
 /// CPU state each opcode requires, from field 10 of `bx_define_opcode`.
 // A `const` for the same reason as OPCODE_EVEX_FLAGS.
-pub const OPCODE_STATE: [CpuState; 3679] = [
+pub const OPCODE_STATE: [CpuState; 3683] = [
     CpuState::Base, // IaError
     CpuState::Base, // InsertedOpcode
     CpuState::Base, // Aaa
@@ -9788,6 +9796,10 @@ pub const OPCODE_STATE: [CpuState; 3679] = [
     CpuState::Evex, // KtestdKgdKed
     CpuState::Base, // RdmsrEqId
     CpuState::Base, // WrmsrnsIdEq
+    CpuState::Base, // UrdmsrEqId
+    CpuState::Base, // UwrmsrIdEq
+    CpuState::Base, // UrdmsrEqGq
+    CpuState::Base, // UwrmsrGqEq
     CpuState::Base, // MovrsGbEb
     CpuState::Base, // MovrsGwEw
     CpuState::Base, // MovrsGdEd
@@ -11151,3 +11163,144 @@ fn _feature_type_is_used(f: X86Feature) -> u16 {
     // discriminants of exactly this enum.
     f as u16
 }
+
+/// Bochs `cpu/decoder/features.h`'s features in declaration order, the
+/// `BX_ISA_` prefix dropped. `X86Feature` keeps exactly this order, so
+/// the numbers above mean what Bochs's do; a decoder test pins it.
+#[cfg(test)]
+pub(crate) const BOCHS_ISA_FEATURES: [&str; 134] = [
+    "386",
+    "X87",
+    "486",
+    "PENTIUM",
+    "P6",
+    "MMX",
+    "3DNOW",
+    "3DNOW_EXT",
+    "DEBUG_EXTENSIONS",
+    "VME",
+    "PSE",
+    "PAE",
+    "PGE",
+    "MTRR",
+    "PAT",
+    "SYSCALL_SYSRET_LEGACY",
+    "SYSENTER_SYSEXIT",
+    "CLFLUSH",
+    "CLFLUSHOPT",
+    "CLWB",
+    "SSE",
+    "SSE2",
+    "SSE3",
+    "SSSE3",
+    "SSE4_1",
+    "SSE4_2",
+    "POPCNT",
+    "MONITOR_MWAIT",
+    "WAITPKG",
+    "MONITORLESS_MWAIT",
+    "MONITORX_MWAITX",
+    "LONG_MODE",
+    "LM_LAHF_SAHF",
+    "NX",
+    "1G_PAGES",
+    "CMPXCHG16B",
+    "RDTSCP",
+    "FFXSR",
+    "XSAVE",
+    "XSAVEOPT",
+    "XSAVEC",
+    "XSAVES",
+    "AES_PCLMULQDQ",
+    "VAES_VPCLMULQDQ",
+    "MOVBE",
+    "FSGSBASE",
+    "AVX",
+    "AVX2",
+    "AVX_F16C",
+    "AVX_FMA",
+    "SSE4A",
+    "MISALIGNED_SSE",
+    "ALT_MOV_CR8",
+    "LZCNT",
+    "BMI1",
+    "BMI2",
+    "FMA4",
+    "XOP",
+    "TBM",
+    "SVM",
+    "VMX",
+    "SMX",
+    "RDRAND",
+    "RDSEED",
+    "ADX",
+    "SMAP",
+    "SMEP",
+    "SHA",
+    "SHA512",
+    "GFNI",
+    "SM3",
+    "SM4",
+    "AVX_IFMA",
+    "AVX_VNNI",
+    "AVX_VNNI_INT8",
+    "AVX_VNNI_INT16",
+    "AVX_NE_CONVERT",
+    "AVX512",
+    "AVX512_DQ",
+    "AVX512_BW",
+    "AVX512_CD",
+    "AVX512_VBMI",
+    "AVX512_VBMI2",
+    "AVX512_IFMA52",
+    "AVX512_VPOPCNTDQ",
+    "AVX512_VNNI",
+    "AVX512_BITALG",
+    "AVX512_VP2INTERSECT",
+    "AVX512_BF16",
+    "AVX512_FP16",
+    "AMX",
+    "AMX_INT8",
+    "AMX_BF16",
+    "AMX_FP16",
+    "AMX_FP8",
+    "AMX_COMPLEX",
+    "AMX_MOVRS",
+    "AMX_AVX512",
+    "AVX10_1",
+    "AVX10_2",
+    "AVX10_2_MOVRS",
+    "XAPIC",
+    "X2APIC",
+    "XAPIC_EXT",
+    "PCID",
+    "INVPCID",
+    "TSC_ADJUST",
+    "TSC_DEADLINE",
+    "FOPCODE_DEPRECATION",
+    "FCS_FDS_DEPRECATION",
+    "FDP_DEPRECATION",
+    "PKU",
+    "PKS",
+    "UMIP",
+    "RDPID",
+    "TCE",
+    "CLZERO",
+    "SCA_MITIGATIONS",
+    "CET",
+    "WRMSRNS",
+    "MSR_IMM",
+    "CMPCCXADD",
+    "SERIALIZE",
+    "LASS",
+    "LA57",
+    "UINTR",
+    "FLEXIBLE_UIRET",
+    "MOVDIRI",
+    "MOVDIR64B",
+    "MSRLIST",
+    "RAO_INT",
+    "MOVRS",
+    "FRED",
+    "USER_MSR",
+];

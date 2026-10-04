@@ -263,6 +263,38 @@ pub enum Exception {
     Sx = 30,
 }
 
+impl Exception {
+    /// The exception `vector` names, or `None` for a vector that names none:
+    /// 2 is the NMI, and 9, 15, 22–29, 31 and everything from 32 up are
+    /// reserved or external.
+    #[must_use]
+    pub const fn from_vector(vector: u8) -> Option<Self> {
+        Some(match vector {
+            0 => Self::De,
+            1 => Self::Db,
+            3 => Self::Bp,
+            4 => Self::Of,
+            5 => Self::Br,
+            6 => Self::Ud,
+            7 => Self::Nm,
+            8 => Self::Df,
+            10 => Self::Ts,
+            11 => Self::Np,
+            12 => Self::Ss,
+            13 => Self::Gp,
+            14 => Self::Pf,
+            16 => Self::Mf,
+            17 => Self::Ac,
+            18 => Self::Mc,
+            19 => Self::Xm,
+            20 => Self::Ve,
+            21 => Self::Cp,
+            30 => Self::Sx,
+            _ => return None,
+        })
+    }
+}
+
 #[allow(clippy::upper_case_acronyms)]
 pub(super) enum CpExceptionErrorCode {
     NearRet = 1,
@@ -1436,6 +1468,11 @@ pub struct BxRegsMsr {
 
     pub(crate) ia32_umwait_ctrl: u32,
     pub(crate) ia32_spec_ctrl: u32, // SCA
+
+    /// IA32_USER_MSR_CTL: bit 0 enables URDMSR/UWRMSR, and the page it names
+    /// holds their permission bitmaps (reads first, writes 2048 bytes in).
+    /// Bochs cpu.h `msr.ia32_user_msr_ctrl`.
+    pub(crate) ia32_user_msr_ctrl: u64,
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
@@ -2059,15 +2096,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             self.diag_inject_ext_intr_vectors[vector as usize] += 1;
         }
 
-        // BOCHS BX_INSTR_HWINTERRUPT(cpu_id, vector, cs, eip)
-        if self.instrumentation.active.has_hw_interrupt() {
-            let cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
-                .selector
-                .value;
-            let rip = self.rip();
-            let ev = super::instrumentation::HwInterruptEvent { vector, cs, rip };
-            self.instrumentation.fire_hwinterrupt(&ev);
-        }
+        self.instrument_hw_interrupt(vector);
 
         // Diagnostic ring for the pf_diag tripwire (see field docs).
         #[cfg(feature = "std")]
@@ -2095,14 +2124,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // - speculative_rsp setup/commit
         // - BadVector → exception() recovery
         // - mode dispatch (real vs protected)
-        // soft_int=false, no error code for external IRQs
-        let result = self.interrupt(
-            vector,
-            super::exception::InterruptType::ExternalInterrupt,
-            false,
-            false,
-            0,
-        );
+        let result =
+            self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, 0);
 
         // Commit prev_rip after successful delivery (Bochs event.cc)
         if result.is_ok() {

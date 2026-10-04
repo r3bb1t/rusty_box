@@ -1061,7 +1061,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// delegates the actual MSR-table dispatch to `rdmsr_value`. The split
     /// lets VMX VM-entry / VM-exit MSR lists reuse the dispatch without the
     /// CPL+intercept ceremony.
-    pub(super) fn rdmsr(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+    /// RDMSR, with the index in ECX or (`RdmsrEqId`) in an immediate — Bochs
+    /// msr.cc `RDMSR`. The ECX form splits the value across EDX:EAX; the
+    /// immediate form writes all of it to its register operand.
+    pub(super) fn rdmsr(&mut self, instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl;
@@ -1070,18 +1073,91 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        let msr = self.ecx();
+        let immediate = instr.get_ia_opcode() == super::decoder::Opcode::RdmsrEqId;
+        let msr = if immediate { instr.id() } else { self.ecx() };
         if self.in_svm_guest {
             self.svm_intercept_msr(0, msr)?;
         }
-        if self.in_vmx_guest && self.vmexit_check_rdmsr(msr)? {
-            return Ok(());
+        if self.in_vmx_guest {
+            let reason = if immediate {
+                super::vmx::MsrExitReason::RdmsrImm
+            } else {
+                super::vmx::MsrExitReason::Rdmsr
+            };
+            if self.vmexit_check_msr(reason, msr)? {
+                return Ok(());
+            }
         }
         let val = self.rdmsr_value(msr)?;
         tracing::trace!("RDMSR: MSR={:#010x} -> {:#018x}", msr, val);
-        self.set_rax(val & 0xFFFF_FFFF);
-        self.set_rdx(val >> 32);
+        if immediate {
+            self.set_gpr64(usize::from(instr.dst()), val);
+        } else {
+            self.set_rax(val & 0xFFFF_FFFF);
+            self.set_rdx(val >> 32);
+        }
         Ok(())
+    }
+
+    /// The URDMSR/UWRMSR permission bit for `msr`: Bochs msr.cc reads it
+    /// with `system_read_byte` from the page IA32_USER_MSR_CTL names — one
+    /// bit per index, read permissions first and write permissions 2048
+    /// bytes in.
+    fn user_msr_permitted(&mut self, msr: u32, write: bool) -> crate::cpu::Result<bool> {
+        let page = self.msr.ia32_user_msr_ctrl & !0xFFF;
+        let byte = page + u64::from(msr >> 3) + if write { 2048 } else { 0 };
+        Ok(self.system_read_byte(byte)? & (1 << (msr & 7)) != 0)
+    }
+
+    /// URDMSR — Bochs msr.cc `URDMSR`: an MSR read at any privilege level,
+    /// for the indexes the OS opens through IA32_USER_MSR_CTL. #UD unless
+    /// bit 0 enables the instruction; #GP for an index past 0x3FFF or one
+    /// the read bitmap does not permit, and for an MSR RDMSR would refuse.
+    pub(super) fn urdmsr(&mut self, instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+        // Bochs reads the index into a 32-bit variable, so the register
+        // form's bits 63:32 are not looked at.
+        let msr = if instr.get_ia_opcode() == super::decoder::Opcode::UrdmsrEqId {
+            instr.id()
+        } else {
+            self.get_gpr64(usize::from(instr.src())) as u32
+        };
+        if self.msr.ia32_user_msr_ctrl & 1 == 0 {
+            tracing::trace!("URDMSR: disabled in IA32_USER_MSR_CTL, #UD");
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if msr > 0x3FFF || !self.user_msr_permitted(msr, false)? {
+            tracing::trace!("URDMSR: MSR {msr:#x} not readable, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        if self.in_vmx_guest && self.vmexit_check_msr(super::vmx::MsrExitReason::Urdmsr, msr)? {
+            return Ok(());
+        }
+        let val = self.rdmsr_value(msr)?;
+        self.set_gpr64(usize::from(instr.dst()), val);
+        Ok(())
+    }
+
+    /// UWRMSR — Bochs msr.cc `UWRMSR`, the write counterpart of
+    /// [`Self::urdmsr`], checked against the write bitmap.
+    pub(super) fn uwrmsr(&mut self, instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+        let msr = if instr.get_ia_opcode() == super::decoder::Opcode::UwrmsrIdEq {
+            instr.id()
+        } else {
+            self.get_gpr64(usize::from(instr.dst())) as u32
+        };
+        if self.msr.ia32_user_msr_ctrl & 1 == 0 {
+            tracing::trace!("UWRMSR: disabled in IA32_USER_MSR_CTL, #UD");
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if msr > 0x3FFF || !self.user_msr_permitted(msr, true)? {
+            tracing::trace!("UWRMSR: MSR {msr:#x} not writable, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        if self.in_vmx_guest && self.vmexit_check_msr(super::vmx::MsrExitReason::Uwrmsr, msr)? {
+            return Ok(());
+        }
+        let val = self.get_gpr64(usize::from(instr.src()));
+        self.wrmsr_value(msr, val)
     }
 
     /// An index this architecture does not define — Bochs msr.cc
@@ -1170,6 +1246,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             BX_MSR_TSC_DEADLINE => self.lapic.get_tsc_deadline(),
             // Bochs msr.cc — WAITPKG umwait max-delay control.
             BX_MSR_IA32_UMWAIT_CONTROL => self.msr.ia32_umwait_ctrl as u64,
+            BX_MSR_IA32_USER_MSR_CTL => self.msr.ia32_user_msr_ctrl,
             // Bochs msr.cc — CET control + shadow-stack pointers.
             // ia32_cet_control[] is indexed `index == BX_MSR_IA32_U_CET` so
             // U_CET → [1] (user), S_CET → [0] (supervisor).
@@ -1213,6 +1290,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             //   [0] RDCL_NO, [1] IBRS_ALL, [2] RSBA,
             //   [3] SKIP_L1DFL_VMENTRY, [4] SSB_NO.
             BX_MSR_IA32_ARCH_CAPABILITIES => 0x1F,
+            // Bochs msr.cc: a VMX guest with IA32_SPEC_CTRL virtualized reads
+            // the shadow its VMM set, not the register.
+            BX_MSR_IA32_SPEC_CTRL if self.spec_ctrl_virtualized() => self.vmcs.ia32_spec_ctrl_shadow,
             BX_MSR_IA32_SPEC_CTRL => self.msr.ia32_spec_ctrl as u64,
             // Bochs msr.cc: write-only MSRs, so a read is a #GP.
             BX_MSR_IA32_PRED_CMD | BX_MSR_IA32_FLUSH_CMD => {
@@ -1362,8 +1442,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             BX_MSR_VMX_VMFUNC => 0x0000_0000_0000_0000u64,
             // IA32_VMX_PROCBASED_CTLS3 and IA32_VMX_EXIT_CTLS2. Bochs msr.cc
             // answers each only while its `vmx_cap` has supported bits for it
-            // and #GPs otherwise; this port implements no tertiary execution
-            // control and no secondary exit control, so neither exists.
+            // and #GPs otherwise. The tertiary controls are 64 allowed-1 bits;
+            // this port offers no secondary exit control.
+            BX_MSR_VMX_PROCBASED_CTRLS3 if super::vmx::VMX_PROCBASED_CTLS3_ALLOWED_1 != 0 => {
+                super::vmx::VMX_PROCBASED_CTLS3_ALLOWED_1
+            }
             BX_MSR_VMX_PROCBASED_CTRLS3 | BX_MSR_VMX_VMEXIT_CTRLS2 => {
                 tracing::debug!("RDMSR: MSR {msr:#010x} has no supported bits, #GP(0)");
                 self.exception(super::cpu::Exception::Gp, 0)?;
@@ -1391,7 +1474,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs msr.cc BX_CPU_C::WRMSR. Performs CPL / instrumentation /
     /// SVM+VMX intercept checks, then delegates to `wrmsr_value`. The
     /// split lets VMX VM-entry / VM-exit MSR lists reuse the dispatch.
-    pub(super) fn wrmsr(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+    /// WRMSR and WRMSRNS — Bochs msr.cc `WRMSR`, which serves both and the
+    /// immediate form of WRMSRNS (`WrmsrnsIdEq`, index in the immediate and
+    /// the value in its register operand). A VMX guest's WRMSRNS exits as
+    /// WRMSRNS with qualification 1.
+    pub(super) fn wrmsr(&mut self, instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl;
@@ -1402,8 +1489,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         self.invalidate_prefetch_q();
 
-        let msr = self.ecx();
-        let val = ((self.edx() as u64) << 32) | (self.eax() as u64);
+        let opcode = instr.get_ia_opcode();
+        let immediate = opcode == super::decoder::Opcode::WrmsrnsIdEq;
+        let msr = if immediate { instr.id() } else { self.ecx() };
+        let val = if immediate {
+            self.get_gpr64(usize::from(instr.src()))
+        } else {
+            ((self.edx() as u64) << 32) | (self.eax() as u64)
+        };
 
         if self.instrumentation.active.has_cpuid_msr() {
             self.instrumentation.fire_wrmsr(msr, val);
@@ -1412,8 +1505,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.in_svm_guest {
             self.svm_intercept_msr(1, msr)?;
         }
-        if self.in_vmx_guest && self.vmexit_check_wrmsr(msr)? {
-            return Ok(());
+        if self.in_vmx_guest {
+            let reason = if opcode == super::decoder::Opcode::Wrmsr {
+                super::vmx::MsrExitReason::Wrmsr
+            } else {
+                super::vmx::MsrExitReason::Wrmsrns
+            };
+            if self.vmexit_check_msr(reason, msr)? {
+                return Ok(());
+            }
         }
 
         self.wrmsr_value(msr, val)?;
@@ -1529,6 +1629,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             // Bochs msr.cc — stores low 32 bits of value.
             BX_MSR_IA32_UMWAIT_CONTROL => self.msr.ia32_umwait_ctrl = val as u32,
+            // Bochs msr.cc: the permission-bitmap base must be canonical to
+            // the processor's width; bit 0 is the enable.
+            BX_MSR_IA32_USER_MSR_CTL => {
+                if !self.is_cpuid_canonical(val) {
+                    tracing::trace!("WRMSR: non-canonical IA32_USER_MSR_CTL {val:#x}");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.ia32_user_msr_ctrl = val;
+            }
             // Bochs msr.cc — CET writes validate canonical address +
             // CET-control bit-pattern, then store. Returns false (#GP) on bad value.
             BX_MSR_IA32_U_CET | BX_MSR_IA32_S_CET => {
@@ -1651,6 +1760,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // bit 9 — IBRS, STIBP, SSBD, IPRED_DIS_U/S, RRSBA_DIS_U/S, PSFD,
             // DDPD_U and BHI_DIS_S.
             BX_MSR_IA32_SPEC_CTRL => {
+                // Bochs msr.cc: with IA32_SPEC_CTRL virtualized, the bits the
+                // VMM's mask covers keep the register's value whatever the
+                // guest writes. The shadow is not written.
+                let val = if self.spec_ctrl_virtualized() {
+                    let mask = self.vmcs.ia32_spec_ctrl_mask;
+                    (u64::from(self.msr.ia32_spec_ctrl) & mask) | (val & !mask)
+                } else {
+                    val
+                };
                 const VALID: u64 = 0x5FF;
                 if (val & !VALID) != 0 {
                     tracing::debug!(
@@ -4985,6 +5103,103 @@ mod tests {
             cpu.wrmsr_value(BX_MSR_IA32_FRED_CONFIG, 0x4).is_err(),
             "bit 2 of FRED_CONFIG is reserved"
         );
+    }
+
+    /// Execute `instr`, which must fault, and return the vector it raised.
+    /// The first exception raised is the instruction's own; delivering it on
+    /// this bare machine may raise more after it.
+    fn faults_with(
+        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, ()>,
+        instr: &Instruction,
+    ) -> u8 {
+        let first = cpu.exc_diag_idx;
+        assert!(cpu.execute_instruction(instr).is_err(), "{:?} must fault", instr.get_ia_opcode());
+        cpu.exc_diag_ring[first % 32].1
+    }
+
+    fn decode(bytes: &[u8]) -> Instruction {
+        rusty_box_decoder::fetch_decode64(bytes).expect("decodes")
+    }
+
+    /// The URDMSR/UWRMSR permission bitmap page, and the MSR the tests use:
+    /// SYSENTER_CS, which every model has and whose index is below 0x4000.
+    const USER_MSR_BITMAP: u64 = 0x8000;
+    const SYSENTER_CS: u32 = crate::cpu::msr::BX_MSR_SYSENTER_CS;
+
+    /// Bochs msr.cc `URDMSR`/`UWRMSR`: IA32_USER_MSR_CTL bit 0 enables the
+    /// instructions (#UD otherwise), the page it names grants each index
+    /// separately for reading and, 2048 bytes in, for writing (#GP
+    /// otherwise), no index past 0x3FFF is ever granted, and the register
+    /// form ignores bits 63:32 of its index.
+    #[test]
+    fn user_msr_access_follows_ia32_user_msr_ctl() {
+        use super::super::decoder::features::X86Feature;
+        use crate::cpu::cpu::Exception;
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        set_cpu_feature(&mut cpu, X86Feature::IsaUserMsr, true);
+        cpu.wrmsr_value(SYSENTER_CS, 0x10).expect("SYSENTER_CS is writable");
+        // URDMSR rcx, rax and UWRMSR rax, rcx: F2/F3 0F 38 F8, ModRM 0xC1.
+        let urdmsr = decode(&[0xF2, 0x0F, 0x38, 0xF8, 0xC1]);
+        let uwrmsr = decode(&[0xF3, 0x0F, 0x38, 0xF8, 0xC1]);
+        cpu.set_rax(u64::from(SYSENTER_CS));
+
+        assert_eq!(faults_with(&mut cpu, &urdmsr), Exception::Ud as u8, "disabled");
+
+        cpu.wrmsr_value(crate::cpu::msr::BX_MSR_IA32_USER_MSR_CTL, USER_MSR_BITMAP | 1)
+            .expect("a canonical page with the enable bit");
+        assert_eq!(faults_with(&mut cpu, &urdmsr), Exception::Gp as u8, "not granted");
+
+        let grant = |cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, ()>, offset: u64| {
+            let byte = USER_MSR_BITMAP + offset + u64::from(SYSENTER_CS >> 3);
+            cpu.mem_write_byte(byte, 1 << (SYSENTER_CS & 7));
+        };
+        grant(&mut cpu, 0);
+        cpu.set_rax((1 << 32) | u64::from(SYSENTER_CS));
+        cpu.execute_instruction(&urdmsr).expect("a granted read");
+        assert_eq!(cpu.rcx(), 0x10);
+
+        cpu.set_rcx(0x23);
+        assert_eq!(
+            faults_with(&mut cpu, &uwrmsr),
+            Exception::Gp as u8,
+            "the read grant is not a write grant"
+        );
+        grant(&mut cpu, 2048);
+        cpu.execute_instruction(&uwrmsr).expect("a granted write");
+        assert_eq!(cpu.rdmsr_value(SYSENTER_CS).expect("readable"), 0x23);
+
+        cpu.set_rax(0x4000);
+        assert_eq!(faults_with(&mut cpu, &urdmsr), Exception::Gp as u8, "past 0x3FFF");
+
+        assert!(cpu
+            .wrmsr_value(crate::cpu::msr::BX_MSR_IA32_USER_MSR_CTL, 0x0000_8000_0000_0001)
+            .is_err(), "the bitmap base must be canonical");
+    }
+
+    /// Bochs msr.cc `RDMSR` and `WRMSR` with the index in an immediate (VEX
+    /// map 7): the value goes to and comes from the instruction's register
+    /// operand, all 64 bits, instead of EDX:EAX.
+    #[test]
+    fn the_msr_immediate_forms_use_their_register_operand() {
+        use super::super::decoder::features::X86Feature;
+        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+        let mut cpu = machine.ctx();
+        set_cpu_feature(&mut cpu, X86Feature::IsaMsrImm, true);
+        let index = SYSENTER_CS.to_le_bytes();
+        // C4 E7 <W0 vvvv=1111 L0 pp> <opcode> ModRM(rm = rdx) imm32.
+        let rdmsr = decode(&[[0xC4, 0xE7, 0x7B, 0xF6, 0xC2].as_slice(), &index].concat());
+        let wrmsrns = decode(&[[0xC4, 0xE7, 0x7A, 0xF6, 0xC2].as_slice(), &index].concat());
+
+        cpu.set_rdx(0x2B);
+        cpu.set_rax(0xDEAD);
+        cpu.execute_instruction(&wrmsrns).expect("WRMSRNS imm");
+        assert_eq!(cpu.rdmsr_value(SYSENTER_CS).expect("readable"), 0x2B);
+
+        cpu.set_rdx(0);
+        cpu.execute_instruction(&rdmsr).expect("RDMSR imm");
+        assert_eq!(cpu.rdx(), 0x2B);
+        assert_eq!(cpu.rax(), 0xDEAD, "EDX:EAX are not the destination");
     }
 
     #[test]

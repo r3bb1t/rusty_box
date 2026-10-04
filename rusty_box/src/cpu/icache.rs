@@ -635,6 +635,8 @@ fn is_trace_end_opcode(opcode: Opcode) -> bool {
         Opcode::Rdmsr | Opcode::Wrmsr | Opcode::Wrmsrns |
         Opcode::Rdmsrlist | Opcode::Wrmsrlist |
         Opcode::RdmsrEqId | Opcode::WrmsrnsIdEq |
+        Opcode::UrdmsrEqId | Opcode::UwrmsrIdEq |
+        Opcode::UrdmsrEqGq | Opcode::UwrmsrGqEq |
         Opcode::Rdtsc | Opcode::Rdtscp |
         Opcode::Xsetbv | Opcode::Wrpkru |
         // Waits and power states

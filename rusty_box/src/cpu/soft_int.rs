@@ -87,14 +87,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Dispatches to real_mode_int or protected_mode_int based on current CPU mode.
     /// After delivery, invalidates prefetch and returns CpuLoopRestart to
     /// restart the trace (matching Bochs BX_NEXT_TRACE).
+    ///
+    /// Whether the gate's DPL is checked follows from `event_type` alone, as
+    /// Bochs derives its `soft_int`: a caller names what is being delivered,
+    /// and the privilege rule that kind of event obeys comes with it.
     pub(super) fn interrupt(
         &mut self,
         vector: u8,
         event_type: super::exception::InterruptType,
-        soft_int: bool,
         push_error: bool,
         error_code: u16,
     ) -> super::Result<()> {
+        let soft_int = event_type.is_software();
         tracing::trace!(
             "interrupt(): vector={:#04x} soft_int={} mode={}",
             vector,
@@ -133,9 +137,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.real_mode() {
             self.interrupt_real_mode(vector)?;
         } else {
-            // V8086 mode software interrupt: try VME redirect first
-            // Bochs exception.cc: v86_redirect_interrupt checked before protected_mode_int
-            if self.v8086_mode() && soft_int && self.v86_redirect_interrupt(vector)? {
+            // V8086 mode software interrupt: try VME redirect first. `INT n`
+            // alone — Bochs exception.cc `interrupt` tests the type against
+            // BX_SOFTWARE_INTERRUPT, so `INT3` and `INTO` are never redirected.
+            if self.v8086_mode()
+                && event_type == super::exception::InterruptType::SoftwareInterrupt
+                && self.v86_redirect_interrupt(vector)?
+            {
                 // Interrupt was redirected through virtual IVT
                 self.speculative_rsp = false;
                 self.ext = false;
@@ -199,28 +207,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         let vector = instr.ib();
         tracing::trace!("INT {:#04x}", vector);
-        // BX_SOFTWARE_INTERRUPT → soft_int=true, no error code
-        self.interrupt(
-            vector,
-            super::exception::InterruptType::SoftwareInterrupt,
-            true,
-            false,
-            0,
-        )
+        self.interrupt(vector, super::exception::InterruptType::SoftwareInterrupt, false, 0)
     }
 
     /// INT3 - Breakpoint interrupt (vector 3)
     /// Based on Bochs INT3 in soft_int.cc
     pub fn int3(&mut self, _instr: &Instruction) -> super::Result<()> {
         tracing::trace!("INT3 (breakpoint)");
-        // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
-        self.interrupt(
-            3,
-            super::exception::InterruptType::SoftwareException,
-            true,
-            false,
-            0,
-        )
+        self.interrupt(3, super::exception::InterruptType::SoftwareException, false, 0)
     }
 
     /// INTO - Interrupt on overflow (vector 4, only if OF=1)
@@ -234,14 +228,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn into_overflow(&mut self, _instr: &Instruction) -> super::Result<()> {
         if self.get_of() {
             tracing::trace!("INTO: overflow detected, calling INT 4");
-            // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
-            return self.interrupt(
-                4,
-                super::exception::InterruptType::SoftwareException,
-                true,
-                false,
-                0,
-            );
+            return self.interrupt(4, super::exception::InterruptType::SoftwareException, false, 0);
         }
         Ok(())
     }
@@ -256,16 +243,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 .selector
                 .value
         );
-        // BX_PRIVILEGED_SOFTWARE_INTERRUPT → soft_int=false (privileged bypass DPL check)
-        // Bochs sets EXT=1 before calling interrupt() for INT1
+        // A privileged software interrupt skips the gate's DPL check, and
+        // Bochs sets EXT=1 before calling interrupt() for INT1.
         self.ext = true;
-        self.interrupt(
-            1,
-            super::exception::InterruptType::PrivilegedSoftwareInterrupt,
-            false,
-            false,
-            0,
-        )
+        self.interrupt(1, super::exception::InterruptType::PrivilegedSoftwareInterrupt, false, 0)
     }
 
     // =========================================================================

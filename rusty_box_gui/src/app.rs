@@ -41,10 +41,9 @@ use egui::RichText;
 // native build hands it to a runner thread instead.
 #[cfg(target_arch = "wasm32")]
 use rusty_box::emulator::RunBudget;
-use rusty_box::params::{
-    BxParams, BX_CPU_CORES_LIMIT, BX_CPU_HT_THREADS_LIMIT, BX_CPU_PROCESSORS_LIMIT,
-    BX_MAX_SMP_THREADS_SUPPORTED,
-};
+use rusty_box::params::{BxParams, BX_MAX_SMP_THREADS_SUPPORTED};
+#[cfg(not(target_arch = "wasm32"))]
+use rusty_box::params::{BX_CPU_CORES_LIMIT, BX_CPU_HT_THREADS_LIMIT, BX_CPU_PROCESSORS_LIMIT};
 use rusty_box_bximage::{calculate_hard_disk_geometry, FloppyFormat, SectorSize};
 #[cfg(target_arch = "wasm32")]
 use rusty_box_bximage::{CreatedImage as BxCreatedImage, ImageSize};
@@ -52,6 +51,7 @@ use rusty_box_bximage::{CreatedImage as BxCreatedImage, ImageSize};
 use rusty_box_bximage::{create_floppy, ExistingFilePolicy};
 
 /// Common pre-boot VBE resolutions offered by the Display panel picker.
+#[cfg(not(target_arch = "wasm32"))]
 const VGA_MODE_PRESETS: &[(u16, u16)] = &[
     (1024, 768),
     (1280, 720),
@@ -60,6 +60,7 @@ const VGA_MODE_PRESETS: &[(u16, u16)] = &[
     (1920, 1080),
 ];
 
+#[cfg(not(target_arch = "wasm32"))]
 fn vga_mode_label(mode: Option<crate::config::VgaMode>) -> String {
     match mode {
         None => "Default (VGA / VBE)".to_owned(),
@@ -4841,7 +4842,7 @@ fn draw_u32_field(
     changed
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
 fn draw_u32_field(
     ui: &mut egui::Ui,
     value: &mut u32,
@@ -4898,7 +4899,7 @@ fn draw_u64_field(
     changed
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
 fn draw_u64_field(
     ui: &mut egui::Ui,
     value: &mut u64,
@@ -5093,6 +5094,7 @@ fn js_error(error: wasm_bindgen::JsValue) -> String {
 }
 
 /// What an engine is called in the window.
+#[cfg(not(target_arch = "wasm32"))]
 fn engine_label(engine: crate::config::Engine) -> &'static str {
     match engine {
         crate::config::Engine::Interpreter => "Interpreter",

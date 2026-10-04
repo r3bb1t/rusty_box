@@ -1091,6 +1091,51 @@ provenance for a facility Bochs lacks).
 The stream is part of the snapshot, so a restored machine keeps codes the guest
 wrote before it was saved.
 
+## D18 — VM entry refuses a 64-bit guest whose RIP is not canonical
+
+**Bochs:** `cpu/vmx.cc BX_CPU_C::VMenterLoadCheckGuestState` checks guest RIP
+once: when the "IA-32e mode guest" entry control is clear or the guest's CS.L
+is 0, bits 63:32 must be zero. A guest entering 64-bit code (IA-32e and
+CS.L=1) gets no check, so any RIP enters. The guest's first fetch then takes
+#GP(0) inside the guest (`cpu/cpu.cc BX_CPU_C::prefetch`, "RIP crossed
+canonical boundary").
+
+**rusty_box:** `vmenter_load_check_guest_state` (`cpu/vmx.rs`) makes Bochs's
+check and, for 64-bit code, also requires RIP to be canonical to the
+processor's linear-address width — 57 bits on a model with LA57, else 48
+(`BxCpuC::is_cpuid_canonical`, Bochs's `IsCpuidCanonical`) — failing the entry
+on guest state otherwise.
+
+### What the guest observes
+
+A VMM that loads a non-canonical RIP for a 64-bit guest gets a failed-entry VM
+exit: reason 33 (VM-entry failure, invalid guest state) with bit 31 set, the
+VMM resuming at its HOST_RIP. Under Bochs the entry succeeds and the guest
+faults on its first instruction, which the VMM sees as a #GP exception exit or
+not at all, depending on its exception bitmap. Every canonical RIP, and every
+RIP outside 64-bit code, behaves the same on both.
+
+### Why the divergence is the correct side
+
+The SDM's VM-entry checks on guest RIP list two rules: bits 63:32 are zero
+outside 64-bit code, and in 64-bit code (IA-32e mode guest with CS.L set) on a
+processor with N < 64 linear-address bits, bits 63:N are all equal — RIP is
+canonical. Bochs implements the first and omits the second, so a VMM sees a
+different exit from the one hardware gives. N is the processor's supported width (CPUID 80000008H), not the current
+paging mode's, which is why the check uses `is_cpuid_canonical` and not
+`is_canonical`.
+
+### Price of closing it
+
+Deleting one branch. Tests pin both rules on a real VMLAUNCH:
+`a_64_bit_guest_needs_a_canonical_rip` and
+`a_compatibility_mode_guest_needs_a_rip_below_4_gib` (`cpu/vmx.rs`).
+
+**Status:** open and deliberate (owner ruling, 2026-10-04: implement the
+hardware behaviour, register it, and record the Bochs gap upstream). Written
+up in `docs/bochs-upstream-bugs.md`, to be confirmed by further checks before
+it is filed.
+
 ---
 
 # Hypervisor-engine divergences (`H<n>`)

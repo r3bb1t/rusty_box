@@ -2755,6 +2755,13 @@ back_to_enum! {
         RdmsrEqId,
         WrmsrnsIdEq,
 
+        // URDMSR/UWRMSR imm form,
+        UrdmsrEqId,
+        UwrmsrIdEq,
+
+        UrdmsrEqGq,
+        UwrmsrGqEq,
+
         // MOVRS only supported in 64-bit mode,
         MovrsGbEb,
         MovrsGwEw,

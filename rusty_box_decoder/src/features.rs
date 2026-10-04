@@ -195,8 +195,6 @@ pub enum X86Feature {
     IsaAmxBf16,
     /// AMX-FP16 Instructions
     IsaAmxFp16,
-    /// AMX-TF32 Instructions
-    IsaAmxTf32,
     /// AMX-FP8 Instructions
     IsaAmxFp8,
     /// AMX-COMPLEX Instructions

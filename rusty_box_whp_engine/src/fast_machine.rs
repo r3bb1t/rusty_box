@@ -1262,6 +1262,211 @@ mod tests {
         assert_eq!(debug_output(&mut machine), std::vec![MARK], "and does once stepped");
     }
 
+    /// A software interrupt whose delivery faults is the fault, once, and
+    /// nothing else.
+    ///
+    /// The guest's interrupt table covers vectors 0-15 only, so `INT 0x80`
+    /// raises #GP while the processor delivers it. This engine traps #GP and
+    /// finishes the instruction on its interpreter, which takes the same #GP
+    /// into the guest's handler. The handler widens the table and steps over
+    /// the `INT`, so the guest prints `G` and then `D` — and never `I`, the
+    /// vector 0x80 handler, because no `INT 0x80` ever completed.
+    ///
+    /// The platform keeps the delivery the fault interrupted as its pending
+    /// interruption (measured: `InterruptionPending` in the exit header and a
+    /// software interrupt, vector 0x80, length 2, in the register). Left
+    /// there, every entry re-delivers it from inside the handler, and once
+    /// the table is wide enough the guest takes an `INT 0x80` it never
+    /// executed.
+    ///
+    /// ```text
+    /// C7 06 34 00 00 11   mov word [0x34], 0x1100    ; IVT[13] = 0000:1100
+    /// C7 06 36 00 00 00   mov word [0x36], 0x0000
+    /// C7 06 00 02 80 11   mov word [0x200], 0x1180   ; IVT[0x80] = 0000:1180
+    /// C7 06 02 02 00 00   mov word [0x202], 0x0000
+    /// 0F 01 1E 00 12      lidt [0x1200]              ; limit 0x3F
+    /// CD 80               int 0x80
+    /// B0 44 E6 E9 EB FE   mov al, 'D' ; out 0xE9, al ; jmp $
+    ///
+    /// 1100: B0 47 E6 E9   mov al, 'G' ; out 0xE9, al
+    ///       0F 01 1E 10 12 lidt [0x1210]             ; limit 0x3FF
+    ///       89 E5          mov bp, sp
+    ///       83 46 00 02    add word [bp], 2          ; past the INT
+    ///       CF             iret
+    /// 1180: B0 49 E6 E9 CF mov al, 'I' ; out 0xE9, al ; iret
+    /// ```
+    #[test]
+    fn a_software_interrupt_whose_delivery_faults_is_the_fault_alone() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut built = machine_running_on(
+            DeviceClock::HostTime,
+            &[
+                0xC7, 0x06, 0x34, 0x00, 0x00, 0x11, //
+                0xC7, 0x06, 0x36, 0x00, 0x00, 0x00, //
+                0xC7, 0x06, 0x00, 0x02, 0x80, 0x11, //
+                0xC7, 0x06, 0x02, 0x02, 0x00, 0x00, //
+                0x0F, 0x01, 0x1E, 0x00, 0x12, //
+                0xCD, 0x80, //
+                0xB0, b'D', 0xE6, DEBUG_PORT, 0xEB, 0xFE, //
+            ],
+        );
+        built
+            .mem_write(
+                0x1100,
+                &[
+                    0xB0, b'G', 0xE6, DEBUG_PORT, //
+                    0x0F, 0x01, 0x1E, 0x10, 0x12, //
+                    0x89, 0xE5, //
+                    0x83, 0x46, 0x00, 0x02, //
+                    0xCF, //
+                ],
+            )
+            .expect("#GP handler");
+        built.mem_write(0x1180, &[0xB0, b'I', 0xE6, DEBUG_PORT, 0xCF]).expect("INT 0x80 handler");
+        built.mem_write(0x1200, &[0x3F, 0x00, 0x00, 0x00, 0x00, 0x00]).expect("narrow IDTR");
+        built.mem_write(0x1210, &[0xFF, 0x03, 0x00, 0x00, 0x00, 0x00]).expect("full IDTR");
+        let mut machine = FastMachine::adopt(built).expect("a machine on hardware");
+
+        for _ in 0..5 {
+            let budget = ten_milliseconds(&mut machine);
+            machine.step(budget).expect("a step");
+        }
+        assert_eq!(String::from_utf8_lossy(&debug_output(&mut machine)), "GD");
+    }
+
+    /// An external interrupt whose delivery faults is the fault, and the
+    /// interrupt is gone.
+    ///
+    /// The guest moves the 8259's vectors to 0x20 and keeps an interrupt table
+    /// that covers vectors 0-15 only, so the keystroke's IRQ1 — vector 0x21 —
+    /// raises #GP while the processor delivers it. That is what a processor
+    /// does with an interrupt it has acknowledged and cannot deliver: the
+    /// fault is taken, and the interrupt is not taken again. So the guest
+    /// prints `G`, and never `K`, the IRQ1 handler.
+    ///
+    /// Nothing at `RIP` recreates the interrupt — the guest is in a loop of
+    /// its own — so the shadow has to DELIVER it to raise the #GP, and a
+    /// shadow that executed the loop instead prints nothing. The platform
+    /// reports the interrupted delivery as an external interrupt, vector 0x21
+    /// (measured: `0x0021_0001`), and unlike an interrupted `INT n` it does
+    /// not make it again at the next entry — measured: the register reads
+    /// empty at the next exit — so clearing the register is pinned by
+    /// `a_software_interrupt_whose_delivery_faults_is_the_fault_alone`, not
+    /// here.
+    ///
+    /// ```text
+    /// 31 C0 / 8E D8 / 8E D0  xor ax, ax ; mov ds, ax ; mov ss, ax
+    /// BC 00 70               mov sp, 0x7000
+    /// B0 11 E6 20            mov al, 0x11 ; out 0x20, al    ; ICW1
+    /// B0 20 E6 21            mov al, 0x20 ; out 0x21, al    ; ICW2: vectors at 0x20
+    /// B0 04 E6 21            mov al, 0x04 ; out 0x21, al    ; ICW3
+    /// B0 01 E6 21            mov al, 0x01 ; out 0x21, al    ; ICW4
+    /// B0 FD E6 21            mov al, 0xFD ; out 0x21, al    ; unmask IRQ1 alone
+    /// C7 06 34 00 00 11      mov word [0x34], 0x1100        ; IVT[13] = 0000:1100
+    /// C7 06 36 00 00 00      mov word [0x36], 0x0000
+    /// C7 06 84 00 80 11      mov word [0x84], 0x1180        ; IVT[0x21] = 0000:1180
+    /// C7 06 86 00 00 00      mov word [0x86], 0x0000
+    /// 0F 01 1E 00 12         lidt [0x1200]                  ; limit 0x3F
+    /// FB                     sti
+    /// 40 / EB FD             busy: inc ax ; jmp busy        ; exit-free
+    ///
+    /// 1100: B0 47 E6 E9      mov al, 'G' ; out 0xE9, al
+    ///       E4 60            in al, 0x60                    ; take the scancode
+    ///       B0 20 E6 20      mov al, 0x20 ; out 0x20, al    ; EOI
+    ///       0F 01 1E 10 12   lidt [0x1210]                  ; limit 0x3FF
+    ///       CF               iret
+    /// 1180: B0 4B E6 E9      mov al, 'K' ; out 0xE9, al
+    ///       E4 60 / B0 20 E6 20 / CF
+    /// ```
+    #[test]
+    fn an_external_interrupt_whose_delivery_faults_is_the_fault_alone() {
+        if !hypervisor_here() {
+            return;
+        }
+        let _turn = a_turn_on_the_hardware();
+        let mut built = machine_with_devices_on(
+            DeviceClock::HostTime,
+            &[
+                0x31, 0xC0, 0x8E, 0xD8, 0x8E, 0xD0, //
+                0xBC, 0x00, 0x70, //
+                0xB0, 0x11, 0xE6, 0x20, //
+                0xB0, 0x20, 0xE6, 0x21, //
+                0xB0, 0x04, 0xE6, 0x21, //
+                0xB0, 0x01, 0xE6, 0x21, //
+                0xB0, 0xFD, 0xE6, 0x21, //
+                0xC7, 0x06, 0x34, 0x00, 0x00, 0x11, //
+                0xC7, 0x06, 0x36, 0x00, 0x00, 0x00, //
+                0xC7, 0x06, 0x84, 0x00, 0x80, 0x11, //
+                0xC7, 0x06, 0x86, 0x00, 0x00, 0x00, //
+                0x0F, 0x01, 0x1E, 0x00, 0x12, //
+                0xFB, //
+                0x40, 0xEB, 0xFD, //
+            ],
+        );
+        built
+            .mem_write(
+                0x1100,
+                &[
+                    0xB0, b'G', 0xE6, DEBUG_PORT, //
+                    0xE4, 0x60, //
+                    0xB0, 0x20, 0xE6, 0x20, //
+                    0x0F, 0x01, 0x1E, 0x10, 0x12, //
+                    0xCF, //
+                ],
+            )
+            .expect("#GP handler");
+        built
+            .mem_write(
+                0x1180,
+                &[0xB0, b'K', 0xE6, DEBUG_PORT, 0xE4, 0x60, 0xB0, 0x20, 0xE6, 0x20, 0xCF],
+            )
+            .expect("IRQ1 handler");
+        built.mem_write(0x1200, &[0x3F, 0x00, 0x00, 0x00, 0x00, 0x00]).expect("narrow IDTR");
+        built.mem_write(0x1210, &[0xFF, 0x03, 0x00, 0x00, 0x00, 0x00]).expect("full IDTR");
+        let mut machine = FastMachine::adopt(built).expect("a machine on hardware");
+
+        // The guest programs its 8259 and opens to interrupts before anything
+        // is owed.
+        let budget = ten_milliseconds(&mut machine);
+        machine.step(budget).expect("a step");
+        let ips = machine
+            .with_machine(|m| m.config().ips.per_second_u64())
+            .expect("a stepped machine is paused");
+        // A press alone: one scancode, so one IRQ1 and nothing after it.
+        let raised = machine
+            .with_machine(|m| {
+                assert!(
+                    m.keyboard().key(rusty_box::iodev::scancodes::BxKey::A, true),
+                    "the 8042 took the keystroke"
+                );
+                for _ in 0..200 {
+                    m.service_device_time(ips / 10_000).expect("the wheel turns");
+                    if m.processor(0).io().device_manager().has_interrupt() {
+                        return true;
+                    }
+                }
+                false
+            })
+            .expect("a stepped machine is paused");
+        assert!(raised, "the keystroke raised the 8259's pin");
+
+        for _ in 0..5 {
+            let budget = ten_milliseconds(&mut machine);
+            machine.step(budget).expect("a step");
+        }
+        let printed = debug_output(&mut machine);
+        assert_eq!(
+            machine.engine_census().injections.injected,
+            1,
+            "the vector was placed for the partition once; the guest printed {:?}",
+            String::from_utf8_lossy(&printed)
+        );
+        assert_eq!(String::from_utf8_lossy(&printed), "G");
+    }
+
     /// The processor a machine was built with is the one its guest starts on.
     ///
     /// The machine points its processor at [`CODE`] before adoption. The

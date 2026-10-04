@@ -1051,6 +1051,103 @@ fn test_vex_vmovntdqa_and_vpclmulqdq_decode() {
     );
 }
 
+/// A VEX map-7 instruction: `C4 E7 <W vvvv L pp> <opcode> <ModRM> imm32`,
+/// with R/X/B clear (no extension), so `pp` selects the form.
+fn vex_map7(vex2: u8, opcode: u8, modrm: u8, imm: u32) -> std::vec::Vec<u8> {
+    let mut bytes = std::vec![0xC4, 0xE7, vex2, opcode, modrm];
+    bytes.extend_from_slice(&imm.to_le_bytes());
+    bytes
+}
+
+/// VEX byte 2 with W0, vvvv unused (1111), L0, and the given `pp`.
+const VEX2_F3: u8 = 0x7A;
+const VEX2_F2: u8 = 0x7B;
+
+/// The register forms of URDMSR and UWRMSR, `F2/F3 0F 38 F8 /r` with a
+/// register operand (Bochs fetchdecode_opmap_0f38.cc `BxOpcodeTable0F38F8`).
+/// URDMSR writes ModRM.rm with the MSR named by ModRM.reg (`Eq, Gq`); UWRMSR
+/// reads the MSR index from ModRM.reg and the value from ModRM.rm (`Gq, Eq`).
+#[test]
+fn urdmsr_and_uwrmsr_register_forms_decode_in_64_bit_mode() {
+    // ModRM 0xC1: mod 11, reg = rax, rm = rcx.
+    let read = fetch_decode64(&[0xF2, 0x0F, 0x38, 0xF8, 0xC1]).unwrap();
+    assert_eq!(read.get_ia_opcode(), Opcode::UrdmsrEqGq);
+    assert_eq!((read.dst(), read.src1()), (1, 0), "rcx <- MSR[rax]");
+
+    let write = fetch_decode64(&[0xF3, 0x0F, 0x38, 0xF8, 0xC1]).unwrap();
+    assert_eq!(write.get_ia_opcode(), Opcode::UwrmsrGqEq);
+    assert_eq!((write.dst(), write.src1()), (0, 1), "MSR[rax] <- rcx");
+
+    // A memory operand is MOVDIR64B's encoding space only with 66; with F2
+    // or F3 it is no instruction.
+    assert!(fetch_decode64(&[0xF2, 0x0F, 0x38, 0xF8, 0x01]).is_err());
+    // 64-bit mode only.
+    assert!(fetch_decode32(&[0xF2, 0x0F, 0x38, 0xF8, 0xC1], true).is_err());
+}
+
+/// VEX map 7 holds the immediate-index forms of RDMSR, WRMSRNS, URDMSR and
+/// UWRMSR (Bochs fetchdecode_opmap_avx.cc `BxOpcodeGroup_VEX_MAP7_F6` and
+/// `_F8`). Each takes a 32-bit immediate and one register operand in
+/// ModRM.rm — the destination of a read, the source of a write.
+#[test]
+fn vex_map_7_decodes_the_msr_immediate_forms() {
+    // ModRM 0xC2: mod 11, reg 0, rm = rdx.
+    for (vex2, opcode, expected, reads) in [
+        (VEX2_F2, 0xF6, Opcode::RdmsrEqId, true),
+        (VEX2_F3, 0xF6, Opcode::WrmsrnsIdEq, false),
+        (VEX2_F2, 0xF8, Opcode::UrdmsrEqId, true),
+        (VEX2_F3, 0xF8, Opcode::UwrmsrIdEq, false),
+    ] {
+        let bytes = vex_map7(vex2, opcode, 0xC2, 0x0000_001C);
+        let i = fetch_decode64(&bytes).unwrap();
+        assert_eq!(i.get_ia_opcode(), expected);
+        assert_eq!(i.ilen() as usize, bytes.len(), "{expected:?} consumes its imm32");
+        assert_eq!(i.id(), 0x1C, "{expected:?} index");
+        let register = if reads { i.dst() } else { i.src1() };
+        assert_eq!(register, 2, "{expected:?} names rdx");
+    }
+}
+
+/// What Bochs's map-7 groups do not accept is #UD: a memory operand, a
+/// nonzero ModRM.reg, VEX.L or VEX.W set, `vvvv` naming a register, an
+/// opcode byte with no group, and anything outside 64-bit mode.
+#[test]
+fn vex_map_7_rejects_what_bochs_rejects() {
+    let imm = 0x1C;
+    assert!(fetch_decode64(&vex_map7(VEX2_F2, 0xF8, 0x02, imm)).is_err(), "memory form");
+    assert!(fetch_decode64(&vex_map7(VEX2_F2, 0xF8, 0xCA, imm)).is_err(), "reg != 0");
+    assert!(fetch_decode64(&vex_map7(VEX2_F2 | 0x04, 0xF8, 0xC2, imm)).is_err(), "VEX.L");
+    assert!(fetch_decode64(&vex_map7(VEX2_F2 | 0x80, 0xF8, 0xC2, imm)).is_err(), "VEX.W");
+    assert!(fetch_decode64(&vex_map7(VEX2_F2 & !0x08, 0xF8, 0xC2, imm)).is_err(), "vvvv");
+    assert!(fetch_decode64(&vex_map7(VEX2_F2, 0xF7, 0xC2, imm)).is_err(), "no group");
+    assert!(fetch_decode32(&vex_map7(VEX2_F2, 0xF8, 0xC2, imm), true).is_err(), "32-bit");
+}
+
+/// `X86Feature` lists Bochs's ISA features, every one and in Bochs's order,
+/// so the generated ISA table's numbers mean what Bochs's do. The reference
+/// is the list `scripts/gen_opcode_isa.py` copied out of Bochs
+/// `cpu/decoder/features.h` (which itself refuses to generate on a
+/// mismatch); this catches `features.rs` edited afterwards. Names compare
+/// with the underscores dropped and case folded, as the script matches them.
+#[test]
+fn x86_feature_lists_the_bochs_features_in_order() {
+    fn normalized(name: &str) -> std::string::String {
+        name.replace('_', "").to_lowercase()
+    }
+    let bochs: Vec<_> = crate::opcode_isa::BOCHS_ISA_FEATURES
+        .iter()
+        .map(|name| normalized(name))
+        .collect();
+    let ours: Vec<_> = include_str!("features.rs")
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("Isa"))
+        .filter_map(|rest| rest.strip_suffix(','))
+        .map(normalized)
+        .collect();
+    assert_eq!(ours, bochs);
+}
+
 #[test]
 fn opcode_isa_table_is_in_sync_with_the_opcode_enum() {
     use crate::features::X86Feature;

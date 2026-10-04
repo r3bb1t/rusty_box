@@ -170,6 +170,27 @@ def main():
     features = re.findall(r"^\s{4}([A-Z]\w+),\s*$", feat_src, re.M)
     feat_index = {norm(v): i for i, v in enumerate(features)}
 
+    # Bochs's features, declaration order. A commented-out `//x86_feature(...)`
+    # line is not one, so the pattern anchors on the start of the line. The
+    # table's numbers are X86Feature discriminants, so the two lists must agree
+    # entry for entry or a number would name a different feature than Bochs's.
+    bochs_features = re.findall(
+        r"^\s*x86_feature\(BX_ISA_(\w+),",
+        read("cpp_orig/bochs/bochs/cpu/decoder/features.h"),
+        re.M,
+    )
+    ours = [norm(v) for v in features]
+    theirs = ["isa" + norm(f) for f in bochs_features]
+    if ours != theirs:
+        print("ERROR: X86Feature differs from Bochs cpu/decoder/features.h:", file=sys.stderr)
+        for extra in [v for v in ours if v not in theirs]:
+            print(f"  only in X86Feature: {extra}", file=sys.stderr)
+        for missing in [v for v in theirs if v not in ours]:
+            print(f"  only in Bochs: {missing}", file=sys.stderr)
+        if sorted(ours) == sorted(theirs):
+            print("  the same features in a different order", file=sys.stderr)
+        return 1
+
     # rusty Opcode variants, declaration order == discriminant
     op_src = read("rusty_box_decoder/src/opcode.rs")
     op_src = op_src[op_src.index("pub enum Opcode"):]
@@ -368,6 +389,17 @@ def main():
         "    // discriminants of exactly this enum.",
         "    f as u16",
         "}",
+        "",
+        "/// Bochs `cpu/decoder/features.h`'s features in declaration order, the",
+        "/// `BX_ISA_` prefix dropped. `X86Feature` keeps exactly this order, so",
+        "/// the numbers above mean what Bochs's do; a decoder test pins it.",
+        "#[cfg(test)]",
+        f"pub(crate) const BOCHS_ISA_FEATURES: [&str; {len(bochs_features)}] = [",
+    ]
+    for f in bochs_features:
+        lines.append(f'    "{f}",')
+    lines += [
+        "];",
         "",
     ]
     OUT.write_text("\n".join(lines), encoding="utf-8", newline="")

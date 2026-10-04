@@ -647,3 +647,31 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::exec_ctx::TestMachine;
+
+    /// The event-information word a FRED delivery pushes names the event's
+    /// type in bits 19:16 with the architecture's encoding — Bochs fred.cc
+    /// `get_fred_event_info`, `type << 16` over `BX_InterruptType`.
+    #[test]
+    fn the_event_information_word_carries_the_architectural_type() {
+        let mut machine = TestMachine::new();
+        let ctx = machine.ctx();
+        for (kind, encoded) in [
+            (InterruptType::ExternalInterrupt, 0),
+            (InterruptType::Nmi, 2),
+            (InterruptType::HardwareException, 3),
+            (InterruptType::SoftwareInterrupt, 4),
+            (InterruptType::PrivilegedSoftwareInterrupt, 5),
+            (InterruptType::SoftwareException, 6),
+            (InterruptType::EventOther, 7),
+        ] {
+            let info = ctx.get_fred_event_info(0x20, kind, false, 0);
+            assert_eq!((info >> 16) & 0xF, encoded, "{kind:?}");
+            assert_eq!(info & 0xFF, 0x20, "{kind:?} keeps its vector");
+        }
+    }
+}

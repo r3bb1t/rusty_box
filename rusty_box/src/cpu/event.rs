@@ -32,6 +32,40 @@ pub(crate) enum TrapDischarge {
     NothingOwed,
 }
 
+/// How a delivery the async-event chain began came out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "a restarted delivery ends the boundary; carrying on past it runs the chain's tail twice"]
+enum Delivered {
+    /// The handler's first instruction is next, and the boundary goes on to
+    /// the chain's tail.
+    Entered,
+    /// The delivery, or a VM exit taken in its place, restarted the loop —
+    /// Bochs's longjmp back to the decode loop.
+    Restarted,
+}
+
+/// An event the processor raises at an instruction boundary, as opposed to
+/// one an instruction raises by executing — the three Bochs delivers with
+/// `BX_EXTERNAL_INTERRUPT`, `BX_NMI` and `BX_HARDWARE_EXCEPTION` (cpu.h
+/// `BX_InterruptType`).
+///
+/// What an execution engine hands this processor when its hardware began
+/// such a delivery and stopped partway: the delivery raised a fault the
+/// engine traps, or touched memory the engine has to finish. Nothing about
+/// such an event can be recreated by executing the instruction at `RIP` — an
+/// acknowledged vector has already left its controller, and a trap's
+/// instruction has already retired — so the processor delivers it itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HardwareEvent {
+    /// A maskable interrupt its controller has already acknowledged.
+    ExternalInterrupt { vector: u8 },
+    /// A non-maskable interrupt.
+    Nmi,
+    /// An exception, with the error code the processor reported for it — zero
+    /// for a vector that pushes none.
+    Exception { vector: super::cpu::Exception, error_code: u16 },
+}
+
 /// Async-event servicing runs on the execution context: interrupt delivery
 /// reads the IDT and pushes stack frames, and the hold-acknowledge path hands
 /// guest memory to the DMA controller. Bochs `handleAsyncEvent` (event.cc)
@@ -337,40 +371,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         } else if self.is_unmasked_event_pending(BxCpuC::<T>::BX_EVENT_NMI) {
             // NMI delivery (Bochs event.cc)
             self.clear_event(BxCpuC::<T>::BX_EVENT_NMI);
-            self.ext = true;
-            // Bochs vmexit.cc VMexit_Event(BX_NMI, 2, 0, 0): pin-based NMI
-            // exit fires before delivery into the guest IDT.
-            if self.in_vmx_guest {
-                match self.vmexit_check_nmi() {
-                    Ok(true) => {
-                        self.ext = false;
-                        self.mask_event(BxCpuC::<T>::BX_EVENT_NMI);
-                        self.prev_rip = self.rip();
-                        return false;
-                    }
-                    Ok(false) => {}
-                    Err(super::error::CpuError::CpuLoopRestart) => {
-                        self.ext = false;
-                        self.mask_event(BxCpuC::<T>::BX_EVENT_NMI);
-                        self.prev_rip = self.rip();
-                        return false;
-                    }
-                    Err(e) => {
-                        tracing::warn!("VMX NMI vmexit failed: {:?}", e);
-                    }
-                }
-            }
-            self.mask_event(BxCpuC::<T>::BX_EVENT_NMI); // Block further NMIs until IRET
-            let result = self.interrupt(2, super::exception::InterruptType::Nmi, false, false, 0); // NMI vector = 2
-            self.ext = false;
-            match result {
-                Ok(()) => {
-                    self.prev_rip = self.rip();
-                }
-                Err(super::error::CpuError::CpuLoopRestart) => {
-                    self.prev_rip = self.rip();
-                    return false;
-                }
+            match self.deliver_the_nmi() {
+                Ok(Delivered::Entered) => {}
+                Ok(Delivered::Restarted) => return false,
                 Err(e) => {
                     tracing::warn!("NMI delivery failed: {:?}", e);
                 }
@@ -450,98 +453,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                     if self.in_vmx_guest && self.vmx_posted_interrupt_processing(vector) {
                         // Consumed; nothing is delivered this boundary.
                     } else {
-                        self.ext = true;
-                        // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
-                        // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set
-                        // — the acknowledged vector is recorded in exit_intr_info.
-                        if self.in_vmx_guest {
-                            match self.vmexit_check_event_intr(vector) {
-                                Ok(true) => {
-                                    self.ext = false;
-                                    self.prev_rip = self.rip();
-                                    return false;
-                                }
-                                Ok(false) => {}
-                                Err(super::error::CpuError::CpuLoopRestart) => {
-                                    self.ext = false;
-                                    self.prev_rip = self.rip();
-                                    return false;
-                                }
-                                Err(e) => {
-                                    tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
-                                }
-                            }
-                        }
-                        let result = self.interrupt(
-                            vector,
-                            super::exception::InterruptType::ExternalInterrupt,
-                            false,
-                            false,
-                            0,
-                        );
-                        self.ext = false;
-                        match result {
-                            Ok(()) => {
-                                // Bochs event.cc — update prev_rip after delivery
-                                self.prev_rip = self.rip();
-                            }
-                            Err(super::error::CpuError::CpuLoopRestart) => {
-                                // interrupt() delivered via exception path (CpuLoopRestart).
-                                // Bochs event.cc: prev_rip = RIP after successful delivery.
-                                self.prev_rip = self.rip();
-                                return false;
-                            }
+                        match self.deliver_acknowledged_interrupt(vector) {
+                            Ok(Delivered::Entered) => {}
+                            Ok(Delivered::Restarted) => return false,
                             Err(e) => {
                                 tracing::warn!("LAPIC interrupt delivery failed: {:?}", e);
                             }
                         }
                     }
                 }
-                AcknowledgedInterrupt::Pic(vector) => {
-                    // Mark as external interrupt (EXT=1)
-                    self.ext = true;
-                    // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
-                    // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set.
-                    if self.in_vmx_guest {
-                        match self.vmexit_check_event_intr(vector) {
-                            Ok(true) => {
-                                self.ext = false;
-                                self.prev_rip = self.rip();
-                                return false;
-                            }
-                            Ok(false) => {}
-                            Err(super::error::CpuError::CpuLoopRestart) => {
-                                self.ext = false;
-                                self.prev_rip = self.rip();
-                                return false;
-                            }
-                            Err(e) => {
-                                tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
-                            }
-                        }
+                AcknowledgedInterrupt::Pic(vector) => match self.deliver_acknowledged_interrupt(vector) {
+                    Ok(Delivered::Entered) => {}
+                    Ok(Delivered::Restarted) => return false,
+                    Err(e) => {
+                        tracing::warn!("PIC interrupt delivery failed: {:?}", e);
                     }
-                    // Deliver interrupt (matches Bochs interrupt() call in event.cc)
-                    let result = self.interrupt(
-                        vector,
-                        super::exception::InterruptType::ExternalInterrupt,
-                        false,
-                        false,
-                        0,
-                    );
-                    self.ext = false;
-                    match result {
-                        Ok(()) => {
-                            self.prev_rip = self.rip();
-                        }
-                        Err(super::error::CpuError::CpuLoopRestart) => {
-                            self.prev_rip = self.rip();
-                            return false;
-                        }
-                        Err(e) => {
-                            tracing::warn!("PIC interrupt delivery failed: {:?}", e);
-                        }
-                    }
-                }
+                },
                 AcknowledgedInterrupt::None => {}
             }
         } else if self.get_hrq() {
@@ -650,6 +577,150 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         }
     }
 
+    /// Deliver an external interrupt its controller has already acknowledged
+    /// — Bochs event.cc `HandleExtInterrupt` from `EXT = 1` on.
+    ///
+    /// The one body every acknowledged vector is delivered through (R5): the
+    /// async-event chain's LAPIC and 8259 arms, and a delivery an execution
+    /// engine's hardware left unfinished. So the post-acknowledge VM exit, the
+    /// instrumentation callback and the `prev_rip` commit cannot drift between
+    /// them.
+    fn deliver_acknowledged_interrupt(&mut self, vector: u8) -> super::Result<Delivered> {
+        use super::exception::InterruptType;
+        self.ext = true;
+        // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector, 0, 0):
+        // the post-acknowledge pin-based exit, taken when INTA_ON_VMEXIT is
+        // set — the acknowledged vector is recorded in exit_intr_info.
+        if self.in_vmx_guest {
+            match self.vmexit_check_event_intr(vector) {
+                Ok(true) | Err(super::error::CpuError::CpuLoopRestart) => {
+                    self.ext = false;
+                    self.prev_rip = self.rip();
+                    return Ok(Delivered::Restarted);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
+                }
+            }
+        }
+        self.instrument_hw_interrupt(vector);
+        if self.cr4.fred() {
+            self.set_fred_event_info_and_data(vector, InterruptType::ExternalInterrupt, false, 0);
+        }
+        let result = self.interrupt(vector, InterruptType::ExternalInterrupt, false, 0);
+        self.ext = false;
+        match result {
+            Ok(()) => {
+                self.prev_rip = self.rip();
+                Ok(Delivered::Entered)
+            }
+            // interrupt() ends in Bochs's longjmp; the commit Bochs's
+            // HandleExtInterrupt makes after it belongs to whoever catches it.
+            Err(super::error::CpuError::CpuLoopRestart) => {
+                self.prev_rip = self.rip();
+                Ok(Delivered::Restarted)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Deliver a non-maskable interrupt whose pending event the caller has
+    /// already consumed — Bochs event.cc `handleAsyncEvent`'s NMI arm from
+    /// `EXT = 1` on.
+    ///
+    /// The one body every NMI is delivered through (R5), for the reason
+    /// [`Self::deliver_acknowledged_interrupt`] gives. Not `deliver_nmi`:
+    /// that is the processor's Bochs `deliver_NMI`, which only signals one,
+    /// and reached through this context's `Deref` the two names would meet.
+    fn deliver_the_nmi(&mut self) -> super::Result<Delivered> {
+        use super::exception::InterruptType;
+        const NMI_VECTOR: u8 = 2;
+        self.ext = true;
+        // Bochs vmexit.cc VMexit_Event(BX_NMI, 2, 0, 0): the pin-based NMI
+        // exit fires before delivery into the guest IDT.
+        if self.in_vmx_guest {
+            match self.vmexit_check_nmi() {
+                Ok(true) | Err(super::error::CpuError::CpuLoopRestart) => {
+                    self.ext = false;
+                    self.mask_event(BxCpuC::<T>::BX_EVENT_NMI);
+                    self.prev_rip = self.rip();
+                    return Ok(Delivered::Restarted);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!("VMX NMI vmexit failed: {:?}", e);
+                }
+            }
+        }
+        // Blocks further NMIs until IRET.
+        self.mask_event(BxCpuC::<T>::BX_EVENT_NMI);
+        self.instrument_hw_interrupt(NMI_VECTOR);
+        if self.cr4.fred() {
+            self.set_fred_event_info_and_data(NMI_VECTOR, InterruptType::Nmi, false, 0);
+        }
+        let result = self.interrupt(NMI_VECTOR, InterruptType::Nmi, false, 0);
+        self.ext = false;
+        match result {
+            Ok(()) => {
+                self.prev_rip = self.rip();
+                Ok(Delivered::Entered)
+            }
+            Err(super::error::CpuError::CpuLoopRestart) => {
+                self.prev_rip = self.rip();
+                Ok(Delivered::Restarted)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Deliver `event` as this processor's next act, in place of the
+    /// instruction at `RIP`.
+    ///
+    /// For an execution engine whose hardware began the delivery and did not
+    /// finish it. Each arm enters the interpreter's own delivery for that
+    /// kind of event past the point where it decided to deliver: the external
+    /// interrupt and the NMI through the bodies the async-event chain uses,
+    /// the exception through `exception` — so the double-fault rules, the
+    /// fault-class rewind to `prev_rip` and the `#DB` bookkeeping are the ones
+    /// every exception the interpreter raises itself goes through.
+    ///
+    /// # Errors
+    /// Whatever the delivery raised that the processor could not take.
+    pub(crate) fn deliver_hardware_event(&mut self, event: HardwareEvent) -> super::Result<()> {
+        // The event belongs to the boundary the processor stands on, which no
+        // instruction has moved past: that boundary is where a fault-class
+        // exception rewinds to and where a stack fault restores RSP from.
+        self.prev_rip = self.rip();
+        self.speculative_rsp = false;
+        match event {
+            HardwareEvent::ExternalInterrupt { vector } => {
+                match self.deliver_acknowledged_interrupt(vector)? {
+                    Delivered::Entered | Delivered::Restarted => Ok(()),
+                }
+            }
+            HardwareEvent::Nmi => match self.deliver_the_nmi()? {
+                Delivered::Entered | Delivered::Restarted => Ok(()),
+            },
+            HardwareEvent::Exception { vector, error_code } => {
+                // `exception` writes EXT into bit 0 of an error code it pushes
+                // (Bochs exception.cc), and the processor that raised this one
+                // has already computed that bit: the shadow's EXT is the one
+                // it reported. A vector whose bit 0 means something else
+                // (#PF, #DF, #CP, #SX) is left alone by `exception`, and
+                // `exception` sets EXT itself before delivering.
+                self.ext = error_code & 1 != 0;
+                match self.exception(vector, error_code) {
+                    Ok(()) | Err(super::error::CpuError::CpuLoopRestart) => {
+                        self.prev_rip = self.rip();
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+
     /// One interrupt-acknowledge moment: LAPIC first, then the 8259, in the
     /// priority order Bochs event.cc HandleExtInterrupt takes them.
     ///
@@ -734,6 +805,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Bochs `BX_INSTR_HWINTERRUPT(cpu, vector, CS, RIP)`: the observer's
+    /// callback for an externally sourced delivery, made before it with the
+    /// `CS:RIP` it interrupts.
+    pub(super) fn instrument_hw_interrupt(&mut self, vector: u8) {
+        if self.instrumentation.active.has_hw_interrupt() {
+            let cs = self.sregs[BxSegregs::Cs as usize].selector.value;
+            let rip = self.rip();
+            let ev = super::instrumentation::HwInterruptEvent { vector, cs, rip };
+            self.instrumentation.fire_hwinterrupt(&ev);
+        }
+    }
+
     /// Bochs `deliver_SMI`: signal SMI unconditionally; masking is
     /// checked when the event is processed in `handle_async_event`.
     #[inline]
@@ -920,6 +1003,7 @@ mod tests {
     use super::*;
     use crate::cpu::arch_state::VcpuArchState;
     use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpu::Exception;
     use crate::cpu::ResetReason;
     use crate::params::{BxParams, CpuTopology};
 
@@ -2064,5 +2148,128 @@ mod tests {
             cpu.is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_NMI),
             "the NMI that ended the wait is still pending: the trap outranks it"
         );
+    }
+
+    // ── A delivery an engine's hardware left unfinished ────────────────────
+    // An engine hands the processor an event its hardware began delivering
+    // and did not finish; the processor delivers it in place of the
+    // instruction at RIP. Each test asserts what the guest's handler sees.
+
+    /// The handler the delivery tests route each vector to, and the code that
+    /// must never run: `inc bx`, so a delivery that executed the instruction
+    /// at RIP instead is caught by BX.
+    const DELIVERY_HANDLER: u16 = 0x1200;
+    const GP_HANDLER: u16 = 0x1300;
+
+    fn point_vector_at(bus: &mut TestBus, vector: u8, handler: u16) {
+        let mut entry = [0u8; 4];
+        entry[..2].copy_from_slice(&handler.to_le_bytes());
+        bus.memory
+            .write_ram(u64::from(vector) * 4, &entry)
+            .expect("the IVT is RAM");
+    }
+
+    /// The real-mode frame a delivery pushed: the saved IP and FLAGS.
+    struct RealModeFrame {
+        ip: u16,
+        flags: u16,
+    }
+
+    fn frame_at_the_top(bus: &mut TestBus, cpu: &BxCpuC) -> RealModeFrame {
+        let sp = u64::from(cpu.sp());
+        RealModeFrame { ip: read_word(bus, sp), flags: read_word(bus, sp + 4) }
+    }
+
+    fn deliver(bus: &mut TestBus, cpu: &mut BxCpuC, event: HardwareEvent) {
+        bus.io()
+            .deliver_hardware_event(cpu, event)
+            .expect("the processor takes the delivery");
+    }
+
+    /// An acknowledged external vector enters its handler from the boundary
+    /// the processor stands on: the saved IP is that boundary, IF is clear
+    /// for the handler, and the instruction at RIP never ran.
+    #[test]
+    fn an_interrupted_external_interrupt_is_delivered_from_its_boundary() {
+        const IF: u64 = 1 << 9;
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        install_real_mode_guest(&mut bus, &[0x43]);
+        point_vector_at(&mut bus, 0x30, DELIVERY_HANDLER);
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED | IF);
+
+        deliver(&mut bus, &mut cpu, HardwareEvent::ExternalInterrupt { vector: 0x30 });
+
+        assert_eq!(cpu.rip(), u64::from(DELIVERY_HANDLER), "the vector's handler is entered");
+        assert_eq!(cpu.bx(), 0, "the instruction at RIP did not run");
+        let frame = frame_at_the_top(&mut bus, &cpu);
+        assert_eq!(frame.ip, TRAP_CODE, "the handler returns to the boundary");
+        assert_eq!(u64::from(frame.flags) & IF, IF, "the frame keeps the guest's IF");
+        assert!(!cpu.interrupts_enabled(), "the handler runs with IF clear");
+    }
+
+    /// An NMI enters vector 2's handler and blocks the next NMI until IRET.
+    #[test]
+    fn an_interrupted_nmi_is_delivered_and_masks_the_next() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        install_real_mode_guest(&mut bus, &[0x43]);
+        point_vector_at(&mut bus, 2, DELIVERY_HANDLER);
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED);
+
+        deliver(&mut bus, &mut cpu, HardwareEvent::Nmi);
+
+        assert_eq!(cpu.rip(), u64::from(DELIVERY_HANDLER), "vector 2's handler is entered");
+        assert_eq!(cpu.bx(), 0, "the instruction at RIP did not run");
+        assert_eq!(frame_at_the_top(&mut bus, &cpu).ip, TRAP_CODE);
+        cpu.deliver_nmi();
+        assert!(
+            !cpu.is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_NMI),
+            "a second NMI waits for the handler's IRET"
+        );
+    }
+
+    /// A fault-class exception rewinds to the boundary it was raised at, not
+    /// to whatever instruction the processor last began: the frame's IP is
+    /// RIP however stale `prev_rip` is.
+    #[test]
+    fn an_interrupted_exception_returns_to_its_own_boundary() {
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        install_real_mode_guest(&mut bus, &[0x43]);
+        point_vector_at(&mut bus, Exception::Ud as u8, DELIVERY_HANDLER);
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED);
+        cpu.prev_rip = 0x0BAD;
+
+        deliver(
+            &mut bus,
+            &mut cpu,
+            HardwareEvent::Exception { vector: Exception::Ud, error_code: 0 },
+        );
+
+        assert_eq!(cpu.rip(), u64::from(DELIVERY_HANDLER), "#UD's handler is entered");
+        assert_eq!(cpu.bx(), 0, "the instruction at RIP did not run");
+        assert_eq!(frame_at_the_top(&mut bus, &cpu).ip, TRAP_CODE, "the frame names the boundary");
+    }
+
+    /// A delivery that faults is the fault: the IVT is too short for the
+    /// vector, so #GP's handler is entered instead, from the same boundary,
+    /// and the vector's own handler never is.
+    #[test]
+    fn an_interrupted_delivery_that_faults_is_the_fault() {
+        /// IDTR limit covering vectors 0-15: #GP inside, 0x30 outside.
+        const SIXTEEN_VECTORS: u32 = 0x3F;
+        let mut cpu = make_cpu(0);
+        let mut bus = TestBus::new();
+        install_real_mode_guest(&mut bus, &[0x43]);
+        point_vector_at(&mut bus, Exception::Gp as u8, GP_HANDLER);
+        reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED);
+        cpu.set_idtr_limit_for_api(SIXTEEN_VECTORS);
+
+        deliver(&mut bus, &mut cpu, HardwareEvent::ExternalInterrupt { vector: 0x30 });
+
+        assert_eq!(cpu.rip(), u64::from(GP_HANDLER), "#GP's handler is entered");
+        assert_eq!(cpu.bx(), 0, "the instruction at RIP did not run");
+        assert_eq!(frame_at_the_top(&mut bus, &cpu).ip, TRAP_CODE);
     }
 }

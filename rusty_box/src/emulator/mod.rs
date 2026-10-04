@@ -778,6 +778,15 @@ impl<'a, T: Instrumentation, E> Processor<'a, T, E> {
         self.io.deliver_the_trap_owed(self.cpu)
     }
 
+    /// Deliver an event this engine's hardware began delivering and did not
+    /// finish, in place of the instruction at `RIP`.
+    ///
+    /// # Errors
+    /// Whatever the delivery raised that the processor could not take.
+    pub fn deliver_hardware_event(&mut self, event: crate::cpu::HardwareEvent) -> crate::cpu::Result<()> {
+        self.io.deliver_hardware_event(self.cpu, event)
+    }
+
     /// Signal a system-management interrupt on this processor. Whether it is
     /// taken is decided when the processor next runs, as Bochs `deliver_SMI`
     /// decides it.

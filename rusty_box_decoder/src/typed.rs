@@ -6171,6 +6171,26 @@ pub enum TypedInstruction {
         src: GprIndex,
         imm: u32,
     },
+    /// URDMSR r64, imm32 — user-mode MSR read, index in the immediate
+    UrdmsrEqIdR {
+        dst: GprIndex,
+        imm: u32,
+    },
+    /// UWRMSR imm32, r64 — user-mode MSR write, index in the immediate
+    UwrmsrIdEqR {
+        src: GprIndex,
+        imm: u32,
+    },
+    /// URDMSR r64, r64 — user-mode MSR read, index in the reg operand
+    UrdmsrEqGqR {
+        dst: GprIndex,
+        index: GprIndex,
+    },
+    /// UWRMSR r64, r64 — user-mode MSR write, index in the reg operand
+    UwrmsrGqEqR {
+        index: GprIndex,
+        src: GprIndex,
+    },
     /// RDMSRLIST — read multiple MSRs from list
     Rdmsrlist,
     /// WRMSRLIST — write multiple MSRs from list
@@ -31682,8 +31702,24 @@ impl Instruction {
             },
             O::Wrmsrns => T::Wrmsrns,
             O::WrmsrnsIdEq => T::WrmsrnsIdEqR {
-                src: self.dst_reg(),
+                src: self.src1_reg(),
                 imm: self.id(),
+            },
+            O::UrdmsrEqId => T::UrdmsrEqIdR {
+                dst: self.dst_reg(),
+                imm: self.id(),
+            },
+            O::UwrmsrIdEq => T::UwrmsrIdEqR {
+                src: self.src1_reg(),
+                imm: self.id(),
+            },
+            O::UrdmsrEqGq => T::UrdmsrEqGqR {
+                dst: self.dst_reg(),
+                index: self.src1_reg(),
+            },
+            O::UwrmsrGqEq => T::UwrmsrGqEqR {
+                index: self.dst_reg(),
+                src: self.src1_reg(),
             },
             O::Rdmsrlist => T::Rdmsrlist,
             O::Wrmsrlist => T::Wrmsrlist,

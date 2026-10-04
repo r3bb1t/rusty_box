@@ -35,8 +35,12 @@ const SNAPSHOT_MAGIC: &[u8; 8] = b"RBXSNAP1";
 /// realtime PM clock alone travels here, as a flag and its reading at the save.
 /// The I/O-bus part of the PLATFORM section carries no PCI configuration-address
 /// latch: the device manager's, in the same section, is the machine's only one.
+///
+/// Version 10: the CPU section's fixed MSRs end with IA32_USER_MSR_CTL (Bochs
+/// `msr.ia32_user_msr_ctrl`), and its VMCS carries the tertiary controls and
+/// the IA32_SPEC_CTRL mask and shadow after the secondary controls.
 #[cfg(feature = "std")]
-pub(crate) const SNAPSHOT_V3_VERSION: u32 = 9;
+pub(crate) const SNAPSHOT_V3_VERSION: u32 = 10;
 #[cfg(feature = "std")]
 pub(crate) const SNAPSHOT_SECTION_VERSION: u32 = 1;
 

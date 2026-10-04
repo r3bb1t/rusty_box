@@ -10,7 +10,7 @@ from bug to bug. Where the architectural behaviour is the better side, the port
 implements it and registers the difference in `docs/bochs-parity-divergences.md`.
 Some bugs are reproduced bug-for-bug for parity instead: the mouse `0xE6`
 scaling, the HPET restore epoch, VRSQRT14's power-of-two case, the unreferenced
-EVEX groups and the unbacked PMU leaf.
+EVEX groups, the unbacked PMU leaf and the stale IA32_SPEC_CTRL shadow.
 
 Filed upstream:
 - https://github.com/bochs-emu/Bochs/issues/791 — the post-Skylake CPU models
@@ -642,3 +642,108 @@ read answers 0 and a write is dropped, so the write-then-read-back probe reads 0
 here too.
 
 **Filing status**: NOT FILED. One issue covers the whole class.
+
+---
+
+## VM entry accepts a non-canonical RIP for a 64-bit guest
+
+**Severity**: Guest-visible to a VMM. A VM entry that hardware fails is
+accepted, and the failure surfaces later, inside the guest, as a different
+event.
+
+**Location**: `cpu/vmx.cc` — `BX_CPU_C::VMenterLoadCheckGuestState`.
+
+**Root cause**: the only check on guest RIP is the 32-bit one:
+
+```cpp
+// cpu/vmx.cc  VMenterLoadCheckGuestState
+if (! x86_64_guest || !guest.sregs[BX_SEG_REG_CS].cache.u.segment.l) {
+  if (GET32H(guest.rip) != 0) {
+     BX_ERROR(("VMENTER FAIL: VMCS guest RIP > 32 bit"));
+     return VMX_VMEXIT_VMENTRY_FAILURE_GUEST_STATE;
+  }
+}
+// no else: a 64-bit guest's RIP is never checked
+```
+
+The SDM's VM-entry checks on guest RIP have a second rule: in 64-bit code (the
+"IA-32e mode guest" control set and CS.L set), on a processor with fewer than
+64 linear-address bits, RIP must be canonical to that width — the width CPUID
+leaf 80000008H reports, not the current paging mode's.
+
+**Manifestation**: a VMM that VMLAUNCHes a 64-bit guest with RIP
+`0x0000800000000000` (bit 47 set, bits 63:48 clear) gets, on hardware, a
+VM-entry failure: exit reason 33 with bit 31 set, the VMM resuming at
+HOST_RIP. Under Bochs the entry succeeds and the guest's first fetch takes
+#GP(0) (`cpu/cpu.cc BX_CPU_C::prefetch`, "RIP crossed canonical boundary"),
+which reaches the VMM as an exception exit if its exception bitmap intercepts
+#GP, and otherwise runs the guest's own handler.
+
+**Fix**: an `else` arm after the 32-bit check:
+
+```cpp
+else {
+  if (! IsCpuidCanonical(guest.rip)) {
+    BX_ERROR(("VMENTER FAIL: VMCS guest RIP not canonical"));
+    return VMX_VMEXIT_VMENTRY_FAILURE_GUEST_STATE;
+  }
+}
+```
+
+`IsCpuidCanonical` (57 bits with LA57 support, else 48) rather than
+`IsCanonical`: the rule is about the processor's width, and a VM entry does
+not run in the guest's paging mode.
+
+**Rusty Box behavior**: implements the SDM rule — divergence D18 in
+`docs/bochs-parity-divergences.md`. `cpu/vmx.rs`
+`vmenter_load_check_guest_state` makes both checks, pinned by
+`a_64_bit_guest_needs_a_canonical_rip` and
+`a_compatibility_mode_guest_needs_a_rip_below_4_gib`, each of which runs a
+real VMLAUNCH.
+
+**Filing status**: NOT FILED. To be confirmed by the planned VMX checks before
+it is filed.
+
+---
+
+## A virtualized IA32_SPEC_CTRL write leaves the shadow stale
+
+**Severity**: Guest-visible on a model offering IA32_SPEC_CTRL
+virtualization (Bochs `sapphire_rapids` and `arrow_lake`, which list
+`BX_VMX_SPEC_CTRL_VIRTUALIZATION`). A guest reads back a value it did not
+write.
+
+**Location**: `cpu/msr.cc` — `BX_CPU_C::wrmsr`, `case BX_MSR_IA32_SPEC_CTRL`.
+
+**Root cause**: with the "virtualize IA32_SPEC_CTRL" tertiary control set, the
+write merges the guest's value into the register through the VMM's mask and
+stops there:
+
+```cpp
+// cpu/msr.cc  wrmsr, BX_MSR_IA32_SPEC_CTRL
+if (BX_CPU_THIS_PTR in_vmx_guest && vm->vmexec_ctrls3.VIRTUALIZE_IA32_SPEC_CTRL())
+  val_64 = (BX_CPU_THIS_PTR msr.ia32_spec_ctrl & vm->ia32_spec_ctrl_mask) | (val_64 & ~vm->ia32_spec_ctrl_mask);
+...
+BX_CPU_THIS_PTR msr.ia32_spec_ctrl = GET32L(val_64);
+// vm->ia32_spec_ctrl_shadow is never written
+```
+
+RDMSR of the same MSR returns `vm->ia32_spec_ctrl_shadow`. Intel's
+definition of the control — as described in the KVM patches that add
+support for it — has a guest WRMSR store the guest's value in the shadow as
+well as writing the masked merge to the register, so a following RDMSR
+returns what the guest wrote.
+
+**Manifestation**: with the mask covering bit 0, a guest that writes 2 and
+reads back gets the VMM's initial shadow, not 2.
+
+**Fix**: `vm->ia32_spec_ctrl_shadow = val_64;` with the guest's original
+value, before the merge.
+
+**Rusty Box behavior**: reproduced, for parity — `cpu/proc_ctrl.rs`
+`wrmsr_value` leaves `vmcs.ia32_spec_ctrl_shadow` unwritten, pinned by
+`a_guest_sees_ia32_spec_ctrl_through_its_shadow_and_mask` (`cpu/vmx.rs`).
+Unreachable in this port: its only VMX model, Skylake-X, offers no tertiary
+control, as in Bochs.
+
+**Filing status**: NOT FILED.

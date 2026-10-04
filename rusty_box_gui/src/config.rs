@@ -1,5 +1,6 @@
 use crate::args::{Args, BootDevice, DiskGeometry, DisplayBackend, LogLevel};
 use crate::error::RunError;
+#[cfg(not(target_arch = "wasm32"))]
 use rusty_box::cpu::decoder::features::X86Feature;
 use rusty_box::iodev::PortE9Hack;
 use rusty_box::params::{BxParamError, BxParams};
@@ -1112,11 +1113,12 @@ fn host_xsave_components() -> u64 {
     (u64::from(reported.edx) << 32) | u64::from(reported.eax)
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(all(not(target_arch = "x86_64"), not(target_arch = "wasm32")))]
 fn host_xsave_components() -> u64 {
     0
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn detect_disk_geometry(path: &Path) -> Result<DiskGeometry, RunError> {
     auto_detect_chs(path)
 }

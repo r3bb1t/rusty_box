@@ -1472,8 +1472,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::Cpuid => self.cpuid(instr),
             Opcode::Rdtsc => self.rdtsc(instr),
             Opcode::Rdpmc => self.rdpmc(instr),
-            Opcode::Rdmsr => self.rdmsr(instr),
-            Opcode::Wrmsr => self.wrmsr(instr),
+            // Bochs ia_opcodes.def sends every MSR form to one of four
+            // handlers, which tell the forms apart by opcode.
+            Opcode::Rdmsr | Opcode::RdmsrEqId => self.rdmsr(instr),
+            Opcode::Wrmsr | Opcode::Wrmsrns | Opcode::WrmsrnsIdEq => self.wrmsr(instr),
+            Opcode::UrdmsrEqId | Opcode::UrdmsrEqGq => self.urdmsr(instr),
+            Opcode::UwrmsrIdEq | Opcode::UwrmsrGqEq => self.uwrmsr(instr),
             Opcode::Sysenter => self.sysenter(instr),
             Opcode::Sysexit => self.sysexit(instr),
             Opcode::Syscall | Opcode::SyscallLegacy => self.syscall(instr),
@@ -2638,6 +2642,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::Cvtpd2psVpsWpd => self.cvtpd2ps_vps_wpd(instr),
             Opcode::Cvtss2sdVsdWss => self.cvtss2sd_vsd_wss(instr),
             Opcode::Cvtsd2ssVssWsd => self.cvtsd2ss_vss_wsd(instr),
+            Opcode::Cvtpi2psVpsQq => self.cvtpi2ps_vps_qq(instr),
+            Opcode::Cvtpi2pdVpdQq => self.cvtpi2pd_vpd_qq(instr),
+            Opcode::Cvttps2piPqWps => self.cvttps2pi_pq_wps(instr),
+            Opcode::Cvttpd2piPqWpd => self.cvttpd2pi_pq_wpd(instr),
+            Opcode::Cvtps2piPqWps => self.cvtps2pi_pq_wps(instr),
+            Opcode::Cvtpd2piPqWpd => self.cvtpd2pi_pq_wpd(instr),
             Opcode::Cvtdq2psVpsWdq => self.cvtdq2ps_vps_wdq(instr),
             Opcode::Cvtps2dqVdqWps => self.cvtps2dq_vdq_wps(instr),
             Opcode::Cvttps2dqVdqWps => self.cvttps2dq_vdq_wps(instr),
@@ -5370,13 +5380,6 @@ mod tests {
         // aborts the emulator instead of taking #UD. These are defects; the
         // list must shrink, never grow.
         const REACHABLE_GAPS: &[&str] = &[
-            // MMX <-> packed-FP conversions (SSE/SSE2), Bochs sse_pfp.cc.
-            "Cvtpi2psVpsQq",
-            "Cvtps2piPqWps",
-            "Cvttps2piPqWps",
-            "Cvtpi2pdVpdQq",
-            "Cvtpd2piPqWpd",
-            "Cvttpd2piPqWpd",
             // SSSE3 horizontal add/subtract, and their VEX forms, which
             // remap_sse_to_vex produces from the same legacy opcode.
             "PhaddwVdqWdq",

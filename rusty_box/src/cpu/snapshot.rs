@@ -783,7 +783,8 @@ fn save_v3_fixed_msrs<W: SnapWrite>(
     writer.write_u64(msr.ia32_fred_stack_levels)?;
     writer.write_u64(msr.ia32_fred_cfg)?;
     writer.write_u32(msr.ia32_umwait_ctrl)?;
-    writer.write_u32(msr.ia32_spec_ctrl)
+    writer.write_u32(msr.ia32_spec_ctrl)?;
+    writer.write_u64(msr.ia32_user_msr_ctrl)
 }
 
 fn restore_v3_fixed_msrs<R: SnapRead>(
@@ -838,6 +839,7 @@ fn restore_v3_fixed_msrs<R: SnapRead>(
     msr.ia32_fred_cfg = reader.read_u64()?;
     msr.ia32_umwait_ctrl = reader.read_u32()?;
     msr.ia32_spec_ctrl = reader.read_u32()?;
+    msr.ia32_user_msr_ctrl = reader.read_u64()?;
     Ok(())
 }
 
@@ -1032,6 +1034,8 @@ fn save_v3_vmcs_cache<W: SnapWrite>(
         write_u32(vm.idt_vectoring_info), write_u32(vm.idt_vectoring_error_code),
         write_u64(vm.guest_linear_addr), write_u32(vm.pin_based_ctls),
         write_u32(vm.proc_based_ctls), write_u32(vm.secondary_proc_based_ctls),
+        write_u64(vm.tertiary_proc_based_ctls), write_u64(vm.ia32_spec_ctrl_mask),
+        write_u64(vm.ia32_spec_ctrl_shadow),
         write_u32(vm.vm_exit_ctls), write_u64(vm.vm_exit_ctls2),
         write_u32(vm.vm_entry_ctls), write_u32(vm.vm_entry_intr_info),
         write_u32(vm.vm_entry_exception_error_code), write_u32(vm.vm_entry_instruction_length),
@@ -1146,6 +1150,8 @@ fn restore_v3_vmcs_cache<R: SnapRead>(
         read_u32 => idt_vectoring_info, read_u32 => idt_vectoring_error_code,
         read_u64 => guest_linear_addr, read_u32 => pin_based_ctls,
         read_u32 => proc_based_ctls, read_u32 => secondary_proc_based_ctls,
+        read_u64 => tertiary_proc_based_ctls, read_u64 => ia32_spec_ctrl_mask,
+        read_u64 => ia32_spec_ctrl_shadow,
         read_u32 => vm_exit_ctls, read_u64 => vm_exit_ctls2,
         read_u32 => vm_entry_ctls, read_u32 => vm_entry_intr_info,
         read_u32 => vm_entry_exception_error_code, read_u32 => vm_entry_instruction_length,

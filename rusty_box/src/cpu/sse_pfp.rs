@@ -47,6 +47,7 @@ use super::softfloat3e::softfloat::{
 use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
     decoder::{BxSegregs, Instruction},
+    i387::BxPackedRegister,
     sse_fp::mxcsr_to_softfloat_status_word,
     xmm::BxPackedXmmRegister,
 };
@@ -939,6 +940,151 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut result = self.read_xmm_reg(instr.dst());
         result.set_xmm32u(0, value);
         self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    // ========================================================================
+    // Conversions: MMX Int32 <-> Packed Float
+    // Bochs sse_pfp.cc: CVTPI2PS, CVTPI2PD, CVTTPS2PI, CVTTPD2PI, CVTPS2PI,
+    // CVTPD2PI. A form that reads or writes an MMX register first checks for
+    // a pending x87 exception and makes the FPU-to-MMX transition; a memory
+    // source touches no MMX register and does neither.
+    // ========================================================================
+
+    /// The 128-bit source of CVTPD2PI / CVTTPD2PI: a register, or memory that
+    /// must be 16-byte aligned unless MXCSR.MM allows misaligned SSE (Bochs
+    /// sse_pfp.cc `CVTPD2PI_PqWpd`, the rule of load.cc `LOAD_Wdq`).
+    fn sse_pfp_read_op2_xmm_aligned(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedXmmRegister> {
+        if instr.mod_c0() {
+            return Ok(self.read_xmm_reg(instr.src1()));
+        }
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        if self.mxcsr.misaligned_sse() {
+            self.v_read_xmmword(seg, eaddr)
+        } else {
+            self.v_read_xmmword_aligned(seg, eaddr)
+        }
+    }
+
+    /// The 64-bit integer source of CVTPI2PS / CVTPI2PD: an MMX register or
+    /// a quadword in memory.
+    fn sse_pfp_read_op2_mmx(&mut self, instr: &Instruction) -> super::Result<BxPackedRegister> {
+        if instr.mod_c0() {
+            Ok(self.read_mmx_reg(instr.src1()))
+        } else {
+            let eaddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            Ok(BxPackedRegister {
+                bytes: self.v_read_qword(seg, eaddr)?.to_le_bytes(),
+            })
+        }
+    }
+
+    /// CVTPI2PS — two MMX int32 to two singles in the low quadword, the rest
+    /// of the register kept (Bochs `CVTPI2PS_VpsQqR` / `CVTPI2PS_VpsQqM`).
+    pub(super) fn cvtpi2ps_vps_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.mod_c0() {
+            self.fpu_check_pending_exceptions()?;
+        }
+        let mut op = self.sse_pfp_read_op2_mmx(instr)?;
+        let mut status = self.sse_status();
+        let lo = i32_to_f32(op.S32(0), &mut status);
+        let hi = i32_to_f32(op.S32(1), &mut status);
+        op.set_U32(0, lo);
+        op.set_U32(1, hi);
+        if instr.mod_c0() {
+            self.prepare_fpu2mmx();
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_lo_qword(instr.dst(), op.U64());
+        Ok(())
+    }
+
+    /// CVTPI2PD — two MMX int32 to two doubles. Exact for every int32, so
+    /// there is no exception check (Bochs `CVTPI2PD_VpdQqR` /
+    /// `CVTPI2PD_VpdQqM`); the register form transitions before it reads.
+    pub(super) fn cvtpi2pd_vpd_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.mod_c0() {
+            self.fpu_check_pending_exceptions()?;
+            self.prepare_fpu2mmx();
+        }
+        let op = self.sse_pfp_read_op2_mmx(instr)?;
+        let mut result = BxPackedXmmRegister::default();
+        result.set_xmm64u(0, i32_to_f64(op.S32(0)));
+        result.set_xmm64u(1, i32_to_f64(op.S32(1)));
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    /// CVTTPS2PI — two singles to two MMX int32, truncating (Bochs
+    /// `CVTTPS2PI_PqWps`).
+    pub(super) fn cvttps2pi_pq_wps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        self.fpu_check_pending_exceptions()?;
+        let op = self.sse_pfp_read_op2_lo_qword(instr)?;
+        let mut status = self.sse_status();
+        let mut result = BxPackedRegister::default();
+        result.set_S32(0, f32_to_i32_r_min_mag(op.xmm32u(0), true, false, &mut status));
+        result.set_S32(1, f32_to_i32_r_min_mag(op.xmm32u(1), true, false, &mut status));
+        self.prepare_fpu2mmx();
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_mmx_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// CVTTPD2PI — two doubles to two MMX int32, truncating (Bochs
+    /// `CVTTPD2PI_PqWpd`).
+    pub(super) fn cvttpd2pi_pq_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        self.fpu_check_pending_exceptions()?;
+        let op = self.sse_pfp_read_op2_xmm_aligned(instr)?;
+        let mut status = self.sse_status();
+        let mut result = BxPackedRegister::default();
+        result.set_S32(0, f64_to_i32_r_min_mag(op.xmm64u(0), true, false, &mut status));
+        result.set_S32(1, f64_to_i32_r_min_mag(op.xmm64u(1), true, false, &mut status));
+        self.prepare_fpu2mmx();
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_mmx_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// CVTPS2PI — two singles to two MMX int32 under the MXCSR rounding mode
+    /// (Bochs `CVTPS2PI_PqWps`).
+    pub(super) fn cvtps2pi_pq_wps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        self.fpu_check_pending_exceptions()?;
+        let op = self.sse_pfp_read_op2_lo_qword(instr)?;
+        let mut status = self.sse_status();
+        let rc = softfloat_get_rounding_mode(&status);
+        let mut result = BxPackedRegister::default();
+        result.set_S32(0, f32_to_i32(op.xmm32u(0), rc, true, &mut status));
+        result.set_S32(1, f32_to_i32(op.xmm32u(1), rc, true, &mut status));
+        self.prepare_fpu2mmx();
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_mmx_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// CVTPD2PI — two doubles to two MMX int32 under the MXCSR rounding mode
+    /// (Bochs `CVTPD2PI_PqWpd`).
+    pub(super) fn cvtpd2pi_pq_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        self.fpu_check_pending_exceptions()?;
+        let op = self.sse_pfp_read_op2_xmm_aligned(instr)?;
+        let mut status = self.sse_status();
+        let rc = softfloat_get_rounding_mode(&status);
+        let mut result = BxPackedRegister::default();
+        result.set_S32(0, f64_to_i32(op.xmm64u(0), rc, true, &mut status));
+        result.set_S32(1, f64_to_i32(op.xmm64u(1), rc, true, &mut status));
+        self.prepare_fpu2mmx();
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_mmx_reg(instr.dst(), result);
         Ok(())
     }
 

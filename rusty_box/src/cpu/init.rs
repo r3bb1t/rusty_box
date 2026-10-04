@@ -29,7 +29,8 @@ use crate::{
 
 // Minimal MXCSR/feature related masks used at reset-time.
 const MXCSR_DAZ: u32 = 1 << 6;
-const MXCSR_MISALIGNED_EXCEPTION_MASK: u32 = 1 << 13;
+/// Bochs xmm.h `MXCSR_MISALIGNED_EXCEPTION_MASK` (0x00020000).
+const MXCSR_MISALIGNED_EXCEPTION_MASK: u32 = super::xmm::Mxcsr::MM.bits();
 
 use super::{cpudb::intel::core_i7_skylake::Corei7SkylakeX, cpuid::BxCpuIdTrait};
 
@@ -331,6 +332,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.msr.ia32_xss = 0;
 
         self.msr.ia32_umwait_ctrl = 0;
+
+        self.msr.ia32_user_msr_ctrl = 0;
 
         self.msr.svm_hsave_pa = 0;
         self.msr.svm_vm_cr = 0; // enable SVME if was disabled, clear LOCK bit
