@@ -254,6 +254,16 @@ const FULL_SCREEN_BUTTON_SIZE: f32 = 40.0;
 #[cfg(target_os = "android")]
 const FULL_SCREEN_BUTTON_ALPHA: u8 = 110;
 
+/// A running VM the phone's console menu can switch to.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SwitchTarget {
+    /// The VM's place in the library list, as `select_profile` takes it.
+    pub(crate) index: usize,
+    /// The VM's name, which its button in the menu carries.
+    pub(crate) name: String,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub(crate) struct NativeVmInfo {
@@ -3404,8 +3414,9 @@ impl NativeShellApp {
     }
 
     /// The full-screen console's menu: the machine's state and rate, the key
-    /// pad, the verbs that act on the guest, the fit or stretch choice, and
-    /// the way back to the shell with the machine left running.
+    /// pad, the verbs that act on the guest, the fit or stretch choice, a
+    /// switch to each other VM that runs or is about to, and the way back to
+    /// the shell with the machine left running.
     #[cfg(target_os = "android")]
     fn draw_full_screen_menu(&mut self, ctx: &egui::Context, area: egui::Rect) {
         let status = self.runtime_status();
@@ -3470,11 +3481,42 @@ impl NativeShellApp {
                     self.request_reset();
                     self.full_screen_menu_open = false;
                 }
+                // Selecting another VM lands on its Home page; a switch goes
+                // on to its console, which stays full screen: that VM runs
+                // or is about to.
+                let targets = self.switch_targets();
+                if !targets.is_empty() {
+                    ui.separator();
+                    ui.label(status_text("Running VMs").color(TEXT_MUTED));
+                    for target in targets {
+                        if ui.button(&target.name).clicked() {
+                            self.full_screen_menu_open = false;
+                            self.select_profile(target.index);
+                            self.chrome.go_to(ShellPage::Console);
+                        }
+                    }
+                }
                 if ui.button("Exit to shell").clicked() {
                     self.chrome.go_to(ShellPage::Home);
                     self.full_screen_menu_open = false;
                 }
             });
+    }
+
+    /// The VMs that run or are about to, other than the selected one, in
+    /// library order: what the full-screen console's menu offers.
+    #[cfg(any(target_os = "android", test))]
+    fn switch_targets(&self) -> Vec<SwitchTarget> {
+        let shown = self.chrome.selected_vm();
+        self.profiles
+            .iter()
+            .enumerate()
+            .filter(|(index, profile)| *index != shown && self.sessions.is_live(&profile.origin))
+            .map(|(index, profile)| SwitchTarget {
+                index,
+                name: profile.name.clone(),
+            })
+            .collect()
     }
 
     /// Whether the full-screen menu asked for the key pad since the last call.
@@ -5571,6 +5613,25 @@ mod tests {
         let scratch = ScratchLibrary::new();
         scratch.library().create("Alpine", &test_resolved_config()).expect("seed");
         scratch.library().create("Windows XP", &test_resolved_config()).expect("seed");
+        let (app, commands) = native_test_app_over(&scratch, None, None);
+        TestShell {
+            app,
+            commands,
+            scratch,
+        }
+    }
+
+    /// A shell over a scratch library holding "Alpine", "DLX" and "Windows
+    /// XP", in that order, with Alpine selected.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn three_vm_app() -> TestShell {
+        let scratch = ScratchLibrary::new();
+        for name in ["Alpine", "DLX", "Windows XP"] {
+            scratch
+                .library()
+                .create(name, &test_resolved_config())
+                .expect("seed");
+        }
         let (app, commands) = native_test_app_over(&scratch, None, None);
         TestShell {
             app,
@@ -8023,6 +8084,48 @@ mod tests {
         assert_eq!(dots[0], Some(ACCENT_CYAN), "the selected VM's row, running");
         assert_eq!(dots[1], None, "a VM that is off and not selected");
         drop(first);
+    }
+
+    /// The full-screen console's menu offers every VM that runs except the
+    /// one shown, by name and in library order; a VM that is off is not
+    /// offered.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_console_menu_offers_every_other_running_vm_in_library_order() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = three_vm_app();
+        let alpine = power_on(&mut app, &command_rx);
+        app.select_profile(2);
+        let xp = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        assert_eq!(app.vm_info.name, "DLX", "DLX, off, is shown");
+        assert_eq!(
+            app.switch_targets(),
+            vec![
+                SwitchTarget {
+                    index: 0,
+                    name: "Alpine".to_owned(),
+                },
+                SwitchTarget {
+                    index: 2,
+                    name: "Windows XP".to_owned(),
+                },
+            ]
+        );
+
+        app.select_profile(0);
+        assert_eq!(
+            app.switch_targets(),
+            vec![SwitchTarget {
+                index: 2,
+                name: "Windows XP".to_owned(),
+            }]
+        );
+        drop(alpine);
+        drop(xp);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
