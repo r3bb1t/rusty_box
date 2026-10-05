@@ -44,6 +44,11 @@ pub struct RunSummary {
     pub instructions_executed: Option<u64>,
 }
 
+/// The stack a thread that runs a machine is given: each VM's thread the
+/// shell's launcher spawns, and the thread `main` runs a machine on without
+/// the shell.
+pub const EMULATOR_STACK_BYTES: usize = 1500 * 1024 * 1024;
+
 pub fn run(args: Args) -> Result<RunSummary, RunError> {
     let config = crate::config::load_config(&args)?;
     #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
@@ -813,11 +818,6 @@ pub(crate) fn run_android_shell(
         crate::android::AndroidShellApp::new(cc, command_tx, start, app)
     })
 }
-
-/// The stack each VM's thread runs its machine on: the size `main` gives the
-/// thread of a run with no shell.
-#[cfg(feature = "gui-egui")]
-const EMULATOR_STACK_BYTES: usize = 1500 * 1024 * 1024;
 
 /// Runs an egui shell over the launcher thread, which runs every power-on
 /// the shell asks for on a thread of its own. `make_app` builds the window's
@@ -1900,63 +1900,158 @@ mod tests {
         assert!(display.runtime_error.is_some());
     }
 
+    /// The launcher on a thread of its own, as the shell runs it.
     #[cfg(feature = "gui-egui")]
-    #[test]
-    fn egui_emulator_loop_clears_lifecycle_on_startup_error() {
-        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
-        let (command_tx, command_rx) = mpsc::channel();
-        let missing_bios = unique_temp_path("rusty-box-gui-missing-bios");
+    fn spawn_launcher(
+        command_rx: mpsc::Receiver<crate::app::NativeEmulatorCommand>,
+    ) -> std::thread::JoinHandle<Result<RunSummary, RunError>> {
+        std::thread::Builder::new()
+            .name("rusty_box_gui_test_launcher".to_owned())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || run_egui_launcher(command_rx))
+            .expect("spawn the launcher")
+    }
 
-        command_tx
+    /// One power-on run on a thread of its own, as the launcher runs it,
+    /// with a stack that holds a 32 MiB guest.
+    #[cfg(feature = "gui-egui")]
+    fn spawn_run(start: crate::app::StartRun) -> std::thread::JoinHandle<Option<u64>> {
+        std::thread::Builder::new()
+            .name("rusty_box_gui_test_run".to_owned())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || run_one_vm(start, &Mutex::new(HashSet::new())))
+            .expect("spawn the run")
+    }
+
+    /// What the shell's power-on asks of `display` and the launcher
+    /// (`NativeShellApp::start_vm`): the VM shows as starting, its stop flag
+    /// is lowered, and the launcher is sent the Start.
+    #[cfg(feature = "gui-egui")]
+    fn power_on(
+        commands: &mpsc::Sender<crate::app::NativeEmulatorCommand>,
+        display: &Arc<Mutex<SharedDisplay>>,
+        config: ResolvedConfig,
+    ) {
+        {
+            let mut shown = display.lock().unwrap();
+            shown.stop_flag.store(false, Ordering::Relaxed);
+            shown.start_pending = true;
+        }
+        commands
             .send(crate::app::NativeEmulatorCommand::Start(crate::app::StartRun {
-                display: Arc::clone(&shared),
-                config: ResolvedConfig {
-                    engine: Engine::Interpreter,
-                    cpu_capabilities: CpuCapabilities::Preset,
-                    memory_mib: 32,
-                    host_memory_mib: 32,
-                    memory_block_kib: 128,
-                    ips: 4_000_000,
-                    pci: true,
-                    sync_slowdown: false,
-                    sync_realtime: false,
-                    smp_quantum: 16,
-                    cpuid_freq: rusty_box::CpuidFreq::None,
-                    port_e9_hack: rusty_box::iodev::PortE9Hack::Off,
-                    max_instructions: 0,
-                    cpu_params: BxParams::default(),
-                    display: DisplayBackend::Egui,
-                    bios: missing_bios,
-                    vga_bios: None,
-                    boot_order: Vec::new(),
-                    disk: None::<ResolvedDisk>,
-                    cdrom: None::<ResolvedCdrom>,
-                    log_level: LogLevel::Warn,
-                    vga_mode: None,
-                    pci_vga: false,
-                    console_stretch: false,
-                    pointer_speed: crate::config::PointerSpeed::DEFAULT,
-                },
+                display: Arc::clone(display),
+                config,
             }))
             .unwrap();
-        drop(command_tx);
+    }
 
-        let result = run_egui_launcher(command_rx);
+    /// Polls `holds` every ten milliseconds until it does, or fails the test
+    /// after thirty seconds.
+    #[cfg(feature = "gui-egui")]
+    fn wait_until(mut holds: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !holds() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the condition did not hold within 30 s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
-        assert!(result.is_ok());
-        let display = shared.lock().unwrap();
-        assert!(!display.emu_running);
-        assert!(!display.start_pending);
-        assert!(display
-            .runtime_error
-            .as_deref()
-            .is_some_and(|message| message.contains("Emulator startup failed")));
+    /// Waits until the run a power-on of `display` asked for is over: the
+    /// VM shows as neither starting nor running.
+    #[cfg(feature = "gui-egui")]
+    fn wait_until_the_run_is_over(display: &Mutex<SharedDisplay>) {
+        wait_until(|| {
+            let shown = display.lock().unwrap();
+            !shown.start_pending && !shown.emu_running
+        });
+    }
+
+    /// Polls `run` every ten milliseconds until its thread is over, or fails
+    /// the test with `failure` after thirty seconds, leaving the thread to
+    /// the end of the test process.
+    #[cfg(feature = "gui-egui")]
+    fn wait_for_end<T>(run: &std::thread::JoinHandle<T>, failure: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !run.is_finished() {
+            assert!(std::time::Instant::now() < deadline, "{failure}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// The launcher's result, once its channel is closed and every run it
+    /// started is over; a launcher still waiting on a run after thirty
+    /// seconds fails the test rather than hanging it.
+    #[cfg(feature = "gui-egui")]
+    fn join_launcher(
+        launcher: std::thread::JoinHandle<Result<RunSummary, RunError>>,
+    ) -> Result<RunSummary, RunError> {
+        wait_for_end(&launcher, "a run the launcher started ignored its stop");
+        launcher.join().expect("the launcher")
+    }
+
+    /// A power-on whose BIOS cannot be read ends with its error on the VM's
+    /// display, and the VM shows as neither starting nor running.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_missing_bios_ends_the_power_on_with_its_error() {
+        let display = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        let missing_bios = unique_temp_path("rusty-box-gui-missing-bios");
+
+        power_on(
+            &commands,
+            &display,
+            ResolvedConfig {
+                engine: Engine::Interpreter,
+                cpu_capabilities: CpuCapabilities::Preset,
+                memory_mib: 32,
+                host_memory_mib: 32,
+                memory_block_kib: 128,
+                ips: 4_000_000,
+                pci: true,
+                sync_slowdown: false,
+                sync_realtime: false,
+                smp_quantum: 16,
+                cpuid_freq: rusty_box::CpuidFreq::None,
+                port_e9_hack: rusty_box::iodev::PortE9Hack::Off,
+                max_instructions: 0,
+                cpu_params: BxParams::default(),
+                display: DisplayBackend::Egui,
+                bios: missing_bios,
+                vga_bios: None,
+                boot_order: Vec::new(),
+                disk: None::<ResolvedDisk>,
+                cdrom: None::<ResolvedCdrom>,
+                log_level: LogLevel::Warn,
+                vga_mode: None,
+                pci_vga: false,
+                console_stretch: false,
+                pointer_speed: crate::config::PointerSpeed::DEFAULT,
+            },
+        );
+        wait_until(|| display.lock().unwrap().runtime_error.is_some());
+
+        {
+            let shown = display.lock().unwrap();
+            assert!(!shown.emu_running);
+            assert!(!shown.start_pending);
+            assert!(shown
+                .runtime_error
+                .as_deref()
+                .is_some_and(|message| message.contains("Emulator startup failed")));
+        }
+        drop(commands);
+        assert!(join_launcher(launcher).is_ok());
     }
 
     /// A BIOS a run's machine builds with: one byte at a fresh path.
     #[cfg(feature = "gui-egui")]
-    fn loop_bios() -> PathBuf {
-        let bios = unique_temp_path("rusty-box-gui-loop-bios");
+    fn one_byte_bios() -> PathBuf {
+        let bios = unique_temp_path("rusty-box-gui-one-byte-bios");
         fs::write(&bios, [0xEA]).unwrap();
         bios
     }
@@ -1980,41 +2075,24 @@ mod tests {
         runtime_errors: Vec<Option<String>>,
     }
 
-    /// The launcher on a thread of its own, as the shell runs it.
+    /// Powers each of `configs` on in turn, each VM on a display of its own
+    /// and once the run before it is over, then closes the channel and
+    /// returns what the launcher left.
     #[cfg(feature = "gui-egui")]
-    fn spawn_launcher(
-        command_rx: mpsc::Receiver<crate::app::NativeEmulatorCommand>,
-    ) -> std::thread::JoinHandle<Result<RunSummary, RunError>> {
-        std::thread::Builder::new()
-            .name("rusty_box_gui_test_launcher".to_owned())
-            .stack_size(16 * 1024 * 1024)
-            .spawn(move || run_egui_launcher(command_rx))
-            .expect("spawn the launcher")
-    }
-
-    /// Powers each of `configs` on, each VM on a display of its own, closes
-    /// the channel, and returns what the launcher left once every run is
-    /// over.
-    #[cfg(feature = "gui-egui")]
-    fn run_loop_over(configs: Vec<ResolvedConfig>) -> LauncherOutcome {
-        let (command_tx, command_rx) = mpsc::channel();
+    fn run_launcher_over(configs: Vec<ResolvedConfig>) -> LauncherOutcome {
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
         let mut displays = Vec::new();
         for config in configs {
             let display = Arc::new(Mutex::new(SharedDisplay::new()));
-            command_tx
-                .send(crate::app::NativeEmulatorCommand::Start(crate::app::StartRun {
-                    display: Arc::clone(&display),
-                    config,
-                }))
-                .unwrap();
+            power_on(&commands, &display, config);
+            wait_until_the_run_is_over(&display);
             displays.push(display);
         }
-        drop(command_tx);
-
-        let result = run_egui_launcher(command_rx);
+        drop(commands);
 
         LauncherOutcome {
-            result,
+            result: join_launcher(launcher),
             runtime_errors: displays
                 .iter()
                 .map(|display| display.lock().unwrap().runtime_error.clone())
@@ -2022,30 +2100,16 @@ mod tests {
         }
     }
 
-    /// Polls `holds` every ten milliseconds until it does, or fails the test
-    /// after thirty seconds.
-    #[cfg(feature = "gui-egui")]
-    fn wait_until(mut holds: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !holds() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the condition did not hold within 30 s"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
-
     /// Each VM's startup disk is created at its first power-on of the
     /// session, not only the disk of the VM that was powered on first.
     #[cfg(feature = "gui-egui")]
     #[test]
-    fn the_loop_creates_each_vms_startup_disk_at_its_first_start() {
-        let bios = loop_bios();
-        let first = unique_temp_path("rusty-box-gui-loop-first-disk");
-        let second = unique_temp_path("rusty-box-gui-loop-second-disk");
+    fn the_launcher_creates_each_vms_startup_disk_at_its_first_start() {
+        let bios = one_byte_bios();
+        let first = unique_temp_path("rusty-box-gui-launcher-first-disk");
+        let second = unique_temp_path("rusty-box-gui-launcher-second-disk");
 
-        let outcome = run_loop_over(vec![
+        let outcome = run_launcher_over(vec![
             runnable_config(first.clone(), false, &bios),
             runnable_config(second.clone(), false, &bios),
         ]);
@@ -2065,13 +2129,13 @@ mod tests {
     /// the erase the shell asked the user about happens.
     #[cfg(feature = "gui-egui")]
     #[test]
-    fn the_loop_recreates_a_second_vms_overwrite_disk_at_its_first_start() {
-        let bios = loop_bios();
-        let first = unique_temp_path("rusty-box-gui-loop-first-disk");
-        let second = unique_temp_path("rusty-box-gui-loop-second-overwrite-disk");
+    fn the_launcher_recreates_a_second_vms_overwrite_disk_at_its_first_start() {
+        let bios = one_byte_bios();
+        let first = unique_temp_path("rusty-box-gui-launcher-first-disk");
+        let second = unique_temp_path("rusty-box-gui-launcher-second-overwrite-disk");
         fs::write(&second, [0u8; 1024]).unwrap();
 
-        let outcome = run_loop_over(vec![
+        let outcome = run_launcher_over(vec![
             runnable_config(first.clone(), false, &bios),
             runnable_config(second.clone(), true, &bios),
         ]);
@@ -2089,14 +2153,14 @@ mod tests {
     /// Start at a time, every one on the same display: one VM powered on
     /// again and again.
     #[cfg(feature = "gui-egui")]
-    struct LoopThread {
+    struct LauncherThread {
         commands: mpsc::Sender<crate::app::NativeEmulatorCommand>,
         shared: Arc<Mutex<SharedDisplay>>,
         thread: std::thread::JoinHandle<Result<RunSummary, RunError>>,
     }
 
     #[cfg(feature = "gui-egui")]
-    impl LoopThread {
+    impl LauncherThread {
         fn spawn() -> Self {
             let (commands, command_rx) = mpsc::channel();
             Self {
@@ -2106,36 +2170,25 @@ mod tests {
             }
         }
 
-        /// Sends the launcher a power-on of `config` on the VM's display.
-        fn power_on(&self, config: ResolvedConfig) {
-            self.commands
-                .send(crate::app::NativeEmulatorCommand::Start(crate::app::StartRun {
-                    display: Arc::clone(&self.shared),
-                    config,
-                }))
-                .unwrap();
-        }
-
-        /// Powers `config` on and waits for its run to end: the run is over
-        /// once its startup disk `disk` exists and the machine no longer
-        /// runs, and the launcher then waits for the next command.
-        fn start_and_wait(&self, config: ResolvedConfig, disk: &Path) {
-            self.power_on(config);
-            wait_until(|| disk.exists() && !self.shared.lock().unwrap().emu_running);
+        /// Powers `config` on and waits until its run is over; the launcher
+        /// then waits for the next command.
+        fn start_and_wait(&self, config: ResolvedConfig) {
+            power_on(&self.commands, &self.shared, config);
+            wait_until_the_run_is_over(&self.shared);
         }
 
         /// Powers `config` on, closes the channel so the launcher finishes
         /// every run it started, and returns what it left: the VM's one
         /// display holds its one error.
         fn start_and_finish(self, config: ResolvedConfig) -> LauncherOutcome {
-            self.power_on(config);
+            power_on(&self.commands, &self.shared, config);
             let Self {
                 commands,
                 shared,
                 thread,
             } = self;
             drop(commands);
-            let result = thread.join().expect("the launcher thread");
+            let result = join_launcher(thread);
             let runtime_error = shared.lock().unwrap().runtime_error.clone();
             LauncherOutcome {
                 result,
@@ -2157,15 +2210,15 @@ mod tests {
     /// powered on: a second Start leaves what the first run left on it.
     #[cfg(feature = "gui-egui")]
     #[test]
-    fn the_loop_erases_an_overwrite_disk_once_however_often_its_vm_starts() {
-        let bios = loop_bios();
-        let disk = unique_temp_path("rusty-box-gui-loop-same-disk");
+    fn the_launcher_erases_an_overwrite_disk_once_however_often_its_vm_starts() {
+        let bios = one_byte_bios();
+        let disk = unique_temp_path("rusty-box-gui-launcher-same-disk");
         let config = runnable_config(disk.clone(), true, &bios);
-        let emulator = LoopThread::spawn();
+        let launcher = LauncherThread::spawn();
 
-        emulator.start_and_wait(config.clone(), &disk);
+        launcher.start_and_wait(config.clone());
         mark_first_byte(&disk);
-        let outcome = emulator.start_and_finish(config);
+        let outcome = launcher.start_and_finish(config);
 
         let after = fs::read(&disk);
         remove_test_file(&disk);
@@ -2181,15 +2234,15 @@ mod tests {
     /// one power-on is there again after the next, and that power-on runs.
     #[cfg(feature = "gui-egui")]
     #[test]
-    fn the_loop_provisions_a_plain_disk_at_every_start() {
-        let bios = loop_bios();
-        let disk = unique_temp_path("rusty-box-gui-loop-plain-disk");
+    fn the_launcher_provisions_a_plain_disk_at_every_start() {
+        let bios = one_byte_bios();
+        let disk = unique_temp_path("rusty-box-gui-launcher-plain-disk");
         let config = runnable_config(disk.clone(), false, &bios);
-        let emulator = LoopThread::spawn();
+        let launcher = LauncherThread::spawn();
 
-        emulator.start_and_wait(config.clone(), &disk);
+        launcher.start_and_wait(config.clone());
         fs::remove_file(&disk).unwrap();
-        let outcome = emulator.start_and_finish(config);
+        let outcome = launcher.start_and_finish(config);
 
         let after_len = fs::metadata(&disk).map(|metadata| metadata.len());
         remove_test_file(&disk);
@@ -2205,13 +2258,13 @@ mod tests {
     #[cfg(feature = "gui-egui")]
     #[test]
     fn an_overwrite_start_after_a_plain_start_of_the_same_disk_erases_it() {
-        let bios = loop_bios();
-        let disk = unique_temp_path("rusty-box-gui-loop-plain-then-overwrite");
-        let emulator = LoopThread::spawn();
+        let bios = one_byte_bios();
+        let disk = unique_temp_path("rusty-box-gui-launcher-plain-then-overwrite");
+        let launcher = LauncherThread::spawn();
 
-        emulator.start_and_wait(runnable_config(disk.clone(), false, &bios), &disk);
+        launcher.start_and_wait(runnable_config(disk.clone(), false, &bios));
         mark_first_byte(&disk);
-        let outcome = emulator.start_and_finish(runnable_config(disk.clone(), true, &bios));
+        let outcome = launcher.start_and_finish(runnable_config(disk.clone(), true, &bios));
 
         let after = fs::read(&disk);
         remove_test_file(&disk);
@@ -2224,12 +2277,12 @@ mod tests {
     }
 
     /// A BIOS whose instruction at the reset vector jumps to itself, so the
-    /// guest spins there until it is stopped. A 64 KiB image ends at the
-    /// 4 GiB boundary (builder.rs `bios_load_address`), so its last sixteen
-    /// bytes lie at the reset vector, 0xFFFF_FFF0. It is no smaller, because
-    /// a fetch maps the ROM a page at a time, and the page holding the reset
-    /// vector is ROM only when the image starts at or below it (misc_mem.rs
-    /// `host_mem_range`).
+    /// guest spins there until it is stopped. A 64 KiB image, a real BIOS's
+    /// size, ends at the 4 GiB boundary (builder.rs `bios_load_address`), so
+    /// its last sixteen bytes lie at the reset vector, 0xFFFF_FFF0. Any image
+    /// of at least one page would do: a fetch maps the ROM a page at a time,
+    /// and the page holding the reset vector is ROM only when the image
+    /// starts at or below it (misc_mem.rs `host_mem_range`).
     #[cfg(feature = "gui-egui")]
     fn spinning_bios() -> PathBuf {
         let bios = unique_temp_path("rusty-box-gui-spinning-bios");
@@ -2283,12 +2336,7 @@ mod tests {
         let (commands, command_rx) = mpsc::channel();
         let launcher = spawn_launcher(command_rx);
         for display in [&first, &second] {
-            commands
-                .send(crate::app::NativeEmulatorCommand::Start(crate::app::StartRun {
-                    display: Arc::clone(display),
-                    config: spinning_config(&bios),
-                }))
-                .unwrap();
+            power_on(&commands, display, spinning_config(&bios));
         }
 
         wait_until(|| first.lock().unwrap().emu_running && second.lock().unwrap().emu_running);
@@ -2296,25 +2344,13 @@ mod tests {
         signal_egui_stop(&first);
         signal_egui_stop(&second);
         drop(commands);
-        let result = launcher.join().expect("the launcher");
+        let result = join_launcher(launcher);
         remove_test_file(&bios);
         assert!(result.is_ok());
         assert!(!first.lock().unwrap().emu_running);
         assert!(!second.lock().unwrap().emu_running);
         assert_eq!(first.lock().unwrap().runtime_error, None);
         assert_eq!(second.lock().unwrap().runtime_error, None);
-    }
-
-    /// Polls `run` every ten milliseconds until its thread is over, or fails
-    /// the test with `failure` after thirty seconds, leaving the thread to
-    /// the end of the test process.
-    #[cfg(feature = "gui-egui")]
-    fn wait_for_end<T>(run: &std::thread::JoinHandle<T>, failure: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !run.is_finished() {
-            assert!(std::time::Instant::now() < deadline, "{failure}");
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
     }
 
     /// A stop raised after the shell asked for a power-on and before the
@@ -2330,16 +2366,10 @@ mod tests {
             shown.start_pending = true;
             shown.stop_flag.store(true, Ordering::Relaxed);
         }
-        let start = crate::app::StartRun {
+        let run = spawn_run(crate::app::StartRun {
             display: Arc::clone(&display),
             config: spinning_config(&bios),
-        };
-        let provisioned = Mutex::new(HashSet::new());
-        let run = std::thread::Builder::new()
-            .name("rusty_box_gui_test_run".to_owned())
-            .stack_size(16 * 1024 * 1024)
-            .spawn(move || run_one_vm(start, &provisioned))
-            .expect("spawn the run");
+        });
 
         wait_for_end(&run, "the run ignored a stop raised before it started");
 
@@ -2358,12 +2388,7 @@ mod tests {
         let display = Arc::new(Mutex::new(SharedDisplay::new()));
         let (commands, command_rx) = mpsc::channel();
         let launcher = spawn_launcher(command_rx);
-        commands
-            .send(crate::app::NativeEmulatorCommand::Start(crate::app::StartRun {
-                display: Arc::clone(&display),
-                config: spinning_config(&bios),
-            }))
-            .unwrap();
+        power_on(&commands, &display, spinning_config(&bios));
         wait_until(|| display.lock().unwrap().emu_running);
 
         ask_for_a_restart(&display);
@@ -2378,7 +2403,7 @@ mod tests {
 
         signal_egui_stop(&display);
         drop(commands);
-        let result = launcher.join().expect("the launcher");
+        let result = join_launcher(launcher);
         remove_test_file(&bios);
         assert!(result.is_ok());
         assert!(!display.lock().unwrap().emu_running);
@@ -2392,16 +2417,10 @@ mod tests {
     fn quitting_while_a_restart_is_queued_ends_the_vm() {
         let bios = spinning_bios();
         let display = Arc::new(Mutex::new(SharedDisplay::new()));
-        let start = crate::app::StartRun {
+        let run = spawn_run(crate::app::StartRun {
             display: Arc::clone(&display),
             config: spinning_config(&bios),
-        };
-        let provisioned = Mutex::new(HashSet::new());
-        let run = std::thread::Builder::new()
-            .name("rusty_box_gui_test_run".to_owned())
-            .stack_size(EMULATOR_STACK_BYTES)
-            .spawn(move || run_one_vm(start, &provisioned))
-            .expect("spawn the run");
+        });
         wait_until(|| display.lock().unwrap().emu_running);
 
         ask_for_a_restart(&display);

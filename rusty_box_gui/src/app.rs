@@ -5371,19 +5371,28 @@ mod tests {
         (app, command_rx, scratch)
     }
 
+    /// A shell opened over a scratch library, with the channel its power-ons
+    /// are sent on and the library folder that must outlive it.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct TestShell {
+        app: NativeShellApp,
+        commands: std::sync::mpsc::Receiver<NativeEmulatorCommand>,
+        scratch: ScratchLibrary,
+    }
+
     /// A shell over a scratch library holding "Alpine" and "Windows XP", in
     /// that order, with Alpine selected.
     #[cfg(not(target_arch = "wasm32"))]
-    fn two_vm_app() -> (
-        NativeShellApp,
-        std::sync::mpsc::Receiver<NativeEmulatorCommand>,
-        ScratchLibrary,
-    ) {
+    fn two_vm_app() -> TestShell {
         let scratch = ScratchLibrary::new();
         scratch.library().create("Alpine", &test_resolved_config()).expect("seed");
         scratch.library().create("Windows XP", &test_resolved_config()).expect("seed");
-        let (app, command_rx) = native_test_app_over(&scratch, None, None);
-        (app, command_rx, scratch)
+        let (app, commands) = native_test_app_over(&scratch, None, None);
+        TestShell {
+            app,
+            commands,
+            scratch,
+        }
     }
 
     /// What the start could not do is the first thing the shell shows.
@@ -7275,7 +7284,11 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn each_vm_has_its_own_display() {
-        let (mut app, _command_rx, _scratch) = two_vm_app();
+        let TestShell {
+            mut app,
+            commands: _commands,
+            scratch: _scratch,
+        } = two_vm_app();
         let first = app.shown_display();
         app.select_profile(1);
         let second = app.shown_display();
@@ -7287,7 +7300,11 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_phone_keeps_the_screen_on_while_any_vm_starts_or_runs() {
-        let (mut app, _command_rx, _scratch) = two_vm_app();
+        let TestShell {
+            mut app,
+            commands: _commands,
+            scratch: _scratch,
+        } = two_vm_app();
         app.select_profile(1);
         let other = app.shown_display();
         app.select_profile(0);
@@ -7306,6 +7323,76 @@ mod tests {
 
         other.lock().unwrap().emu_running = false;
         assert!(!app.any_vm_keeps_screen_on(), "both VMs are off again");
+    }
+
+    /// Keeping the launch VM in the library while it runs keeps its screen
+    /// and its run: the kept VM shows the display its run draws into, still
+    /// running.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keeping_a_running_vm_in_the_library_keeps_its_session() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        app.start_vm();
+        let Ok(NativeEmulatorCommand::Start(start)) = command_rx.try_recv() else {
+            panic!("a power-on sends a Start");
+        };
+        // What the launcher's run does once it begins.
+        start.display.lock().unwrap().emu_running = true;
+
+        app.keep_selected_in_library();
+
+        assert!(
+            matches!(app.profiles[0].origin, VmOrigin::Library(_)),
+            "the VM is kept in the library"
+        );
+        assert!(Arc::ptr_eq(&app.shown_display(), &start.display));
+        assert!(app.is_vm_running(), "the kept VM still runs");
+    }
+
+    /// Deleting a VM that is off forgets its session: nothing of the shell
+    /// holds its display any more.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deleting_a_vm_closes_its_session() {
+        let TestShell {
+            mut app,
+            commands: _commands,
+            scratch: _scratch,
+        } = two_vm_app();
+        app.select_profile(1);
+        let deleted = app.shown_vm();
+        let display = app.shown_display();
+
+        app.request_delete_selected();
+        app.confirm_pending();
+
+        assert_eq!(app.profiles.len(), 1, "Windows XP is deleted");
+        assert!(app.sessions.get(&deleted).is_none(), "its session is closed");
+        assert_eq!(
+            Arc::strong_count(&display),
+            1,
+            "neither a session nor a console still holds its display"
+        );
+    }
+
+    /// Closing the window stops every VM's run: the running VM's stop flag
+    /// is raised, and it shows as off.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn closing_the_window_stops_the_running_vm() {
+        let (mut app, command_rx, _scratch) = library_app();
+        app.start_vm();
+        let Ok(NativeEmulatorCommand::Start(start)) = command_rx.try_recv() else {
+            panic!("a power-on sends a Start");
+        };
+        // What the launcher's run does once it begins.
+        start.display.lock().unwrap().emu_running = true;
+
+        eframe::App::on_exit(&mut app, None);
+
+        let display = start.display.lock().unwrap();
+        assert!(display.stop_flag.load(Ordering::Relaxed), "the run is asked to stop");
+        assert!(!display.emu_running);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
