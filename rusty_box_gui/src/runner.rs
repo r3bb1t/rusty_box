@@ -2467,9 +2467,10 @@ mod tests {
         assert!(!shown.reset_requested);
     }
 
-    /// A run keeps what it holds while it runs and gives it back once its
-    /// thread is done with the machine. The spinning VM runs on the
-    /// interpreter: only the hold is under test, so no hypervisor is needed.
+    /// A run keeps what it holds while it runs, through a restart, and gives
+    /// it back once its thread is done with the machine. The spinning VM runs
+    /// on the interpreter: only the hold is under test, so no hypervisor is
+    /// needed.
     #[cfg(feature = "gui-egui")]
     #[test]
     fn a_run_gives_its_holds_back_once_it_is_over() {
@@ -2499,8 +2500,19 @@ mod tests {
         };
         assert_eq!(
             holdings.take(Exclusive::Hypervisor, xp.clone()).err(),
-            Some(alpine),
+            Some(alpine.clone()),
             "held while it runs"
+        );
+
+        ask_for_a_restart(&display);
+        wait_until(|| {
+            let shown = display.lock().unwrap();
+            !shown.reset_requested && shown.emu_running
+        });
+        assert_eq!(
+            holdings.take(Exclusive::Hypervisor, xp.clone()).err(),
+            Some(alpine),
+            "held through the restart"
         );
 
         signal_egui_stop(&display);

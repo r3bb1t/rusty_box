@@ -11,7 +11,7 @@ use std::sync::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::sessions::{Exclusive, HeldBy, Holdings, RunHolds, Sessions, VmSession};
+use crate::sessions::{Exclusive, HeldBy, Hold, Holdings, RunHolds, Sessions, VmSession};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::{SidebarAction, VmBarAction};
 use crate::shell::destination::{Destination, ShellPage};
@@ -221,10 +221,12 @@ pub struct NativeShellApp {
     /// The overwrite creations settled this session, by path: each file the
     /// user agreed to let a startup-disk creation erase, and each one that
     /// did not exist when its VM was powered on, so there was nothing to
-    /// erase and nothing to ask. The runner erases an overwrite creation's
-    /// file at the first power-on of the session that uses the path and at
-    /// no later one, and provisions a plain creation at every power-on
-    /// without erasing anything, so one answer per file covers the session.
+    /// erase and nothing to ask. Each is recorded once the power-on that
+    /// settles it is sent, since only a sent power-on erases. The runner
+    /// erases an overwrite creation's file at the first power-on of the
+    /// session that uses the path and at no later one, and provisions a
+    /// plain creation at every power-on without erasing anything, so one
+    /// answer per file covers the session.
     overwrite_confirmed: std::collections::HashSet<PathBuf>,
     /// The gravest notice raised in this frame, which a lesser one may not
     /// replace; see `notify`.
@@ -1347,6 +1349,13 @@ fn disk_identity(path: &Path) -> PathBuf {
     }
 }
 
+/// What the shell says when the hard-disk image at `path` is refused, to a
+/// power-on or to a new disk's create, because `holder` runs on it.
+#[cfg(not(target_arch = "wasm32"))]
+fn disk_in_use(path: &Path, holder: &HeldBy) -> String {
+    format!("{} is in use by {}; stop it first.", path.display(), holder.name)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn status_snapshot(
     shared: &Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
@@ -1472,6 +1481,13 @@ impl NativeShellApp {
             .iter()
             .find(|profile| &profile.origin == vm)
             .map_or("A VM", |profile| profile.name.as_str())
+    }
+
+    /// Takes the hard-disk image at `path` for the VM named `by`, or says
+    /// which VM has it. The one way the shell takes a disk, by its identity
+    /// (`disk_identity`), whether to run a VM on it or to write it anew.
+    fn take_disk(&self, path: &Path, by: HeldBy) -> Result<Hold, HeldBy> {
+        self.holdings.take(Exclusive::Disk(disk_identity(path)), by)
     }
 
     /// The engine the shell names beside the selected VM's state: while the
@@ -2657,7 +2673,9 @@ impl NativeShellApp {
 
     /// Creates the sheet's disk and attaches it to the VM. A file of the same
     /// name stops a plain create: the sheet then asks whether to replace it
-    /// or save under the first free name.
+    /// or save under the first free name. The disk is taken for the create
+    /// as a power-on takes it (`take_disk`), so a file a running VM uses is
+    /// neither made nor replaced, and the sheet says which VM has it.
     fn create_new_disk(&mut self, existing: ExistingFilePolicy) {
         let Some(draft) = self.new_disk.as_mut() else {
             return;
@@ -2683,7 +2701,19 @@ impl NativeShellApp {
             return;
         }
         draft.conflict = None;
-        match crate::hard_disk::create_disk(&path, draft.size, existing) {
+        let size = draft.size;
+        let by = HeldBy {
+            name: self.vm_name(&self.shown_vm()).to_owned(),
+        };
+        let created = match self.take_disk(&path, by) {
+            Ok(hold) => {
+                let created = crate::hard_disk::create_disk(&path, size, existing);
+                drop(hold);
+                created
+            }
+            Err(holder) => Err(disk_in_use(&path, &holder)),
+        };
+        match created {
             Ok(_) => {
                 self.new_disk = None;
                 self.handle_created_image(CreatedImage {
@@ -2691,7 +2721,11 @@ impl NativeShellApp {
                     kind: CreatedImageKind::HardDisk,
                 });
             }
-            Err(message) => draft.error = Some(message),
+            Err(message) => {
+                if let Some(draft) = self.new_disk.as_mut() {
+                    draft.error = Some(message);
+                }
+            }
         }
     }
 
@@ -3005,8 +3039,8 @@ impl NativeShellApp {
 
     /// Runs the step waiting for confirmation, if any. A delete or an
     /// overwrite whose VM is no longer the selected one does nothing and
-    /// says so. An agreed overwrite is kept for the session, and the
-    /// power-on it stopped runs.
+    /// says so. The power-on an agreed overwrite stopped runs, and the
+    /// answer is kept for the session once that power-on is sent.
     fn confirm_pending(&mut self) {
         match self.pending_confirm.take() {
             None => {}
@@ -3026,8 +3060,7 @@ impl NativeShellApp {
                 path,
             }) => {
                 if self.is_selected(index, &origin) {
-                    self.overwrite_confirmed.extend([path]);
-                    self.start_vm();
+                    self.start_vm_answered(Some(path));
                 } else {
                     self.notify(ShellNotice::warning(
                         "Another VM was selected while the power-on waited; nothing was started.",
@@ -3154,13 +3187,24 @@ impl NativeShellApp {
 
     /// Powers on the selected VM: its edits are applied and written first,
     /// then a VM that lacks a BIOS path or a medium to boot from is refused
-    /// with a notice naming what is missing, a startup-disk creation that
-    /// would erase an existing file is put to the user, and a hard disk
-    /// another running VM uses is refused with a notice naming that VM, all
+    /// with a notice naming what is missing, a hard disk another running VM
+    /// uses is refused with a notice naming that VM, and a startup-disk
+    /// creation that would erase an existing file is put to the user, all
     /// before anything starts, so a power-on that stops at any of them has
-    /// still written the VM. A VM set to the hypervisor while another VM
-    /// holds it runs on the interpreter, says so, and keeps its setting.
+    /// still written the VM. A disk in use is refused before the question,
+    /// so nothing is asked, or agreed, about erasing a file another VM
+    /// writes to. A VM set to the hypervisor while another VM holds it runs
+    /// on the interpreter, says so, and keeps its setting.
     fn start_vm(&mut self) {
+        self.start_vm_answered(None);
+    }
+
+    /// `start_vm` for a power-on an overwrite answer lets through: `agreed`
+    /// is the existing file the user has just agreed to have erased. It is
+    /// not asked about again, and it is kept as agreed for the session once
+    /// the power-on is sent and only then: a power-on refused or not sent
+    /// erases nothing, so the next one asks again.
+    fn start_vm_answered(&mut self, agreed: Option<PathBuf>) {
         let snapshot = self.runtime_status();
         if snapshot.running {
             self.chrome.go_to(ShellPage::Console);
@@ -3179,38 +3223,39 @@ impl NativeShellApp {
             self.notify(ShellNotice::warning(gap.notice()));
             return;
         }
-        if let Some(path) = self.unconfirmed_overwrite() {
+        let vm = self.shown_vm();
+        let name = HeldBy {
+            name: self.vm_name(&vm).to_owned(),
+        };
+        let mut config = self.config.clone();
+        // A hard disk has one running writer: a second would corrupt it. It
+        // is taken before the overwrite question, so a disk another VM uses
+        // is refused before anything is asked about erasing it.
+        let disk = match &config.disk {
+            None => None,
+            Some(disk) => match self.take_disk(&disk.path, name.clone()) {
+                Ok(hold) => Some(hold),
+                Err(holder) => {
+                    self.notify(ShellNotice::warning(disk_in_use(&disk.path, &holder)));
+                    return;
+                }
+            },
+        };
+        if let Some(path) = self
+            .unconfirmed_overwrite()
+            .filter(|path| agreed.as_ref() != Some(path))
+        {
             let index = self.chrome.selected_vm();
             self.pending_confirm = Some(PendingConfirm::OverwriteDisk {
                 index,
                 origin: self.profiles[index].origin.clone(),
                 path,
             });
+            // The disk goes back as this returns. The question is modal, so
+            // no other power-on can take the disk before the answer, and the
+            // power-on the answer lets through takes it again.
             return;
         }
-        let vm = self.shown_vm();
-        let name = HeldBy {
-            name: self.vm_name(&vm).to_owned(),
-        };
-        let mut config = self.config.clone();
-        // A hard disk has one running writer: a second would corrupt it.
-        let disk = match &config.disk {
-            None => None,
-            Some(disk) => match self
-                .holdings
-                .take(Exclusive::Disk(disk_identity(&disk.path)), name.clone())
-            {
-                Ok(hold) => Some(hold),
-                Err(holder) => {
-                    self.notify(ShellNotice::warning(format!(
-                        "{} is in use by {}; stop it first.",
-                        disk.path.display(),
-                        holder.name
-                    )));
-                    return;
-                }
-            },
-        };
         // One VM at a time runs on the hypervisor; another runs on the
         // interpreter for this power-on, and its setting stays as it is.
         let hypervisor = match config.engine {
@@ -3229,8 +3274,9 @@ impl NativeShellApp {
                 }
             }
         };
-        self.overwrite_confirmed
-            .extend(self.overwrite_with_nothing_to_erase());
+        // A file this power-on's overwrite creation makes, with nothing there
+        // to erase yet; read now, before the run makes it.
+        let nothing_to_erase = self.overwrite_with_nothing_to_erase();
         // The engine the run uses, which the shell names while the VM is live.
         self.sessions.open(&vm).set_run_engine(config.engine);
         let display = self.shown_display();
@@ -3247,6 +3293,10 @@ impl NativeShellApp {
             holds: RunHolds { hypervisor, disk },
         })) {
             Ok(()) => {
+                // The overwrite creations this power-on settles for the
+                // session: the file just agreed to, and the one made new.
+                self.overwrite_confirmed.extend(agreed);
+                self.overwrite_confirmed.extend(nothing_to_erase);
                 self.chrome.go_to(ShellPage::Console);
             }
             // The Start comes back in the error, and what it holds is given
@@ -6779,6 +6829,42 @@ mod tests {
         remove_test_file(&disk);
     }
 
+    /// An overwrite answer counts once the power-on it lets through is sent:
+    /// a power-on that cannot be sent erased nothing, so the next one asks
+    /// again.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_overwrite_answer_whose_power_on_is_not_sent_is_asked_again() {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-overwrite-unsent");
+        write_test_disk(&disk);
+        let (mut app, command_rx) =
+            native_test_app_over(&scratch, Some(overwriting_launch(&disk)), None);
+        app.start_vm();
+        let asked = PendingConfirm::OverwriteDisk {
+            index: 0,
+            origin: VmOrigin::Launch,
+            path: disk.clone(),
+        };
+        assert_eq!(app.pending_confirm, Some(asked.clone()));
+
+        // The launcher is gone, so the agreed power-on is not sent.
+        drop(command_rx);
+        app.confirm_pending();
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::error(
+                "Emulator worker is not available. Restart the application."
+            ))
+        );
+
+        app.start_vm();
+
+        let asked_again = app.pending_confirm == Some(asked);
+        remove_test_file(&disk);
+        assert!(asked_again, "the question is asked again");
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn an_overwrite_confirmed_for_another_vm_starts_nothing() {
@@ -7728,6 +7814,154 @@ mod tests {
         drop(first);
     }
 
+    /// A hard disk another running VM uses is refused before its overwrite
+    /// is asked about: nothing is agreed while it is in use, so once that VM
+    /// is off, the power-on asks before the file is erased.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_disk_in_use_is_refused_before_its_overwrite_is_asked() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_sharing_a_disk();
+        let disk = app.profiles[0]
+            .config
+            .disk
+            .as_ref()
+            .map(|disk| disk.path.clone())
+            .expect("a disk");
+        write_test_disk(&disk);
+        // Alpine creates its disk plainly, so the file it runs on is reused.
+        let alpine = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        // Windows XP recreates the same file, erasing it, at its power-on.
+        if let Some(creation) = app.settings.disk_creation.as_mut() {
+            creation.overwrite = true;
+        }
+
+        app.start_vm();
+
+        let refused_unasked = app.pending_confirm.is_none();
+        let message = app
+            .shell_notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        let nothing_started = command_rx.try_recv().is_err();
+        drop(alpine);
+        app.start_vm();
+        let asked = matches!(
+            &app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk { path, .. }) if path == &disk
+        );
+        let still_nothing_started = command_rx.try_recv().is_err();
+        remove_test_file(&disk);
+        assert!(refused_unasked, "nothing is asked about a disk in use");
+        assert!(
+            message.ends_with("is in use by Alpine; stop it first."),
+            "{message}"
+        );
+        assert!(nothing_started, "nothing is started");
+        assert!(asked, "once Alpine is off, the power-on asks before erasing");
+        assert!(still_nothing_started, "nothing starts before the answer");
+    }
+
+    /// The new-disk sheet does not replace a hard disk a running VM uses:
+    /// its Replace is refused, saying which VM has the disk, and the file is
+    /// as the running VM left it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_new_disk_does_not_replace_a_disk_a_running_vm_uses() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_sharing_a_disk();
+        let disk = app.profiles[0]
+            .config
+            .disk
+            .as_ref()
+            .map(|disk| disk.path.clone())
+            .expect("a disk");
+        let written = vec![0xABu8; 512 * 16 * 63];
+        fs::write(&disk, &written).expect("write the running VM's disk");
+        let alpine = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        app.open_new_disk_sheet();
+        if let Some(draft) = app.new_disk.as_mut() {
+            draft.folder = DiskFolder::Chosen(disk.parent().expect("a folder").to_path_buf());
+            draft.name = disk
+                .file_name()
+                .expect("a file name")
+                .to_string_lossy()
+                .into_owned();
+            draft.size = crate::hard_disk::DiskSize::mib(10);
+        }
+
+        // The sheet finds the file and offers to replace it; Replace it.
+        app.create_new_disk(ExistingFilePolicy::CreateNew);
+        let offered = app
+            .new_disk
+            .as_ref()
+            .is_some_and(|draft| draft.conflict.is_some());
+        app.create_new_disk(ExistingFilePolicy::Truncate);
+
+        let after = fs::read(&disk);
+        remove_test_file(&disk);
+        assert!(offered, "the sheet offers to replace the file it found");
+        assert_eq!(
+            app.new_disk.as_ref().and_then(|draft| draft.error.clone()),
+            Some(format!(
+                "{} is in use by Alpine; stop it first.",
+                disk.display()
+            ))
+        );
+        assert!(
+            after.expect("the disk is still there") == written,
+            "the running VM's disk is as it left it"
+        );
+        drop(alpine);
+    }
+
+    /// Deleting a VM that is off while another runs leaves the running VM
+    /// its dot and its session on the row it moves up to.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deleting_an_off_vm_keeps_the_running_vms_dot_and_session() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        app.add_vm_copying_selected();
+        let copy = power_on(&mut app, &command_rx);
+        app.select_profile(0);
+
+        app.request_delete_selected();
+        app.confirm_pending();
+
+        let rows: Vec<&str> = app
+            .chrome
+            .vm_library
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(rows, ["Windows XP", "Alpine copy"], "Alpine is deleted");
+        assert_eq!(app.chrome.selected_vm(), 0, "Windows XP is shown");
+        assert_eq!(
+            app.row_dots(),
+            vec![Some(TEXT_MUTED), Some(ACCENT_CYAN)],
+            "the running copy's row, one up, keeps its dot"
+        );
+        app.select_profile(1);
+        assert!(
+            Arc::ptr_eq(&app.shown_display(), &copy.display),
+            "the running copy keeps its session"
+        );
+        assert!(app.is_vm_running());
+    }
+
     /// The drawer's dots: a running VM's row shows it running, the selected
     /// VM's row shows its state, and a VM that is off and not selected has
     /// no dot.
@@ -7998,7 +8232,10 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     mod in_a_window {
         use super::*;
-        use egui_kittest::{kittest::Queryable, Harness};
+        use egui_kittest::{
+            kittest::{NodeT, Queryable},
+            Harness,
+        };
 
         /// A frame every sixtieth of a second, as a desktop draws them, so a
         /// double-click's two clicks land inside egui's double-click delay,
@@ -8364,6 +8601,56 @@ mod tests {
                 "both name the engine Windows XP is set to"
             );
             assert!(window.query_by_label("Interpreter").is_none());
+            drop(alpine);
+        }
+
+        /// What the Hardware page says while the VM shown runs or starts.
+        const HARDWARE_LOCKED: &str = "Power off before changing VM hardware.";
+
+        /// Whether each number field on the page shown can be edited.
+        fn number_fields_editable(window: &Harness<'_, Window>) -> Vec<bool> {
+            window
+                .query_all_by_role(egui::accesskit::Role::SpinButton)
+                .map(|field| !field.accesskit_node().is_disabled())
+                .collect()
+        }
+
+        /// Hardware is locked per VM: while Alpine runs, its Hardware page
+        /// is locked and says so, and the page of Windows XP, which is off,
+        /// can be edited.
+        #[test]
+        fn a_running_vms_hardware_is_locked_and_another_vms_is_not() {
+            let TestShell {
+                mut app,
+                commands: command_rx,
+                scratch: _scratch,
+            } = two_vm_app();
+            let alpine = power_on(&mut app, &command_rx);
+            app.chrome.go_to(ShellPage::Hardware);
+            let mut window = window(app);
+            window.run_steps(2);
+            let alpine_fields = number_fields_editable(&window);
+            assert!(
+                window.query_by_label(HARDWARE_LOCKED).is_some(),
+                "Alpine runs: its page says it is locked"
+            );
+            assert!(
+                !alpine_fields.is_empty() && alpine_fields.iter().all(|editable| !editable),
+                "Alpine runs: its fields are locked: {alpine_fields:?}"
+            );
+
+            window.state_mut().app.select_profile(1);
+            window.state_mut().app.chrome.go_to(ShellPage::Hardware);
+            window.run_steps(2);
+            let xp_fields = number_fields_editable(&window);
+            assert!(
+                window.query_by_label(HARDWARE_LOCKED).is_none(),
+                "Windows XP is off: its page is not locked"
+            );
+            assert!(
+                !xp_fields.is_empty() && xp_fields.iter().all(|editable| *editable),
+                "Windows XP is off: its fields can be edited: {xp_fields:?}"
+            );
             drop(alpine);
         }
     }
