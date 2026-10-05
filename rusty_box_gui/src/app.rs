@@ -11,6 +11,8 @@ use std::sync::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
+use crate::sessions::{Sessions, VmSession};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::{SidebarAction, VmBarAction};
 use crate::shell::destination::{Destination, ShellPage};
 use crate::shell::sidebar::{Drawer, VmLibraryEntry};
@@ -42,6 +44,8 @@ use egui::RichText;
 #[cfg(target_arch = "wasm32")]
 use rusty_box::emulator::RunBudget;
 use rusty_box::params::{BxParams, BX_MAX_SMP_THREADS_SUPPORTED};
+#[cfg(not(target_arch = "wasm32"))]
+use rusty_box::gui::shared_display::SharedDisplay;
 #[cfg(not(target_arch = "wasm32"))]
 use rusty_box::params::{BX_CPU_CORES_LIMIT, BX_CPU_HT_THREADS_LIMIT, BX_CPU_PROCESSORS_LIMIT};
 use rusty_box_bximage::{calculate_hard_disk_geometry, FloppyFormat, SectorSize};
@@ -78,7 +82,16 @@ const BROWSER_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub enum NativeEmulatorCommand {
-    Start(crate::config::ResolvedConfig),
+    Start(StartRun),
+}
+
+/// One power-on, as the shell hands it to the launcher.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct StartRun {
+    /// The VM's display: the run draws into it and reads its input from it.
+    pub(crate) display: Arc<Mutex<SharedDisplay>>,
+    /// What the run builds.
+    pub(crate) config: crate::config::ResolvedConfig,
 }
 
 /// A path field the shell fills from a file chooser.
@@ -177,7 +190,9 @@ fn save_native_file(default_name: &str) -> Option<PathBuf> {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub struct NativeShellApp {
-    emulator: rusty_box::gui::RustyBoxApp,
+    /// Every VM's display and console, by VM; the shell draws and drives the
+    /// selected VM's.
+    sessions: Sessions,
     chrome: ShellChrome,
     floppy_maker: FloppyMaker,
     /// The floppy maker's window is open.
@@ -189,7 +204,6 @@ pub struct NativeShellApp {
     settings: NativeVmSettings,
     vm_info: NativeVmInfo,
     command_tx: Sender<NativeEmulatorCommand>,
-    shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
     shell_notice: Option<ShellNotice>,
     /// The folder every library VM's edits are written to.
     library: crate::library::VmLibrary,
@@ -492,10 +506,11 @@ impl NativeVmSettings {
     }
 }
 
-/// Where a VM in the list came from, and so where its edits go.
+/// Where a VM in the list came from, and so where its edits go. It is also
+/// the VM's identity: the key of its session.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum VmOrigin {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum VmOrigin {
     /// A library file; every applied edit is written back to it.
     Library(crate::library::VmStem),
     /// In memory only — the command line's machine, or the blank "New VM" —
@@ -1329,29 +1344,17 @@ pub(crate) fn status_snapshot(
 impl NativeShellApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
         command_tx: Sender<NativeEmulatorCommand>,
         start: crate::runner::ShellStart,
     ) -> Self {
         configure_shell_style(&cc.egui_ctx);
-        let emulator = rusty_box::gui::RustyBoxApp::new(cc, Arc::clone(&shared));
-        #[cfg(target_os = "android")]
-        let emulator = {
-            let mut emulator = emulator;
-            emulator.set_display_scale(rusty_box::gui::DisplayScale::Fit);
-            // A finger is not a mouse: on a phone the guest's image is a
-            // trackpad with its own left and right buttons.
-            emulator.set_pointer_mode(rusty_box::gui::PointerMode::Touchpad);
-            emulator
-        };
-        Self::with_emulator(emulator, shared, command_tx, start)
+        Self::with_commands(command_tx, start)
     }
 
-    /// The shell around `emulator`, opened on `start`'s VM list. `new` builds
-    /// the emulator view from the window; tests build it without one.
-    fn with_emulator(
-        emulator: rusty_box::gui::RustyBoxApp,
-        shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
+    /// The shell opened on `start`'s VM list, powering VMs on through
+    /// `command_tx`. `new` styles the window first; tests build the shell
+    /// without one.
+    fn with_commands(
         command_tx: Sender<NativeEmulatorCommand>,
         start: crate::runner::ShellStart,
     ) -> Self {
@@ -1374,7 +1377,7 @@ impl NativeShellApp {
             chrome.show_serial = false;
         }
         Self {
-            emulator,
+            sessions: Sessions::default(),
             chrome,
             floppy_maker: FloppyMaker::default(),
             floppy_maker_open: false,
@@ -1384,7 +1387,6 @@ impl NativeShellApp {
             settings,
             vm_info,
             command_tx,
-            shared,
             shell_notice: opening.notice,
             library: start.library,
             broken_files: opening.broken,
@@ -1400,12 +1402,52 @@ impl NativeShellApp {
         }
     }
 
+    /// The selected VM's identity: the key of its session.
+    fn shown_vm(&self) -> VmOrigin {
+        self.profiles[self.chrome.selected_vm().min(self.profiles.len() - 1)]
+            .origin
+            .clone()
+    }
+
+    /// The selected VM's state; a VM with no session is off.
     fn runtime_status(&self) -> ShellStatus {
-        status_snapshot(&self.shared)
+        self.sessions.get(&self.shown_vm()).map_or(
+            ShellStatus {
+                running: false,
+                ips: 0,
+                reset_requested: false,
+                start_pending: false,
+            },
+            VmSession::status,
+        )
+    }
+
+    /// The selected VM's display, its session opened on first use.
+    pub(crate) fn shown_display(&mut self) -> Arc<Mutex<SharedDisplay>> {
+        let vm = self.shown_vm();
+        Arc::clone(self.sessions.open(&vm).display())
+    }
+
+    /// Whether the phone keeps its screen on: while any VM starts or runs
+    /// (`MachineActivity::keeps_screen_on`), not only the one shown.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn any_vm_keeps_screen_on(&self) -> bool {
+        self.sessions
+            .statuses()
+            .iter()
+            .any(|status| crate::android_support::MachineActivity::of(status).keeps_screen_on())
+    }
+
+    /// The name a VM goes by in the shell's notices.
+    fn vm_name(&self, vm: &VmOrigin) -> &str {
+        self.profiles
+            .iter()
+            .find(|profile| &profile.origin == vm)
+            .map_or("A VM", |profile| profile.name.as_str())
     }
 
     fn is_vm_running(&self) -> bool {
-        status_snapshot(&self.shared).running
+        self.runtime_status().running
     }
 
     fn draw_shell_notice(&mut self, ui: &mut egui::Ui) {
@@ -1452,14 +1494,10 @@ impl NativeShellApp {
         self.gravest_raised = None;
     }
 
+    /// Shows every run's error as an error notice, named by its VM.
     fn take_runtime_error_notice(&mut self) {
-        let runtime_error = self
-            .shared
-            .lock()
-            .ok()
-            .and_then(|mut display| display.runtime_error.take());
-
-        if let Some(message) = runtime_error {
+        for error in self.sessions.take_runtime_errors() {
+            let message = format!("{}: {}", self.vm_name(&error.vm), error.message);
             self.notify(ShellNotice::error(message));
         }
     }
@@ -1491,6 +1529,7 @@ impl NativeShellApp {
     /// rest of the shell cannot.
     fn draw_vm_bar(&mut self, ui: &mut egui::Ui) {
         let status = self.runtime_status();
+        let vm = self.shown_vm();
         let action = crate::shell::vm_bar::draw_vm_bar(
             ui,
             VmBarState {
@@ -1503,7 +1542,10 @@ impl NativeShellApp {
                 start_pending: status.start_pending,
                 on_console: self.chrome.page() == ShellPage::Console,
                 serial_shown: self.chrome.show_serial,
-                mouse_captured: self.emulator.mouse_captured(),
+                mouse_captured: self
+                    .sessions
+                    .get(&vm)
+                    .is_some_and(VmSession::mouse_captured),
             },
         );
         match action {
@@ -1517,8 +1559,12 @@ impl NativeShellApp {
             Some(VmBarAction::ToggleSerial) => {
                 self.chrome.show_serial = !self.chrome.show_serial;
             }
-            Some(VmBarAction::ToggleMouseCapture) => self.emulator.toggle_mouse_capture(),
-            Some(VmBarAction::SendCtrlAltDel) => self.emulator.send_ctrl_alt_del(),
+            Some(VmBarAction::ToggleMouseCapture) => {
+                self.sessions.open(&vm).console().toggle_mouse_capture();
+            }
+            Some(VmBarAction::SendCtrlAltDel) => {
+                self.sessions.open(&vm).console().send_ctrl_alt_del();
+            }
             Some(VmBarAction::CreateFloppy) => self.floppy_maker_open = true,
             Some(VmBarAction::ShowAbout) => self.chrome.show_about = true,
             Some(VmBarAction::Quit) => {
@@ -1602,7 +1648,7 @@ impl NativeShellApp {
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    if self.shared.is_poisoned() {
+                    if self.shown_display().is_poisoned() {
                         status_dot(ui, ACCENT_RED);
                         ui.label(status_text("State unavailable").color(ACCENT_RED));
                         return;
@@ -1802,8 +1848,13 @@ impl NativeShellApp {
         } else {
             Some(powered_off_placeholder())
         };
-        self.emulator
-            .ui_embedded_with_serial(ui, frame, self.chrome.show_serial, placeholder);
+        let vm = self.shown_vm();
+        self.sessions.open(&vm).console().ui_embedded_with_serial(
+            ui,
+            frame,
+            self.chrome.show_serial,
+            placeholder,
+        );
     }
 
     fn draw_hardware_page(&mut self, ui: &mut egui::Ui) {
@@ -2829,6 +2880,10 @@ impl NativeShellApp {
                 profile.origin = VmOrigin::Library(stem.clone());
                 profile.file = Some(VmFileContents::of(&profile.name, &profile.config));
                 profile.save_state = SaveState::Saved;
+                // The VM keeps its screen, its console and any run it has:
+                // its session moves to the VM's new identity.
+                self.sessions
+                    .rekey(&VmOrigin::Launch, VmOrigin::Library(stem.clone()));
                 self.chrome.vm_library[index] = self.profiles[index].library_entry();
                 self.notify(ShellNotice::info(format!(
                     "Saved {} to the VM library.",
@@ -2865,7 +2920,8 @@ impl NativeShellApp {
                 return;
             }
         }
-        self.profiles.remove(removed);
+        let gone = self.profiles.remove(removed);
+        self.sessions.close(&gone.origin);
         if removed < self.chrome.vm_library.len() {
             self.chrome.vm_library.remove(removed);
         }
@@ -3082,19 +3138,24 @@ impl NativeShellApp {
         }
         self.overwrite_confirmed
             .extend(self.overwrite_with_nothing_to_erase());
-        if let Ok(mut display) = self.shared.lock() {
-            display.start_pending = true;
+        let display = self.shown_display();
+        if let Ok(mut shown) = display.lock() {
+            // The power-on lowers the stop its VM's last run left raised. The
+            // run never lowers it at its start, so a stop raised from here
+            // on, before the run begins, is honoured.
+            shown.stop_flag.store(false, Ordering::Relaxed);
+            shown.start_pending = true;
         }
-        match self
-            .command_tx
-            .send(NativeEmulatorCommand::Start(self.config.clone()))
-        {
+        match self.command_tx.send(NativeEmulatorCommand::Start(StartRun {
+            display: Arc::clone(&display),
+            config: self.config.clone(),
+        })) {
             Ok(()) => {
                 self.chrome.go_to(ShellPage::Console);
             }
             Err(_) => {
-                if let Ok(mut display) = self.shared.lock() {
-                    display.start_pending = false;
+                if let Ok(mut shown) = display.lock() {
+                    shown.start_pending = false;
                 }
                 self.notify(ShellNotice::error(
                     "Emulator worker is not available. Restart the application.",
@@ -3107,7 +3168,7 @@ impl NativeShellApp {
             return;
         }
 
-        if let Ok(mut display) = self.shared.lock() {
+        if let Ok(mut display) = self.shown_display().lock() {
             display.stop_flag.store(true, Ordering::Relaxed);
             display.reset_requested = false;
         }
@@ -3138,9 +3199,11 @@ impl NativeShellApp {
         } else {
             rusty_box::gui::DisplayScale::Fit
         };
-        self.emulator.set_display_scale(scale);
+        let vm = self.shown_vm();
+        let console = self.sessions.open(&vm).console();
+        console.set_display_scale(scale);
         let area = ui.max_rect();
-        self.emulator.ui_embedded_with_serial(ui, frame, false, None);
+        console.ui_embedded_with_serial(ui, frame, false, None);
 
         let ctx = ui.ctx().clone();
         egui::Area::new(egui::Id::new("full_screen_menu_button"))
@@ -3167,6 +3230,7 @@ impl NativeShellApp {
     fn draw_full_screen_menu(&mut self, ctx: &egui::Context, area: egui::Rect) {
         let status = self.runtime_status();
         let badge = shell_state_badge(&status, self.has_error_notice());
+        let vm = self.shown_vm();
         let below_button = SPACE_GROUP + FULL_SCREEN_BUTTON_SIZE + SPACE_ITEM;
         egui::Window::new("full_screen_menu")
             .title_bar(false)
@@ -3192,7 +3256,7 @@ impl NativeShellApp {
                     .add_enabled(status.running, egui::Button::new("Ctrl+Alt+Del"))
                     .clicked()
                 {
-                    self.emulator.send_ctrl_alt_del();
+                    self.sessions.open(&vm).console().send_ctrl_alt_del();
                 }
                 let mut stretch = self.settings.console_stretch;
                 if ui.checkbox(&mut stretch, "Stretch to fill").changed() {
@@ -3244,7 +3308,7 @@ impl NativeShellApp {
             return;
         }
 
-        if let Ok(mut display) = self.shared.lock() {
+        if let Ok(mut display) = self.shown_display().lock() {
             display.stop_flag.store(true, Ordering::Relaxed);
             display.reset_requested = true;
         }
@@ -3380,14 +3444,19 @@ impl NativeShellApp {
         self.take_runtime_error_notice();
         #[cfg(target_os = "android")]
         {
-            self.emulator
+            let vm = self.shown_vm();
+            self.sessions
+                .open(&vm)
+                .console()
                 .set_pointer_speed(self.settings.pointer_speed.factor());
             if self.console_view() == crate::android_support::ConsoleView::FullScreen {
                 self.draw_full_screen_console(ui, frame);
                 return;
             }
             self.full_screen_menu_open = false;
-            self.emulator
+            self.sessions
+                .open(&vm)
+                .console()
                 .set_display_scale(rusty_box::gui::DisplayScale::Fit);
         }
 
@@ -3434,8 +3503,10 @@ impl eframe::App for NativeShellApp {
         false
     }
 
-    /// The window is closing: every edit still only in memory is written.
+    /// The window is closing: every VM's run is asked to stop, and every edit
+    /// still only in memory is written.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.sessions.stop_all();
         self.flush_unsaved();
     }
 }
@@ -5265,11 +5336,7 @@ mod tests {
         NativeShellApp,
         std::sync::mpsc::Receiver<NativeEmulatorCommand>,
     ) {
-        let shared = Arc::new(Mutex::new(
-            rusty_box::gui::shared_display::SharedDisplay::new(),
-        ));
         let (command_tx, command_rx) = std::sync::mpsc::channel();
-        let emulator = rusty_box::gui::RustyBoxApp::new_embedded(Arc::clone(&shared));
         let start = crate::runner::ShellStart {
             library: scratch.library(),
             opening: launch.map_or(
@@ -5278,10 +5345,16 @@ mod tests {
             ),
             notice,
         };
-        (
-            NativeShellApp::with_emulator(emulator, shared, command_tx, start),
-            command_rx,
-        )
+        (NativeShellApp::with_commands(command_tx, start), command_rx)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl NativeShellApp {
+        /// The selected VM's console view, its session opened on first use.
+        fn shown_console(&mut self) -> &mut rusty_box::gui::RustyBoxApp {
+            let vm = self.shown_vm();
+            self.sessions.open(&vm).console()
+        }
     }
 
     /// A shell opened over a scratch library holding one VM, "Alpine", and
@@ -5294,6 +5367,21 @@ mod tests {
     ) {
         let scratch = ScratchLibrary::new();
         scratch.library().create("Alpine", &test_resolved_config()).expect("seed");
+        let (app, command_rx) = native_test_app_over(&scratch, None, None);
+        (app, command_rx, scratch)
+    }
+
+    /// A shell over a scratch library holding "Alpine" and "Windows XP", in
+    /// that order, with Alpine selected.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn two_vm_app() -> (
+        NativeShellApp,
+        std::sync::mpsc::Receiver<NativeEmulatorCommand>,
+        ScratchLibrary,
+    ) {
+        let scratch = ScratchLibrary::new();
+        scratch.library().create("Alpine", &test_resolved_config()).expect("seed");
+        scratch.library().create("Windows XP", &test_resolved_config()).expect("seed");
         let (app, command_rx) = native_test_app_over(&scratch, None, None);
         (app, command_rx, scratch)
     }
@@ -5759,7 +5847,7 @@ mod tests {
         assert_eq!(memory_in_file(&scratch), 512);
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(NativeEmulatorCommand::Start(config)) if config.memory_mib == 512
+            Ok(NativeEmulatorCommand::Start(start)) if start.config.memory_mib == 512
         ));
     }
 
@@ -6031,7 +6119,7 @@ mod tests {
         assert_eq!(memory_in_file(&scratch), 512);
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(NativeEmulatorCommand::Start(config)) if config.memory_mib == 512
+            Ok(NativeEmulatorCommand::Start(start)) if start.config.memory_mib == 512
         ));
     }
 
@@ -6191,7 +6279,7 @@ mod tests {
             ))
         );
         assert!(command_rx.try_recv().is_err());
-        assert!(!app.shared.lock().unwrap().start_pending);
+        assert!(!app.shown_display().lock().unwrap().start_pending);
     }
 
     /// The blank "New VM" lacks both, and its refusal names both, pointing
@@ -6423,7 +6511,7 @@ mod tests {
         // it at no later one this session, so the next power-on asks nothing
         // either.
         write_test_disk(&disk);
-        app.shared.lock().unwrap().start_pending = false;
+        app.shown_display().lock().unwrap().start_pending = false;
         app.start_vm();
 
         assert_eq!(app.pending_confirm, None);
@@ -6456,7 +6544,7 @@ mod tests {
         assert!(!app.overwrite_confirmed.contains(&disk));
 
         write_test_disk(&disk);
-        app.shared.lock().unwrap().start_pending = false;
+        app.shown_display().lock().unwrap().start_pending = false;
         if let Some(creation) = app.settings.disk_creation.as_mut() {
             creation.overwrite = true;
         }
@@ -6506,7 +6594,7 @@ mod tests {
 
         // Powered off again. The runner recreated the disk at the first
         // power-on and does not again this session, so nothing is asked.
-        app.shared.lock().unwrap().start_pending = false;
+        app.shown_display().lock().unwrap().start_pending = false;
         app.start_vm();
 
         assert_eq!(app.pending_confirm, None);
@@ -6561,7 +6649,7 @@ mod tests {
     #[test]
     fn adding_a_vm_is_refused_while_the_vm_runs() {
         let (mut app, _command_rx, scratch) = library_app();
-        app.shared.lock().unwrap().emu_running = true;
+        app.shown_display().lock().unwrap().emu_running = true;
 
         app.add_vm_copying_selected();
 
@@ -7074,7 +7162,7 @@ mod tests {
         app.start_vm();
 
         let command = command_rx.try_recv().expect("start command should be sent");
-        let NativeEmulatorCommand::Start(config) = command;
+        let NativeEmulatorCommand::Start(StartRun { config, .. }) = command;
         assert_eq!(config.memory_mib, 640);
         assert_eq!(config.host_memory_mib, 256);
         assert_eq!(config.ips, 123_000_000);
@@ -7120,23 +7208,104 @@ mod tests {
             app.floppy_maker.status,
             Some(CreatorStatus::Success("existing status".to_owned()))
         );
-        assert!(!app.shared.lock().unwrap().start_pending);
+        assert!(!app.shown_display().lock().unwrap().start_pending);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_runtime_error_becomes_shell_notice() {
         let (mut app, _command_rx, _library) = native_test_app();
-        app.shared.lock().unwrap().runtime_error =
+        app.shown_display().lock().unwrap().runtime_error =
             Some("Emulator startup failed: BIOS missing".to_owned());
 
         app.take_runtime_error_notice();
 
         assert_eq!(
             app.shell_notice,
-            Some(ShellNotice::error("Emulator startup failed: BIOS missing"))
+            Some(ShellNotice::error(
+                "Rusty Box: Emulator startup failed: BIOS missing"
+            ))
         );
-        assert!(app.shared.lock().unwrap().runtime_error.is_none());
+        assert!(app.shown_display().lock().unwrap().runtime_error.is_none());
+    }
+
+    /// A run's error reaches the shell named by its VM.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_runtime_error_is_shown_with_its_vms_name() {
+        let (mut app, _command_rx, _scratch) = library_app();
+        app.shown_display().lock().unwrap().runtime_error =
+            Some("the BIOS did not load".to_owned());
+        app.take_runtime_error_notice();
+        let notice = app.shell_notice.clone().expect("a notice");
+        assert!(notice.message.starts_with("Alpine: "), "{}", notice.message);
+    }
+
+    /// A power-on hands the launcher the selected VM's own display.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn powering_on_sends_the_selected_vms_display() {
+        let (mut app, command_rx, _scratch) = library_app();
+        app.start_vm();
+        let Ok(NativeEmulatorCommand::Start(start)) = command_rx.try_recv() else {
+            panic!("a power-on sends a Start");
+        };
+        assert!(Arc::ptr_eq(&start.display, &app.shown_display()));
+    }
+
+    /// A power-on lowers the stop the VM's last run left raised, so the run
+    /// it asks for runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_lowers_the_stop_its_last_run_left() {
+        let (mut app, command_rx, _scratch) = library_app();
+        app.shown_display()
+            .lock()
+            .unwrap()
+            .stop_flag
+            .store(true, Ordering::Relaxed);
+        app.start_vm();
+        let Ok(NativeEmulatorCommand::Start(start)) = command_rx.try_recv() else {
+            panic!("a power-on sends a Start");
+        };
+        assert!(!start.display.lock().unwrap().stop_flag.load(Ordering::Relaxed));
+    }
+
+    /// Every VM has a display of its own.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn each_vm_has_its_own_display() {
+        let (mut app, _command_rx, _scratch) = two_vm_app();
+        let first = app.shown_display();
+        app.select_profile(1);
+        let second = app.shown_display();
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    /// The phone keeps its screen on while any VM starts or runs, the one
+    /// not shown included, and lets it sleep once every VM is off.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_phone_keeps_the_screen_on_while_any_vm_starts_or_runs() {
+        let (mut app, _command_rx, _scratch) = two_vm_app();
+        app.select_profile(1);
+        let other = app.shown_display();
+        app.select_profile(0);
+        assert_eq!(app.vm_info.name, "Alpine", "Windows XP is not shown");
+        assert!(!app.any_vm_keeps_screen_on(), "no VM is live");
+
+        other.lock().unwrap().start_pending = true;
+        assert!(app.any_vm_keeps_screen_on(), "the VM not shown starts");
+
+        {
+            let mut display = other.lock().unwrap();
+            display.start_pending = false;
+            display.emu_running = true;
+        }
+        assert!(app.any_vm_keeps_screen_on(), "the VM not shown runs");
+
+        other.lock().unwrap().emu_running = false;
+        assert!(!app.any_vm_keeps_screen_on(), "both VMs are off again");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -7147,8 +7316,8 @@ mod tests {
         app.request_power_off();
         app.request_reset();
 
-        let display = app
-            .shared
+        let shared = app.shown_display();
+        let display = shared
             .lock()
             .expect("shared display should not be poisoned");
         assert!(!display.stop_flag.load(Ordering::Relaxed));
@@ -7213,7 +7382,7 @@ mod tests {
         );
 
         app.add_vm_copying_selected();
-        app.shared.lock().unwrap().emu_running = true;
+        app.shown_display().lock().unwrap().emu_running = true;
         app.request_delete_selected();
         app.confirm_pending();
 
@@ -7232,7 +7401,7 @@ mod tests {
         let (mut app, _command_rx, _library) = native_test_app();
         app.add_vm_copying_selected();
         assert_eq!(app.chrome.selected_vm(), 1);
-        app.shared.lock().unwrap().emu_running = true;
+        app.shown_display().lock().unwrap().emu_running = true;
 
         app.select_profile(0);
 
@@ -7323,7 +7492,7 @@ mod tests {
     fn created_image_hard_disk_warns_while_running() {
         let (mut app, _command_rx, _library) = native_test_app();
         let original_disk_path = app.settings.disk_path.clone();
-        app.shared.lock().unwrap().emu_running = true;
+        app.shown_display().lock().unwrap().emu_running = true;
 
         app.handle_created_image(CreatedImage {
             path: std::path::PathBuf::from("created.img"),
@@ -7539,9 +7708,10 @@ mod tests {
         fn show_a_running_guest(app: &mut NativeShellApp, library: Drawer) {
             app.chrome.go_to(ShellPage::Console);
             app.chrome.library = library;
-            app.emulator
+            app.shown_console()
                 .set_display_scale(rusty_box::gui::DisplayScale::Stretch);
-            let mut display = app.shared.lock().expect("shared display");
+            let shared = app.shown_display();
+            let mut display = shared.lock().expect("shared display");
             display.fb_width = 64;
             display.fb_height = 40;
             display.framebuffer = vec![0x80; 64 * 40 * 4];
@@ -7561,7 +7731,7 @@ mod tests {
         fn presses_on_the_guest_image_at_the_left_edge_leave_a_closed_drawer_closed() {
             let (mut app, _command_rx, _scratch) = native_test_app();
             show_a_running_guest(&mut app, Drawer::Closed);
-            let shared = Arc::clone(&app.shared);
+            let shared = app.shown_display();
             let mut window = window(app);
             window.run_steps(2);
             let edge = window.state().left_edge;
@@ -7666,7 +7836,7 @@ mod tests {
         /// by touch.
         fn show_a_running_guest_on_a_trackpad(app: &mut NativeShellApp) {
             show_a_running_guest(app, Drawer::Closed);
-            app.emulator
+            app.shown_console()
                 .set_pointer_mode(rusty_box::gui::PointerMode::Touchpad);
         }
 
@@ -7677,7 +7847,7 @@ mod tests {
         fn a_finger_slid_across_the_guest_moves_its_mouse() {
             let (mut app, _command_rx, _scratch) = native_test_app();
             show_a_running_guest_on_a_trackpad(&mut app);
-            let shared = Arc::clone(&app.shared);
+            let shared = app.shown_display();
             let mut window = window(app);
             window.run_steps(2);
             let from = guest_image(&window).center();
@@ -7702,7 +7872,7 @@ mod tests {
         fn a_touch_under_an_area_over_the_guest_stays_with_the_area() {
             let (mut app, _command_rx, _scratch) = native_test_app();
             show_a_running_guest_on_a_trackpad(&mut app);
-            let shared = Arc::clone(&app.shared);
+            let shared = app.shown_display();
             let mut window = window(app);
             window.run_steps(2);
             let image = guest_image(&window);

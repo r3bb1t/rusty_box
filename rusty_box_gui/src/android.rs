@@ -2,8 +2,8 @@
 //!
 //! NativeActivity loads the `rusty_box_gui_android` example's library and
 //! calls its `android_main`, which passes the activity to [`main`]. From there
-//! a phone runs the desktop shell — the same `NativeShellApp`, emulator thread
-//! and machine start — over a VM library in the app's storage, seeded from
+//! a phone runs the desktop shell — the same `NativeShellApp`, launcher and
+//! machine start — over a VM library in the app's storage, seeded from
 //! the files the APK carries. What a desktop gets from its host and a phone
 //! lacks is supplied here: a file browser for the shell's Browse buttons, the
 //! storage permission that browser needs, a key pad for a device without a
@@ -15,7 +15,7 @@
 
 use crate::android_support::{
     content_rect_in_points, list_directory, needs_first_vm, seed_first_vm, stage_file,
-    CarriedMachine, DirectoryEntry, EntryKind, FileFilter, MachineActivity, PixelRect,
+    CarriedMachine, DirectoryEntry, EntryKind, FileFilter, PixelRect,
 };
 use crate::app::{BrowseRequest, BrowseTarget, NativeEmulatorCommand, NativeShellApp};
 use crate::library::VmLibrary;
@@ -26,7 +26,7 @@ use rusty_box::gui::{char_to_bx_key_sequence, HostInputEvent, HostInputSink};
 use rusty_box::iodev::scancodes::BxKey;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 pub use winit::platform::android::activity::AndroidApp;
 
@@ -219,7 +219,6 @@ fn stage(kind: &'static str, dir: &Path, name: &str, bytes: &[u8]) -> Result<Pat
 /// safe area, with the file browser and key pad a phone needs drawn over it.
 pub(crate) struct AndroidShellApp {
     shell: NativeShellApp,
-    shared: Arc<Mutex<SharedDisplay>>,
     app: AndroidApp,
     browser: Option<FileBrowser>,
     keypad: Option<Keypad>,
@@ -246,12 +245,11 @@ enum ScreenHold {
 impl AndroidShellApp {
     pub(crate) fn new(
         cc: &eframe::CreationContext<'_>,
-        shared: Arc<Mutex<SharedDisplay>>,
         command_tx: Sender<NativeEmulatorCommand>,
         start: crate::runner::ShellStart,
         app: AndroidApp,
     ) -> Self {
-        let shell = NativeShellApp::new(cc, Arc::clone(&shared), command_tx, start);
+        let shell = NativeShellApp::new(cc, command_tx, start);
         // A finger needs a larger target than a pointer: every control is at
         // least TOUCH_TARGET points tall, with room around its caption.
         // On a touch screen a press on text is a tap on what holds it, and a
@@ -263,7 +261,6 @@ impl AndroidShellApp {
         });
         Self {
             shell,
-            shared,
             app,
             browser: None,
             keypad: None,
@@ -274,7 +271,7 @@ impl AndroidShellApp {
     }
 
     /// Puts the window in the state a game's has: no status bar, and the
-    /// screen held on while a machine starts or runs. Applied whenever the
+    /// screen held on while any VM starts or runs. Applied whenever the
     /// hold changes and whenever the window regains the focus, because
     /// Android may rebuild the window when the app comes back.
     ///
@@ -357,7 +354,10 @@ impl AndroidShellApp {
         let Some(keypad) = &mut self.keypad else {
             return;
         };
-        let shared = &self.shared;
+        // The keys go to the VM shown, whose console the menu opened the pad
+        // over.
+        let display = self.shell.shown_display();
+        let shared: &Mutex<SharedDisplay> = &display;
         let mut open = true;
         egui::Window::new("Keys")
             .open(&mut open)
@@ -406,8 +406,7 @@ impl AndroidShellApp {
 impl eframe::App for AndroidShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let activity = MachineActivity::of(&crate::app::status_snapshot(&self.shared));
-        let hold = if activity.keeps_screen_on() {
+        let hold = if self.shell.any_vm_keeps_screen_on() {
             ScreenHold::Held
         } else {
             ScreenHold::Released
