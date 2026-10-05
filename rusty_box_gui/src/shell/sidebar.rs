@@ -16,9 +16,7 @@ use crate::shell::theme::{
     TEXT_MUTED,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::widgets::{
-    selection_row, touch_row_height, RowMark, ShellStateBadge, CHILD_INDENT, ROOT_INDENT,
-};
+use crate::shell::widgets::{selection_row, touch_row_height, RowMark, CHILD_INDENT, ROOT_INDENT};
 #[cfg(not(target_arch = "wasm32"))]
 use egui::{RichText, Stroke};
 
@@ -148,8 +146,8 @@ pub(crate) struct Sidebar<'a> {
     pub(crate) destination: Destination,
     /// The search field's text.
     pub(crate) filter: &'a mut String,
-    /// The shown VM's state, whose colour is the dot on that VM's row.
-    pub(crate) badge: ShellStateBadge,
+    /// The dot on each VM's row, by index into `entries`.
+    pub(crate) dots: &'a [Option<egui::Color32>],
     /// The library files that do not load, listed under "Could not load".
     pub(crate) broken: &'a [crate::library::BrokenVmFile],
     /// Open or closed; a drag across the drawer's edge changes it.
@@ -173,7 +171,7 @@ impl Sidebar<'_> {
             visible,
             destination,
             filter,
-            badge,
+            dots,
             broken,
             drawer,
         } = self;
@@ -230,7 +228,7 @@ impl Sidebar<'_> {
                     .show(ui, |ui| {
                         for &index in visible {
                             let is_selected_vm = destination.vm() == index;
-                            let dot = is_selected_vm.then_some(badge.color);
+                            let dot = dots.get(index).copied().flatten();
                             let vm_mark = if is_selected_vm {
                                 RowMark::Expanded
                             } else {
@@ -310,7 +308,6 @@ impl Sidebar<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::theme::TEXT_MUTED;
     use crate::shell::widgets::ROW_HEIGHT;
     use egui_kittest::{kittest::Queryable, Harness};
 
@@ -365,10 +362,7 @@ mod tests {
                         visible: &library.visible,
                         destination: library.destination,
                         filter: &mut library.filter,
-                        badge: ShellStateBadge {
-                            label: "Stopped",
-                            color: TEXT_MUTED,
-                        },
+                        dots: &[],
                         broken: &library.broken,
                         drawer: &mut library.drawer,
                     }

@@ -51,7 +51,7 @@ cargo run --release -p rusty_box_gui -- `
 
 ### The shell
 
-The egui shell runs `eframe` on the main thread and the emulator on a worker thread with a 1500 MiB stack. The window has four parts:
+The egui shell runs `eframe` on the main thread and a launcher thread, which starts every power-on on a thread of its own with a 1500 MiB stack: one thread for each running VM. The window has four parts:
 
 - **Sidebar tree.** Every VM is a row, and the selected one opens to its four pages: **Summary**, **Console**, **Hardware** and **Images**. The `+` button adds a new VM to the library, copied from the selected one, and a "Search VMs" field filters the list. The command line's temporary VM is marked "(unsaved)", and a library VM whose last save failed "(save failed)". Library files that do not load are listed under **Could not load**. The list scrolls by the wheel, by its scroll bar, and by a finger on a touch screen. Dragging the sidebar's edge in past its narrowest width folds it away; a folded sidebar comes back with a drag from the window's left edge, where the guest's image does not reach it, or with `☰`.
 - **VM bar** above the page. It carries the selected VM's name, its state, and the verbs that change the state:
@@ -59,7 +59,7 @@ The egui shell runs `eframe` on the main thread and the emulator on a worker thr
   - On the Console page only, the bar adds `Ctrl+Alt+Del`, `Capture mouse` / `Release mouse` and `Show serial` / `Hide serial`. The first two are enabled only while the VM runs; `Show serial` / `Hide serial` always is. When the window is too narrow, these fold into the `…` menu.
   - `…` always holds `About Rusty Box Workstation` and `Quit`.
   - `☰` hides the sidebar, so the Console can scale wider, and shows it again.
-- **Status strip** along the bottom. It shows the state, the engine, the memory and CPU count, and the measured instruction rate (`--- IPS` when none is published). It adds `Restart queued` while a restart is pending.
+- **Status strip** along the bottom. It shows the state, the engine, the memory and CPU count, and the measured instruction rate (`--- IPS` when none is published). While the VM runs or starts, the engine is the one its run uses (see [Several VMs at once](#several-vms-at-once)). It adds `Restart queued` while a restart is pending.
 - **Page.** Startup and runtime errors appear as notices at the top of the page.
 
 The pages:
@@ -82,7 +82,14 @@ The pages:
   An edit to a library VM is written to its file when the edit ends — when the field loses focus or the drag ends — and at once when you switch VMs, add a VM, keep one, power on, or the window goes behind another or closes. The Hardware page shows the file's path; for the temporary VM it reads `Not saved. Keep this VM in the library from its Summary page.` A write that fails is shown as an error and marks the VM "(save failed)" in the sidebar; it is tried again at the next change, selection or power-on. The file is rewritten whole each time, so hand-written comments in it are lost. The CPU topology is written as `cpu_sockets` / `cpu_cores` / `cpu_threads` rather than `cpus`; `engine`, `cpu_capabilities`, `sync_realtime`, `smp_quantum`, `max_instructions`, `cpuid_freq`, `port_e9_hack` and `pci_vga` are written only when they differ from their defaults; relative paths are written absolute.
 - **Images** creates disk images (see [Disk images](#disk-images)).
 
-A confirmation dialog is dismissed by `Cancel`, Escape or a click outside it. While a VM runs or starts, selecting another VM and adding one are refused, with `Stop the running VM before selecting another VM.` and `Stop the running VM before adding a VM.` The `Search VMs` field matches a VM's name, boot order, and disk and CD/DVD paths, ignoring case.
+A confirmation dialog is dismissed by `Cancel`, Escape or a click outside it. The `Search VMs` field matches a VM's name, boot order, and disk and CD/DVD paths, ignoring case.
+
+### Several VMs at once
+
+Several VMs run at once, each on a thread of its own. Select one in the sidebar to see its console, VM bar and status strip; the others keep running, and only the VM shown gets the keyboard and mouse. A VM can be added, or another powered on, while VMs run. The selected VM's row has a dot in its state's colour, and so has the row of every other VM that runs or is starting; a VM that is off and not selected has none. A VM that runs or is starting cannot be deleted until it stops. Two things are used by one running VM at a time:
+
+- **The hypervisor.** A process holds one Windows Hypervisor Platform partition at a time, so one VM at a time runs on it. Another VM set to it starts on the interpreter, with the warning `<VM> runs on the interpreter: <VM> is using the hypervisor.` naming both, and its status strip and Summary page name the interpreter while it runs; its Engine setting is left as it is. The hypervisor is free again once the VM that holds it has stopped.
+- **A hard-disk image.** Two writers would corrupt it, so powering on a VM whose hard disk is a file another running VM uses is refused with `<path> is in use by <VM>; stop it first.` A CD/DVD image, which is only read, can be used by several VMs at once.
 
 ### Mouse and keyboard
 
@@ -182,7 +189,7 @@ The disk geometry comes from `rusty_box_bximage`: 16 heads, 63 sectors per track
 
 The same shell runs on an Android phone as an APK. `cargo xtask android build` builds it, and `cargo xtask android run` installs and launches it on a phone attached over USB debugging (see [xtask/README.md](../xtask/README.md#android-commands)).
 
-The APK's native library is this crate's `rusty_box_gui_android` example. NativeActivity calls its `android_main`, which hands the activity to `rusty_box_gui::android::main`. From there the phone runs the desktop shell, with the same pages, emulator thread and power-on path, and these differences:
+The APK's native library is this crate's `rusty_box_gui_android` example. NativeActivity calls its `android_main`, which hands the activity to `rusty_box_gui::android::main`. From there the phone runs the desktop shell, with the same pages, the same launcher starting a thread for each running VM, and the same power-on path, and these differences:
 
 - **Files it carries.** The Bochs BIOS and VGA BIOS are compiled into the APK and written to the app's private storage at launch. No disk image or ISO travels with it.
 - **Configuration.** VMs live in a library in the app's private storage, one TOML file each, saved when an edit ends and when the app goes to the background. A first launch, with an empty library, makes one VM: from a `rusty_box.toml` in the app's storage when one is there, the carried ROMs, 256 MiB of guest memory and 300,000,000 instructions per second filling in whatever the file leaves out; otherwise from the carried ROMs alone, called "Rusty Box", with those defaults and no CD. Choose its ISO under Hardware › CD/DVD. What a launch could not do — the file did not import, so the VM was made from the ROMs instead; no VM could be made; the VM was made but not recorded as the one to open on — is shown as a notice when the shell opens. The ☰ button opens the VM list; picking anything in it — a VM, or a page of the VM already shown — closes it.
@@ -191,6 +198,7 @@ The APK's native library is this crate's `rusty_box_gui_android` example. Native
 - **Layout.** A page strip replaces the sidebar, the shell stays inside the area the system bars leave free, and number fields step with − and + buttons (memory in steps of 64 MB). The strip labels the Summary page `Home`, so `Keep in library` is on the `Home` page there.
 - **Console page.** It has a header of its own in place of the VM bar: a `File` menu (`Home`, `Create Disk Image`, `Quit`), a `VM` menu (`Power On`, `Power Off`, `Restart VM`), the state, the instruction rate, the four page buttons, a `Power On` button and the VM's name. So the phone has no `Capture mouse`, `Ctrl+Alt+Del` or `Show serial` button, and the serial pane, hidden at launch, stays hidden; Ctrl+Alt+Del is on the Keys pad. Touch input to the guest is not recorded.
 - **Engine.** The interpreter only; the hypervisor engine is Windows-only.
+- **Several VMs.** As on the desktop ([Several VMs at once](#several-vms-at-once)), several VMs run at once: the ☰ list marks every running VM with a dot and shows the one picked, a hard-disk image is used by one running VM at a time, and a running VM cannot be deleted.
 
 ## Browser
 

@@ -11,7 +11,7 @@ use std::sync::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::sessions::{Sessions, VmSession};
+use crate::sessions::{Exclusive, HeldBy, Holdings, RunHolds, Sessions, VmSession};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::{SidebarAction, VmBarAction};
 use crate::shell::destination::{Destination, ShellPage};
@@ -92,6 +92,9 @@ pub struct StartRun {
     pub(crate) display: Arc<Mutex<SharedDisplay>>,
     /// What the run builds.
     pub(crate) config: crate::config::ResolvedConfig,
+    /// What the power-on took that only one running VM may have: the run's
+    /// thread holds it until every machine the power-on builds is gone.
+    pub(crate) holds: RunHolds,
 }
 
 /// A path field the shell fills from a file chooser.
@@ -193,6 +196,10 @@ pub struct NativeShellApp {
     /// Every VM's display and console, by VM; the shell draws and drives the
     /// selected VM's.
     sessions: Sessions,
+    /// What only one running VM may have — the hypervisor, each hard-disk
+    /// image — and which VM has it. A power-on takes; its run's thread gives
+    /// back.
+    holdings: Holdings,
     chrome: ShellChrome,
     floppy_maker: FloppyMaker,
     /// The floppy maker's window is open.
@@ -1320,6 +1327,26 @@ fn trimmed_optional_path(value: &str) -> Option<PathBuf> {
     }
 }
 
+/// A hard-disk image's identity, so two spellings of one file are one disk:
+/// its canonical path where it exists, and where it does not yet — a
+/// startup disk its first run makes — its name in its folder's canonical
+/// path, the canonical path the file has once it is made. A path whose
+/// folder does not exist either is made absolute.
+#[cfg(not(target_arch = "wasm32"))]
+fn disk_identity(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let folder = absolute
+        .parent()
+        .and_then(|folder| std::fs::canonicalize(folder).ok());
+    match (folder, absolute.file_name()) {
+        (Some(folder), Some(name)) => folder.join(name),
+        (None, _) | (_, None) => absolute,
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn status_snapshot(
     shared: &Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
@@ -1378,6 +1405,7 @@ impl NativeShellApp {
         }
         Self {
             sessions: Sessions::default(),
+            holdings: Holdings::default(),
             chrome,
             floppy_maker: FloppyMaker::default(),
             floppy_maker_open: false,
@@ -1444,6 +1472,18 @@ impl NativeShellApp {
             .iter()
             .find(|profile| &profile.origin == vm)
             .map_or("A VM", |profile| profile.name.as_str())
+    }
+
+    /// The engine the shell names beside the selected VM's state: while the
+    /// VM runs or is about to, the one its run uses, which is the
+    /// interpreter when another VM held the hypervisor at its power-on;
+    /// otherwise the one it is set to.
+    fn shown_engine(&self) -> crate::config::Engine {
+        self.sessions
+            .get(&self.shown_vm())
+            .filter(|session| session.is_live())
+            .and_then(VmSession::run_engine)
+            .unwrap_or(self.settings.engine)
     }
 
     fn is_vm_running(&self) -> bool {
@@ -1579,14 +1619,14 @@ impl NativeShellApp {
     /// `handle_sidebar_action`. A drag on the drawer's edge opens or closes
     /// it in `chrome.library`, as the VM bar's toggle does.
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
-        let badge = shell_state_badge(&self.runtime_status(), self.has_error_notice());
+        let dots = self.row_dots();
         let visible = self.chrome.visible_vm_indices();
         let action = crate::shell::sidebar::Sidebar {
             entries: &self.chrome.vm_library,
             visible: &visible,
             destination: self.chrome.destination,
             filter: &mut self.chrome.library_filter,
-            badge,
+            dots: &dots,
             broken: &self.broken_files,
             drawer: &mut self.chrome.library,
         }
@@ -1594,6 +1634,28 @@ impl NativeShellApp {
         if let Some(action) = action {
             self.handle_sidebar_action(action);
         }
+    }
+
+    /// The dot each VM's row shows, by library index: the selected VM's state
+    /// badge, as the header shows it, and the state of every other VM that
+    /// runs or is about to; no dot for another VM that is off.
+    fn row_dots(&self) -> Vec<Option<egui::Color32>> {
+        let shown = self.chrome.selected_vm();
+        self.profiles
+            .iter()
+            .enumerate()
+            .map(|(index, profile)| {
+                if index == shown {
+                    return Some(
+                        shell_state_badge(&self.runtime_status(), self.has_error_notice()).color,
+                    );
+                }
+                self.sessions
+                    .get(&profile.origin)
+                    .filter(|session| session.is_live())
+                    .map(|session| shell_state_badge(&session.status(), false).color)
+            })
+            .collect()
     }
 
     /// Acts on a click in the tree. A page of the VM already shown is a move;
@@ -1659,9 +1721,7 @@ impl NativeShellApp {
                     status_dot(ui, badge.color);
                     ui.label(status_text(badge.label).color(badge.color));
                     ui.separator();
-                    ui.label(
-                        status_text(engine_label(self.settings.engine)).color(TEXT_PRIMARY),
-                    );
+                    ui.label(status_text(engine_label(self.shown_engine())).color(TEXT_PRIMARY));
                     ui.separator();
                     ui.label(
                         status_text(format!(
@@ -1758,7 +1818,7 @@ impl NativeShellApp {
                 status_dot(ui, badge.color);
                 ui.label(status_text(badge.label).color(badge.color));
                 ui.label(status_text("·").color(TEXT_MUTED));
-                ui.label(status_text(engine_label(self.settings.engine)).color(TEXT_MUTED));
+                ui.label(status_text(engine_label(self.shown_engine())).color(TEXT_MUTED));
             });
             let mut name_changed = false;
             if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm()) {
@@ -2797,17 +2857,12 @@ impl NativeShellApp {
         applied
     }
 
-    /// Shows the VM at `index`. The VM being left is applied and written
-    /// first, so nothing of it waits on a later frame.
+    /// Shows the VM at `index`, whether or not either VM runs: a VM left
+    /// running keeps running, and its console is there when it is shown
+    /// again. The VM being left is applied and written first, so nothing of
+    /// it waits on a later frame.
     fn select_profile(&mut self, index: usize) {
         if index >= self.profiles.len() {
-            return;
-        }
-        let status = self.runtime_status();
-        if status.running || status.start_pending {
-            self.notify(ShellNotice::warning(
-                "Stop the running VM before selecting another VM.",
-            ));
             return;
         }
         if let Err(message) = self.apply_pending_settings() {
@@ -2827,17 +2882,10 @@ impl NativeShellApp {
         }
     }
 
-    /// Adds a library VM copied from the selected one and selects it. Its file
-    /// is written at once, so it is there at the next launch. Refused while
-    /// the machine runs or is starting, when the new VM could not be selected.
+    /// Adds a library VM copied from the selected one and selects it, whether
+    /// or not a VM runs; the copy is off. Its file is written at once, so it
+    /// is there at the next launch.
     fn add_vm_copying_selected(&mut self) {
-        let status = self.runtime_status();
-        if status.running || status.start_pending {
-            self.notify(ShellNotice::warning(
-                "Stop the running VM before adding a VM.",
-            ));
-            return;
-        }
         if let Err(message) = self.apply_pending_settings() {
             self.notify(ShellNotice::error(message));
             return;
@@ -2895,17 +2943,18 @@ impl NativeShellApp {
         }
     }
 
-    /// Removes the selected VM and, for a library VM, its file. The VM goes as
+    /// Removes the selected VM and, for a library VM, its file. A VM that
+    /// runs or is about to is refused, with a notice naming it: once it was
+    /// gone, nothing would show its run or stop it. Otherwise the VM goes as
     /// it stands: nothing about it is validated or written first, so a VM
     /// whose settings no longer apply — a disk image that is gone, an empty
     /// BIOS path — is still deleted, and its unsaved edits go with it. A
     /// refresh error outranks a `remember` warning, so the refresh comes last.
     fn delete_selected_profile(&mut self) {
-        let status = self.runtime_status();
-        if status.running || status.start_pending {
-            self.notify(ShellNotice::warning(
-                "Stop the running VM before deleting it.",
-            ));
+        let vm = self.shown_vm();
+        if self.sessions.is_live(&vm) {
+            let message = format!("Stop {} before deleting it.", self.vm_name(&vm));
+            self.notify(ShellNotice::warning(message));
             return;
         }
         if self.profiles.len() == 1 {
@@ -3105,9 +3154,12 @@ impl NativeShellApp {
 
     /// Powers on the selected VM: its edits are applied and written first,
     /// then a VM that lacks a BIOS path or a medium to boot from is refused
-    /// with a notice naming what is missing, and a startup-disk creation that
-    /// would erase an existing file is put to the user before anything
-    /// starts, so a power-on that stops at either has still written the VM.
+    /// with a notice naming what is missing, a startup-disk creation that
+    /// would erase an existing file is put to the user, and a hard disk
+    /// another running VM uses is refused with a notice naming that VM, all
+    /// before anything starts, so a power-on that stops at any of them has
+    /// still written the VM. A VM set to the hypervisor while another VM
+    /// holds it runs on the interpreter, says so, and keeps its setting.
     fn start_vm(&mut self) {
         let snapshot = self.runtime_status();
         if snapshot.running {
@@ -3136,8 +3188,51 @@ impl NativeShellApp {
             });
             return;
         }
+        let vm = self.shown_vm();
+        let name = HeldBy {
+            name: self.vm_name(&vm).to_owned(),
+        };
+        let mut config = self.config.clone();
+        // A hard disk has one running writer: a second would corrupt it.
+        let disk = match &config.disk {
+            None => None,
+            Some(disk) => match self
+                .holdings
+                .take(Exclusive::Disk(disk_identity(&disk.path)), name.clone())
+            {
+                Ok(hold) => Some(hold),
+                Err(holder) => {
+                    self.notify(ShellNotice::warning(format!(
+                        "{} is in use by {}; stop it first.",
+                        disk.path.display(),
+                        holder.name
+                    )));
+                    return;
+                }
+            },
+        };
+        // One VM at a time runs on the hypervisor; another runs on the
+        // interpreter for this power-on, and its setting stays as it is.
+        let hypervisor = match config.engine {
+            crate::config::Engine::Interpreter => None,
+            crate::config::Engine::Whp => {
+                match self.holdings.take(Exclusive::Hypervisor, name.clone()) {
+                    Ok(hold) => Some(hold),
+                    Err(holder) => {
+                        config.engine = crate::config::Engine::Interpreter;
+                        self.notify(ShellNotice::warning(format!(
+                            "{} runs on the interpreter: {} is using the hypervisor.",
+                            name.name, holder.name
+                        )));
+                        None
+                    }
+                }
+            }
+        };
         self.overwrite_confirmed
             .extend(self.overwrite_with_nothing_to_erase());
+        // The engine the run uses, which the shell names while the VM is live.
+        self.sessions.open(&vm).set_run_engine(config.engine);
         let display = self.shown_display();
         if let Ok(mut shown) = display.lock() {
             // The power-on lowers the stop its VM's last run left raised. The
@@ -3148,11 +3243,14 @@ impl NativeShellApp {
         }
         match self.command_tx.send(NativeEmulatorCommand::Start(StartRun {
             display: Arc::clone(&display),
-            config: self.config.clone(),
+            config,
+            holds: RunHolds { hypervisor, disk },
         })) {
             Ok(()) => {
                 self.chrome.go_to(ShellPage::Console);
             }
+            // The Start comes back in the error, and what it holds is given
+            // back as the error is dropped.
             Err(_) => {
                 if let Ok(mut shown) = display.lock() {
                     shown.start_pending = false;
@@ -3243,7 +3341,7 @@ impl NativeShellApp {
                     status_dot(ui, badge.color);
                     ui.label(status_text(badge.label).color(badge.color));
                     ui.label(status_text("·").color(TEXT_MUTED));
-                    ui.label(status_text(engine_label(self.settings.engine)).color(TEXT_PRIMARY));
+                    ui.label(status_text(engine_label(self.shown_engine())).color(TEXT_PRIMARY));
                     ui.label(status_text("·").color(TEXT_MUTED));
                     ui.label(status_text(format_ips_u32(status.ips)).color(ACCENT_BLUE));
                 });
@@ -5395,6 +5493,76 @@ mod tests {
         }
     }
 
+    /// `two_vm_app`, both VMs set to run on `engine`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn two_vm_app_with_engine(engine: crate::config::Engine) -> TestShell {
+        let scratch = ScratchLibrary::new();
+        let mut config = test_resolved_config();
+        config.engine = engine;
+        scratch.library().create("Alpine", &config).expect("seed");
+        scratch.library().create("Windows XP", &config).expect("seed");
+        let (app, commands) = native_test_app_over(&scratch, None, None);
+        TestShell {
+            app,
+            commands,
+            scratch,
+        }
+    }
+
+    /// `two_vm_app`, both VMs on one hard disk: the same startup-disk path, a
+    /// file not made yet (a plain creation, which erases nothing).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn two_vm_app_sharing_a_disk() -> TestShell {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-shared-disk");
+        let mut config = test_resolved_config();
+        config.disk = Some(crate::config::ResolvedDisk {
+            path: disk.clone(),
+            geometry: crate::args::DiskGeometry {
+                cylinders: 20,
+                heads: 16,
+                sectors_per_track: 63,
+            },
+            channel: 0,
+            drive: 0,
+            creation: Some(crate::config::ResolvedDiskCreation {
+                path: disk,
+                size: rusty_box_bximage::ImageSize::mib(10),
+                overwrite: false,
+            }),
+        });
+        scratch.library().create("Alpine", &config).expect("seed");
+        scratch.library().create("Windows XP", &config).expect("seed");
+        let (app, commands) = native_test_app_over(&scratch, None, None);
+        TestShell {
+            app,
+            commands,
+            scratch,
+        }
+    }
+
+    /// Powers the selected VM on and plays the launcher's part: takes the
+    /// Start and marks its display running, no longer starting, in one lock
+    /// as `prepare_egui_run` does. Keep the returned run alive for as long as
+    /// the VM should hold what it took; dropping it gives the holds back, as
+    /// the run thread does once its machine is gone.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn power_on(
+        app: &mut NativeShellApp,
+        command_rx: &std::sync::mpsc::Receiver<NativeEmulatorCommand>,
+    ) -> StartRun {
+        app.start_vm();
+        let Ok(NativeEmulatorCommand::Start(start)) = command_rx.try_recv() else {
+            panic!("a power-on sends a Start");
+        };
+        {
+            let mut display = start.display.lock().unwrap();
+            display.start_pending = false;
+            display.emu_running = true;
+        }
+        start
+    }
+
     /// What the start could not do is the first thing the shell shows.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
@@ -6654,22 +6822,6 @@ mod tests {
         remove_test_file(&disk);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn adding_a_vm_is_refused_while_the_vm_runs() {
-        let (mut app, _command_rx, scratch) = library_app();
-        app.shown_display().lock().unwrap().emu_running = true;
-
-        app.add_vm_copying_selected();
-
-        assert_eq!(app.profiles.len(), 1);
-        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
-        assert_eq!(
-            app.shell_notice,
-            Some(ShellNotice::warning("Stop the running VM before adding a VM."))
-        );
-    }
-
     #[test]
     fn shell_starts_on_home_page() {
         let chrome = ShellChrome::default();
@@ -7332,12 +7484,7 @@ mod tests {
     #[test]
     fn keeping_a_running_vm_in_the_library_keeps_its_session() {
         let (mut app, command_rx, _scratch) = native_test_app();
-        app.start_vm();
-        let Ok(NativeEmulatorCommand::Start(start)) = command_rx.try_recv() else {
-            panic!("a power-on sends a Start");
-        };
-        // What the launcher's run does once it begins.
-        start.display.lock().unwrap().emu_running = true;
+        let start = power_on(&mut app, &command_rx);
 
         app.keep_selected_in_library();
 
@@ -7375,24 +7522,237 @@ mod tests {
         );
     }
 
-    /// Closing the window stops every VM's run: the running VM's stop flag
-    /// is raised, and it shows as off.
+    /// Closing the window stops every VM's run: with two VMs running, each
+    /// one's stop flag is raised, and each shows as off.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn closing_the_window_stops_the_running_vm() {
-        let (mut app, command_rx, _scratch) = library_app();
-        app.start_vm();
-        let Ok(NativeEmulatorCommand::Start(start)) = command_rx.try_recv() else {
-            panic!("a power-on sends a Start");
-        };
-        // What the launcher's run does once it begins.
-        start.display.lock().unwrap().emu_running = true;
+    fn closing_the_window_stops_every_running_vm() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        let alpine = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        let xp = power_on(&mut app, &command_rx);
 
         eframe::App::on_exit(&mut app, None);
 
-        let display = start.display.lock().unwrap();
-        assert!(display.stop_flag.load(Ordering::Relaxed), "the run is asked to stop");
-        assert!(!display.emu_running);
+        for (index, run) in [&alpine, &xp].into_iter().enumerate() {
+            let name = &app.profiles[index].name;
+            assert!(
+                run.display.lock().unwrap().stop_flag.load(Ordering::Relaxed),
+                "{name}'s run is asked to stop"
+            );
+            assert!(
+                !app.sessions.is_live(&app.profiles[index].origin),
+                "{name} shows as off"
+            );
+        }
+    }
+
+    /// Another VM is selected and powered on while one runs, and both run
+    /// at once, each on its own display.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn another_vm_can_be_selected_and_powered_on_while_one_runs() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        let first = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        assert_eq!(app.chrome.selected_vm(), 1, "selecting is not refused");
+        let second = power_on(&mut app, &command_rx);
+        assert!(!Arc::ptr_eq(&first.display, &second.display));
+        let alpine = app.profiles[0].origin.clone();
+        let xp = app.profiles[1].origin.clone();
+        assert!(
+            app.sessions.is_live(&alpine) && app.sessions.is_live(&xp),
+            "both run at once"
+        );
+    }
+
+    /// A VM is added while another runs: the copy is written to the library
+    /// and shown.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_vm_can_be_added_while_one_runs() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch,
+        } = two_vm_app();
+        let run = power_on(&mut app, &command_rx);
+
+        app.add_vm_copying_selected();
+
+        assert_eq!(app.profiles.len(), 3, "the copy is added");
+        assert_eq!(app.vm_info.name, "Alpine copy", "the copy is shown");
+        assert_eq!(
+            scratch.toml_files(),
+            ["alpine-copy.toml", "alpine.toml", "windows-xp.toml"]
+        );
+        drop(run);
+    }
+
+    /// A VM that runs is not deleted, and the notice names it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_running_vm_is_not_deleted() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        // The run's holds go; its display stays live.
+        drop(power_on(&mut app, &command_rx));
+
+        app.delete_selected_profile();
+
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(
+            app.shell_notice.as_ref().map(|notice| notice.message.as_str()),
+            Some("Stop Alpine before deleting it.")
+        );
+    }
+
+    /// A second VM set to the hypervisor, powered on while the first holds
+    /// it, runs on the interpreter, says which VM holds the hypervisor, and
+    /// keeps its setting.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_second_hypervisor_vm_runs_on_the_interpreter_and_says_who_holds_it() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_with_engine(crate::config::Engine::Whp);
+        let first = power_on(&mut app, &command_rx);
+        assert_eq!(first.config.engine, crate::config::Engine::Whp);
+        app.select_profile(1);
+        let second = power_on(&mut app, &command_rx);
+        assert_eq!(second.config.engine, crate::config::Engine::Interpreter);
+        assert_eq!(
+            app.shell_notice.as_ref().map(|notice| notice.message.as_str()),
+            Some("Windows XP runs on the interpreter: Alpine is using the hypervisor.")
+        );
+        assert_eq!(
+            app.settings.engine,
+            crate::config::Engine::Whp,
+            "its saved engine is unchanged"
+        );
+    }
+
+    /// The hypervisor is free for the next VM once the run that held it is
+    /// over.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_hypervisor_is_free_again_once_its_runs_are_over() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_with_engine(crate::config::Engine::Whp);
+        let first = power_on(&mut app, &command_rx);
+        // The thread gives its holds back after its machine is gone.
+        drop(first);
+        app.select_profile(1);
+        let second = power_on(&mut app, &command_rx);
+        assert_eq!(second.config.engine, crate::config::Engine::Whp);
+    }
+
+    /// A hard disk one running VM uses is refused to a second, with a notice
+    /// naming the VM that uses it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_disk_in_use_is_refused_to_a_second_vm() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_sharing_a_disk();
+        let first = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        app.start_vm();
+        assert!(command_rx.try_recv().is_err(), "nothing is started");
+        let message = app
+            .shell_notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        assert!(
+            message.ends_with("is in use by Alpine; stop it first."),
+            "{message}"
+        );
+        drop(first);
+    }
+
+    /// A startup disk the first VM's run makes stays that VM's: once the
+    /// file exists, a second VM on its path is refused as it is while the
+    /// file does not.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_disk_made_by_the_first_run_is_refused_to_a_second_vm() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_sharing_a_disk();
+        let first = power_on(&mut app, &command_rx);
+        let disk = first
+            .config
+            .disk
+            .as_ref()
+            .map(|disk| disk.path.clone())
+            .expect("a disk");
+        // What the first run does as it starts: it makes the disk's file.
+        write_test_disk(&disk);
+
+        app.select_profile(1);
+        app.start_vm();
+
+        let started = command_rx.try_recv().is_ok();
+        remove_test_file(&disk);
+        assert!(!started, "nothing is started");
+        let message = app
+            .shell_notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        assert!(
+            message.ends_with("is in use by Alpine; stop it first."),
+            "{message}"
+        );
+        drop(first);
+    }
+
+    /// The drawer's dots: a running VM's row shows it running, the selected
+    /// VM's row shows its state, and a VM that is off and not selected has
+    /// no dot.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn every_running_vm_shows_a_dot_and_an_off_one_none() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        let first = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        // Shown, Windows XP has a session, as the status strip opens it.
+        drop(app.shown_display());
+
+        let dots = app.row_dots();
+        assert_eq!(dots[0], Some(ACCENT_CYAN), "the running VM's row");
+        assert_eq!(dots[1], Some(TEXT_MUTED), "the selected VM's row, off");
+
+        app.select_profile(0);
+        let dots = app.row_dots();
+        assert_eq!(dots[0], Some(ACCENT_CYAN), "the selected VM's row, running");
+        assert_eq!(dots[1], None, "a VM that is off and not selected");
+        drop(first);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -7477,26 +7837,7 @@ mod tests {
         assert_eq!(
             app.shell_notice,
             Some(ShellNotice::warning(
-                "Stop the running VM before deleting it."
-            ))
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn native_profile_selection_refuses_while_running() {
-        let (mut app, _command_rx, _library) = native_test_app();
-        app.add_vm_copying_selected();
-        assert_eq!(app.chrome.selected_vm(), 1);
-        app.shown_display().lock().unwrap().emu_running = true;
-
-        app.select_profile(0);
-
-        assert_eq!(app.chrome.selected_vm(), 1);
-        assert_eq!(
-            app.shell_notice,
-            Some(ShellNotice::warning(
-                "Stop the running VM before selecting another VM."
+                "Stop Rusty Box copy before deleting it."
             ))
         );
     }
@@ -7988,6 +8329,42 @@ mod tests {
                 sent_right(&shared) > 0,
                 "beside the area the image is still the trackpad"
             );
+        }
+
+        /// A VM set to the hypervisor that runs on the interpreter, because
+        /// another VM held the hypervisor at its power-on, names the
+        /// interpreter while it runs, in the status strip and on its Summary
+        /// page; once its run is over, both name the engine it is set to.
+        #[test]
+        fn a_vm_on_the_interpreter_in_place_of_the_hypervisor_says_so_while_it_runs() {
+            let TestShell {
+                mut app,
+                commands: command_rx,
+                scratch: _scratch,
+            } = two_vm_app_with_engine(crate::config::Engine::Whp);
+            let alpine = power_on(&mut app, &command_rx);
+            app.select_profile(1);
+            let xp = power_on(&mut app, &command_rx);
+            app.chrome.go_to(ShellPage::Home);
+            let mut window = window(app);
+            window.run_steps(2);
+            assert_eq!(
+                window.query_all_by_label("Interpreter").count(),
+                2,
+                "the status strip and the Summary page name the interpreter"
+            );
+            assert!(window.query_by_label("Windows Hypervisor").is_none());
+
+            // What the run's end does: the VM shows as off.
+            xp.display.lock().unwrap().emu_running = false;
+            window.run_steps(2);
+            assert_eq!(
+                window.query_all_by_label("Windows Hypervisor").count(),
+                2,
+                "both name the engine Windows XP is set to"
+            );
+            assert!(window.query_by_label("Interpreter").is_none());
+            drop(alpine);
         }
     }
 }

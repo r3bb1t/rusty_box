@@ -935,11 +935,17 @@ fn run_egui_launcher(
     })
 }
 
-/// One power-on, restarts included, on its own thread. Returns what it
-/// retired, `None` when a run on the hypervisor counted nothing.
+/// One power-on, restarts included, on its own thread. What the power-on
+/// holds — the hypervisor, its hard disk — is held across every restart and
+/// given back once the last run's machine is gone. Returns what it retired,
+/// `None` when a run on the hypervisor counted nothing.
 #[cfg(feature = "gui-egui")]
 fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>) -> Option<u64> {
-    let crate::app::StartRun { display, config } = start;
+    let crate::app::StartRun {
+        display,
+        config,
+        holds,
+    } = start;
     let mut retired = Some(0u64);
     let mut how = RunStart::PowerOn;
     loop {
@@ -1000,6 +1006,11 @@ fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>
         }
         how = RunStart::Restart;
     }
+    // Every machine this power-on built is gone: the next VM may take the
+    // hypervisor, and the disk may have its next writer.
+    let crate::sessions::RunHolds { hypervisor, disk } = holds;
+    drop(hypervisor);
+    drop(disk);
     retired
 }
 
@@ -1276,6 +1287,8 @@ mod tests {
     use crate::config::{
         CpuCapabilities, Engine, ResolvedCdrom, ResolvedDisk, ResolvedDiskCreation,
     };
+    #[cfg(feature = "gui-egui")]
+    use crate::sessions::{Exclusive, HeldBy, Holdings, RunHolds};
     use rusty_box::params::BxParams;
     use rusty_box_bximage::ImageSize;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1912,8 +1925,9 @@ mod tests {
             .expect("spawn the launcher")
     }
 
-    /// One power-on run on a thread of its own, as the launcher runs it,
-    /// with a stack that holds a 32 MiB guest.
+    /// One power-on run on a thread of its own, as the launcher runs it. The
+    /// guest's memory is on the heap, so the stack bounds only the run's own
+    /// frames, and 16 MiB holds them.
     #[cfg(feature = "gui-egui")]
     fn spawn_run(start: crate::app::StartRun) -> std::thread::JoinHandle<Option<u64>> {
         std::thread::Builder::new()
@@ -1925,12 +1939,25 @@ mod tests {
 
     /// What the shell's power-on asks of `display` and the launcher
     /// (`NativeShellApp::start_vm`): the VM shows as starting, its stop flag
-    /// is lowered, and the launcher is sent the Start.
+    /// is lowered, and the launcher is sent the Start, which holds nothing.
     #[cfg(feature = "gui-egui")]
     fn power_on(
         commands: &mpsc::Sender<crate::app::NativeEmulatorCommand>,
         display: &Arc<Mutex<SharedDisplay>>,
         config: ResolvedConfig,
+    ) {
+        power_on_holding(commands, display, config, RunHolds::default());
+    }
+
+    /// `power_on` for a VM that took `holds` at its power-on, as the shell
+    /// takes the hypervisor or a hard disk: the Start carries them to the
+    /// run's thread.
+    #[cfg(feature = "gui-egui")]
+    fn power_on_holding(
+        commands: &mpsc::Sender<crate::app::NativeEmulatorCommand>,
+        display: &Arc<Mutex<SharedDisplay>>,
+        config: ResolvedConfig,
+        holds: RunHolds,
     ) {
         {
             let mut shown = display.lock().unwrap();
@@ -1941,6 +1968,7 @@ mod tests {
             .send(crate::app::NativeEmulatorCommand::Start(crate::app::StartRun {
                 display: Arc::clone(display),
                 config,
+                holds,
             }))
             .unwrap();
     }
@@ -2039,10 +2067,12 @@ mod tests {
             let shown = display.lock().unwrap();
             assert!(!shown.emu_running);
             assert!(!shown.start_pending);
-            assert!(shown
-                .runtime_error
-                .as_deref()
-                .is_some_and(|message| message.contains("Emulator startup failed")));
+            let message = shown.runtime_error.as_deref().unwrap_or_default();
+            assert!(message.contains("Emulator startup failed"), "{message}");
+            assert!(
+                message.contains("failed to read BIOS file"),
+                "the error names the BIOS read: {message}"
+            );
         }
         drop(commands);
         assert!(join_launcher(launcher).is_ok());
@@ -2369,6 +2399,7 @@ mod tests {
         let run = spawn_run(crate::app::StartRun {
             display: Arc::clone(&display),
             config: spinning_config(&bios),
+            holds: RunHolds::default(),
         });
 
         wait_for_end(&run, "the run ignored a stop raised before it started");
@@ -2420,6 +2451,7 @@ mod tests {
         let run = spawn_run(crate::app::StartRun {
             display: Arc::clone(&display),
             config: spinning_config(&bios),
+            holds: RunHolds::default(),
         });
         wait_until(|| display.lock().unwrap().emu_running);
 
@@ -2433,6 +2465,53 @@ mod tests {
         let shown = display.lock().unwrap();
         assert!(!shown.emu_running);
         assert!(!shown.reset_requested);
+    }
+
+    /// A run keeps what it holds while it runs and gives it back once its
+    /// thread is done with the machine. The spinning VM runs on the
+    /// interpreter: only the hold is under test, so no hypervisor is needed.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_run_gives_its_holds_back_once_it_is_over() {
+        let bios = spinning_bios();
+        let holdings = Holdings::default();
+        let alpine = HeldBy {
+            name: "Alpine".to_owned(),
+        };
+        let held = holdings
+            .take(Exclusive::Hypervisor, alpine.clone())
+            .expect("free");
+        let display = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        power_on_holding(
+            &commands,
+            &display,
+            spinning_config(&bios),
+            RunHolds {
+                hypervisor: Some(held),
+                disk: None,
+            },
+        );
+        wait_until(|| display.lock().unwrap().emu_running);
+        let xp = HeldBy {
+            name: "Windows XP".to_owned(),
+        };
+        assert_eq!(
+            holdings.take(Exclusive::Hypervisor, xp.clone()).err(),
+            Some(alpine),
+            "held while it runs"
+        );
+
+        signal_egui_stop(&display);
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert!(
+            holdings.take(Exclusive::Hypervisor, xp).is_ok(),
+            "given back once the run is over"
+        );
     }
 
     #[test]
