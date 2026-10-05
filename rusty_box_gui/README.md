@@ -215,7 +215,7 @@ Then open `http://localhost:8080`. `trunk build --release` writes the site to `r
 Browser builds use no TOML, no CLI flags, no native file dialogs, and no host filesystem. What the browser shell offers:
 
 - **Menu bar.** `File` (`Boot OS Image`, `Create Disk Image`), `Edit` (`Clear Library Search`), `VM` (`Reset Browser VM`), `Help` (`About Rusty Box Workstation`), then the Home, Console, Hardware and Images pages.
-- **Toolbar.** `▶ Boot OS Image` before a browser VM exists, and `Console` after launch. `↻ Reset Browser VM` clears the browser VM. `▣ Hardware` and `+ New Image` jump to their pages. The `Library` and `Serial` checkboxes show or hide the library sidebar and the serial pane.
+- **Toolbar.** `▶ Boot OS Image` before a browser VM exists, and `Console` after launch. `↻ Reset Browser VM` clears the browser VM. `▣ Hardware` and `+ New Image` jump to their pages. The `Library` toggle opens or closes the library sidebar, and the `Serial` checkbox shows or hides the serial pane.
 - **Home.** `Boot OS Image` opens a file picker for `.iso` or `.img` files and attaches the chosen file as a bootable CD/DVD. The "Boot DLX sample" tile is disabled, because this build does not bundle DLX. `Create Disk Image` opens the Images page.
 - **Hardware.** Memory (1 to 4096 MB, default 128) and the processor count (default 1) can be changed before boot; reset the browser VM to change them again. The page says so: `Browser hardware can be changed before boot. Reset the VM to edit it again.` Devices, Hard Disk, CD/DVD and Display are read-only information. CD/DVD shows the uploaded file's name and size.
 - **Status strip.** The state (`Error`, `Starting`, `Launcher`, `Stopped` or `Running`), the instruction rate and a frame counter.

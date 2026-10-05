@@ -89,6 +89,13 @@ log = "0.4"
 web-time = "1"
 web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement", "HtmlElement", "HtmlInputElement", "HtmlAnchorElement", "Element", "Node", "Event", "FileReader", "FileList", "File", "Blob", "Url", "console"] }
 
+# The shell's widget tests drive egui the way a user does: they find a widget
+# by the text on screen, through the accessibility tree egui builds, and send
+# it pointer, wheel and touch events. No feature: the tests read the tree and
+# render nothing.
+[dev-dependencies]
+egui_kittest = { version = "0.36.2", default-features = false }
+
 # The APK's native library. NativeActivity loads it and calls its
 # `android_main`; `cargo xtask android build` packages it with cargo-apk, which
 # reads the `package.metadata.android` tables below.

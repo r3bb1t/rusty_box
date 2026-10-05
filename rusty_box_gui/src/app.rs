@@ -13,7 +13,7 @@ use std::sync::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::{SidebarAction, VmBarAction};
 use crate::shell::destination::{Destination, ShellPage};
-use crate::shell::sidebar::VmLibraryEntry;
+use crate::shell::sidebar::{Drawer, VmLibraryEntry};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::theme::{SPACE_PAGE, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_DISPLAY};
 use crate::shell::theme::{
@@ -874,7 +874,9 @@ pub(crate) struct ShellChrome {
     vm_library: Vec<VmLibraryEntry>,
     library_filter: String,
     show_serial: bool,
-    show_library: bool,
+    /// The drawer `vm_library` is listed in, open beside the page or folded
+    /// away to its grab handle.
+    library: Drawer,
     show_about: bool,
 }
 
@@ -886,7 +888,7 @@ impl Default for ShellChrome {
             vm_library: Vec::new(),
             library_filter: String::new(),
             show_serial: true,
-            show_library: true,
+            library: Drawer::Open,
             show_about: false,
         }
     }
@@ -921,10 +923,6 @@ impl ShellChrome {
             .filter_map(|(index, entry)| entry.matches_filter(filter.as_str()).then_some(index))
             .collect()
     }
-}
-
-fn shell_should_draw_library(chrome: &ShellChrome) -> bool {
-    chrome.show_library
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1372,7 +1370,7 @@ impl NativeShellApp {
         chrome.destination = chrome.destination.select_vm(opening.selected);
         #[cfg(target_os = "android")]
         {
-            chrome.show_library = false;
+            chrome.library = Drawer::Closed;
             chrome.show_serial = false;
         }
         Self {
@@ -1511,7 +1509,7 @@ impl NativeShellApp {
         match action {
             None => {}
             Some(VmBarAction::ToggleSidebar) => {
-                self.chrome.show_library = !self.chrome.show_library;
+                self.chrome.library = self.chrome.library.toggled();
             }
             Some(VmBarAction::PowerOn) => self.start_vm(),
             Some(VmBarAction::PowerOff) => self.request_power_off(),
@@ -1531,19 +1529,22 @@ impl NativeShellApp {
         }
     }
 
-    /// Draws the tree and hands its click to `handle_sidebar_action`.
+    /// Draws the tree's drawer, open or closed, and hands its click to
+    /// `handle_sidebar_action`. A drag on the drawer's edge opens or closes
+    /// it in `chrome.library`, as the VM bar's toggle does.
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
         let badge = shell_state_badge(&self.runtime_status(), self.has_error_notice());
         let visible = self.chrome.visible_vm_indices();
-        let action = crate::shell::sidebar::draw_sidebar(
-            ui,
-            &self.chrome.vm_library,
-            &visible,
-            self.chrome.destination,
-            &mut self.chrome.library_filter,
+        let action = crate::shell::sidebar::Sidebar {
+            entries: &self.chrome.vm_library,
+            visible: &visible,
+            destination: self.chrome.destination,
+            filter: &mut self.chrome.library_filter,
             badge,
-            &self.broken_files,
-        );
+            broken: &self.broken_files,
+            drawer: &mut self.chrome.library,
+        }
+        .show(ui);
         if let Some(action) = action {
             self.handle_sidebar_action(action);
         }
@@ -1561,7 +1562,7 @@ impl NativeShellApp {
                 self.add_vm_copying_selected();
                 #[cfg(target_os = "android")]
                 {
-                    self.chrome.show_library = false;
+                    self.chrome.library = Drawer::Closed;
                 }
             }
             SidebarAction::DeleteBroken(index) => {
@@ -1577,7 +1578,7 @@ impl NativeShellApp {
                 }
                 #[cfg(target_os = "android")]
                 {
-                    self.chrome.show_library = false;
+                    self.chrome.library = Drawer::Closed;
                 }
             }
         }
@@ -3382,9 +3383,7 @@ impl NativeShellApp {
         }
 
         self.draw_vm_bar(ui);
-        if shell_should_draw_library(&self.chrome) {
-            self.draw_sidebar(ui);
-        }
+        self.draw_sidebar(ui);
         self.draw_status_strip(ui);
         self.draw_central(ui, frame);
         self.draw_floppy_maker(ui.ctx());
@@ -4253,7 +4252,12 @@ impl WebShellApp {
                     if ui.button("+ New Disk").clicked() {
                         self.open_new_disk_sheet();
                     }
-                    ui.checkbox(&mut self.chrome.show_library, "Library");
+                    if ui
+                        .selectable_label(self.chrome.library == Drawer::Open, "Library")
+                        .clicked()
+                    {
+                        self.chrome.library = self.chrome.library.toggled();
+                    }
                     ui.checkbox(&mut self.chrome.show_serial, "Serial");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new("Rusty Box Web").strong().color(TEXT_PRIMARY));
@@ -4262,7 +4266,13 @@ impl WebShellApp {
             });
     }
 
+    /// The library's drawer, open or closed: its heading, search field and
+    /// group caption stay put while the VM rows scroll under them. A drag on
+    /// the drawer's edge opens or closes it in `chrome.library`, as the
+    /// toolbar's Library toggle does; a closed drawer leaves its grab handle
+    /// at the left edge.
     fn draw_library(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.chrome.library == Drawer::Open;
         egui::Panel::left("web_vm_library")
             .resizable(true)
             .default_size(250.0)
@@ -4272,7 +4282,7 @@ impl WebShellApp {
                     .fill(BG_PANEL)
                     .inner_margin(egui::Margin::same(14)),
             )
-            .show(ui, |ui| {
+            .show_collapsible(ui, &mut open, |ui| {
                 ui.label(
                     RichText::new("Library")
                         .size(16.0)
@@ -4286,28 +4296,34 @@ impl WebShellApp {
                 ui.add_space(8.0);
                 ui.label(RichText::new("⏷ My Computer").color(TEXT_MUTED));
                 let visible = self.chrome.visible_vm_indices();
-                for index in visible {
-                    let clicked = {
-                        let entry = &self.chrome.vm_library[index];
-                        let selected = ui.selectable_label(
-                            self.chrome.selected_vm() == index,
-                            format!("  ▣ {}", entry.name),
-                        );
-                        if self.chrome.selected_vm() == index {
-                            ui.indent(format!("web_library_metadata_{index}"), |ui| {
-                                ui.label(metadata_text("Boot", &entry.boot));
-                                ui.label(metadata_text("Memory", &entry.memory));
-                                ui.label(metadata_text("Disk", &entry.disk));
-                                ui.label(metadata_text("CD/DVD", &entry.cdrom));
-                            });
+                egui::ScrollArea::vertical()
+                    .id_salt("web_vm_list")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for index in visible {
+                            let clicked = {
+                                let entry = &self.chrome.vm_library[index];
+                                let selected = ui.selectable_label(
+                                    self.chrome.selected_vm() == index,
+                                    format!("  ▣ {}", entry.name),
+                                );
+                                if self.chrome.selected_vm() == index {
+                                    ui.indent(format!("web_library_metadata_{index}"), |ui| {
+                                        ui.label(metadata_text("Boot", &entry.boot));
+                                        ui.label(metadata_text("Memory", &entry.memory));
+                                        ui.label(metadata_text("Disk", &entry.disk));
+                                        ui.label(metadata_text("CD/DVD", &entry.cdrom));
+                                    });
+                                }
+                                selected.clicked()
+                            };
+                            if clicked {
+                                self.chrome.destination = Destination::new(index, ShellPage::Home);
+                            }
                         }
-                        selected.clicked()
-                    };
-                    if clicked {
-                        self.chrome.destination = Destination::new(index, ShellPage::Home);
-                    }
-                }
+                    });
             });
+        self.chrome.library = if open { Drawer::Open } else { Drawer::Closed };
     }
 
     fn draw_status_strip(&mut self, ui: &mut egui::Ui) {
@@ -4764,9 +4780,7 @@ impl eframe::App for WebShellApp {
 
         self.draw_menu_bar(ui);
         self.draw_toolbar(ui);
-        if shell_should_draw_library(&self.chrome) {
-            self.draw_library(ui);
-        }
+        self.draw_library(ui);
         self.draw_status_strip(ui);
         self.draw_central(ui);
         draw_about_window(ui.ctx(), &mut self.chrome);
@@ -6573,17 +6587,8 @@ mod tests {
     }
 
     #[test]
-    fn shell_library_sidebar_is_visible_by_default() {
-        let chrome = ShellChrome::default();
-        assert!(chrome.show_library);
-    }
-
-    #[test]
-    fn shell_library_sidebar_respects_visibility_toggle() {
-        let mut chrome = ShellChrome::default();
-        assert!(shell_should_draw_library(&chrome));
-        chrome.show_library = false;
-        assert!(!shell_should_draw_library(&chrome));
+    fn the_library_drawer_opens_by_default() {
+        assert_eq!(ShellChrome::default().library, Drawer::Open);
     }
 
     #[test]
