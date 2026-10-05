@@ -28,7 +28,7 @@ use crate::shell::widgets::disabled_tile;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::{
     action_tile_enabled, hairline_above, home_fact, path_field_width, selection_row, status_text,
-    RowMark, ShellStateBadge, BROWSE, HOME_FACT_GAP, ROOT_INDENT,
+    RowMark, ShellStateBadge, BROWSE, HOME_FACT_GAP, ROOT_INDENT, ROW_HEIGHT,
 };
 use crate::shell::widgets::{
     action_tile, field_row, metadata_text, page_header, primary_button, status_dot,
@@ -1554,8 +1554,8 @@ impl NativeShellApp {
     /// a different VM is a profile switch, which goes through `select_profile`
     /// so that profile's config and settings are loaded too. Deleting a file
     /// that does not load waits for confirmation like every other delete. On
-    /// Android the tree is a drawer over the page, so a pick in it closes it
-    /// as well.
+    /// Android a pick in the tree also closes its drawer, so the page gets the
+    /// screen's width.
     fn handle_sidebar_action(&mut self, action: SidebarAction) {
         match action {
             SidebarAction::NewVm => {
@@ -1834,8 +1834,17 @@ impl NativeShellApp {
                                     } else {
                                         RowMark::Plain
                                     };
-                                    if selection_row(ui, device.label(), ROOT_INDENT, mark, None)
-                                        .clicked()
+                                    // The list fits its card, so its rows keep
+                                    // `ROW_HEIGHT` even under a phone's style.
+                                    if selection_row(
+                                        ui,
+                                        device.label(),
+                                        ROOT_INDENT,
+                                        mark,
+                                        None,
+                                        ROW_HEIGHT,
+                                    )
+                                    .clicked()
                                     {
                                         self.chrome.selected_hardware = device;
                                     }
@@ -4515,7 +4524,10 @@ impl WebShellApp {
                 };
                 let mut image_rect = None;
                 ui.centered_and_justified(|ui| {
-                    let response = ui.image(egui::load::SizedTexture::new(texture, size));
+                    let response = ui.add(
+                        egui::Image::new(egui::load::SizedTexture::new(texture, size))
+                            .sense(rusty_box::gui::host_input::GUEST_IMAGE_SENSE),
+                    );
                     image_rect = Some(response.rect);
                 });
                 if let Some(rect) = image_rect {
@@ -7382,5 +7394,219 @@ mod tests {
             matches!(&panel.status, Some(CreatorStatus::Error(msg)) if msg.contains("already exists"))
         );
         remove_test_file(&path);
+    }
+
+    /// The native shell in a kittest window, drawn by `draw_shell` and driven
+    /// as a user drives it.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod in_a_window {
+        use super::*;
+        use egui_kittest::{kittest::Queryable, Harness};
+
+        /// A frame every sixtieth of a second, as a desktop draws them, so a
+        /// double-click's two clicks land inside egui's double-click delay,
+        /// which kittest's default quarter-second frames overrun.
+        const FRAME: f32 = 1.0 / 60.0;
+
+        /// The launch VM's row, which only an open drawer draws.
+        const LAUNCH_VM_ROW: &str = "Rusty Box (unsaved)";
+
+        /// The shell, and the left edge of the area the harness draws it in,
+        /// which kittest insets from the window's edge: the drawer's fixed
+        /// edge, where a closed drawer's grab handle lies.
+        struct Window {
+            app: NativeShellApp,
+            left_edge: f32,
+        }
+
+        fn window(app: NativeShellApp) -> Harness<'static, Window> {
+            let mut frame = eframe::Frame::_new_kittest();
+            Harness::builder()
+                .with_size(egui::vec2(800.0, 600.0))
+                .with_step_dt(FRAME)
+                .build_ui_state(
+                    move |ui, window: &mut Window| {
+                        window.left_edge = ui.available_rect_before_wrap().left();
+                        window.app.draw_shell(ui, &mut frame);
+                    },
+                    Window {
+                        app,
+                        left_edge: 0.0,
+                    },
+                )
+        }
+
+        fn drawer_shows_its_rows(window: &Harness<'_, Window>) -> bool {
+            window.query_by_label(LAUNCH_VM_ROW).is_some()
+        }
+
+        fn press(pos: egui::Pos2) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }
+        }
+
+        fn release(pos: egui::Pos2) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }
+        }
+
+        /// Two clicks at `pos`, one event a frame, as a double-click arrives.
+        fn double_click(window: &mut Harness<'_, Window>, pos: egui::Pos2) {
+            window.hover_at(pos);
+            for _ in 0..2 {
+                window.event(press(pos));
+                window.event(release(pos));
+            }
+            window.step();
+            window.step();
+        }
+
+        /// A drag from `from` to `to`, as a pointer makes one: pressed, moved
+        /// through the points between, and released where it stopped.
+        fn drag(window: &mut Harness<'_, Window>, from: egui::Pos2, to: egui::Pos2) {
+            window.drag_at(from);
+            window.step();
+            for n in 1..=4u8 {
+                window.hover_at(from + (to - from) * (f32::from(n) / 4.0));
+                window.step();
+            }
+            window.drop_at(to);
+            window.step();
+        }
+
+        #[test]
+        fn the_menu_button_closes_and_opens_the_drawer_and_its_edge_drags_it_open() {
+            let (app, _command_rx, _scratch) = native_test_app();
+            let mut window = window(app);
+            window.run();
+            assert!(
+                drawer_shows_its_rows(&window),
+                "a desktop's drawer starts open"
+            );
+
+            window.get_by_label("☰").click();
+            window.run();
+            assert_eq!(window.state().app.chrome.library, Drawer::Closed);
+            assert!(!drawer_shows_its_rows(&window));
+
+            window.get_by_label("☰").click();
+            window.run();
+            assert_eq!(window.state().app.chrome.library, Drawer::Open);
+            assert!(drawer_shows_its_rows(&window));
+
+            window.get_by_label("☰").click();
+            window.run();
+            assert_eq!(window.state().app.chrome.library, Drawer::Closed);
+            assert!(!drawer_shows_its_rows(&window));
+
+            // Closed, the drawer is still drawn as its grab handle, so a drag
+            // from the window's left edge opens it again.
+            let edge = window.state().left_edge;
+            drag(
+                &mut window,
+                egui::pos2(edge + 1.0, 300.0),
+                egui::pos2(edge + 260.0, 300.0),
+            );
+            window.run();
+            assert_eq!(window.state().app.chrome.library, Drawer::Open);
+            assert!(drawer_shows_its_rows(&window));
+        }
+
+        /// Puts `app` on its Console page with `library` as its drawer and a
+        /// running guest's frame stretched over the whole display region, so
+        /// the guest's image starts where the page does: at the window's left
+        /// edge while the drawer is closed, at the drawer's edge while it is
+        /// open. A running console asks for a frame every frame, so a test of
+        /// it steps the window rather than running it until it settles.
+        fn show_a_running_guest(app: &mut NativeShellApp, library: Drawer) {
+            app.chrome.go_to(ShellPage::Console);
+            app.chrome.library = library;
+            app.emulator
+                .set_display_scale(rusty_box::gui::DisplayScale::Stretch);
+            let mut display = app.shared.lock().expect("shared display");
+            display.fb_width = 64;
+            display.fb_height = 40;
+            display.framebuffer = vec![0x80; 64 * 40 * 4];
+            display.fb_dirty = true;
+            display.emu_running = true;
+        }
+
+        fn guest_image(window: &Harness<'_, Window>) -> egui::Rect {
+            window.get_by_role(egui::accesskit::Role::Image).rect()
+        }
+
+        /// The guest's image claims its own presses. With the drawer closed,
+        /// the image reaches the window's left edge, over the drawer's grab
+        /// handle; neither a double-click nor an outward drag there opens the
+        /// drawer, and the guest gets both.
+        #[test]
+        fn presses_on_the_guest_image_at_the_left_edge_leave_a_closed_drawer_closed() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            show_a_running_guest(&mut app, Drawer::Closed);
+            let shared = Arc::clone(&app.shared);
+            let mut window = window(app);
+            window.run_steps(2);
+            let edge = window.state().left_edge;
+            let image = guest_image(&window);
+            assert_eq!(
+                image.left(),
+                edge,
+                "the image lies over the drawer's handle"
+            );
+
+            let on_the_handle = egui::pos2(edge + 1.0, image.center().y);
+            double_click(&mut window, on_the_handle);
+            assert_eq!(window.state().app.chrome.library, Drawer::Closed);
+            assert!(
+                shared.lock().expect("shared display").mouse_captured,
+                "the click reached the guest: it captured the mouse"
+            );
+
+            drag(
+                &mut window,
+                on_the_handle,
+                egui::pos2(edge + 260.0, image.center().y),
+            );
+            window.run_steps(2);
+            assert_eq!(window.state().app.chrome.library, Drawer::Closed);
+            assert!(!drawer_shows_its_rows(&window));
+            assert!(
+                shared
+                    .lock()
+                    .expect("shared display")
+                    .pending_mouse
+                    .iter()
+                    .any(|event| event.buttons & 0x01 != 0 && event.dx > 0),
+                "the drag reached the guest: a held left button moved right"
+            );
+        }
+
+        /// With the drawer open, the image starts at the drawer's edge, inside
+        /// the reach of the drawer's resize handle; a double-click on the
+        /// image's first point there leaves the drawer open.
+        #[test]
+        fn a_double_click_on_the_guest_image_beside_an_open_drawer_leaves_it_open() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            show_a_running_guest(&mut app, Drawer::Open);
+            let mut window = window(app);
+            window.run_steps(2);
+            let image = guest_image(&window);
+
+            double_click(
+                &mut window,
+                egui::pos2(image.left() + 1.0, image.center().y),
+            );
+            window.run_steps(2);
+            assert_eq!(window.state().app.chrome.library, Drawer::Open);
+            assert!(drawer_shows_its_rows(&window));
+        }
     }
 }

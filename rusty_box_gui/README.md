@@ -53,12 +53,12 @@ cargo run --release -p rusty_box_gui -- `
 
 The egui shell runs `eframe` on the main thread and the emulator on a worker thread with a 1500 MiB stack. The window has four parts:
 
-- **Sidebar tree.** Every VM is a row, and the selected one opens to its four pages: **Summary**, **Console**, **Hardware** and **Images**. The `+` button adds a new VM to the library, copied from the selected one, and a "Search VMs" field filters the list. The command line's temporary VM is marked "(unsaved)", and a library VM whose last save failed "(save failed)". Library files that do not load are listed under **Could not load**.
+- **Sidebar tree.** Every VM is a row, and the selected one opens to its four pages: **Summary**, **Console**, **Hardware** and **Images**. The `+` button adds a new VM to the library, copied from the selected one, and a "Search VMs" field filters the list. The command line's temporary VM is marked "(unsaved)", and a library VM whose last save failed "(save failed)". Library files that do not load are listed under **Could not load**. The list scrolls by the wheel, by its scroll bar, and by a finger on a touch screen. Dragging the sidebar's edge in past its narrowest width folds it away; a folded sidebar comes back with a drag from the window's left edge, where the guest's image does not reach it, or with `☰`.
 - **VM bar** above the page. It carries the selected VM's name, its state, and the verbs that change the state:
   - `▶ Power on` is enabled while the VM is stopped. `■ Power off` and `↻ Restart` are enabled only while it runs.
   - On the Console page only, the bar adds `Ctrl+Alt+Del`, `Capture mouse` / `Release mouse` and `Show serial` / `Hide serial`. The first two are enabled only while the VM runs; `Show serial` / `Hide serial` always is. When the window is too narrow, these fold into the `…` menu.
   - `…` always holds `About Rusty Box Workstation` and `Quit`.
-  - `☰` hides the sidebar, so the Console can scale wider.
+  - `☰` hides the sidebar, so the Console can scale wider, and shows it again.
 - **Status strip** along the bottom. It shows the state, the engine, the memory and CPU count, and the measured instruction rate (`--- IPS` when none is published). It adds `Restart queued` while a restart is pending.
 - **Page.** Startup and runtime errors appear as notices at the top of the page.
 
@@ -215,7 +215,7 @@ Then open `http://localhost:8080`. `trunk build --release` writes the site to `r
 Browser builds use no TOML, no CLI flags, no native file dialogs, and no host filesystem. What the browser shell offers:
 
 - **Menu bar.** `File` (`Boot OS Image`, `Create Disk Image`), `Edit` (`Clear Library Search`), `VM` (`Reset Browser VM`), `Help` (`About Rusty Box Workstation`), then the Home, Console, Hardware and Images pages.
-- **Toolbar.** `▶ Boot OS Image` before a browser VM exists, and `Console` after launch. `↻ Reset Browser VM` clears the browser VM. `▣ Hardware` and `+ New Image` jump to their pages. The `Library` toggle opens or closes the library sidebar, and the `Serial` checkbox shows or hides the serial pane.
+- **Toolbar.** `▶ Boot OS Image` before a browser VM exists, and `Console` after launch. `↻ Reset Browser VM` clears the browser VM. `▣ Hardware` and `+ New Image` jump to their pages. The `Library` toggle opens or closes the library sidebar, and the `Serial` checkbox shows or hides the serial pane. The library scrolls by the wheel, by its scroll bar, and by a finger on a touch screen; dragging its edge in past its narrowest width folds it away, and a folded library comes back with a drag from the window's left edge, where the guest's image does not reach it, or with the `Library` toggle.
 - **Home.** `Boot OS Image` opens a file picker for `.iso` or `.img` files and attaches the chosen file as a bootable CD/DVD. The "Boot DLX sample" tile is disabled, because this build does not bundle DLX. `Create Disk Image` opens the Images page.
 - **Hardware.** Memory (1 to 4096 MB, default 128) and the processor count (default 1) can be changed before boot; reset the browser VM to change them again. The page says so: `Browser hardware can be changed before boot. Reset the VM to edit it again.` Devices, Hard Disk, CD/DVD and Display are read-only information. CD/DVD shows the uploaded file's name and size.
 - **Status strip.** The state (`Error`, `Starting`, `Launcher`, `Stopped` or `Running`), the instruction rate and a frame counter.

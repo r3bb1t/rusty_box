@@ -65,6 +65,24 @@ pub trait HostInputSink {
     fn push(&mut self, event: HostInputEvent) -> bool;
 }
 
+/// How the guest's image senses the pointer, in both consoles. Every click and
+/// drag over the image is the image's, so a host widget beside it — a panel's
+/// resize or grab handle, whose catch zone reaches a few points past its own
+/// edge — never takes a press meant for the guest. It is not
+/// [`egui::Sense::FOCUSABLE`], which [`egui::Sense::click_and_drag`] carries:
+/// the image stays out of the Tab chain and never holds the keyboard the
+/// guest's keys come from. The guest itself is fed from the raw pointer and
+/// touch state ([`translate_egui_mouse`], the trackpad), never from this
+/// widget's response.
+#[cfg(feature = "gui-egui")]
+pub const GUEST_IMAGE_SENSE: egui::Sense = egui::Sense::CLICK.union(egui::Sense::DRAG);
+
+#[cfg(feature = "gui-egui")]
+const _: () = assert!(
+    !GUEST_IMAGE_SENSE.contains(egui::Sense::FOCUSABLE),
+    "the guest's image must never take the keyboard from the guest"
+);
+
 /// Translate this frame's egui pointer state into at most one [`HostMouseEvent`]
 /// and push it into `sink`. Returns the current button bitmask so the caller can
 /// track it across frames (a button release with no motion still needs to be

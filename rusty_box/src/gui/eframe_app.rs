@@ -643,10 +643,13 @@ impl RustyBoxApp {
                     ui.add_space(offset_y);
                     ui.horizontal(|ui| {
                         ui.add_space(offset_x);
-                        let response = ui.image(egui::load::SizedTexture::new(
-                            tex.id(),
-                            egui::vec2(draw_w, draw_h),
-                        ));
+                        let response = ui.add(
+                            egui::Image::new(egui::load::SizedTexture::new(
+                                tex.id(),
+                                egui::vec2(draw_w, draw_h),
+                            ))
+                            .sense(super::host_input::GUEST_IMAGE_SENSE),
+                        );
                         image_rect = Some(response.rect);
                     });
                 } else {

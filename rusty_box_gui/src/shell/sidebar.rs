@@ -16,7 +16,9 @@ use crate::shell::theme::{
     TEXT_MUTED,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::widgets::{selection_row, RowMark, ShellStateBadge, CHILD_INDENT, ROOT_INDENT};
+use crate::shell::widgets::{
+    selection_row, touch_row_height, RowMark, ShellStateBadge, CHILD_INDENT, ROOT_INDENT,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use egui::{RichText, Stroke};
 
@@ -102,8 +104,9 @@ impl VmLibraryEntry {
 }
 
 /// Whether the VM library's drawer is open beside the page or folded away.
-/// Both shells draw it every frame: a closed drawer leaves a grab handle at
-/// the left edge, from which it is dragged back open.
+/// Both shells draw it on every frame that shows their bars, which is every
+/// frame but the phone's full-screen console's: a closed drawer leaves a grab
+/// handle at the left edge, from which it is dragged back open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Drawer {
     Open,
@@ -113,6 +116,7 @@ pub(crate) enum Drawer {
 impl Drawer {
     /// The drawer in its other state: what the VM bar's `☰` and the browser
     /// toolbar's Library toggle make of it.
+    #[must_use]
     pub(crate) fn toggled(self) -> Self {
         match self {
             Self::Open => Self::Closed,
@@ -121,9 +125,11 @@ impl Drawer {
     }
 }
 
-/// The width the sidebar opens at, and the narrowest a drag may make it.
+/// The width the sidebar opens at.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const SIDEBAR_DEFAULT_WIDTH: f32 = 200.0;
+/// The narrowest a drag may make the open sidebar, and the width below which
+/// a drag folds the drawer away.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 170.0;
 
@@ -152,13 +158,15 @@ pub(crate) struct Sidebar<'a> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Sidebar<'_> {
-    /// Draws the drawer and reports what was clicked in it. Called every
-    /// frame, open or closed: a closed drawer leaves egui's grab handle at
-    /// the left edge, from which it is dragged back open, and an open one
-    /// folds away when its edge is dragged in past `SIDEBAR_MIN_WIDTH`. The
-    /// header row and the search field stay put; the rows under them scroll,
-    /// by the wheel, by the scroll bar, or, once egui has seen a touch screen,
-    /// by a finger dragged across them.
+    /// Draws the drawer and reports what was clicked in it. Called on every
+    /// frame the shell's bars are drawn, which is all but the phone's
+    /// full-screen console's, open or closed: a closed drawer leaves egui's
+    /// grab handle at the left edge, from which it is dragged back open, and
+    /// an open one folds away when its edge is dragged in past
+    /// `SIDEBAR_MIN_WIDTH`. The header row and the search field stay put; the
+    /// rows under them scroll, by the wheel, by the scroll bar, or, once egui
+    /// has seen a touch screen, by a finger dragged across them. Every row is
+    /// a finger's height under a phone's style (`touch_row_height`).
     pub(crate) fn show(self, ui: &mut egui::Ui) -> Option<SidebarAction> {
         let Sidebar {
             entries,
@@ -215,6 +223,7 @@ impl Sidebar<'_> {
                     return action;
                 }
 
+                let row_height = touch_row_height(ui);
                 egui::ScrollArea::vertical()
                     .id_salt("vm_list")
                     .auto_shrink([false, false])
@@ -233,6 +242,7 @@ impl Sidebar<'_> {
                                 ROOT_INDENT,
                                 vm_mark,
                                 dot,
+                                row_height,
                             )
                             .clicked()
                             {
@@ -247,8 +257,15 @@ impl Sidebar<'_> {
                                 } else {
                                     RowMark::Plain
                                 };
-                                if selection_row(ui, page.label(), CHILD_INDENT, page_mark, None)
-                                    .clicked()
+                                if selection_row(
+                                    ui,
+                                    page.label(),
+                                    CHILD_INDENT,
+                                    page_mark,
+                                    None,
+                                    row_height,
+                                )
+                                .clicked()
                                 {
                                     action =
                                         Some(SidebarAction::Select(destination.select_page(page)));
@@ -267,10 +284,16 @@ impl Sidebar<'_> {
                                 let name = file.path.file_name().map_or_else(String::new, |name| {
                                     name.to_string_lossy().into_owned()
                                 });
+                                // The row is the style's control height, and
+                                // its Delete fills it, so a phone's finger
+                                // reaches it as it does every other row.
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(name).color(ACCENT_AMBER))
                                         .on_hover_text(&file.error);
-                                    if ui.small_button("Delete").clicked() {
+                                    let delete = egui::Button::new("Delete")
+                                        .small()
+                                        .min_size(egui::vec2(0.0, ui.spacing().interact_size.y));
+                                    if ui.add(delete).clicked() {
                                         action = Some(SidebarAction::DeleteBroken(index));
                                     }
                                 });
@@ -288,6 +311,7 @@ impl Sidebar<'_> {
 mod tests {
     use super::*;
     use crate::shell::theme::TEXT_MUTED;
+    use crate::shell::widgets::ROW_HEIGHT;
     use egui_kittest::{kittest::Queryable, Harness};
 
     const WINDOW: egui::Vec2 = egui::vec2(640.0, 400.0);
@@ -304,6 +328,7 @@ mod tests {
         destination: Destination,
         filter: String,
         drawer: Drawer,
+        broken: Vec<crate::library::BrokenVmFile>,
         picked: Option<SidebarAction>,
         /// The x of the drawer's fixed edge, where a closed drawer's grab
         /// handle lies: the left of the area the harness draws the app in,
@@ -322,6 +347,7 @@ mod tests {
             destination: Destination::new(0, ShellPage::Home),
             filter: String::new(),
             drawer: Drawer::Open,
+            broken: Vec::new(),
             picked: None,
             left_edge: 0.0,
         }
@@ -343,7 +369,7 @@ mod tests {
                             label: "Stopped",
                             color: TEXT_MUTED,
                         },
-                        broken: &[],
+                        broken: &library.broken,
                         drawer: &mut library.drawer,
                     }
                     .show(ui);
@@ -391,10 +417,11 @@ mod tests {
         ));
     }
 
-    /// A finger dragged up the list scrolls it, as egui-winit reports a touch:
-    /// a `Touch` event and the pointer events it simulates.
+    /// A finger dragged up the list scrolls it and picks nothing, and a tap
+    /// then picks the last VM: the phone's flow, where a pick also closes the
+    /// drawer.
     #[test]
-    fn a_long_library_scrolls_with_a_finger() {
+    fn a_long_library_scrolls_with_a_finger_and_its_last_vm_can_be_tapped() {
         let mut harness = harness(library_of(60));
         harness.run();
         for _ in 0..8 {
@@ -408,35 +435,81 @@ mod tests {
             );
         }
         assert!(on_screen(&harness, "VM 59"));
+        assert!(harness.state().picked.is_none(), "a swipe picks nothing");
+
+        let row = harness.get_by_label("VM 59").rect().center();
+        tap(&mut harness, row);
+        assert!(matches!(
+            harness.state().picked,
+            Some(SidebarAction::Select(destination)) if destination.vm() == 59
+        ));
     }
 
-    fn swipe(harness: &mut Harness<'_, Library>, from: egui::Pos2, to: egui::Pos2) {
-        let touch = |phase, pos| egui::Event::Touch {
+    /// The one finger these tests touch with, at `pos`.
+    fn finger(phase: egui::TouchPhase, pos: egui::Pos2) -> egui::Event {
+        egui::Event::Touch {
             device_id: egui::TouchDeviceId(1),
             id: egui::TouchId(1),
             phase,
             pos,
             force: None,
-        };
-        let button = |pos, pressed| egui::Event::PointerButton {
+        }
+    }
+
+    fn press(pos: egui::Pos2) -> egui::Event {
+        egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
-            pressed,
+            pressed: true,
             modifiers: egui::Modifiers::NONE,
-        };
-        harness.event(touch(egui::TouchPhase::Start, from));
-        harness.event(egui::Event::PointerMoved(from));
-        harness.event(button(from, true));
+        }
+    }
+
+    fn release(pos: egui::Pos2) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// A finger put down at `pos`, as egui-winit reports it: the `Touch`
+    /// event, then the pointer move and press it simulates.
+    fn put_down(harness: &mut Harness<'_, Library>, pos: egui::Pos2) {
+        harness.event(finger(egui::TouchPhase::Start, pos));
+        harness.event(egui::Event::PointerMoved(pos));
+        harness.event(press(pos));
         harness.step();
+    }
+
+    /// The finger lifted at `pos`, as egui-winit reports it: the `Touch`
+    /// event, the simulated release, and `PointerGone`, so nothing stays
+    /// hovered.
+    fn lift(harness: &mut Harness<'_, Library>, pos: egui::Pos2) {
+        harness.event(finger(egui::TouchPhase::End, pos));
+        harness.event(release(pos));
+        harness.event(egui::Event::PointerGone);
+        harness.run();
+    }
+
+    /// A finger dragged from `from` to `to` in ten moves, each a `Touch`
+    /// event and the pointer move it simulates.
+    fn swipe(harness: &mut Harness<'_, Library>, from: egui::Pos2, to: egui::Pos2) {
+        put_down(harness, from);
         for n in 1..=10u8 {
             let pos = from + (to - from) * (f32::from(n) / 10.0);
-            harness.event(touch(egui::TouchPhase::Move, pos));
+            harness.event(finger(egui::TouchPhase::Move, pos));
             harness.event(egui::Event::PointerMoved(pos));
             harness.step();
         }
-        harness.event(touch(egui::TouchPhase::End, to));
-        harness.event(button(to, false));
-        harness.run();
+        lift(harness, to);
+    }
+
+    /// A finger tapped at `pos`: put down and lifted where it landed.
+    fn tap(harness: &mut Harness<'_, Library>, pos: egui::Pos2) {
+        put_down(harness, pos);
+        lift(harness, pos);
     }
 
     #[test]
@@ -465,6 +538,70 @@ mod tests {
         harness.run();
         assert_eq!(harness.state().drawer, Drawer::Open);
         assert!(harness.query_by_label("VM 00").is_some());
+    }
+
+    /// The phone style's touch-target height: `interact_size.y` as
+    /// `android.rs` sets it (`TOUCH_TARGET`).
+    const FINGER: f32 = 40.0;
+
+    /// Three VMs and two library files that do not load, so the drawer holds
+    /// every kind of row: VM rows, the selected VM's page rows, and the
+    /// "Could not load" rows.
+    fn every_kind_of_row() -> Library {
+        let mut library = library_of(3);
+        library.broken = ["bad.toml", "worse.toml"]
+            .map(|name| crate::library::BrokenVmFile {
+                path: std::path::PathBuf::from(name),
+                error: "not a VM".to_owned(),
+            })
+            .to_vec();
+        library
+    }
+
+    /// The tops of the two "Could not load" rows' Delete buttons.
+    fn delete_tops(harness: &Harness<'_, Library>) -> Vec<f32> {
+        harness
+            .query_all_by_label("Delete")
+            .map(|delete| delete.rect().top())
+            .collect()
+    }
+
+    #[test]
+    fn under_a_phones_style_every_drawer_row_is_a_finger_tall() {
+        let mut harness = harness(every_kind_of_row());
+        harness
+            .ctx
+            .all_styles_mut(|style| style.spacing.interact_size.y = FINGER);
+        harness.run();
+        for label in ["VM 00", "Summary", "Console", "Hardware", "VM 02"] {
+            let height = harness.get_by_label(label).rect().height();
+            assert!(height >= FINGER, "the {label} row is {height} tall");
+        }
+        for delete in harness.query_all_by_label("Delete") {
+            let height = delete.rect().height();
+            assert!(height >= FINGER, "a Delete is {height} tall");
+        }
+    }
+
+    #[test]
+    fn under_the_desktop_style_the_drawer_rows_keep_their_height() {
+        let mut harness = harness(every_kind_of_row());
+        harness.run();
+        for label in ["VM 00", "Summary", "Console", "Hardware", "VM 02"] {
+            assert_eq!(
+                harness.get_by_label(label).rect().height(),
+                ROW_HEIGHT,
+                "{label}"
+            );
+        }
+        // A "Could not load" row stays one control tall, the style's
+        // `interact_size.y`, as `ui.horizontal` lays it out.
+        let spacing = harness.ctx.global_style().spacing.clone();
+        let tops = delete_tops(&harness);
+        assert_eq!(
+            tops[1] - tops[0],
+            spacing.interact_size.y + spacing.item_spacing.y
+        );
     }
 
     #[test]
