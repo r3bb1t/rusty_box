@@ -1210,6 +1210,34 @@ fn x86_feature_lists_the_bochs_features_in_order() {
     assert_eq!(ours, bochs);
 }
 
+/// Every `X86Feature` has a bit in the `[u32; BX_ISA_EXTENSIONS_ARRAY_SIZE]`
+/// ISA-extension bitmask, which `enable_extension` and
+/// `bx_cpuid_support_isa_extension` index as `[feature / 32]`. Bochs
+/// `cpu/decoder/decoder.h` refuses to build when `BX_ISA_EXTENSION_LAST >=
+/// BX_ISA_EXTENSIONS_ARRAY_SIZE*32`; this is that check, over the feature list
+/// `scripts/gen_opcode_isa.py` copied out of `features.h`. The order test above
+/// reads `features.rs` as text, so the compiled enum is tied to the list here:
+/// its last discriminant is the list's last index.
+#[test]
+fn every_x86_feature_fits_the_isa_extensions_bitmask() {
+    use crate::features::X86Feature;
+    use crate::opcode_isa::BOCHS_ISA_FEATURES;
+    use crate::BX_ISA_EXTENSIONS_ARRAY_SIZE;
+
+    assert_eq!(
+        X86Feature::IsaUserMsr as usize + 1,
+        BOCHS_ISA_FEATURES.len(),
+        "X86Feature's last variant must number the last Bochs feature"
+    );
+    assert!(
+        BOCHS_ISA_FEATURES.len() < BX_ISA_EXTENSIONS_ARRAY_SIZE * 32,
+        "ISA extensions array limit exceeded! (Bochs cpu/decoder/decoder.h): \
+         {} features, {} bitmask words",
+        BOCHS_ISA_FEATURES.len(),
+        BX_ISA_EXTENSIONS_ARRAY_SIZE
+    );
+}
+
 #[test]
 fn opcode_isa_table_is_in_sync_with_the_opcode_enum() {
     use crate::features::X86Feature;
@@ -1258,8 +1286,9 @@ fn opcode_isa_table_is_in_sync_with_the_opcode_enum() {
     );
     assert_eq!(
         opcode_isa_feature(Opcode::V128VpclmulqdqVdqHdqWdqIb),
-        X86Feature::IsaAvx as u16,
-        "the 128-bit form is plain AVX; only the 256-bit form needs VPCLMULQDQ"
+        X86Feature::IsaAesPclmulqdq as u16,
+        "the 128-bit form needs AES+PCLMULQDQ (its AVX state is BX_PREPARE_AVX's); \
+         only the 256-bit form needs VPCLMULQDQ"
     );
 }
 

@@ -5805,17 +5805,75 @@ mod tests {
         }
     }
 
+    /// The two 4 KiB pages above 4 GiB the BTS tests address, and the physical
+    /// frames `long_mode_with_high_pages` maps them onto. Their 32-bit
+    /// truncations, 0x4000 and 0x5000, stay identity-mapped, so a truncated
+    /// access and a correct one reach different RAM.
+    const HIGH_DWORD_PAGE: u64 = 0x1_0000_4000;
+    const HIGH_DWORD_FRAME: u64 = 0x2_0000;
+    const HIGH_WORD_PAGE: u64 = 0x1_0000_5000;
+    const HIGH_WORD_FRAME: u64 = 0x2_1000;
+
+    /// A processor in 64-bit mode as a guest reaches it: a 64-bit code
+    /// segment, CR0.PG, CR4.PAE and EFER.LMA over a 4-level map. The low
+    /// 2 MiB is identity-mapped; `HIGH_DWORD_PAGE` and `HIGH_WORD_PAGE` map
+    /// onto frames of their own. No GDT backs the selectors, so nothing here
+    /// may reload a segment register.
+    fn long_mode_with_high_pages(
+        machine: &mut crate::cpu::exec_ctx::TestMachine,
+    ) -> crate::cpu::exec_ctx::ExecCtx<'_, ()> {
+        use crate::cpu::api_bridge::SegmentSize;
+        use crate::cpu::instrumentation::X86Reg;
+
+        const PML4: u64 = 0x1_0000;
+        const PDPT: u64 = 0x1_1000;
+        const LOW_DIRECTORY: u64 = 0x1_2000;
+        const HIGH_DIRECTORY: u64 = 0x1_3000;
+        const HIGH_TABLE: u64 = 0x1_4000;
+        const PRESENT_WRITABLE: u64 = 0x3;
+        const LARGE_PAGE: u64 = 0x80;
+        /// PDPT slot of the gigabyte at 4 GiB, and each high page's slot in
+        /// the table under it.
+        const HIGH_PDPT_SLOT: u64 = HIGH_DWORD_PAGE >> 30;
+        const HIGH_DWORD_SLOT: u64 = (HIGH_DWORD_PAGE >> 12) & 0x1FF;
+        const HIGH_WORD_SLOT: u64 = (HIGH_WORD_PAGE >> 12) & 0x1FF;
+
+        let memory = machine.memory_mut();
+        let mut map = |at: u64, entry: u64| {
+            let bytes = entry.to_le_bytes();
+            let copied = memory.write_ram(at, &bytes).expect("the page tables are RAM");
+            assert_eq!(copied, bytes.len(), "the entry at {at:#x} reached RAM whole");
+        };
+        map(PML4, PDPT | PRESENT_WRITABLE);
+        map(PDPT, LOW_DIRECTORY | PRESENT_WRITABLE);
+        map(LOW_DIRECTORY, PRESENT_WRITABLE | LARGE_PAGE);
+        map(PDPT + HIGH_PDPT_SLOT * 8, HIGH_DIRECTORY | PRESENT_WRITABLE);
+        map(HIGH_DIRECTORY, HIGH_TABLE | PRESENT_WRITABLE);
+        map(HIGH_TABLE + HIGH_DWORD_SLOT * 8, HIGH_DWORD_FRAME | PRESENT_WRITABLE);
+        map(HIGH_TABLE + HIGH_WORD_SLOT * 8, HIGH_WORD_FRAME | PRESENT_WRITABLE);
+
+        let mut cpu = machine.ctx();
+        cpu.reset(crate::cpu::ResetReason::Hardware);
+        cpu.set_seg_for_api(X86Reg::Cs, 0x08, 0, 0xFFFF_FFFF, SegmentSize::Long64);
+        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
+            cpu.set_seg_for_api(reg, 0x10, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
+        }
+        cpu.enter_long_mode_for_api(PML4);
+        assert!(cpu.long64_mode(), "the processor is in 64-bit mode");
+        cpu
+    }
+
     #[test]
     fn bts_ed_gd_memory_keeps_64_bit_effective_address() {
         let mut machine =
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
-        cpu.cpu_mode = CpuMode::Long64;
+        let mut cpu = long_mode_with_high_pages(&mut machine);
 
-        cpu.linaddr_width = 48;
         const LOW_ADDR: u64 = 0x4000;
-        const HIGH_ADDR: u64 = 0x1_0000_4000;
+        const HIGH_ADDR: u64 = HIGH_DWORD_PAGE;
         cpu.write_virtual_dword_64(BxSegregs::Ds, LOW_ADDR, 0x1234_0000)
+            .unwrap();
+        cpu.write_virtual_dword_64(BxSegregs::Ds, HIGH_ADDR, 0xABCD_0000)
             .unwrap();
         cpu.set_rbx(HIGH_ADDR);
         cpu.set_r14(1);
@@ -5835,6 +5893,11 @@ mod tests {
 
         cpu.execute_instruction(&instr).unwrap();
         assert_eq!(
+            cpu.read_virtual_dword_64(BxSegregs::Ds, HIGH_ADDR).unwrap(),
+            0xABCD_0002,
+            "BTS Ed,Gd sets the bit at its 64-bit effective address"
+        );
+        assert_eq!(
             cpu.read_virtual_dword_64(BxSegregs::Ds, LOW_ADDR).unwrap(),
             0x1234_0000,
             "BTS Ed,Gd in 64-bit address mode must not truncate the memory address"
@@ -5845,13 +5908,13 @@ mod tests {
     fn bts_ew_gw_memory_keeps_64_bit_effective_address() {
         let mut machine =
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
-        cpu.cpu_mode = CpuMode::Long64;
-        cpu.linaddr_width = 48;
+        let mut cpu = long_mode_with_high_pages(&mut machine);
 
         const LOW_ADDR: u64 = 0x5000;
-        const HIGH_ADDR: u64 = 0x1_0000_5000;
+        const HIGH_ADDR: u64 = HIGH_WORD_PAGE;
         cpu.write_virtual_word_64(BxSegregs::Ds, LOW_ADDR, 0x1200)
+            .unwrap();
+        cpu.write_virtual_word_64(BxSegregs::Ds, HIGH_ADDR, 0xAB00)
             .unwrap();
         cpu.set_rbx(HIGH_ADDR);
         cpu.set_r14(1);
@@ -5870,6 +5933,11 @@ mod tests {
         instr.set_seg(BxSegregs::Ds);
 
         cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(
+            cpu.read_virtual_word_64(BxSegregs::Ds, HIGH_ADDR).unwrap(),
+            0xAB02,
+            "BTS Ew,Gw sets the bit at its 64-bit effective address"
+        );
         assert_eq!(
             cpu.read_virtual_word_64(BxSegregs::Ds, LOW_ADDR).unwrap(),
             0x1200,

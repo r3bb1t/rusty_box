@@ -951,6 +951,96 @@ mod tests {
         );
     }
 
+    /// Bochs smm.cc `resume_from_system_management_mode` validates PAE PDPTEs
+    /// only for an image that resumes into PAE paging outside long mode:
+    /// `!long_mode()`, which Bochs cpu.h answers from `efer.get_LMA()` — the
+    /// EFER this restore has just loaded from the image. A 64-bit guest's CR3
+    /// names a PML4, whose entries legitimately carry bits a PDPTE reserves,
+    /// so it is never validated as one. Windows XP x64 takes its ACPI-enable
+    /// SMI with exactly such an entry in PML4[0].
+    #[test]
+    fn rsm_resumes_a_long_mode_guest_whose_pml4_is_no_valid_pdpt() {
+        use crate::cpu::api_bridge::SegmentSize;
+        use crate::cpu::instrumentation::X86Reg;
+
+        const PML4: u64 = 0x1000;
+        const PDPT: u64 = 0x2000;
+        /// Windows XP x64's PML4[0] flags: present, writable, user, accessed,
+        /// dirty and its software bits 11, 53 and 54. A legal PML4E — and bits
+        /// 1, 2, 5, 6, 53 and 54 are each reserved in a PAE PDPTE.
+        const XP64_PML4E_FLAGS: u64 = 0x0060_0000_0000_0867;
+        const GUEST_RIP: u64 = 0xffff_f800_0102_3456;
+
+        let mut machine = cpu_with_memory();
+        let mut cpu = machine.ctx();
+        let pml4e = (PDPT | XP64_PML4E_FLAGS).to_le_bytes();
+        let copied = cpu.memory.write_ram(PML4, &pml4e).expect("the PML4 is RAM");
+        assert_eq!(copied, pml4e.len(), "PML4[0] reached RAM whole");
+
+        cpu.set_seg_for_api(X86Reg::Cs, 0x08, 0, 0xFFFF_FFFF, SegmentSize::Long64);
+        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
+            cpu.set_seg_for_api(reg, 0x10, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
+        }
+        cpu.enter_long_mode_for_api(PML4);
+        cpu.set_rip(GUEST_RIP);
+        assert!(cpu.long64_mode(), "the SMI arrives while the guest runs 64-bit code");
+
+        cpu.enter_system_management_mode();
+        cpu.rsm(&Instruction::default())
+            .expect("RSM resumes a long-mode guest without validating its PML4 as PDPTEs");
+
+        assert!(!cpu.in_smm);
+        assert!(cpu.efer.lma(), "EFER.LMA comes back from the image");
+        assert!(cpu.long64_mode(), "the guest resumes in 64-bit mode");
+        assert_eq!(cpu.cr3, PML4, "CR3 still names the guest's PML4");
+        assert_eq!(cpu.rip(), GUEST_RIP, "the guest resumes at the interrupted instruction");
+    }
+
+    /// The other side of the same gate: an image that resumes into PAE paging
+    /// outside long mode has its PDPTEs validated (Bochs smm.cc
+    /// `resume_from_system_management_mode` calls `CheckPDPTR`), and a present
+    /// PDPTE with a reserved bit set makes the image inconsistent, so the
+    /// processor shuts down.
+    #[test]
+    fn rsm_shuts_down_on_a_pae_image_with_a_reserved_pdpte_bit() {
+        const PDPT: u64 = 0x2000;
+        /// Present and writable: R/W is reserved in a PAE PDPTE.
+        const RESERVED_BIT_PDPTE: u64 = 0x3000 | 0x3;
+        /// The CR0, CR3 and CR4 slots of the save area at SMBASE 0x30000.
+        const SAVED_CR0: u64 = 0x3ff58;
+        const SAVED_CR3: u64 = 0x3ff50;
+        const SAVED_CR4: u64 = 0x3ff48;
+        const CR0_PG_PE: u32 = 0x8000_0001;
+        const CR4_PAE: u32 = 1 << 5;
+
+        let mut machine = cpu_with_memory();
+        let mut cpu = machine.ctx();
+        let pdpte = RESERVED_BIT_PDPTE.to_le_bytes();
+        let copied = cpu.memory.write_ram(PDPT, &pdpte).expect("the PDPT is RAM");
+        assert_eq!(copied, pdpte.len(), "PDPT[0] reached RAM whole");
+
+        // The image describes a 32-bit PAE guest: paging on, and the EFER
+        // reset left clear keeps it out of long mode.
+        cpu.enter_system_management_mode();
+        let cr0 = cpu.smram_read_physical_dword(SAVED_CR0);
+        cpu.smram_write_physical_dword(SAVED_CR0, cr0 | CR0_PG_PE);
+        cpu.smram_write_physical_dword(SAVED_CR3, PDPT as u32);
+        cpu.smram_write_physical_dword(SAVED_CR4, CR4_PAE);
+
+        let result = cpu.rsm(&Instruction::default());
+        assert!(
+            matches!(result, Err(super::super::error::CpuError::CpuLoopRestart)),
+            "a reserved PDPTE bit makes the image inconsistent"
+        );
+        assert!(
+            matches!(
+                cpu.activity_state,
+                super::super::cpu::CpuActivityState::Shutdown
+            ),
+            "Bochs RSM: an inconsistent image shuts the processor down"
+        );
+    }
+
     /// The relocated-SMBASE case, which is the one every real OS actually
     /// exercises: after the Bochs BIOS `smm_init` handshake, SMBASE is 0xa0000
     /// and the SMRAM control register is 0x0a (SMRAME=1, DOPEN=0, DCLS=0), so

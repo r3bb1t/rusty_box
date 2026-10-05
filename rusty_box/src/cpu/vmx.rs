@@ -4945,10 +4945,11 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         revision
     }
 
-    /// Bochs cpu.h long_compat_mode — 32-bit compatibility sub-mode of long mode.
+    /// The compatibility sub-mode of long mode, as Bochs vmx.cc asks it in
+    /// every VMX instruction's mode check: `cpu_mode == BX_MODE_LONG_COMPAT`.
     #[inline]
     pub(super) fn long_compat_mode(&self) -> bool {
-        self.long_mode() && !self.long64_mode()
+        self.cpu_mode == super::cpu::CpuMode::LongCompat
     }
 
     /// Is A20 masking enabled? Bochs' `BX_GET_ENABLE_A20()` macro pokes

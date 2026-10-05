@@ -2058,4 +2058,56 @@ mod tests {
             assert_eq!(injected.rip, CODE, "{word:#010x} delivered nothing");
         }
     }
+
+    /// `#VMEXIT` reloads the host's EFER before it asks whether the host
+    /// resumes into PAE paging outside long mode, and Bochs svm.cc
+    /// `SvmExitLoadHostState` asks it with `long_mode()` — `efer.get_LMA()`,
+    /// the host's own. A 64-bit host's CR3 names a PML4 whose entries carry
+    /// bits a PDPTE reserves, so leaving a guest that runs outside long mode
+    /// must not validate that PML4 as a PDPT and shut the processor down.
+    #[test]
+    fn vmexit_from_a_32_bit_guest_resumes_a_64_bit_host() {
+        const PML4: u64 = 0x1000;
+        const PDPT: u64 = 0x2000;
+        /// Present, writable, user, accessed: an ordinary PML4E, and R/W, U/S
+        /// and A are each reserved in a PAE PDPTE.
+        const PML4E_FLAGS: u64 = 0x27;
+        const HOST_RIP: u64 = 0xffff_ffff_8100_0000;
+        const GUEST_RIP: u64 = 0x0040_1000;
+        const CR0_ET_PE: u32 = 0x11;
+
+        let mut machine = TestMachine::new();
+        let mut ctx = machine.ctx();
+        ctx.reset(crate::cpu::ResetReason::Hardware);
+        let pml4e = (PDPT | PML4E_FLAGS).to_le_bytes();
+        let copied = ctx.memory.write_ram(PML4, &pml4e).expect("the PML4 is RAM");
+        assert_eq!(copied, pml4e.len(), "PML4[0] reached RAM whole");
+
+        // The host: 64-bit mode over that PML4, with SVM enabled, saved the
+        // way VMRUN saves it.
+        ctx.set_seg_for_api(X86Reg::Cs, 0x08, 0, 0xFFFF_FFFF, SegmentSize::Long64);
+        for reg in [X86Reg::Es, X86Reg::Ss, X86Reg::Ds] {
+            ctx.set_seg_for_api(reg, 0x10, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
+        }
+        ctx.enter_long_mode_for_api(PML4);
+        ctx.efer.insert(BxEfer::SVME);
+        ctx.set_rip(HOST_RIP);
+        assert!(ctx.long64_mode(), "the host runs 64-bit code");
+        ctx.svm_enter_save_host_state();
+
+        // The guest: 32-bit protected mode, no paging, outside long mode.
+        ctx.set_cr0_raw_for_api(CR0_ET_PE);
+        ctx.set_efer_for_api(u64::from(BxEfer::SVME.bits()));
+        ctx.set_seg_for_api(X86Reg::Cs, 0x08, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
+        ctx.set_rip(GUEST_RIP);
+        assert!(!ctx.long_mode(), "the guest runs outside long mode");
+
+        ctx.svm_exit_load_host_state()
+            .expect("#VMEXIT resumes a 64-bit host without validating its PML4 as PDPTEs");
+
+        assert!(ctx.efer.lma(), "the host's EFER.LMA is restored");
+        assert!(ctx.long64_mode(), "the host resumes in 64-bit mode");
+        assert_eq!(ctx.cr3, PML4, "CR3 names the host's PML4 again");
+        assert_eq!(ctx.rip(), HOST_RIP, "the host resumes at its saved RIP");
+    }
 }

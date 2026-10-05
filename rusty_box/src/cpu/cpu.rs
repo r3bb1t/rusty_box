@@ -3474,10 +3474,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.cpu_mode == CpuMode::Long64
     }
 
-    /// Returns true when CPU is in long mode (either 64-bit or compatibility sub-mode).
-    /// Matches Bochs `long_mode()` which checks `EFER.LMA == 1`.
+    /// Long mode, 64-bit or compatibility: Bochs cpu.h `long_mode`, which is
+    /// `efer.get_LMA()` read directly rather than the `cpu_mode` that
+    /// `handle_cpu_mode_change` derives from it. The two agree between
+    /// instructions. Inside a state load — RSM, VMRUN and #VMEXIT, VM entry
+    /// and VM exit, a CR0 write — EFER is loaded first and `cpu_mode` is
+    /// recomputed only at the end, and every long-mode question asked in
+    /// between (the PDPTR checks, the EFLAGS.VM mask, the walk format of a
+    /// descriptor fetch) is about the EFER just loaded.
     pub(super) fn long_mode(&self) -> bool {
-        self.cpu_mode == CpuMode::Long64 || self.cpu_mode == CpuMode::LongCompat
+        self.efer.lma()
     }
 
     pub(crate) fn smm_mode(&self) -> bool {

@@ -981,10 +981,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let val_32 = val_flags.bits();
 
         // Bochs SetCR0 — PDPTR check when enabling paging with PAE outside
-        // long mode. CheckPDPTR returns false on a reserved-bit violation
-        // and SetCR0 propagates as #GP(0). Predicate is `efer.lma()` (Bochs's
-        // `long_mode()` is `efer.get_LMA()` directly).
-        if pg && self.cr4.pae() && !self.efer.lma() && !self.check_pdptrs(self.cr3)? {
+        // long mode (`pg && cr4.PAE && !long_mode()`). CheckPDPTR returns
+        // false on a reserved-bit violation and SetCR0 propagates as #GP(0).
+        if pg && self.cr4.pae() && !self.long_mode() && !self.check_pdptrs(self.cr3)? {
             tracing::trace!("MOV CR0: PDPTR check failed, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1066,13 +1065,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs MOV_CR3Rd (cpu/crregs.cc): when paging is active in PAE-not-
         // long-mode, CheckPDPTR validates the 4 PDPTE entries BEFORE SetCR3 so a
         // reserved-bit failure leaves CR3 unchanged. Predicate is `cr0.PG &&
-        // cr4.PAE && !long_mode()` (Bochs `long_mode()` is `efer.get_LMA()`
-        // directly, so we use `efer.lma()` here — rusty_box's
-        // `cpu.rs::long_mode()` is cpu_mode-derived and lags EFER.LMA across
-        // CR transitions). The `cr0.pg()` gate matters during long-mode entry:
-        // Linux loads CR3 with a long-mode PML4 (R/W=1, U/S=1) BEFORE CR0.PG=1
-        // — those bits would fail legacy PAE PDPTE reserved-bit checks.
-        if self.cr0.pg() && self.cr4.pae() && !self.efer.lma() && !self.check_pdptrs(val)? {
+        // cr4.PAE && !long_mode()`. The `cr0.pg()` gate matters during
+        // long-mode entry: Linux loads CR3 with a long-mode PML4 (R/W=1,
+        // U/S=1) BEFORE CR0.PG=1 — those bits would fail legacy PAE PDPTE
+        // reserved-bit checks.
+        if self.cr0.pg() && self.cr4.pae() && !self.long_mode() && !self.check_pdptrs(val)? {
             tracing::trace!("MOV CR3: PDPTR check failed for cr3={:#x}, #GP(0)", val);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1186,23 +1183,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let new_cr4 = BxCr4::from_bits_retain(val_32);
 
         // Bochs check_CR4 (crregs.cc) sequence — must match ordering exactly
-        // for Bochs-correct fault prioritisation. Bochs's `long_mode()` is
-        // `efer.get_LMA()` directly, so the long-mode predicates are gated on
-        // `efer.lma()` here (rusty_box's `cpu.rs::long_mode()` is
-        // cpu_mode-derived and lags EFER.LMA across CR transitions, so it
-        // would observe stale state mid-handler).
+        // for Bochs-correct fault prioritisation.
         // (1) PAE cannot be cleared when in long mode.
-        if self.efer.lma() && !new_cr4.contains(BxCr4::PAE) {
+        if self.long_mode() && !new_cr4.contains(BxCr4::PAE) {
             tracing::trace!("MOV CR4: attempt to clear PAE while in long mode, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // (2) PCIDE cannot be set when not in long mode.
-        if !self.efer.lma() && new_cr4.contains(BxCr4::PCIDE) {
+        if !self.long_mode() && new_cr4.contains(BxCr4::PCIDE) {
             tracing::trace!("MOV CR4: attempt to set PCIDE outside long mode, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // (3) FRED cannot be set when not in long mode (Bochs check_CR4 FRED).
-        if !self.efer.lma() && new_cr4.contains(BxCr4::FRED) {
+        if !self.long_mode() && new_cr4.contains(BxCr4::FRED) {
             tracing::trace!("MOV CR4: attempt to set FRED outside long mode, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1219,7 +1212,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // LA57 cannot change while in long mode (Bochs SetCR4 LA57 block).
-        if self.efer.lma() && (new_cr4.contains(BxCr4::LA57) != self.cr4.contains(BxCr4::LA57)) {
+        if self.long_mode() && (new_cr4.contains(BxCr4::LA57) != self.cr4.contains(BxCr4::LA57)) {
             tracing::trace!("MOV CR4: attempt to change LA57 while in long mode, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1228,7 +1221,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // = PSE | PAE | PGE | LA57 | PCIDE | SMEP | SMAP | PKE | CET | PKS |
         // LASS). When any TLB-relevant bit flips, run the BEFORE-write
         // side-effects:
-        //   - if (cr0.PG && new.PAE && !efer.lma): CheckPDPTR or #GP(0).
+        //   - if (cr0.PG && new.PAE && !long_mode()): CheckPDPTR or #GP(0).
         //   - else (long mode): if PCIDE 0->1, require (cr3 & 0xfff)==0.
         // Bochs `TLB_flush()` runs INSIDE that block (crregs.cc SetCR4) BEFORE
         // `cr4 = temp_cr4` so it sees the OLD CR4 — keep that ordering.
@@ -1246,7 +1239,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let changed_bits = self.cr4.symmetric_difference(new_cr4);
         let tlb_relevant_change = changed_bits.intersects(flush_mask);
         if tlb_relevant_change {
-            if self.cr0.pg() && new_cr4.contains(BxCr4::PAE) && !self.efer.lma() {
+            if self.cr0.pg() && new_cr4.contains(BxCr4::PAE) && !self.long_mode() {
                 if !self.check_pdptrs(self.cr3)? {
                     tracing::trace!("MOV CR4: PDPTR check failed, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);

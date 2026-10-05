@@ -33,7 +33,7 @@ use rusty_box_core::time::VmClock;
 
 use crate::api::{Declared, WindowDecls, WindowOffset};
 use crate::display::sink::{DisplaySink, Refreshed};
-use crate::display::vga::{VerticalPhase, VerticalTick, VgaCore, VgaWindow};
+use crate::display::vga::{RedrawArea, VerticalPhase, VerticalTick, VgaCore, VgaWindow};
 
 /// What an extension did with a memory write it was offered first.
 ///
@@ -44,6 +44,15 @@ pub enum Written {
     /// The extension did not claim this write; the core performs it.
     FallThrough,
     /// The extension performed the write itself.
+    Done,
+}
+
+/// What an extension did with a redraw request it was offered first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Redrawn {
+    /// The extension did not claim the request; the core marks the area.
+    FallThrough,
+    /// The extension marked what the area covers itself.
     Done,
 }
 
@@ -308,6 +317,41 @@ impl<'a> ResetCtx<'a> {
     }
 }
 
+/// A redraw request the extension is offered before the core marks it.
+pub struct RedrawCtx<'a> {
+    core: &'a mut VgaCore,
+    area: RedrawArea,
+}
+
+impl<'a> RedrawCtx<'a> {
+    pub(crate) fn new(core: &'a mut VgaCore, area: RedrawArea) -> Self {
+        Self { core, area }
+    }
+
+    /// The screen region to redraw; never empty.
+    pub fn area(&self) -> RedrawArea {
+        self.area
+    }
+
+    pub fn core(&mut self) -> &mut VgaCore {
+        self.core
+    }
+}
+
+/// Bochs vgacore.cc `vga_redraw_area()`: an empty area — the screen before a
+/// frame sized it — marks nothing; any other is offered to the card's
+/// `redraw_area`, the virtual `bx_vga_c` overrides while VBE is enabled,
+/// before the core's.
+fn vga_redraw_area<E: VgaExtension>(ext: &mut E, core: &mut VgaCore, area: RedrawArea) {
+    if area.is_empty() {
+        return;
+    }
+    match ext.vga_redraw_area(&mut RedrawCtx::new(core, area)) {
+        Redrawn::Done => {}
+        Redrawn::FallThrough => core.redraw_area(area),
+    }
+}
+
 /// What a card adds to a standard VGA.
 ///
 /// Every hook falls through to the core by default, so `impl VgaExtension for
@@ -350,6 +394,15 @@ pub trait VgaExtension {
     fn vga_refresh<S: DisplaySink>(&mut self, cx: &mut RefreshCtx<'_, S>) -> Option<Refreshed> {
         let _ = cx;
         None
+    }
+
+    /// Offered every redraw request that covers something, before the core
+    /// marks it — Bochs's virtual `redraw_area`, which `vga_redraw_area`
+    /// calls. A card driving its own scanout marks its own tiles here, as
+    /// `bx_vga_c` does while VBE is enabled.
+    fn vga_redraw_area(&mut self, cx: &mut RedrawCtx<'_>) -> Redrawn {
+        let _ = cx;
+        Redrawn::FallThrough
     }
 
     /// Offered a whole register-window access before the core serves it.
@@ -660,7 +713,10 @@ impl<E: VgaExtension> VgaCard<E> {
     /// offered the tick afterwards, either way — `bx_geforce_c` overrides this
     /// virtual, calls the base first and then acts on the phase.
     pub fn vertical_timer(&mut self, now_usec: u64, icount: u64) -> VerticalTick {
-        let tick = self.core.vertical_timer(now_usec);
+        let ext = &mut self.ext;
+        let tick = self
+            .core
+            .vertical_timer(now_usec, |core, area| vga_redraw_area(ext, core, area));
         self.ext
             .vga_vertical_timer(&mut TimingCtx::new(&mut self.core, icount, tick.phase));
         tick
@@ -713,12 +769,19 @@ impl<E: VgaExtension> VgaCard<E> {
         self.core.is_text_dirty()
     }
 
+    /// Redraw the whole screen as the last frame sized it, character
+    /// generator included — Bochs vgacore.cc `refresh_display(true)`, which a
+    /// front end asks for when it has nothing of the screen to build on.
+    /// Before any frame has sized the screen there is nothing to mark, as
+    /// upstream.
     #[cfg_attr(
         not(feature = "alloc"),
         allow(dead_code, reason = "reached through the `Display` handle, which needs an allocator")
     )]
     pub fn force_initial_update(&mut self) {
-        self.core.force_initial_update();
+        let ext = &mut self.ext;
+        self.core
+            .refresh_display_with(|core, area| vga_redraw_area(ext, core, area));
     }
 
     /// One whole frame in microseconds, which the two halves the vertical
@@ -793,7 +856,12 @@ impl<E: VgaExtension> crate::api::PioDevice for VgaCard<E> {
         if self.ext.vga_pio_write(&mut offered, value) == Written::Done {
             return;
         }
-        crate::api::PioDevice::pio_write(&mut self.core, port, value, len, ctx);
+        // The core's write, with each redraw it asks for answered by this
+        // card's `redraw_area` — Bochs reaches the virtual the same way.
+        let ext = &mut self.ext;
+        self.core.write_port_with(port, value, len.bytes(), |core, area| {
+            vga_redraw_area(ext, core, area)
+        });
     }
 }
 
