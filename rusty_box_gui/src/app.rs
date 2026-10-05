@@ -985,6 +985,9 @@ struct FloppyMaker {
     /// shell can reach the platform's file chooser.
     #[cfg(not(target_arch = "wasm32"))]
     browse_requested: bool,
+    /// The maker's Create was pressed; the shell makes the image, since only
+    /// the shell knows which files its running VMs use as hard disks.
+    create_requested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1003,6 +1006,7 @@ impl Default for FloppyMaker {
             status: None,
             #[cfg(not(target_arch = "wasm32"))]
             browse_requested: false,
+            create_requested: false,
         }
     }
 }
@@ -2463,21 +2467,49 @@ impl NativeShellApp {
         }
     }
 
-    /// The floppy maker's window while it is open, and its Browse.
+    /// The floppy maker's window while it is open, its Browse, and its
+    /// Create, which the shell makes (`create_floppy`).
     fn draw_floppy_maker(&mut self, ctx: &egui::Context) {
         if !self.floppy_maker_open {
             return;
         }
         let mut open = true;
-        if let Some(created) = self.floppy_maker.ui_window(ctx, &mut open) {
-            self.handle_created_image(created);
-        }
+        self.floppy_maker.ui_window(ctx, &mut open);
         self.floppy_maker_open = open;
+        if std::mem::take(&mut self.floppy_maker.create_requested) {
+            self.create_floppy();
+            // The maker's window drew this frame before the image was made:
+            // the next frame shows what became of it.
+            ctx.request_repaint();
+        }
         if std::mem::take(&mut self.floppy_maker.browse_requested)
             && self.browse(BrowseTarget::NewFloppy)
         {
             if let Err(message) = self.apply_pending_settings() {
                 self.notify(ShellNotice::error(message));
+            }
+        }
+    }
+
+    /// Makes the floppy maker's image. Its file is taken for the write as a
+    /// power-on takes a hard disk (`take_disk`), so a file a running VM uses
+    /// as its hard disk is not written, and the maker says which VM uses it.
+    fn create_floppy(&mut self) {
+        let path = PathBuf::from(self.floppy_maker.path.trim());
+        let by = HeldBy {
+            name: self.vm_name(&self.shown_vm()).to_owned(),
+        };
+        match self.take_disk(&path, by) {
+            Ok(hold) => {
+                let created = self.floppy_maker.create_image();
+                drop(hold);
+                if let Some(created) = created {
+                    self.handle_created_image(created);
+                }
+            }
+            Err(holder) => {
+                self.floppy_maker.status =
+                    Some(CreatorStatus::Error(disk_in_use(&path, &holder)));
             }
         }
     }
@@ -3660,10 +3692,10 @@ impl eframe::App for NativeShellApp {
 }
 
 impl FloppyMaker {
-    /// The floppy maker's window, while `open`. Returns the image it made.
+    /// The floppy maker's window, while `open`. Its Create is left for the
+    /// shell (`create_requested`), which makes the image.
     #[cfg(feature = "gui-egui")]
-    fn ui_window(&mut self, ctx: &egui::Context, open: &mut bool) -> Option<CreatedImage> {
-        let mut created_image = None;
+    fn ui_window(&mut self, ctx: &egui::Context, open: &mut bool) {
         egui::Window::new("Create floppy image")
             .open(open)
             .collapsible(false)
@@ -3714,7 +3746,7 @@ impl FloppyMaker {
                     "Create floppy image"
                 };
                 if ui.add(primary_button(action)).clicked() {
-                    created_image = self.create_image();
+                    self.create_requested = true;
                 }
                 if let Some(status) = &self.status {
                     match status {
@@ -3727,7 +3759,6 @@ impl FloppyMaker {
                     }
                 }
             });
-        created_image
     }
 
     fn create_image(&mut self) -> Option<CreatedImage> {
@@ -4607,10 +4638,15 @@ impl WebShellApp {
             });
         if self.floppy_maker_open {
             let mut open = true;
-            // The browser saves the floppy as a download; the shell has
-            // nothing to attach it to.
-            drop(self.floppy_maker.ui_window(ui.ctx(), &mut open));
+            self.floppy_maker.ui_window(ui.ctx(), &mut open);
             self.floppy_maker_open = open;
+            if std::mem::take(&mut self.floppy_maker.create_requested) {
+                // The browser saves the floppy as a download; the shell has
+                // nothing to attach it to, and no VM's disk to keep it off.
+                drop(self.floppy_maker.create_image());
+                // The next frame shows what became of the download.
+                ui.ctx().request_repaint();
+            }
         }
     }
 
@@ -8652,6 +8688,80 @@ mod tests {
                 "Windows XP is off: its fields can be edited: {xp_fields:?}"
             );
             drop(alpine);
+        }
+
+        /// The floppy maker does not replace a file a running VM uses as its
+        /// hard disk: its Create is refused, saying which VM uses the file,
+        /// and the file is as the running VM left it.
+        #[test]
+        fn the_floppy_maker_does_not_replace_a_disk_a_running_vm_uses() {
+            let TestShell {
+                mut app,
+                commands: command_rx,
+                scratch: _scratch,
+            } = two_vm_app_sharing_a_disk();
+            let disk = app.profiles[0]
+                .config
+                .disk
+                .as_ref()
+                .map(|disk| disk.path.clone())
+                .expect("a disk");
+            let written = vec![0xABu8; 512 * 16 * 63];
+            fs::write(&disk, &written).expect("write the running VM's disk");
+            let alpine = power_on(&mut app, &command_rx);
+            app.chrome.go_to(ShellPage::Home);
+            app.floppy_maker_open = true;
+            app.floppy_maker.path = disk.display().to_string();
+            app.floppy_maker.overwrite = true;
+            let mut window = window(app);
+            window.run_steps(2);
+
+            window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Create floppy image")
+                .click();
+            window.run_steps(2);
+
+            let refusal = format!("{} is in use by Alpine; stop it first.", disk.display());
+            let refused = window.query_by_label(&refusal).is_some();
+            let after = fs::read(&disk);
+            remove_test_file(&disk);
+            assert!(refused, "the maker says which VM uses the file");
+            assert!(
+                after.expect("the disk is still there") == written,
+                "the running VM's disk is as it left it"
+            );
+            drop(alpine);
+        }
+
+        /// The floppy maker's Create makes the image when no running VM uses
+        /// its file, and the shell says the floppy was made.
+        #[test]
+        fn the_floppy_makers_create_makes_the_image() {
+            let TestShell {
+                mut app,
+                commands: _commands,
+                scratch: _scratch,
+            } = two_vm_app();
+            let floppy = unique_temp_path("rusty-box-gui-made-floppy");
+            app.floppy_maker_open = true;
+            app.floppy_maker.path = floppy.display().to_string();
+            let mut window = window(app);
+            window.run_steps(2);
+
+            window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Create floppy image")
+                .click();
+            window.run_steps(2);
+
+            let made = fs::metadata(&floppy).map(|metadata| metadata.len());
+            remove_test_file(&floppy);
+            assert_eq!(made.expect("the image is made"), 1_474_560);
+            assert!(
+                window
+                    .query_by_label("Floppy image created. Floppy drive emulation is not wired yet.")
+                    .is_some(),
+                "the shell says the floppy was made"
+            );
         }
     }
 }
