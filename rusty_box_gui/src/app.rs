@@ -7417,6 +7417,9 @@ mod tests {
         struct Window {
             app: NativeShellApp,
             left_edge: f32,
+            /// An area drawn over the shell, as the phone's console draws its
+            /// menu over the guest.
+            cover: Option<egui::Rect>,
         }
 
         fn window(app: NativeShellApp) -> Harness<'static, Window> {
@@ -7428,10 +7431,17 @@ mod tests {
                     move |ui, window: &mut Window| {
                         window.left_edge = ui.available_rect_before_wrap().left();
                         window.app.draw_shell(ui, &mut frame);
+                        if let Some(cover) = window.cover {
+                            egui::Area::new(egui::Id::new("cover"))
+                                .order(egui::Order::Foreground)
+                                .fixed_pos(cover.min)
+                                .show(ui.ctx(), |ui| ui.set_min_size(cover.size()));
+                        }
                     },
                     Window {
                         app,
                         left_edge: 0.0,
+                        cover: None,
                     },
                 )
         }
@@ -7607,6 +7617,120 @@ mod tests {
             window.run_steps(2);
             assert_eq!(window.state().app.chrome.library, Drawer::Open);
             assert!(drawer_shows_its_rows(&window));
+        }
+
+        fn finger(phase: egui::TouchPhase, pos: egui::Pos2) -> egui::Event {
+            egui::Event::Touch {
+                device_id: egui::TouchDeviceId(1),
+                id: egui::TouchId(1),
+                phase,
+                pos,
+                force: None,
+            }
+        }
+
+        /// A finger slid from `from` to `to` and lifted, as egui-winit
+        /// reports one: each touch with the pointer events it simulates for
+        /// the first finger, and `PointerGone` once the finger is up.
+        fn slide(window: &mut Harness<'_, Window>, from: egui::Pos2, to: egui::Pos2) {
+            window.event(finger(egui::TouchPhase::Start, from));
+            window.event(egui::Event::PointerMoved(from));
+            window.event(press(from));
+            window.step();
+            for n in 1..=10u8 {
+                let pos = from + (to - from) * (f32::from(n) / 10.0);
+                window.event(finger(egui::TouchPhase::Move, pos));
+                window.event(egui::Event::PointerMoved(pos));
+                window.step();
+            }
+            window.event(finger(egui::TouchPhase::End, to));
+            window.event(release(to));
+            window.event(egui::Event::PointerGone);
+            window.step();
+            window.run_steps(2);
+        }
+
+        /// How far right the guest's mouse was sent, summed over what is
+        /// queued for it.
+        fn sent_right(shared: &Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>) -> i32 {
+            shared
+                .lock()
+                .expect("shared display")
+                .pending_mouse
+                .iter()
+                .map(|event| event.dx)
+                .sum()
+        }
+
+        /// Puts `app`'s console as a phone draws it: a running guest driven
+        /// by touch.
+        fn show_a_running_guest_on_a_trackpad(app: &mut NativeShellApp) {
+            show_a_running_guest(app, Drawer::Closed);
+            app.emulator
+                .set_pointer_mode(rusty_box::gui::PointerMode::Touchpad);
+        }
+
+        /// On a phone a finger is a trackpad: one slid right across the
+        /// guest's image moves the guest's mouse right, and a slide clicks
+        /// nothing.
+        #[test]
+        fn a_finger_slid_across_the_guest_moves_its_mouse() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            show_a_running_guest_on_a_trackpad(&mut app);
+            let shared = Arc::clone(&app.shared);
+            let mut window = window(app);
+            window.run_steps(2);
+            let from = guest_image(&window).center();
+
+            slide(&mut window, from, from + egui::vec2(120.0, 0.0));
+            assert!(sent_right(&shared) > 0, "the guest's mouse moved right");
+            assert!(
+                shared
+                    .lock()
+                    .expect("shared display")
+                    .pending_mouse
+                    .iter()
+                    .all(|event| event.buttons == 0),
+                "a slide holds no button"
+            );
+        }
+
+        /// An area drawn over the guest, as the phone's console menu is,
+        /// keeps the touches that start under it; the rest of the image is
+        /// still the trackpad.
+        #[test]
+        fn a_touch_under_an_area_over_the_guest_stays_with_the_area() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            show_a_running_guest_on_a_trackpad(&mut app);
+            let shared = Arc::clone(&app.shared);
+            let mut window = window(app);
+            window.run_steps(2);
+            let image = guest_image(&window);
+            let cover =
+                egui::Rect::from_min_max(image.min, egui::pos2(image.center().x, image.max.y));
+            window.state_mut().cover = Some(cover);
+            window.run_steps(2);
+
+            slide(
+                &mut window,
+                cover.center(),
+                cover.center() + egui::vec2(120.0, 0.0),
+            );
+            assert!(
+                shared
+                    .lock()
+                    .expect("shared display")
+                    .pending_mouse
+                    .is_empty(),
+                "a touch that starts under the area never reaches the guest"
+            );
+
+            let beside = egui::pos2(image.right() - image.width() / 4.0, image.center().y);
+            slide(&mut window, beside, beside + egui::vec2(120.0, 0.0));
+            assert!(
+                sent_right(&shared) > 0,
+                "beside the area the image is still the trackpad"
+            );
         }
     }
 }
