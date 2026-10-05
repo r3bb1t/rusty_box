@@ -354,8 +354,9 @@ impl AndroidShellApp {
         let Some(keypad) = &mut self.keypad else {
             return;
         };
-        // The keys go to the VM shown, whose console the menu opened the pad
-        // over.
+        // The keys go to the VM shown when they are sent. The pad stays open
+        // until its close button puts it away, so after a switch from the
+        // full-screen menu it types into the VM switched to.
         let display = self.shell.shown_display();
         let shared: &Mutex<SharedDisplay> = &display;
         let mut open = true;

@@ -3366,7 +3366,7 @@ impl NativeShellApp {
 
     /// How the phone draws this frame: see `android_support::console_view`.
     /// Only a notice the phone shows holds the shell's bars.
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", test))]
     fn console_view(&self) -> crate::android_support::ConsoleView {
         use crate::android_support::{console_view, MachineActivity, NoticeWaiting};
         let notice = match &self.shell_notice {
@@ -3414,9 +3414,12 @@ impl NativeShellApp {
     }
 
     /// The full-screen console's menu: the machine's state and rate, the key
-    /// pad, the verbs that act on the guest, the fit or stretch choice, a
-    /// switch to each other VM that runs or is about to, and the way back to
-    /// the shell with the machine left running.
+    /// pad, the verbs that act on the guest, the fit or stretch choice, the
+    /// way back to the shell with the machine left running, and last a
+    /// switch to each other VM that runs or is about to, so the menu's own
+    /// items keep their places however many VMs run. egui holds the menu
+    /// inside `area` and scrolls whatever does not fit: on a landscape phone
+    /// nothing in it is out of reach.
     #[cfg(target_os = "android")]
     fn draw_full_screen_menu(&mut self, ctx: &egui::Context, area: egui::Rect) {
         let status = self.runtime_status();
@@ -3427,6 +3430,7 @@ impl NativeShellApp {
             .title_bar(false)
             .resizable(false)
             .collapsible(false)
+            .vscroll(true)
             .fixed_pos(area.left_top() + egui::vec2(SPACE_GROUP, below_button))
             .constrain_to(area)
             .show(ctx, |ui| {
@@ -3481,24 +3485,19 @@ impl NativeShellApp {
                     self.request_reset();
                     self.full_screen_menu_open = false;
                 }
-                // Selecting another VM lands on its Home page; a switch goes
-                // on to its console, which stays full screen: that VM runs
-                // or is about to.
+                if ui.button("Exit to shell").clicked() {
+                    self.chrome.go_to(ShellPage::Home);
+                    self.full_screen_menu_open = false;
+                }
                 let targets = self.switch_targets();
                 if !targets.is_empty() {
                     ui.separator();
                     ui.label(status_text("Running VMs").color(TEXT_MUTED));
                     for target in targets {
                         if ui.button(&target.name).clicked() {
-                            self.full_screen_menu_open = false;
-                            self.select_profile(target.index);
-                            self.chrome.go_to(ShellPage::Console);
+                            self.switch_to(target);
                         }
                     }
-                }
-                if ui.button("Exit to shell").clicked() {
-                    self.chrome.go_to(ShellPage::Home);
-                    self.full_screen_menu_open = false;
                 }
             });
     }
@@ -3517,6 +3516,21 @@ impl NativeShellApp {
                 name: profile.name.clone(),
             })
             .collect()
+    }
+
+    /// Shows `target`'s console, as a tap on it in the full-screen menu
+    /// asks: the menu closes, the VM is selected, and the shell goes on to
+    /// its Console page, since selecting a different VM lands on its Home
+    /// page (`Destination::select_vm`). The VM runs or is about to, so the
+    /// phone draws its console full screen unless a notice waits.
+    #[cfg(any(target_os = "android", test))]
+    fn switch_to(&mut self, target: SwitchTarget) {
+        #[cfg(target_os = "android")]
+        {
+            self.full_screen_menu_open = false;
+        }
+        self.select_profile(target.index);
+        self.chrome.go_to(ShellPage::Console);
     }
 
     /// Whether the full-screen menu asked for the key pad since the last call.
@@ -5621,23 +5635,36 @@ mod tests {
         }
     }
 
-    /// A shell over a scratch library holding "Alpine", "DLX" and "Windows
-    /// XP", in that order, with Alpine selected.
+    /// A shell over a scratch library listing "Windows XP", "DLX" and
+    /// "Alpine", in that order, the reverse of their names' order, with
+    /// Windows XP selected. Each VM was made as "VM 1", "VM 2" or "VM 3" and
+    /// renamed since, and a renamed VM keeps the file it was made in, whose
+    /// name places it in the list.
     #[cfg(not(target_arch = "wasm32"))]
     fn three_vm_app() -> TestShell {
         let scratch = ScratchLibrary::new();
-        for name in ["Alpine", "DLX", "Windows XP"] {
-            scratch
-                .library()
-                .create(name, &test_resolved_config())
-                .expect("seed");
-        }
+        let library = scratch.library();
+        create_renamed(&library, "VM 1", "Windows XP");
+        create_renamed(&library, "VM 2", "DLX");
+        create_renamed(&library, "VM 3", "Alpine");
         let (app, commands) = native_test_app_over(&scratch, None, None);
         TestShell {
             app,
             commands,
             scratch,
         }
+    }
+
+    /// Adds a VM to `library` made as `made_as` and renamed `name` since, as
+    /// the shell writes a rename: its file keeps the stem `made_as` gave it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create_renamed(library: &crate::library::VmLibrary, made_as: &str, name: &str) {
+        let stem = library
+            .create(made_as, &test_resolved_config())
+            .expect("seed");
+        library
+            .save(&stem, name, &test_resolved_config())
+            .expect("rename");
     }
 
     /// `two_vm_app`, both VMs set to run on `engine`.
@@ -8087,8 +8114,8 @@ mod tests {
     }
 
     /// The full-screen console's menu offers every VM that runs except the
-    /// one shown, by name and in library order; a VM that is off is not
-    /// offered.
+    /// one shown, by name, in the order of the VM list, which follows the
+    /// VMs' files and not their names; a VM that is off is not offered.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_console_menu_offers_every_other_running_vm_in_library_order() {
@@ -8097,9 +8124,9 @@ mod tests {
             commands: command_rx,
             scratch: _scratch,
         } = three_vm_app();
-        let alpine = power_on(&mut app, &command_rx);
-        app.select_profile(2);
         let xp = power_on(&mut app, &command_rx);
+        app.select_profile(2);
+        let alpine = power_on(&mut app, &command_rx);
         app.select_profile(1);
         assert_eq!(app.vm_info.name, "DLX", "DLX, off, is shown");
         assert_eq!(
@@ -8107,11 +8134,11 @@ mod tests {
             vec![
                 SwitchTarget {
                     index: 0,
-                    name: "Alpine".to_owned(),
+                    name: "Windows XP".to_owned(),
                 },
                 SwitchTarget {
                     index: 2,
-                    name: "Windows XP".to_owned(),
+                    name: "Alpine".to_owned(),
                 },
             ]
         );
@@ -8121,8 +8148,80 @@ mod tests {
             app.switch_targets(),
             vec![SwitchTarget {
                 index: 2,
-                name: "Windows XP".to_owned(),
+                name: "Alpine".to_owned(),
             }]
+        );
+        drop(xp);
+        drop(alpine);
+    }
+
+    /// A VM that is starting, its power-on sent and its run not up yet, is
+    /// offered too: the menu lists the VMs that run or are about to.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_console_menu_offers_a_vm_that_is_starting() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        app.start_vm();
+        let Ok(NativeEmulatorCommand::Start(starting)) = command_rx.try_recv() else {
+            panic!("a power-on sends a Start");
+        };
+        {
+            let display = starting.display.lock().unwrap();
+            assert!(
+                display.start_pending && !display.emu_running,
+                "Alpine is starting, not running"
+            );
+        }
+        app.select_profile(1);
+
+        assert_eq!(
+            app.switch_targets(),
+            vec![SwitchTarget {
+                index: 0,
+                name: "Alpine".to_owned(),
+            }]
+        );
+        drop(starting);
+    }
+
+    /// A tap on a VM in the full-screen console's menu shows that VM's
+    /// console: the shell is on its Console page, and since the VM runs, the
+    /// phone draws that console full screen, as it drew the one the tap was
+    /// made over. The menu's open flag, which `switch_to` also clears, is in
+    /// the Android build only, so it is not asserted here.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_switch_from_the_console_menu_shows_that_vms_console_full_screen() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        let alpine = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        let xp = power_on(&mut app, &command_rx);
+        assert_eq!(
+            app.console_view(),
+            crate::android_support::ConsoleView::FullScreen,
+            "Windows XP's console fills the screen, under the menu"
+        );
+        let Some(offered) = app.switch_targets().into_iter().next() else {
+            panic!("the menu offers Alpine");
+        };
+
+        app.switch_to(offered);
+
+        assert_eq!(app.vm_info.name, "Alpine", "the VM tapped is shown");
+        assert_eq!(app.chrome.page(), ShellPage::Console, "on its Console page");
+        assert!(app.sessions.is_live(&app.shown_vm()), "Alpine runs");
+        assert_eq!(
+            app.console_view(),
+            crate::android_support::ConsoleView::FullScreen,
+            "Alpine's console fills the screen"
         );
         drop(alpine);
         drop(xp);
