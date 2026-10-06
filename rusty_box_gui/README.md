@@ -95,7 +95,7 @@ Several VMs run at once, each on a thread of its own. Select one in the sidebar 
 
 - `Hide` minimizes the window to the taskbar; the VMs keep running.
 - `Stop VMs and quit` stops every VM and closes the window.
-- `Cancel`, Escape or a click outside the question leaves everything as it was.
+- `Cancel`, Escape or a click outside the question leaves everything as it was. The question also goes, with nothing done, once every VM has stopped.
 
 With `Remember my choice` ticked, a `Hide` or `Stop VMs and quit` answer is kept in `.on_close` in the VM library folder, and every later close follows it without asking. A hidden window closed from the taskbar follows it too; with nothing remembered, the window comes back with the question. The About window (`…` › `About Rusty Box Workstation`) shows the remembered choice under `When closing with VMs running` and changes it: `Ask`, `Hide` or `Stop VMs and quit`.
 
@@ -207,7 +207,7 @@ The APK's native library is this crate's `rusty_box_gui_android` example. Native
 - **Console page.** It has a header of its own in place of the VM bar: a `File` menu (`Home`, `Create Disk Image`, `Quit`), a `VM` menu (`Power On`, `Power Off`, `Restart VM`), the state, the instruction rate, the four page buttons, a `Power On` button and the VM's name. So the phone has no `Capture mouse`, `Ctrl+Alt+Del` or `Show serial` button, and the serial pane, hidden at launch, stays hidden; Ctrl+Alt+Del is on the Keys pad. Touch input to the guest is not recorded.
 - **Engine.** The interpreter only; the hypervisor engine is Windows-only.
 - **Several VMs.** As on the desktop ([Several VMs at once](#several-vms-at-once)), several VMs run at once: the ☰ list marks every running VM with a dot and shows the one picked, a hard-disk image is used by one running VM at a time, and a running VM cannot be deleted. While a VM's console fills the screen, the menu of its corner ☰ button ends with the other VMs that run or are starting, under `Running VMs`, in the order of the VM list; a tap on one switches the screen to that VM's console. The menu scrolls when it does not fit, and opens at its top.
-- **Back.** While a VM runs or is starting, Back asks what closing the desktop window asks ([Several VMs at once](#several-vms-at-once)), and follows the same remembered choice, which the About window changes. `Hide` sends the app to the background, as Home does; there Android may pause the VMs, or close the app when memory runs low. `Stop VMs and quit` stops every VM and ends the app. With no VM running, Back does nothing.
+- **Back and Quit.** Back first puts away what is open, topmost first: the close question (as `Cancel`), a confirmation, an open menu or list, the file browser, the key pad, the full-screen console's menu, the floppy maker, the About window, then the VM list. With nothing open, Back is a close of the app. While a VM runs or is starting, that close, and `…` › `Quit`, ask what closing the desktop window asks ([Several VMs at once](#several-vms-at-once)), and follow the same remembered choice, which the About window changes. `Hide` sends the app to the background, as Home does; there Android may pause the VMs, or close the app when memory runs low. `Stop VMs and quit` stops every VM and ends the app. With no VM running, Back with nothing open does nothing, and `Quit` ends the app.
 
 ## Browser
 

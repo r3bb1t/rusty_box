@@ -17,7 +17,9 @@ use crate::android_support::{
     content_rect_in_points, list_directory, needs_first_vm, seed_first_vm, stage_file,
     CarriedMachine, DirectoryEntry, EntryKind, FileFilter, PixelRect,
 };
-use crate::app::{BrowseRequest, BrowseTarget, CloseAction, NativeEmulatorCommand, NativeShellApp};
+use crate::app::{
+    BrowseRequest, BrowseTarget, CloseAction, HostWindow, NativeEmulatorCommand, NativeShellApp,
+};
 use crate::library::VmLibrary;
 use crate::{RunError, RunSummary};
 use egui::RichText;
@@ -294,6 +296,19 @@ impl AndroidShellApp {
         self.screen_hold = Some(hold);
     }
 
+    /// The host's windows open over the shell, for Back to weigh against the
+    /// shell's own.
+    fn open_windows(&self) -> Vec<HostWindow> {
+        let mut open = Vec::new();
+        if self.browser.is_some() {
+            open.push(HostWindow::FileBrowser);
+        }
+        if self.keypad.is_some() {
+            open.push(HostWindow::KeyPad);
+        }
+        open
+    }
+
     /// Does to the activity what the last close decided: Hide sends the app
     /// to the background, Quit finishes the activity. Both are calls on the
     /// activity, which belongs to Android's UI thread, so each is posted
@@ -425,6 +440,15 @@ impl AndroidShellApp {
 }
 
 impl eframe::App for AndroidShellApp {
+    /// Before each frame: the shell takes over a close of the window asked
+    /// for while VMs run — the VM bar's Quit — as it takes over a desktop's
+    /// (`NativeShellApp::logic`), and the activity is then given what the
+    /// close decided.
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        eframe::App::logic(&mut self.shell, ctx, frame);
+        self.perform_close_action();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let hold = if self.shell.any_vm_keeps_screen_on() {
@@ -439,11 +463,15 @@ impl eframe::App for AndroidShellApp {
             self.apply_window_flags(hold);
         }
 
-        // Back while VMs run is a close: it follows the remembered choice or
-        // asks. With no VM running it does nothing.
-        let back = ctx.input(|input| input.key_pressed(egui::Key::BrowserBack));
-        if back && self.shell.any_vm_live() {
-            self.shell.close_requested();
+        // Back puts away the topmost thing open, and with nothing open is a
+        // close of the app (`NativeShellApp::back_pressed`).
+        if ctx.input(|input| input.key_pressed(egui::Key::BrowserBack)) {
+            let open = self.open_windows();
+            match self.shell.back_pressed(&ctx, &open) {
+                None => {}
+                Some(HostWindow::FileBrowser) => self.browser = None,
+                Some(HostWindow::KeyPad) => self.keypad = None,
+            }
         }
 
         // The platform's content rect ends at the top of the soft keyboard

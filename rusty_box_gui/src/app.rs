@@ -272,7 +272,7 @@ pub struct NativeShellApp {
     #[cfg(target_os = "android")]
     browse_request: Option<BrowseTarget>,
     /// The full-screen console's menu is open.
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", test))]
     full_screen_menu_open: bool,
     /// The full-screen menu asked the Android host for its key pad.
     #[cfg(target_os = "android")]
@@ -327,6 +327,88 @@ where
         .show(ctx, |ui| {
             list.show(ui, contents);
         });
+}
+
+/// A window the phone's host draws over the shell.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostWindow {
+    /// The file browser a Browse press opens.
+    FileBrowser,
+    /// The key pad the full-screen console's menu opens.
+    KeyPad,
+}
+
+/// Something of the shell's own open over its pages.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShellOverlay {
+    /// The question a close asks while VMs run.
+    CloseQuestion,
+    /// A step waiting for confirmation.
+    Confirmation,
+    /// An open menu or drop-down list.
+    Popup,
+    /// The full-screen console's menu.
+    ConsoleMenu,
+    /// The floppy maker.
+    FloppyMaker,
+    /// The About window.
+    About,
+    /// The VM list.
+    VmList,
+}
+
+/// Something open on the phone's screen that Back puts away before it
+/// closes the app.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Overlay {
+    /// The shell's own, which the shell puts away.
+    Shell(ShellOverlay),
+    /// One of the host's windows, which the host puts away.
+    Host(HostWindow),
+}
+
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+impl Overlay {
+    /// Its place in Back's order, topmost first. The two modals and an open
+    /// popup sit over every window, so whichever of them is open is on top;
+    /// the host's windows come next, then the shell's own, and the VM list,
+    /// part of the page, last.
+    fn depth(self) -> u8 {
+        match self {
+            Self::Shell(ShellOverlay::CloseQuestion) => 0,
+            Self::Shell(ShellOverlay::Confirmation) => 1,
+            Self::Shell(ShellOverlay::Popup) => 2,
+            Self::Host(HostWindow::FileBrowser) => 3,
+            Self::Host(HostWindow::KeyPad) => 4,
+            Self::Shell(ShellOverlay::ConsoleMenu) => 5,
+            Self::Shell(ShellOverlay::FloppyMaker) => 6,
+            Self::Shell(ShellOverlay::About) => 7,
+            Self::Shell(ShellOverlay::VmList) => 8,
+        }
+    }
+}
+
+/// What a press of the phone's Back does.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackPress {
+    /// Puts away the topmost of what is open.
+    PutAway(Overlay),
+    /// Nothing is open: Back is a close of the app.
+    Close,
+}
+
+/// What Back does with `open` on the phone's screen: puts away the topmost
+/// of it, or, with nothing open, closes the app. The one place that decides.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+fn back_press(open: &[Overlay]) -> BackPress {
+    match open.iter().copied().min_by_key(|overlay| overlay.depth()) {
+        Some(topmost) => BackPress::PutAway(topmost),
+        None => BackPress::Close,
+    }
 }
 
 /// A running VM the phone's console menu can switch to.
@@ -1525,7 +1607,7 @@ impl NativeShellApp {
             close_action: None,
             #[cfg(target_os = "android")]
             browse_request: None,
-            #[cfg(target_os = "android")]
+            #[cfg(any(target_os = "android", test))]
             full_screen_menu_open: false,
             #[cfg(target_os = "android")]
             keypad_requested: false,
@@ -3293,7 +3375,9 @@ impl NativeShellApp {
     }
 
     /// The question a close asks while VMs run: hide the app, stop the VMs
-    /// and quit, or stay. Escape or a click outside is Cancel.
+    /// and quit, or stay. Escape or a click outside is Cancel. Once no VM
+    /// runs or is about to, there is nothing to ask, and the question goes
+    /// as Cancel would: the app stays open, to be closed again.
     fn draw_close_question(&mut self, ctx: &egui::Context) {
         if self.close_question.is_none() {
             return;
@@ -3305,6 +3389,10 @@ impl NativeShellApp {
             .iter()
             .map(|vm| self.vm_name(vm).to_owned())
             .collect();
+        if names.is_empty() {
+            self.cancel_close_question();
+            return;
+        }
         names.sort();
         let Some(question) = &mut self.close_question else {
             return;
@@ -3341,7 +3429,7 @@ impl NativeShellApp {
         let choice = match answer {
             None => return,
             Some(CloseAnswer::Cancel) => {
-                self.close_question = None;
+                self.cancel_close_question();
                 return;
             }
             Some(CloseAnswer::Hide) => CloseChoice::Hide,
@@ -3352,6 +3440,12 @@ impl NativeShellApp {
             self.remember_close_choice(choice);
         }
         self.carry_out(choice);
+    }
+
+    /// The close question goes unanswered: nothing is decided, nothing
+    /// remembered, and the app stays as it is.
+    fn cancel_close_question(&mut self) {
+        self.close_question = None;
     }
 
     /// Carries out a close `choice` once it is made: Hide and Quit are the
@@ -3750,12 +3844,90 @@ impl NativeShellApp {
     /// phone draws its console full screen unless a notice waits.
     #[cfg(any(target_os = "android", test))]
     fn switch_to(&mut self, target: SwitchTarget) {
-        #[cfg(target_os = "android")]
-        {
-            self.full_screen_menu_open = false;
-        }
+        self.full_screen_menu_open = false;
         self.select_profile(target.index);
         self.chrome.go_to(ShellPage::Console);
+    }
+
+    /// The phone's Back, pressed with `host` open over the shell: puts away
+    /// the topmost thing open (`back_press`), or, with nothing open, is a
+    /// close of the app, which goes to `close_requested` while a VM runs or
+    /// is about to and does nothing otherwise. Answers the host's window
+    /// when that is the topmost, for the host to put away.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn back_pressed(
+        &mut self,
+        ctx: &egui::Context,
+        host: &[HostWindow],
+    ) -> Option<HostWindow> {
+        let mut open = self.open_overlays(ctx);
+        open.extend(host.iter().copied().map(Overlay::Host));
+        match back_press(&open) {
+            BackPress::PutAway(Overlay::Host(window)) => Some(window),
+            BackPress::PutAway(Overlay::Shell(overlay)) => {
+                self.put_away(overlay, ctx);
+                None
+            }
+            BackPress::Close => {
+                if self.any_vm_live() {
+                    self.close_requested();
+                }
+                None
+            }
+        }
+    }
+
+    /// What of the shell's own the phone shows open this frame: the close
+    /// question, a confirmation and an open popup whatever the page; over
+    /// the full-screen console its menu; with the shell's bars, the floppy
+    /// maker, the About window and the VM list, which the full-screen
+    /// console does not draw.
+    #[cfg(any(target_os = "android", test))]
+    fn open_overlays(&self, ctx: &egui::Context) -> Vec<Overlay> {
+        let mut open = Vec::new();
+        if self.close_question.is_some() {
+            open.push(ShellOverlay::CloseQuestion);
+        }
+        if self.pending_confirm.is_some() {
+            open.push(ShellOverlay::Confirmation);
+        }
+        if egui::Popup::is_any_open(ctx) {
+            open.push(ShellOverlay::Popup);
+        }
+        match self.console_view() {
+            crate::android_support::ConsoleView::FullScreen => {
+                if self.full_screen_menu_open {
+                    open.push(ShellOverlay::ConsoleMenu);
+                }
+            }
+            crate::android_support::ConsoleView::Shell => {
+                if self.floppy_maker_open {
+                    open.push(ShellOverlay::FloppyMaker);
+                }
+                if self.chrome.show_about {
+                    open.push(ShellOverlay::About);
+                }
+                if self.chrome.library == Drawer::Open {
+                    open.push(ShellOverlay::VmList);
+                }
+            }
+        }
+        open.into_iter().map(Overlay::Shell).collect()
+    }
+
+    /// Puts `overlay` away, as its own Cancel or close button does: the
+    /// close question and a confirmation are cancelled.
+    #[cfg(any(target_os = "android", test))]
+    fn put_away(&mut self, overlay: ShellOverlay, ctx: &egui::Context) {
+        match overlay {
+            ShellOverlay::CloseQuestion => self.cancel_close_question(),
+            ShellOverlay::Confirmation => self.cancel_pending(),
+            ShellOverlay::Popup => egui::Popup::close_all(ctx),
+            ShellOverlay::ConsoleMenu => self.full_screen_menu_open = false,
+            ShellOverlay::FloppyMaker => self.floppy_maker_open = false,
+            ShellOverlay::About => self.chrome.show_about = false,
+            ShellOverlay::VmList => self.chrome.library = Drawer::Closed,
+        }
     }
 
     /// Whether the full-screen menu asked for the key pad since the last call.
@@ -3932,25 +4104,30 @@ impl NativeShellApp {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl eframe::App for NativeShellApp {
-    /// A desktop's close, read before each frame and, while the window is
-    /// minimized, in place of one: eframe draws no frame for a minimized
-    /// window and runs this alone, so a hidden app closed from the taskbar
-    /// is seen here too. A close asked for while VMs run — the window's close
-    /// button, the VM bar's Quit — is cancelled and goes to `close_requested`.
-    /// A question it opens on a window that is not shown brings the window
-    /// back, so it can be answered. What the close decided is carried out
-    /// before this returns.
-    #[cfg(not(target_os = "android"))]
+    /// A close of the window, read before each frame and, while a desktop's
+    /// window is minimized, in place of one: eframe draws no frame for a
+    /// minimized window and runs this alone, so a hidden app closed from the
+    /// taskbar is seen here too. A close asked for while VMs run — a
+    /// desktop's close button, the VM bar's Quit on a desktop or a phone — is
+    /// cancelled and goes to `close_requested`; with no VM live it goes
+    /// ahead. On a desktop, a question it opens on a window that is not shown
+    /// brings the window back, so it can be answered, and what the close
+    /// decided is carried out before this returns; a phone's host carries it
+    /// out itself (`AndroidShellApp::logic`).
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if ctx.input(|input| input.viewport().close_requested()) && self.sessions.any_live() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_requested();
-            let shown = ctx.input(|input| input.viewport().visible().unwrap_or(true));
-            if self.close_question.is_some() && !shown {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            #[cfg(not(target_os = "android"))]
+            {
+                let shown = ctx.input(|input| input.viewport().visible().unwrap_or(true));
+                if self.close_question.is_some() && !shown {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
             }
         }
+        #[cfg(not(target_os = "android"))]
         self.perform_close_action(ctx);
     }
 
@@ -9436,6 +9613,156 @@ mod tests {
             assert!(!window.state().app.any_vm_live());
             drop(run);
         }
+
+        /// The About window shows the choice the library folder records,
+        /// as the app opens on it.
+        #[test]
+        fn the_about_window_shows_the_remembered_choice() {
+            let scratch = ScratchLibrary::new();
+            scratch
+                .library()
+                .remember_close_choice(CloseChoice::Hide)
+                .expect("remember");
+            let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+            app.chrome.show_about = true;
+            let mut window = window(app);
+            window.run_steps(2);
+            let toggled = |label: &str| window.get_by_label(label).accesskit_node().toggled();
+            assert_eq!(toggled("Hide"), Some(egui::accesskit::Toggled::True));
+            assert_eq!(toggled("Ask"), Some(egui::accesskit::Toggled::False));
+            assert_eq!(
+                toggled("Stop VMs and quit"),
+                Some(egui::accesskit::Toggled::False)
+            );
+        }
+
+        /// With two VMs running, the question names both, and Stop VMs and
+        /// quit stops both.
+        #[test]
+        fn the_question_names_every_running_vm_and_stop_vms_and_quit_stops_them_all() {
+            let TestShell {
+                mut app,
+                commands: command_rx,
+                scratch: _scratch,
+            } = two_vm_app();
+            let alpine = power_on(&mut app, &command_rx);
+            app.select_profile(1);
+            let xp = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            assert!(window
+                .query_by_label("Alpine, Windows XP will keep running if the app is hidden.")
+                .is_some());
+            window.get_by_label("Stop VMs and quit").click();
+            window.step();
+            assert!(commands(&window).contains(&egui::ViewportCommand::Close));
+            assert!(!window.state().app.any_vm_live());
+            for run in [&alpine, &xp] {
+                assert!(
+                    !run.display.lock().unwrap().emu_running,
+                    "each VM shows as off"
+                );
+            }
+        }
+
+        /// Escape, or a click outside the question, is Cancel: nothing is
+        /// asked of the window, the VM runs on, and the question goes.
+        #[test]
+        fn escape_or_a_click_outside_cancels_the_question() {
+            let (mut app, command_rx, scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            window.input_mut().events.push(egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            window.step();
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Close));
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Minimized(true)));
+            window.step();
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_none(),
+                "Escape cancels"
+            );
+
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            // A corner of the window, away from the centred question.
+            let outside = egui::pos2(10.0, 590.0);
+            window.hover_at(outside);
+            window.event(press(outside));
+            window.event(release(outside));
+            window.step();
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Close));
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Minimized(true)));
+            window.step();
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_none(),
+                "a click outside cancels"
+            );
+            assert!(window.state().app.any_vm_live());
+            assert_eq!(scratch.library().close_choice(), CloseChoice::Ask);
+            drop(run);
+        }
+
+        /// Once no VM runs, the question has nothing to ask: it goes, and
+        /// the app stays open, to be closed again.
+        #[test]
+        fn the_question_goes_once_no_vm_runs() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            // What the run's end does: the VM shows as off.
+            run.display.lock().unwrap().emu_running = false;
+            window.step();
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Close));
+            window.step();
+            assert!(window.query_by_label("Stop VMs and quit").is_none());
+            close_requested_by_the_window(&mut window);
+            assert!(
+                !commands(&window).contains(&egui::ViewportCommand::CancelClose),
+                "the next close closes"
+            );
+        }
+
+        /// The VM bar's Quit asks the window to close, and that close, the
+        /// next frame's close request, is taken over as the close button's:
+        /// with a VM running it asks. A phone's Quit reaches the same
+        /// `App::logic` through its host.
+        #[test]
+        fn the_vm_bars_quit_asks_while_a_vm_runs() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            window.get_by_label("…").click();
+            window.run_steps(2);
+            window.get_by_label("Quit").click();
+            window.step();
+            assert!(commands(&window).contains(&egui::ViewportCommand::Close));
+            // egui-winit turns the Close command into the next frame's close
+            // request (`process_viewport_command`).
+            close_requested_by_the_window(&mut window);
+            assert!(commands(&window).contains(&egui::ViewportCommand::CancelClose));
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_some(),
+                "it asks"
+            );
+            assert!(window.state().app.any_vm_live());
+            drop(run);
+        }
     }
 
     /// What a close leads to is taken once: the phone's Back and the
@@ -9455,6 +9782,169 @@ mod tests {
         app.close_requested();
         assert_eq!(app.take_close_action(), Some(CloseAction::Quit));
         assert_eq!(app.take_close_action(), None);
+        assert!(!app.any_vm_live());
+        drop(run);
+    }
+
+    /// Back's order, topmost first: with one thing open and everything
+    /// below it, Back puts that one away; with nothing open, Back closes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_puts_away_the_topmost_thing_open() {
+        let topmost_first = [
+            Overlay::Shell(ShellOverlay::CloseQuestion),
+            Overlay::Shell(ShellOverlay::Confirmation),
+            Overlay::Shell(ShellOverlay::Popup),
+            Overlay::Host(HostWindow::FileBrowser),
+            Overlay::Host(HostWindow::KeyPad),
+            Overlay::Shell(ShellOverlay::ConsoleMenu),
+            Overlay::Shell(ShellOverlay::FloppyMaker),
+            Overlay::Shell(ShellOverlay::About),
+            Overlay::Shell(ShellOverlay::VmList),
+        ];
+        for (place, topmost) in topmost_first.iter().enumerate() {
+            // Listed bottom first, so the order is Back's own.
+            let open: Vec<Overlay> = topmost_first[place..].iter().rev().copied().collect();
+            assert_eq!(back_press(&open), BackPress::PutAway(*topmost));
+        }
+        assert_eq!(back_press(&[]), BackPress::Close);
+    }
+
+    /// Back answers the close question with Cancel, before the host's file
+    /// browser under it: nothing is decided or remembered, and the VM runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_answers_the_close_question_with_cancel() {
+        let (mut app, command_rx, scratch) = native_test_app();
+        let run = power_on(&mut app, &command_rx);
+        app.chrome.library = Drawer::Closed;
+        let ctx = egui::Context::default();
+        app.close_requested();
+        assert!(app.close_question.is_some());
+        assert_eq!(app.back_pressed(&ctx, &[HostWindow::FileBrowser]), None);
+        assert!(app.close_question.is_none());
+        assert_eq!(app.take_close_action(), None);
+        assert!(app.any_vm_live());
+        assert_eq!(scratch.library().close_choice(), CloseChoice::Ask);
+        drop(run);
+    }
+
+    /// Back cancels a step waiting for confirmation, before the host's
+    /// windows: the file it would delete is kept.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_cancels_a_confirmation() {
+        let (mut app, _command_rx, scratch) = native_test_app();
+        app.chrome.library = Drawer::Closed;
+        let broken = scratch.dir.join("broken.toml");
+        fs::write(&broken, "not a VM").expect("write");
+        app.pending_confirm = Some(PendingConfirm::DeleteBroken(broken.clone()));
+        let ctx = egui::Context::default();
+        let host = [HostWindow::FileBrowser, HostWindow::KeyPad];
+        assert_eq!(app.back_pressed(&ctx, &host), None);
+        assert!(app.pending_confirm.is_none());
+        assert!(broken.exists(), "nothing was deleted");
+    }
+
+    /// Back closes an open menu or drop-down list before the host's windows.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_closes_an_open_popup() {
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        app.chrome.library = Drawer::Closed;
+        let ctx = egui::Context::default();
+        egui::Popup::open_id(&ctx, egui::Id::new("a menu"));
+        assert_eq!(app.back_pressed(&ctx, &[HostWindow::KeyPad]), None);
+        assert!(!egui::Popup::is_any_open(&ctx));
+    }
+
+    /// Back hands the host its own windows, the file browser before the key
+    /// pad, both above the full-screen console's menu, which stays open.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_hands_the_host_its_windows() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        let run = power_on(&mut app, &command_rx);
+        app.chrome.library = Drawer::Closed;
+        app.full_screen_menu_open = true;
+        let ctx = egui::Context::default();
+        let host = [HostWindow::KeyPad, HostWindow::FileBrowser];
+        assert_eq!(app.back_pressed(&ctx, &host), Some(HostWindow::FileBrowser));
+        assert_eq!(
+            app.back_pressed(&ctx, &[HostWindow::KeyPad]),
+            Some(HostWindow::KeyPad)
+        );
+        assert!(app.full_screen_menu_open);
+        drop(run);
+    }
+
+    /// Over the full-screen console Back closes its menu, and then, with
+    /// nothing open on the screen, is a close, which asks while the VM runs.
+    /// The About window, which the full-screen console does not draw, does
+    /// not count.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_closes_the_console_menu_then_asks() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        let run = power_on(&mut app, &command_rx);
+        app.chrome.library = Drawer::Closed;
+        app.chrome.show_about = true;
+        app.full_screen_menu_open = true;
+        let ctx = egui::Context::default();
+        assert_eq!(
+            app.console_view(),
+            crate::android_support::ConsoleView::FullScreen
+        );
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(!app.full_screen_menu_open);
+        assert!(app.close_question.is_none());
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(app.close_question.is_some(), "with nothing open, Back asks");
+        drop(run);
+    }
+
+    /// With the shell's bars shown, Back closes the floppy maker, then the
+    /// About window, then the VM list, and only then is a close.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_closes_the_shells_windows_then_the_vm_list() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        let run = power_on(&mut app, &command_rx);
+        app.chrome.go_to(ShellPage::Home);
+        app.chrome.library = Drawer::Open;
+        app.chrome.show_about = true;
+        app.floppy_maker_open = true;
+        let ctx = egui::Context::default();
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(!app.floppy_maker_open);
+        assert!(app.chrome.show_about);
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(!app.chrome.show_about);
+        assert_eq!(app.chrome.library, Drawer::Open);
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert_eq!(app.chrome.library, Drawer::Closed);
+        assert!(app.close_question.is_none());
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(app.close_question.is_some());
+        drop(run);
+    }
+
+    /// With nothing open, Back does nothing while no VM runs, and follows
+    /// the remembered choice while one does.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_with_nothing_open_does_nothing_or_follows_the_choice() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        app.chrome.library = Drawer::Closed;
+        let ctx = egui::Context::default();
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(app.close_question.is_none());
+        assert_eq!(app.take_close_action(), None);
+
+        let run = power_on(&mut app, &command_rx);
+        app.remember_close_choice(CloseChoice::StopAndQuit);
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert_eq!(app.take_close_action(), Some(CloseAction::Quit));
         assert!(!app.any_vm_live());
         drop(run);
     }
