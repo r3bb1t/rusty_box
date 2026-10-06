@@ -17,7 +17,9 @@ use crate::android_support::{
     content_rect_in_points, list_directory, needs_first_vm, seed_first_vm, stage_file,
     CarriedMachine, DirectoryEntry, EntryKind, FileFilter, PixelRect,
 };
-use crate::app::{BrowseRequest, BrowseTarget, HostWindow, NativeEmulatorCommand, NativeShellApp};
+use crate::app::{
+    BrowseRequest, BrowseTarget, HostWindow, NativeEmulatorCommand, NativeShellApp, THIS_PLATFORM,
+};
 use crate::library::VmLibrary;
 use crate::{RunError, RunSummary};
 use egui::RichText;
@@ -307,14 +309,14 @@ impl AndroidShellApp {
         open
     }
 
-    /// Carries out what the last close decided, as the shell does on every
-    /// platform (`NativeShellApp::perform_close_action`): Quit closes the
-    /// window through eframe. A phone's Hide sends the app to the
-    /// background, a call on the activity, which belongs to Android's UI
-    /// thread, so it is posted there, as `apply_window_flags` posts its own.
+    /// Carries out what the last close decided, as the shell maps it for a
+    /// phone (`NativeShellApp::perform_close_action`): Hide and Quit both
+    /// send the app to the background, Quit once its VMs were stopped. That
+    /// is a call on the activity, which belongs to Android's UI thread, so it
+    /// is posted there, as `apply_window_flags` posts its own.
     fn perform_close_action(&mut self, ctx: &egui::Context) {
         let app = &self.app;
-        self.shell.perform_close_action(ctx, || {
+        self.shell.perform_close_action(ctx, THIS_PLATFORM, || {
             let activity = app.clone();
             app.run_on_java_main_thread(Box::new(move || go_to_background(&activity)));
         });
@@ -431,10 +433,10 @@ impl AndroidShellApp {
 }
 
 impl eframe::App for AndroidShellApp {
-    /// Before each frame: the shell takes over a close of the window asked
-    /// for while VMs run — the VM bar's Quit — as it takes over a desktop's
-    /// (`NativeShellApp::logic`), and what the close decided is then carried
-    /// out.
+    /// Before each frame: the shell takes over a close of the window — the
+    /// VM bar's Quit — as a phone takes it (`NativeShellApp::logic`): it is
+    /// always cancelled, since the app never ends its own loop. What the
+    /// close decided is then carried out.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         eframe::App::logic(&mut self.shell, ctx, frame);
         self.perform_close_action(ctx);
@@ -973,18 +975,20 @@ fn apply_game_window(app: &AndroidApp, add: i32, clear: i32) -> jni::errors::Res
     })
 }
 
-/// Hide, on Android's UI thread: the app goes to the background with its VMs
-/// running, and the log says whether Android let it.
+/// Hide or Quit, on Android's UI thread: the app goes to the background,
+/// its VMs running after Hide and stopped after Quit, and the log says
+/// whether Android let it.
 fn go_to_background(app: &AndroidApp) {
     match move_task_to_back(app) {
-        Ok(true) => log::info!("the app went to the background with its VMs running"),
+        Ok(true) => log::info!("the app went to the background"),
         Ok(false) => log::warn!("Android kept the app in front: it did not move to the background"),
         Err(error) => log::warn!("the app could not go to the background: {error}"),
     }
 }
 
-/// Sends the app to the background, as Home does; its VMs keep running for
-/// as long as Android lets the process run. Answers whether it moved.
+/// Sends the app to the background, as Home does; whatever still runs in
+/// it runs on for as long as Android lets the process run. Answers whether
+/// it moved.
 fn move_task_to_back(app: &AndroidApp) -> jni::errors::Result<bool> {
     with_activity(app, |env, activity| {
         env.call_method(
