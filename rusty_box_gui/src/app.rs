@@ -193,13 +193,21 @@ fn save_native_file(default_name: &str) -> Option<PathBuf> {
         .save_file()
 }
 
-/// What a close the user asked for leads to, for the platform to carry out.
+/// A desktop's Hide: the window goes to the taskbar, and its VMs run on.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+fn minimize_window(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+}
+
+/// What a close the user asked for leads to, for the platform to carry out
+/// (`NativeShellApp::perform_close_action`).
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CloseAction {
     /// Hide the app: minimize the window; on Android, move the task to the back.
     Hide,
-    /// Every VM has been asked to stop: close the window; on Android, finish the activity.
+    /// Every VM has been asked to stop: close the window through eframe, on
+    /// every platform.
     Quit,
 }
 
@@ -3362,14 +3370,15 @@ impl NativeShellApp {
         }
     }
 
-    /// A close was asked for while VMs run (a desktop's window close or VM
-    /// bar Quit, the phone's Back): carries out the remembered choice, or
-    /// opens the question.
+    /// A close was asked for while VMs run (a desktop's window close, the VM
+    /// bar's Quit on a desktop or a phone, the phone's Back): carries out the
+    /// remembered choice, or opens the question.
     pub(crate) fn close_requested(&mut self) {
         self.carry_out(self.close_choice);
     }
 
-    /// What the last close decided, once; the platform carries it out.
+    /// What the last close decided, once; `perform_close_action` carries it
+    /// out.
     pub(crate) fn take_close_action(&mut self) -> Option<CloseAction> {
         self.close_action.take()
     }
@@ -3448,8 +3457,8 @@ impl NativeShellApp {
         self.close_question = None;
     }
 
-    /// Carries out a close `choice` once it is made: Hide and Quit are the
-    /// platform's to perform (`take_close_action`). Asking opens the
+    /// Carries out a close `choice` once it is made: Hide and Quit are
+    /// performed after it (`perform_close_action`). Asking opens the
     /// question; one already open stays as it is, its checkbox included.
     fn carry_out(&mut self, choice: CloseChoice) {
         match choice {
@@ -3478,15 +3487,17 @@ impl NativeShellApp {
         }
     }
 
-    /// Does to a desktop's window what the last close decided: Hide
-    /// minimizes it, Quit closes it.
-    #[cfg(not(target_os = "android"))]
-    fn perform_close_action(&mut self, ctx: &egui::Context) {
+    /// Carries out what the last close decided, on every platform. Quit
+    /// closes the window through eframe: every VM was asked to stop when
+    /// the choice was made, so the next frame's `logic` finds none live and
+    /// lets the close through. Hiding is the platform's own: `hide` does it.
+    pub(crate) fn perform_close_action<H>(&mut self, ctx: &egui::Context, hide: H)
+    where
+        H: FnOnce(),
+    {
         match self.take_close_action() {
             None => {}
-            Some(CloseAction::Hide) => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true))
-            }
+            Some(CloseAction::Hide) => hide(),
             Some(CloseAction::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
     }
@@ -4113,7 +4124,7 @@ impl eframe::App for NativeShellApp {
     /// ahead. On a desktop, a question it opens on a window that is not shown
     /// brings the window back, so it can be answered, and what the close
     /// decided is carried out before this returns; a phone's host carries it
-    /// out itself (`AndroidShellApp::logic`).
+    /// out itself, with its own way to hide (`AndroidShellApp::logic`).
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if ctx.input(|input| input.viewport().close_requested()) && self.sessions.any_live() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -4128,7 +4139,7 @@ impl eframe::App for NativeShellApp {
             }
         }
         #[cfg(not(target_os = "android"))]
-        self.perform_close_action(ctx);
+        self.perform_close_action(ctx, || minimize_window(ctx));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -4143,7 +4154,7 @@ impl eframe::App for NativeShellApp {
         // An answer the close question got in this frame is carried out in
         // this frame, so the click and what it leads to land together.
         #[cfg(not(target_os = "android"))]
-        self.perform_close_action(&ctx);
+        self.perform_close_action(&ctx, || minimize_window(&ctx));
     }
 
     /// eframe's save, made when the window is taken away from the app — on
@@ -9782,6 +9793,40 @@ mod tests {
         app.close_requested();
         assert_eq!(app.take_close_action(), Some(CloseAction::Quit));
         assert_eq!(app.take_close_action(), None);
+        assert!(!app.any_vm_live());
+        drop(run);
+    }
+
+    /// What a close decided is carried out the same way on every platform
+    /// (`perform_close_action`): Quit closes the window through eframe, once
+    /// every VM was asked to stop, and Hide is the platform's own.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn quit_closes_the_window_and_hide_is_the_platforms_own() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        let run = power_on(&mut app, &command_rx);
+        let ctx = egui::Context::default();
+        let mut hides = 0;
+
+        app.remember_close_choice(CloseChoice::Hide);
+        app.close_requested();
+        let hidden = ctx.run_logic(&egui::RawInput::default(), |ctx| {
+            app.perform_close_action(ctx, || hides += 1);
+        });
+        assert_eq!(hides, 1);
+        assert_eq!(hidden.viewport_commands.get(&egui::ViewportId::ROOT), None);
+        assert!(app.any_vm_live(), "hiding stops nothing");
+
+        app.remember_close_choice(CloseChoice::StopAndQuit);
+        app.close_requested();
+        let quit = ctx.run_logic(&egui::RawInput::default(), |ctx| {
+            app.perform_close_action(ctx, || hides += 1);
+        });
+        assert_eq!(hides, 1, "Quit hides nothing");
+        assert_eq!(
+            quit.viewport_commands.get(&egui::ViewportId::ROOT),
+            Some(&vec![egui::ViewportCommand::Close])
+        );
         assert!(!app.any_vm_live());
         drop(run);
     }

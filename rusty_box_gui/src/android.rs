@@ -17,9 +17,7 @@ use crate::android_support::{
     content_rect_in_points, list_directory, needs_first_vm, seed_first_vm, stage_file,
     CarriedMachine, DirectoryEntry, EntryKind, FileFilter, PixelRect,
 };
-use crate::app::{
-    BrowseRequest, BrowseTarget, CloseAction, HostWindow, NativeEmulatorCommand, NativeShellApp,
-};
+use crate::app::{BrowseRequest, BrowseTarget, HostWindow, NativeEmulatorCommand, NativeShellApp};
 use crate::library::VmLibrary;
 use crate::{RunError, RunSummary};
 use egui::RichText;
@@ -309,24 +307,17 @@ impl AndroidShellApp {
         open
     }
 
-    /// Does to the activity what the last close decided: Hide sends the app
-    /// to the background, Quit finishes the activity. Both are calls on the
-    /// activity, which belongs to Android's UI thread, so each is posted
-    /// there, as `apply_window_flags` posts its own.
-    fn perform_close_action(&mut self) {
-        match self.shell.take_close_action() {
-            None => {}
-            Some(CloseAction::Hide) => {
-                let app = self.app.clone();
-                self.app
-                    .run_on_java_main_thread(Box::new(move || go_to_background(&app)));
-            }
-            Some(CloseAction::Quit) => {
-                let app = self.app.clone();
-                self.app
-                    .run_on_java_main_thread(Box::new(move || end_activity(&app)));
-            }
-        }
+    /// Carries out what the last close decided, as the shell does on every
+    /// platform (`NativeShellApp::perform_close_action`): Quit closes the
+    /// window through eframe. A phone's Hide sends the app to the
+    /// background, a call on the activity, which belongs to Android's UI
+    /// thread, so it is posted there, as `apply_window_flags` posts its own.
+    fn perform_close_action(&mut self, ctx: &egui::Context) {
+        let app = &self.app;
+        self.shell.perform_close_action(ctx, || {
+            let activity = app.clone();
+            app.run_on_java_main_thread(Box::new(move || go_to_background(&activity)));
+        });
     }
 
     /// The part of the window the system bars leave uncovered, in points; the
@@ -442,11 +433,11 @@ impl AndroidShellApp {
 impl eframe::App for AndroidShellApp {
     /// Before each frame: the shell takes over a close of the window asked
     /// for while VMs run — the VM bar's Quit — as it takes over a desktop's
-    /// (`NativeShellApp::logic`), and the activity is then given what the
-    /// close decided.
+    /// (`NativeShellApp::logic`), and what the close decided is then carried
+    /// out.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         eframe::App::logic(&mut self.shell, ctx, frame);
-        self.perform_close_action();
+        self.perform_close_action(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -507,7 +498,7 @@ impl eframe::App for AndroidShellApp {
             }
         }
         self.draw_keypad(&ctx, safe_rect);
-        self.perform_close_action();
+        self.perform_close_action(&ctx);
     }
 
     /// The activity's window is being taken away — the app went to the
@@ -992,15 +983,6 @@ fn go_to_background(app: &AndroidApp) {
     }
 }
 
-/// Quit, on Android's UI thread, once every VM was asked to stop: the
-/// activity finishes, and the log says whether it could.
-fn end_activity(app: &AndroidApp) {
-    match finish_activity(app) {
-        Ok(()) => log::info!("the activity is finishing; every VM was asked to stop"),
-        Err(error) => log::warn!("the activity could not finish: {error}"),
-    }
-}
-
 /// Sends the app to the background, as Home does; its VMs keep running for
 /// as long as Android lets the process run. Answers whether it moved.
 fn move_task_to_back(app: &AndroidApp) -> jni::errors::Result<bool> {
@@ -1012,14 +994,6 @@ fn move_task_to_back(app: &AndroidApp) -> jni::errors::Result<bool> {
             &[jni::objects::JValue::Bool(true)],
         )?
         .z()
-    })
-}
-
-/// Ends the activity: the app quits once every VM was asked to stop.
-fn finish_activity(app: &AndroidApp) -> jni::errors::Result<()> {
-    with_activity(app, |env, activity| {
-        env.call_method(activity, jni::jni_str!("finish"), jni::jni_sig!("()V"), &[])?
-            .v()
     })
 }
 
