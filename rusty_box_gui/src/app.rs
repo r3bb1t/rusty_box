@@ -11,6 +11,8 @@ use std::sync::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
+use crate::library::CloseChoice;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::sessions::{Exclusive, HeldBy, Hold, Holdings, RunHolds, Sessions, VmSession};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::{SidebarAction, VmBarAction};
@@ -191,6 +193,33 @@ fn save_native_file(default_name: &str) -> Option<PathBuf> {
         .save_file()
 }
 
+/// What a close the user asked for leads to, for the platform to carry out.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseAction {
+    /// Hide the app: minimize the window; on Android, move the task to the back.
+    Hide,
+    /// Every VM has been asked to stop: close the window; on Android, finish the activity.
+    Quit,
+}
+
+/// The question a close asks while VMs run, while it is open.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CloseQuestion {
+    /// Its "Remember my choice" checkbox.
+    remember: bool,
+}
+
+/// What the close question was answered with.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseAnswer {
+    Hide,
+    StopAndQuit,
+    Cancel,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub struct NativeShellApp {
     /// Every VM's display and console, by VM; the shell draws and drives the
@@ -231,6 +260,14 @@ pub struct NativeShellApp {
     /// The gravest notice raised in this frame, which a lesser one may not
     /// replace; see `notify`.
     gravest_raised: Option<ShellNoticeKind>,
+    /// What closing the app does while VMs run, as the library folder
+    /// records it (`.on_close`) and the About window changes it.
+    close_choice: CloseChoice,
+    /// The question a close asks while VMs run, while it is open.
+    close_question: Option<CloseQuestion>,
+    /// What the last close decided, until the platform carries it out
+    /// (`take_close_action`).
+    close_action: Option<CloseAction>,
     /// A Browse press the Android host has yet to answer.
     #[cfg(target_os = "android")]
     browse_request: Option<BrowseTarget>,
@@ -247,12 +284,50 @@ pub struct NativeShellApp {
 #[cfg(target_os = "android")]
 const FULL_SCREEN_MENU: &str = "☰";
 /// The menu button's side, points: a comfortable thumb target.
-#[cfg(target_os = "android")]
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
 const FULL_SCREEN_BUTTON_SIZE: f32 = 40.0;
 /// The menu button's fill over the guest: dark enough to find, light enough
 /// to leave the guest's corner readable under it.
 #[cfg(target_os = "android")]
 const FULL_SCREEN_BUTTON_ALPHA: u8 = 110;
+
+/// Where the full-screen console's menu list stands on a frame.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuScroll {
+    /// The menu opens on this frame: its list starts at its top.
+    Top,
+    /// The menu was open on the frame before: its list stays where it is.
+    Kept,
+}
+
+/// The full-screen console's menu window, under its corner button and held
+/// inside `area`. `contents` sit in a list that scrolls whenever they do not
+/// fit, so nothing in the menu is ever out of reach, and the list stands at
+/// `scroll`: on the frame the menu opens, at its top, whatever offset the
+/// last opening left behind.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+fn show_full_screen_menu<F>(ctx: &egui::Context, area: egui::Rect, scroll: MenuScroll, contents: F)
+where
+    F: FnOnce(&mut egui::Ui),
+{
+    let below_button = SPACE_GROUP + FULL_SCREEN_BUTTON_SIZE + SPACE_ITEM;
+    // As wide as the window, and as tall as its items up to what fits.
+    let list = egui::ScrollArea::vertical().auto_shrink([false, true]);
+    let list = match scroll {
+        MenuScroll::Top => list.vertical_scroll_offset(0.0),
+        MenuScroll::Kept => list,
+    };
+    egui::Window::new("full_screen_menu")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .fixed_pos(area.left_top() + egui::vec2(SPACE_GROUP, below_button))
+        .constrain_to(area)
+        .show(ctx, |ui| {
+            list.show(ui, contents);
+        });
+}
 
 /// A running VM the phone's console menu can switch to.
 #[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
@@ -1426,6 +1501,7 @@ impl NativeShellApp {
             chrome.library = Drawer::Closed;
             chrome.show_serial = false;
         }
+        let close_choice = start.library.close_choice();
         Self {
             sessions: Sessions::default(),
             holdings: Holdings::default(),
@@ -1444,6 +1520,9 @@ impl NativeShellApp {
             pending_confirm: None,
             overwrite_confirmed: std::collections::HashSet::new(),
             gravest_raised: None,
+            close_choice,
+            close_question: None,
+            close_action: None,
             #[cfg(target_os = "android")]
             browse_request: None,
             #[cfg(target_os = "android")]
@@ -1487,6 +1566,12 @@ impl NativeShellApp {
             .statuses()
             .iter()
             .any(|status| crate::android_support::MachineActivity::of(status).keeps_screen_on())
+    }
+
+    /// Whether any VM runs or is about to: what makes a close ask.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn any_vm_live(&self) -> bool {
+        self.sessions.any_live()
     }
 
     /// The name a VM goes by in the shell's notices.
@@ -3195,6 +3280,150 @@ impl NativeShellApp {
         }
     }
 
+    /// A close was asked for while VMs run (a desktop's window close or VM
+    /// bar Quit, the phone's Back): carries out the remembered choice, or
+    /// opens the question.
+    pub(crate) fn close_requested(&mut self) {
+        self.carry_out(self.close_choice);
+    }
+
+    /// What the last close decided, once; the platform carries it out.
+    pub(crate) fn take_close_action(&mut self) -> Option<CloseAction> {
+        self.close_action.take()
+    }
+
+    /// The question a close asks while VMs run: hide the app, stop the VMs
+    /// and quit, or stay. Escape or a click outside is Cancel.
+    fn draw_close_question(&mut self, ctx: &egui::Context) {
+        if self.close_question.is_none() {
+            return;
+        }
+        // The running VMs' names are read before the question is borrowed.
+        let mut names: Vec<String> = self
+            .sessions
+            .live_vms()
+            .iter()
+            .map(|vm| self.vm_name(vm).to_owned())
+            .collect();
+        names.sort();
+        let Some(question) = &mut self.close_question else {
+            return;
+        };
+        let mut answer = None;
+        let modal = egui::Modal::new(egui::Id::new("close_question")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label(
+                RichText::new("VMs are still running")
+                    .size(TEXT_TITLE)
+                    .strong(),
+            );
+            ui.label(format!(
+                "{} will keep running if the app is hidden.",
+                names.join(", ")
+            ));
+            ui.checkbox(&mut question.remember, "Remember my choice");
+            ui.horizontal(|ui| {
+                if ui.button("Hide").clicked() {
+                    answer = Some(CloseAnswer::Hide);
+                }
+                if ui.button("Stop VMs and quit").clicked() {
+                    answer = Some(CloseAnswer::StopAndQuit);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(CloseAnswer::Cancel);
+                }
+            });
+        });
+        let remember = question.remember;
+        if answer.is_none() && modal.should_close() {
+            answer = Some(CloseAnswer::Cancel);
+        }
+        let choice = match answer {
+            None => return,
+            Some(CloseAnswer::Cancel) => {
+                self.close_question = None;
+                return;
+            }
+            Some(CloseAnswer::Hide) => CloseChoice::Hide,
+            Some(CloseAnswer::StopAndQuit) => CloseChoice::StopAndQuit,
+        };
+        self.close_question = None;
+        if remember {
+            self.remember_close_choice(choice);
+        }
+        self.carry_out(choice);
+    }
+
+    /// Carries out a close `choice` once it is made: Hide and Quit are the
+    /// platform's to perform (`take_close_action`). Asking opens the
+    /// question; one already open stays as it is, its checkbox included.
+    fn carry_out(&mut self, choice: CloseChoice) {
+        match choice {
+            CloseChoice::Ask => {
+                if self.close_question.is_none() {
+                    self.close_question = Some(CloseQuestion { remember: false });
+                }
+            }
+            CloseChoice::Hide => self.close_action = Some(CloseAction::Hide),
+            CloseChoice::StopAndQuit => {
+                self.sessions.stop_all();
+                self.close_action = Some(CloseAction::Quit);
+            }
+        }
+    }
+
+    /// Keeps `choice` for every later close, here and in the library folder.
+    /// A record that cannot be written leaves it kept here only, until the
+    /// app closes.
+    fn remember_close_choice(&mut self, choice: CloseChoice) {
+        self.close_choice = choice;
+        if let Err(error) = self.library.remember_close_choice(choice) {
+            self.notify(ShellNotice::warning(format!(
+                "Your choice was not saved for the next launch: {error}"
+            )));
+        }
+    }
+
+    /// Does to a desktop's window what the last close decided: Hide
+    /// minimizes it, Quit closes it.
+    #[cfg(not(target_os = "android"))]
+    fn perform_close_action(&mut self, ctx: &egui::Context) {
+        match self.take_close_action() {
+            None => {}
+            Some(CloseAction::Hide) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true))
+            }
+            Some(CloseAction::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        }
+    }
+
+    /// The About window, with what closing does while VMs run. A choice
+    /// picked there is kept at once (`remember_close_choice`).
+    fn draw_about_window(&mut self, ctx: &egui::Context) {
+        if !self.chrome.show_about {
+            return;
+        }
+        // The window's close button writes `open`, and its contents use
+        // `self`: the two borrows cannot overlap, so the window closes
+        // through a copy, written back once it is drawn.
+        let mut open = self.chrome.show_about;
+        about_window(&mut open).show(ctx, |ui| {
+            draw_about_text(ui);
+            ui.separator();
+            ui.label(RichText::new("When closing with VMs running").color(TEXT_MUTED));
+            let mut choice = self.close_choice;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut choice, CloseChoice::Ask, "Ask");
+                ui.selectable_value(&mut choice, CloseChoice::Hide, "Hide");
+                ui.selectable_value(&mut choice, CloseChoice::StopAndQuit, "Stop VMs and quit");
+            });
+            if choice != self.close_choice {
+                self.remember_close_choice(choice);
+            }
+        });
+        self.chrome.show_about = open;
+    }
+
     fn delete_broken_file(&mut self, path: &Path) {
         match self.library.delete_file(path) {
             Ok(()) => self.broken_files.retain(|file| file.path != path),
@@ -3396,6 +3625,8 @@ impl NativeShellApp {
         console.ui_embedded_with_serial(ui, frame, false, None);
 
         let ctx = ui.ctx().clone();
+        // A tap that opens the menu shows it from its top.
+        let mut scroll = MenuScroll::Kept;
         egui::Area::new(egui::Id::new("full_screen_menu_button"))
             .fixed_pos(area.left_top() + egui::vec2(SPACE_GROUP, SPACE_GROUP))
             .order(egui::Order::Foreground)
@@ -3406,100 +3637,94 @@ impl NativeShellApp {
                     .min_size(egui::vec2(FULL_SCREEN_BUTTON_SIZE, FULL_SCREEN_BUTTON_SIZE));
                 if ui.add(button).clicked() {
                     self.full_screen_menu_open = !self.full_screen_menu_open;
+                    scroll = MenuScroll::Top;
                 }
             });
         if self.full_screen_menu_open {
-            self.draw_full_screen_menu(&ctx, area);
+            self.draw_full_screen_menu(&ctx, area, scroll);
         }
     }
 
     /// The full-screen console's menu: the machine's state and rate, the key
     /// pad, the verbs that act on the guest, the fit or stretch choice, the
-    /// way back to the shell with the machine left running, and last a
-    /// switch to each other VM that runs or is about to, so the menu's own
-    /// items keep their places however many VMs run. egui holds the menu
-    /// inside `area` and scrolls whatever does not fit: on a landscape phone
-    /// nothing in it is out of reach.
+    /// pointer speed, the way back to the shell with the machine left
+    /// running, and last a switch to each other VM that runs or is about to,
+    /// so the menu's own items keep their places however many VMs run. Its
+    /// list scrolls whenever it does not fit inside `area`, so on a
+    /// landscape phone nothing in it is out of reach, and it opens at its
+    /// top (`show_full_screen_menu`).
     #[cfg(target_os = "android")]
-    fn draw_full_screen_menu(&mut self, ctx: &egui::Context, area: egui::Rect) {
+    fn draw_full_screen_menu(&mut self, ctx: &egui::Context, area: egui::Rect, scroll: MenuScroll) {
         let status = self.runtime_status();
         let badge = shell_state_badge(&status, self.has_error_notice());
         let vm = self.shown_vm();
-        let below_button = SPACE_GROUP + FULL_SCREEN_BUTTON_SIZE + SPACE_ITEM;
-        egui::Window::new("full_screen_menu")
-            .title_bar(false)
-            .resizable(false)
-            .collapsible(false)
-            .vscroll(true)
-            .fixed_pos(area.left_top() + egui::vec2(SPACE_GROUP, below_button))
-            .constrain_to(area)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    status_dot(ui, badge.color);
-                    ui.label(status_text(badge.label).color(badge.color));
-                    ui.label(status_text("·").color(TEXT_MUTED));
-                    ui.label(status_text(engine_label(self.shown_engine())).color(TEXT_PRIMARY));
-                    ui.label(status_text("·").color(TEXT_MUTED));
-                    ui.label(status_text(format_ips_u32(status.ips)).color(ACCENT_BLUE));
-                });
-                ui.separator();
-                if ui.button("Keys").clicked() {
-                    self.keypad_requested = true;
-                    self.full_screen_menu_open = false;
-                }
-                if ui
-                    .add_enabled(status.running, egui::Button::new("Ctrl+Alt+Del"))
-                    .clicked()
-                {
-                    self.sessions.open(&vm).console().send_ctrl_alt_del();
-                }
-                let mut stretch = self.settings.console_stretch;
-                if ui.checkbox(&mut stretch, "Stretch to fill").changed() {
-                    self.settings.console_stretch = stretch;
-                    if let Err(message) = self.apply_pending_settings() {
-                        self.notify(ShellNotice::error(message));
-                    }
-                }
-                let mut speed = self.settings.pointer_speed.percent();
-                let slider = egui::Slider::new(&mut speed, crate::config::PointerSpeed::RANGE_PERCENT)
-                    .text("Pointer speed")
-                    .suffix(" %");
-                if ui.add(slider).changed() {
-                    self.settings.pointer_speed = crate::config::PointerSpeed::from_percent(speed);
-                    if let Err(message) = self.apply_pending_settings() {
-                        self.notify(ShellNotice::error(message));
-                    }
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(status.running, egui::Button::new("■ Power off"))
-                    .clicked()
-                {
-                    self.request_power_off();
-                    self.full_screen_menu_open = false;
-                }
-                if ui
-                    .add_enabled(status.running, egui::Button::new("↻ Restart"))
-                    .clicked()
-                {
-                    self.request_reset();
-                    self.full_screen_menu_open = false;
-                }
-                if ui.button("Exit to shell").clicked() {
-                    self.chrome.go_to(ShellPage::Home);
-                    self.full_screen_menu_open = false;
-                }
-                let targets = self.switch_targets();
-                if !targets.is_empty() {
-                    ui.separator();
-                    ui.label(status_text("Running VMs").color(TEXT_MUTED));
-                    for target in targets {
-                        if ui.button(&target.name).clicked() {
-                            self.switch_to(target);
-                        }
-                    }
-                }
+        show_full_screen_menu(ctx, area, scroll, |ui| {
+            ui.horizontal(|ui| {
+                status_dot(ui, badge.color);
+                ui.label(status_text(badge.label).color(badge.color));
+                ui.label(status_text("·").color(TEXT_MUTED));
+                ui.label(status_text(engine_label(self.shown_engine())).color(TEXT_PRIMARY));
+                ui.label(status_text("·").color(TEXT_MUTED));
+                ui.label(status_text(format_ips_u32(status.ips)).color(ACCENT_BLUE));
             });
+            ui.separator();
+            if ui.button("Keys").clicked() {
+                self.keypad_requested = true;
+                self.full_screen_menu_open = false;
+            }
+            if ui
+                .add_enabled(status.running, egui::Button::new("Ctrl+Alt+Del"))
+                .clicked()
+            {
+                self.sessions.open(&vm).console().send_ctrl_alt_del();
+            }
+            let mut stretch = self.settings.console_stretch;
+            if ui.checkbox(&mut stretch, "Stretch to fill").changed() {
+                self.settings.console_stretch = stretch;
+                if let Err(message) = self.apply_pending_settings() {
+                    self.notify(ShellNotice::error(message));
+                }
+            }
+            let mut speed = self.settings.pointer_speed.percent();
+            let slider = egui::Slider::new(&mut speed, crate::config::PointerSpeed::RANGE_PERCENT)
+                .text("Pointer speed")
+                .suffix(" %");
+            if ui.add(slider).changed() {
+                self.settings.pointer_speed = crate::config::PointerSpeed::from_percent(speed);
+                if let Err(message) = self.apply_pending_settings() {
+                    self.notify(ShellNotice::error(message));
+                }
+            }
+            ui.separator();
+            if ui
+                .add_enabled(status.running, egui::Button::new("■ Power off"))
+                .clicked()
+            {
+                self.request_power_off();
+                self.full_screen_menu_open = false;
+            }
+            if ui
+                .add_enabled(status.running, egui::Button::new("↻ Restart"))
+                .clicked()
+            {
+                self.request_reset();
+                self.full_screen_menu_open = false;
+            }
+            if ui.button("Exit to shell").clicked() {
+                self.chrome.go_to(ShellPage::Home);
+                self.full_screen_menu_open = false;
+            }
+            let targets = self.switch_targets();
+            if !targets.is_empty() {
+                ui.separator();
+                ui.label(status_text("Running VMs").color(TEXT_MUTED));
+                for target in targets {
+                    if ui.button(&target.name).clicked() {
+                        self.switch_to(target);
+                    }
+                }
+            }
+        });
     }
 
     /// The VMs that run or are about to, other than the selected one, in
@@ -3701,19 +3926,47 @@ impl NativeShellApp {
         self.draw_status_strip(ui);
         self.draw_central(ui, frame);
         self.draw_floppy_maker(ui.ctx());
-        draw_about_window(ui.ctx(), &mut self.chrome);
+        self.draw_about_window(ui.ctx());
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl eframe::App for NativeShellApp {
+    /// A desktop's close, read before each frame and, while the window is
+    /// minimized, in place of one: eframe draws no frame for a minimized
+    /// window and runs this alone, so a hidden app closed from the taskbar
+    /// is seen here too. A close asked for while VMs run — the window's close
+    /// button, the VM bar's Quit — is cancelled and goes to `close_requested`.
+    /// A question it opens on a window that is not shown brings the window
+    /// back, so it can be answered. What the close decided is carried out
+    /// before this returns.
+    #[cfg(not(target_os = "android"))]
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|input| input.viewport().close_requested()) && self.sessions.any_live() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_requested();
+            let shown = ctx.input(|input| input.viewport().visible().unwrap_or(true));
+            if self.close_question.is_some() && !shown {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
+        self.perform_close_action(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         self.begin_frame();
-        self.handle_native_dropped_files(ui.ctx());
-        self.draw_pending_confirm(ui.ctx());
+        self.handle_native_dropped_files(&ctx);
+        self.draw_pending_confirm(&ctx);
+        self.draw_close_question(&ctx);
         self.draw_shell(ui, frame);
-        self.flush_when_window_focus_is_lost(ui.ctx());
-        self.flush_unsaved_when_idle(ui.ctx());
+        self.flush_when_window_focus_is_lost(&ctx);
+        self.flush_unsaved_when_idle(&ctx);
+        // An answer the close question got in this frame is carried out in
+        // this frame, so the click and what it leads to land together.
+        #[cfg(not(target_os = "android"))]
+        self.perform_close_action(&ctx);
     }
 
     /// eframe's save, made when the window is taken away from the app — on
@@ -5114,32 +5367,45 @@ impl eframe::App for WebShellApp {
     }
 }
 
+/// The browser shell's About window.
+#[cfg(target_arch = "wasm32")]
 fn draw_about_window(ctx: &egui::Context, chrome: &mut ShellChrome) {
     if !chrome.show_about {
         return;
     }
+    about_window(&mut chrome.show_about).show(ctx, draw_about_text);
+}
 
+/// The About window of every shell, shown while `open` holds; its close
+/// button clears `open`.
+fn about_window(open: &mut bool) -> egui::Window<'_> {
     egui::Window::new("About Rusty Box Workstation")
         .collapsible(false)
         .resizable(false)
-        .open(&mut chrome.show_about)
-        .show(ctx, |ui| {
-            ui.label(RichText::new("Rusty Box Workstation").size(TEXT_TITLE).strong());
-            ui.label("VMware-style shell for Rusty Box emulator sessions.");
-            ui.separator();
-            ui.label(metadata_text(
-                "Console",
-                "existing emulator display and keyboard path",
-            ));
-            ui.label(metadata_text(
-                "Images",
-                "bximage-backed hard disk and floppy creation",
-            ));
-            ui.label(metadata_text(
-                "Browser",
-                "upload ISO, download generated images",
-            ));
-        });
+        .open(open)
+}
+
+/// What the About window says in every shell.
+fn draw_about_text(ui: &mut egui::Ui) {
+    ui.label(
+        RichText::new("Rusty Box Workstation")
+            .size(TEXT_TITLE)
+            .strong(),
+    );
+    ui.label("VMware-style shell for Rusty Box emulator sessions.");
+    ui.separator();
+    ui.label(metadata_text(
+        "Console",
+        "existing emulator display and keyboard path",
+    ));
+    ui.label(metadata_text(
+        "Images",
+        "bximage-backed hard disk and floppy creation",
+    ));
+    ui.label(metadata_text(
+        "Browser",
+        "upload ISO, download generated images",
+    ));
 }
 
 #[cfg(target_os = "android")]
@@ -8465,8 +8731,9 @@ mod tests {
         remove_test_file(&path);
     }
 
-    /// The native shell in a kittest window, drawn by `draw_shell` and driven
-    /// as a user drives it.
+    /// The native shell in a kittest window, run as eframe runs it — its
+    /// `App::logic`, then its `App::ui`, each frame — and driven as a user
+    /// drives it.
     #[cfg(not(target_arch = "wasm32"))]
     mod in_a_window {
         use super::*;
@@ -8502,7 +8769,8 @@ mod tests {
                 .build_ui_state(
                     move |ui, window: &mut Window| {
                         window.left_edge = ui.available_rect_before_wrap().left();
-                        window.app.draw_shell(ui, &mut frame);
+                        eframe::App::logic(&mut window.app, ui.ctx(), &mut frame);
+                        eframe::App::ui(&mut window.app, ui, &mut frame);
                         if let Some(cover) = window.cover {
                             egui::Area::new(egui::Id::new("cover"))
                                 .order(egui::Order::Foreground)
@@ -8965,5 +9233,284 @@ mod tests {
                 "the shell says the floppy was made"
             );
         }
+
+        /// The window's close button, pressed: one frame with the close request.
+        fn close_requested_by_the_window(window: &mut Harness<'_, Window>) {
+            window
+                .input_mut()
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .events
+                .push(egui::ViewportEvent::Close);
+            window.step();
+        }
+
+        /// One more frame, for the close question to be where it shows: egui
+        /// lays a newly shown modal out unseen in its first frame, centred
+        /// from the next, so a click aimed at it waits that frame.
+        fn let_the_question_settle(window: &mut Harness<'_, Window>) {
+            window.step();
+        }
+
+        /// What the last frame asked of the window.
+        fn commands(window: &Harness<'_, Window>) -> Vec<egui::ViewportCommand> {
+            window
+                .output()
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .map(|output| output.commands.clone())
+                .unwrap_or_default()
+        }
+
+        /// The window's close button, pressed while the window is minimized.
+        /// eframe draws no frame for a minimized window: it runs the app's
+        /// `App::logic` alone, as `run_logic` does here. Returns what the app
+        /// asked of the window.
+        fn close_requested_while_minimized(app: &mut NativeShellApp) -> Vec<egui::ViewportCommand> {
+            let mut input = egui::RawInput::default();
+            input.viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    minimized: Some(true),
+                    events: vec![egui::ViewportEvent::Close],
+                    ..egui::ViewportInfo::default()
+                },
+            );
+            let mut frame = eframe::Frame::_new_kittest();
+            egui::Context::default()
+                .run_logic(&input, |ctx| eframe::App::logic(app, ctx, &mut frame))
+                .viewport_commands
+                .get(&egui::ViewportId::ROOT)
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        #[test]
+        fn closing_with_a_vm_running_asks_and_hide_minimizes() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            assert!(commands(&window).contains(&egui::ViewportCommand::CancelClose));
+            let_the_question_settle(&mut window);
+            window.get_by_label("Hide").click();
+            window.step();
+            assert!(commands(&window).contains(&egui::ViewportCommand::Minimized(true)));
+            assert!(window.state().app.any_vm_live(), "hiding stops nothing");
+            drop(run);
+        }
+
+        #[test]
+        fn stop_vms_and_quit_stops_every_vm_and_closes() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            window.get_by_label("Stop VMs and quit").click();
+            window.step();
+            assert!(!window.state().app.any_vm_live());
+            assert!(commands(&window).contains(&egui::ViewportCommand::Close));
+            drop(run);
+        }
+
+        #[test]
+        fn a_remembered_choice_is_carried_out_without_asking() {
+            let (mut app, command_rx, scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            window.get_by_label("Remember my choice").click();
+            window.step();
+            window.get_by_label("Hide").click();
+            window.step();
+            assert_eq!(scratch.library().close_choice(), CloseChoice::Hide);
+            close_requested_by_the_window(&mut window);
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_none(),
+                "no question"
+            );
+            assert!(commands(&window).contains(&egui::ViewportCommand::Minimized(true)));
+            drop(run);
+        }
+
+        #[test]
+        fn closing_with_no_vm_running_closes() {
+            let (app, _command_rx, _scratch) = native_test_app();
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            assert!(!commands(&window).contains(&egui::ViewportCommand::CancelClose));
+        }
+
+        /// Cancel leaves the window open and the VM running, and the next
+        /// close asks again.
+        #[test]
+        fn cancel_keeps_the_window_and_the_next_close_asks_again() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            window.get_by_label("Cancel").click();
+            window.step();
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Close));
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Minimized(true)));
+            // The frame that took the click drew the question; the next does not.
+            window.step();
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_none(),
+                "the question is gone"
+            );
+            assert!(window.state().app.any_vm_live());
+            close_requested_by_the_window(&mut window);
+            assert!(commands(&window).contains(&egui::ViewportCommand::CancelClose));
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_some(),
+                "it asks again"
+            );
+            drop(run);
+        }
+
+        /// A hidden app closed from the taskbar: its window is minimized, so
+        /// the close reaches `App::logic` alone. It is cancelled there and
+        /// follows the remembered choice: a remembered Hide keeps the VM
+        /// running, a remembered Stop VMs and quit stops it and closes.
+        #[test]
+        fn closing_the_hidden_app_follows_the_remembered_choice() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            app.remember_close_choice(CloseChoice::Hide);
+            let asked = close_requested_while_minimized(&mut app);
+            assert!(asked.contains(&egui::ViewportCommand::CancelClose));
+            assert!(app.any_vm_live(), "the hidden VM runs on");
+
+            app.remember_close_choice(CloseChoice::StopAndQuit);
+            let asked = close_requested_while_minimized(&mut app);
+            assert!(asked.contains(&egui::ViewportCommand::CancelClose));
+            assert!(asked.contains(&egui::ViewportCommand::Close));
+            assert!(!app.any_vm_live());
+            drop(run);
+        }
+
+        /// A hidden app closed from the taskbar with no choice remembered:
+        /// the window comes back, with the question in it.
+        #[test]
+        fn closing_the_hidden_app_brings_it_back_to_ask() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let asked = close_requested_while_minimized(&mut app);
+            assert!(asked.contains(&egui::ViewportCommand::CancelClose));
+            assert!(asked.contains(&egui::ViewportCommand::Minimized(false)));
+            assert!(asked.contains(&egui::ViewportCommand::Focus));
+            let mut window = window(app);
+            window.run_steps(2);
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_some(),
+                "the question is in the window"
+            );
+            assert!(window.state().app.any_vm_live());
+            drop(run);
+        }
+
+        /// The About window changes the remembered choice: picked there, it
+        /// is kept in the library folder, and the next close follows it.
+        #[test]
+        fn the_about_window_changes_the_remembered_choice() {
+            let (mut app, command_rx, scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            app.chrome.show_about = true;
+            let mut window = window(app);
+            window.run_steps(2);
+            window.get_by_label("Stop VMs and quit").click();
+            window.step();
+            assert_eq!(scratch.library().close_choice(), CloseChoice::StopAndQuit);
+            close_requested_by_the_window(&mut window);
+            assert!(commands(&window).contains(&egui::ViewportCommand::Close));
+            assert!(!window.state().app.any_vm_live());
+            drop(run);
+        }
+    }
+
+    /// What a close leads to is taken once: the phone's Back and the
+    /// desktop's close read it through `take_close_action` and carry it out.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_close_action_is_taken_once() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        let run = power_on(&mut app, &command_rx);
+        app.remember_close_choice(CloseChoice::Hide);
+        app.close_requested();
+        assert_eq!(app.take_close_action(), Some(CloseAction::Hide));
+        assert_eq!(app.take_close_action(), None);
+        assert!(app.any_vm_live());
+
+        app.remember_close_choice(CloseChoice::StopAndQuit);
+        app.close_requested();
+        assert_eq!(app.take_close_action(), Some(CloseAction::Quit));
+        assert_eq!(app.take_close_action(), None);
+        assert!(!app.any_vm_live());
+        drop(run);
+    }
+
+    /// The phone's console menu opens at its top. Scrolled to its end when
+    /// it closed, it opens again with its first item where that item stood
+    /// the first time it opened.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_full_screen_menu_opens_at_its_top() {
+        use egui_kittest::{kittest::Queryable, Harness};
+
+        // A landscape phone's console, and a list taller than it.
+        let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 360.0));
+        let mut menu = Harness::builder().with_size(area.size()).build_ui_state(
+            move |ui, shown: &mut Option<MenuScroll>| {
+                if let Some(scroll) = *shown {
+                    show_full_screen_menu(ui.ctx(), area, scroll, |ui| {
+                        for item in 0..40 {
+                            ui.label(format!("Item {item}"));
+                        }
+                    });
+                }
+            },
+            Some(MenuScroll::Top),
+        );
+        menu.step();
+        *menu.state_mut() = Some(MenuScroll::Kept);
+        menu.run_steps(2);
+        let first_opening = menu.get_by_label("Item 0").rect().top();
+
+        // The wheel, over the list, scrolls it to its end.
+        menu.hover_at(menu.get_by_label("Item 0").rect().center());
+        menu.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -2000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        menu.run_steps(3);
+        assert!(
+            menu.get_by_label("Item 0").rect().top() < first_opening,
+            "the list was scrolled to its end"
+        );
+
+        // Closed for a frame, then opened again.
+        *menu.state_mut() = None;
+        menu.step();
+        *menu.state_mut() = Some(MenuScroll::Top);
+        menu.step();
+        *menu.state_mut() = Some(MenuScroll::Kept);
+        menu.run_steps(2);
+        assert_eq!(
+            menu.get_by_label("Item 0").rect().top(),
+            first_opening,
+            "the menu opens at its top"
+        );
     }
 }

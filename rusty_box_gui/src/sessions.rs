@@ -168,6 +168,20 @@ impl Sessions {
         self.get(vm).is_some_and(VmSession::is_live)
     }
 
+    /// The VMs that run or are about to, in no particular order.
+    pub(crate) fn live_vms(&self) -> Vec<VmOrigin> {
+        self.by_vm
+            .iter()
+            .filter(|(_, session)| session.is_live())
+            .map(|(vm, _)| vm.clone())
+            .collect()
+    }
+
+    /// Whether any VM runs or is about to.
+    pub(crate) fn any_live(&self) -> bool {
+        self.by_vm.values().any(VmSession::is_live)
+    }
+
     /// Every session's state, in no particular order.
     #[cfg(any(target_os = "android", test))]
     pub(crate) fn statuses(&self) -> Vec<ShellStatus> {
