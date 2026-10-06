@@ -877,10 +877,56 @@ struct VmRunThread {
     thread: std::thread::JoinHandle<Option<u64>>,
 }
 
+/// What the launcher's runs left, summed as each one's thread is joined.
+#[cfg(feature = "gui-egui")]
+struct RunTally {
+    /// The instructions every joined run retired, `None` once a run on the
+    /// hypervisor makes the sum a guess.
+    instructions_executed: Option<u64>,
+    /// Whether a joined run's thread panicked.
+    panicked: bool,
+}
+
+#[cfg(feature = "gui-egui")]
+impl RunTally {
+    fn new() -> Self {
+        Self {
+            instructions_executed: Some(0),
+            panicked: false,
+        }
+    }
+
+    /// Waits for `run`'s thread to end, and counts what it retired or that
+    /// it panicked. Its display is let go with it.
+    fn join(&mut self, run: VmRunThread) {
+        match run.thread.join() {
+            Ok(counted) => {
+                self.instructions_executed = match (self.instructions_executed, counted) {
+                    (Some(total), Some(counted)) => Some(total.saturating_add(counted)),
+                    (None, _) | (_, None) => None,
+                };
+            }
+            Err(_) => self.panicked = true,
+        }
+    }
+
+    /// The launcher's result, once every run it started is joined.
+    fn summary(self) -> Result<RunSummary, RunError> {
+        if self.panicked {
+            return Err(RunError::EmulatorThreadPanic);
+        }
+        Ok(RunSummary {
+            instructions_executed: self.instructions_executed,
+        })
+    }
+}
+
 /// Runs every power-on the shell sends on a thread of its own, until the
 /// shell closes the channel; then stops every run still going and waits for
-/// each. Returns the instructions every run retired, `None` once a run on the
-/// hypervisor makes the sum a guess.
+/// each. A run whose thread is over is joined at the next power-on, so the
+/// threads of ended runs do not pile up however long the app lives. Returns
+/// the instructions every run retired, `None` once a run on the hypervisor
+/// makes the sum a guess.
 #[cfg(feature = "gui-egui")]
 fn run_egui_launcher(
     command_rx: mpsc::Receiver<crate::app::NativeEmulatorCommand>,
@@ -896,11 +942,18 @@ fn run_egui_launcher(
     // it erases nothing.
     let provisioned: Arc<Mutex<HashSet<PathBuf>>> = Arc::default();
     let mut runs: Vec<VmRunThread> = Vec::new();
-    let mut instructions_executed = Some(0u64);
-    let mut panicked = false;
+    let mut tally = RunTally::new();
 
     while let Ok(command) = command_rx.recv() {
         let crate::app::NativeEmulatorCommand::Start(start) = command;
+        // Every run whose thread is over is joined before the next is
+        // spawned. A phone's app never ends its own process, and a thread
+        // left unjoined keeps its stack mapping (`EMULATOR_STACK_BYTES`;
+        // bionic frees a joinable thread's stack only when it is joined)
+        // and its VM's display, a deleted VM's included.
+        for finished in runs.extract_if(.., |run| run.thread.is_finished()) {
+            tally.join(finished);
+        }
         let display = Arc::clone(&start.display);
         let provisioned = Arc::clone(&provisioned);
         let spawned = std::thread::Builder::new()
@@ -917,22 +970,9 @@ fn run_egui_launcher(
         signal_egui_stop(&run.display);
     }
     for run in runs {
-        match run.thread.join() {
-            Ok(counted) => {
-                instructions_executed = match (instructions_executed, counted) {
-                    (Some(total), Some(counted)) => Some(total.saturating_add(counted)),
-                    (None, _) | (_, None) => None,
-                };
-            }
-            Err(_) => panicked = true,
-        }
+        tally.join(run);
     }
-    if panicked {
-        return Err(RunError::EmulatorThreadPanic);
-    }
-    Ok(RunSummary {
-        instructions_executed,
-    })
+    tally.summary()
 }
 
 /// One power-on, restarts included, on its own thread. What the power-on
@@ -1973,15 +2013,22 @@ mod tests {
             .unwrap();
     }
 
+    /// How long a launcher test waits for a run before it fails. The waits
+    /// detect a hang, and a pass ends them early, so the bound is set for a
+    /// host loaded with other builds, where a machine is slow to build.
+    #[cfg(feature = "gui-egui")]
+    const RUN_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
     /// Polls `holds` every ten milliseconds until it does, or fails the test
-    /// after thirty seconds.
+    /// once `RUN_WAIT_BOUND` has passed.
     #[cfg(feature = "gui-egui")]
     fn wait_until(mut holds: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + RUN_WAIT_BOUND;
         while !holds() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the condition did not hold within 30 s"
+                "the condition did not hold within {} s",
+                RUN_WAIT_BOUND.as_secs()
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -1998,25 +2045,29 @@ mod tests {
     }
 
     /// Polls `run` every ten milliseconds until its thread is over, or fails
-    /// the test with `failure` after thirty seconds, leaving the thread to
-    /// the end of the test process.
+    /// the test, saying that `what` did not end, once `RUN_WAIT_BOUND` has
+    /// passed, leaving the thread to the end of the test process.
     #[cfg(feature = "gui-egui")]
-    fn wait_for_end<T>(run: &std::thread::JoinHandle<T>, failure: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    fn wait_for_end<T>(run: &std::thread::JoinHandle<T>, what: &str) {
+        let deadline = std::time::Instant::now() + RUN_WAIT_BOUND;
         while !run.is_finished() {
-            assert!(std::time::Instant::now() < deadline, "{failure}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what} did not end within {} s",
+                RUN_WAIT_BOUND.as_secs()
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
     /// The launcher's result, once its channel is closed and every run it
-    /// started is over; a launcher still waiting on a run after thirty
-    /// seconds fails the test rather than hanging it.
+    /// started is over; a launcher still waiting on a run once
+    /// `RUN_WAIT_BOUND` has passed fails the test rather than hanging it.
     #[cfg(feature = "gui-egui")]
     fn join_launcher(
         launcher: std::thread::JoinHandle<Result<RunSummary, RunError>>,
     ) -> Result<RunSummary, RunError> {
-        wait_for_end(&launcher, "a run the launcher started ignored its stop");
+        wait_for_end(&launcher, "a run the launcher started");
         launcher.join().expect("the launcher")
     }
 
@@ -2355,8 +2406,9 @@ mod tests {
         }
     }
 
-    /// Two VMs powered on one after the other both run at once, each on its
-    /// own display; stopping them ends both runs and the launcher.
+    /// Two VMs powered on one after the other both run their guests at once,
+    /// each on its own display; stopping them ends both runs and the
+    /// launcher.
     #[cfg(feature = "gui-egui")]
     #[test]
     fn the_launcher_runs_two_vms_at_once() {
@@ -2369,7 +2421,16 @@ mod tests {
             power_on(&commands, display, spinning_config(&bios));
         }
 
-        wait_until(|| first.lock().unwrap().emu_running && second.lock().unwrap().emu_running);
+        // Every real second, a run shows the instructions per second its
+        // guest retired, so a display that shows more than none had its
+        // guest run. Neither spinning guest ends until it is stopped, so
+        // the two ran at once.
+        wait_until(|| {
+            [&first, &second].iter().all(|display| {
+                let shown = display.lock().unwrap();
+                shown.emu_running && shown.ips > 0
+            })
+        });
 
         signal_egui_stop(&first);
         signal_egui_stop(&second);
@@ -2381,6 +2442,52 @@ mod tests {
         assert!(!second.lock().unwrap().emu_running);
         assert_eq!(first.lock().unwrap().runtime_error, None);
         assert_eq!(second.lock().unwrap().runtime_error, None);
+    }
+
+    /// A run that is over is let go of at the next power-on, not only when
+    /// the app ends: its thread is joined, its VM's display is released, and
+    /// what it retired counts in the total the app reports at exit. An app
+    /// that outlives any number of runs, as a phone's does, keeps nothing of
+    /// the runs that ended.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_run_that_is_over_is_let_go_of_at_the_next_power_on() {
+        const FIRST_BUDGET: u64 = 100_000;
+        const SECOND_BUDGET: u64 = 1_000;
+        let bios = spinning_bios();
+        // A spinning VM whose run ends once it has retired `budget`.
+        let budgeted = |budget| ResolvedConfig {
+            max_instructions: budget,
+            ..spinning_config(&bios)
+        };
+        let first = Arc::new(Mutex::new(SharedDisplay::new()));
+        let second = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+
+        power_on(&commands, &first, budgeted(FIRST_BUDGET));
+        wait_until_the_run_is_over(&first);
+        // The run's thread holds the first display until it ends; then only
+        // this test and the launcher's record of the run do.
+        wait_until(|| Arc::strong_count(&first) == 2);
+        power_on(&commands, &second, budgeted(SECOND_BUDGET));
+        wait_until_the_run_is_over(&second);
+        let holders_of_the_first = Arc::strong_count(&first);
+
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert_eq!(
+            holders_of_the_first, 1,
+            "once the second VM has run, the first run's display is this test's alone"
+        );
+        assert_eq!(first.lock().unwrap().runtime_error, None);
+        assert_eq!(second.lock().unwrap().runtime_error, None);
+        let retired = result.expect("the launcher's result").instructions_executed;
+        assert!(
+            retired.is_some_and(|retired| retired >= FIRST_BUDGET + SECOND_BUDGET),
+            "both runs count in the total: {retired:?}"
+        );
     }
 
     /// A stop raised after the shell asked for a power-on and before the
@@ -2402,7 +2509,7 @@ mod tests {
             holds: RunHolds::default(),
         });
 
-        wait_for_end(&run, "the run ignored a stop raised before it started");
+        wait_for_end(&run, "a run stopped before it started");
 
         let retired = run.join().expect("the run's thread");
         remove_test_file(&bios);
@@ -2458,7 +2565,7 @@ mod tests {
         ask_for_a_restart(&display);
         signal_egui_stop(&display);
 
-        wait_for_end(&run, "the VM began again after the shell stopped it");
+        wait_for_end(&run, "a VM stopped with its restart queued");
         let retired = run.join().expect("the run's thread");
         assert!(retired.is_some(), "a run on the interpreter counts what it retired");
         remove_test_file(&bios);

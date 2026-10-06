@@ -149,7 +149,10 @@ impl Drop for LogcatRecord {
 }
 
 /// Runs the shell for `app`, the activity NativeActivity handed this process,
-/// until the activity ends, and logs how the run finished.
+/// and logs how the run finished. The shell never ends its own loop: on a
+/// phone, quitting stops every VM and sends the app to the background
+/// (`ClosePlatform::Phone`), so the run finishes only when the shell cannot
+/// start or eframe fails.
 pub fn main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
@@ -505,7 +508,8 @@ impl eframe::App for AndroidShellApp {
 
     /// The activity's window is being taken away — the app went to the
     /// background, the last call before Android may kill the process — or
-    /// the shell is closing: the shell writes every edit still in memory.
+    /// eframe is ending its loop after a failure: the shell writes every
+    /// edit still in memory.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::App::save(&mut self.shell, storage);
     }
@@ -518,7 +522,9 @@ impl eframe::App for AndroidShellApp {
         eframe::App::persist_egui_memory(&self.shell)
     }
 
-    /// The activity is closing: the shell writes every edit still in memory.
+    /// eframe is ending its loop, which on a phone only a failure of
+    /// eframe's own does: every VM's run is asked to stop, and the shell
+    /// writes every edit still in memory (`NativeShellApp::on_exit`).
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
         eframe::App::on_exit(&mut self.shell, gl);
     }

@@ -1576,7 +1576,8 @@ fn disk_identity(path: &Path) -> PathBuf {
 }
 
 /// What the shell says when the hard-disk image at `path` is refused, to a
-/// power-on or to a new disk's create, because `holder` runs on it.
+/// power-on, a new disk's create or the floppy maker's, because `holder`
+/// runs on it.
 #[cfg(not(target_arch = "wasm32"))]
 fn disk_in_use(path: &Path, holder: &HeldBy) -> String {
     format!("{} is in use by {}; stop it first.", path.display(), holder.name)
@@ -3440,13 +3441,15 @@ impl NativeShellApp {
         if self.sessions.any_live() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_requested();
-            #[cfg(not(target_os = "android"))]
-            {
-                let shown = ctx.input(|input| input.viewport().visible().unwrap_or(true));
-                if self.close_question.is_some() && !shown {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            match platform {
+                ClosePlatform::Desktop => {
+                    let shown = ctx.input(|input| input.viewport().visible().unwrap_or(true));
+                    if self.close_question.is_some() && !shown {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
                 }
+                ClosePlatform::Phone => {}
             }
             return;
         }
@@ -8468,6 +8471,44 @@ mod tests {
         drop(first);
     }
 
+    /// Two spellings of one existing hard-disk image are one disk: while a
+    /// VM runs on the file, a second VM given the same file by another path,
+    /// into a sibling folder and back out, is refused, and the notice names
+    /// the VM that runs on it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_disk_in_use_is_refused_under_another_spelling_of_its_path() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch,
+        } = two_vm_app();
+        // The disk's folder lies in the scratch library's, and goes with it.
+        let folder = scratch.dir.join("disks");
+        fs::create_dir_all(folder.join("sub")).expect("create the disk's folder");
+        let disk = folder.join("d.img");
+        write_test_disk(&disk);
+        assert!(app.set_browsed_path(BrowseTarget::HardDisk, disk));
+        let alpine = power_on(&mut app, &command_rx);
+
+        app.select_profile(1);
+        let same_disk = folder.join("sub").join("..").join("d.img");
+        assert!(app.set_browsed_path(BrowseTarget::HardDisk, same_disk));
+        app.start_vm();
+
+        assert!(command_rx.try_recv().is_err(), "nothing is started");
+        let message = app
+            .shell_notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        assert!(
+            message.ends_with("is in use by Alpine; stop it first."),
+            "{message}"
+        );
+        drop(alpine);
+    }
+
     /// A hard disk another running VM uses is refused before its overwrite
     /// is asked about: nothing is agreed while it is in use, so once that VM
     /// is off, the power-on asks before the file is erased.
@@ -9899,19 +9940,20 @@ mod tests {
         }
     }
 
-    /// A close of the window, taken over as `platform` takes it. Returns what
-    /// was asked of the window.
+    /// A close of the window, as `window` describes it, taken over as
+    /// `platform` takes it. Returns what was asked of the window.
     #[cfg(not(target_arch = "wasm32"))]
     fn take_over_a_close_on(
         app: &mut NativeShellApp,
         platform: ClosePlatform,
+        window: egui::ViewportInfo,
     ) -> Vec<egui::ViewportCommand> {
         let mut input = egui::RawInput::default();
         input.viewports.insert(
             egui::ViewportId::ROOT,
             egui::ViewportInfo {
                 events: vec![egui::ViewportEvent::Close],
-                ..egui::ViewportInfo::default()
+                ..window
             },
         );
         egui::Context::default()
@@ -9965,12 +10007,21 @@ mod tests {
     #[test]
     fn a_phone_cancels_every_close_and_quits_off_the_screen() {
         let (mut desktop, _desktop_commands, _desktop_scratch) = native_test_app();
-        assert!(take_over_a_close_on(&mut desktop, ClosePlatform::Desktop).is_empty());
+        assert!(take_over_a_close_on(
+            &mut desktop,
+            ClosePlatform::Desktop,
+            egui::ViewportInfo::default()
+        )
+        .is_empty());
         assert_eq!(desktop.take_close_action(), None);
 
         let (mut phone, phone_commands, _phone_scratch) = native_test_app();
         assert_eq!(
-            take_over_a_close_on(&mut phone, ClosePlatform::Phone),
+            take_over_a_close_on(
+                &mut phone,
+                ClosePlatform::Phone,
+                egui::ViewportInfo::default()
+            ),
             [egui::ViewportCommand::CancelClose]
         );
         let quit = carry_out_on(&mut phone, ClosePlatform::Phone);
@@ -9979,11 +10030,49 @@ mod tests {
 
         let run = power_on(&mut phone, &phone_commands);
         assert_eq!(
-            take_over_a_close_on(&mut phone, ClosePlatform::Phone),
+            take_over_a_close_on(
+                &mut phone,
+                ClosePlatform::Phone,
+                egui::ViewportInfo::default()
+            ),
             [egui::ViewportCommand::CancelClose]
         );
         assert!(phone.close_question.is_some(), "with a VM running it asks");
         drop(run);
+    }
+
+    /// A close taken over while a VM runs brings a minimized window back for
+    /// its question on a desktop alone: a phone asks nothing of its window
+    /// but to stay open.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn only_a_desktop_brings_a_minimized_window_back_to_ask() {
+        let minimized = egui::ViewportInfo {
+            minimized: Some(true),
+            ..egui::ViewportInfo::default()
+        };
+        for platform in [ClosePlatform::Desktop, ClosePlatform::Phone] {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+
+            let asked = take_over_a_close_on(&mut app, platform, minimized.clone());
+
+            assert!(app.close_question.is_some(), "{platform:?} asks");
+            match platform {
+                ClosePlatform::Desktop => assert_eq!(
+                    asked,
+                    [
+                        egui::ViewportCommand::CancelClose,
+                        egui::ViewportCommand::Minimized(false),
+                        egui::ViewportCommand::Focus
+                    ]
+                ),
+                ClosePlatform::Phone => {
+                    assert_eq!(asked, [egui::ViewportCommand::CancelClose]);
+                }
+            }
+            drop(run);
+        }
     }
 
     /// Back's order, topmost first: with one thing open and everything
