@@ -69,10 +69,117 @@ impl Drop for Hold {
 }
 
 /// What a power-on holds for as long as its runs last.
-#[derive(Default)]
 pub(crate) struct RunHolds {
     pub(crate) hypervisor: Option<Hold>,
     pub(crate) disk: Option<Hold>,
+    /// The app is kept running while the power-on lasts.
+    pub(crate) alive: AliveHold,
+}
+
+/// What keeping the app running takes on this platform.
+#[derive(Clone)]
+pub(crate) enum AliveEffect {
+    /// A desktop app keeps running whatever its screen does.
+    Nothing,
+    /// A phone runs `VmService`, a foreground service with a wake lock, while
+    /// any VM runs: without one Android puts the app to sleep and closes it
+    /// once the screen has been off for a while (src/android.rs).
+    #[cfg(target_os = "android")]
+    Phone(crate::android::AndroidApp),
+    /// Each start and stop, in order, for a test to read.
+    #[cfg(test)]
+    Record(Arc<Mutex<Vec<AliveChange>>>),
+}
+
+/// A change of the platform's keep-alive, as a test records it.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AliveChange {
+    Started,
+    Stopped,
+}
+
+impl AliveEffect {
+    fn start(&self) {
+        match self {
+            Self::Nothing => {}
+            #[cfg(target_os = "android")]
+            Self::Phone(app) => crate::android::keep_alive(app),
+            #[cfg(test)]
+            Self::Record(changes) => changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(AliveChange::Started),
+        }
+    }
+
+    fn stop(&self) {
+        match self {
+            Self::Nothing => {}
+            #[cfg(target_os = "android")]
+            Self::Phone(app) => crate::android::let_go(app),
+            #[cfg(test)]
+            Self::Record(changes) => changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(AliveChange::Stopped),
+        }
+    }
+}
+
+/// Keeps the app running while any power-on lasts: the first hold taken
+/// starts the platform's keep-alive and the last one given back stops it,
+/// the one place either happens (R5). Shared by the shell, which takes a
+/// hold for each power-on it sends, and the run threads, which give it back
+/// once the power-on's last machine is gone — with the app in the
+/// background as much as in front.
+#[derive(Clone)]
+pub(crate) struct KeepAlive(Arc<Mutex<Keeping>>);
+
+struct Keeping {
+    /// The power-ons holding the app alive.
+    holds: usize,
+    effect: AliveEffect,
+}
+
+impl KeepAlive {
+    pub(crate) fn new(effect: AliveEffect) -> Self {
+        Self(Arc::new(Mutex::new(Keeping { holds: 0, effect })))
+    }
+
+    /// Keeps the app running until the hold is dropped. A lock a panicking
+    /// thread poisoned still holds a whole count, since every change to it
+    /// is one step up or down, so it is used as it is.
+    pub(crate) fn take(&self) -> AliveHold {
+        let mut keeping = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        keeping.holds += 1;
+        if keeping.holds == 1 {
+            keeping.effect.start();
+        }
+        AliveHold {
+            keep_alive: self.clone(),
+        }
+    }
+}
+
+/// One power-on keeping the app running; given back when dropped.
+pub(crate) struct AliveHold {
+    keep_alive: KeepAlive,
+}
+
+impl Drop for AliveHold {
+    fn drop(&mut self) {
+        let mut keeping = self
+            .keep_alive
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Every hold was counted once when it was taken.
+        keeping.holds = keeping.holds.saturating_sub(1);
+        if keeping.holds == 0 {
+            keeping.effect.stop();
+        }
+    }
 }
 
 /// A VM's screen and console: what its runs draw into and read their input
@@ -249,6 +356,34 @@ mod tests {
         );
         drop(held);
         assert!(holdings.take(Exclusive::Hypervisor, xp).is_ok());
+    }
+
+    /// A phone's foreground service runs from the first VM's power-on until
+    /// the last VM is off, and starts again with the next power-on.
+    #[test]
+    fn the_app_is_kept_alive_from_the_first_power_on_until_the_last_is_over() {
+        let changes = Arc::new(Mutex::new(Vec::new()));
+        let keep_alive = KeepAlive::new(AliveEffect::Record(Arc::clone(&changes)));
+        let recorded = || changes.lock().unwrap().clone();
+
+        let alpine = keep_alive.take();
+        let xp = keep_alive.take();
+        assert_eq!(recorded(), [AliveChange::Started], "one start for two VMs");
+        drop(alpine);
+        assert_eq!(recorded(), [AliveChange::Started], "Windows XP still runs");
+        drop(xp);
+        assert_eq!(recorded(), [AliveChange::Started, AliveChange::Stopped]);
+
+        drop(keep_alive.take());
+        assert_eq!(
+            recorded(),
+            [
+                AliveChange::Started,
+                AliveChange::Stopped,
+                AliveChange::Started,
+                AliveChange::Stopped,
+            ]
+        );
     }
 
     #[test]

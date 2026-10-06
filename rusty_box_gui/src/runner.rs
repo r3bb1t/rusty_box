@@ -1047,10 +1047,16 @@ fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>
         how = RunStart::Restart;
     }
     // Every machine this power-on built is gone: the next VM may take the
-    // hypervisor, and the disk may have its next writer.
-    let crate::sessions::RunHolds { hypervisor, disk } = holds;
+    // hypervisor, the disk may have its next writer, and with the last VM off
+    // a phone no longer keeps the app running.
+    let crate::sessions::RunHolds {
+        hypervisor,
+        disk,
+        alive,
+    } = holds;
     drop(hypervisor);
     drop(disk);
+    drop(alive);
     retired
 }
 
@@ -1328,7 +1334,9 @@ mod tests {
         CpuCapabilities, Engine, ResolvedCdrom, ResolvedDisk, ResolvedDiskCreation,
     };
     #[cfg(feature = "gui-egui")]
-    use crate::sessions::{Exclusive, HeldBy, Holdings, RunHolds};
+    use crate::sessions::{
+        AliveChange, AliveEffect, Exclusive, HeldBy, Holdings, KeepAlive, RunHolds,
+    };
     use rusty_box::params::BxParams;
     use rusty_box_bximage::ImageSize;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1986,7 +1994,18 @@ mod tests {
         display: &Arc<Mutex<SharedDisplay>>,
         config: ResolvedConfig,
     ) {
-        power_on_holding(commands, display, config, RunHolds::default());
+        power_on_holding(commands, display, config, holds_of_a_plain_power_on());
+    }
+
+    /// What a power-on holds when it takes neither the hypervisor nor a hard
+    /// disk: the app kept running, here by a keep-alive that does nothing.
+    #[cfg(feature = "gui-egui")]
+    fn holds_of_a_plain_power_on() -> RunHolds {
+        RunHolds {
+            hypervisor: None,
+            disk: None,
+            alive: KeepAlive::new(AliveEffect::Nothing).take(),
+        }
     }
 
     /// `power_on` for a VM that took `holds` at its power-on, as the shell
@@ -2506,7 +2525,7 @@ mod tests {
         let run = spawn_run(crate::app::StartRun {
             display: Arc::clone(&display),
             config: spinning_config(&bios),
-            holds: RunHolds::default(),
+            holds: holds_of_a_plain_power_on(),
         });
 
         wait_for_end(&run, "a run stopped before it started");
@@ -2558,7 +2577,7 @@ mod tests {
         let run = spawn_run(crate::app::StartRun {
             display: Arc::clone(&display),
             config: spinning_config(&bios),
-            holds: RunHolds::default(),
+            holds: holds_of_a_plain_power_on(),
         });
         wait_until(|| display.lock().unwrap().emu_running);
 
@@ -2575,9 +2594,10 @@ mod tests {
     }
 
     /// A run keeps what it holds while it runs, through a restart, and gives
-    /// it back once its thread is done with the machine. The spinning VM runs
-    /// on the interpreter: only the hold is under test, so no hypervisor is
-    /// needed.
+    /// it back once its thread is done with the machine: the hypervisor, and
+    /// the keep-alive that on a phone runs the foreground service keeping the
+    /// app running with the screen off. The spinning VM runs on the
+    /// interpreter: only the holds are under test, so no hypervisor is needed.
     #[cfg(feature = "gui-egui")]
     #[test]
     fn a_run_gives_its_holds_back_once_it_is_over() {
@@ -2589,6 +2609,9 @@ mod tests {
         let held = holdings
             .take(Exclusive::Hypervisor, alpine.clone())
             .expect("free");
+        let changes = Arc::new(Mutex::new(Vec::new()));
+        let keep_alive = KeepAlive::new(AliveEffect::Record(Arc::clone(&changes)));
+        let kept_alive = || changes.lock().unwrap().clone();
         let display = Arc::new(Mutex::new(SharedDisplay::new()));
         let (commands, command_rx) = mpsc::channel();
         let launcher = spawn_launcher(command_rx);
@@ -2599,6 +2622,7 @@ mod tests {
             RunHolds {
                 hypervisor: Some(held),
                 disk: None,
+                alive: keep_alive.take(),
             },
         );
         wait_until(|| display.lock().unwrap().emu_running);
@@ -2610,6 +2634,7 @@ mod tests {
             Some(alpine.clone()),
             "held while it runs"
         );
+        assert_eq!(kept_alive(), [AliveChange::Started], "kept alive while it runs");
 
         ask_for_a_restart(&display);
         wait_until(|| {
@@ -2621,6 +2646,11 @@ mod tests {
             Some(alpine),
             "held through the restart"
         );
+        assert_eq!(
+            kept_alive(),
+            [AliveChange::Started],
+            "kept alive through the restart"
+        );
 
         signal_egui_stop(&display);
         drop(commands);
@@ -2630,6 +2660,11 @@ mod tests {
         assert!(
             holdings.take(Exclusive::Hypervisor, xp).is_ok(),
             "given back once the run is over"
+        );
+        assert_eq!(
+            kept_alive(),
+            [AliveChange::Started, AliveChange::Stopped],
+            "let go once the run is over"
         );
     }
 

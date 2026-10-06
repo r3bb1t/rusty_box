@@ -14,13 +14,15 @@
 )]
 
 use crate::android_support::{
-    content_rect_in_points, list_directory, needs_first_vm, seed_first_vm, stage_file,
-    CarriedMachine, DirectoryEntry, EntryKind, FileFilter, PixelRect,
+    content_rect_in_points, exit_sentence, list_directory, needs_first_vm, seed_first_vm,
+    stage_file, untold_exit, CarriedMachine, DirectoryEntry, EntryKind, EpochMillis, ExitReason,
+    ExitRecord, ExitStanding, FileFilter, Kib, PixelRect,
 };
 use crate::app::{
     BrowseRequest, BrowseTarget, HostWindow, NativeEmulatorCommand, NativeShellApp, THIS_PLATFORM,
 };
 use crate::library::VmLibrary;
+use crate::sessions::AliveEffect;
 use crate::{RunError, RunSummary};
 use egui::RichText;
 use rusty_box::gui::shared_display::SharedDisplay;
@@ -57,6 +59,23 @@ const PERMISSION_GRANTED: i32 = 0;
 /// The code the permission prompt answers with. Nothing listens for it: the
 /// browser reads the grant again when the app regains focus.
 const STORAGE_REQUEST_CODE: i32 = 1_001;
+
+/// The service `AndroidManifest.xml` declares, which keeps the app running
+/// while a VM runs (`android/java/com/rustybox/android/VmService.java`).
+const VM_SERVICE: &str = "com.rustybox.android.VmService";
+/// `Build.VERSION_CODES.O`: from Android 8 a service that is to run in the
+/// foreground is started as one.
+const ANDROID_8: i32 = 26;
+/// `Build.VERSION_CODES.TIRAMISU`: from Android 13 an app shows notifications
+/// only with the user's permission.
+const ANDROID_13: i32 = 33;
+const POST_NOTIFICATIONS: &str = "android.permission.POST_NOTIFICATIONS";
+/// The code the notification prompt answers with. Nothing listens for it:
+/// the service runs whatever the answer, its notification shown or not.
+const NOTIFICATION_REQUEST_CODE: i32 = 1_002;
+/// The file in the app's storage holding when the newest end of the app a
+/// launch has seen happened, so each end is told once.
+const LAST_EXIT_SEEN: &str = "last_exit_seen";
 
 /// The smallest height a control may have on a phone, points: a thumb's
 /// target rather than a pointer's.
@@ -168,13 +187,78 @@ pub fn main(app: AndroidApp) {
 
 fn run(app: AndroidApp) -> Result<RunSummary, RunError> {
     let storage = app.internal_data_path().ok_or(RunError::NoAppStorage)?;
+    let ended = previous_end_notice(&app, &storage);
     let PhoneLibrary { library, notice } = phone_library(&storage)?;
     let start = crate::runner::ShellStart {
         library,
         opening: crate::runner::ShellOpening::LastShown,
-        notice,
+        notice: joined_notice(ended, notice),
     };
     crate::runner::run_android_shell(start, app, &storage)
+}
+
+/// Both notices, the first first, as the one the shell opens with.
+fn joined_notice(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first}\n\n{second}")),
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    }
+}
+
+/// What the shell says first about how the app last ended, when Android
+/// recorded an end the user did not ask for and no launch has told of yet:
+/// on a phone the VMs end with the app, so the user should learn why. Every
+/// end Android keeps goes to the log, whichever is told.
+fn previous_end_notice(app: &AndroidApp, storage: &Path) -> Option<String> {
+    let records = match with_activity(app, previous_ends) {
+        Ok(records) => records,
+        Err(error) => {
+            log::warn!("Android's record of how the app ended before could not be read: {error}");
+            return None;
+        }
+    };
+    for record in &records {
+        log::info!("an earlier end of the app, as Android recorded it: {record:?}");
+    }
+    let marker = storage.join(LAST_EXIT_SEEN);
+    let untold = untold_exit(&records, last_seen_end(&marker));
+    if let Some(newest) = untold.newest {
+        if let Err(error) = std::fs::write(&marker, newest.0.to_string()) {
+            log::warn!(
+                "{} was not written, so the next launch may tell of the same end: {error}",
+                marker.display()
+            );
+        }
+    }
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => EpochMillis(i64::try_from(since.as_millis()).unwrap_or(i64::MAX)),
+        Err(_) => EpochMillis(0),
+    };
+    let sentence = untold.record.map(|record| exit_sentence(record, now));
+    if let Some(sentence) = &sentence {
+        log::warn!("{sentence}");
+    }
+    sentence
+}
+
+/// When the newest end an earlier launch saw happened; `None` before any
+/// launch has recorded one.
+fn last_seen_end(marker: &Path) -> Option<EpochMillis> {
+    match std::fs::read_to_string(marker) {
+        Ok(text) => match text.trim().parse() {
+            Ok(millis) => Some(EpochMillis(millis)),
+            Err(error) => {
+                log::warn!("{} holds no time ({error}); every end counts", marker.display());
+                None
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            log::warn!("{} could not be read ({error}); every end counts", marker.display());
+            None
+        }
+    }
 }
 
 /// What a phone opens the shell on.
@@ -254,7 +338,12 @@ impl AndroidShellApp {
         start: crate::runner::ShellStart,
         app: AndroidApp,
     ) -> Self {
-        let shell = NativeShellApp::new(cc, command_tx, start);
+        let shell = NativeShellApp::keeping_alive_by(
+            cc,
+            command_tx,
+            start,
+            AliveEffect::Phone(app.clone()),
+        );
         // A finger needs a larger target than a pointer: every control is at
         // least TOUCH_TARGET points tall, with room around its caption.
         // On a touch screen a press on text is a tap on what holds it, and a
@@ -1023,20 +1112,282 @@ fn storage_access_granted(
             .z();
     }
     for name in [READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE] {
-        let permission = env.new_string(name)?;
-        let state = env
-            .call_method(
-                activity,
-                jni::jni_str!("checkSelfPermission"),
-                jni::jni_sig!("(Ljava/lang/String;)I"),
-                &[jni::objects::JValue::Object(&permission)],
-            )?
-            .i()?;
-        if state != PERMISSION_GRANTED {
+        if !permission_granted(env, activity, name)? {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// Whether the user has granted the app the runtime permission `name`.
+fn permission_granted(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+    name: &str,
+) -> jni::errors::Result<bool> {
+    let permission = env.new_string(name)?;
+    let state = env
+        .call_method(
+            activity,
+            jni::jni_str!("checkSelfPermission"),
+            jni::jni_sig!("(Ljava/lang/String;)I"),
+            &[jni::objects::JValue::Object(&permission)],
+        )?
+        .i()?;
+    Ok(state == PERMISSION_GRANTED)
+}
+
+/// Shows Android's prompt for the runtime permissions `names`; the answer
+/// comes back under `code`, which nothing here listens for.
+fn request_permissions(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+    names: &[&str],
+    code: i32,
+) -> jni::errors::Result<()> {
+    let string_class = env.find_class(jni::jni_str!("java/lang/String"))?;
+    let length = i32::try_from(names.len())
+        .map_err(|_| jni::errors::Error::JniCall(jni::errors::JniError::InvalidArguments))?;
+    let permissions = env.new_object_array(length, string_class, jni::objects::JObject::null())?;
+    for (index, name) in names.iter().enumerate() {
+        let permission = env.new_string(name)?;
+        permissions.set_element(env, index, &permission)?;
+    }
+    env.call_method(
+        activity,
+        jni::jni_str!("requestPermissions"),
+        jni::jni_sig!("([Ljava/lang/String;I)V"),
+        &[
+            jni::objects::JValue::Object(&permissions),
+            jni::objects::JValue::Int(code),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Starts `VmService`: a foreground service with a notification, and a wake
+/// lock that keeps the processor running with the screen off, so Android
+/// neither puts the app to sleep nor closes it while a VM runs. From
+/// Android 13 the notification shows only with the user's permission, which
+/// is asked for first; the service runs whatever the answer. The calls
+/// belong to Android's UI thread, so they are posted there.
+pub(crate) fn keep_alive(app: &AndroidApp) {
+    let activity = app.clone();
+    app.run_on_java_main_thread(Box::new(move || {
+        if let Err(error) = with_activity(&activity, ask_to_notify) {
+            log::warn!("could not ask to show the running-VM notification: {error}");
+        }
+        match with_activity(&activity, start_vm_service) {
+            Ok(ServiceStart::Started) => {
+                log::info!("VmService started: the VMs keep running with the screen off")
+            }
+            Ok(ServiceStart::NotInApk) => log::warn!(
+                "this APK declares no {VM_SERVICE}, so Android may close the app once the \
+                 screen is off"
+            ),
+            Err(error) => log::warn!(
+                "VmService did not start, so Android may close the app once the screen is \
+                 off: {error}"
+            ),
+        }
+    }));
+}
+
+/// Stops `VmService`: the last VM is off, and the app lets the phone sleep.
+/// Posted to Android's UI thread, after the start it follows.
+pub(crate) fn let_go(app: &AndroidApp) {
+    let activity = app.clone();
+    app.run_on_java_main_thread(Box::new(move || {
+        match with_activity(&activity, stop_vm_service) {
+            Ok(true) => log::info!("VmService stopped: no VM runs"),
+            Ok(false) => log::info!("VmService was not running"),
+            Err(error) => log::warn!("VmService did not stop, so the phone stays awake: {error}"),
+        }
+    }));
+}
+
+/// Whether Android found the service to start.
+enum ServiceStart {
+    Started,
+    /// The APK declares no such service.
+    NotInApk,
+}
+
+fn ask_to_notify(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<()> {
+    if sdk_level(env)? < ANDROID_13 || permission_granted(env, activity, POST_NOTIFICATIONS)? {
+        return Ok(());
+    }
+    request_permissions(
+        env,
+        activity,
+        &[POST_NOTIFICATIONS],
+        NOTIFICATION_REQUEST_CODE,
+    )
+}
+
+fn start_vm_service(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<ServiceStart> {
+    let intent = vm_service_intent(env, activity)?;
+    let started = if sdk_level(env)? >= ANDROID_8 {
+        env.call_method(
+            activity,
+            jni::jni_str!("startForegroundService"),
+            jni::jni_sig!("(Landroid/content/Intent;)Landroid/content/ComponentName;"),
+            &[jni::objects::JValue::Object(&intent)],
+        )?
+    } else {
+        env.call_method(
+            activity,
+            jni::jni_str!("startService"),
+            jni::jni_sig!("(Landroid/content/Intent;)Landroid/content/ComponentName;"),
+            &[jni::objects::JValue::Object(&intent)],
+        )?
+    }
+    .l()?;
+    Ok(if started.is_null() {
+        ServiceStart::NotInApk
+    } else {
+        ServiceStart::Started
+    })
+}
+
+/// Answers whether a running service was stopped.
+fn stop_vm_service(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<bool> {
+    let intent = vm_service_intent(env, activity)?;
+    env.call_method(
+        activity,
+        jni::jni_str!("stopService"),
+        jni::jni_sig!("(Landroid/content/Intent;)Z"),
+        &[jni::objects::JValue::Object(&intent)],
+    )?
+    .z()
+}
+
+/// An intent naming `VmService` by its class name: the class is the app's
+/// own, which a thread attached from native code cannot look up by
+/// `FindClass`.
+fn vm_service_intent<'local>(
+    env: &mut jni::Env<'local>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<jni::objects::JObject<'local>> {
+    let intent_class = env.find_class(jni::jni_str!("android/content/Intent"))?;
+    let blank = env.new_object(&intent_class, jni::jni_sig!("()V"), &[])?;
+    let name = env.new_string(VM_SERVICE)?;
+    env.call_method(
+        &blank,
+        jni::jni_str!("setClassName"),
+        jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;)Landroid/content/Intent;"),
+        &[
+            jni::objects::JValue::Object(activity),
+            jni::objects::JValue::Object(&name),
+        ],
+    )?
+    .l()
+}
+
+/// Every end of this app's process Android still keeps, newest first
+/// (`ActivityManager.getHistoricalProcessExitReasons`, Android 11 and later;
+/// none before).
+fn previous_ends(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<Vec<ExitRecord>> {
+    if sdk_level(env)? < ANDROID_11 {
+        return Ok(Vec::new());
+    }
+    let service = env.new_string("activity")?;
+    let manager = env
+        .call_method(
+            activity,
+            jni::jni_str!("getSystemService"),
+            jni::jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+            &[jni::objects::JValue::Object(&service)],
+        )?
+        .l()?;
+    // No package name: this app's own; no pid and no limit: every end kept.
+    let ends = env
+        .call_method(
+            &manager,
+            jni::jni_str!("getHistoricalProcessExitReasons"),
+            jni::jni_sig!("(Ljava/lang/String;II)Ljava/util/List;"),
+            &[
+                jni::objects::JValue::Object(&jni::objects::JObject::null()),
+                jni::objects::JValue::Int(0),
+                jni::objects::JValue::Int(0),
+            ],
+        )?
+        .l()?;
+    let count = env
+        .call_method(&ends, jni::jni_str!("size"), jni::jni_sig!("()I"), &[])?
+        .i()?;
+    let mut records = Vec::new();
+    for index in 0..count {
+        let record = env.with_local_frame(8, |env| -> jni::errors::Result<ExitRecord> {
+            let end = env
+                .call_method(
+                    &ends,
+                    jni::jni_str!("get"),
+                    jni::jni_sig!("(I)Ljava/lang/Object;"),
+                    &[jni::objects::JValue::Int(index)],
+                )?
+                .l()?;
+            exit_record(env, &end)
+        })?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// One `ApplicationExitInfo`, read into a record.
+fn exit_record(
+    env: &mut jni::Env<'_>,
+    end: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<ExitRecord> {
+    let reason = env
+        .call_method(end, jni::jni_str!("getReason"), jni::jni_sig!("()I"), &[])?
+        .i()?;
+    let status = env
+        .call_method(end, jni::jni_str!("getStatus"), jni::jni_sig!("()I"), &[])?
+        .i()?;
+    let importance = env
+        .call_method(end, jni::jni_str!("getImportance"), jni::jni_sig!("()I"), &[])?
+        .i()?;
+    let at = env
+        .call_method(end, jni::jni_str!("getTimestamp"), jni::jni_sig!("()J"), &[])?
+        .j()?;
+    let resident = env
+        .call_method(end, jni::jni_str!("getRss"), jni::jni_sig!("()J"), &[])?
+        .j()?;
+    let note = env
+        .call_method(
+            end,
+            jni::jni_str!("getDescription"),
+            jni::jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )?
+        .l()?;
+    let description = if note.is_null() {
+        None
+    } else {
+        let note = env.cast_local::<jni::objects::JString>(note)?;
+        Some(note.try_to_string(env)?)
+    };
+    Ok(ExitRecord {
+        reason: ExitReason::from_code(reason),
+        status,
+        standing: ExitStanding::of(importance),
+        at: EpochMillis(at),
+        resident: Kib(resident),
+        description,
+    })
 }
 
 /// Asks for shared-storage access: on Android 11 and later by opening this
@@ -1117,25 +1468,12 @@ fn ask_for_storage_access(
         )?;
         return Ok(());
     }
-    let string_class = env.find_class(jni::jni_str!("java/lang/String"))?;
-    let permissions = env.new_object_array(2, string_class, jni::objects::JObject::null())?;
-    for (index, name) in [READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE]
-        .into_iter()
-        .enumerate()
-    {
-        let permission = env.new_string(name)?;
-        permissions.set_element(env, index, &permission)?;
-    }
-    env.call_method(
-        activity.as_ref(),
-        jni::jni_str!("requestPermissions"),
-        jni::jni_sig!("([Ljava/lang/String;I)V"),
-        &[
-            jni::objects::JValue::Object(&permissions),
-            jni::objects::JValue::Int(STORAGE_REQUEST_CODE),
-        ],
-    )?;
-    Ok(())
+    request_permissions(
+        env,
+        activity,
+        &[READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE],
+        STORAGE_REQUEST_CODE,
+    )
 }
 
 /// `Build.VERSION.SDK_INT`, the API level the device runs.

@@ -25,8 +25,14 @@ const ANDROID_COMPONENT: &str = "com.rustybox.android/android.app.NativeActivity
 const APK_NAME: &str = "RustyBoxAndroid.apk";
 
 /// The cargo profile the APK builds with, `[profile.android]` in the
-/// workspace manifest; cargo-apk writes the APK under `target/<profile>/apk`.
+/// workspace manifest; cargo-apk writes its APK under `target/<profile>/apk`,
+/// and [`package_apk`] replaces it there with the one the phone installs.
 const ANDROID_PROFILE: &str = "android";
+/// The manifest the APK ships and the Java it carries, relative to the
+/// repository: cargo-apk can neither declare a service nor compile Java.
+const ANDROID_SOURCES: &str = "rusty_box_gui/android";
+/// The lowest API level the APK runs on, as its manifest names it.
+const ANDROID_MIN_SDK: &str = "23";
 /// The signing variables cargo-apk reads for [`ANDROID_PROFILE`]: it names
 /// them `CARGO_APK_<PROFILE>_KEYSTORE` and `…_KEYSTORE_PASSWORD`.
 const SIGNING_KEYSTORE_ENV: &str = "CARGO_APK_ANDROID_KEYSTORE";
@@ -152,6 +158,70 @@ impl AndroidContext {
             .join(".android")
             .join("rusty_box_android_xtask_debug.keystore")
     }
+
+    fn build_tool(&self, tool: BuildTool) -> PathBuf {
+        self.sdk
+            .join("build-tools")
+            .join(BUILD_TOOLS_VERSION)
+            .join(tool.file_name(self.host))
+    }
+
+    /// The Android API the Java is compiled and dexed against.
+    fn android_jar(&self) -> PathBuf {
+        self.sdk
+            .join("platforms")
+            .join(ANDROID_PLATFORM)
+            .join("android.jar")
+    }
+
+    /// Where [`package_apk`] works; emptied at the start of each build.
+    fn package_dir(&self) -> PathBuf {
+        self.repo
+            .join("target")
+            .join(ANDROID_PROFILE)
+            .join("apk")
+            .join("package")
+    }
+}
+
+/// An SDK build tool the APK is packed with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildTool {
+    Aapt2,
+    D8,
+    Zipalign,
+    Apksigner,
+}
+
+impl BuildTool {
+    /// The tool's file in `build-tools/<version>`: d8 and apksigner are
+    /// batch files on Windows.
+    pub fn file_name(self, host: HostOs) -> &'static str {
+        match (self, host) {
+            (Self::Aapt2, HostOs::Windows) => "aapt2.exe",
+            (Self::Aapt2, HostOs::Macos | HostOs::Linux) => "aapt2",
+            (Self::D8, HostOs::Windows) => "d8.bat",
+            (Self::D8, HostOs::Macos | HostOs::Linux) => "d8",
+            (Self::Zipalign, HostOs::Windows) => "zipalign.exe",
+            (Self::Zipalign, HostOs::Macos | HostOs::Linux) => "zipalign",
+            (Self::Apksigner, HostOs::Windows) => "apksigner.bat",
+            (Self::Apksigner, HostOs::Macos | HostOs::Linux) => "apksigner",
+        }
+    }
+}
+
+/// The keystore the APK is signed with, and its password.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApkSigning {
+    pub keystore: PathBuf,
+    pub password: String,
+}
+
+/// The version an APK declares, as `aapt2 dump badging` prints it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApkVersion {
+    pub code: String,
+    pub name: String,
 }
 
 pub fn main_entry() -> Result<(), String> {
@@ -341,12 +411,14 @@ fn execute_android(command: AndroidCommand) -> Result<(), String> {
 
     match command.action {
         AndroidAction::Build => {
-            let signing_env = prepare_android_build(&context, &command)?;
-            build_apk(&context, signing_env)?;
+            let signing = prepare_android_build(&context, &command)?;
+            build_apk(&context, &signing)?;
+            package_apk(&context, &signing)?;
         }
         AndroidAction::Run => {
-            let signing_env = prepare_android_build(&context, &command)?;
-            build_apk(&context, signing_env)?;
+            let signing = prepare_android_build(&context, &command)?;
+            build_apk(&context, &signing)?;
+            package_apk(&context, &signing)?;
             install_and_launch(&context)?;
             if let Some(path) = command.screenshot.as_deref() {
                 thread::sleep(Duration::from_secs(10));
@@ -369,11 +441,11 @@ fn execute_android(command: AndroidCommand) -> Result<(), String> {
 }
 
 /// Readies the SDK, the Rust tools and the signing keystore, and returns the
-/// signing variables the build hands cargo-apk.
+/// keystore the APK is signed with.
 fn prepare_android_build(
     context: &AndroidContext,
     command: &AndroidCommand,
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<ApkSigning, String> {
     if !command.skip_sdk {
         ensure_android_sdk(context)?;
     }
@@ -551,14 +623,17 @@ fn ensure_rust_tools(context: &AndroidContext) -> Result<(), String> {
     )
 }
 
-fn ensure_signing_keystore(context: &AndroidContext) -> Result<Vec<(String, String)>, String> {
+fn ensure_signing_keystore(context: &AndroidContext) -> Result<ApkSigning, String> {
     if let (Ok(keystore), Ok(password)) = (
         env::var(SIGNING_KEYSTORE_ENV),
         env::var(SIGNING_PASSWORD_ENV),
     ) {
         if !password.is_empty() {
             step(&format!("Using {SIGNING_KEYSTORE_ENV} from environment"));
-            return Ok(cargo_apk_signing_env(Path::new(&keystore), &password));
+            return Ok(ApkSigning {
+                keystore: PathBuf::from(keystore),
+                password,
+            });
         }
     }
 
@@ -569,7 +644,7 @@ fn ensure_signing_keystore(context: &AndroidContext) -> Result<Vec<(String, Stri
             "Android local dev keystore found: {}",
             keystore.display()
         ));
-        return Ok(cargo_apk_signing_env(&keystore, &password));
+        return Ok(ApkSigning { keystore, password });
     }
 
     step("Generating local Android dev keystore");
@@ -577,7 +652,7 @@ fn ensure_signing_keystore(context: &AndroidContext) -> Result<Vec<(String, Stri
         fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {error}", parent.display()))?;
     }
-    let keytool = keytool_program(context.host);
+    let keytool = jdk_program(context.host, "keytool");
     run_program(
         keytool.as_os_str(),
         &[
@@ -604,11 +679,11 @@ fn ensure_signing_keystore(context: &AndroidContext) -> Result<Vec<(String, Stri
         &[],
         "generate Android dev keystore",
     )?;
-    Ok(cargo_apk_signing_env(&keystore, &password))
+    Ok(ApkSigning { keystore, password })
 }
 
-fn build_apk(context: &AndroidContext, signing_env: Vec<(String, String)>) -> Result<(), String> {
-    let mut build_env = signing_env;
+fn build_apk(context: &AndroidContext, signing: &ApkSigning) -> Result<(), String> {
+    let mut build_env = cargo_apk_signing_env(&signing.keystore, &signing.password);
     build_env.push(android_rustflags_env(
         caller_env("CARGO_ENCODED_RUSTFLAGS")?.as_deref(),
         caller_env("RUSTFLAGS")?.as_deref(),
@@ -624,6 +699,273 @@ fn build_apk(context: &AndroidContext, signing_env: Vec<(String, String)>) -> Re
         &build_env,
         "build Rusty Box Android APK",
     )
+}
+
+/// Packs the APK the phone installs, in place of the one cargo-apk built:
+/// the manifest under [`ANDROID_SOURCES`], linked by aapt2; the dex of the
+/// Java beside it, which keeps the app running while a VM runs; and the
+/// native library from cargo-apk's APK, with the version cargo-apk derives
+/// from the crate's. It is aligned, then signed with `signing`, the key
+/// cargo-apk signs with, so it installs over an earlier build and keeps its
+/// data.
+fn package_apk(context: &AndroidContext, signing: &ApkSigning) -> Result<(), String> {
+    step("Packing the APK: manifest, service and native library");
+    let built = context.apk_path();
+    let work = context.package_dir();
+    remove_dir_if_exists(&work)?;
+    let classes = work.join("classes");
+    let dex = work.join("dex");
+    for dir in [&classes, &dex] {
+        fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    }
+    let sources = context.repo.join(ANDROID_SOURCES);
+    let android_jar = path_for_env(&context.android_jar());
+
+    let badging = program_stdout(
+        context.build_tool(BuildTool::Aapt2).as_os_str(),
+        &[
+            "dump".to_string(),
+            "badging".to_string(),
+            path_for_env(&built),
+        ],
+        context,
+        "read the version of cargo-apk's APK",
+    )?;
+    let version = parse_badging(&badging)?;
+
+    let linked = work.join("linked.apk");
+    run_program(
+        context.build_tool(BuildTool::Aapt2).as_os_str(),
+        &[
+            "link".to_string(),
+            "-o".to_string(),
+            path_for_env(&linked),
+            "-I".to_string(),
+            android_jar.clone(),
+            "--manifest".to_string(),
+            path_for_env(&sources.join("AndroidManifest.xml")),
+            "--version-code".to_string(),
+            version.code,
+            "--version-name".to_string(),
+            version.name,
+        ],
+        context,
+        &[],
+        "link the APK's manifest",
+    )?;
+
+    let java = files_with_extension(&sources.join("java"), "java")?;
+    let mut javac_args = vec![
+        "-source".to_string(),
+        "8".to_string(),
+        "-target".to_string(),
+        "8".to_string(),
+        // The JDK warns that release 8 is old; Android's d8 reads it.
+        "-Xlint:-options".to_string(),
+        "-encoding".to_string(),
+        "UTF-8".to_string(),
+        "-bootclasspath".to_string(),
+        android_jar.clone(),
+        "-d".to_string(),
+        path_for_env(&classes),
+    ];
+    javac_args.extend(java.iter().map(|path| path_for_env(path)));
+    run_program(
+        jdk_program(context.host, "javac").as_os_str(),
+        &javac_args,
+        context,
+        &[],
+        "compile the APK's Java",
+    )?;
+
+    let mut d8_args = vec![
+        "--release".to_string(),
+        "--min-api".to_string(),
+        ANDROID_MIN_SDK.to_string(),
+        "--lib".to_string(),
+        android_jar,
+        "--output".to_string(),
+        path_for_env(&dex),
+    ];
+    d8_args.extend(
+        files_with_extension(&classes, "class")?
+            .iter()
+            .map(|path| path_for_env(path)),
+    );
+    run_program(
+        context.build_tool(BuildTool::D8).as_os_str(),
+        &d8_args,
+        context,
+        &[],
+        "dex the APK's Java",
+    )?;
+
+    let unaligned = work.join("unaligned.apk");
+    merge_apk(&ApkParts {
+        linked: &linked,
+        dex: &dex.join("classes.dex"),
+        native: &built,
+        out: &unaligned,
+    })?;
+
+    let aligned = work.join("aligned.apk");
+    run_program(
+        context.build_tool(BuildTool::Zipalign).as_os_str(),
+        &[
+            "-f".to_string(),
+            "-p".to_string(),
+            "4".to_string(),
+            path_for_env(&unaligned),
+            path_for_env(&aligned),
+        ],
+        context,
+        &[],
+        "align the APK",
+    )?;
+
+    // The password reaches apksigner through its environment, not its
+    // command line.
+    let signing_env = [(SIGNING_PASSWORD_ENV.to_string(), signing.password.clone())];
+    run_program(
+        context.build_tool(BuildTool::Apksigner).as_os_str(),
+        &[
+            "sign".to_string(),
+            "--ks".to_string(),
+            path_for_env(&signing.keystore),
+            "--ks-pass".to_string(),
+            format!("env:{SIGNING_PASSWORD_ENV}"),
+            "--out".to_string(),
+            path_for_env(&built),
+            path_for_env(&aligned),
+        ],
+        context,
+        &signing_env,
+        "sign the APK",
+    )?;
+    run_program(
+        context.build_tool(BuildTool::Apksigner).as_os_str(),
+        &["verify".to_string(), path_for_env(&built)],
+        context,
+        &[],
+        "verify the APK's signature",
+    )
+}
+
+/// What [`merge_apk`] puts together, and where.
+struct ApkParts<'a> {
+    /// The APK aapt2 linked: the binary manifest and any resources.
+    linked: &'a Path,
+    /// The dex of the APK's Java.
+    dex: &'a Path,
+    /// cargo-apk's APK, which carries the native libraries.
+    native: &'a Path,
+    out: &'a Path,
+}
+
+/// Writes the APK's entries before alignment: everything aapt2 linked,
+/// `classes.dex`, and the native libraries (`lib/…`) of cargo-apk's APK,
+/// copied as they are stored. cargo-apk's manifest and signature
+/// (`META-INF/…`) stay behind: the APK is signed again once aligned.
+fn merge_apk(parts: &ApkParts<'_>) -> Result<(), String> {
+    let open = |path: &Path| -> Result<zip::ZipArchive<File>, String> {
+        let file = File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+        zip::ZipArchive::new(file).map_err(|error| format!("read zip {}: {error}", path.display()))
+    };
+    let out = File::create(parts.out)
+        .map_err(|error| format!("create {}: {error}", parts.out.display()))?;
+    let mut writer = zip::ZipWriter::new(out);
+    let copy_failed = |path: &Path, error: zip::result::ZipError| {
+        format!("copy an entry of {} into the APK: {error}", path.display())
+    };
+
+    let mut linked = open(parts.linked)?;
+    for index in 0..linked.len() {
+        let entry = linked
+            .by_index_raw(index)
+            .map_err(|error| copy_failed(parts.linked, error))?;
+        writer
+            .raw_copy_file(entry)
+            .map_err(|error| copy_failed(parts.linked, error))?;
+    }
+
+    let dex = fs::read(parts.dex).map_err(|error| format!("read {}: {error}", parts.dex.display()))?;
+    writer
+        .start_file(
+            "classes.dex",
+            zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated),
+        )
+        .map_err(|error| format!("add classes.dex to the APK: {error}"))?;
+    writer
+        .write_all(&dex)
+        .map_err(|error| format!("write classes.dex into the APK: {error}"))?;
+
+    let mut native = open(parts.native)?;
+    for index in 0..native.len() {
+        let entry = native
+            .by_index_raw(index)
+            .map_err(|error| copy_failed(parts.native, error))?;
+        if entry.name().starts_with("lib/") {
+            writer
+                .raw_copy_file(entry)
+                .map_err(|error| copy_failed(parts.native, error))?;
+        }
+    }
+
+    let finished = writer
+        .finish()
+        .map_err(|error| format!("finish {}: {error}", parts.out.display()))?;
+    finished
+        .sync_all()
+        .map_err(|error| format!("flush {}: {error}", parts.out.display()))
+}
+
+/// The version on the `package:` line of `aapt2 dump badging` output.
+pub fn parse_badging(badging: &str) -> Result<ApkVersion, String> {
+    let line = badging
+        .lines()
+        .find(|line| line.starts_with("package:"))
+        .ok_or_else(|| "aapt2 printed no package line for the APK".to_string())?;
+    let attribute = |name: &str| -> Result<String, String> {
+        let start = format!("{name}='");
+        let from = line
+            .find(&start)
+            .map(|at| at + start.len())
+            .ok_or_else(|| format!("the APK's package line names no {name}: {line}"))?;
+        line[from..]
+            .find('\'')
+            .map(|end| line[from..from + end].to_string())
+            .ok_or_else(|| format!("the APK's {name} is not closed: {line}"))
+    };
+    Ok(ApkVersion {
+        code: attribute("versionCode")?,
+        name: attribute("versionName")?,
+    })
+}
+
+/// Every file under `dir` whose extension is `extension`, in a fixed order.
+fn files_with_extension(dir: &Path, extension: &str) -> Result<Vec<PathBuf>, String> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let entries =
+            fs::read_dir(&next).map_err(|error| format!("list {}: {error}", next.display()))?;
+        for entry in entries {
+            let path = entry
+                .map_err(|error| format!("list {}: {error}", next.display()))?
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension() == Some(OsStr::new(extension)) {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    if found.is_empty() {
+        return Err(format!("no .{extension} file under {}", dir.display()));
+    }
+    Ok(found)
 }
 
 fn install_and_launch(context: &AndroidContext) -> Result<(), String> {
@@ -743,6 +1085,29 @@ fn run_program(
     }
 }
 
+/// What `program` prints, when it succeeds.
+fn program_stdout(
+    program: &OsStr,
+    args: &[String],
+    context: &AndroidContext,
+    label: &str,
+) -> Result<String, String> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(&context.repo)
+        .stderr(Stdio::inherit());
+    apply_android_env(&mut command, context, &[]);
+    let output = command
+        .output()
+        .map_err(|error| format!("{label}: failed to spawn {:?}: {error}", program))?;
+    if !output.status.success() {
+        return Err(format!("{label}: command exited with status {}", output.status));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("{label}: the output is not UTF-8: {error}"))
+}
+
 fn command_success(
     program: &OsStr,
     args: &[String],
@@ -855,16 +1220,18 @@ fn make_executable(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn keytool_program(host: HostOs) -> PathBuf {
+/// The JDK's `tool` (keytool, javac): the one in `JAVA_HOME` when it has
+/// one, else whichever the PATH finds.
+fn jdk_program(host: HostOs, tool: &str) -> PathBuf {
     if let Some(java_home) = env::var_os("JAVA_HOME") {
         let candidate = PathBuf::from(java_home)
             .join("bin")
-            .join(format!("keytool{}", host.exe_suffix()));
+            .join(format!("{tool}{}", host.exe_suffix()));
         if candidate.exists() {
             return candidate;
         }
     }
-    PathBuf::from(format!("keytool{}", host.exe_suffix()))
+    PathBuf::from(format!("{tool}{}", host.exe_suffix()))
 }
 
 fn usage() -> String {
@@ -1033,5 +1400,113 @@ mod tests {
                 "com.rustybox.android/android.app.NativeActivity",
             ]
         );
+    }
+
+    #[test]
+    fn the_version_is_read_from_cargo_apks_badging() {
+        let badging = "package: name='com.rustybox.android' versionCode='16777219' \
+                       versionName='0.0.3' platformBuildVersionName='14'\nsdkVersion:'23'\n";
+        assert_eq!(
+            parse_badging(badging),
+            Ok(ApkVersion {
+                code: "16777219".to_string(),
+                name: "0.0.3".to_string(),
+            })
+        );
+        assert!(parse_badging("sdkVersion:'23'\n").is_err());
+        assert!(parse_badging("package: name='com.rustybox.android'\n").is_err());
+    }
+
+    #[test]
+    fn d8_and_apksigner_are_batch_files_on_windows() {
+        assert_eq!(BuildTool::D8.file_name(HostOs::Windows), "d8.bat");
+        assert_eq!(BuildTool::Apksigner.file_name(HostOs::Windows), "apksigner.bat");
+        assert_eq!(BuildTool::Aapt2.file_name(HostOs::Windows), "aapt2.exe");
+        assert_eq!(BuildTool::D8.file_name(HostOs::Linux), "d8");
+    }
+
+    /// A zip at `path` holding `entries`, each a name and its bytes.
+    fn write_zip(path: &Path, entries: &[ZipEntry]) {
+        let mut writer = zip::ZipWriter::new(File::create(path).expect("create zip"));
+        for entry in entries {
+            writer
+                .start_file(entry.name, zip::write::FileOptions::default())
+                .expect("start entry");
+            writer.write_all(entry.bytes).expect("write entry");
+        }
+        writer.finish().expect("finish zip");
+    }
+
+    struct ZipEntry {
+        name: &'static str,
+        bytes: &'static [u8],
+    }
+
+    /// The APK keeps aapt2's manifest, gains the dex, takes cargo-apk's
+    /// library as it is, and leaves cargo-apk's manifest and signature behind.
+    #[test]
+    fn the_packed_apk_holds_the_linked_manifest_the_dex_and_the_library() {
+        let dir = env::temp_dir().join(format!("rusty_box_xtask_merge_{}", std::process::id()));
+        remove_dir_if_exists(&dir).expect("clean scratch dir");
+        fs::create_dir_all(&dir).expect("scratch dir");
+        let linked = dir.join("linked.apk");
+        let native = dir.join("native.apk");
+        let dex = dir.join("classes.dex");
+        let out = dir.join("unaligned.apk");
+        write_zip(
+            &linked,
+            &[ZipEntry {
+                name: "AndroidManifest.xml",
+                bytes: b"linked manifest",
+            }],
+        );
+        write_zip(
+            &native,
+            &[
+                ZipEntry {
+                    name: "AndroidManifest.xml",
+                    bytes: b"cargo-apk manifest",
+                },
+                ZipEntry {
+                    name: "lib/arm64-v8a/librusty_box_gui_android.so",
+                    bytes: b"\x7fELF library",
+                },
+                ZipEntry {
+                    name: "META-INF/RUSTYBOX.SF",
+                    bytes: b"cargo-apk signature",
+                },
+            ],
+        );
+        fs::write(&dex, b"dex\n035").expect("dex");
+
+        merge_apk(&ApkParts {
+            linked: &linked,
+            dex: &dex,
+            native: &native,
+            out: &out,
+        })
+        .expect("merge");
+
+        let mut packed =
+            zip::ZipArchive::new(File::open(&out).expect("open packed")).expect("read packed");
+        let names: Vec<String> = packed.file_names().map(str::to_string).collect();
+        let mut read = |name: &str| {
+            let mut bytes = Vec::new();
+            io::Read::read_to_end(&mut packed.by_name(name).expect(name), &mut bytes)
+                .expect("read entry");
+            bytes
+        };
+        assert_eq!(read("AndroidManifest.xml"), b"linked manifest");
+        assert_eq!(read("classes.dex"), b"dex\n035");
+        assert_eq!(
+            read("lib/arm64-v8a/librusty_box_gui_android.so"),
+            b"\x7fELF library"
+        );
+        assert!(
+            !names.iter().any(|name| name.starts_with("META-INF/")),
+            "{names:?}"
+        );
+        assert_eq!(names.len(), 3, "{names:?}");
+        remove_dir_if_exists(&dir).expect("remove scratch dir");
     }
 }

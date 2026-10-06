@@ -13,7 +13,9 @@ use std::sync::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::library::CloseChoice;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::sessions::{Exclusive, HeldBy, Hold, Holdings, RunHolds, Sessions, VmSession};
+use crate::sessions::{
+    AliveEffect, Exclusive, HeldBy, Hold, Holdings, KeepAlive, RunHolds, Sessions, VmSession,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::{SidebarAction, VmBarAction};
 use crate::shell::destination::{Destination, ShellPage};
@@ -284,6 +286,9 @@ pub struct NativeShellApp {
     /// image — and which VM has it. A power-on takes; its run's thread gives
     /// back.
     holdings: Holdings,
+    /// Keeps the app running while any power-on lasts: each power-on takes
+    /// a hold, and its run's thread gives it back.
+    keep_alive: KeepAlive,
     chrome: ShellChrome,
     floppy_maker: FloppyMaker,
     /// The floppy maker's window is open.
@@ -1605,21 +1610,35 @@ pub(crate) fn status_snapshot(
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeShellApp {
+    /// The shell of a desktop window, which keeps running whatever its screen
+    /// does.
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         command_tx: Sender<NativeEmulatorCommand>,
         start: crate::runner::ShellStart,
     ) -> Self {
+        Self::keeping_alive_by(cc, command_tx, start, AliveEffect::Nothing)
+    }
+
+    /// The shell, keeping the app running by `alive` while any VM's
+    /// power-on lasts.
+    pub(crate) fn keeping_alive_by(
+        cc: &eframe::CreationContext<'_>,
+        command_tx: Sender<NativeEmulatorCommand>,
+        start: crate::runner::ShellStart,
+        alive: AliveEffect,
+    ) -> Self {
         configure_shell_style(&cc.egui_ctx);
-        Self::with_commands(command_tx, start)
+        Self::with_commands(command_tx, start, alive)
     }
 
     /// The shell opened on `start`'s VM list, powering VMs on through
-    /// `command_tx`. `new` styles the window first; tests build the shell
-    /// without one.
+    /// `command_tx`. `keeping_alive_by` styles the window first; tests build
+    /// the shell without one.
     fn with_commands(
         command_tx: Sender<NativeEmulatorCommand>,
         start: crate::runner::ShellStart,
+        alive: AliveEffect,
     ) -> Self {
         let opening = OpeningList::from_start(&start);
         let shown = &opening.profiles[opening.selected];
@@ -1643,6 +1662,7 @@ impl NativeShellApp {
         Self {
             sessions: Sessions::default(),
             holdings: Holdings::default(),
+            keep_alive: KeepAlive::new(alive),
             chrome,
             floppy_maker: FloppyMaker::default(),
             floppy_maker_open: false,
@@ -3759,7 +3779,11 @@ impl NativeShellApp {
         match self.command_tx.send(NativeEmulatorCommand::Start(StartRun {
             display: Arc::clone(&display),
             config,
-            holds: RunHolds { hypervisor, disk },
+            holds: RunHolds {
+                hypervisor,
+                disk,
+                alive: self.keep_alive.take(),
+            },
         })) {
             Ok(()) => {
                 // The overwrite creations this power-on settles for the
@@ -6118,7 +6142,10 @@ mod tests {
             ),
             notice,
         };
-        (NativeShellApp::with_commands(command_tx, start), command_rx)
+        (
+            NativeShellApp::with_commands(command_tx, start, AliveEffect::Nothing),
+            command_rx,
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
