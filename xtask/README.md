@@ -111,7 +111,7 @@ It passes only if the run exits successfully and its stdout contains `*** LOGIN 
 
 ## `cargo xtask perf-baseline`
 
-This command takes no options. It does three things:
+This command takes no options; anything written after it is ignored. It does three things:
 
 1. Builds the `perfbench` example: `cargo build --release -p rusty_box --example perfbench --features std`. The source is `rusty_box/examples/perfbench/perfbench.rs`.
 2. Copies the binary to `target/perf-baselines/<rev>/`, where `<rev>` is `git rev-parse --short=12 HEAD`. The directory is named after `HEAD`, so a build of an uncommitted tree is filed under the last commit's revision.
@@ -171,7 +171,9 @@ Captures the connected device's screen through `adb_client`. If `PATH` is omitte
 
 - `--sdk PATH` sets the Android SDK root for this run.
 - `--skip-sdk` skips SDK package installation and license acceptance. Use it when the SDK is already prepared.
-- `--screenshot PATH` (`run` only) captures the screen after launch.
+- `--screenshot PATH` captures the screen 10 seconds after `run` launches the app; for `screenshot` it is the same as the positional `PATH`. `build` accepts it and takes no screenshot.
+
+Options may come in any order after the action.
 
 ### Commit-safety rules
 

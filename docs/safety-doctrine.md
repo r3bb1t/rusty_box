@@ -673,9 +673,11 @@ fn bmdma_start_arms_its_timer_at_issuing_epoch() {
 Kept complete on purpose — an exemption not listed here is a violation. Counted, not
 recalled: a whole-word search for `dyn` over the `src` tree of every workspace crate finds:
 
-- `rusty_box/src`: 22 occurrences. Nineteen are code, and every one of them is below. The
-  other three are comments that name the pattern: in `emulator/engine.rs`, `emulator/run.rs`
-  and `cpu/instrumentation/bochs.rs`.
+- `rusty_box/src`: 23 occurrences. Nineteen are production code, and every one of them is
+  below. One is test code: the test double in `emulator/tests.rs` implements
+  `BxGui::headerbar_bitmap`, whose `Box<dyn Fn()>` the trait dictates. The other three are
+  comments that name the pattern: in `emulator/engine.rs`, `emulator/run.rs` and
+  `cpu/instrumentation/bochs.rs`.
 - `rusty_box_gui/src`: 5, all code, all below.
 - `rusty_box_devices/src`: 4. Two are code (`DeviceCtx`, below); two are comments, in
   `api.rs` and `display/card.rs`.
@@ -706,8 +708,8 @@ not stored closures.
   (`rusty_box_devices/src/display/sink.rs`), and `GuiSink` in `gui/gui_trait.rs` is what
   still presents a `BxGui` as one. These go when the machine hands its frames only to a
   `DisplaySink`.
-- `Box<dyn Fn()>` in `BxGui::headerbar_bitmap` and its three implementations — dies with
-  the same seam.
+- `Box<dyn Fn()>` in `BxGui::headerbar_bitmap` and its three implementations, plus the
+  test double's — dies with the same seam.
 - `&mut dyn CpuAccess` — `cpu/instrumentation/ctx.rs`. Load-bearing today: because
   `HookCtx` erases the whole context, dispatch has to move the tracer out of the registry
   rather than hold it beside `ExecCtx`. Making `HookCtx` generic is its own unit.

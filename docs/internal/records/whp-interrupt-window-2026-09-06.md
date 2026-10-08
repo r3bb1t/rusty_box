@@ -1,5 +1,10 @@
 # The interrupt-deliverability window under an emulated local APIC
 
+Measured on 2026-09-06 with probe P10 of
+`cargo run --release -p rusty_box_whp --example whp_probe`. This is a dated
+record and is not kept current: for what was built afterwards, the code is the
+authority.
+
 **Question.** When the WHP partition runs with `LocalApicEmulationMode = X2Apic`/`XApic`, how does
 a VMM deliver a legacy 8259 ExtINT into a guest that is momentarily unable to take one (`IF=0`, an
 interrupt shadow, or a delivery already in flight)?

@@ -9,7 +9,14 @@ of this repository (`/cpp_orig` is ignored), so this file pins it.
 | Commit | `f87c5e226add9a319902fd3fce5a11a38f22b3f9` |
 | Upstream date | 2026-10-03 |
 | Previous reference | `9cd6d6353b21a1faa736590c1708c70d6d6eb730` (2026-07-28) |
-| Sync ledger | `docs/bochs-reference-sync-ledger.md` |
+| Port synced to | the previous reference; the 322 upstream commits since are not ported yet |
+| Sync ledger | `docs/bochs-reference-sync-ledger.md`, written as the sync ports each commit; it does not exist yet |
+
+Until a commit is ported, the port can differ from the reference wherever that
+commit changed Bochs. Three of those commits fix bugs this port recorded —
+VRSQRT14's power-of-two case (`a0d1ee9a2`), KSHIFTLW and KSHIFTRW by 15
+(`2c1dca87d`), and the quadword shifts by 64 (`be01ec83e`, `8908f189d`) — see
+`docs/bochs-upstream-bugs.md` and divergences D8 and D9.
 
 ## Build options the port mirrors
 
