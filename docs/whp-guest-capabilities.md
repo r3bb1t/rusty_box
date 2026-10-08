@@ -1,7 +1,12 @@
 # What a machine may tell its guest it has
 
-Measured on 2026-08-31 against the Windows Hypervisor Platform engine, on a
-12th Gen Core i5-12450H. Companion to `docs/internal/records/whp-platform-probe-2026-08-27.md`.
+The failures under "What went wrong" were measured on 2026-08-31 against the
+Windows Hypervisor Platform engine, on a 12th Gen Core i5-12450H; that record is
+a companion to `docs/internal/records/whp-platform-probe-2026-08-27.md`. The rest
+of this page describes the code as it stands and is kept current with it. The
+departures from Bochs that it describes are registered divergences: the VMX and
+SVM withholding is H3 and the narrowing is H4, in
+[`bochs-parity-divergences.md`](bochs-parity-divergences.md).
 
 ## The rule
 
@@ -16,8 +21,8 @@ every hypervisor supplies the answer itself and every one of them narrows it.
 KVM's `KVM_GET_SUPPORTED_CPUID` returns "the host cpuid ... with unknown or
 unsupported features masked out"; VMware's EVC masks `CPUID` down to a cluster
 baseline so a guest keeps running when the hardware under it changes. The second
-is exactly this port's problem, because a guest here can be moved between the
-interpreter and the hypervisor mid-run.
+is the problem this port's design faces, because that design moves a guest
+between the interpreter and the hypervisor mid-run; the switch is not built yet.
 
 ## Three terms, not one
 
@@ -109,10 +114,22 @@ answers `CPUID` exactly as the model does.
 `XSETBV` is not trapped on the partition, so a guest that believed the full
 preset would enable register state the host does not have.
 
-**It is a machine setting, not an engine one.** A guest keeps what it enabled
-across a switch from the hypervisor to the interpreter. The two engines must
-therefore offer the same processor, or the switch changes the hardware under
-a running guest.
+**The rule is the front end's to keep.** The engine itself withholds only VMX
+and SVM (step 3). Everything else — AVX-512, AVX, `MONITOR`/`MWAIT` — is
+narrowed by whoever builds the machine. `rusty_box_gui` does it as described
+above. Among `rusty_box_whp_engine`'s examples, `alpine_bench` and
+`alpine_probe` carry a copy of `CpuCapabilities::HostShared::narrow`, and
+`dlx_whp`, `compute_bench` and `step_bench` narrow nothing. A program that calls
+`MachineBuilder::build_on::<WhpEngine>()` itself offers the full preset unless
+it narrows its `BxParams` first.
+
+**The same VM gets a different processor on each engine.** Under `rusty_box_gui`
+a VM runs with its `--cpu-capabilities` setting on the interpreter, the full
+preset by default, and with `host-shared` on the hypervisor. Nothing moves a
+running guest from one engine to the other today, so no guest sees its
+processor change. A switch mid-run would need both engines to offer the same
+processor, because a guest keeps what it enabled; that is the design H4 argues
+for, and it is not built.
 
 ## The platform API this should use instead
 

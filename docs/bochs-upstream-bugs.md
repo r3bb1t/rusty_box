@@ -10,7 +10,13 @@ from bug to bug. Where the architectural behaviour is the better side, the port
 implements it and registers the difference in `docs/bochs-parity-divergences.md`.
 Some bugs are reproduced bug-for-bug for parity instead: the mouse `0xE6`
 scaling, the HPET restore epoch, VRSQRT14's power-of-two case, the unreferenced
-EVEX groups and the unbacked PMU leaf.
+EVEX groups, the unbacked PMU leaf, the stale IA32_SPEC_CTRL shadow and, until
+it is ruled on, the sign-extended RETF immediate.
+
+Three entries are fixed upstream inside the reference `docs/bochs-reference.md`
+pins, and each names its commit: VRSQRT14's power-of-two case, KSHIFTLW and
+KSHIFTRW by 15, and the quadword shifts by 64. The port adopts those fixes in
+the reference sync.
 
 Filed upstream:
 - https://github.com/bochs-emu/Bochs/issues/791 — the post-Skylake CPU models
@@ -92,7 +98,8 @@ The same fold has two more effects:
   forward is skipped, and the IOAPIC pin the guest programmed is never raised.
 
 **Reachability**: `hpet.cc` advertises `HPET_ROUTING_CAP = 0xffffff` (all 24
-GSIs legal for every timer), and `HPET_TN_CFG_WRITE_MASK` (0x7f4e) keeps all
+GSIs legal for every timer), and `HPET_TN_CFG_WRITE_MASK` (0x7f4e, defined in
+`iodev/hpet.h`) keeps all
 five `TN_INT_ROUTE` bits writable, so a guest can legally program any timer to
 route 16–23. In APIC mode an OS routinely picks a non-legacy HPET GSI ≥ 16
 from the routing-cap bitmap.
@@ -179,7 +186,8 @@ boot) instead of the saved counter — a discontinuity a guest clocksource
 would observe.
 
 **Note**: this may be an accepted limitation of Bochs's state model rather
-than an intended-precise restore; filed as low confidence. Rusty Box
+than an intended-precise restore; recorded here as low confidence, and not
+reported upstream. Rusty Box
 deliberately reproduces Bochs's behavior here (zeroes the reference fields on
 restore) for parity — see the snapshot section's `restore` for `BxHpetC`
 (`rusty_box/src/iodev/hpet.rs`).
@@ -191,9 +199,15 @@ restore) for parity — see the snapshot section's `restore` for `BxHpetC`
 **Files**: `cpu/avx/avx512_rsqrt14.cc` — `approximate_rsqrt14(float16)`,
 `approximate_rsqrt14(float32)`, `approximate_rsqrt14(float64)`
 **Confidence**: high — arithmetic, reproducible from the source alone
-**Rusty Box**: reproduced deliberately for parity, see
-`rusty_box/src/cpu/avx512_rcp14.rs` and the test
-`rsqrt14_reproduces_the_upstream_power_of_two_bug`
+**Fixed upstream**: `a0d1ee9a2` ("fixed corner case correctness issue for
+VRSQRTSH/VRSQRTPH and VRSQRT14* instructions") looks the table up for an exact
+power of two unless the exponent's parity makes the result one, in all three
+widths. The reference pinned in `docs/bochs-reference.md` includes it; the code
+below is the reference before it.
+**Rusty Box**: reproduces the bug, as the previous reference did, until the
+reference sync ports `a0d1ee9a2`; see `rusty_box/src/cpu/avx512_rcp14.rs` and
+the test `rsqrt14_reproduces_the_upstream_power_of_two_bug`. The port has no
+float16 form.
 
 VRSQRT14 selects one of two 32K-entry tables by the parity of the biased
 exponent, because halving an odd unbiased exponent leaves a factor of
@@ -201,7 +215,9 @@ sqrt(2) that the table has to absorb. `rsqrt14_table0` covers the odd
 unbiased exponents (its entry 0 is ~0.4142 = 2/sqrt(2) - 1) and
 `rsqrt14_table1` the even ones (entry 0 ~1.0).
 
-All three width variants then do:
+The float32 variant then does the following; the float16 and float64 variants
+differ only in the exponent bias and the table index (`fraction << 5` for
+float16), and carry the same `else exp++`:
 
 ```c
   const Bit16u *rsqrt_table = (exp & 1) ? rsqrt14_table1 : rsqrt14_table0;
@@ -241,23 +257,21 @@ even-exponent table only, or equivalently to seed `fraction` from
 **Found 2026-08-01**, while generating rusty's EVEX opcode maps from
 `cpu/decoder/fetchdecode_opmap_evex.cc`.
 
-Four groups are defined in that file and then never referenced from
-`BxOpcodeTableEVEX`, so nothing can ever select them:
+Three groups are defined in that file and then never referenced from
+`BxOpcodeTableEVEX`, so nothing can ever select them. Each name appears once in
+the file, at its definition:
 
-| group | instructions | ISA |
+| group | instructions (each with its masked `_Kmask` form) | ISA (`ia_opcodes_evex.def`) |
 |---|---|---|
-| `BxOpcodeGroup_EVEX_0F38D2` | VPDPWSUD, VPDPWSUDS | AVX-VNNI-INT16 |
-| `BxOpcodeGroup_EVEX_0F38D3` | VPDPWUSD, VPDPWUSDS | AVX-VNNI-INT16 |
-| `BxOpcodeGroup_EVEX_0F38DA` | VSM4KEY4 | SM4 |
-| `BxOpcodeGroup_EVEX_0F38DB` | VSM4RNDS4 | SM4 |
+| `BxOpcodeGroup_EVEX_0F38D2` | VPDPWUUD (no prefix), VPDPWUSD (66), VPDPWSUD (F3) | `BX_ISA_AVX10_2` |
+| `BxOpcodeGroup_EVEX_0F38D3` | VPDPWUUDS (no prefix), VPDPWUSDS (66), VPDPWSUDS (F3) | `BX_ISA_AVX10_2` |
+| `BxOpcodeGroup_EVEX_0F38DA` | VSM4KEY4 (F3), VSM4RNDS4 (F2) | `BX_ISA_SM4` |
 
-`BxOpcodeGroup_EVEX_0F38DB` is not referenced at all — not even by its own
-definition site being reachable — and the other three appear exactly once,
-at their definition. The corresponding master-table slots hold
-`BxOpcodeGroup_ERR`, so a guest executing any of these encodings takes #UD
-even on a CPU model that advertises the ISA.
+The master table's 0F38 slots `D2`, `D3` and `DA` hold `BxOpcodeGroup_ERR`, so
+a guest executing any of these 14 encodings takes #UD even on a CPU model that
+advertises the ISA.
 
-The handlers exist (`BX_IA_EVEX_VPDPWSUD_VdqHdqWdq` and friends are defined
+The handlers exist (`BX_IA_EVEX_VPDPWUUD_VdqHdqWdq` and the rest are defined
 in `ia_opcodes_evex.def` with real execute functions), so this is missing
 wiring rather than missing implementation — the same shape of defect as the
 gap this project hit on its own side: an opcode can have a correct,
@@ -265,9 +279,10 @@ dispatched handler and still be unreachable because no decoder table slot
 produces it.
 
 Reproduced deliberately in rusty for parity: `scripts/gen_opmap_evex.py`
-transcribes the master table as it stands, so those slots are empty there
-too. 14 of the 19 EVEX opcodes rusty cannot reach are these; if upstream
-wires them up, regenerating picks them up automatically.
+transcribes the master table as it stands, so those slots are empty in
+`rusty_box_decoder/src/decoder/opmap_evex.rs` too, although the decoder names
+all 14 opcodes. If upstream wires them up, regenerating picks them up
+automatically.
 
 Detection is mechanical — for each `BxOpcodeGroup_EVEX_*` definition, count
 references in the same file; a count of one means the group is orphaned.
@@ -339,7 +354,9 @@ higher level is enumerated, so nothing depends on it.
 latency.
 
 **Location**: `cpu/io.cc` — `FastRepINSW`, `FastRepOUTSW`, and their callers
-`INSW32_YwDX` / `OUTSW32_DXXw`; `cpu/faststring.cc` — `FastRepMOVSB`.
+`INSW32_YwDX` / `OUTSW32_DXXw`. `cpu/faststring.cc` is not affected:
+`FastRepMOVSB` and `FastRepSTOSB` / `FastRepSTOSW` / `FastRepSTOSD` each cap
+their count at `bx_pc_system.getNumCpuTicksLeftNextEvent()`.
 
 **Requires**: `BX_SUPPORT_REPEAT_SPEEDUPS`.
 
@@ -374,8 +391,15 @@ deadline 300 ticks out delivers that interrupt when the clock lands at 2048 —
 limit rather than by anything the guest chose.
 
 **Fix**: bound the burst additionally by the ticks remaining to the next event,
-and advance the clock as the burst proceeds rather than once at the end, so the
-existing `async_event` check can observe a deadline landing inside the burst.
+as `faststring.cc` already does:
+
+```cpp
+if (wordCount > bx_pc_system.getNumCpuTicksLeftNextEvent())
+  wordCount = bx_pc_system.getNumCpuTicksLeftNextEvent();
+```
+
+The burst then ends on the deadline instead of running up to a page of elements
+past it.
 
 **Not reproduced in rusty** — see divergence D3 in
 `docs/bochs-parity-divergences.md`. Cost there is one extra `min` per chunk.
@@ -389,7 +413,8 @@ configuration look healthy — see "Why it matters" below. Not a crash: Bochs is
 internally consistent and boots guests correctly.
 
 **Location**:
-- `iodev/pic.cc` — `bx_pic_c::service_master_pic()` reaches `BX_RAISE_INTR()`.
+- `iodev/pic.cc` — `bx_pic_c::pic_service()` reaches `BX_RAISE_INTR()`
+  (`pc_system.h`).
 - `pc_system.cc` — `bx_pc_system_c::raise_INTR()`:
   `BX_CPU(BX_BOOTSTRAP_PROCESSOR)->raise_INTR()`.
 - `cpu/event.cc` — `BX_CPU_C::raise_INTR()`:
@@ -543,7 +568,9 @@ where the SDM gives `1`.
 `kshiftlw_kgw_kew_ib_r` / `kshiftrw_kgw_kew_ib_r` write zero only for
 `count >= 16`.
 
-**Filing status**: NOT FILED.
+**Filing status**: not needed. Fixed upstream in `2c1dca87d` ("Fix KSHIFTW
+behavior for a shift count of 15", `count < 16` in both handlers), which the
+reference pinned in `docs/bochs-reference.md` includes.
 
 ---
 
@@ -589,7 +616,10 @@ element's sign bit, replicated, for VPSRAVQ.
 `rusty_box/tests/sse_qword_shift_count.rs` pins the SSE2 forms at a count of
 64.
 
-**Filing status**: NOT FILED.
+**Filing status**: not needed. Fixed upstream in `be01ec83e` ("Fix PSRLQ
+behavior for a shift count of 64", `xmm_psrlq`) and `8908f189d` ("fix another
+UB with shift count == 64", `xmm_psravq`), both `> 63`, which the reference
+pinned in `docs/bochs-reference.md` includes.
 
 ---
 
@@ -642,3 +672,183 @@ read answers 0 and a write is dropped, so the write-then-read-back probe reads 0
 here too.
 
 **Filing status**: NOT FILED. One issue covers the whole class.
+
+---
+
+## VM entry accepts a non-canonical RIP for a 64-bit guest
+
+**Severity**: Guest-visible to a VMM. A VM entry that hardware fails is
+accepted, and the failure surfaces later, inside the guest, as a different
+event.
+
+**Location**: `cpu/vmx.cc` — `BX_CPU_C::VMenterLoadCheckGuestState`.
+
+**Root cause**: the only check on guest RIP is the 32-bit one:
+
+```cpp
+// cpu/vmx.cc  VMenterLoadCheckGuestState
+if (! x86_64_guest || !guest.sregs[BX_SEG_REG_CS].cache.u.segment.l) {
+  if (GET32H(guest.rip) != 0) {
+     BX_ERROR(("VMENTER FAIL: VMCS guest RIP > 32 bit"));
+     return VMX_VMEXIT_VMENTRY_FAILURE_GUEST_STATE;
+  }
+}
+// no else: a 64-bit guest's RIP is never checked
+```
+
+The SDM's VM-entry checks on guest RIP have a second rule: in 64-bit code (the
+"IA-32e mode guest" control set and CS.L set), on a processor with fewer than
+64 linear-address bits, RIP must be canonical to that width — the width CPUID
+leaf 80000008H reports, not the current paging mode's.
+
+**Manifestation**: a VMM that VMLAUNCHes a 64-bit guest with RIP
+`0x0000800000000000` (bit 47 set, bits 63:48 clear) gets, on hardware, a
+VM-entry failure: exit reason 33 with bit 31 set, the VMM resuming at
+HOST_RIP. Under Bochs the entry succeeds and the guest's first fetch takes
+#GP(0) (`cpu/cpu.cc BX_CPU_C::prefetch`, "RIP crossed canonical boundary"),
+which reaches the VMM as an exception exit if its exception bitmap intercepts
+#GP, and otherwise runs the guest's own handler.
+
+**Fix**: an `else` arm after the 32-bit check:
+
+```cpp
+else {
+  if (! IsCpuidCanonical(guest.rip)) {
+    BX_ERROR(("VMENTER FAIL: VMCS guest RIP not canonical"));
+    return VMX_VMEXIT_VMENTRY_FAILURE_GUEST_STATE;
+  }
+}
+```
+
+`IsCpuidCanonical` (57 bits with LA57 support, else 48) rather than
+`IsCanonical`: the rule is about the processor's width, and a VM entry does
+not run in the guest's paging mode.
+
+**Rusty Box behavior**: implements the SDM rule — divergence D18 in
+`docs/bochs-parity-divergences.md`. `cpu/vmx.rs`
+`vmenter_load_check_guest_state` makes both checks, pinned by
+`a_64_bit_guest_needs_a_canonical_rip` and
+`a_compatibility_mode_guest_needs_a_rip_below_4_gib`, each of which runs a
+real VMLAUNCH.
+
+**Filing status**: NOT FILED. To be confirmed by the planned VMX checks before
+it is filed.
+
+---
+
+## A virtualized IA32_SPEC_CTRL write leaves the shadow stale
+
+**Severity**: Guest-visible on a model offering IA32_SPEC_CTRL
+virtualization (Bochs `sapphire_rapids` and `arrow_lake`, which list
+`BX_VMX_SPEC_CTRL_VIRTUALIZATION`). A guest reads back a value it did not
+write.
+
+**Location**: `cpu/msr.cc` — `SpecCtrlMSR::set`, the `MSR_IA32_SPEC_CTRL`
+descriptor that upstream `a93931e76` ("Rewrite MSR interface in CPU code")
+made of the `case BX_MSR_IA32_SPEC_CTRL` arm of `BX_CPU_C::wrmsr`. The rewrite
+kept the bug.
+
+**Root cause**: with the "virtualize IA32_SPEC_CTRL" tertiary control set, the
+write merges the guest's value into the register through the VMM's mask and
+stops there:
+
+```cpp
+// cpu/msr.cc  SpecCtrlMSR::set
+if (cpu->in_vmx_guest && vm->vmexec_ctrls3.VIRTUALIZE_IA32_SPEC_CTRL())
+  val = (cpu->msr.ia32_spec_ctrl & vm->ia32_spec_ctrl_mask) | (val & ~vm->ia32_spec_ctrl_mask);
+...
+cpu->msr.ia32_spec_ctrl = GET32L(val);
+// vm->ia32_spec_ctrl_shadow is never written
+```
+
+RDMSR of the same MSR (`SpecCtrlMSR::get`) returns `vm->ia32_spec_ctrl_shadow`. Intel's
+definition of the control — as described in the KVM patches that add
+support for it — has a guest WRMSR store the guest's value in the shadow as
+well as writing the masked merge to the register, so a following RDMSR
+returns what the guest wrote.
+
+**Manifestation**: with the mask covering bit 0, a guest that writes 2 and
+reads back gets the VMM's initial shadow, not 2.
+
+**Fix**: `vm->ia32_spec_ctrl_shadow = val;` with the guest's original value,
+before the merge.
+
+**Rusty Box behavior**: reproduced, for parity — `cpu/proc_ctrl.rs`
+`wrmsr_value` leaves `vmcs.ia32_spec_ctrl_shadow` unwritten, pinned by
+`a_guest_sees_ia32_spec_ctrl_through_its_shadow_and_mask` (`cpu/vmx.rs`).
+Unreachable in this port: its only VMX model, Skylake-X, offers no tertiary
+control, as in Bochs.
+
+**Filing status**: NOT FILED.
+
+---
+
+## RETF imm16 in real mode sign-extends the immediate on a 32-bit stack
+
+**Severity**: Guest-visible, narrow. Real mode with a 32-bit stack (SS cached
+with B = 1, "big real mode") and an immediate of 0x8000 or more: the stack
+pointer lands 64 KiB lower than on hardware.
+
+**Location**: `cpu/ctrl_xfer16.cc` — `BX_CPU_C::RETfar16_Iw`.
+
+**Root cause**:
+
+```cpp
+// cpu/ctrl_xfer16.cc  RETfar16_Iw
+Bit16s imm16 = (Bit16s) i->Iw();   // <-- should be Bit16u
+...
+  if (BX_CPU_THIS_PTR sregs[BX_SEG_REG_SS].cache.u.segment.d_b)
+    ESP += imm16;                  // sign-extends
+  else
+     SP += imm16;
+```
+
+Every other RET path reads the immediate unsigned: `RETnear16_Iw`,
+`RETnear32_Iw` and `RETfar32_Iw` declare `Bit16u`, `RETnear64_Iw` adds
+`i->Iw()`, and `RETfar64_Iw` and this handler's own protected-mode branch pass
+it to `return_protected(bxInstruction_c *, Bit16u)`. The `Bit16s` is in the
+original 2000 snapshot. Upstream master `f87c5e226` (2026-10-03) still has it.
+
+**Architecture**: the immediate is a byte count. AMD's APM vol. 3, RET (Far),
+real and virtual-8086 mode: "temp_IMM = word-sized immediate specified in the
+instruction, zero-extended to 64 bits", then `RSP.s = RSP + temp_IMM`. Intel's
+SDM: "pop imm16 bytes from stack". Intel's real-mode far-return pseudocode
+writes the release as `SP := SP + (SRC AND FFFFH)`, a 16-bit-stack
+simplification that the measurement below rules out.
+
+**Measured** (2026-10-04) with a boot-sector probe that enters big real mode
+and executes `RETF 0x8000` and `RET 0x8000`, 16-bit operand size, from two
+starting ESP values. The second start is needed because from 0x20000 a
+zero-extended 32-bit add and a 16-bit SP update give the same ESP:
+
+| Start ESP | RETF: zext / sext / SP-only | Hardware | Bochs `f87c5e226` | Bochs + fix |
+|---|---|---|---|---|
+| 0x20000 | 0x28004 / 0x18004 / 0x28004 | 0x28004 | 0x18004 | 0x28004 |
+| 0x29000 | 0x31004 / 0x21004 / 0x21004 | 0x31004 | 0x21004 | 0x31004 |
+
+Near RET gives 0x28002 and 0x31002 on all three, so Bochs and hardware agree
+there. The hardware is an Intel Core i5-12450H (family 6, model 154,
+stepping 3), reached through the Windows Hypervisor Platform, which runs
+real-mode guest code natively; the probe image was loaded by a temporary
+`rusty_box_whp_engine` test (since deleted). The Bochs builds are master
+`f87c5e226` from a clean tarball, unpatched and patched.
+
+**Other implementations**: VirtualBox's IEM takes the count as
+`uint16_t cbPop` (`iemCImpl_retf`). QEMU's TCG reads every RET/RETF immediate
+as `int16_t` (`target/i386/tcg/emit.c.inc` `gen_RET` / `gen_RETF`), so it
+sign-extends on 32-bit stacks too.
+
+**Fix**: `Bit16u imm16 = i->Iw();` — prepared as
+`docs/bochs-retf16-imm16-fix.patch` (`git am`-ready, with a HISTORY line).
+
+**Reproduction**: `docs/bochs-retf16-imm16-probe.S`, a 512-byte boot sector
+built with GNU binutils alone; it prints ESP after each return to port 0xE9
+and the VGA screen, then writes `Shutdown` to port 0x8900.
+
+**Rusty Box behavior**: reproduced, for parity — `cpu/ctrl_xfer16.rs`
+`retfar16_iw` sign-extends (`imm16 as i16 as u32`) and prints the Bochs row.
+Taking the hardware behaviour would be a divergence entry, like D18; not yet
+decided.
+
+**Filing status**: NOT FILED. The PR body, filing steps and verification notes
+are in `docs/bochs-upstream-pr-retf16-imm16.md`.

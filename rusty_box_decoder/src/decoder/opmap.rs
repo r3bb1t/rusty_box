@@ -940,7 +940,7 @@ pub(super) const BxOpcodeTableCC: [u64; 1] = [form_opcode(attrs!(), Opcode::INT3
 pub(super) const BxOpcodeTableCD: [u64; 1] = [form_opcode_lockable(attrs!(), Opcode::IntIb)];
 
 // opcode CE
-pub(super) const BxOpcodeTableCE: [u64; 1] = [form_opcode(attrs!(), Opcode::Int0)];
+pub(super) const BxOpcodeTableCE: [u64; 1] = [form_opcode(attrs!(), Opcode::Into)];
 
 // opcode CF
 pub(super) const BxOpcodeTableCF_32: [u64; 2] = [

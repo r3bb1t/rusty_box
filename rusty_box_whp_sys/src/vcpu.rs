@@ -220,6 +220,78 @@ impl PendingInterruption {
     }
 }
 
+/// The kinds of delivery `WHvRegisterPendingInterruption` reads back as.
+///
+/// Wider than [`InterruptionType`], which is what a caller may INJECT: the
+/// SDK's `WHV_X64_PENDING_INTERRUPTION_TYPE` names 0, 2 and 3, but a read
+/// reports whatever the platform was delivering, and that includes the events
+/// an instruction raises. Measured on an Intel host: an `INT 0x80` whose
+/// delivery faulted reads back as type 4, instruction length 2. The values are
+/// the processor's interruption-type encoding (Intel SDM Vol. 3C, "Information
+/// for VM Exits That Occur During Event Delivery"), which Hyper-V carries
+/// through unchanged.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InterruptedKind {
+    /// A maskable interrupt, already acknowledged at its controller.
+    ExternalInterrupt,
+    /// A non-maskable interrupt.
+    Nmi,
+    /// An exception the processor raised, not an instruction.
+    HardwareException,
+    /// `INT n`.
+    SoftwareInterrupt,
+    /// `INT1`.
+    PrivilegedSoftwareException,
+    /// `INT3` or `INTO`.
+    SoftwareException,
+}
+
+/// One delivery the platform began and did not finish, as the register holds
+/// it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InterruptedDelivery {
+    pub kind: InterruptedKind,
+    pub vector: u16,
+    /// The error code the delivery pushes, when it pushes one.
+    pub error_code: Option<u32>,
+}
+
+/// `WHvRegisterPendingInterruption` read back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PendingInterruptionRead {
+    /// `InterruptionPending` is clear: the platform holds no delivery.
+    Empty,
+    /// A delivery the platform will make at the next entry unless told
+    /// otherwise.
+    Delivery(InterruptedDelivery),
+    /// An interruption type no delivery has — 1, or 7 — so nobody can say
+    /// what finishing it would mean.
+    UnknownKind { kind: u8 },
+}
+
+impl PendingInterruptionRead {
+    /// Decode the register word, laid out as `WHV_X64_PENDING_INTERRUPTION_REGISTER`
+    /// (see [`PendingInterruption::as_word`]).
+    #[must_use]
+    pub const fn from_word(word: u64) -> Self {
+        if word & 1 == 0 {
+            return Self::Empty;
+        }
+        let kind = ((word >> 1) & 0b111) as u8;
+        let kind = match kind {
+            0 => InterruptedKind::ExternalInterrupt,
+            2 => InterruptedKind::Nmi,
+            3 => InterruptedKind::HardwareException,
+            4 => InterruptedKind::SoftwareInterrupt,
+            5 => InterruptedKind::PrivilegedSoftwareException,
+            6 => InterruptedKind::SoftwareException,
+            _ => return Self::UnknownKind { kind },
+        };
+        let error_code = if (word >> 4) & 1 == 1 { Some((word >> 32) as u32) } else { None };
+        Self::Delivery(InterruptedDelivery { kind, vector: (word >> 16) as u16, error_code })
+    }
+}
+
 /// Bit positions and the event-type value within
 /// `WHV_X64_PENDING_EXT_INT_EVENT`, the ExtINT member of the 128-bit
 /// `WHvRegisterPendingEvent` slot.
@@ -994,6 +1066,58 @@ mod tests {
         assert_eq!(word >> 1 & 0b111, 3, "type Exception");
         assert_eq!(word >> 4 & 1, 1, "deliver error code");
         assert_eq!(word >> 32, 0xDEAD_BEEF);
+    }
+
+    /// The word the platform held after an `INT 0x80` whose delivery faulted,
+    /// as measured: pending, type 4, length 2, vector 0x80, no error code.
+    #[test]
+    fn an_interrupted_software_interrupt_reads_back_as_one() {
+        assert_eq!(
+            PendingInterruptionRead::from_word(0x0080_0049),
+            PendingInterruptionRead::Delivery(InterruptedDelivery {
+                kind: InterruptedKind::SoftwareInterrupt,
+                vector: 0x80,
+                error_code: None,
+            })
+        );
+    }
+
+    /// What this crate injects reads back as what it injected.
+    #[test]
+    fn an_injected_exception_reads_back_with_its_error_code() {
+        let word = PendingInterruption {
+            kind: InterruptionType::Exception,
+            vector: 14,
+            error_code: Some(0x0000_0006),
+        }
+        .as_word();
+        assert_eq!(
+            PendingInterruptionRead::from_word(word),
+            PendingInterruptionRead::Delivery(InterruptedDelivery {
+                kind: InterruptedKind::HardwareException,
+                vector: 14,
+                error_code: Some(6),
+            })
+        );
+    }
+
+    #[test]
+    fn a_clear_pending_bit_is_no_delivery_whatever_else_the_word_holds() {
+        assert_eq!(PendingInterruptionRead::from_word(0x0080_0048), PendingInterruptionRead::Empty);
+    }
+
+    /// Type 1 is reserved and 7 is "other event"; neither is a delivery
+    /// anyone can finish, so neither may decode as one.
+    #[test]
+    fn a_type_no_delivery_has_is_reported_rather_than_guessed() {
+        assert_eq!(
+            PendingInterruptionRead::from_word(1 | 1 << 1),
+            PendingInterruptionRead::UnknownKind { kind: 1 }
+        );
+        assert_eq!(
+            PendingInterruptionRead::from_word(1 | 7 << 1),
+            PendingInterruptionRead::UnknownKind { kind: 7 }
+        );
     }
 
     #[test]

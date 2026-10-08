@@ -102,9 +102,20 @@ pub(crate) fn path_field_width(ui: &egui::Ui) -> f32 {
         .max(0.0)
 }
 
-/// The height of every row in a selectable list.
+/// The height of a row in a selectable list: every row of the Hardware device
+/// list, whatever the style, and a drawer row under a style that asks for no
+/// taller touch target, as a desktop's does not.
 #[cfg(not(target_arch = "wasm32"))]
-const ROW_HEIGHT: f32 = 24.0;
+pub(crate) const ROW_HEIGHT: f32 = 24.0;
+
+/// The height of a row a finger picks from, as the library drawer's rows
+/// are: the style's touch-target height (`interact_size.y`, which a phone's
+/// style raises to a finger's size), never less than `ROW_HEIGHT`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn touch_row_height(ui: &egui::Ui) -> f32 {
+    ui.spacing().interact_size.y.max(ROW_HEIGHT)
+}
+
 /// How far in from the row's left edge a top-level label starts: a VM in the
 /// tree, or a device in the Hardware list.
 #[cfg(not(target_arch = "wasm32"))]
@@ -135,9 +146,9 @@ pub(crate) enum RowMark {
 /// above the `BG_PANEL` surface a list of these rows sits on, marks the one
 /// `Destination` row; an `Expanded` row is told apart by its text alone, and
 /// any row without the fill tints on hover. The row is the whole click
-/// target, so a name and its indent never disagree about what was hit, and it
-/// is one accessibility node: a selectable named by its full label, selected
-/// only when it is the `Destination`.
+/// target, `height` points tall, so a name and its indent never disagree
+/// about what was hit, and it is one accessibility node: a selectable named
+/// by its full label, selected only when it is the `Destination`.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn selection_row(
     ui: &mut egui::Ui,
@@ -145,9 +156,12 @@ pub(crate) fn selection_row(
     indent: f32,
     mark: RowMark,
     trailing_dot: Option<Color32>,
+    height: f32,
 ) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
     // Assistive technology hears exactly one selected row, the same one the
     // accent bar marks: the `Expanded` VM is the parent of the selection, not
     // the selection.

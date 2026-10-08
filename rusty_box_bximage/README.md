@@ -18,7 +18,7 @@ An image is written by seeking to its last 512 bytes and writing them as zeros. 
 
 `MB` and `GB` are binary units here, the same as `MiB` and `GiB`. An empty string is `BxImageError::MissingSize`. A decimal (`1.5G`), zero, a sign, an inner space (`20 G`) or any other unit is `InvalidSize`. A number too large for a `u64` byte count is `SizeOverflow`.
 
-Sizes can also be built directly with `ImageSize::mib`, `ImageSize::gib` and `ImageSize::from_bytes`. `DEFAULT_HARD_DISK_SIZE` is 20 GiB, which `rusty_box_gui` uses when a disk is created without a size.
+Sizes can also be built directly with `ImageSize::mib`, `ImageSize::gib` and `ImageSize::from_bytes`. `DEFAULT_HARD_DISK_SIZE` is 20 GiB, which `rusty_box_gui` uses when `--create-disk` or a VM file's `[disk.create]` names no size. The shell's New Hard Disk sheet has its own default, 32 GB.
 
 ## Hard-disk geometry
 

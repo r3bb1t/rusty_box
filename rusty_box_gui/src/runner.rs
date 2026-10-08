@@ -21,6 +21,8 @@ use rusty_box::gui::{BxGui, NoGui, TermGui};
 #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
 use rusty_box_whp_engine::{FastMachine, FastMachineFault, StepStop, WhpEngine};
 #[cfg(feature = "gui-egui")]
+use std::collections::HashSet;
+#[cfg(feature = "gui-egui")]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "gui-egui")]
 use std::sync::{mpsc, Mutex};
@@ -41,6 +43,11 @@ pub struct RunSummary {
     /// indistinguishable from a real one.
     pub instructions_executed: Option<u64>,
 }
+
+/// The stack a thread that runs a machine is given: each VM's thread the
+/// shell's launcher spawns, and the thread `main` runs a machine on without
+/// the shell.
+pub const EMULATOR_STACK_BYTES: usize = 1500 * 1024 * 1024;
 
 pub fn run(args: Args) -> Result<RunSummary, RunError> {
     let config = crate::config::load_config(&args)?;
@@ -241,6 +248,7 @@ where
         sync_realtime: config.sync_realtime,
         smp_quantum: config.smp_quantum,
         cpuid_freq: config.cpuid_freq,
+        port_e9_hack: config.port_e9_hack,
         cpu_params: cpu_params_for_engine(&config),
         // The engine decides who turns the device wheel, so it decides which
         // clock the wheel runs on.
@@ -755,7 +763,8 @@ fn import_bundled_vm_from(library: &crate::library::VmLibrary, exe_dir: &Path) -
     }
 }
 
-/// The desktop shell: a window of its own over the emulator thread.
+/// The desktop shell: a window of its own over the launcher, which runs each
+/// power-on on a thread of its own.
 #[cfg(all(feature = "gui-egui", not(target_os = "android")))]
 fn run_egui(start: ShellStart) -> Result<RunSummary, RunError> {
     let native_options = eframe::NativeOptions {
@@ -805,14 +814,15 @@ pub(crate) fn run_android_shell(
         persist_window: false,
         ..Default::default()
     };
-    run_egui_shell(start, native_options, move |cc, shared, command_tx, start| {
-        crate::android::AndroidShellApp::new(cc, shared, command_tx, start, app)
+    run_egui_shell(start, native_options, move |cc, command_tx, start| {
+        crate::android::AndroidShellApp::new(cc, command_tx, start, app)
     })
 }
 
-/// Runs an egui shell over the emulator thread. `make_app` builds the
-/// window's app from the display the two threads share, the channel the
-/// shell starts machines through, and the VM list the shell opens on.
+/// Runs an egui shell over the launcher thread, which runs every power-on
+/// the shell asks for on a thread of its own. `make_app` builds the window's
+/// app from the channel the shell starts machines through and the VM list
+/// the shell opens on.
 #[cfg(feature = "gui-egui")]
 fn run_egui_shell<A, F>(
     start: ShellStart,
@@ -823,36 +833,35 @@ where
     A: eframe::App + 'static,
     F: FnOnce(
             &eframe::CreationContext<'_>,
-            Arc<Mutex<SharedDisplay>>,
             mpsc::Sender<crate::app::NativeEmulatorCommand>,
             ShellStart,
         ) -> A
         + 'static,
 {
-    let shared = Arc::new(Mutex::new(SharedDisplay::new()));
     let (command_tx, command_rx) = mpsc::channel();
-    let shared_for_emu = Arc::clone(&shared);
-    let emulator_thread = std::thread::Builder::new()
-        .name("rusty_box_gui_emulator".to_owned())
-        .stack_size(1500 * 1024 * 1024)
-        .spawn(move || run_egui_emulator_loop(command_rx, shared_for_emu))
+    // The launcher runs no machine, so it takes the default stack; each VM's
+    // thread it spawns takes `EMULATOR_STACK_BYTES`.
+    let launcher = std::thread::Builder::new()
+        .name("rusty_box_gui_launcher".to_owned())
+        .spawn(move || run_egui_launcher(command_rx))
         .map_err(|source| RunError::ThreadStart { source })?;
 
-    let shared_for_gui = Arc::clone(&shared);
     let gui_result = eframe::run_native(
         "Rusty Box Workstation",
         native_options,
-        Box::new(move |cc| Ok(Box::new(make_app(cc, shared_for_gui, command_tx, start)))),
+        Box::new(move |cc| Ok(Box::new(make_app(cc, command_tx, start)))),
     );
 
-    signal_egui_stop(&shared);
-    let emulator_result = emulator_thread
+    // The app, and the shell's sender with it, is gone once `run_native`
+    // returns: the launcher sees its channel close, stops every run still
+    // going and waits for each.
+    let launcher_result = launcher
         .join()
         .map_err(|_| RunError::EmulatorThreadPanic)?;
     gui_result.map_err(|source| RunError::Gui {
         message: source.to_string(),
     })?;
-    emulator_result
+    launcher_result
 }
 
 /// `config`'s startup-disk creation, when it has one.
@@ -861,85 +870,228 @@ fn startup_disk_creation(config: &ResolvedConfig) -> Option<&crate::config::Reso
     config.disk.as_ref()?.creation.as_ref()
 }
 
+/// A power-on's thread and the display it runs on.
 #[cfg(feature = "gui-egui")]
-fn run_egui_emulator_loop(
-    command_rx: mpsc::Receiver<crate::app::NativeEmulatorCommand>,
-    shared: Arc<Mutex<SharedDisplay>>,
-) -> Result<RunSummary, RunError> {
-    let mut instructions_executed = Some(0u64);
-    // The overwrite creations provisioned this session, by path. An overwrite
-    // creation erases its file at the first power-on of the session that
-    // uses the path and at no later one, so a file the user agreed to have
-    // erased is erased once; the shell asks about each such file once per
-    // session by the same rule (`NativeShellApp::overwrite_confirmed`). A
-    // plain creation is provisioned at every power-on and never recorded
-    // here: it only creates a missing file and reuses a valid one
-    // (`disk_images::provision_startup_disk`), so it erases nothing.
-    let mut provisioned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+struct VmRunThread {
+    display: Arc<Mutex<SharedDisplay>>,
+    thread: std::thread::JoinHandle<Option<u64>>,
+}
 
-    while let Ok(command) = command_rx.recv() {
-        match command {
-            crate::app::NativeEmulatorCommand::Start(config) => loop {
-                let stop_flag = prepare_egui_run(&shared);
-                let creation = startup_disk_creation(&config);
-                let create_startup_disks = creation
-                    .is_some_and(|creation| !creation.overwrite || !provisioned.contains(&creation.path));
-                // Warn in the window that a (possibly slow) disk allocation is
-                // about to happen, before the run blocks on it. Reusing an
-                // existing image returns None here (instant, no warning).
-                if create_startup_disks {
-                    if let Some(status) = startup_disk_action(&config) {
-                        if let Ok(mut display) = shared.lock() {
-                            display.startup_status = Some(status);
-                        }
-                    }
-                }
-                let bridge = BridgeGui::new(Arc::clone(&shared));
-                let run = prepare_run(config.clone(), create_startup_disks).and_then(|prepared| {
-                    // The disk is provisioned once `prepare_run` returns, and
-                    // the run after it can still fail, so an overwrite path is
-                    // recorded here and not after the run: a later power-on
-                    // must not erase the file a second time.
-                    provisioned.extend(
-                        creation
-                            .filter(|creation| creation.overwrite)
-                            .map(|creation| creation.path.clone()),
-                    );
-                    run_prepared(prepared, bridge, Some(stop_flag))
-                });
-                let summary = match run {
-                    Ok(summary) => summary,
-                    Err(error) => {
-                        record_egui_error(&shared, &error);
-                        break;
-                    }
-                };
-                // A total is a total only while every run counted. One run on
-                // the hypervisor makes the sum a guess, and a guess is not
-                // reported as a count.
-                instructions_executed =
-                    match (instructions_executed, summary.instructions_executed) {
-                        (Some(total), Some(counted)) => Some(total.saturating_add(counted)),
-                        (None, _) | (_, None) => None,
-                    };
-
-                let restart_requested = finish_egui_run(&shared);
-                if !restart_requested {
-                    break;
-                }
-            },
-        }
-    }
-
-    Ok(RunSummary {
-        instructions_executed,
-    })
+/// What the launcher's runs left, summed as each one's thread is joined.
+#[cfg(feature = "gui-egui")]
+struct RunTally {
+    /// The instructions every joined run retired, `None` once a run on the
+    /// hypervisor makes the sum a guess.
+    instructions_executed: Option<u64>,
+    /// Whether a joined run's thread panicked.
+    panicked: bool,
 }
 
 #[cfg(feature = "gui-egui")]
-fn prepare_egui_run(shared: &Arc<Mutex<SharedDisplay>>) -> Arc<AtomicBool> {
+impl RunTally {
+    fn new() -> Self {
+        Self {
+            instructions_executed: Some(0),
+            panicked: false,
+        }
+    }
+
+    /// Waits for `run`'s thread to end, and counts what it retired or that
+    /// it panicked. Its display is let go with it.
+    fn join(&mut self, run: VmRunThread) {
+        match run.thread.join() {
+            Ok(counted) => {
+                self.instructions_executed = match (self.instructions_executed, counted) {
+                    (Some(total), Some(counted)) => Some(total.saturating_add(counted)),
+                    (None, _) | (_, None) => None,
+                };
+            }
+            Err(_) => self.panicked = true,
+        }
+    }
+
+    /// The launcher's result, once every run it started is joined.
+    fn summary(self) -> Result<RunSummary, RunError> {
+        if self.panicked {
+            return Err(RunError::EmulatorThreadPanic);
+        }
+        Ok(RunSummary {
+            instructions_executed: self.instructions_executed,
+        })
+    }
+}
+
+/// Runs every power-on the shell sends on a thread of its own, until the
+/// shell closes the channel; then stops every run still going and waits for
+/// each. A run whose thread is over is joined at the next power-on, so the
+/// threads of ended runs do not pile up however long the app lives. Returns
+/// the instructions every run retired, `None` once a run on the hypervisor
+/// makes the sum a guess.
+#[cfg(feature = "gui-egui")]
+fn run_egui_launcher(
+    command_rx: mpsc::Receiver<crate::app::NativeEmulatorCommand>,
+) -> Result<RunSummary, RunError> {
+    // The overwrite creations provisioned this session, by path. An overwrite
+    // creation erases its file at the first power-on of the session that
+    // uses the path and at no later one, whichever VM's thread powers it on,
+    // so a file the user agreed to have erased is erased once; the shell asks
+    // about each such file once per session by the same rule
+    // (`NativeShellApp::overwrite_confirmed`). A plain creation is provisioned
+    // at every power-on and never recorded here: it only creates a missing
+    // file and reuses a valid one (`disk_images::provision_startup_disk`), so
+    // it erases nothing.
+    let provisioned: Arc<Mutex<HashSet<PathBuf>>> = Arc::default();
+    let mut runs: Vec<VmRunThread> = Vec::new();
+    let mut tally = RunTally::new();
+
+    while let Ok(command) = command_rx.recv() {
+        let crate::app::NativeEmulatorCommand::Start(start) = command;
+        // Every run whose thread is over is joined before the next is
+        // spawned. A phone's app never ends its own process, and a thread
+        // left unjoined keeps its stack mapping (`EMULATOR_STACK_BYTES`;
+        // bionic frees a joinable thread's stack only when it is joined)
+        // and its VM's display, a deleted VM's included.
+        for finished in runs.extract_if(.., |run| run.thread.is_finished()) {
+            tally.join(finished);
+        }
+        let display = Arc::clone(&start.display);
+        let provisioned = Arc::clone(&provisioned);
+        let spawned = std::thread::Builder::new()
+            .name("rusty_box_gui_emulator".to_owned())
+            .stack_size(EMULATOR_STACK_BYTES)
+            .spawn(move || run_one_vm(start, &provisioned));
+        match spawned {
+            Ok(thread) => runs.push(VmRunThread { display, thread }),
+            Err(source) => record_egui_error(&display, &RunError::ThreadStart { source }),
+        }
+    }
+
+    for run in &runs {
+        signal_egui_stop(&run.display);
+    }
+    for run in runs {
+        tally.join(run);
+    }
+    tally.summary()
+}
+
+/// One power-on, restarts included, on its own thread. What the power-on
+/// holds — the hypervisor, its hard disk — is held across every restart and
+/// given back once the last run's machine is gone. Returns what it retired,
+/// `None` when a run on the hypervisor counted nothing.
+#[cfg(feature = "gui-egui")]
+fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>) -> Option<u64> {
+    let crate::app::StartRun {
+        display,
+        config,
+        holds,
+    } = start;
+    let mut retired = Some(0u64);
+    let mut how = RunStart::PowerOn;
+    loop {
+        let stop_flag = prepare_egui_run(&display, how);
+        let creation = startup_disk_creation(&config);
+        // A record that cannot be read, its lock poisoned, reads as not yet
+        // provisioned: the creation runs, as at the path's first power-on.
+        let create_startup_disks = creation.is_some_and(|creation| {
+            !creation.overwrite
+                || provisioned
+                    .lock()
+                    .map_or(true, |provisioned| !provisioned.contains(&creation.path))
+        });
+        // Warn in the window that a (possibly slow) disk allocation is
+        // about to happen, before the run blocks on it. Reusing an
+        // existing image returns None here (instant, no warning).
+        if create_startup_disks {
+            if let Some(status) = startup_disk_action(&config) {
+                if let Ok(mut shown) = display.lock() {
+                    shown.startup_status = Some(status);
+                }
+            }
+        }
+        let bridge = BridgeGui::new(Arc::clone(&display));
+        let run = prepare_run(config.clone(), create_startup_disks).and_then(|prepared| {
+            // The disk is provisioned once `prepare_run` returns, and
+            // the run after it can still fail, so an overwrite path is
+            // recorded here and not after the run: a later power-on
+            // must not erase the file a second time.
+            provisioned
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(
+                    creation
+                        .filter(|creation| creation.overwrite)
+                        .map(|creation| creation.path.clone()),
+                );
+            run_prepared(prepared, bridge, Some(stop_flag))
+        });
+        let summary = match run {
+            Ok(summary) => summary,
+            Err(error) => {
+                record_egui_error(&display, &error);
+                break;
+            }
+        };
+        // A total is a total only while every run counted. One run on
+        // the hypervisor makes the sum a guess, and a guess is not
+        // reported as a count.
+        retired = match (retired, summary.instructions_executed) {
+            (Some(total), Some(counted)) => Some(total.saturating_add(counted)),
+            (None, _) | (_, None) => None,
+        };
+
+        let restart_requested = finish_egui_run(&display);
+        if !restart_requested {
+            break;
+        }
+        how = RunStart::Restart;
+    }
+    // Every machine this power-on built is gone: the next VM may take the
+    // hypervisor, the disk may have its next writer, and with the last VM off
+    // a phone no longer keeps the app running.
+    let crate::sessions::RunHolds {
+        hypervisor,
+        disk,
+        alive,
+    } = holds;
+    drop(hypervisor);
+    drop(disk);
+    drop(alive);
+    retired
+}
+
+/// How a run begins.
+#[cfg(feature = "gui-egui")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunStart {
+    /// The shell asked for it and lowered the stop flag then; a stop raised
+    /// since is honoured.
+    PowerOn,
+    /// The run before it ended on a restart; the stop that ended it is spent.
+    Restart,
+}
+
+/// Marks `shared`'s VM running for a run that begins `how`, and returns the
+/// stop flag the run polls.
+///
+/// A run never lowers the flag at a power-on: the shell lowered it when it
+/// asked for the power-on, so a stop raised since, as closing the shell
+/// raises one before the run's thread gets here, ends the run at once. A
+/// restart lowers the stop that ended the run before it, in the same lock
+/// as it reads that the restart still stands: a stop raised after the
+/// restart was asked for withdraws it (`signal_egui_stop`, a power-off) and
+/// is honoured the same way.
+#[cfg(feature = "gui-egui")]
+fn prepare_egui_run(shared: &Arc<Mutex<SharedDisplay>>, how: RunStart) -> Arc<AtomicBool> {
     if let Ok(mut display) = shared.lock() {
-        display.stop_flag.store(false, Ordering::Relaxed);
+        match how {
+            RunStart::PowerOn => {}
+            RunStart::Restart => {
+                if display.reset_requested {
+                    display.stop_flag.store(false, Ordering::Relaxed);
+                }
+            }
+        }
         display.emu_running = true;
         display.start_pending = false;
         display.reset_requested = false;
@@ -980,12 +1132,16 @@ fn record_egui_error(shared: &Arc<Mutex<SharedDisplay>>, error: &RunError) {
     }
 }
 
+/// Stops `shared`'s VM for good: its run's stop flag is raised, it shows as
+/// neither running nor starting, and a restart asked for and not yet begun
+/// is withdrawn, so the run ends rather than beginning again.
 #[cfg(feature = "gui-egui")]
-fn signal_egui_stop(shared: &Arc<Mutex<SharedDisplay>>) {
+pub(crate) fn signal_egui_stop(shared: &Arc<Mutex<SharedDisplay>>) {
     if let Ok(mut display) = shared.lock() {
         display.emu_running = false;
         display.stop_flag.store(true, Ordering::Relaxed);
         display.start_pending = false;
+        display.reset_requested = false;
     }
 }
 
@@ -1177,6 +1333,10 @@ mod tests {
     use crate::config::{
         CpuCapabilities, Engine, ResolvedCdrom, ResolvedDisk, ResolvedDiskCreation,
     };
+    #[cfg(feature = "gui-egui")]
+    use crate::sessions::{
+        AliveChange, AliveEffect, Exclusive, HeldBy, Holdings, KeepAlive, RunHolds,
+    };
     use rusty_box::params::BxParams;
     use rusty_box_bximage::ImageSize;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1205,6 +1365,7 @@ mod tests {
             sync_realtime: false,
             smp_quantum: 16,
             cpuid_freq: rusty_box::CpuidFreq::None,
+            port_e9_hack: rusty_box::iodev::PortE9Hack::Off,
             max_instructions: 0,
             cpu_params: BxParams::default(),
             display: DisplayBackend::Headless,
@@ -1238,12 +1399,19 @@ mod tests {
         }
     }
 
+    /// A path no other test of this process has: the clock alone is not
+    /// enough, since two tests can start within one of its ticks.
     fn unique_temp_path(name: &str) -> PathBuf {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("{name}-{}-{suffix}.img", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "{name}-{}-{suffix}-{sequence}.img",
+            std::process::id()
+        ))
     }
 
     fn disk_creation_config(path: PathBuf, overwrite: bool) -> ResolvedConfig {
@@ -1259,6 +1427,7 @@ mod tests {
             sync_realtime: false,
             smp_quantum: 16,
             cpuid_freq: rusty_box::CpuidFreq::None,
+            port_e9_hack: rusty_box::iodev::PortE9Hack::Off,
             max_instructions: 0,
             cpu_params: BxParams::default(),
             display: DisplayBackend::Headless,
@@ -1690,7 +1859,7 @@ mod tests {
         let shared = Arc::new(Mutex::new(SharedDisplay::new()));
         shared.lock().unwrap().queue_serial_input_line("stale");
 
-        drop(prepare_egui_run(&shared));
+        drop(prepare_egui_run(&shared, RunStart::PowerOn));
 
         assert_eq!(
             shared.lock().unwrap().drain_serial_input(),
@@ -1712,9 +1881,39 @@ mod tests {
             .push(HostInputEvent::Key(BxKey::Enter, true)));
         assert_eq!(shared.lock().unwrap().pending_keys.len(), 1);
 
-        drop(prepare_egui_run(&shared));
+        drop(prepare_egui_run(&shared, RunStart::PowerOn));
 
         assert!(shared.lock().unwrap().pending_keys.is_empty());
+    }
+
+    /// What the shell's Restart asks of `shared`
+    /// (`NativeShellApp::request_reset`): the run stops, to begin again.
+    #[cfg(feature = "gui-egui")]
+    fn ask_for_a_restart(shared: &Mutex<SharedDisplay>) {
+        let mut display = shared.lock().unwrap();
+        display.stop_flag.store(true, Ordering::Relaxed);
+        display.reset_requested = true;
+    }
+
+    /// A restart lowers the stop that ended the run before it, and only that
+    /// one: a stop raised after the restart was asked for withdraws it, and
+    /// still stands when the run it would have begun starts.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_restart_lowers_only_the_stop_that_ended_its_run() {
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+
+        ask_for_a_restart(&shared);
+        let stop = prepare_egui_run(&shared, RunStart::Restart);
+        assert!(!stop.load(Ordering::Relaxed), "the stop that ended the run is spent");
+
+        ask_for_a_restart(&shared);
+        signal_egui_stop(&shared);
+        let stop = prepare_egui_run(&shared, RunStart::Restart);
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "a stop raised after the restart was asked for still stands"
+        );
     }
 
     /// A power-on refused for a missing CD-ROM leaves an `overwrite` disk as
@@ -1762,15 +1961,149 @@ mod tests {
         assert!(display.runtime_error.is_some());
     }
 
+    /// The launcher on a thread of its own, as the shell runs it.
+    #[cfg(feature = "gui-egui")]
+    fn spawn_launcher(
+        command_rx: mpsc::Receiver<crate::app::NativeEmulatorCommand>,
+    ) -> std::thread::JoinHandle<Result<RunSummary, RunError>> {
+        std::thread::Builder::new()
+            .name("rusty_box_gui_test_launcher".to_owned())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || run_egui_launcher(command_rx))
+            .expect("spawn the launcher")
+    }
+
+    /// One power-on run on a thread of its own, as the launcher runs it. The
+    /// guest's memory is on the heap, so the stack bounds only the run's own
+    /// frames, and 16 MiB holds them.
+    #[cfg(feature = "gui-egui")]
+    fn spawn_run(start: crate::app::StartRun) -> std::thread::JoinHandle<Option<u64>> {
+        std::thread::Builder::new()
+            .name("rusty_box_gui_test_run".to_owned())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || run_one_vm(start, &Mutex::new(HashSet::new())))
+            .expect("spawn the run")
+    }
+
+    /// What the shell's power-on asks of `display` and the launcher
+    /// (`NativeShellApp::start_vm`): the VM shows as starting, its stop flag
+    /// is lowered, and the launcher is sent the Start, which holds nothing.
+    #[cfg(feature = "gui-egui")]
+    fn power_on(
+        commands: &mpsc::Sender<crate::app::NativeEmulatorCommand>,
+        display: &Arc<Mutex<SharedDisplay>>,
+        config: ResolvedConfig,
+    ) {
+        power_on_holding(commands, display, config, holds_of_a_plain_power_on());
+    }
+
+    /// What a power-on holds when it takes neither the hypervisor nor a hard
+    /// disk: the app kept running, here by a keep-alive that does nothing.
+    #[cfg(feature = "gui-egui")]
+    fn holds_of_a_plain_power_on() -> RunHolds {
+        RunHolds {
+            hypervisor: None,
+            disk: None,
+            alive: KeepAlive::new(AliveEffect::Nothing).take(),
+        }
+    }
+
+    /// `power_on` for a VM that took `holds` at its power-on, as the shell
+    /// takes the hypervisor or a hard disk: the Start carries them to the
+    /// run's thread.
+    #[cfg(feature = "gui-egui")]
+    fn power_on_holding(
+        commands: &mpsc::Sender<crate::app::NativeEmulatorCommand>,
+        display: &Arc<Mutex<SharedDisplay>>,
+        config: ResolvedConfig,
+        holds: RunHolds,
+    ) {
+        {
+            let mut shown = display.lock().unwrap();
+            shown.stop_flag.store(false, Ordering::Relaxed);
+            shown.start_pending = true;
+        }
+        commands
+            .send(crate::app::NativeEmulatorCommand::Start(crate::app::StartRun {
+                display: Arc::clone(display),
+                config,
+                holds,
+            }))
+            .unwrap();
+    }
+
+    /// How long a launcher test waits for a run before it fails. The waits
+    /// detect a hang, and a pass ends them early, so the bound is set for a
+    /// host loaded with other builds, where a machine is slow to build.
+    #[cfg(feature = "gui-egui")]
+    const RUN_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// Polls `holds` every ten milliseconds until it does, or fails the test
+    /// once `RUN_WAIT_BOUND` has passed.
+    #[cfg(feature = "gui-egui")]
+    fn wait_until(mut holds: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + RUN_WAIT_BOUND;
+        while !holds() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the condition did not hold within {} s",
+                RUN_WAIT_BOUND.as_secs()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Waits until the run a power-on of `display` asked for is over: the
+    /// VM shows as neither starting nor running.
+    #[cfg(feature = "gui-egui")]
+    fn wait_until_the_run_is_over(display: &Mutex<SharedDisplay>) {
+        wait_until(|| {
+            let shown = display.lock().unwrap();
+            !shown.start_pending && !shown.emu_running
+        });
+    }
+
+    /// Polls `run` every ten milliseconds until its thread is over, or fails
+    /// the test, saying that `what` did not end, once `RUN_WAIT_BOUND` has
+    /// passed, leaving the thread to the end of the test process.
+    #[cfg(feature = "gui-egui")]
+    fn wait_for_end<T>(run: &std::thread::JoinHandle<T>, what: &str) {
+        let deadline = std::time::Instant::now() + RUN_WAIT_BOUND;
+        while !run.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what} did not end within {} s",
+                RUN_WAIT_BOUND.as_secs()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// The launcher's result, once its channel is closed and every run it
+    /// started is over; a launcher still waiting on a run once
+    /// `RUN_WAIT_BOUND` has passed fails the test rather than hanging it.
+    #[cfg(feature = "gui-egui")]
+    fn join_launcher(
+        launcher: std::thread::JoinHandle<Result<RunSummary, RunError>>,
+    ) -> Result<RunSummary, RunError> {
+        wait_for_end(&launcher, "a run the launcher started");
+        launcher.join().expect("the launcher")
+    }
+
+    /// A power-on whose BIOS cannot be read ends with its error on the VM's
+    /// display, and the VM shows as neither starting nor running.
     #[cfg(feature = "gui-egui")]
     #[test]
-    fn egui_emulator_loop_clears_lifecycle_on_startup_error() {
-        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
-        let (command_tx, command_rx) = mpsc::channel();
+    fn a_missing_bios_ends_the_power_on_with_its_error() {
+        let display = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
         let missing_bios = unique_temp_path("rusty-box-gui-missing-bios");
 
-        command_tx
-            .send(crate::app::NativeEmulatorCommand::Start(ResolvedConfig {
+        power_on(
+            &commands,
+            &display,
+            ResolvedConfig {
                 engine: Engine::Interpreter,
                 cpu_capabilities: CpuCapabilities::Preset,
                 memory_mib: 32,
@@ -1782,6 +2115,7 @@ mod tests {
                 sync_realtime: false,
                 smp_quantum: 16,
                 cpuid_freq: rusty_box::CpuidFreq::None,
+                port_e9_hack: rusty_box::iodev::PortE9Hack::Off,
                 max_instructions: 0,
                 cpu_params: BxParams::default(),
                 display: DisplayBackend::Egui,
@@ -1795,31 +2129,34 @@ mod tests {
                 pci_vga: false,
                 console_stretch: false,
                 pointer_speed: crate::config::PointerSpeed::DEFAULT,
-            }))
-            .unwrap();
-        drop(command_tx);
+            },
+        );
+        wait_until(|| display.lock().unwrap().runtime_error.is_some());
 
-        let result = run_egui_emulator_loop(command_rx, Arc::clone(&shared));
-
-        assert!(result.is_ok());
-        let display = shared.lock().unwrap();
-        assert!(!display.emu_running);
-        assert!(!display.start_pending);
-        assert!(display
-            .runtime_error
-            .as_deref()
-            .is_some_and(|message| message.contains("Emulator startup failed")));
+        {
+            let shown = display.lock().unwrap();
+            assert!(!shown.emu_running);
+            assert!(!shown.start_pending);
+            let message = shown.runtime_error.as_deref().unwrap_or_default();
+            assert!(message.contains("Emulator startup failed"), "{message}");
+            assert!(
+                message.contains("failed to read BIOS file"),
+                "the error names the BIOS read: {message}"
+            );
+        }
+        drop(commands);
+        assert!(join_launcher(launcher).is_ok());
     }
 
-    /// A BIOS the loop's machine builds with: one byte at a fresh path.
+    /// A BIOS a run's machine builds with: one byte at a fresh path.
     #[cfg(feature = "gui-egui")]
-    fn loop_bios() -> PathBuf {
-        let bios = unique_temp_path("rusty-box-gui-loop-bios");
+    fn one_byte_bios() -> PathBuf {
+        let bios = unique_temp_path("rusty-box-gui-one-byte-bios");
         fs::write(&bios, [0xEA]).unwrap();
         bios
     }
 
-    /// A VM the loop runs to the end: its BIOS is the one byte at `bios`
+    /// A VM whose run ends on its own: its BIOS is the one byte at `bios`
     /// and, `max_instructions` being 0, its run retires nothing.
     #[cfg(feature = "gui-egui")]
     fn runnable_config(disk: PathBuf, overwrite: bool, bios: &Path) -> ResolvedConfig {
@@ -1829,36 +2166,37 @@ mod tests {
         config
     }
 
-    /// Runs the loop over `configs`, one Start each, until the channel
-    /// closes, and returns the loop's result with what the display holds.
+    /// What the launcher left once its channel closed and every run it
+    /// started was over: its own result, and the error each power-on's
+    /// display holds, in the order the power-ons were sent.
     #[cfg(feature = "gui-egui")]
-    fn run_loop_over(configs: Vec<ResolvedConfig>) -> (Result<RunSummary, RunError>, Option<String>) {
-        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
-        let (command_tx, command_rx) = mpsc::channel();
-        for config in configs {
-            command_tx
-                .send(crate::app::NativeEmulatorCommand::Start(config))
-                .unwrap();
-        }
-        drop(command_tx);
-
-        let result = run_egui_emulator_loop(command_rx, Arc::clone(&shared));
-
-        let runtime_error = shared.lock().unwrap().runtime_error.clone();
-        (result, runtime_error)
+    struct LauncherOutcome {
+        result: Result<RunSummary, RunError>,
+        runtime_errors: Vec<Option<String>>,
     }
 
-    /// Polls `holds` every ten milliseconds until it does, or fails the test
-    /// after thirty seconds.
+    /// Powers each of `configs` on in turn, each VM on a display of its own
+    /// and once the run before it is over, then closes the channel and
+    /// returns what the launcher left.
     #[cfg(feature = "gui-egui")]
-    fn wait_until(mut holds: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !holds() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the condition did not hold within 30 s"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
+    fn run_launcher_over(configs: Vec<ResolvedConfig>) -> LauncherOutcome {
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        let mut displays = Vec::new();
+        for config in configs {
+            let display = Arc::new(Mutex::new(SharedDisplay::new()));
+            power_on(&commands, &display, config);
+            wait_until_the_run_is_over(&display);
+            displays.push(display);
+        }
+        drop(commands);
+
+        LauncherOutcome {
+            result: join_launcher(launcher),
+            runtime_errors: displays
+                .iter()
+                .map(|display| display.lock().unwrap().runtime_error.clone())
+                .collect(),
         }
     }
 
@@ -1866,12 +2204,12 @@ mod tests {
     /// session, not only the disk of the VM that was powered on first.
     #[cfg(feature = "gui-egui")]
     #[test]
-    fn the_loop_creates_each_vms_startup_disk_at_its_first_start() {
-        let bios = loop_bios();
-        let first = unique_temp_path("rusty-box-gui-loop-first-disk");
-        let second = unique_temp_path("rusty-box-gui-loop-second-disk");
+    fn the_launcher_creates_each_vms_startup_disk_at_its_first_start() {
+        let bios = one_byte_bios();
+        let first = unique_temp_path("rusty-box-gui-launcher-first-disk");
+        let second = unique_temp_path("rusty-box-gui-launcher-second-disk");
 
-        let (result, runtime_error) = run_loop_over(vec![
+        let outcome = run_launcher_over(vec![
             runnable_config(first.clone(), false, &bios),
             runnable_config(second.clone(), false, &bios),
         ]);
@@ -1881,8 +2219,8 @@ mod tests {
         remove_test_file(&first);
         remove_test_file(&second);
         remove_test_file(&bios);
-        assert!(result.is_ok());
-        assert_eq!(runtime_error, None);
+        assert!(outcome.result.is_ok());
+        assert_eq!(outcome.runtime_errors, vec![None, None]);
         assert_eq!(first_len.unwrap(), 10_321_920);
         assert_eq!(second_len.unwrap(), 10_321_920);
     }
@@ -1891,13 +2229,13 @@ mod tests {
     /// the erase the shell asked the user about happens.
     #[cfg(feature = "gui-egui")]
     #[test]
-    fn the_loop_recreates_a_second_vms_overwrite_disk_at_its_first_start() {
-        let bios = loop_bios();
-        let first = unique_temp_path("rusty-box-gui-loop-first-disk");
-        let second = unique_temp_path("rusty-box-gui-loop-second-overwrite-disk");
+    fn the_launcher_recreates_a_second_vms_overwrite_disk_at_its_first_start() {
+        let bios = one_byte_bios();
+        let first = unique_temp_path("rusty-box-gui-launcher-first-disk");
+        let second = unique_temp_path("rusty-box-gui-launcher-second-overwrite-disk");
         fs::write(&second, [0u8; 1024]).unwrap();
 
-        let (result, runtime_error) = run_loop_over(vec![
+        let outcome = run_launcher_over(vec![
             runnable_config(first.clone(), false, &bios),
             runnable_config(second.clone(), true, &bios),
         ]);
@@ -1906,63 +2244,56 @@ mod tests {
         remove_test_file(&first);
         remove_test_file(&second);
         remove_test_file(&bios);
-        assert!(result.is_ok());
-        assert_eq!(runtime_error, None);
+        assert!(outcome.result.is_ok());
+        assert_eq!(outcome.runtime_errors, vec![None, None]);
         assert_eq!(second_len.unwrap(), 10_321_920);
     }
 
-    /// The loop on a thread of its own, as the shell runs it, fed one Start
-    /// at a time.
+    /// The launcher on a thread of its own, as the shell runs it, fed one
+    /// Start at a time, every one on the same display: one VM powered on
+    /// again and again.
     #[cfg(feature = "gui-egui")]
-    struct LoopThread {
+    struct LauncherThread {
         commands: mpsc::Sender<crate::app::NativeEmulatorCommand>,
         shared: Arc<Mutex<SharedDisplay>>,
         thread: std::thread::JoinHandle<Result<RunSummary, RunError>>,
     }
 
     #[cfg(feature = "gui-egui")]
-    impl LoopThread {
+    impl LauncherThread {
         fn spawn() -> Self {
-            let shared = Arc::new(Mutex::new(SharedDisplay::new()));
             let (commands, command_rx) = mpsc::channel();
-            let loop_shared = Arc::clone(&shared);
-            let thread = std::thread::Builder::new()
-                .name("rusty_box_gui_test_emulator".to_owned())
-                .stack_size(16 * 1024 * 1024)
-                .spawn(move || run_egui_emulator_loop(command_rx, loop_shared))
-                .expect("spawn the loop");
             Self {
                 commands,
-                shared,
-                thread,
+                shared: Arc::new(Mutex::new(SharedDisplay::new())),
+                thread: spawn_launcher(command_rx),
             }
         }
 
-        /// Powers `config` on and waits for its run to end: the run is over
-        /// once its startup disk `disk` exists and the machine no longer
-        /// runs, and the loop then waits for the next command.
-        fn start_and_wait(&self, config: ResolvedConfig, disk: &Path) {
-            self.commands
-                .send(crate::app::NativeEmulatorCommand::Start(config))
-                .unwrap();
-            wait_until(|| disk.exists() && !self.shared.lock().unwrap().emu_running);
+        /// Powers `config` on and waits until its run is over; the launcher
+        /// then waits for the next command.
+        fn start_and_wait(&self, config: ResolvedConfig) {
+            power_on(&self.commands, &self.shared, config);
+            wait_until_the_run_is_over(&self.shared);
         }
 
-        /// Powers `config` on, lets the loop finish every command it was
-        /// sent, and returns its result with the error the display holds.
-        fn start_and_finish(self, config: ResolvedConfig) -> (Result<RunSummary, RunError>, Option<String>) {
+        /// Powers `config` on, closes the channel so the launcher finishes
+        /// every run it started, and returns what it left: the VM's one
+        /// display holds its one error.
+        fn start_and_finish(self, config: ResolvedConfig) -> LauncherOutcome {
+            power_on(&self.commands, &self.shared, config);
             let Self {
                 commands,
                 shared,
                 thread,
             } = self;
-            commands
-                .send(crate::app::NativeEmulatorCommand::Start(config))
-                .unwrap();
             drop(commands);
-            let result = thread.join().expect("the loop thread");
+            let result = join_launcher(thread);
             let runtime_error = shared.lock().unwrap().runtime_error.clone();
-            (result, runtime_error)
+            LauncherOutcome {
+                result,
+                runtime_errors: vec![runtime_error],
+            }
         }
     }
 
@@ -1979,21 +2310,21 @@ mod tests {
     /// powered on: a second Start leaves what the first run left on it.
     #[cfg(feature = "gui-egui")]
     #[test]
-    fn the_loop_erases_an_overwrite_disk_once_however_often_its_vm_starts() {
-        let bios = loop_bios();
-        let disk = unique_temp_path("rusty-box-gui-loop-same-disk");
+    fn the_launcher_erases_an_overwrite_disk_once_however_often_its_vm_starts() {
+        let bios = one_byte_bios();
+        let disk = unique_temp_path("rusty-box-gui-launcher-same-disk");
         let config = runnable_config(disk.clone(), true, &bios);
-        let emulator = LoopThread::spawn();
+        let launcher = LauncherThread::spawn();
 
-        emulator.start_and_wait(config.clone(), &disk);
+        launcher.start_and_wait(config.clone());
         mark_first_byte(&disk);
-        let (result, runtime_error) = emulator.start_and_finish(config);
+        let outcome = launcher.start_and_finish(config);
 
         let after = fs::read(&disk);
         remove_test_file(&disk);
         remove_test_file(&bios);
-        assert!(result.is_ok());
-        assert_eq!(runtime_error, None);
+        assert!(outcome.result.is_ok());
+        assert_eq!(outcome.runtime_errors, vec![None]);
         let after = after.unwrap();
         assert_eq!(after.len(), 10_321_920);
         assert_eq!(after[0], 0xAB);
@@ -2003,21 +2334,21 @@ mod tests {
     /// one power-on is there again after the next, and that power-on runs.
     #[cfg(feature = "gui-egui")]
     #[test]
-    fn the_loop_provisions_a_plain_disk_at_every_start() {
-        let bios = loop_bios();
-        let disk = unique_temp_path("rusty-box-gui-loop-plain-disk");
+    fn the_launcher_provisions_a_plain_disk_at_every_start() {
+        let bios = one_byte_bios();
+        let disk = unique_temp_path("rusty-box-gui-launcher-plain-disk");
         let config = runnable_config(disk.clone(), false, &bios);
-        let emulator = LoopThread::spawn();
+        let launcher = LauncherThread::spawn();
 
-        emulator.start_and_wait(config.clone(), &disk);
+        launcher.start_and_wait(config.clone());
         fs::remove_file(&disk).unwrap();
-        let (result, runtime_error) = emulator.start_and_finish(config);
+        let outcome = launcher.start_and_finish(config);
 
         let after_len = fs::metadata(&disk).map(|metadata| metadata.len());
         remove_test_file(&disk);
         remove_test_file(&bios);
-        assert!(result.is_ok());
-        assert_eq!(runtime_error, None);
+        assert!(outcome.result.is_ok());
+        assert_eq!(outcome.runtime_errors, vec![None]);
         assert_eq!(after_len.unwrap(), 10_321_920);
     }
 
@@ -2027,23 +2358,314 @@ mod tests {
     #[cfg(feature = "gui-egui")]
     #[test]
     fn an_overwrite_start_after_a_plain_start_of_the_same_disk_erases_it() {
-        let bios = loop_bios();
-        let disk = unique_temp_path("rusty-box-gui-loop-plain-then-overwrite");
-        let emulator = LoopThread::spawn();
+        let bios = one_byte_bios();
+        let disk = unique_temp_path("rusty-box-gui-launcher-plain-then-overwrite");
+        let launcher = LauncherThread::spawn();
 
-        emulator.start_and_wait(runnable_config(disk.clone(), false, &bios), &disk);
+        launcher.start_and_wait(runnable_config(disk.clone(), false, &bios));
         mark_first_byte(&disk);
-        let (result, runtime_error) =
-            emulator.start_and_finish(runnable_config(disk.clone(), true, &bios));
+        let outcome = launcher.start_and_finish(runnable_config(disk.clone(), true, &bios));
 
         let after = fs::read(&disk);
         remove_test_file(&disk);
         remove_test_file(&bios);
-        assert!(result.is_ok());
-        assert_eq!(runtime_error, None);
+        assert!(outcome.result.is_ok());
+        assert_eq!(outcome.runtime_errors, vec![None]);
         let after = after.unwrap();
         assert_eq!(after.len(), 10_321_920);
         assert_eq!(after[0], 0x00, "the overwrite Start left the first run's data");
+    }
+
+    /// A BIOS whose instruction at the reset vector jumps to itself, so the
+    /// guest spins there until it is stopped. A 64 KiB image, a real BIOS's
+    /// size, ends at the 4 GiB boundary (builder.rs `bios_load_address`), so
+    /// its last sixteen bytes lie at the reset vector, 0xFFFF_FFF0. Any image
+    /// of at least one page would do: a fetch maps the ROM a page at a time,
+    /// and the page holding the reset vector is ROM only when the image
+    /// starts at or below it (misc_mem.rs `host_mem_range`).
+    #[cfg(feature = "gui-egui")]
+    fn spinning_bios() -> PathBuf {
+        let bios = unique_temp_path("rusty-box-gui-spinning-bios");
+        let mut image = vec![0x90u8; 0x1_0000];
+        image[0xFFF0] = 0xEB; // JMP short
+        image[0xFFF1] = 0xFE; // -2: itself
+        fs::write(&bios, image).unwrap();
+        bios
+    }
+
+    /// A VM that runs until it is stopped: no disk, no limit.
+    #[cfg(feature = "gui-egui")]
+    fn spinning_config(bios: &Path) -> ResolvedConfig {
+        ResolvedConfig {
+            engine: Engine::Interpreter,
+            cpu_capabilities: CpuCapabilities::Preset,
+            memory_mib: 32,
+            host_memory_mib: 32,
+            memory_block_kib: 128,
+            ips: 4_000_000,
+            pci: true,
+            sync_slowdown: false,
+            sync_realtime: false,
+            smp_quantum: 16,
+            cpuid_freq: rusty_box::CpuidFreq::None,
+            port_e9_hack: rusty_box::iodev::PortE9Hack::Off,
+            max_instructions: u64::MAX,
+            cpu_params: BxParams::default(),
+            display: DisplayBackend::Egui,
+            bios: bios.to_path_buf(),
+            vga_bios: None,
+            boot_order: Vec::new(),
+            disk: None,
+            cdrom: None,
+            log_level: LogLevel::Warn,
+            vga_mode: None,
+            pci_vga: false,
+            console_stretch: false,
+            pointer_speed: crate::config::PointerSpeed::DEFAULT,
+        }
+    }
+
+    /// Two VMs powered on one after the other both run their guests at once,
+    /// each on its own display; stopping them ends both runs and the
+    /// launcher.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn the_launcher_runs_two_vms_at_once() {
+        let bios = spinning_bios();
+        let first = Arc::new(Mutex::new(SharedDisplay::new()));
+        let second = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        for display in [&first, &second] {
+            power_on(&commands, display, spinning_config(&bios));
+        }
+
+        // Every real second, a run shows the instructions per second its
+        // guest retired, so a display that shows more than none had its
+        // guest run. Neither spinning guest ends until it is stopped, so
+        // the two ran at once.
+        wait_until(|| {
+            [&first, &second].iter().all(|display| {
+                let shown = display.lock().unwrap();
+                shown.emu_running && shown.ips > 0
+            })
+        });
+
+        signal_egui_stop(&first);
+        signal_egui_stop(&second);
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert!(!first.lock().unwrap().emu_running);
+        assert!(!second.lock().unwrap().emu_running);
+        assert_eq!(first.lock().unwrap().runtime_error, None);
+        assert_eq!(second.lock().unwrap().runtime_error, None);
+    }
+
+    /// A run that is over is let go of at the next power-on, not only when
+    /// the app ends: its thread is joined, its VM's display is released, and
+    /// what it retired counts in the total the app reports at exit. An app
+    /// that outlives any number of runs, as a phone's does, keeps nothing of
+    /// the runs that ended.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_run_that_is_over_is_let_go_of_at_the_next_power_on() {
+        const FIRST_BUDGET: u64 = 100_000;
+        const SECOND_BUDGET: u64 = 1_000;
+        let bios = spinning_bios();
+        // A spinning VM whose run ends once it has retired `budget`.
+        let budgeted = |budget| ResolvedConfig {
+            max_instructions: budget,
+            ..spinning_config(&bios)
+        };
+        let first = Arc::new(Mutex::new(SharedDisplay::new()));
+        let second = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+
+        power_on(&commands, &first, budgeted(FIRST_BUDGET));
+        wait_until_the_run_is_over(&first);
+        // The run's thread holds the first display until it ends; then only
+        // this test and the launcher's record of the run do.
+        wait_until(|| Arc::strong_count(&first) == 2);
+        power_on(&commands, &second, budgeted(SECOND_BUDGET));
+        wait_until_the_run_is_over(&second);
+        let holders_of_the_first = Arc::strong_count(&first);
+
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert_eq!(
+            holders_of_the_first, 1,
+            "once the second VM has run, the first run's display is this test's alone"
+        );
+        assert_eq!(first.lock().unwrap().runtime_error, None);
+        assert_eq!(second.lock().unwrap().runtime_error, None);
+        let retired = result.expect("the launcher's result").instructions_executed;
+        assert!(
+            retired.is_some_and(|retired| retired >= FIRST_BUDGET + SECOND_BUDGET),
+            "both runs count in the total: {retired:?}"
+        );
+    }
+
+    /// A stop raised after the shell asked for a power-on and before the
+    /// power-on's run began, as closing the shell at once raises one, ends
+    /// the run as soon as it starts: the guest runs nothing.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_stop_raised_before_a_run_starts_ends_it_at_once() {
+        let bios = spinning_bios();
+        let display = Arc::new(Mutex::new(SharedDisplay::new()));
+        {
+            let mut shown = display.lock().unwrap();
+            shown.start_pending = true;
+            shown.stop_flag.store(true, Ordering::Relaxed);
+        }
+        let run = spawn_run(crate::app::StartRun {
+            display: Arc::clone(&display),
+            config: spinning_config(&bios),
+            holds: holds_of_a_plain_power_on(),
+        });
+
+        wait_for_end(&run, "a run stopped before it started");
+
+        let retired = run.join().expect("the run's thread");
+        remove_test_file(&bios);
+        assert_eq!(retired, Some(0), "the guest ran nothing");
+        assert!(!display.lock().unwrap().emu_running);
+    }
+
+    /// A restart ends the run and begins the VM again on its display, with
+    /// the stop that ended the run lowered for the run it begins.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_restart_runs_the_vm_again() {
+        let bios = spinning_bios();
+        let display = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        power_on(&commands, &display, spinning_config(&bios));
+        wait_until(|| display.lock().unwrap().emu_running);
+
+        ask_for_a_restart(&display);
+        wait_until(|| {
+            let shown = display.lock().unwrap();
+            !shown.reset_requested && shown.emu_running
+        });
+        assert!(
+            !display.lock().unwrap().stop_flag.load(Ordering::Relaxed),
+            "the restart lowered the stop that ended the run before it"
+        );
+
+        signal_egui_stop(&display);
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert!(!display.lock().unwrap().emu_running);
+        assert_eq!(display.lock().unwrap().runtime_error, None);
+    }
+
+    /// The shell closing just after Restart was pressed ends the VM: the
+    /// stop withdraws the restart, and the VM does not begin again.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn quitting_while_a_restart_is_queued_ends_the_vm() {
+        let bios = spinning_bios();
+        let display = Arc::new(Mutex::new(SharedDisplay::new()));
+        let run = spawn_run(crate::app::StartRun {
+            display: Arc::clone(&display),
+            config: spinning_config(&bios),
+            holds: holds_of_a_plain_power_on(),
+        });
+        wait_until(|| display.lock().unwrap().emu_running);
+
+        ask_for_a_restart(&display);
+        signal_egui_stop(&display);
+
+        wait_for_end(&run, "a VM stopped with its restart queued");
+        let retired = run.join().expect("the run's thread");
+        assert!(retired.is_some(), "a run on the interpreter counts what it retired");
+        remove_test_file(&bios);
+        let shown = display.lock().unwrap();
+        assert!(!shown.emu_running);
+        assert!(!shown.reset_requested);
+    }
+
+    /// A run keeps what it holds while it runs, through a restart, and gives
+    /// it back once its thread is done with the machine: the hypervisor, and
+    /// the keep-alive that on a phone runs the foreground service keeping the
+    /// app running with the screen off. The spinning VM runs on the
+    /// interpreter: only the holds are under test, so no hypervisor is needed.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_run_gives_its_holds_back_once_it_is_over() {
+        let bios = spinning_bios();
+        let holdings = Holdings::default();
+        let alpine = HeldBy {
+            name: "Alpine".to_owned(),
+        };
+        let held = holdings
+            .take(Exclusive::Hypervisor, alpine.clone())
+            .expect("free");
+        let changes = Arc::new(Mutex::new(Vec::new()));
+        let keep_alive = KeepAlive::new(AliveEffect::Record(Arc::clone(&changes)));
+        let kept_alive = || changes.lock().unwrap().clone();
+        let display = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        power_on_holding(
+            &commands,
+            &display,
+            spinning_config(&bios),
+            RunHolds {
+                hypervisor: Some(held),
+                disk: None,
+                alive: keep_alive.take(),
+            },
+        );
+        wait_until(|| display.lock().unwrap().emu_running);
+        let xp = HeldBy {
+            name: "Windows XP".to_owned(),
+        };
+        assert_eq!(
+            holdings.take(Exclusive::Hypervisor, xp.clone()).err(),
+            Some(alpine.clone()),
+            "held while it runs"
+        );
+        assert_eq!(kept_alive(), [AliveChange::Started], "kept alive while it runs");
+
+        ask_for_a_restart(&display);
+        wait_until(|| {
+            let shown = display.lock().unwrap();
+            !shown.reset_requested && shown.emu_running
+        });
+        assert_eq!(
+            holdings.take(Exclusive::Hypervisor, xp.clone()).err(),
+            Some(alpine),
+            "held through the restart"
+        );
+        assert_eq!(
+            kept_alive(),
+            [AliveChange::Started],
+            "kept alive through the restart"
+        );
+
+        signal_egui_stop(&display);
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert!(
+            holdings.take(Exclusive::Hypervisor, xp).is_ok(),
+            "given back once the run is over"
+        );
+        assert_eq!(
+            kept_alive(),
+            [AliveChange::Started, AliveChange::Stopped],
+            "let go once the run is over"
+        );
     }
 
     #[test]

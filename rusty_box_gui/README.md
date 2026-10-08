@@ -7,12 +7,12 @@
 
 The shell borrows VMware's layout for familiarity. It is not VMware, and Rusty Box's own constraints still apply.
 
-[docs/getting-started.md](../docs/getting-started.md) walks through the config file and the panels at more length. Its [Running guests](../docs/getting-started.md#running-guests) section gives the settings for each guest known to run: Alpine Linux, Ubuntu Server, and the Windows 10 and Windows 7 installers.
+[docs/getting-started.md](../docs/getting-started.md) walks through the config file and the panels at more length. Its [Running guests](../docs/getting-started.md#running-guests) section gives the settings for each guest known to run: Windows XP, Alpine Linux, Ubuntu Server, and the Windows 10 and Windows 7 installers.
 
 ## Before you start
 
 - **ROMs.** You need a Bochs BIOS ROM, and optionally a VGA BIOS ROM. Neither is in this repository. The in-tree tools expect a Bochs source checkout at `cpp_orig/` (gitignored), which provides `cpp_orig/bochs/bochs/bios/BIOS-bochs-latest` and `cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin`. `.github/workflows/ci.yml` downloads the same two files from the Bochs repository. The desktop build takes any path. The browser build embeds exactly these two files at compile time.
-- **Boot media.** You need an ISO for the CD-ROM or a raw flat disk image. The launcher can also create a blank disk for you (see [Disk images](#disk-images)). For a first VM, the Alpine Linux Virtual ISO, `alpine-virt-3.24.1-x86_64.iso`, is the one the examples below use; the front page's [Getting an Alpine Linux ISO](../README.md#getting-an-alpine-linux-iso) says where to get it.
+- **Boot media.** You need an ISO for the CD-ROM or a raw flat disk image. The launcher can also create a blank disk for you (see [Disk images](#disk-images)). For a first VM, the Alpine Linux Virtual ISO, `alpine-virt-3.24.1-x86_64.iso`, is the one the examples below use; the front page's [Firmware and disk images](../README.md#firmware-and-disk-images) says where to get it.
 - **Settings.** A new VM starts at 32 MiB of guest memory and an IPS target of 4,000,000, and no guest is recorded booting at those values. Alpine uses 256 MiB and 300,000,000; the other guests' settings are in [Running guests](../docs/getting-started.md#running-guests).
 - **Release builds.** A debug build of the emulator is too slow to be usable, so every command below passes `--release`.
 
@@ -51,20 +51,20 @@ cargo run --release -p rusty_box_gui -- `
 
 ### The shell
 
-The egui shell runs `eframe` on the main thread and the emulator on a worker thread with a 1500 MiB stack. The window has four parts:
+The egui shell runs `eframe` on the main thread and a launcher thread, which starts every power-on on a thread of its own with a 1500 MiB stack: one thread for each running VM. The window has four parts:
 
-- **Sidebar tree.** Every VM is a row, and the selected one opens to its four pages: **Summary**, **Console**, **Hardware** and **Images**. The `+` button adds a new VM to the library, copied from the selected one, and a "Search VMs" field filters the list. The command line's temporary VM is marked "(unsaved)", and a library VM whose last save failed "(save failed)". Library files that do not load are listed under **Could not load**.
+- **Sidebar tree.** Every VM is a row, and the selected one opens to its three pages: **Summary**, **Console** and **Hardware**. The `+` button adds a new VM to the library, copied from the selected one, and a "Search VMs" field filters the list. The command line's temporary VM is marked "(unsaved)", and a library VM whose last save failed "(save failed)". Library files that do not load are listed under **Could not load**. The list scrolls by the wheel, by its scroll bar, and by a finger on a touch screen. Dragging the sidebar's edge in past its narrowest width folds it away; a folded sidebar comes back with a drag from the window's left edge, where the guest's image does not reach it, or with `☰`.
 - **VM bar** above the page. It carries the selected VM's name, its state, and the verbs that change the state:
   - `▶ Power on` is enabled while the VM is stopped. `■ Power off` and `↻ Restart` are enabled only while it runs.
   - On the Console page only, the bar adds `Ctrl+Alt+Del`, `Capture mouse` / `Release mouse` and `Show serial` / `Hide serial`. The first two are enabled only while the VM runs; `Show serial` / `Hide serial` always is. When the window is too narrow, these fold into the `…` menu.
-  - `…` always holds `About Rusty Box Workstation` and `Quit`.
-  - `☰` hides the sidebar, so the Console can scale wider.
-- **Status strip** along the bottom. It shows the state, the engine, the memory and CPU count, and the measured instruction rate (`--- IPS` when none is published). It adds `Restart queued` while a restart is pending.
+  - `…` always holds `Create floppy image…` (see [Disk images](#disk-images)), `About Rusty Box Workstation` and `Quit`.
+  - `☰` hides the sidebar, so the Console can scale wider, and shows it again.
+- **Status strip** along the bottom. It shows the state, the engine, the memory and CPU count, and the measured instruction rate (`--- IPS` when none is published). While the VM runs or starts, the engine is the one its run uses (see [Several VMs at once](#several-vms-at-once)). It adds `Restart queued` while a restart is pending.
 - **Page.** Startup and runtime errors appear as notices at the top of the page.
 
 The pages:
 
-- **Summary** shows the state and engine and the VM's name, which you can edit here. It lists the memory, processors, boot order, CD/DVD and disk. Its tiles are `Power On VM`, `Create Disk Image` and `Hardware Settings`. A library VM has `Delete VM`; the temporary VM has `Keep in library` and `Discard`. `Delete VM` and `Discard` ask first (`Delete <name>?` / `Discard <name>?`) and work only while the VM is stopped and another VM remains; deleting removes the VM's file, and the disk images it uses are kept. A caption says where the VM is kept: `Saved automatically to <path>`, `Saving to <path> when the edit ends`, or `Not saved: the last write to <path> failed. It is tried again at the next change, selection or power-on.`; for the temporary VM it reads `Temporary VM. Not saved until it is kept in the library.`
+- **Summary** shows the state and engine and the VM's name, which you can edit here. It lists the memory, processors, boot order, CD/DVD and disk. Its tiles are `Power On VM`, `New Hard Disk` (opens the new-disk sheet under Hardware › Hard Disk) and `Hardware Settings`. A library VM has `Delete VM`; the temporary VM has `Keep in library` and `Discard`. `Delete VM` and `Discard` ask first (`Delete <name>?` / `Discard <name>?`) and work only while the VM is stopped and another VM remains; deleting removes the VM's file, and the disk images it uses are kept. A caption says where the VM is kept: `Saved automatically to <path>`, `Saving to <path> when the edit ends`, or `Not saved: the last write to <path> failed. It is tried again at the next change, selection or power-on.`; for the temporary VM it reads `Temporary VM. Not saved until it is kept in the library.`
 - **Console** shows the guest's display, or `This VM is powered off`, or, while a startup disk is being created, a spinner and a notice naming the image. The serial pane below it, headed `Serial Console (ttyS0)`, shows what the guest writes to COM1, has a `serial input` line (`Send`, or Enter, sends the line with a newline added, and works only while the VM runs), a `Copy Log` button and a `Paste` button that is always disabled. It is shown by default.
 - **Hardware** edits the selected VM. Changes can be made only while the VM is powered off, and apply at the next power-on:
 
@@ -73,16 +73,30 @@ The pages:
   | Memory | Guest memory and host memory, each 1 to 4096 MB; memory block size, 1 to 65,536 KiB |
   | Processors | Sockets, cores per socket, threads per core (with the logical total and a warning above the SMP limit); IPS target; sync slowdown; **Engine** (Interpreter or Windows Hypervisor, see [Execution engines](#execution-engines)); max instructions (0 means unlimited) |
   | Devices | Enable PCI; boot order, which you can reorder, remove from, and add attached devices to; the effective boot order, in which an attached device the order leaves out comes last |
-  | Hard Disk | Enable, path (with a file browser), ATA channel and drive, an optional CHS override; `Create disk image` opens the Images page |
+  | Hard Disk | With no disk, two tiles: `+ New disk` (the new-disk sheet, see [Disk images](#disk-images)) and `Use a disk file` (a file browser). With one, its file name, size and folder, and `Change`, `Detach` and `+ New disk`. `Advanced` holds the ATA channel and drive and an optional CHS override |
   | CD/DVD | Enable, ISO path (with a file browser), ATA channel and drive, `Boot CD/DVD first` |
   | Display | BIOS and VGA BIOS paths, log level, a pre-boot `Display resolution` (`Default (VGA / VBE)` or one of five presets from `1024×768 @ 32bpp` to `1920×1080 @ 32bpp`), and `Register VGA on PCI (experimental KMS / bochs-drm)` (it exposes the adapter as PCI 1234:1111 for Linux `bochs-drm`) |
 
-  Choosing a file with a hard disk's or CD/DVD's file browser also enables that device. A few settings have no control in the shell, and are set in the VM file or, for most, by a flag: `cpu_capabilities`, `sync_realtime`, `smp_quantum`, `cpuid_freq`, `display.backend`, a display mode other than the presets, `disk.create`, and memory above 4096 MB. The shell keeps what the file sets for each, except memory: showing a VM's Memory pane lowers a larger value to 4096. No setting anywhere chooses the CPU model; every VM runs the Skylake-X model the [front page](../README.md#the-emulated-pc) describes.
+  Choosing a file with a hard disk's or CD/DVD's file browser also enables that device. A few settings have no control in the shell, and are set in the VM file or, for most, by a flag: `cpu_capabilities`, `sync_realtime`, `smp_quantum`, `cpuid_freq`, `port_e9_hack`, `display.backend`, a display mode other than the presets, `disk.create`, and memory above 4096 MB. The shell keeps what the file sets for each, except memory: showing a VM's Memory pane lowers a larger value to 4096. No setting anywhere chooses the CPU model; every VM runs the Skylake-X model the [front page](../README.md#the-emulated-pc) describes.
 
-  An edit to a library VM is written to its file when the edit ends — when the field loses focus or the drag ends — and at once when you switch VMs, add a VM, keep one, power on, or the window goes behind another or closes. The Hardware page shows the file's path; for the temporary VM it reads `Not saved. Keep this VM in the library from its Summary page.` A write that fails is shown as an error and marks the VM "(save failed)" in the sidebar; it is tried again at the next change, selection or power-on. The file is rewritten whole each time, so hand-written comments in it are lost. The CPU topology is written as `cpu_sockets` / `cpu_cores` / `cpu_threads` rather than `cpus`; `engine`, `cpu_capabilities`, `sync_realtime`, `smp_quantum`, `max_instructions`, `cpuid_freq` and `pci_vga` are written only when they differ from their defaults; relative paths are written absolute.
-- **Images** creates disk images (see [Disk images](#disk-images)).
+  An edit to a library VM is written to its file when the edit ends — when the field loses focus or the drag ends — and at once when you switch VMs, add a VM, keep one, power on, or the window goes behind another or closes. The Hardware page shows the file's path; for the temporary VM it reads `Not saved. Keep this VM in the library from its Summary page.` A write that fails is shown as an error and marks the VM "(save failed)" in the sidebar; it is tried again at the next change, selection or power-on. The file is rewritten whole each time, so hand-written comments in it are lost. The CPU topology is written as `cpu_sockets` / `cpu_cores` / `cpu_threads` rather than `cpus`; `engine`, `cpu_capabilities`, `sync_realtime`, `smp_quantum`, `max_instructions`, `cpuid_freq`, `port_e9_hack` and `pci_vga` are written only when they differ from their defaults; relative paths are written absolute.
 
-A confirmation dialog is dismissed by `Cancel`, Escape or a click outside it. While a VM runs or starts, selecting another VM and adding one are refused, with `Stop the running VM before selecting another VM.` and `Stop the running VM before adding a VM.` The `Search VMs` field matches a VM's name, boot order, and disk and CD/DVD paths, ignoring case.
+A confirmation dialog is dismissed by `Cancel`, Escape or a click outside it. The `Search VMs` field matches a VM's name, boot order, and disk and CD/DVD paths, ignoring case.
+
+### Several VMs at once
+
+Several VMs run at once, each on a thread of its own. Select one in the sidebar to see its console, VM bar and status strip; the others keep running, and only the VM shown gets the keyboard and mouse. A VM can be added, or another powered on, while VMs run. The selected VM's row has a dot in its state's colour, and so has the row of every other VM that runs or is starting; a VM that is off and not selected has none. A VM that runs or is starting cannot be deleted until it stops. Two things are used by one running VM at a time:
+
+- **The hypervisor.** A process holds one Windows Hypervisor Platform partition at a time, so one VM at a time runs on it. Another VM set to it starts on the interpreter, with the warning `<VM> runs on the interpreter: <VM> is using the hypervisor.` naming both, and its status strip and Summary page name the interpreter while it runs; its Engine setting is left as it is. The hypervisor is free again once the VM that holds it has stopped.
+- **A hard-disk image.** Two writers would corrupt it, so powering on a VM whose hard disk is a file another running VM in this window uses is refused, before any question about recreating the file, with `<path> is in use by <VM>; stop it first.` A new disk's `Replace it`, and the floppy maker's Create with `Replace an existing file`, are refused the same way for such a file, which is left as it is. A second `rusty_box_gui` window keeps no such record, so it can still open the same file. A CD/DVD image, which is only read, can be used by several VMs at once.
+
+**Closing while VMs run.** With no VM running or starting, closing the window, or `…` › `Quit`, closes it. Otherwise the window stays open and asks `VMs are still running`, naming them:
+
+- `Hide` minimizes the window to the taskbar; the VMs keep running.
+- `Stop VMs and quit` stops every VM and closes the window.
+- `Cancel`, Escape or a click outside the question leaves everything as it was. The question also goes, with nothing done, once every VM has stopped.
+
+With `Remember my choice` ticked, a `Hide` or `Stop VMs and quit` answer is kept in `.on_close` in the VM library folder, and every later close follows it without asking. A hidden window closed from the taskbar follows it too; with nothing remembered, the window comes back with the question. The About window (`…` › `About Rusty Box Workstation`) shows the remembered choice under `When closing with VMs running` and changes it: `Ask`, `Hide` or `Stop VMs and quit`.
 
 ### Mouse and keyboard
 
@@ -103,7 +117,7 @@ The browser shell and the Android APK differ; see [Browser](#browser) and [Andro
 - **`interpreter`** (the default) is this port's own CPU. It runs everywhere.
 - **`whp`** runs the guest on the Windows Hypervisor Platform. It needs a Windows build with the `hv-whp` feature, which is on by default, and a host with the platform enabled. If the platform is absent, the run is refused with ``this host has no Windows Hypervisor Platform, so the `whp` engine (chosen by `--engine`, a VM file's `emulator.engine`, or the shell's Hardware › Processors › Engine) cannot run. Enable it with: dism /Online /Enable-Feature /FeatureName:HypervisorPlatform``. The shell lists the "Windows Hypervisor" engine only in the builds that carry it: Windows, with `hv-whp`, without `guest-trace`.
 
-Alpine Linux 3.24.1 reaches `login:` in 27.1 s on WHP against 65.0 s on the interpreter (2.40×; Intel Core i5-12450H, 2026-09-12, the `alpine_probe` harness). The maintainer reports Ubuntu Server reaching its installer in under 5 minutes on WHP against 20–30 minutes on the interpreter, which no harness has timed. DLX Linux does not reach `login:` on WHP today, and no Windows guest is claimed on it. The front page's [Windows Hypervisor Platform](../README.md#windows-hypervisor-platform) section has the measurement, and [Execution engines](../docs/getting-started.md#execution-engines) in the getting-started guide says which engine to choose for which guest.
+Alpine Linux 3.24.1 reaches `login:` in 27.1 s on WHP against 65.0 s on the interpreter (2.40×; Intel Core i5-12450H, 2026-09-12, the `alpine_probe` harness). The maintainer reports Ubuntu Server reaching its installer in under 5 minutes on WHP against 20–30 minutes on the interpreter, which no harness has timed. DLX Linux does not reach `login:` on WHP today, and no Windows guest is claimed on it. The front page's [Execution engines](../README.md#execution-engines) section has the measurement, and [Execution engines](../docs/getting-started.md#execution-engines) in the getting-started guide says which engine to choose for which guest.
 
 A machine on the hypervisor differs from an interpreter machine in these ways:
 
@@ -127,20 +141,25 @@ In TOML this is `emulator.cpu_capabilities`; `--cpu-capabilities` overrides it, 
 
 ## Disk images
 
-### Images page (desktop)
+Disks are made with `rusty_box_bximage`: flat images, 16 heads and 63 sectors per track. An image is written by seeking to its end, so on filesystems that leave the skipped region unallocated, such as ext4 and APFS and a phone's storage, the file grows as the guest fills it; on NTFS the whole size is taken at once.
 
-- Creates flat hard disks and floppy images with `rusty_box_bximage`. The images are sparse only on filesystems that leave the unwritten region unallocated, such as ext4 and APFS. On NTFS the whole image is allocated.
-- The path field has a file browser, a native save dialog that suggests `c.img` or `floppy.img`. Dropping a file onto the page puts its path in the field.
-- Hard-disk sizes take the bximage syntax: `10M`, `512M`, `20G`, or a bare number, which means MiB. The size must be at least 10 MiB, and it is rounded down to whole 16-head, 63-sector cylinders. Fewer than 2^24 cylinders are allowed, so 8064 GiB or more is refused.
-- Floppies come in the ten bximage formats, from 160 KB to 2.88 MB.
-- "Overwrite existing file" is off by default. Without it, an existing file is refused.
-- A new hard disk is attached to the selected VM if it is stopped (`Attached created disk image to <name>.`). If the VM is running or starting, the image is still created but not attached, with the notice `Disk image created. Stop the VM before attaching it.`; attach it under Hardware › Hard Disk once the VM is off. A floppy is created but not attached (`Floppy image created. Floppy drive emulation is not wired yet.`): the machine has no floppy controller.
+### A new hard disk
 
-### Images page (browser)
+`New Hard Disk` on the Summary page, and `+ New disk` under Hardware › Hard Disk, open the new-disk sheet there:
 
-- Downloads zero-filled hard disk and floppy images, built in memory with the bximage writer functions.
-- Hard disks are capped at 64 MiB (final image size). Use the desktop build for anything larger.
-- Downloaded images are not attached to the browser VM.
+- **Name.** The VM's name with `.img` after it, the characters a file name may not hold replaced.
+- **Size.** `2 GB`, `8 GB`, `16 GB`, `32 GB` (the default) or `64 GB`, or `Custom`, in whole GB from 1 to 2048. A caption gives the sizes guests want: Linux 2 GB or more, Windows 7 16 GB or more, Windows 10 32 GB or more.
+- **Save to.** `Documents/Rusty Box` under your home folder (on a phone, in shared storage), or a folder chosen with `Other folder…`.
+- `Create and attach` writes the disk and attaches it to the VM (`Attached created disk image to <name>.`). If the VM is running or starting, the disk is written but not attached, with the notice `Disk image created. Stop the VM before attaching it.`; attach it under Hardware › Hard Disk once the VM is off.
+- A file of that name already in the folder stops the create with `<name> is already in this folder.` and three choices: `Replace it`, `Save as <name (2).img>` (the first free name) or `Cancel`. A file another running VM uses as its hard disk is never replaced (see [Several VMs at once](#several-vms-at-once)).
+
+### Floppy images
+
+`…` › `Create floppy image…` opens the floppy maker. It writes any of the ten bximage formats, from 160 KB to 2.88 MB, to the path under `Save as` (with `Browse…`). `Replace an existing file` is off by default; without it, an existing file is refused. The machine has no floppy controller, so the image is only written, never attached (`Floppy image created. Floppy drive emulation is not wired yet.`).
+
+### In the browser
+
+The browser's sheet and floppy maker download what they make: zero-filled images built in memory, which are not attached to the browser VM. The sheet offers 16 MB to 512 MB, but a download is capped at 64 MiB: a larger disk is refused with `browser downloads are capped at 64 MiB; use the desktop app for larger disks`.
 
 ### Creating a disk at startup
 
@@ -174,23 +193,28 @@ What provisioning does depends on `overwrite`:
 - **Without `overwrite`** (the default), provisioning is idempotent. If no file is at the path, a raw flat disk with 512-byte sectors is created there, 20G if no size is given. An existing file that is non-empty and a multiple of 512 bytes is reused untouched. Anything else fails startup.
 - **With `overwrite`** (`--overwrite-created-disk` or `disk.create.overwrite = true`), the file is recreated empty, whatever it holds.
 
-When provisioning happens depends on the display. A `terminal` or `headless` run provisions at every launch. In the egui shell, a plain creation (no `overwrite`) is provisioned at every power-on, which recreates a file removed since the last one and reuses a valid one untouched. An `overwrite` creation erases its file once per session, at the first power-on of a VM that uses the path, and not again at later power-ons or restarts in that session; a power-on whose disk creation fails leaves the path for the next power-on to try. An `overwrite` creation whose file already exists asks before the power-on that would erase it — `Overwrite <path>?`, `This VM's startup disk is set to be recreated, which erases the existing file.` — with the button `Overwrite and power on`; each file is asked about once per session, and a file that does not exist yet is created without asking and is not asked about again at the session's later power-ons.
+When provisioning happens depends on the display. A `terminal` or `headless` run provisions at every launch. In the egui shell, a plain creation (no `overwrite`) is provisioned at every power-on, which recreates a file removed since the last one and reuses a valid one untouched. An `overwrite` creation erases its file once per session, at the first power-on of a VM that uses the path, and not again at later power-ons or restarts in that session; a power-on whose disk creation fails leaves the path for the next power-on to try. An `overwrite` creation whose file already exists asks before the power-on that would erase it — `Overwrite <path>?`, `This VM's startup disk is set to be recreated, which erases the existing file.` — with the button `Overwrite and power on`; each file is asked about once per session, and a file that does not exist yet is created without asking and is not asked about again at the session's later power-ons. An answer counts once the power-on it lets through is sent, so a power-on that is not sent asks again at the next one. A file another running VM uses is refused before anything is asked (see [Several VMs at once](#several-vms-at-once)).
 
 The disk geometry comes from `rusty_box_bximage`: 16 heads, 63 sectors per track.
 
 ## Android
 
-The same shell runs on an Android phone as an APK. `cargo xtask android build` builds it, and `cargo xtask android run` installs and launches it on a phone attached over USB debugging (see [xtask/README.md](../xtask/README.md#android-commands)).
+The same shell runs on an Android phone as an APK. `cargo xtask android build` builds it, and `cargo xtask android run` installs and launches it on a phone attached over USB debugging (see [xtask/README.md](../xtask/README.md#android-commands)). cargo-apk builds the native library; the build then packs the APK from it and from `android/` — the manifest the APK ships and a small Java service — with the JDK's `javac` and the SDK's `aapt2`, `d8`, `zipalign` and `apksigner`, signed with the key cargo-apk uses, so a new build installs over an earlier one and keeps its VMs.
 
-The APK's native library is this crate's `rusty_box_gui_android` example. NativeActivity calls its `android_main`, which hands the activity to `rusty_box_gui::android::main`. From there the phone runs the desktop shell, with the same pages, emulator thread and power-on path, and these differences:
+The APK's native library is this crate's `rusty_box_gui_android` example. NativeActivity calls its `android_main`, which hands the activity to `rusty_box_gui::android::main`. There is one activity for the process's life: it handles every configuration change itself, so a dark theme switching on at night or a keyboard plugged in never makes Android re-create it, and a second launch, from the launcher or the notification, comes back to it. From there the phone runs the desktop shell, with the same pages, the same launcher starting a thread for each running VM, and the same power-on path, and these differences:
 
 - **Files it carries.** The Bochs BIOS and VGA BIOS are compiled into the APK and written to the app's private storage at launch. No disk image or ISO travels with it.
 - **Configuration.** VMs live in a library in the app's private storage, one TOML file each, saved when an edit ends and when the app goes to the background. A first launch, with an empty library, makes one VM: from a `rusty_box.toml` in the app's storage when one is there, the carried ROMs, 256 MiB of guest memory and 300,000,000 instructions per second filling in whatever the file leaves out; otherwise from the carried ROMs alone, called "Rusty Box", with those defaults and no CD. Choose its ISO under Hardware › CD/DVD. What a launch could not do — the file did not import, so the VM was made from the ROMs instead; no VM could be made; the VM was made but not recorded as the one to open on — is shown as a notice when the shell opens. The ☰ button opens the VM list; picking anything in it — a VM, or a page of the VM already shown — closes it.
-- **Browse.** Every Browse button opens a file browser drawn in the shell; a Browse pressed while one is open leaves that one, and whatever was typed in it, as it is. It starts beside the path its field holds, or in the shared Download folder, and a CD/DVD browse lists `.iso` files. A disk image to be created is saved under the name typed beside `Save here`, in the folder shown; a name that is a path is refused with `Enter a file name, not a path`. On Android 11 and later, reaching all of shared storage needs "All files access": while the app lacks it, a browser that opens on a folder outside the app's own storage opens the app's "All files access" page once, lists what it can, and reads the grant again when you come back; one that opens in the app's own storage, such as its ROMs folder, asks nothing, and its `Grant access` button asks when you want it to. Android 6 to 10 asks for READ and WRITE_EXTERNAL_STORAGE instead. Android 10 itself confines the browser to what scoped storage shows, because cargo-apk cannot declare `requestLegacyExternalStorage`.
-- **Keys.** A Keys button at the bottom right opens a pad that types text into the guest and sends Esc, Tab, Enter, Backspace, the arrows, Ctrl+C and Ctrl+Alt+Del.
-- **Layout.** A page strip replaces the sidebar, the shell stays inside the area the system bars leave free, and number fields step with − and + buttons (memory in steps of 64 MB). The strip labels the Summary page `Home`, so `Keep in library` is on the `Home` page there.
-- **Console page.** It has a header of its own in place of the VM bar: a `File` menu (`Home`, `Create Disk Image`, `Quit`), a `VM` menu (`Power On`, `Power Off`, `Restart VM`), the state, the instruction rate, the four page buttons, a `Power On` button and the VM's name. So the phone has no `Capture mouse`, `Ctrl+Alt+Del` or `Show serial` button, and the serial pane, hidden at launch, stays hidden; Ctrl+Alt+Del is on the Keys pad. Touch input to the guest is not recorded.
+- **Browse.** Every Browse button opens a file browser drawn in the shell; a Browse pressed while one is open leaves that one, and whatever was typed in it, as it is. It starts beside the path its field holds, or in the shared Download folder, and a CD/DVD browse lists `.iso` files. A disk image to be created is saved under the name typed beside `Save here`, in the folder shown; a name that is a path is refused with `Enter a file name, not a path`. On Android 11 and later, reaching all of shared storage needs "All files access": while the app lacks it, a browser that opens on a folder outside the app's own storage opens the app's "All files access" page once, lists what it can, and reads the grant again when you come back; one that opens in the app's own storage, such as its ROMs folder, asks nothing, and its `Grant access` button asks when you want it to. Android 6 to 10 asks for READ and WRITE_EXTERNAL_STORAGE instead. Android 10 itself confines the browser to what scoped storage shows: the manifest does not ask for legacy storage.
+- **Layout.** The VM list is a drawer that `☰` opens, and the VM bar carries the page tabs (`Summary`, `Console`, `Hardware`) in place of the state badge. The shell stays inside the area the system bars leave free, and number fields step with − and + buttons (memory in steps of 64 MB). The serial pane is hidden.
+- **The full-screen console.** While the VM shown runs or is starting and no notice waits, its Console page is the guest alone on the screen, fitted to it, under a round `☰` button in the corner. Its menu shows the state, the engine and the instruction rate, then `Keys`, `Ctrl+Alt+Del`, `Stretch to fill`, a `Pointer speed` slider, `■ Power off`, `↻ Restart` and `Exit to shell`, which goes to the Summary page with the VM left running.
+- **Touch.** A finger on the guest's screen is a trackpad for its PS/2 mouse: a slide moves the pointer, a tap clicks, a tap with two fingers right-clicks, and a touch straight after a tap holds the button, to drag or double-click. On-screen `L` and `R` buttons press the left and right buttons.
+- **Keys.** `Keys` in the full-screen menu opens a pad that types text into the guest and sends Esc, Tab, Enter, Backspace, the arrows, Ctrl+C and Ctrl+Alt+Del; it stays open until its close button puts it away.
 - **Engine.** The interpreter only; the hypervisor engine is Windows-only.
+- **Several VMs.** As on the desktop ([Several VMs at once](#several-vms-at-once)), several VMs run at once: the ☰ list marks every running VM with a dot and shows the one picked, a hard-disk image is used by one running VM at a time, and a running VM cannot be deleted. While a VM's console fills the screen, the menu of its corner ☰ button ends with the other VMs that run or are starting, under `Running VMs`, in the order of the VM list; a tap on one switches the screen to that VM's console. The menu scrolls when it does not fit, and opens at its top.
+- **Back and Quit.** Back first puts away what is open, topmost first: the close question (as `Cancel`), a confirmation, an open menu or list, the file browser, the key pad, the full-screen console's menu, the floppy maker, the About window, then the VM list. With nothing open, Back is a close of the app while a VM runs or is starting, and does nothing otherwise. While a VM runs or is starting, that close and `…` › `Quit` ask what closing the desktop window asks ([Several VMs at once](#several-vms-at-once)), and follow the same remembered choice, which the About window changes. `Hide` sends the app to the background, as Home does, with its VMs running on. `Stop VMs and quit` stops every VM and puts the app in the background; reopening it shows the shell with its VMs off. `Quit` with no VM running does the same.
+- **Running with the screen off.** From the first VM's power-on until the last VM is off, the app runs a foreground service: a notification, `A VM is running`, whose tap brings the app back, and a wake lock that keeps the processor running. So a VM goes on with the screen locked or the app in the background — an install left running overnight finishes — and Android does not close the app for being out of sight; it can still close it when the phone runs out of memory. Android 13 and later ask once whether the app may show notifications; the service runs whatever the answer, its notification then hidden from the shade. While a VM runs the screen also stays on as long as the app is in front.
+- **How it last ended.** When Android ended the app unasked — the phone ran low on memory, the app crashed or stopped responding, or Android judged it used too much in the background — the next launch says when, why and where the app stood, from Android's own record of it (Android 11 and later). Each end is told once; an update of the app, or closing it from the recent apps, is not told.
 
 ## Browser
 
@@ -214,9 +238,9 @@ Then open `http://localhost:8080`. `trunk build --release` writes the site to `r
 
 Browser builds use no TOML, no CLI flags, no native file dialogs, and no host filesystem. What the browser shell offers:
 
-- **Menu bar.** `File` (`Boot OS Image`, `Create Disk Image`), `Edit` (`Clear Library Search`), `VM` (`Reset Browser VM`), `Help` (`About Rusty Box Workstation`), then the Home, Console, Hardware and Images pages.
-- **Toolbar.** `▶ Boot OS Image` before a browser VM exists, and `Console` after launch. `↻ Reset Browser VM` clears the browser VM. `▣ Hardware` and `+ New Image` jump to their pages. The `Library` and `Serial` checkboxes show or hide the library sidebar and the serial pane.
-- **Home.** `Boot OS Image` opens a file picker for `.iso` or `.img` files and attaches the chosen file as a bootable CD/DVD. The "Boot DLX sample" tile is disabled, because this build does not bundle DLX. `Create Disk Image` opens the Images page.
+- **Menu bar.** `File` (`Boot OS Image`, `New Hard Disk…`, `Create floppy image…`), `Edit` (`Clear Library Search`), `VM` (`Reset Browser VM`), `Help` (`About Rusty Box Workstation`), then the Home, Console and Hardware pages.
+- **Toolbar.** `▶ Boot OS Image` before a browser VM exists, and `Console` after launch. `↻ Reset Browser VM` clears the browser VM. `▣ Hardware` goes to the Hardware page, and `+ New Disk` opens the new-disk sheet there. The `Library` toggle opens or closes the library sidebar, and the `Serial` checkbox shows or hides the serial pane. The library scrolls by the wheel, by its scroll bar, and by a finger on a touch screen; dragging its edge in past its narrowest width folds it away, and a folded library comes back with a drag from the window's left edge, where the guest's image does not reach it, or with the `Library` toggle.
+- **Home.** `Boot OS Image` opens a file picker for `.iso` or `.img` files and attaches the chosen file as a bootable CD/DVD. The "Boot DLX sample" tile is disabled, because this build does not bundle DLX. `New Hard Disk` opens the new-disk sheet.
 - **Hardware.** Memory (1 to 4096 MB, default 128) and the processor count (default 1) can be changed before boot; reset the browser VM to change them again. The page says so: `Browser hardware can be changed before boot. Reset the VM to edit it again.` Devices, Hard Disk, CD/DVD and Display are read-only information. CD/DVD shows the uploaded file's name and size.
 - **Status strip.** The state (`Error`, `Starting`, `Launcher`, `Stopped` or `Running`), the instruction rate and a frame counter.
 - **Mouse and keyboard.** The mouse is forwarded whenever the pointer is over the display, with no capture step, and the cursor is not hidden; the wheel does not reach the guest. Keys are forwarded while the Console page is shown and no text field, such as the library search, has the keyboard. A browser reports no physical key, so the host's keyboard layout decides which key is sent.
@@ -301,10 +325,13 @@ Every key, with its default and matching flag:
 | `emulator.smp_quantum` | SMP scheduling quantum, 1-32 (Bochs `cpu: quantum=`) | `16` | `--smp-quantum` |
 | `emulator.max_instructions` | Stop after this many instructions | unlimited | `--max-instructions` |
 | `emulator.cpuid_freq` | How CPUID leaves 0x15/0x16 report frequency: `"hardware"`, `"none"` or `"ips"` (Bochs `cpu: cpuid_freq=`) | `"none"` | `--cpuid-freq` |
+| `emulator.port_e9_hack` | Bochs's port-0xE9 debug console, its output on standard output: `"off"`, `"on"` or `"all-rings"` (Bochs `port_e9_hack:`) | `"off"` | `--port-e9-hack` |
 | `display.backend` | `"egui"`, `"terminal"` or `"headless"` | `egui` (`terminal` without the `gui-egui` feature) | `--display` |
 | `display.width`, `display.height` | Pre-boot VBE mode. Both are needed and must be non-zero; this raises the VBE ceiling so the guest can select the mode | unset | none |
 | `display.bpp` | Bits per pixel of that mode (8/16/24/32) | `32` | none |
 | `display.pci_vga` | Register the VGA on PCI for Linux `bochs-drm` (experimental) | `false` | none |
+| `display.stretch` | Stretch the phone's full-screen console to fill the screen rather than keep the guest's shape (its menu's `Stretch to fill`) | `false` | none |
+| `display.pointer_speed_percent` | The phone trackpad's cursor speed, in percent of the finger's travel across the guest's image, 50 to 300 (its menu's `Pointer speed`) | `100` | none |
 | `rom.bios` | System BIOS ROM (required) | none | `--bios` |
 | `rom.vga_bios` | VGA BIOS ROM | none | `--vga-bios` |
 | `boot.order` | One or both of `"disk"`, `"cdrom"`, in order, with no repeats | inferred, see below | `--boot` |
@@ -365,7 +392,7 @@ Validation rules:
 - A VGA BIOS file must be a non-zero multiple of 512 bytes.
 - Disk and CD-ROM paths must be valid UTF-8, because `MachineBuilder::disk_file` / `cdrom_file` take `&str`. A non-UTF-8 path is rejected with `path must be valid UTF-8 for current emulator media API`.
 - `disk.create` cannot be combined with `disk.path` or `disk.chs` in the TOML file. A CLI disk option picks one mode explicitly: `--disk` wins over a TOML `disk.create`, and `--create-disk` wins over a TOML `disk.path`. A creation size or overwrite flag with no creation path is an error.
-- A created disk must be at least 10 MiB and have fewer than 2^24 cylinders, so under 8064 GiB. It uses the same geometry rules as the Images page.
+- A created disk must be at least 10 MiB and have fewer than 2^24 cylinders, so under 8064 GiB. It uses the same geometry as a disk the shell's new-disk sheet makes.
 
 ## Cargo features
 
@@ -388,9 +415,9 @@ Validation rules:
 - `ResolvedConfig`
 - `RunError`
 
-On native targets it also re-exports `run`, `run_resolved` and `RunSummary`; with `gui-egui`, `LaunchVm` and `ShellStart` as well, and on the desktop `run_shell`.
+On native targets it also re-exports `run`, `run_resolved` and `RunSummary`; with `gui-egui`, `LaunchSource`, `LaunchVm`, `ShellOpening` and `ShellStart` as well, and on the desktop `run_shell`.
 
-The `args`, `config` and `error` modules are public, as are `library` and `runner` (native only) and `app` (with `gui-egui`). `config::Engine` and `config::CpuCapabilities` are reachable through `config`; `library::VmLibrary`, `library::VmStem` and `LibraryError` (in `error`, re-exported by `library`) through `library`. Browser targets start the shell through `app::WebShellApp`.
+The `args`, `config` and `error` modules are public, as are `library` and `runner` (native only), `app` (with `gui-egui`) and `android` (the APK's entry point, Android only). `config::Engine` and `config::CpuCapabilities` are reachable through `config`; `library::VmLibrary`, `library::VmStem` and `LibraryError` (in `error`, re-exported by `library`) through `library`. Browser targets start the shell through `app::WebShellApp`.
 
 ## Automation
 

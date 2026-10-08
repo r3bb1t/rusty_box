@@ -77,6 +77,9 @@ pub enum RunError {
     #[error("cpuid_freq must be hardware|none|ips (Bochs cpu: cpuid_freq=), got {value}")]
     InvalidCpuidFreq { value: String },
 
+    #[error("port_e9_hack must be off|on|all-rings (Bochs port_e9_hack: enabled=, all_rings=), got {value}")]
+    InvalidPortE9Hack { value: String },
+
     #[error("boot order cannot be empty; set boot.order or pass --boot disk|cdrom")]
     EmptyBootOrder,
 

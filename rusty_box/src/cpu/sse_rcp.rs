@@ -19,10 +19,7 @@ use super::softfloat3e::internals::pack_to_f32;
 use super::softfloat3e::softfloat::{f32_sign, SoftFloatClass};
 use super::softfloat3e::softfloat_types::Float32;
 use super::softfloat3e::specialize::{FLOAT32_DEFAULT_NAN, FLOAT32_EXP_BIAS};
-use super::{
-    decoder::{BxSegregs, Instruction},
-    xmm::BxPackedXmmRegister,
-};
+use super::decoder::Instruction;
 
 /// Bochs xmm.h `convert_to_QNaN` — force the quiet bit on a NaN.
 #[inline]
@@ -92,18 +89,6 @@ pub(super) fn approximate_rsqrt(op: Float32) -> Float32 {
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
-    /// Shared source read for the packed forms.
-    #[inline]
-    fn sse_rcp_read_op(&mut self, instr: &Instruction) -> super::Result<BxPackedXmmRegister> {
-        if instr.mod_c0() {
-            Ok(self.read_xmm_reg(instr.src1()))
-        } else {
-            let eaddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            self.v_read_xmmword(seg, eaddr)
-        }
-    }
-
     // ========================================================================
     // RCPPS — Reciprocal of Packed Single-Precision (approximate)
     // Bochs: RCPPS_VpsWps in sse_rcp.cc
@@ -111,7 +96,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     pub(super) fn rcpps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let mut op = self.sse_rcp_read_op(instr)?;
+        let mut op = self.sse_read_op2_xmm(instr)?;
         for i in 0..4 {
             op.set_xmm32u(i, approximate_rcp(op.xmm32u(i)));
         }
@@ -140,7 +125,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     pub(super) fn rsqrtps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let mut op = self.sse_rcp_read_op(instr)?;
+        let mut op = self.sse_read_op2_xmm(instr)?;
         for i in 0..4 {
             op.set_xmm32u(i, approximate_rsqrt(op.xmm32u(i)));
         }

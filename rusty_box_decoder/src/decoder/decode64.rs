@@ -312,9 +312,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         let opcode_byte = bytes[pos] as u32;
         pos += 1;
 
-        // Valid VEX maps: 1 (0F), 2 (0F38), 3 (0F3A)
-        // Upstream Bochs also supports map 5 (AMX-FP8) and map 7, but we
-        // don't have those VEX opcode table entries yet.
+        // VEX maps: 1 (0F), 2 (0F38), 3 (0F3A) and 7 (the MSR-immediate
+        // forms), as Bochs decoder_vex64. Bochs's map 5 (AMX-FP8, built with
+        // BX_SUPPORT_AMX) has no table here, so it decodes as #UD.
         match vex_opc_map {
             1 => {
                 b1 = 0x100 | opcode_byte;
@@ -327,6 +327,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             3 => {
                 b1 = 0x300 | opcode_byte;
                 opcode_map = 3;
+            }
+            super::vex_shared::VEX_MAP7 => {
+                b1 = 0x700 | opcode_byte;
+                opcode_map = super::vex_shared::VEX_MAP7;
             }
             _ => {
                 return Err(DecodeError::Decoder(
@@ -905,8 +909,18 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // === Phase 4: Parse immediate ===
     // Pass nnn to distinguish Group 3a/3b variants (TEST vs NOT/NEG/etc)
+    let ib_ib2 = !is_vex
+        && super::tables::has_ib_ib2(
+            opcode_map,
+            (b1 & 0xFF) as u8,
+            sse_prefix,
+            (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0,
+            nnn,
+        );
     let imm_size = if is_vex {
         super::vex_shared::vex_immediate_size(opcode_map, (b1 & 0xFF) as u8)
+    } else if ib_ib2 {
+        2
     } else {
         get_immediate_size_64(b1, opcode_map, sse_prefix, metainfo1_bits, nnn)
     };
@@ -917,6 +931,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         }
 
         match imm_size {
+            // SSE4A EXTRQ/INSERTQ: Ib, then Ib2 where `ib2` reads it.
+            2 if ib_ib2 => {
+                instr.immediate = bytes[pos] as u32;
+                instr.displacement = bytes[pos + 1] as u32;
+                pos += 2;
+            }
             1 => {
                 let byte_val = bytes[pos];
                 // Sign-extend byte immediates that are used as 32-bit values via id():
@@ -1049,6 +1069,20 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         }
     } else {
         instr.opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
+    }
+
+    // The MSR reads into a register name it first, `Eq`, in Bochs
+    // ia_opcodes.def, so `assign_srcs` makes ModRM.rm their destination. The
+    // byte rules above put rm in the source for these bytes, which is right
+    // for their `Id, Eq` and `Gq, Eq` write counterparts and wrong for them.
+    // SSE4A's EXTRQ immediate form names its one register first too
+    // (`Wdq, Ib, Ib2`), where INSERTQ on the same byte names ModRM.reg.
+    if matches!(
+        instr.opcode,
+        Opcode::RdmsrEqId | Opcode::UrdmsrEqId | Opcode::UrdmsrEqGq | Opcode::ExtrqUdqIbIb
+    ) {
+        instr.operands.dst = rm as u8;
+        instr.operands.src1 = nnn as u8;
     }
 
     // EVEX resolves against its own map, exactly as Bochs does: an EVEX-encoded
@@ -1219,6 +1253,8 @@ const fn lookup_opcode_64(b1: u32, opcode_map: u8, decmask: u32, _nnn: u32) -> O
         } else {
             Opcode::IaError
         }
+    } else if opcode_map == super::vex_shared::VEX_MAP7 {
+        super::vex_shared::lookup_vex_map7((b1 & 0xFF) as u8, decmask)
     } else {
         Opcode::IaError
     }

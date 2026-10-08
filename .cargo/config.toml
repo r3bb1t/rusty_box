@@ -25,4 +25,4 @@ RUST_MIN_STACK="16777216"
 [alias]
 xtask = "run --package xtask --"
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "link-args=-z stack-size=8388608"]
+rustflags = ["-C", "link-args=-z stack-size=8388608", "-C", "link-arg=--max-memory=4294967296"]

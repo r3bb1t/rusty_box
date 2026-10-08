@@ -810,13 +810,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.mem_write(11 * 16, &gate).expect("write #NP gate");
                 emu.mem_write(13 * 16, &gate).expect("write #GP gate");
                 emu.mem_write(HANDLER, &[0xEB, 0xFE]).expect("write handler");
-                // The FlatLong64 harness GDT (install_flat_gdt) holds a
-                // 32-bit code descriptor at selector 0x08 (the API loads
-                // descriptor CACHES directly); gate delivery reloads CS from
-                // the GDT and requires L=1 in long mode, so give it a real
-                // 64-bit code descriptor.
-                emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
-                    .expect("write 64-bit code descriptor");
                 emu.reg_write(X86Reg::Rsp, 0x0058_0000);
 
                 // SAFETY: memory-bus wiring invariants held by the emulator.
@@ -3068,8 +3061,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 let reset_guest = |code: &[u8]| {
+                    // The marker is a write to the port-0xE9 console, which
+                    // has to be on for its absence to mean anything.
                     let mut emu = Emulator::new_with_mode(
-                        EmulatorConfig::default(),
+                        EmulatorConfig {
+                            port_e9_hack: crate::iodev::PortE9Hack::On,
+                            ..EmulatorConfig::default()
+                        },
                         CpuSetupMode::FlatProtected32,
                     )
                     .unwrap();
@@ -3269,8 +3267,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
+                // The marker is a write to the port-0xE9 console, which has to
+                // be on for its absence to mean anything.
                 let mut emu = Emulator::new_with_mode(
-                    EmulatorConfig::default(),
+                    EmulatorConfig {
+                        port_e9_hack: crate::iodev::PortE9Hack::On,
+                        ..EmulatorConfig::default()
+                    },
                     CpuSetupMode::FlatProtected32,
                 )
                 .unwrap();
@@ -6631,9 +6634,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const STAMP_COUNT: u8 = 16;
 
     fn stamp_machine(id: u8) -> Box<Emulator> {
-        let mut emu =
-            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
-                .unwrap();
+        // The stamps are written to the port-0xE9 console.
+        let config = EmulatorConfig {
+            port_e9_hack: crate::iodev::PortE9Hack::On,
+            ..EmulatorConfig::default()
+        };
+        let mut emu = Emulator::new_with_mode(config, CpuSetupMode::FlatProtected32).unwrap();
         // `new_with_mode` deliberately skips device registration.
         emu.devices.init(&mut emu.memory).unwrap();
         emu.device_manager
@@ -7177,7 +7183,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.initialize().unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
                 let offered: Vec<u8> = b"root\n".to_vec();
-                emu.host_input.push_serial(offered.clone());
+                assert_eq!(emu.serial(0).unwrap().send(&offered), offered.len());
                 emu.reset(ResetReason::Hardware).unwrap();
 
                 let mut received: Vec<u8> = Vec::new();

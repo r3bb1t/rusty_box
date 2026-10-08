@@ -79,24 +79,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// POP m64 - Pop into 64-bit memory location
-    /// Based on Bochs stack64.cc POP_EqM — uses RSP_SPECULATIVE
+    /// Bochs stack64.cc POP_EqM: the pop is speculative — a fault on the write
+    /// is raised with RSP and SSP back where the instruction began — and the
+    /// address is formed after it, so an RSP-relative operand sees RSP already
+    /// advanced.
     pub fn pop_eq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let prev_rsp = self.rsp();
-        self.speculative_rsp = true;
+        self.rsp_speculative();
         let val64 = self.pop_64()?;
         let eaddr = self.resolve_addr64(instr);
         let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
-        match self.write_virtual_qword_64(seg, eaddr, val64) {
-            Ok(()) => {
-                self.speculative_rsp = false;
-                Ok(())
-            }
-            Err(e) => {
-                self.set_rsp(prev_rsp);
-                self.speculative_rsp = false;
-                Err(e)
-            }
-        }
+        self.write_virtual_qword_64(seg, eaddr, val64)?;
+        self.rsp_commit();
+        Ok(())
     }
 
     /// PUSH r/m64 - Unified dispatch based on mod_c0()
@@ -246,25 +240,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    /// POP segment selector (64-bit) — Bochs stack64.cc POP64_Sw
-    /// Bochs reads 16-bit from RSP, calls load_seg_reg, THEN increments RSP.
-    /// We use RSP_SPECULATIVE: pop first, restore RSP on load_seg_reg failure.
+    /// POP segment selector (64-bit) — Bochs stack64.cc POP64_Sw: the selector
+    /// is READ as a word at RSP, the segment is loaded, and only then does RSP
+    /// move by 8. A selector the load refuses leaves the stack untouched, and
+    /// no more than the word is read.
     pub fn pop_op64_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let prev_rsp = self.rsp();
-        self.speculative_rsp = true;
-        let selector_64 = self.pop_64()?;
-        let seg_idx = BxSegregs::from(instr.dst());
-        match self.load_seg_reg(seg_idx, selector_64 as u16) {
-            Ok(()) => {
-                self.speculative_rsp = false;
-                Ok(())
-            }
-            Err(e) => {
-                self.set_rsp(prev_rsp);
-                self.speculative_rsp = false;
-                Err(e)
-            }
-        }
+        let rsp = self.rsp();
+        let selector = self.stack_read_word_64(rsp)?;
+        self.load_seg_reg(BxSegregs::from(instr.dst()), selector)?;
+        self.set_rsp(rsp.wrapping_add(8));
+        Ok(())
     }
 
     /// PUSH imm8 sign-extended to 64-bit

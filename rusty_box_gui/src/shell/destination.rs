@@ -13,8 +13,10 @@ pub(crate) enum ShellPage {
 
 impl ShellPage {
     /// The pages a VM node lists, in the order the tree draws them.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const ALL: [Self; 3] = [Self::Home, Self::Console, Self::Hardware];
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Home => "Summary",
@@ -47,6 +49,7 @@ impl Destination {
 
     /// Moving to a different VM lands on its summary; re-selecting the VM
     /// already shown leaves the page where the user put it.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn select_vm(self, vm: usize) -> Self {
         if vm == self.vm {
             self
@@ -64,6 +67,7 @@ impl Destination {
 
     /// The destination after `removed` is deleted from a library that then
     /// holds `remaining` profiles, clamped so it always names a live one.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn clamped_after_removal(self, removed: usize, remaining: usize) -> Self {
         let vm = if self.vm > removed { self.vm - 1 } else { self.vm };
         Self {
@@ -81,6 +85,7 @@ impl Default for Destination {
 
 /// What a click in the sidebar asked for. The sidebar reports it; the app
 /// decides what it means.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarAction {
     Select(Destination),
@@ -91,6 +96,7 @@ pub(crate) enum SidebarAction {
 }
 
 /// What a click in the VM bar asked for.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VmBarAction {
     ToggleSidebar,

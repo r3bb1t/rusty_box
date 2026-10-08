@@ -5,12 +5,14 @@
 //! Transcribed from Bochs `cpu/decoder/fetchdecode_opmap_evex.cc`,
 //! which is itself the table: one group per (map, opcode byte), each
 //! entry a `form_opcode(attrs, opcode)`, selected by the same decmask
-//! machinery `tables.rs` already implements. The master table is
-//! indexed `(map - 1) * 256 + opcode`, matching `BxOpcodeTableEVEX`.
+//! machinery `tables.rs` already implements. Preprocessor conditions
+//! are resolved as the reference build resolves them: BX_SUPPORT_AMX
+//! is 0 there, so no AMX encoding is present. The master table is
+//! indexed `(block - 1) * 256 + opcode`, matching `BxOpcodeTableEVEX`.
 //!
-//! Opcodes rusty does not implement (FP16/BF16/FP8 forms, which
-//! Skylake-X does not advertise) resolve to `Opcode::IaError`, i.e. a
-//! guest #UD — what Bochs produces with those ISA bits off.
+//! An opcode the CPU model does not advertise still decodes here; the
+//! ISA gate rewrites it to `Opcode::IaError` at icache fill, a guest
+//! #UD — what Bochs produces with that ISA bit off.
 
 use super::form_opcode;
 use super::tables::OpcodeAttrs as A;
@@ -511,11 +513,6 @@ static EVEX_0F3847: &[u64] = &[
     form_opcode(A::SSE_PREFIX_66.union(A::VEX_W1), Opcode::EvexVpsllvqVdqHdqWdqKmask),
 ];
 
-static EVEX_0F384A: &[u64] = &[
-    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTilemovrowVdqTrmBd),
-    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTcvtrowd2psVpsTrmBd),
-];
-
 static EVEX_0F384C: &[u64] = &[
     form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0), Opcode::EvexVrcp14psVpsWpsKmask),
     form_opcode(A::SSE_PREFIX_66.union(A::VEX_W1), Opcode::EvexVrcp14pdVpdWpdKmask),
@@ -636,20 +633,13 @@ static EVEX_0F3866: &[u64] = &[
 ];
 
 static EVEX_0F3867: &[u64] = &[
-    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0).union(A::MASK_K0), Opcode::IaError),
+    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0).union(A::MASK_K0), Opcode::EvexVcvt2ps2phxVphHpsWps),
     form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0), Opcode::EvexVcvt2ps2phxVphHpsWpsKmask),
 ];
 
 static EVEX_0F3868: &[u64] = &[
     form_opcode(A::SSE_PREFIX_F2.union(A::VEX_W0).union(A::MASK_K0), Opcode::EvexVp2intersectdKgqHdqWdq),
     form_opcode(A::SSE_PREFIX_F2.union(A::VEX_W1).union(A::MASK_K0), Opcode::EvexVp2intersectqKgqHdqWdq),
-];
-
-static EVEX_0F386D: &[u64] = &[
-    form_opcode(A::SSE_NO_PREFIX.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTcvtrowps2phhVphTrmBd),
-    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTcvtrowps2phlVphTrmBd),
-    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTcvtrowps2bf16lVphTrmBd),
-    form_opcode(A::SSE_PREFIX_F2.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTcvtrowps2bf16hVphTrmBd),
 ];
 
 static EVEX_0F3870: &[u64] = &[
@@ -1084,11 +1074,6 @@ static EVEX_0F3A05: &[u64] = &[
     form_opcode(A::SSE_PREFIX_66.union(A::VEX_W1), Opcode::EvexVpermilpdVpdWpdIbKmask),
 ];
 
-static EVEX_0F3A07: &[u64] = &[
-    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTilemovrowVdqTrmIb),
-    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTcvtrowd2psVpsTrmIb),
-];
-
 static EVEX_0F3A08: &[u64] = &[
     form_opcode(A::SSE_NO_PREFIX.union(A::VEX_W0), Opcode::EvexVrndscalephVphWphIbKmask),
     form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0), Opcode::EvexVrndscalepsVpsWpsIbKmask),
@@ -1343,13 +1328,6 @@ static EVEX_0F3A72: &[u64] = &[
 static EVEX_0F3A73: &[u64] = &[
     form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0), Opcode::EvexVpshrddVdqHdqWdqIbKmask),
     form_opcode(A::SSE_PREFIX_66.union(A::VEX_W1), Opcode::EvexVpshrdqVdqHdqWdqIbKmask),
-];
-
-static EVEX_0F3A77: &[u64] = &[
-    form_opcode(A::SSE_NO_PREFIX.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTcvtrowps2phhVphTrmIb),
-    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTcvtrowps2phlVphTrmIb),
-    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTcvtrowps2bf16lVphTrmIb),
-    form_opcode(A::SSE_PREFIX_F2.union(A::VEX_W0).union(A::VL512).union(A::MASK_K0).union(A::MOD_REG).union(A::IS64), Opcode::EvexTcvtrowps2bf16hVphTrmIb),
 ];
 
 static EVEX_0F3AC2: &[u64] = &[
@@ -2091,8 +2069,8 @@ static EVEX_MAP5_5C: &[u64] = &[
 static EVEX_MAP5_5D: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_NO_PREFIX), Opcode::EvexVminphVphHphWph),
     form_opcode(A::VEX_W0.union(A::SSE_NO_PREFIX), Opcode::EvexVminphVphHphWphKmask),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::IaError),
-    form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::IaError),
+    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::EvexVminbf16VphHphWph),
+    form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::EvexVminbf16VphHphWphKmask),
     form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVminshVshHphWsh),
     form_opcode(A::VEX_W0.union(A::SSE_PREFIX_F3), Opcode::EvexVminshVshHphWshKmask),
 ];
@@ -2109,8 +2087,8 @@ static EVEX_MAP5_5E: &[u64] = &[
 static EVEX_MAP5_5F: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_NO_PREFIX), Opcode::EvexVmaxphVphHphWph),
     form_opcode(A::VEX_W0.union(A::SSE_NO_PREFIX), Opcode::EvexVmaxphVphHphWphKmask),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::IaError),
-    form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::IaError),
+    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::EvexVmaxbf16VphHphWph),
+    form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::EvexVmaxbf16VphHphWphKmask),
     form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVmaxshVshHphWsh),
     form_opcode(A::VEX_W0.union(A::SSE_PREFIX_F3), Opcode::EvexVmaxshVshHphWshKmask),
 ];
@@ -2505,13 +2483,13 @@ static EVEX_MAP6_D7: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::SSE_PREFIX_F2), Opcode::EvexVfcmulcshVshHphWshKmask),
 ];
 
-/// Master EVEX table, indexed `(map - 1) * 256 + opcode`.
+/// Master EVEX table, indexed `(block - 1) * 256 + opcode`.
 ///
-/// Bochs `BxOpcodeTableEVEX[256*5]`. Map 1 = 0F, 2 = 0F38, 3 = 0F3A,
-/// 5 = MAP5, 6 = MAP6; the map-4 block is unused but kept so the
-/// indexing matches upstream exactly.
+/// Bochs `BxOpcodeTableEVEX[256*5]`: blocks 1-5 hold 0F, 0F38, 0F3A,
+/// MAP5 and MAP6. There is no EVEX map 4, so maps 5 and 6 are blocks
+/// 4 and 5 (Bochs fetchdecode64.cc decoder_evex64).
 pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
-    // ---- map 1 (0F) ----
+    // ---- block 1 (0F) ----
     /* 00 */ EVEX_GROUP_ERR,
     /* 01 */ EVEX_GROUP_ERR,
     /* 02 */ EVEX_GROUP_ERR,
@@ -2768,7 +2746,7 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* FD */ EVEX_0FFD,
     /* FE */ EVEX_0FFE,
     /* FF */ EVEX_GROUP_ERR,
-    // ---- map 2 (0F38) ----
+    // ---- block 2 (0F38) ----
     /* 00 */ EVEX_0F3800,
     /* 01 */ EVEX_GROUP_ERR,
     /* 02 */ EVEX_GROUP_ERR,
@@ -2843,7 +2821,7 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* 47 */ EVEX_0F3847,
     /* 48 */ EVEX_GROUP_ERR,
     /* 49 */ EVEX_GROUP_ERR,
-    /* 4A */ EVEX_0F384A,
+    /* 4A */ EVEX_GROUP_ERR,
     /* 4B */ EVEX_GROUP_ERR,
     /* 4C */ EVEX_0F384C,
     /* 4D */ EVEX_0F384D,
@@ -2878,7 +2856,7 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* 6A */ EVEX_GROUP_ERR,
     /* 6B */ EVEX_GROUP_ERR,
     /* 6C */ EVEX_GROUP_ERR,
-    /* 6D */ EVEX_0F386D,
+    /* 6D */ EVEX_GROUP_ERR,
     /* 6E */ EVEX_GROUP_ERR,
     /* 6F */ EVEX_GROUP_ERR,
     /* 70 */ EVEX_0F3870,
@@ -3025,7 +3003,7 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* FD */ EVEX_GROUP_ERR,
     /* FE */ EVEX_GROUP_ERR,
     /* FF */ EVEX_GROUP_ERR,
-    // ---- map 3 (0F3A) ----
+    // ---- block 3 (0F3A) ----
     /* 00 */ EVEX_0F3A00,
     /* 01 */ EVEX_0F3A01,
     /* 02 */ EVEX_GROUP_ERR,
@@ -3033,7 +3011,7 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* 04 */ EVEX_0F3A04,
     /* 05 */ EVEX_0F3A05,
     /* 06 */ EVEX_GROUP_ERR,
-    /* 07 */ EVEX_0F3A07,
+    /* 07 */ EVEX_GROUP_ERR,
     /* 08 */ EVEX_0F3A08,
     /* 09 */ EVEX_0F3A09,
     /* 0A */ EVEX_0F3A0A,
@@ -3145,7 +3123,7 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* 74 */ EVEX_GROUP_ERR,
     /* 75 */ EVEX_GROUP_ERR,
     /* 76 */ EVEX_GROUP_ERR,
-    /* 77 */ EVEX_0F3A77,
+    /* 77 */ EVEX_GROUP_ERR,
     /* 78 */ EVEX_GROUP_ERR,
     /* 79 */ EVEX_GROUP_ERR,
     /* 7A */ EVEX_GROUP_ERR,
@@ -3282,7 +3260,7 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* FD */ EVEX_GROUP_ERR,
     /* FE */ EVEX_GROUP_ERR,
     /* FF */ EVEX_GROUP_ERR,
-    // ---- map 4 (unused) ----
+    // ---- block 4 (MAP5) ----
     /* 00 */ EVEX_GROUP_ERR,
     /* 01 */ EVEX_GROUP_ERR,
     /* 02 */ EVEX_GROUP_ERR,
@@ -3539,7 +3517,7 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* FD */ EVEX_GROUP_ERR,
     /* FE */ EVEX_GROUP_ERR,
     /* FF */ EVEX_GROUP_ERR,
-    // ---- map 5 (MAP5) ----
+    // ---- block 5 (MAP6) ----
     /* 00 */ EVEX_GROUP_ERR,
     /* 01 */ EVEX_GROUP_ERR,
     /* 02 */ EVEX_GROUP_ERR,
@@ -3798,5 +3776,5 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* FF */ EVEX_GROUP_ERR,
 ];
 
-/// Number of 256-byte map blocks in [`EVEX_TABLE`] (Bochs `256*5`).
+/// Number of 256-byte blocks in [`EVEX_TABLE`] (Bochs `256*5`).
 pub(crate) const EVEX_MAPS: usize = 5;

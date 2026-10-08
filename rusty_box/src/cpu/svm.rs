@@ -390,6 +390,17 @@ use super::{
     segment_ctrl_pro::parse_selector,
 };
 
+/// What `VMRUN`'s event injection made of `EVENTINJ` — Bochs svm.cc
+/// `SvmInjectEvents`'s answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "an invalid injection ends VMRUN with VMEXIT_INVALID"]
+enum EventInjection {
+    /// Nothing was asked for, or the event is delivered.
+    Done,
+    /// An event Bochs refuses to inject; `VMRUN` exits with `VMEXIT_INVALID`.
+    Invalid,
+}
+
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Whether this processor model implements SVM.
     ///
@@ -1214,17 +1225,28 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // =====================================================================
 
     /// Inject events from VMCB EVENT_INJECTION field into the guest.
-    /// Returns false if the injection is invalid (VMEXIT_INVALID).
     /// Bochs svm.cc SvmInjectEvents()
-    fn svm_inject_events(&mut self) -> bool {
+    ///
+    /// `EVENTINJ`'s type field is the architecture's interruption type, which
+    /// is what [`InterruptType`]'s discriminants are, so each arm names the
+    /// Bochs case label it mirrors.
+    ///
+    /// # Errors
+    /// Whatever the delivery raised that the processor could not take.
+    fn svm_inject_events(&mut self) -> super::Result<EventInjection> {
+        const EXTERNAL_INTERRUPT: u32 = InterruptType::ExternalInterrupt as u32;
+        const NMI: u32 = InterruptType::Nmi as u32;
+        const HARDWARE_EXCEPTION: u32 = InterruptType::HardwareException as u32;
+        const SOFTWARE_INTERRUPT: u32 = InterruptType::SoftwareInterrupt as u32;
+
         let eventinj = self.vmcb_read32(SVM_CONTROL32_EVENT_INJECTION);
         self.vmcb.ctrls.eventinj = eventinj;
         if (eventinj & 0x8000_0000) == 0 {
-            return true; // No event to inject
+            return Ok(EventInjection::Done); // No event to inject
         }
 
-        let vector = (eventinj & 0xff) as u8;
-        let event_type = ((eventinj >> 8) & 7) as u8;
+        let mut vector = (eventinj & 0xff) as u8;
+        let event_type = (eventinj >> 8) & 7;
         let push_error = (eventinj & (1 << 11)) != 0;
         let error_code = if push_error {
             self.vmcb_read32(SVM_CONTROL32_EVENT_INJECTION_ERRORCODE) as u16
@@ -1232,73 +1254,71 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             0
         };
 
-        // Convert SVM event type to InterruptType
         let int_type = match event_type {
-            4 => {
-                // NMI
+            NMI => {
+                // An injected NMI does not mask delivery of further NMIs.
                 self.ext = true;
+                vector = 2;
                 InterruptType::Nmi
             }
-            3 => {
-                // External interrupt
+            EXTERNAL_INTERRUPT => {
                 self.ext = true;
                 InterruptType::ExternalInterrupt
             }
-            5 => {
-                // Hardware exception
+            HARDWARE_EXCEPTION => {
                 if vector == 2 || vector > 31 {
                     tracing::error!(
                         "SvmInjectEvents: invalid vector {} for HW exception",
                         vector
                     );
-                    return false;
+                    return Ok(EventInjection::Invalid);
                 }
-                // #BP and #OF are software exceptions
-                if vector == 3 || vector == 4 {
-                    self.ext = true;
+                if (vector == Exception::Br as u8 || vector == Exception::Of as u8)
+                    && self.long64_mode()
+                {
+                    tracing::error!("SvmInjectEvents: invalid vector {} for 64-bit mode", vector);
+                    return Ok(EventInjection::Invalid);
+                }
+                self.ext = true;
+                if vector == Exception::Bp as u8 || vector == Exception::Of as u8 {
                     InterruptType::SoftwareException
                 } else {
-                    self.ext = true;
                     InterruptType::HardwareException
                 }
             }
-            0 => {
-                // Software interrupt
-                InterruptType::SoftwareInterrupt
-            }
+            SOFTWARE_INTERRUPT => InterruptType::SoftwareInterrupt,
             _ => {
-                tracing::error!("SvmInjectEvents: unsupported event type {}", event_type);
-                return false;
+                tracing::error!("SvmInjectEvents: unsupported event injection type {}", event_type);
+                return Ok(EventInjection::Invalid);
             }
         };
 
         tracing::debug!(
-            "SvmInjectEvents: vector={:#04x} error_code={:#06x}",
+            "SvmInjectEvents: Injecting vector {:#04x} (error_code {:#06x})",
             vector,
             error_code
         );
+
+        // Recorded the same way `exception` records one, so a fault the
+        // delivery raises is classified against it for a double fault.
+        if int_type == InterruptType::HardwareException {
+            self.last_exception_type = self.exception_type_for(vector);
+        }
 
         // Record exit int info for nested event tracking
         self.vmcb.ctrls.exitintinfo = eventinj & !0x8000_0000;
         self.vmcb.ctrls.exitintinfo_error_code = u32::from(error_code);
 
-        // Deliver the interrupt (this may unwind via CpuLoopRestart on exception)
-        let nmi_vector = if int_type as u8 == InterruptType::Nmi as u8 {
-            2
-        } else {
-            vector
-        };
-        let soft_int = matches!(int_type, InterruptType::SoftwareInterrupt);
-        if self
-            .interrupt(nmi_vector, int_type, soft_int, push_error, error_code)
-            .is_err()
-        {
-            // If interrupt delivery itself caused an exception, the CpuLoopRestart
-            // will propagate up. The event is still recorded in exitintinfo.
+        match self.interrupt(vector, int_type, push_error, error_code) {
+            // Delivered, or a fault the delivery raised was delivered in its
+            // place — Bochs's longjmp out of `interrupt`. Either way the
+            // event is resolved.
+            Ok(()) | Err(super::error::CpuError::CpuLoopRestart) => {}
+            Err(error) => return Err(error),
         }
 
         self.last_exception_type = -1; // BX_ET_NONE
-        true
+        Ok(EventInjection::Done)
     }
 
     // =====================================================================
@@ -1702,8 +1722,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.async_event = 1;
 
         // Step 4: Inject events
-        if !self.svm_inject_events() {
-            return self.svm_vmexit(SVM_VMEXIT_INVALID, 0, 0);
+        match self.svm_inject_events()? {
+            EventInjection::Done => {}
+            EventInjection::Invalid => return self.svm_vmexit(SVM_VMEXIT_INVALID, 0, 0),
         }
 
         // Return CpuLoopRestart to restart the decode loop in guest context
@@ -1938,5 +1959,155 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // icache link break that Bochs paging.cc TLB_invlpg performs.
         self.tlb_invlpg(laddr);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::api_bridge::SegmentSize;
+    use crate::cpu::exec_ctx::TestMachine;
+    use crate::cpu::instrumentation::X86Reg;
+
+    /// Where the injection tests keep the VMCB and the guest's code, and
+    /// the stack the delivery pushes onto.
+    const VMCB: u64 = 0x5000;
+    const CODE: u64 = 0x1000;
+    const STACK_TOP: u64 = 0x7000;
+    /// `EVENTINJ`'s valid bit, and its type field's shift.
+    const EVENTINJ_VALID: u32 = 1 << 31;
+    const EVENTINJ_TYPE_SHIFT: u32 = 8;
+
+    /// What injecting one `EVENTINJ` word did.
+    struct Injection {
+        outcome: EventInjection,
+        /// Where the guest stands afterwards: a delivery leaves it at the
+        /// handler its vector names.
+        rip: u64,
+    }
+
+    /// A real-mode guest at 0:CODE whose IVT sends every vector `v` to
+    /// handler offset `0x100 + v`, so the handler a delivery entered names its
+    /// vector; then `eventinj` injected at VMRUN.
+    fn inject(eventinj: u32) -> Injection {
+        let mut machine = TestMachine::new();
+        let mut ctx = machine.ctx();
+        ctx.reset(crate::cpu::ResetReason::Hardware);
+        for reg in [X86Reg::Cs, X86Reg::Ss, X86Reg::Ds] {
+            ctx.set_seg_for_api(reg, 0, 0, 0xFFFF, SegmentSize::Bits16);
+        }
+        ctx.set_rip(CODE);
+        ctx.set_rsp(STACK_TOP);
+        for vector in 0..=0xFFu16 {
+            let entry = [(0x100 + vector) as u8, ((0x100 + vector) >> 8) as u8, 0, 0];
+            ctx.memory.write_ram(u64::from(vector) * 4, &entry).expect("the IVT is RAM");
+        }
+        ctx.memory
+            .write_ram(VMCB + u64::from(SVM_CONTROL32_EVENT_INJECTION), &eventinj.to_le_bytes())
+            .expect("the VMCB is RAM");
+        ctx.set_vmcbptr(VMCB);
+        ctx.in_svm_guest = true;
+        let outcome = ctx.svm_inject_events().expect("the injection completes");
+        Injection { outcome, rip: ctx.rip() }
+    }
+
+    fn eventinj(kind: InterruptType, vector: u8) -> u32 {
+        EVENTINJ_VALID | (kind as u32) << EVENTINJ_TYPE_SHIFT | u32::from(vector)
+    }
+
+    fn handler_of(vector: u8) -> u64 {
+        0x100 + u64::from(vector)
+    }
+
+    /// An injected NMI is delivered through vector 2, whatever vector the
+    /// word names — Bochs svm.cc `SvmInjectEvents`, `case BX_NMI`.
+    #[test]
+    fn an_injected_nmi_takes_vector_2() {
+        let injected = inject(eventinj(InterruptType::Nmi, 0x55));
+        assert_eq!(injected.outcome, EventInjection::Done);
+        assert_eq!(injected.rip, handler_of(2));
+    }
+
+    /// Each deliverable type reaches the vector it names.
+    #[test]
+    fn an_injected_event_reaches_the_vector_it_names() {
+        for (kind, vector) in [
+            (InterruptType::ExternalInterrupt, 0x30),
+            (InterruptType::HardwareException, Exception::Ud as u8),
+            (InterruptType::SoftwareInterrupt, 0x80),
+        ] {
+            let injected = inject(eventinj(kind, vector));
+            assert_eq!(injected.outcome, EventInjection::Done, "{kind:?} is injectable");
+            assert_eq!(injected.rip, handler_of(vector), "{kind:?} reaches vector {vector:#x}");
+        }
+    }
+
+    /// The combinations Bochs refuses end VMRUN as invalid, and nothing is
+    /// delivered: a hardware exception naming the NMI's vector or one past
+    /// 31, and a type no event has.
+    #[test]
+    fn an_event_bochs_refuses_to_inject_is_invalid() {
+        for word in [
+            eventinj(InterruptType::HardwareException, 2),
+            eventinj(InterruptType::HardwareException, 32),
+            EVENTINJ_VALID | 1 << EVENTINJ_TYPE_SHIFT,
+            eventinj(InterruptType::PrivilegedSoftwareInterrupt, 1),
+        ] {
+            let injected = inject(word);
+            assert_eq!(injected.outcome, EventInjection::Invalid, "{word:#010x} is refused");
+            assert_eq!(injected.rip, CODE, "{word:#010x} delivered nothing");
+        }
+    }
+
+    /// `#VMEXIT` reloads the host's EFER before it asks whether the host
+    /// resumes into PAE paging outside long mode, and Bochs svm.cc
+    /// `SvmExitLoadHostState` asks it with `long_mode()` — `efer.get_LMA()`,
+    /// the host's own. A 64-bit host's CR3 names a PML4 whose entries carry
+    /// bits a PDPTE reserves, so leaving a guest that runs outside long mode
+    /// must not validate that PML4 as a PDPT and shut the processor down.
+    #[test]
+    fn vmexit_from_a_32_bit_guest_resumes_a_64_bit_host() {
+        const PML4: u64 = 0x1000;
+        const PDPT: u64 = 0x2000;
+        /// Present, writable, user, accessed: an ordinary PML4E, and R/W, U/S
+        /// and A are each reserved in a PAE PDPTE.
+        const PML4E_FLAGS: u64 = 0x27;
+        const HOST_RIP: u64 = 0xffff_ffff_8100_0000;
+        const GUEST_RIP: u64 = 0x0040_1000;
+        const CR0_ET_PE: u32 = 0x11;
+
+        let mut machine = TestMachine::new();
+        let mut ctx = machine.ctx();
+        ctx.reset(crate::cpu::ResetReason::Hardware);
+        let pml4e = (PDPT | PML4E_FLAGS).to_le_bytes();
+        let copied = ctx.memory.write_ram(PML4, &pml4e).expect("the PML4 is RAM");
+        assert_eq!(copied, pml4e.len(), "PML4[0] reached RAM whole");
+
+        // The host: 64-bit mode over that PML4, with SVM enabled, saved the
+        // way VMRUN saves it.
+        ctx.set_seg_for_api(X86Reg::Cs, 0x08, 0, 0xFFFF_FFFF, SegmentSize::Long64);
+        for reg in [X86Reg::Es, X86Reg::Ss, X86Reg::Ds] {
+            ctx.set_seg_for_api(reg, 0x10, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
+        }
+        ctx.enter_long_mode_for_api(PML4);
+        ctx.efer.insert(BxEfer::SVME);
+        ctx.set_rip(HOST_RIP);
+        assert!(ctx.long64_mode(), "the host runs 64-bit code");
+        ctx.svm_enter_save_host_state();
+
+        // The guest: 32-bit protected mode, no paging, outside long mode.
+        ctx.set_cr0_raw_for_api(CR0_ET_PE);
+        ctx.set_efer_for_api(u64::from(BxEfer::SVME.bits()));
+        ctx.set_seg_for_api(X86Reg::Cs, 0x08, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
+        ctx.set_rip(GUEST_RIP);
+        assert!(!ctx.long_mode(), "the guest runs outside long mode");
+
+        ctx.svm_exit_load_host_state()
+            .expect("#VMEXIT resumes a 64-bit host without validating its PML4 as PDPTEs");
+
+        assert!(ctx.efer.lma(), "the host's EFER.LMA is restored");
+        assert!(ctx.long64_mode(), "the host resumes in 64-bit mode");
+        assert_eq!(ctx.cr3, PML4, "CR3 names the host's PML4 again");
+        assert_eq!(ctx.rip(), HOST_RIP, "the host resumes at its saved RIP");
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! NativeActivity loads the `rusty_box_gui_android` example's library and
 //! calls its `android_main`, which passes the activity to [`main`]. From there
-//! a phone runs the desktop shell — the same `NativeShellApp`, emulator thread
-//! and machine start — over a VM library in the app's storage, seeded from
+//! a phone runs the desktop shell — the same `NativeShellApp`, launcher and
+//! machine start — over a VM library in the app's storage, seeded from
 //! the files the APK carries. What a desktop gets from its host and a phone
 //! lacks is supplied here: a file browser for the shell's Browse buttons, the
 //! storage permission that browser needs, a key pad for a device without a
@@ -14,11 +14,15 @@
 )]
 
 use crate::android_support::{
-    content_rect_in_points, list_directory, needs_first_vm, seed_first_vm, stage_file,
-    CarriedMachine, DirectoryEntry, EntryKind, FileFilter, MachineActivity, PixelRect,
+    content_rect_in_points, exit_sentence, list_directory, needs_first_vm, seed_first_vm,
+    stage_file, untold_exit, CarriedMachine, DirectoryEntry, EntryKind, EpochMillis, ExitReason,
+    ExitRecord, ExitStanding, FileFilter, Kib, PixelRect,
 };
-use crate::app::{BrowseRequest, BrowseTarget, NativeEmulatorCommand, NativeShellApp};
+use crate::app::{
+    BrowseRequest, BrowseTarget, HostWindow, NativeEmulatorCommand, NativeShellApp, THIS_PLATFORM,
+};
 use crate::library::VmLibrary;
+use crate::sessions::AliveEffect;
 use crate::{RunError, RunSummary};
 use egui::RichText;
 use rusty_box::gui::shared_display::SharedDisplay;
@@ -26,7 +30,7 @@ use rusty_box::gui::{char_to_bx_key_sequence, HostInputEvent, HostInputSink};
 use rusty_box::iodev::scancodes::BxKey;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 pub use winit::platform::android::activity::AndroidApp;
 
@@ -55,6 +59,23 @@ const PERMISSION_GRANTED: i32 = 0;
 /// The code the permission prompt answers with. Nothing listens for it: the
 /// browser reads the grant again when the app regains focus.
 const STORAGE_REQUEST_CODE: i32 = 1_001;
+
+/// The service `AndroidManifest.xml` declares, which keeps the app running
+/// while a VM runs (`android/java/com/rustybox/android/VmService.java`).
+const VM_SERVICE: &str = "com.rustybox.android.VmService";
+/// `Build.VERSION_CODES.O`: from Android 8 a service that is to run in the
+/// foreground is started as one.
+const ANDROID_8: i32 = 26;
+/// `Build.VERSION_CODES.TIRAMISU`: from Android 13 an app shows notifications
+/// only with the user's permission.
+const ANDROID_13: i32 = 33;
+const POST_NOTIFICATIONS: &str = "android.permission.POST_NOTIFICATIONS";
+/// The code the notification prompt answers with. Nothing listens for it:
+/// the service runs whatever the answer, its notification shown or not.
+const NOTIFICATION_REQUEST_CODE: i32 = 1_002;
+/// The file in the app's storage holding when the newest end of the app a
+/// launch has seen happened, so each end is told once.
+const LAST_EXIT_SEEN: &str = "last_exit_seen";
 
 /// The smallest height a control may have on a phone, points: a thumb's
 /// target rather than a pointer's.
@@ -147,7 +168,10 @@ impl Drop for LogcatRecord {
 }
 
 /// Runs the shell for `app`, the activity NativeActivity handed this process,
-/// until the activity ends, and logs how the run finished.
+/// and logs how the run finished. The shell never ends its own loop: on a
+/// phone, quitting stops every VM and sends the app to the background
+/// (`ClosePlatform::Phone`), so the run finishes only when the shell cannot
+/// start or eframe fails.
 pub fn main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
@@ -163,13 +187,78 @@ pub fn main(app: AndroidApp) {
 
 fn run(app: AndroidApp) -> Result<RunSummary, RunError> {
     let storage = app.internal_data_path().ok_or(RunError::NoAppStorage)?;
+    let ended = previous_end_notice(&app, &storage);
     let PhoneLibrary { library, notice } = phone_library(&storage)?;
     let start = crate::runner::ShellStart {
         library,
         opening: crate::runner::ShellOpening::LastShown,
-        notice,
+        notice: joined_notice(ended, notice),
     };
     crate::runner::run_android_shell(start, app, &storage)
+}
+
+/// Both notices, the first first, as the one the shell opens with.
+fn joined_notice(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first}\n\n{second}")),
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    }
+}
+
+/// What the shell says first about how the app last ended, when Android
+/// recorded an end the user did not ask for and no launch has told of yet:
+/// on a phone the VMs end with the app, so the user should learn why. Every
+/// end Android keeps goes to the log, whichever is told.
+fn previous_end_notice(app: &AndroidApp, storage: &Path) -> Option<String> {
+    let records = match with_activity(app, previous_ends) {
+        Ok(records) => records,
+        Err(error) => {
+            log::warn!("Android's record of how the app ended before could not be read: {error}");
+            return None;
+        }
+    };
+    for record in &records {
+        log::info!("an earlier end of the app, as Android recorded it: {record:?}");
+    }
+    let marker = storage.join(LAST_EXIT_SEEN);
+    let untold = untold_exit(&records, last_seen_end(&marker));
+    if let Some(newest) = untold.newest {
+        if let Err(error) = std::fs::write(&marker, newest.0.to_string()) {
+            log::warn!(
+                "{} was not written, so the next launch may tell of the same end: {error}",
+                marker.display()
+            );
+        }
+    }
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => EpochMillis(i64::try_from(since.as_millis()).unwrap_or(i64::MAX)),
+        Err(_) => EpochMillis(0),
+    };
+    let sentence = untold.record.map(|record| exit_sentence(record, now));
+    if let Some(sentence) = &sentence {
+        log::warn!("{sentence}");
+    }
+    sentence
+}
+
+/// When the newest end an earlier launch saw happened; `None` before any
+/// launch has recorded one.
+fn last_seen_end(marker: &Path) -> Option<EpochMillis> {
+    match std::fs::read_to_string(marker) {
+        Ok(text) => match text.trim().parse() {
+            Ok(millis) => Some(EpochMillis(millis)),
+            Err(error) => {
+                log::warn!("{} holds no time ({error}); every end counts", marker.display());
+                None
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            log::warn!("{} could not be read ({error}); every end counts", marker.display());
+            None
+        }
+    }
 }
 
 /// What a phone opens the shell on.
@@ -219,7 +308,6 @@ fn stage(kind: &'static str, dir: &Path, name: &str, bytes: &[u8]) -> Result<Pat
 /// safe area, with the file browser and key pad a phone needs drawn over it.
 pub(crate) struct AndroidShellApp {
     shell: NativeShellApp,
-    shared: Arc<Mutex<SharedDisplay>>,
     app: AndroidApp,
     browser: Option<FileBrowser>,
     keypad: Option<Keypad>,
@@ -246,12 +334,16 @@ enum ScreenHold {
 impl AndroidShellApp {
     pub(crate) fn new(
         cc: &eframe::CreationContext<'_>,
-        shared: Arc<Mutex<SharedDisplay>>,
         command_tx: Sender<NativeEmulatorCommand>,
         start: crate::runner::ShellStart,
         app: AndroidApp,
     ) -> Self {
-        let shell = NativeShellApp::new(cc, Arc::clone(&shared), command_tx, start);
+        let shell = NativeShellApp::keeping_alive_by(
+            cc,
+            command_tx,
+            start,
+            AliveEffect::Phone(app.clone()),
+        );
         // A finger needs a larger target than a pointer: every control is at
         // least TOUCH_TARGET points tall, with room around its caption.
         // On a touch screen a press on text is a tap on what holds it, and a
@@ -263,7 +355,6 @@ impl AndroidShellApp {
         });
         Self {
             shell,
-            shared,
             app,
             browser: None,
             keypad: None,
@@ -274,7 +365,7 @@ impl AndroidShellApp {
     }
 
     /// Puts the window in the state a game's has: no status bar, and the
-    /// screen held on while a machine starts or runs. Applied whenever the
+    /// screen held on while any VM starts or runs. Applied whenever the
     /// hold changes and whenever the window regains the focus, because
     /// Android may rebuild the window when the app comes back.
     ///
@@ -295,6 +386,32 @@ impl AndroidShellApp {
             }
         }));
         self.screen_hold = Some(hold);
+    }
+
+    /// The host's windows open over the shell, for Back to weigh against the
+    /// shell's own.
+    fn open_windows(&self) -> Vec<HostWindow> {
+        let mut open = Vec::new();
+        if self.browser.is_some() {
+            open.push(HostWindow::FileBrowser);
+        }
+        if self.keypad.is_some() {
+            open.push(HostWindow::KeyPad);
+        }
+        open
+    }
+
+    /// Carries out what the last close decided, as the shell maps it for a
+    /// phone (`NativeShellApp::perform_close_action`): Hide and Quit both
+    /// send the app to the background, Quit once its VMs were stopped. That
+    /// is a call on the activity, which belongs to Android's UI thread, so it
+    /// is posted there, as `apply_window_flags` posts its own.
+    fn perform_close_action(&mut self, ctx: &egui::Context) {
+        let app = &self.app;
+        self.shell.perform_close_action(ctx, THIS_PLATFORM, || {
+            let activity = app.clone();
+            app.run_on_java_main_thread(Box::new(move || go_to_background(&activity)));
+        });
     }
 
     /// The part of the window the system bars leave uncovered, in points; the
@@ -357,7 +474,11 @@ impl AndroidShellApp {
         let Some(keypad) = &mut self.keypad else {
             return;
         };
-        let shared = &self.shared;
+        // The keys go to the VM shown when they are sent. The pad stays open
+        // until its close button puts it away, so after a switch from the
+        // full-screen menu it types into the VM switched to.
+        let display = self.shell.shown_display();
+        let shared: &Mutex<SharedDisplay> = &display;
         let mut open = true;
         egui::Window::new("Keys")
             .open(&mut open)
@@ -404,10 +525,18 @@ impl AndroidShellApp {
 }
 
 impl eframe::App for AndroidShellApp {
+    /// Before each frame: the shell takes over a close of the window — the
+    /// VM bar's Quit — as a phone takes it (`NativeShellApp::logic`): it is
+    /// always cancelled, since the app never ends its own loop. What the
+    /// close decided is then carried out.
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        eframe::App::logic(&mut self.shell, ctx, frame);
+        self.perform_close_action(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let activity = MachineActivity::of(&crate::app::status_snapshot(&self.shared));
-        let hold = if activity.keeps_screen_on() {
+        let hold = if self.shell.any_vm_keeps_screen_on() {
             ScreenHold::Held
         } else {
             ScreenHold::Released
@@ -417,6 +546,17 @@ impl eframe::App for AndroidShellApp {
         self.focused = focused;
         if regained_focus || self.screen_hold != Some(hold) {
             self.apply_window_flags(hold);
+        }
+
+        // Back puts away the topmost thing open, and with nothing open is a
+        // close of the app (`NativeShellApp::back_pressed`).
+        if ctx.input(|input| input.key_pressed(egui::Key::BrowserBack)) {
+            let open = self.open_windows();
+            match self.shell.back_pressed(&ctx, &open) {
+                None => {}
+                Some(HostWindow::FileBrowser) => self.browser = None,
+                Some(HostWindow::KeyPad) => self.keypad = None,
+            }
         }
 
         // The platform's content rect ends at the top of the soft keyboard
@@ -452,11 +592,13 @@ impl eframe::App for AndroidShellApp {
             }
         }
         self.draw_keypad(&ctx, safe_rect);
+        self.perform_close_action(&ctx);
     }
 
     /// The activity's window is being taken away — the app went to the
     /// background, the last call before Android may kill the process — or
-    /// the shell is closing: the shell writes every edit still in memory.
+    /// eframe is ending its loop after a failure: the shell writes every
+    /// edit still in memory.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::App::save(&mut self.shell, storage);
     }
@@ -469,7 +611,9 @@ impl eframe::App for AndroidShellApp {
         eframe::App::persist_egui_memory(&self.shell)
     }
 
-    /// The activity is closing: the shell writes every edit still in memory.
+    /// eframe is ending its loop, which on a phone only a failure of
+    /// eframe's own does: every VM's run is asked to stop, and the shell
+    /// writes every edit still in memory (`NativeShellApp::on_exit`).
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
         eframe::App::on_exit(&mut self.shell, gl);
     }
@@ -926,6 +1070,32 @@ fn apply_game_window(app: &AndroidApp, add: i32, clear: i32) -> jni::errors::Res
     })
 }
 
+/// Hide or Quit, on Android's UI thread: the app goes to the background,
+/// its VMs running after Hide and stopped after Quit, and the log says
+/// whether Android let it.
+fn go_to_background(app: &AndroidApp) {
+    match move_task_to_back(app) {
+        Ok(true) => log::info!("the app went to the background"),
+        Ok(false) => log::warn!("Android kept the app in front: it did not move to the background"),
+        Err(error) => log::warn!("the app could not go to the background: {error}"),
+    }
+}
+
+/// Sends the app to the background, as Home does; whatever still runs in
+/// it runs on for as long as Android lets the process run. Answers whether
+/// it moved.
+fn move_task_to_back(app: &AndroidApp) -> jni::errors::Result<bool> {
+    with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            jni::jni_str!("moveTaskToBack"),
+            jni::jni_sig!("(Z)Z"),
+            &[jni::objects::JValue::Bool(true)],
+        )?
+        .z()
+    })
+}
+
 fn storage_access_granted(
     env: &mut jni::Env<'_>,
     activity: &jni::objects::JObject<'_>,
@@ -942,20 +1112,282 @@ fn storage_access_granted(
             .z();
     }
     for name in [READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE] {
-        let permission = env.new_string(name)?;
-        let state = env
-            .call_method(
-                activity,
-                jni::jni_str!("checkSelfPermission"),
-                jni::jni_sig!("(Ljava/lang/String;)I"),
-                &[jni::objects::JValue::Object(&permission)],
-            )?
-            .i()?;
-        if state != PERMISSION_GRANTED {
+        if !permission_granted(env, activity, name)? {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// Whether the user has granted the app the runtime permission `name`.
+fn permission_granted(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+    name: &str,
+) -> jni::errors::Result<bool> {
+    let permission = env.new_string(name)?;
+    let state = env
+        .call_method(
+            activity,
+            jni::jni_str!("checkSelfPermission"),
+            jni::jni_sig!("(Ljava/lang/String;)I"),
+            &[jni::objects::JValue::Object(&permission)],
+        )?
+        .i()?;
+    Ok(state == PERMISSION_GRANTED)
+}
+
+/// Shows Android's prompt for the runtime permissions `names`; the answer
+/// comes back under `code`, which nothing here listens for.
+fn request_permissions(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+    names: &[&str],
+    code: i32,
+) -> jni::errors::Result<()> {
+    let string_class = env.find_class(jni::jni_str!("java/lang/String"))?;
+    let length = i32::try_from(names.len())
+        .map_err(|_| jni::errors::Error::JniCall(jni::errors::JniError::InvalidArguments))?;
+    let permissions = env.new_object_array(length, string_class, jni::objects::JObject::null())?;
+    for (index, name) in names.iter().enumerate() {
+        let permission = env.new_string(name)?;
+        permissions.set_element(env, index, &permission)?;
+    }
+    env.call_method(
+        activity,
+        jni::jni_str!("requestPermissions"),
+        jni::jni_sig!("([Ljava/lang/String;I)V"),
+        &[
+            jni::objects::JValue::Object(&permissions),
+            jni::objects::JValue::Int(code),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Starts `VmService`: a foreground service with a notification, and a wake
+/// lock that keeps the processor running with the screen off, so Android
+/// neither puts the app to sleep nor closes it while a VM runs. From
+/// Android 13 the notification shows only with the user's permission, which
+/// is asked for first; the service runs whatever the answer. The calls
+/// belong to Android's UI thread, so they are posted there.
+pub(crate) fn keep_alive(app: &AndroidApp) {
+    let activity = app.clone();
+    app.run_on_java_main_thread(Box::new(move || {
+        if let Err(error) = with_activity(&activity, ask_to_notify) {
+            log::warn!("could not ask to show the running-VM notification: {error}");
+        }
+        match with_activity(&activity, start_vm_service) {
+            Ok(ServiceStart::Started) => {
+                log::info!("VmService started: the VMs keep running with the screen off")
+            }
+            Ok(ServiceStart::NotInApk) => log::warn!(
+                "this APK declares no {VM_SERVICE}, so Android may close the app once the \
+                 screen is off"
+            ),
+            Err(error) => log::warn!(
+                "VmService did not start, so Android may close the app once the screen is \
+                 off: {error}"
+            ),
+        }
+    }));
+}
+
+/// Stops `VmService`: the last VM is off, and the app lets the phone sleep.
+/// Posted to Android's UI thread, after the start it follows.
+pub(crate) fn let_go(app: &AndroidApp) {
+    let activity = app.clone();
+    app.run_on_java_main_thread(Box::new(move || {
+        match with_activity(&activity, stop_vm_service) {
+            Ok(true) => log::info!("VmService stopped: no VM runs"),
+            Ok(false) => log::info!("VmService was not running"),
+            Err(error) => log::warn!("VmService did not stop, so the phone stays awake: {error}"),
+        }
+    }));
+}
+
+/// Whether Android found the service to start.
+enum ServiceStart {
+    Started,
+    /// The APK declares no such service.
+    NotInApk,
+}
+
+fn ask_to_notify(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<()> {
+    if sdk_level(env)? < ANDROID_13 || permission_granted(env, activity, POST_NOTIFICATIONS)? {
+        return Ok(());
+    }
+    request_permissions(
+        env,
+        activity,
+        &[POST_NOTIFICATIONS],
+        NOTIFICATION_REQUEST_CODE,
+    )
+}
+
+fn start_vm_service(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<ServiceStart> {
+    let intent = vm_service_intent(env, activity)?;
+    let started = if sdk_level(env)? >= ANDROID_8 {
+        env.call_method(
+            activity,
+            jni::jni_str!("startForegroundService"),
+            jni::jni_sig!("(Landroid/content/Intent;)Landroid/content/ComponentName;"),
+            &[jni::objects::JValue::Object(&intent)],
+        )?
+    } else {
+        env.call_method(
+            activity,
+            jni::jni_str!("startService"),
+            jni::jni_sig!("(Landroid/content/Intent;)Landroid/content/ComponentName;"),
+            &[jni::objects::JValue::Object(&intent)],
+        )?
+    }
+    .l()?;
+    Ok(if started.is_null() {
+        ServiceStart::NotInApk
+    } else {
+        ServiceStart::Started
+    })
+}
+
+/// Answers whether a running service was stopped.
+fn stop_vm_service(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<bool> {
+    let intent = vm_service_intent(env, activity)?;
+    env.call_method(
+        activity,
+        jni::jni_str!("stopService"),
+        jni::jni_sig!("(Landroid/content/Intent;)Z"),
+        &[jni::objects::JValue::Object(&intent)],
+    )?
+    .z()
+}
+
+/// An intent naming `VmService` by its class name: the class is the app's
+/// own, which a thread attached from native code cannot look up by
+/// `FindClass`.
+fn vm_service_intent<'local>(
+    env: &mut jni::Env<'local>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<jni::objects::JObject<'local>> {
+    let intent_class = env.find_class(jni::jni_str!("android/content/Intent"))?;
+    let blank = env.new_object(&intent_class, jni::jni_sig!("()V"), &[])?;
+    let name = env.new_string(VM_SERVICE)?;
+    env.call_method(
+        &blank,
+        jni::jni_str!("setClassName"),
+        jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;)Landroid/content/Intent;"),
+        &[
+            jni::objects::JValue::Object(activity),
+            jni::objects::JValue::Object(&name),
+        ],
+    )?
+    .l()
+}
+
+/// Every end of this app's process Android still keeps, newest first
+/// (`ActivityManager.getHistoricalProcessExitReasons`, Android 11 and later;
+/// none before).
+fn previous_ends(
+    env: &mut jni::Env<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<Vec<ExitRecord>> {
+    if sdk_level(env)? < ANDROID_11 {
+        return Ok(Vec::new());
+    }
+    let service = env.new_string("activity")?;
+    let manager = env
+        .call_method(
+            activity,
+            jni::jni_str!("getSystemService"),
+            jni::jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+            &[jni::objects::JValue::Object(&service)],
+        )?
+        .l()?;
+    // No package name: this app's own; no pid and no limit: every end kept.
+    let ends = env
+        .call_method(
+            &manager,
+            jni::jni_str!("getHistoricalProcessExitReasons"),
+            jni::jni_sig!("(Ljava/lang/String;II)Ljava/util/List;"),
+            &[
+                jni::objects::JValue::Object(&jni::objects::JObject::null()),
+                jni::objects::JValue::Int(0),
+                jni::objects::JValue::Int(0),
+            ],
+        )?
+        .l()?;
+    let count = env
+        .call_method(&ends, jni::jni_str!("size"), jni::jni_sig!("()I"), &[])?
+        .i()?;
+    let mut records = Vec::new();
+    for index in 0..count {
+        let record = env.with_local_frame(8, |env| -> jni::errors::Result<ExitRecord> {
+            let end = env
+                .call_method(
+                    &ends,
+                    jni::jni_str!("get"),
+                    jni::jni_sig!("(I)Ljava/lang/Object;"),
+                    &[jni::objects::JValue::Int(index)],
+                )?
+                .l()?;
+            exit_record(env, &end)
+        })?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// One `ApplicationExitInfo`, read into a record.
+fn exit_record(
+    env: &mut jni::Env<'_>,
+    end: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<ExitRecord> {
+    let reason = env
+        .call_method(end, jni::jni_str!("getReason"), jni::jni_sig!("()I"), &[])?
+        .i()?;
+    let status = env
+        .call_method(end, jni::jni_str!("getStatus"), jni::jni_sig!("()I"), &[])?
+        .i()?;
+    let importance = env
+        .call_method(end, jni::jni_str!("getImportance"), jni::jni_sig!("()I"), &[])?
+        .i()?;
+    let at = env
+        .call_method(end, jni::jni_str!("getTimestamp"), jni::jni_sig!("()J"), &[])?
+        .j()?;
+    let resident = env
+        .call_method(end, jni::jni_str!("getRss"), jni::jni_sig!("()J"), &[])?
+        .j()?;
+    let note = env
+        .call_method(
+            end,
+            jni::jni_str!("getDescription"),
+            jni::jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )?
+        .l()?;
+    let description = if note.is_null() {
+        None
+    } else {
+        let note = env.cast_local::<jni::objects::JString>(note)?;
+        Some(note.try_to_string(env)?)
+    };
+    Ok(ExitRecord {
+        reason: ExitReason::from_code(reason),
+        status,
+        standing: ExitStanding::of(importance),
+        at: EpochMillis(at),
+        resident: Kib(resident),
+        description,
+    })
 }
 
 /// Asks for shared-storage access: on Android 11 and later by opening this
@@ -1036,25 +1468,12 @@ fn ask_for_storage_access(
         )?;
         return Ok(());
     }
-    let string_class = env.find_class(jni::jni_str!("java/lang/String"))?;
-    let permissions = env.new_object_array(2, string_class, jni::objects::JObject::null())?;
-    for (index, name) in [READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE]
-        .into_iter()
-        .enumerate()
-    {
-        let permission = env.new_string(name)?;
-        permissions.set_element(env, index, &permission)?;
-    }
-    env.call_method(
-        activity.as_ref(),
-        jni::jni_str!("requestPermissions"),
-        jni::jni_sig!("([Ljava/lang/String;I)V"),
-        &[
-            jni::objects::JValue::Object(&permissions),
-            jni::objects::JValue::Int(STORAGE_REQUEST_CODE),
-        ],
-    )?;
-    Ok(())
+    request_permissions(
+        env,
+        activity,
+        &[READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE],
+        STORAGE_REQUEST_CODE,
+    )
 }
 
 /// `Build.VERSION.SDK_INT`, the API level the device runs.

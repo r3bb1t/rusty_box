@@ -321,9 +321,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(Exception::Ud, 0);
         }
 
-        // RSP_SPECULATIVE
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp();
+        // Bochs fred.cc ERETS: RSP_SPECULATIVE.
+        self.rsp_speculative();
 
         // Skip error code
         let rsp = self.rsp().wrapping_add(8);
@@ -373,8 +372,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         }
 
-        // RSP_COMMIT
-        self.speculative_rsp = false;
+        // Bochs fred.cc ERETS: RSP_COMMIT.
+        self.rsp_commit();
 
         self.set_rip(new_rip);
         self.set_eflags_internal(new_rflags as u32);
@@ -423,9 +422,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(Exception::Gp, 0);
         }
 
-        // RSP_SPECULATIVE
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp();
+        // Bochs fred.cc ERETU: RSP_SPECULATIVE.
+        self.rsp_speculative();
 
         // Skip error code
         let rsp = self.rsp().wrapping_add(8);
@@ -532,8 +530,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.load_null_selector(BxSegregs::Ss, raw_ss_selector);
             }
 
-            // RSP_COMMIT
-            self.speculative_rsp = false;
+            // Bochs fred.cc ERETU: RSP_COMMIT.
+            self.rsp_commit();
 
             self.set_rip(new_rip);
             self.set_eflags_internal(new_rflags as u32);
@@ -588,8 +586,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET);
         }
 
-        // RSP_COMMIT
-        self.speculative_rsp = false;
+        // Bochs fred.cc ERETU: RSP_COMMIT.
+        self.rsp_commit();
 
         self.set_rip(new_rip);
         self.set_eflags_internal(new_rflags as u32);
@@ -645,5 +643,33 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.swapgs_internal();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::exec_ctx::TestMachine;
+
+    /// The event-information word a FRED delivery pushes names the event's
+    /// type in bits 19:16 with the architecture's encoding — Bochs fred.cc
+    /// `get_fred_event_info`, `type << 16` over `BX_InterruptType`.
+    #[test]
+    fn the_event_information_word_carries_the_architectural_type() {
+        let mut machine = TestMachine::new();
+        let ctx = machine.ctx();
+        for (kind, encoded) in [
+            (InterruptType::ExternalInterrupt, 0),
+            (InterruptType::Nmi, 2),
+            (InterruptType::HardwareException, 3),
+            (InterruptType::SoftwareInterrupt, 4),
+            (InterruptType::PrivilegedSoftwareInterrupt, 5),
+            (InterruptType::SoftwareException, 6),
+            (InterruptType::EventOther, 7),
+        ] {
+            let info = ctx.get_fred_event_info(0x20, kind, false, 0);
+            assert_eq!((info >> 16) & 0xF, encoded, "{kind:?}");
+            assert_eq!(info & 0xFF, 0x20, "{kind:?} keeps its vector");
+        }
     }
 }

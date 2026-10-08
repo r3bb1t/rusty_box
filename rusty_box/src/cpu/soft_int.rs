@@ -87,14 +87,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Dispatches to real_mode_int or protected_mode_int based on current CPU mode.
     /// After delivery, invalidates prefetch and returns CpuLoopRestart to
     /// restart the trace (matching Bochs BX_NEXT_TRACE).
+    ///
+    /// Whether the gate's DPL is checked follows from `event_type` alone, as
+    /// Bochs derives its `soft_int`: a caller names what is being delivered,
+    /// and the privilege rule that kind of event obeys comes with it.
     pub(super) fn interrupt(
         &mut self,
         vector: u8,
         event_type: super::exception::InterruptType,
-        soft_int: bool,
         push_error: bool,
         error_code: u16,
     ) -> super::Result<()> {
+        let soft_int = event_type.is_software();
         tracing::trace!(
             "interrupt(): vector={:#04x} soft_int={} mode={}",
             vector,
@@ -116,28 +120,32 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // a fault or VM exit and never fall back to handleAsyncEvent's tail.
         self.activity_state = super::cpu::CpuActivityState::Active;
 
-        // Discard any traps and inhibits for new context (matches Bochs line 800-801)
+        // Bochs exception.cc interrupt: discard any traps and inhibits for the
+        // new context.
         self.debug_trap = 0;
         self.inhibit_mask = 0;
 
-        // Invalidate prefetch queue (matches Bochs line 777)
+        // Bochs exception.cc interrupt: invalidate_prefetch_q.
         self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
-        // RSP_SPECULATIVE — mark speculative RSP so exceptions during delivery
-        // can restore the original value (matches Bochs line 807)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
-        self.prev_ssp = 0; // no shadow stack
+        // Bochs exception.cc interrupt: RSP_SPECULATIVE, so a fault during
+        // delivery puts RSP and SSP back.
+        self.rsp_speculative();
 
         if self.real_mode() {
             self.interrupt_real_mode(vector)?;
         } else {
-            // V8086 mode software interrupt: try VME redirect first
-            // Bochs exception.cc: v86_redirect_interrupt checked before protected_mode_int
-            if self.v8086_mode() && soft_int && self.v86_redirect_interrupt(vector)? {
-                // Interrupt was redirected through virtual IVT
-                self.speculative_rsp = false;
+            // V8086 mode software interrupt: try VME redirect first. `INT n`
+            // alone — Bochs exception.cc `interrupt` tests the type against
+            // BX_SOFTWARE_INTERRUPT, so `INT3` and `INTO` are never redirected.
+            if self.v8086_mode()
+                && event_type == super::exception::InterruptType::SoftwareInterrupt
+                && self.v86_redirect_interrupt(vector)?
+            {
+                // Redirected through the virtual IVT; Bochs exception.cc
+                // interrupt reaches its RSP_COMMIT and EXT = 0 from here too.
+                self.rsp_commit();
                 self.ext = false;
                 self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
                 return Err(super::error::CpuError::CpuLoopRestart);
@@ -174,10 +182,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         }
 
-        // RSP_COMMIT (matches Bochs line 828)
-        self.speculative_rsp = false;
+        // Bochs exception.cc interrupt: RSP_COMMIT.
+        self.rsp_commit();
 
-        // EXT = 0 after delivery (matches Bochs line 838)
+        // Bochs exception.cc interrupt: EXT = 0 once delivery is done.
         self.ext = false;
 
         // Software interrupts cause trace restart (matches Bochs BX_NEXT_TRACE)
@@ -199,28 +207,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         let vector = instr.ib();
         tracing::trace!("INT {:#04x}", vector);
-        // BX_SOFTWARE_INTERRUPT → soft_int=true, no error code
-        self.interrupt(
-            vector,
-            super::exception::InterruptType::SoftwareInterrupt,
-            true,
-            false,
-            0,
-        )
+        self.interrupt(vector, super::exception::InterruptType::SoftwareInterrupt, false, 0)
     }
 
     /// INT3 - Breakpoint interrupt (vector 3)
     /// Based on Bochs INT3 in soft_int.cc
     pub fn int3(&mut self, _instr: &Instruction) -> super::Result<()> {
         tracing::trace!("INT3 (breakpoint)");
-        // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
-        self.interrupt(
-            3,
-            super::exception::InterruptType::SoftwareException,
-            true,
-            false,
-            0,
-        )
+        self.interrupt(3, super::exception::InterruptType::SoftwareException, false, 0)
     }
 
     /// INTO - Interrupt on overflow (vector 4, only if OF=1)
@@ -234,14 +228,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn into_overflow(&mut self, _instr: &Instruction) -> super::Result<()> {
         if self.get_of() {
             tracing::trace!("INTO: overflow detected, calling INT 4");
-            // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
-            return self.interrupt(
-                4,
-                super::exception::InterruptType::SoftwareException,
-                true,
-                false,
-                0,
-            );
+            return self.interrupt(4, super::exception::InterruptType::SoftwareException, false, 0);
         }
         Ok(())
     }
@@ -256,16 +243,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 .selector
                 .value
         );
-        // BX_PRIVILEGED_SOFTWARE_INTERRUPT → soft_int=false (privileged bypass DPL check)
-        // Bochs sets EXT=1 before calling interrupt() for INT1
+        // A privileged software interrupt skips the gate's DPL check, and
+        // Bochs sets EXT=1 before calling interrupt() for INT1.
         self.ext = true;
-        self.interrupt(
-            1,
-            super::exception::InterruptType::PrivilegedSoftwareInterrupt,
-            false,
-            false,
-            0,
-        )
+        self.interrupt(1, super::exception::InterruptType::PrivilegedSoftwareInterrupt, false, 0)
     }
 
     // =========================================================================
@@ -371,20 +352,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.unmask_event(BxCpuC::<T>::BX_EVENT_NMI);
 
         // RSP_SPECULATIVE before all mode branches (Bochs ctrl_xfer16.cc)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
+        self.rsp_speculative();
 
         // Protected mode dispatch (Bochs ctrl_xfer16.cc)
         // Bochs checks protected_mode() first, which includes protected+long modes
-        // but NOT V8086. V8086 is handled inside iret_protected via
-        // iret16_stack_return_from_v86.
+        // but NOT V8086, which takes the branch below.
         if self.protected_mode() {
             return self.iret_protected_16();
         }
 
-        // V8086 mode IRET (Bochs ctrl_xfer16.cc)
+        // V8086 mode IRET, then the RSP_COMMIT every path of Bochs
+        // ctrl_xfer16.cc IRET16 reaches.
         if self.v8086_mode() {
-            return self.iret16_stack_return_from_v86();
+            self.iret16_stack_return_from_v86()?;
+            self.rsp_commit();
+            return Ok(());
         }
 
         // Real mode: Pop IP, CS, FLAGS from stack
@@ -427,8 +409,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // write_flags with change_IOPL=true, change_IF=true (Bochs ctrl_xfer16.cc)
         self.write_flags(new_flags, true, true);
 
-        // RSP_COMMIT
-        self.speculative_rsp = false;
+        // Bochs ctrl_xfer16.cc IRET16: RSP_COMMIT.
+        self.rsp_commit();
 
         tracing::trace!(
             "IRET16: returning to {:04x}:{:04x}, flags={:04x}",
@@ -453,17 +435,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.unmask_event(BxCpuC::<T>::BX_EVENT_NMI);
 
         // RSP_SPECULATIVE before all mode branches (Bochs ctrl_xfer32.cc)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
+        self.rsp_speculative();
 
         // Protected mode dispatch (Bochs ctrl_xfer32.cc)
         if self.protected_mode() {
             return self.iret_protected();
         }
 
-        // V8086 mode IRET (Bochs ctrl_xfer32.cc)
+        // V8086 mode IRET, then the RSP_COMMIT every path of Bochs
+        // ctrl_xfer32.cc IRET32 reaches.
         if self.v8086_mode() {
-            return self.iret32_stack_return_from_v86();
+            self.iret32_stack_return_from_v86()?;
+            self.rsp_commit();
+            return Ok(());
         }
 
         // Real mode: Pop EIP, CS, EFLAGS from stack
@@ -491,8 +475,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // writeEFlags with VIF, VIP, VM unchanged (Bochs ctrl_xfer32.cc)
         self.write_eflags(new_eflags, EFlags::IRET32_REAL_CHANGE.bits());
 
-        // RSP_COMMIT
-        self.speculative_rsp = false;
+        // Bochs ctrl_xfer32.cc IRET32: RSP_COMMIT.
+        self.rsp_commit();
 
         tracing::trace!(
             "IRET32: returning to {:04x}:{:08x}, eflags={:08x}",
@@ -569,9 +553,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             );
         }
 
-        // RSP_SPECULATIVE (Bochs iret.cc)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
+        // The speculative region iret32 opened (Bochs ctrl_xfer32.cc IRET32
+        // RSP_SPECULATIVE) covers everything from here.
 
         // Peek at stack without modifying ESP
         let temp_esp = if self.is_stack_32bit() {
@@ -590,7 +573,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let current_cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
             if current_cpl == 0 {
                 self.stack_return_to_v86(new_eip, raw_cs_raw as u32, new_eflags)?;
-                self.speculative_rsp = false;
+                // Bochs iret.cc iret_protected returns here, and ctrl_xfer32.cc
+                // IRET32's RSP_COMMIT follows.
+                self.rsp_commit();
                 return Ok(());
             } else {
                 tracing::error!("iret_protected: VM bit set but CPL={} != 0", current_cpl);
@@ -803,8 +788,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.validate_seg_regs();
         }
 
-        // RSP_COMMIT
-        self.speculative_rsp = false;
+        // Bochs ctrl_xfer32.cc IRET32: RSP_COMMIT once iret_protected returns.
+        self.rsp_commit();
         Ok(())
     }
 
@@ -852,9 +837,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             );
         }
 
-        // RSP_SPECULATIVE
-        self.speculative_rsp = true;
-        self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
+        // The speculative region iret16 opened (Bochs ctrl_xfer16.cc IRET16
+        // RSP_SPECULATIVE) covers everything from here, so each fault below
+        // restores RSP and SSP.
 
         // Peek at stack — 16-bit reads (6 bytes total)
         let temp_esp = if self.is_stack_32bit() {
@@ -869,7 +854,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Return CS selector must be non-null
         if (raw_cs_raw & 0xfffc) == 0 {
-            self.speculative_rsp = false;
             return self.exception(Exception::Gp, 0);
         }
 
@@ -878,22 +862,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
-            Err(_) => {
-                self.speculative_rsp = false;
-                return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
-            }
+            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xfffc),
         };
         let mut cs_descriptor = match self.parse_descriptor(dword1, dword2) {
             Ok(v) => v,
-            Err(_) => {
-                self.speculative_rsp = false;
-                return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
-            }
+            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xfffc),
         };
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         if cs_selector.rpl < cpl {
-            self.speculative_rsp = false;
             return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
         }
 
@@ -932,7 +909,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let raw_ss_raw = self.stack_read_word(temp_esp + 8)?;
 
             if (raw_ss_raw & 0xfffc) == 0 {
-                self.speculative_rsp = false;
                 return self.exception(Exception::Gp, 0);
             }
 
@@ -940,23 +916,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             parse_selector(raw_ss_raw, &mut ss_selector);
 
             if ss_selector.rpl != cs_selector.rpl {
-                self.speculative_rsp = false;
                 return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
             }
 
             let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
                 Ok(v) => v,
-                Err(_) => {
-                    self.speculative_rsp = false;
-                    return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
-                }
+                Err(_) => return self.exception(Exception::Gp, raw_ss_raw & 0xfffc),
             };
             let mut ss_descriptor = match self.parse_descriptor(ss_dw1, ss_dw2) {
                 Ok(v) => v,
-                Err(_) => {
-                    self.speculative_rsp = false;
-                    return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
-                }
+                Err(_) => return self.exception(Exception::Gp, raw_ss_raw & 0xfffc),
             };
 
             if ss_descriptor.valid == 0
@@ -964,15 +933,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 || ss_descriptor.r#type >= 8
                 || (ss_descriptor.r#type & 2) == 0
             {
-                self.speculative_rsp = false;
                 return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
             }
             if ss_descriptor.dpl != cs_selector.rpl {
-                self.speculative_rsp = false;
                 return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
             }
             if !ss_descriptor.p {
-                self.speculative_rsp = false;
                 return self.exception(Exception::Np, raw_ss_raw & 0xfffc);
             }
 
@@ -1016,8 +982,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.validate_seg_regs();
         }
 
-        // RSP_COMMIT
-        self.speculative_rsp = false;
+        // Bochs ctrl_xfer16.cc IRET16: RSP_COMMIT once iret_protected returns.
+        self.rsp_commit();
         Ok(())
     }
 

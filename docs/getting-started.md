@@ -18,7 +18,7 @@ serial pane and mouse capture, in `rusty_box/src/gui/`.
   hard-disk image. The launcher can create a blank disk image for you. For a
   first VM, use the Alpine Linux **Virtual** x86_64 ISO,
   `alpine-virt-3.24.1-x86_64.iso`; the front page's
-  [Getting an Alpine Linux ISO](../README.md#getting-an-alpine-linux-iso)
+  [Firmware and disk images](../README.md#firmware-and-disk-images)
   says where to download it.
 
 ### Getting the firmware
@@ -108,7 +108,7 @@ page.
 
 These are the guests with a recorded milestone, with the settings on record
 for each. The front page's [What runs today](../README.md#what-runs-today)
-table lists the same guests. DLX Linux, the first row there, is booted by the
+table lists the same guests. DLX Linux, the last row there, is booted by the
 `dlxlinux` example rather than from the shell.
 
 ### A new VM's defaults
@@ -206,11 +206,41 @@ so a shell boot on the interpreter is not the identical machine.
 `ubuntu-26.04-live-server-amd64.iso`. A finished install, or an installed
 system booting, is not recorded.
 
-**The VM file** is on the front page, under
-[The Ubuntu Server recipe](../README.md#the-ubuntu-server-recipe): 2048 MiB of
-guest and host memory, one processor (1 × 1 × 1), `ips` 120,000,000, PCI on,
-sync slowdown off, `smp_quantum` 32, a 1280×720 display at 32 bits per pixel,
-and the CD as the only boot device. It attaches no hard disk.
+**The VM file:** 2048 MiB of guest and host memory, one processor
+(1 × 1 × 1), `ips` 120,000,000, PCI on, sync slowdown off, `smp_quantum` 32, a
+1280×720 display at 32 bits per pixel, and the CD as the only boot device. It
+attaches no hard disk. Save it as `ubuntu.toml` in the repository root, next
+to the ISO, and open it with
+`cargo run --release -p rusty_box_gui -- --config ubuntu.toml`; it opens as a
+temporary VM, which `Keep in library` on its Summary page adds to the library.
+
+```toml
+[emulator]
+memory_mib = 2048
+host_memory_mib = 2048
+cpu_sockets = 1
+cpu_cores = 1
+cpu_threads = 1
+ips = 120000000
+pci = true
+sync_slowdown = false
+smp_quantum = 32
+
+[display]
+width = 1280
+height = 720
+bpp = 32
+
+[rom]
+bios = "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"
+vga_bios = "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"
+
+[boot]
+order = ["cdrom"]
+
+[cdrom]
+path = "ubuntu-26.04-live-server-amd64.iso"
+```
 
 **In the shell,** the same machine is: `Guest memory` and `Host memory` 2048;
 `IPS target` 120000000; `Display resolution` `1280×720 @ 32bpp`; the ISO
@@ -224,14 +254,28 @@ not harness measurements. To run it on WHP, choose `Windows Hypervisor` under
 Hardware › Processors › Engine, add `engine = "whp"` under the file's
 `[emulator]`, or pass `--engine whp`.
 
+### Windows XP
+
+**What it reaches:** a finished install that boots and runs. A full install
+from the CD took about five hours on a phone (the interpreter, the Android
+shell, with the screen locked for most of it), and the installed system then
+worked. No run on WHP is claimed.
+
+**Settings on record:** none were kept from that run. A Windows install needs
+a hard disk as well as its CD: `New Hard Disk` on the Summary page makes one
+and attaches it (8 GB is more than XP needs). Set the BIOS, VGA BIOS and CD
+as for Alpine above, and give the VM more memory and a higher IPS target than
+a new VM's defaults; the Windows 10 file below is a starting point.
+
 ### Windows 10 22H2
 
-**What it reaches:** the installer starts. Its start screen was reached on the
-interpreter after 88.2 billion guest instructions, on 2026-07-14. Nothing past
-that screen is recorded, nor any run on WHP, nor any run since that July
-record.
+**What it reaches:** Setup runs, but no install has finished. On a phone, on
+the interpreter, Setup ran for more than 15 hours and then stayed at its
+"Please wait" screen, the animation still moving. The installer's start
+screen was first reached on the desktop interpreter after 88.2 billion guest
+instructions, on 2026-07-14. No run on WHP is claimed.
 
-**Settings on record:** the Windows 10 22H2 ISO on the CD/DVD, 2 GiB of guest
+**Settings on record** for the desktop run: the Windows 10 22H2 ISO on the CD/DVD, 2 GiB of guest
 and host memory, `ips` 120,000,000, PCI on and sync slowdown off, on the
 interpreter. As a VM file, with your own ISO's name in `path`:
 
@@ -282,7 +326,7 @@ third-party build of it) and took about 20 minutes to reach the picker.
   chipset around them.
 - **There is no network adapter, no sound card, no USB controller and no
   floppy controller.** No guest has networking; the mouse is a PS/2 mouse,
-  never a USB tablet; and a floppy image the Images page creates cannot be
+  never a USB tablet; and a floppy image the floppy maker writes cannot be
   attached.
 
 ## The window
@@ -298,22 +342,33 @@ The desktop shell has four parts:
 
 The sidebar, headed `My computer`, lists the VMs in the library and has a
 `Search VMs` box that filters them by name, boot order, and disk and CD/DVD
-path, ignoring case. The selected VM opens into its four pages:
-**Summary**, **Console**, **Hardware** and **Images**. Clicking a page moves
-to it. Clicking another VM switches to it and lands on its Summary page, but
-only once the running VM has been stopped: while a VM runs or starts, the
-switch is refused with `Stop the running VM before selecting another VM.`
-The VM being left is saved first.
+path, ignoring case. The selected VM opens into its three pages:
+**Summary**, **Console** and **Hardware**. Clicking a page moves to it.
+Clicking another VM switches to it and lands on its Summary page; the VM
+being left is saved first, and keeps running if it runs.
+
+Several VMs run at once, each on a thread of its own. The selected VM's row
+has a dot in its state's colour, and so has the row of every other VM that
+runs or is starting. Only the VM shown gets the keyboard and mouse. A process
+holds one Windows Hypervisor Platform partition, so one VM at a time runs on
+WHP: another VM set to it starts on the interpreter and says so. A hard-disk
+image has one running writer: powering on a VM whose disk another running VM
+uses is refused with `<path> is in use by <VM>; stop it first.`
 
 Every VM is a complete launch configuration, kept in its own file in the
 library. The VM the command line described, if any, comes first, marked
 "(unsaved)"; a library VM whose last save failed is marked "(save failed)".
 The sidebar's `+` button adds a new VM to the library, copied from the
-selected one; while a VM runs it is refused with
-`Stop the running VM before adding a VM.` Library files that do not load are
-listed under **Could not load**, each with its error as a tooltip and a
-Delete button. The **☰** button at the left of the VM bar shows or hides the
-sidebar.
+selected one. Library files that do not load are listed under **Could not
+load**, each with its error as a tooltip and a Delete button. The **☰**
+button at the left of the VM bar shows or hides the sidebar; dragging the
+sidebar's edge in past its narrowest width also folds it away, and a drag
+from the window's left edge brings it back.
+
+Closing the window while VMs run asks `VMs are still running`: `Hide`
+minimizes the window with the VMs running, `Stop VMs and quit` stops them and
+closes it, and `Cancel` leaves everything as it was. `Remember my choice`
+keeps the answer for every later close; the About window changes it.
 
 ### VM bar
 
@@ -329,7 +384,8 @@ It also carries the verbs that change that state:
 
 - `▶ Power on` is enabled when the VM is stopped and not already starting.
 - `■ Power off` and `↻ Restart` are enabled while the VM is running.
-- `…` opens a menu with `About Rusty Box Workstation` and `Quit`.
+- `…` opens a menu with `Create floppy image…`, `About Rusty Box Workstation`
+  and `Quit`.
 
 While the Console page is shown, the bar adds three controls for the guest's
 console:
@@ -362,8 +418,9 @@ library** and **Discard**. `Delete VM` and `Discard` ask first
 (`Delete <name>?` / `Discard <name>?`) and work only while the VM is stopped
 and another VM remains; deleting removes the VM's file, and the disk images
 it uses are kept. `Cancel`, Escape or a click outside the dialog dismisses
-it. Three tiles lead elsewhere: **Power On VM**, **Create Disk Image** (goes
-to the Images page) and **Hardware Settings** (goes to the Hardware page).
+it. Three tiles lead elsewhere: **Power On VM**, **New Hard Disk** (opens the
+new-disk sheet under Hardware › Hard Disk; see [Disks](#disks)) and
+**Hardware Settings** (goes to the Hardware page).
 
 ### Console page
 
@@ -395,7 +452,7 @@ The Hardware page lists six devices. Selecting one opens its settings:
 | **Memory** | `Guest memory` and `Host memory`, each 1 to 4096 MB; `Memory block`, 1 to 65,536 KiB |
 | **Processors** | `Sockets`, `Cores / socket` and `Threads / core`, with the logical total and a warning above the SMP limit; `IPS target`; `Sync slowdown`; `Engine` (`Interpreter`, or `Windows Hypervisor` in a Windows build that carries it); `Max instructions` (0 means unlimited) |
 | **Devices** | `Enable PCI`; `Boot order (first match boots)`, whose entries move earlier or later or are removed, with `Add disk` / `Add cdrom` for an attached device the order leaves out; `Effective boot order` |
-| **Hard Disk** | `Enable hard disk`, `Disk path` with `Browse…`, `ATA channel` and `drive`, `Override CHS geometry`; `Detected CHS` and `Controller` for an attached disk, or `Attached disk` `None`; `Create disk image`, which opens the Images page |
+| **Hard Disk** | With no disk, two tiles: `+ New disk` (the new-disk sheet, see [Disks](#disks)) and `Use a disk file` (a file browser). With one, its file name, size and folder, and `Change`, `Detach` and `+ New disk`. `Advanced` holds `ATA channel` and `drive` and `Override CHS geometry` |
 | **CD/DVD** | `Enable CD/DVD`, `ISO path` with `Browse…`, `ATA channel` and `drive`, `Boot CD/DVD first`; `Controller`, or `Attached CD/DVD` `None` |
 | **Display** | `BIOS path` and `VGA BIOS path`, each with `Browse…`; `Log level`; `Display resolution`; `Register VGA on PCI (experimental KMS / bochs-drm)`; `Adapter`, `Applied BIOS` and `Applied VGA BIOS`; `Open console` |
 
@@ -403,8 +460,8 @@ Settings can be edited only while the VM is powered off, and they take effect
 at the next power-on. While the VM runs, the page reads
 `Power off before changing VM hardware.`
 
-- **Browse.** Choosing a file for `Disk path` or `ISO path` also ticks that
-  device's `Enable` box.
+- **Browse.** Choosing a hard disk with `Use a disk file` or `Change`, or a
+  file for `ISO path`, also turns that device on.
 - **Boot order.** An attached device the order leaves out is added to it,
   after the listed ones; `Effective boot order` shows the order a power-on
   uses.
@@ -433,28 +490,34 @@ The config file's `emulator.engine` key chooses the engine (see
 [Execution engines](#execution-engines)); `--engine` on the command line
 overrides it.
 
-### Images page
+### Disks
 
-The Images page creates blank images with the `rusty_box_bximage` backend:
+**A new hard disk.** `New Hard Disk` on the Summary page, and `+ New disk`
+under Hardware › Hard Disk, open the new-disk sheet on that pane:
 
-- `Kind`: `Hard disk` or `Floppy`.
-- `Path`, which starts as `c.img`, with `Browse…`: a native save dialog that
-  suggests `c.img` or `floppy.img`. Dropping a file onto the page puts its
-  path in the field.
-- For a hard disk, `Size`, which starts as `20G`, with
-  `Examples: 10M, 512M, 20G, 512` beside it. A bare number means MiB. The
-  size must be at least 10 MiB, and under 8064 GiB.
-- For a floppy, `Floppy format`: one of the ten bximage formats, from 160 KB
-  to 2.88 MB.
-- `Overwrite existing file`, off by default. Without it, an existing file is
-  refused.
-- `Create image` creates it.
+- `Name`: the VM's name with `.img` after it, to start with.
+- `Size`: `2 GB`, `8 GB`, `16 GB`, `32 GB` (the default) or `64 GB`, or
+  `Custom`, in whole GB from 1 to 2048. The caption under it gives the sizes
+  guests want: Linux 2 GB or more, Windows 7 16 GB or more, Windows 10 32 GB
+  or more.
+- `Save to`: `Documents/Rusty Box` under your home folder, or a folder chosen
+  with `Other folder…`.
+- `Create and attach` writes the disk and attaches it to the VM, with the
+  notice `Attached created disk image to <name>.` If the VM is running or
+  starting, the disk is written but not attached, with
+  `Disk image created. Stop the VM before attaching it.`; attach it under
+  Hardware › Hard Disk once the VM is off.
+- If a file of that name is already in the folder, the sheet says so and
+  offers `Replace it`, `Save as <name (2).img>` or `Cancel`. A disk another
+  running VM uses is never replaced.
 
-A new hard disk is attached to the selected VM at once if the VM is stopped,
-with the notice `Attached created disk image to <name>.` If the VM is running
-or starting, the image is still created, but not attached: the notice reads
-`Disk image created. Stop the VM before attaching it.`, and you attach it
-yourself under Hardware › Hard Disk once the VM is off. A floppy image is only
+The disk is a flat image with 16 heads and 63 sectors per track. It is
+written by seeking to its end, so on ext4, APFS and a phone's storage the file
+grows as the guest fills it, while on NTFS the whole size is taken at once.
+
+**A floppy image.** `…` › `Create floppy image…` opens the floppy maker: one
+of the ten bximage formats, from 160 KB to 2.88 MB, written to the path under
+`Save as`; `Replace an existing file` is off by default. The image is only
 written, with the notice
 `Floppy image created. Floppy drive emulation is not wired yet.`: the machine
 has no floppy controller.
@@ -519,12 +582,17 @@ display, with no capture step, and does not hide the cursor. It forwards keys
 while its Console page is shown and no text field has the keyboard. A browser
 reports no physical key, so there the host's layout decides the key sent.
 
-**On Android** the Console page has its own header instead of the VM bar, so
-it has no `Capture mouse`, `Ctrl+Alt+Del` or `Show serial` button. A `Keys`
-button at the bottom right opens a pad with a `Text to type` field and `Send`,
-and buttons for `Esc`, `Tab`, `Enter`, `Backspace`, `Left`, `Up`, `Down`,
-`Right`, `Ctrl+C` and `Ctrl+Alt+Del`. Touch input to the guest is not
-recorded.
+**On Android** a running VM's Console page fills the screen with the guest,
+under a round `☰` button in the corner whose menu holds `Keys`,
+`Ctrl+Alt+Del`, `Stretch to fill`, a `Pointer speed` slider, `■ Power off`,
+`↻ Restart`, `Exit to shell` and a switch to each other running VM. There is
+no capture step: a finger on the guest's screen is a trackpad for its mouse.
+A slide moves the pointer, a tap clicks, a two-finger tap right-clicks, and a
+touch straight after a tap holds the button, to drag or double-click; the
+on-screen `L` and `R` buttons press the left and right buttons. `Keys` opens a
+pad with a `Text to type` field and `Send`, and buttons for `Esc`, `Tab`,
+`Enter`, `Backspace`, `Left`, `Up`, `Down`, `Right`, `Ctrl+C` and
+`Ctrl+Alt+Del`. The phone has no serial pane.
 
 ## The config file, section by section
 
@@ -556,6 +624,7 @@ VM, and leaves it out when the name is blank.
 | `sync_realtime` | `false` | Run the devices that keep their own clock on wall-clock time (Bochs `clock: sync=realtime`): the PIT, the ACPI power-management timer, and the VGA's vertical retrace, which is what a guest polls port 0x3DA for. When off, all three follow emulated time. |
 | `smp_quantum` | `16` | Instructions each CPU runs before the next one gets its turn (Bochs `cpu: quantum=`). Must be 1–32. |
 | `cpuid_freq` | `"none"` | How CPUID frequency leaves `0x15`/`0x16` are reported (Bochs `cpu: cpuid_freq=`): `"none"`, `"hardware"` or `"ips"`. |
+| `port_e9_hack` | `"off"` | Bochs's port-0xE9 debug console (Bochs `port_e9_hack:`): `"off"`, `"on"`, or `"all-rings"`, which also lets unprivileged code write it. While it is on, a guest that reads the port gets `0xE9` back, and the bytes it writes go to the launcher's standard output. |
 | `max_instructions` | no limit | Stops the VM after exactly that many instructions. Useful for benchmarks and CI; **looks like a freeze** if you set it by accident. Leave the key out for no limit. |
 
 `max_instructions` needs care. A value in the file or on the command line is
@@ -570,6 +639,8 @@ only when a limit is set.
 | `backend` | `"egui"` (the windowed shell; the default in a build with the `gui-egui` feature, which is on by default), `"terminal"` (text mode in your terminal), or `"headless"` (no display, for benchmarks and CI). |
 | `width` / `height` / `bpp` | Preferred pre-boot VBE mode. It raises the display capability ceiling so the guest *may* select this resolution (GRUB `gfxpayload`, vesafb, KMS). It does not force the mode; the guest decides. Takes effect only when both `width` and `height` are given. `bpp` is 8, 16, 24 or 32, and defaults to 32. |
 | `pci_vga` | **Experimental.** Off by default. Registers the VGA adapter as a PCI device (`1234:1111`), which lets Linux's `bochs-drm` driver bind and switch the console to a KMS framebuffer at the preferred resolution. Caveat: when `bochs-drm` takes over, the text console goes dark until the framebuffer console comes up, and during a slow boot phase that can look like a hang. Confirm your config boots with it off before turning it on. |
+| `stretch` | On a phone, stretch the full-screen console to fill the screen rather than keep the guest's shape. Off by default; the full-screen menu's `Stretch to fill` sets it. |
+| `pointer_speed_percent` | On a phone, the trackpad's cursor speed, in percent of the finger's travel across the guest's image: 50 to 300, 100 by default. The full-screen menu's `Pointer speed` sets it. |
 
 ### `[rom]`
 
@@ -667,13 +738,14 @@ VM file sets for each when it saves the VM:
 
 - `emulator.cpu_capabilities` (on WHP it is `host-shared` whatever the file
   says);
-- `emulator.sync_realtime`, `emulator.smp_quantum` and `emulator.cpuid_freq`;
+- `emulator.sync_realtime`, `emulator.smp_quantum`, `emulator.cpuid_freq` and
+  `emulator.port_e9_hack`;
 - `display.backend`, which decides whether `--config FILE` opens the shell or
   runs in the terminal or headless;
 - a `display.width` and `display.height` other than the five presets, or a
   `bpp` other than 32;
-- `[disk.create]`: the Images page creates a disk at once and attaches it as a
-  plain `disk.path`.
+- `[disk.create]`: the shell's new-disk sheet creates a disk at once and
+  attaches it as a plain `disk.path`.
 
 Guest and host memory above 4096 MiB, and a memory block above 65,536 KiB,
 are also set only in the file, and are lowered to the pane's limit when the
@@ -734,9 +806,8 @@ Choose the interpreter for everything else:
   same on every host;
 - **Android and the browser**, which have no other engine.
 
-The front page's
-[Windows Hypervisor Platform](../README.md#windows-hypervisor-platform)
-section has the rest of the measurement.
+The front page's [Execution engines](../README.md#execution-engines) section
+summarizes the measurement.
 
 ### How a machine on WHP differs
 
@@ -968,6 +1039,7 @@ add the memory and IPS target the guest needs (see
 | `--max-instructions <N>` | `emulator.max_instructions` | Instruction limit (taken literally) |
 | `--smp-quantum <N>` | `emulator.smp_quantum` | Instructions per CPU per turn, 1–32 |
 | `--cpuid-freq <MODE>` | `emulator.cpuid_freq` | `hardware`, `none` or `ips` |
+| `--port-e9-hack <MODE>` | `emulator.port_e9_hack` | The port-0xE9 debug console: `off`, `on` or `all-rings` |
 | `--sync-realtime` | `emulator.sync_realtime` | PIT, ACPI timer and VGA retrace on wall-clock time |
 | `--cpus <N>` | `emulator.cpus` | Flat CPU count (conflicts with the three below) |
 | `--cpu-sockets <N>` / `--cpu-cores <N>` / `--cpu-threads <N>` | `emulator.cpu_sockets` / `cpu_cores` / `cpu_threads` | Explicit topology |

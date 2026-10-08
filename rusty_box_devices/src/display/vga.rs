@@ -100,6 +100,11 @@ const CHARMAP_OFFSET: [u16; 8] = [
 /// Bochs: `s.vga_mem_updated |= 4` / `if ((s.vga_mem_updated & 4) > 0) update_charmap()`.
 const VGA_MEM_UPDATED_CHARMAP: u8 = 4;
 
+/// The `vga_mem_updated` bits a redraw request adds: planes 0 to 2 written,
+/// which takes in the character generator bit.
+/// Bochs: `bx_vgacore_c::redraw_area()`'s `s.vga_mem_updated |= 0x07`.
+const VGA_MEM_UPDATED_REDRAW: u8 = 0x07;
+
 /// VGA clock frequencies in Hz (matching Bochs vgacore.cc)
 const VGA_VCLK: [u32; 4] = [25_175_000, 28_322_000, 25_175_000, 25_175_000];
 
@@ -285,6 +290,8 @@ const ATTR_REG_COLOR_SELECT: usize = 0x14;
 // Attribute mode control bits (reg 0x10)
 const ATTR_MODE_LINE_GRAPHICS: u8 = 0x04;
 const ATTR_MODE_SPLIT_HPANNING: u8 = 0x20;
+/// Bochs `mode_ctrl.internal_palette_size`.
+const ATTR_MODE_PALETTE_SIZE: u8 = 0x80;
 const ATTR_HPANNING_MASK: u8 = 0x0F;
 
 // ---- VGA memory mapping values (from graphics reg 6, bits 2-3) ----
@@ -531,6 +538,21 @@ impl crate::display::card::VgaExtension for StdVga {
         }
         let parts = cx.parts();
         Some(self.refresh_vbe_graphics(parts.core, parts.sink, parts.dirt))
+    }
+
+    /// Bochs vga.cc `bx_vga_c::redraw_area()`: a DISPI-enabled card marks its
+    /// framebuffer's tiles itself; otherwise the core's `redraw_area`
+    /// answers the request.
+    fn vga_redraw_area(
+        &mut self,
+        cx: &mut crate::display::card::RedrawCtx<'_>,
+    ) -> crate::display::card::Redrawn {
+        if self.vbe.enabled == 0 {
+            return crate::display::card::Redrawn::FallThrough;
+        }
+        let area = cx.area();
+        self.vbe_redraw_area(cx.core(), area);
+        crate::display::card::Redrawn::Done
     }
 
     /// Once DISPI is enabled at a depth other than 4bpp, video memory is the
@@ -871,6 +893,39 @@ pub struct VerticalTick {
     pub next_usec: Option<u32>,
 }
 
+/// The screen region a redraw request covers, in pixels — the `x0, y0,
+/// width, height` of Bochs's `vga_redraw_area()` and `redraw_area()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RedrawArea {
+    pub x0: u32,
+    pub y0: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl RedrawArea {
+    /// Whether the area covers nothing, which is what the screen is before a
+    /// frame has sized it. Bochs `vga_redraw_area()` returns on it before
+    /// any card sees the request.
+    pub fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+}
+
+/// Whether a register write changed how the whole screen is drawn — the
+/// local `needs_update` of Bochs vgacore.cc `write()`, whose last statement
+/// turns it into `vga_redraw_area(0, 0, last_xres, last_yres)`.
+///
+/// Handed back rather than acted on because that redraw is Bochs's virtual
+/// `redraw_area`: the card answers it, and the VBE extension answers it
+/// differently from the core while DISPI is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a dropped update leaves the screen drawn the old way"]
+enum ScreenUpdate {
+    Unchanged,
+    Redraw,
+}
+
 /// VGA controller state.
 ///
 /// Public only as an identity: it names the adapter a `StandardPc` machine
@@ -975,10 +1030,12 @@ pub struct VgaCore {
 
     /// The two extracted character generators (8KB each = 256 glyphs x 32
     /// bytes). Bochs keeps these on the GUI side (`bx_gui_c::vga_charmap[2]`,
-    /// filled by `update_charmap()` -> `set_text_charmap`); here the device owns
-    /// the extraction and the GUI copies them when `charmap_updated` is set.
-    /// Derived entirely from planar memory + the two addresses, so they are not
-    /// snapshotted — a restore re-extracts them.
+    /// filled by `update_charmap()` -> `set_text_charmap`); here the device
+    /// owns the extraction and hands both to the sink from the frame that
+    /// re-reads them. Derived entirely from planar memory + the two addresses,
+    /// so they are not snapshotted — a text-mode restore marks the generator
+    /// changed, as Bochs's `after_restore_state` redraw does, and the next
+    /// frame re-reads it.
     charmap: [[u8; CHARMAP_SIZE]; 2],
 
     /// Doubled scanlines in classic graphics modes, derived from CRTC register
@@ -1616,9 +1673,12 @@ impl VgaCore {
         // Also set entries for bright colors (palette indices 0x38-0x3F)
         self.pel_data[0x38..0x40].copy_from_slice(&dac_colors[8..16]);
 
-        // Force text buffer refresh
+        // Every register a frame is drawn from changed, the cell height and
+        // the character map selection among them, so the next frame re-reads
+        // the planes and the character generator — Bochs's CRTC 0x09 and
+        // sequencer 3 writes each add `vga_mem_updated |= 4`.
         self.text_buffer_update = true;
-        self.vga_mem_updated = 1;
+        self.vga_mem_updated |= VGA_MEM_UPDATED_REDRAW;
     }
 
     /// Read from I/O port
@@ -1778,22 +1838,53 @@ impl VgaCore {
         }
     }
 
-    /// Write to I/O port
+    /// Bochs vgacore.cc `write()` on a core with no extension: every redraw a
+    /// byte asks for is the core's own `redraw_area`.
     pub(crate) fn write_port(&mut self, port: u16, value: u32, io_len: u8) {
+        self.write_port_with(port, value, io_len, |core, area| core.vga_redraw_area(area));
+    }
+
+    /// Bochs vgacore.cc `write()`: a 16-bit access is two byte writes, the low
+    /// byte at `port` first, and each byte that changed how the screen is
+    /// drawn ends in its own `vga_redraw_area(0, 0, last_xres, last_yres)` —
+    /// which `redraw` performs the way the card's `redraw_area` does.
+    pub(crate) fn write_port_with<F>(&mut self, port: u16, value: u32, io_len: u8, mut redraw: F)
+    where
+        F: FnMut(&mut Self, RedrawArea),
+    {
+        if io_len == 2 {
+            self.write_byte_with(port, value as u8, &mut redraw);
+            self.write_byte_with(port + 1, (value >> 8) as u8, &mut redraw);
+        } else {
+            self.write_byte_with(port, value as u8, &mut redraw);
+        }
+    }
+
+    /// One byte of [`Self::write_port_with`].
+    fn write_byte_with<F>(&mut self, port: u16, value: u8, redraw: &mut F)
+    where
+        F: FnMut(&mut Self, RedrawArea),
+    {
+        match self.write_register(port, value) {
+            ScreenUpdate::Redraw => {
+                let area = self.screen_area();
+                redraw(self, area);
+            }
+            ScreenUpdate::Unchanged => {}
+        }
+    }
+
+    /// One byte written to a VGA register — Bochs vgacore.cc `write()` up to
+    /// its last statement, the redraw, which the answer asks the caller for.
+    fn write_register(&mut self, port: u16, value: u8) -> ScreenUpdate {
         // Bochs vgacore.cc: port gating based on color_emulation
         if (0x3B0..=0x3BF).contains(&port) && self.misc_color_emulation {
-            return; // mono ports disabled in color mode
+            return ScreenUpdate::Unchanged; // mono ports disabled in color mode
         }
         if (0x3D0..=0x3DF).contains(&port) && !self.misc_color_emulation {
-            return; // color ports disabled in mono mode
+            return ScreenUpdate::Unchanged; // color ports disabled in mono mode
         }
-        // Word writes: split into two byte writes (Bochs vgacore.cc)
-        if io_len == 2 {
-            self.write_port(port, value & 0xFF, 1);
-            self.write_port(port + 1, (value >> 8) & 0xFF, 1);
-            return;
-        }
-        let value = value as u8;
+        let mut needs_update = ScreenUpdate::Unchanged;
         match port {
             VGA_CRTC_INDEX | VGA_CRTC_INDEX_MONO => {
                 self.crtc_index = value & CRTC_INDEX_MASK;
@@ -1810,11 +1901,9 @@ impl VgaCore {
                     if index == CRTC_OVERFLOW {
                         self.crtc_regs[CRTC_OVERFLOW] =
                             (self.crtc_regs[CRTC_OVERFLOW] & !0x10) | (value & 0x10);
-                        self.vga_mem_updated = 1;
-                        #[cfg(feature = "alloc")]
-                        self.redraw_current_legacy_area();
+                        return ScreenUpdate::Redraw;
                     }
-                    return;
+                    return ScreenUpdate::Unchanged;
                 }
 
                 let old_value = self.crtc_regs[index];
@@ -1829,7 +1918,6 @@ impl VgaCore {
                             (cursor_addr as usize / BYTES_PER_ROW),
                             (cursor_addr as usize % BYTES_PER_ROW) / BYTES_PER_CHAR,
                         );
-                        self.vga_mem_updated |= 1;
                     } else if index == CRTC_CURSOR_LOC_LOW {
                         let cursor_addr =
                             ((self.crtc_regs[CRTC_CURSOR_LOC_HIGH] as u16) << 8) | (value as u16);
@@ -1837,7 +1925,6 @@ impl VgaCore {
                             (cursor_addr as usize / BYTES_PER_ROW),
                             (cursor_addr as usize % BYTES_PER_ROW) / BYTES_PER_CHAR,
                         );
-                        self.vga_mem_updated |= 1;
                     }
                     // CRTC 0x0C/0x0D deliberately have no immediate effect:
                     // Bochs vgacore.cc notes "Start address change handled in
@@ -1873,17 +1960,22 @@ impl VgaCore {
                     }
 
                     match index {
+                        // A new cell height re-reads the character generator.
+                        CRTC_MAX_SCAN_LINE => {
+                            self.vga_mem_updated |= VGA_MEM_UPDATED_CHARMAP;
+                            needs_update = ScreenUpdate::Redraw;
+                        }
                         CRTC_OVERFLOW
                         | CRTC_PRESET_ROW_SCAN
-                        | CRTC_MAX_SCAN_LINE
                         | CRTC_OFFSET
                         | CRTC_UNDERLINE_LOC
                         | CRTC_MODE_CONTROL
-                        | CRTC_LINE_COMPARE => {
-                            self.vga_mem_updated = 1;
-                            #[cfg(feature = "alloc")]
-                            self.redraw_current_legacy_area();
-                        }
+                        | CRTC_LINE_COMPARE => needs_update = ScreenUpdate::Redraw,
+                        // Cursor size / location change.
+                        CRTC_CURSOR_START
+                        | CRTC_CURSOR_END
+                        | CRTC_CURSOR_LOC_HIGH
+                        | CRTC_CURSOR_LOC_LOW => self.vga_mem_updated |= 1,
                         _ => {}
                     }
                 }
@@ -1898,8 +1990,13 @@ impl VgaCore {
                     let prev_video_enabled = self.video_enabled;
                     self.video_enabled = (value & 0x20) != 0;
 
-                    if self.video_enabled && !prev_video_enabled {
-                        self.text_buffer_update = true;
+                    // Bochs vgacore.cc write case 0x03c0: blanking the display
+                    // calls `bx_gui->clear_screen()`, which the next frame's
+                    // preamble delivers; unblanking it sets needs_update.
+                    if !self.video_enabled && prev_video_enabled {
+                        self.pending_clear_screen = true;
+                    } else if self.video_enabled && !prev_video_enabled {
+                        needs_update = ScreenUpdate::Redraw;
                     }
 
                     self.attr_index = value & ATTR_INDEX_MASK; // bits 0-4 only
@@ -1911,32 +2008,39 @@ impl VgaCore {
                     // Bochs vgacore.cc write case 0x03c0 data-write mode: each
                     // register keeps only its defined bits, and a change to the
                     // palette / plane-enable / pel-panning / color-select
-                    // registers sets needs_update, which ends in a full
-                    // vga_redraw_area(0, 0, last_xres, last_yres).
+                    // registers sets needs_update.
                     let index = self.attr_index as usize;
                     if index < 21 {
                         let old_value = self.attr_regs[index];
-                        let (stored, redraw) = match index {
+                        match index {
                             // Internal palette registers 0x00-0x0F.
-                            0x00..=0x0F => (value, value != old_value),
-                            // 0x10 mode control: bit 7 (internal palette size)
-                            // change forces a redraw; bit 2 (line graphics) marks
-                            // the charmap dirty, which rusty folds into the same
-                            // redraw since it has no separate charmap channel.
-                            0x10 => (value, (value ^ old_value) & 0x84 != 0),
+                            0x00..=0x0F => {
+                                self.attr_regs[index] = value;
+                                if value != old_value {
+                                    needs_update = ScreenUpdate::Redraw;
+                                }
+                            }
+                            // 0x10 mode control: a line-graphics change
+                            // re-reads the character generator, an
+                            // internal-palette-size change redraws the screen.
+                            0x10 => {
+                                self.attr_regs[index] = value;
+                                if (value ^ old_value) & ATTR_MODE_LINE_GRAPHICS != 0 {
+                                    self.vga_mem_updated |= VGA_MEM_UPDATED_CHARMAP;
+                                }
+                                if (value ^ old_value) & ATTR_MODE_PALETTE_SIZE != 0 {
+                                    needs_update = ScreenUpdate::Redraw;
+                                }
+                            }
                             // 0x11 overscan color: 6 bits, no redraw in Bochs.
-                            0x11 => (value & 0x3F, false),
+                            0x11 => self.attr_regs[index] = value & 0x3F,
                             // 0x12 color plane enable, 0x13 horizontal pel
                             // panning, 0x14 color select: 4 bits, always redraw.
-                            0x12 | 0x13 | 0x14 => (value & 0x0F, true),
-                            _ => (value, false),
-                        };
-                        self.attr_regs[index] = stored;
-                        if redraw {
-                            self.vga_mem_updated = 1;
-                            self.text_buffer_update = true;
-                            #[cfg(feature = "alloc")]
-                            self.redraw_current_legacy_area();
+                            0x12 | 0x13 | 0x14 => {
+                                self.attr_regs[index] = value & 0x0F;
+                                needs_update = ScreenUpdate::Redraw;
+                            }
+                            _ => self.attr_regs[index] = value,
                         }
                     }
                 }
@@ -1981,9 +2085,7 @@ impl VgaCore {
                                 // Bochs: s.sequencer.clear_screen = ((value & 0x20) > 0)
                                 self.seq_clear_screen = (value & 0x20) != 0;
                                 self.calculate_retrace_timing();
-                                self.vga_mem_updated = 1;
-                                #[cfg(feature = "alloc")]
-                                self.redraw_current_legacy_area();
+                                needs_update = ScreenUpdate::Redraw;
                             } else {
                                 self.seq_regs[1] = value & 0x3D;
                             }
@@ -2035,9 +2137,11 @@ impl VgaCore {
                     self.graphics_regs[self.graphics_index as usize] = value;
 
                     // Special handling for Miscellaneous Graphics register.
-                    // Bochs vgacore.cc write_handler marks needs_update when
-                    // graphics/text alpha or memory mapping changes; alpha also
-                    // invalidates the text snapshot and last_yres.
+                    // Bochs vgacore.cc write case 6 sets needs_update when the
+                    // graphics/alpha bit or the memory mapping changes. An
+                    // alpha change also rebuilds the text buffer and zeroes
+                    // last_yres, so the next frame announces new dimensions
+                    // and the redraw this write ends in covers no area.
                     if self.graphics_index as usize == GFX_REG_MISC {
                         let old_mapping =
                             (old_value >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
@@ -2053,9 +2157,7 @@ impl VgaCore {
                                 old_graphics_alpha,
                                 new_graphics_alpha
                             );
-                            self.vga_mem_updated = 1;
-                            #[cfg(feature = "alloc")]
-                            self.redraw_current_legacy_area();
+                            needs_update = ScreenUpdate::Redraw;
                             if old_graphics_alpha != new_graphics_alpha {
                                 self.text_buffer_update = true;
                                 self.last_yres = 0;
@@ -2100,8 +2202,7 @@ impl VgaCore {
             VGA_PEL_MASK => {
                 if self.pel_mask != value {
                     self.pel_mask = value;
-                    #[cfg(feature = "alloc")]
-                    self.redraw_area(0, 0, self.last_xres, self.last_yres);
+                    needs_update = ScreenUpdate::Redraw;
                 }
             }
 
@@ -2128,12 +2229,14 @@ impl VgaCore {
                     self.pel_write_cycle = 0;
                     // Bochs vgacore.cc publishes the completed DAC entry to the
                     // GUI here: palette_change_common(write_data_register,
-                    // red << dac_shift, green << dac_shift, blue << dac_shift).
+                    // red << dac_shift, green << dac_shift, blue << dac_shift),
+                    // and its answer sets needs_update. Tiles reach the sink
+                    // already converted through the DAC, so the answer here is
+                    // the one a true-colour Bochs front end gives: redraw.
                     self.dac_dirty[color_index as usize] = true;
                     self.dac_any_dirty = true;
                     self.pel_write_addr = self.pel_write_addr.wrapping_add(1);
-                    #[cfg(feature = "alloc")]
-                    self.redraw_area(0, 0, self.last_xres, self.last_yres);
+                    needs_update = ScreenUpdate::Redraw;
                 }
             }
 
@@ -2152,6 +2255,7 @@ impl VgaCore {
             _ => {
             }
         }
+        needs_update
     }
 
     /// Whether the adapter is presenting a character grid rather than pixels.
@@ -2326,49 +2430,118 @@ impl VgaCore {
         self.text_dirty
     }
 
-    /// Force initial update (for first GUI render)
-    pub(crate) fn force_initial_update(&mut self) {
-        self.vga_mem_updated = 1;
+    /// Redraw the whole screen as the last frame sized it — Bochs vgacore.cc
+    /// `refresh_display(true)`, which a front end asks for when it needs
+    /// everything drawn again: `vga_redraw_area(0, 0, last_xres, last_yres)`,
+    /// answered by `redraw` the way the card's `redraw_area` answers it.
+    pub(crate) fn refresh_display_with<F>(&mut self, mut redraw: F)
+    where
+        F: FnMut(&mut Self, RedrawArea),
+    {
         self.text_buffer_update = true;
+        let area = self.screen_area();
+        redraw(self, area);
     }
 
-    #[cfg(feature = "alloc")]
-    fn mark_tile_updated(&mut self, x_tile: u32, y_tile: u32) {
-        if x_tile >= self.num_x_tiles as u32 || y_tile >= self.num_y_tiles as u32 {
-            return;
-        }
-        let index = y_tile as usize * self.num_x_tiles as usize + x_tile as usize;
-        if let Some(tile) = self.vga_tile_updated.get_mut(index) {
-            *tile = true;
-            self.vga_mem_updated = 1;
+    /// The whole screen as the last frame sized it — the area Bochs's
+    /// `needs_update` and `refresh_display()` hand to `vga_redraw_area()`.
+    fn screen_area(&self) -> RedrawArea {
+        RedrawArea {
+            x0: 0,
+            y0: 0,
+            width: self.last_xres,
+            height: self.last_yres,
         }
     }
 
-    #[cfg(feature = "alloc")]
-    fn redraw_area(&mut self, x0: u32, y0: u32, width: u32, height: u32) {
-        if width == 0 || height == 0 {
+    /// Bochs vgacore.cc `vga_redraw_area()` on a core with no extension: an
+    /// empty area marks nothing, any other goes to the core's `redraw_area`.
+    pub(crate) fn vga_redraw_area(&mut self, area: RedrawArea) {
+        if area.is_empty() {
             return;
         }
+        self.redraw_area(area);
+    }
 
-        let x1 = x0.saturating_add(width.saturating_sub(1));
-        let y1 = y0.saturating_add(height.saturating_sub(1));
-        let start_x = x0 / VGA_X_TILESIZE;
-        let start_y = y0 / VGA_Y_TILESIZE;
-        let end_x = (x1 / VGA_X_TILESIZE).min(self.num_x_tiles.saturating_sub(1) as u32);
-        let end_y = (y1 / VGA_Y_TILESIZE).min(self.num_y_tiles.saturating_sub(1) as u32);
+    /// Bochs vgacore.cc `bx_vgacore_c::redraw_area()`: planes 0 to 2, and
+    /// with plane 2 the character generator, count as changed; then a
+    /// graphics mode marks the tiles the area covers, up to the last frame's
+    /// resolution, and a text mode forgets the frame its next diff starts
+    /// from.
+    pub(crate) fn redraw_area(&mut self, area: RedrawArea) {
+        self.vga_mem_updated |= VGA_MEM_UPDATED_REDRAW;
+        if self.in_text_mode() {
+            // Bochs clears `text_snap_size[memory_mapping]` bytes, never
+            // fewer than the 32 KiB this snapshot holds.
+            self.text_snapshot.fill(0);
+            return;
+        }
+        if self.last_xres == 0 || self.last_yres == 0 {
+            return;
+        }
+        #[cfg(feature = "alloc")]
+        self.mark_area_tiles(area, self.last_xres, self.last_yres);
+        #[cfg(not(feature = "alloc"))]
+        let _ = area;
+    }
 
-        for y_tile in start_y..=end_y {
-            for x_tile in start_x..=end_x {
+    /// Mark the tiles `area` covers — the walk every Bochs `redraw_area`
+    /// shares. An area that starts at or past the `limit_width` /
+    /// `limit_height` edge is cut back to the last tile inside it; one that
+    /// starts inside keeps its own extent, and a tile outside the grid is
+    /// skipped, as `SET_TILE_UPDATED` skips it.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn mark_area_tiles(&mut self, area: RedrawArea, limit_width: u32, limit_height: u32) {
+        let last_x = if area.x0 < limit_width {
+            area.x0.wrapping_add(area.width).wrapping_sub(1)
+        } else {
+            limit_width.wrapping_sub(1)
+        };
+        let last_y = if area.y0 < limit_height {
+            area.y0.wrapping_add(area.height).wrapping_sub(1)
+        } else {
+            limit_height.wrapping_sub(1)
+        };
+        let Some(last_column) = u32::from(self.num_x_tiles).checked_sub(1) else {
+            return;
+        };
+        let Some(last_row) = u32::from(self.num_y_tiles).checked_sub(1) else {
+            return;
+        };
+        for y_tile in (area.y0 / VGA_Y_TILESIZE)..=(last_y / VGA_Y_TILESIZE).min(last_row) {
+            for x_tile in (area.x0 / VGA_X_TILESIZE)..=(last_x / VGA_X_TILESIZE).min(last_column) {
                 self.mark_tile_updated(x_tile, y_tile);
             }
         }
     }
+
+    /// Every tile of the grid marked — the loop over `num_x_tiles` x
+    /// `num_y_tiles` that Bochs vga.cc `vbe_write` runs on `needs_update`.
     #[cfg(feature = "alloc")]
-    fn redraw_current_legacy_area(&mut self) {
-        let (width, height) = self.determine_screen_dimensions();
-        self.redraw_area(0, 0, width, height);
+    pub(crate) fn mark_every_tile(&mut self) {
+        self.vga_tile_updated.fill(true);
     }
 
+    /// The tile's slot in the dirty grid, or `None` outside it — the bounds
+    /// test of Bochs's `SET_TILE_UPDATED`.
+    #[cfg(feature = "alloc")]
+    fn tile_index(&self, x_tile: u32, y_tile: u32) -> Option<usize> {
+        (x_tile < u32::from(self.num_x_tiles) && y_tile < u32::from(self.num_y_tiles))
+            .then(|| y_tile as usize * usize::from(self.num_x_tiles) + x_tile as usize)
+    }
+
+    /// Bochs `SET_TILE_UPDATED(…, 1)`: the next frame draws the tile, and one
+    /// outside the grid is ignored. Marking a tile leaves the change flags
+    /// alone; whoever marks one sets those, as each Bochs caller does.
+    #[cfg(feature = "alloc")]
+    fn mark_tile_updated(&mut self, x_tile: u32, y_tile: u32) {
+        let Some(index) = self.tile_index(x_tile, y_tile) else {
+            return;
+        };
+        if let Some(tile) = self.vga_tile_updated.get_mut(index) {
+            *tile = true;
+        }
+    }
 
     fn determine_screen_dimensions(&self) -> (u32, u32) {
         let width = (self.crtc_regs[0x01] as u32 + 1) * 8;
@@ -2487,11 +2660,6 @@ impl VgaCore {
         if width == 0 || height == 0 {
             return Refreshed::Unchanged;
         }
-        // Bochs vgacore.cc update(): the graphics branch also bails out through
-        // skip_update() once the dimensions are known.
-        if self.skip_update() {
-            return Refreshed::Unchanged;
-        }
         let dimension_changed =
             width != self.last_xres || height != self.last_yres || self.last_bpp > 8;
         if dimension_changed {
@@ -2500,7 +2668,12 @@ impl VgaCore {
             self.last_fw = 0;
             self.last_fh = 0;
             self.last_bpp = 8;
-            self.redraw_area(0, 0, width, height);
+            self.redraw_area(RedrawArea {
+                x0: 0,
+                y0: 0,
+                width,
+                height,
+            });
             sink.dimension_update(Dimensions {
                 width,
                 height,
@@ -2508,6 +2681,11 @@ impl VgaCore {
                 font_height: 0,
                 bits_per_pixel: 8,
             });
+        }
+        // Bochs vgacore.cc update(): the graphics branch bails out through
+        // skip_update() once the front end has the dimensions.
+        if self.skip_update() {
+            return Refreshed::Unchanged;
         }
 
         // Bochs uses the per-frame latch here too (s.CRTC.start_addr).
@@ -2697,7 +2875,13 @@ impl VgaCore {
     ///     if changed -> graphics: vga_redraw_area(0, 0, last_xres, last_yres),
     ///                   text:     s.vga_mem_updated |= 1; }
     ///   else s.display_start_usec = bx_virt_timer.time_usec(vsync_realtime);
-    pub(crate) fn vertical_timer(&mut self, now_usec: u64) -> VerticalTick {
+    ///
+    /// `redraw` performs that `vga_redraw_area` the way the card's
+    /// `redraw_area` does.
+    pub(crate) fn vertical_timer<F>(&mut self, now_usec: u64, mut redraw: F) -> VerticalTick
+    where
+        F: FnMut(&mut Self, RedrawArea),
+    {
         self.vtimer_phase = self.vtimer_phase.next();
         match self.vtimer_phase {
             VerticalPhase::RetraceEnd => {
@@ -2706,15 +2890,8 @@ impl VgaCore {
                     | self.crtc_regs[CRTC_START_ADDR_LOW] as u16;
                 if self.crtc_start_addr != previous {
                     if (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0 {
-                        // Bochs marks every tile of the frame. A build without
-                        // an allocator has no tile grid to mark, and the frame
-                        // flag alone is what a whole-frame redraw leaves behind.
-                        #[cfg(feature = "alloc")]
-                        self.redraw_area(0, 0, self.last_xres, self.last_yres);
-                        #[cfg(not(feature = "alloc"))]
-                        {
-                            self.vga_mem_updated |= 1;
-                        }
+                        let area = self.screen_area();
+                        redraw(self, area);
                     } else {
                         self.vga_mem_updated |= 1;
                         self.text_buffer_update = true;
@@ -2878,18 +3055,14 @@ impl VgaCore {
             return Refreshed::Unchanged;
         }
 
-        // Bochs vgacore.cc update(): `if ((s.vga_mem_updated & 4) > 0) update_charmap();`
-        // — re-extract the character generators before drawing the frame.
-        let charmap_updated = (self.vga_mem_updated & VGA_MEM_UPDATED_CHARMAP) != 0;
-        if charmap_updated {
-            self.vga_mem_updated &= !VGA_MEM_UPDATED_CHARMAP;
+        // Bochs vgacore.cc update(): `if ((s.vga_mem_updated & 4) > 0)
+        // update_charmap();` — both character generators are re-read and
+        // handed to the front end before anything decides whether this frame
+        // is drawn, and the bit stays set until a frame is.
+        if (self.vga_mem_updated & VGA_MEM_UPDATED_CHARMAP) != 0 {
             self.update_charmap();
-        }
-
-        // Bochs vgacore.cc update(): `if (skip_update()) return;` — no frame is
-        // drawn while the display is disabled or a mode set is in progress.
-        if self.skip_update() {
-            return Refreshed::Unchanged;
+            sink.set_text_charmap(0, &self.charmap[0]);
+            sink.set_text_charmap(1, &self.charmap[1]);
         }
 
         // The grid comes from the shared reader, so the frame drawn here and
@@ -2941,19 +3114,6 @@ impl VgaCore {
             *palette = self.attr_regs[i] & self.pel_mask;
         }
 
-        // Copy from VGA memory to text_buffer if needed.
-        // We update the visible page whenever memory changed since the last update,
-        // or when parameters request a full refresh.
-        let need_refresh = self.text_buffer_update || (self.vga_mem_updated > 0);
-        let visible_size = 0x8000.min(self.text_buffer.len());
-
-        // Bochs maps the selected window to the same underlying memory backing store.
-        let visible_size = visible_size.min(self.text_memory.len());
-        if need_refresh {
-            self.text_buffer[..visible_size].copy_from_slice(&self.text_memory[..visible_size]);
-            self.text_buffer_update = false;
-        }
-
         // Create text mode info
         let tm_info = VgaTextModeInfo {
             start_address,
@@ -2996,11 +3156,24 @@ impl VgaCore {
             });
         }
 
-        // Bochs vgacore.cc update_charmap() pushes both guest character
-        // generators before the text is drawn with them.
-        if charmap_updated {
-            sink.set_text_charmap(0, &self.charmap[0]);
-            sink.set_text_charmap(1, &self.charmap[1]);
+        // Bochs vgacore.cc update(): `if (skip_update()) return;` — no frame is
+        // drawn while the display is disabled or a mode set is in progress,
+        // though the front end has its dimensions by now.
+        if self.skip_update() {
+            return Refreshed::Unchanged;
+        }
+
+        // Copy from VGA memory to text_buffer if needed.
+        // We update the visible page whenever memory changed since the last update,
+        // or when parameters request a full refresh.
+        let need_refresh = self.text_buffer_update || (self.vga_mem_updated > 0);
+        let visible_size = 0x8000.min(self.text_buffer.len());
+
+        // Bochs maps the selected window to the same underlying memory backing store.
+        let visible_size = visible_size.min(self.text_memory.len());
+        if need_refresh {
+            self.text_buffer[..visible_size].copy_from_slice(&self.text_memory[..visible_size]);
+            self.text_buffer_update = false;
         }
 
         // The snapshot is the previous frame's cells and the buffer is this
@@ -4272,6 +4445,45 @@ mod tests {
         }
     }
 
+    /// The interrupt and timer capabilities a port access is handed. The VGA
+    /// raises no interrupt and arms no timer from a port access, so nothing
+    /// here is read.
+    struct Unwired;
+
+    impl crate::api::IrqSink for Unwired {
+        fn set_level(&mut self, _line: crate::api::IrqLine, _level: bool) {}
+        fn level(&self, _line: crate::api::IrqLine) -> bool {
+            false
+        }
+    }
+
+    impl crate::api::TimerService for Unwired {
+        fn arm_oneshot_usec(&mut self, _key: crate::api::TimerKey, _delay_usec: u64) {}
+        fn arm_periodic_usec(&mut self, _key: crate::api::TimerKey, _period_usec: u64) {}
+        fn arm_oneshot_ticks(&mut self, _key: crate::api::TimerKey, _delay_ticks: u64) {}
+        fn cancel(&mut self, _key: crate::api::TimerKey) {}
+    }
+
+    /// One byte to a VGA port the way a guest's `out` reaches it: through the
+    /// card, which offers the access to its extension first and answers any
+    /// redraw the write asks for with its own `redraw_area`.
+    fn port_out(vga: &mut VgaCard<StdVga>, port: u16, value: u8) {
+        let mut irq = Unwired;
+        let mut timers = Unwired;
+        let mut ctx = crate::api::DeviceCtx {
+            clock: clock_at(0),
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        crate::api::PioDevice::pio_write(
+            vga,
+            port,
+            u32::from(value),
+            crate::api::IoLen::Byte,
+            &mut ctx,
+        );
+    }
+
     fn pci_vga() -> VgaCard<StdVga> {
         let mut vga = card();
         vga.enable_pci();
@@ -4795,6 +5007,10 @@ mod tests {
         assert_eq!(vga.core.vga_memory[0], 0xa5);
     }
 
+    /// The graphics controller is still in its alphanumeric setting, as a
+    /// driver that programs DISPI directly leaves it, so the redraw the DAC
+    /// write asks for is one only `bx_vga_c::redraw_area` — the card's — marks
+    /// tiles for.
     #[test]
     fn vbe_8bpp_dac_change_redraws_existing_tile() {
         let mut vga = card();
@@ -4809,10 +5025,10 @@ mod tests {
         let first = draw(&mut vga);
         assert_eq!(&first.tile_at(0, 0)[0..4], &[0xfc, 0x00, 0x00, 0xff]);
 
-        vga.core.write_port(VGA_PEL_ADDR_WRITE, 5, 1);
-        vga.core.write_port(VGA_PEL_DATA, 0, 1);
-        vga.core.write_port(VGA_PEL_DATA, 0x3f, 1);
-        vga.core.write_port(VGA_PEL_DATA, 0, 1);
+        port_out(&mut vga, VGA_PEL_ADDR_WRITE, 5);
+        port_out(&mut vga, VGA_PEL_DATA, 0);
+        port_out(&mut vga, VGA_PEL_DATA, 0x3f);
+        port_out(&mut vga, VGA_PEL_DATA, 0);
 
         let second = draw(&mut vga);
         assert_eq!(&second.tile_at(0, 0)[0..4], &[0x00, 0xfc, 0x00, 0xff]);
@@ -5232,6 +5448,282 @@ mod tests {
         assert_eq!(vga.core.charmap_address2, 0);
     }
 
+    /// One register write through the sequencer's index/data pair, as a
+    /// guest's `out` pair makes it.
+    fn seq(vga: &mut VgaCard<StdVga>, index: u8, value: u8) {
+        port_out(vga, VGA_SEQ_INDEX, index);
+        port_out(vga, VGA_SEQ_DATA, value);
+    }
+
+    /// One register write through the graphics controller's index/data pair.
+    fn gfx(vga: &mut VgaCard<StdVga>, index: u8, value: u8) {
+        port_out(vga, VGA_GRAPHICS_INDEX, index);
+        port_out(vga, VGA_GRAPHICS_DATA, value);
+    }
+
+    /// One register write through the CRTC's index/data pair.
+    fn crtc(vga: &mut VgaCard<StdVga>, index: usize, value: u8) {
+        port_out(vga, VGA_CRTC_INDEX, index as u8);
+        port_out(vga, VGA_CRTC_DATA, value);
+    }
+
+    /// One attribute-controller register write: address phase (flip-flop
+    /// clear, palette address source kept set so the display stays on), then
+    /// data phase.
+    fn attr(vga: &mut VgaCard<StdVga>, index: u8, value: u8) {
+        vga.core.attr_flip_flop = false;
+        port_out(vga, VGA_ATTRIB_ADDR, index | 0x20);
+        port_out(vga, VGA_ATTRIB_ADDR, value);
+    }
+
+    /// The 80x25 colour text mode the BIOS leaves behind: display on, a grid
+    /// of 16-line cells, odd/even addressing through the B8000 aperture, and
+    /// every bit of a CPU write reaching its plane.
+    fn into_text_mode(vga: &mut VgaCard<StdVga>) {
+        vga.core.vga_enabled = true;
+        vga.core.video_enabled = true;
+        vga.core.crtc_regs[CRTC_HORIZ_DISPLAY_END] = 79;
+        vga.core.crtc_regs[CRTC_MAX_SCAN_LINE] = 15 & CRTC_MSL_MASK;
+        vga.core.crtc_regs[CRTC_VERT_DISPLAY_END] = (399u16 & 0xFF) as u8;
+        vga.core.crtc_regs[CRTC_OVERFLOW] = CRTC_OVERFLOW_VDE_BIT8;
+        vga.core.crtc_regs[CRTC_OFFSET] = 40;
+        seq(vga, 0, 0x03);
+        seq(vga, 2, 0x03);
+        seq(vga, 4, 0x02);
+        gfx(vga, 5, 0x10);
+        gfx(vga, 6, 0x0E);
+        gfx(vga, 8, 0xFF);
+    }
+
+    /// The DDK `vga` miniport's `EnableA000Data` command stream: plane 2
+    /// alone, sequential addressing, the 64 KiB A0000 aperture.
+    fn enable_a000_data(vga: &mut VgaCard<StdVga>) {
+        seq(vga, 0, 0x01);
+        seq(vga, 2, 0x04);
+        seq(vga, 4, 0x07);
+        seq(vga, 0, 0x03);
+        gfx(vga, 4, 0x02);
+        gfx(vga, 5, 0x00);
+        gfx(vga, 6, 0x04);
+    }
+
+    /// Its `DisableA000Color`: planes 0 and 1, odd/even addressing, the B8000
+    /// colour text aperture.
+    fn disable_a000_color(vga: &mut VgaCard<StdVga>) {
+        seq(vga, 0, 0x01);
+        seq(vga, 2, 0x03);
+        seq(vga, 4, 0x03);
+        seq(vga, 0, 0x03);
+        gfx(vga, 4, 0x00);
+        gfx(vga, 5, 0x10);
+        gfx(vga, 6, 0x0E);
+    }
+
+    /// A recognisable, never-blank glyph row.
+    fn glyph_row(ch: usize, row: usize) -> u8 {
+        ((ch as u8).wrapping_mul(29) ^ (row as u8).wrapping_mul(0x35)) | 0x80
+    }
+
+    /// Windows' VGA miniport — the DDK `vga` sample's `VgaZeroVideoMemory`,
+    /// then `VgaLoadAndSetFont`, which Windows XP x64 text-mode setup runs —
+    /// clears all four planes, loads its own font into plane 2 through the
+    /// A0000 aperture, and returns to text addressing through GC6. A frame
+    /// drawn while the planes are clear publishes an empty generator; the
+    /// font loaded after it must still reach the display. Bochs vgacore.cc
+    /// keeps it: the GC6 change ends in `redraw_area()`'s
+    /// `vga_mem_updated |= 0x07`, and CRTC 9 adds `vga_mem_updated |= 4`.
+    #[test]
+    fn a_font_loaded_after_the_planes_were_cleared_reaches_the_display() {
+        const FONT_HEIGHT: usize = 12;
+        let mut vga = card();
+        into_text_mode(&mut vga);
+        let first = draw(&mut vga);
+        assert!(first.text_frames > 0, "the card draws a text screen");
+
+        enable_a000_data(&mut vga);
+        seq(&mut vga, 2, 0x0F);
+        write_vram(&mut vga, VgaWindow::Legacy, 0, &alloc::vec![0u8; 0x1_0000]);
+        let cleared = draw(&mut vga);
+        assert_eq!(cleared.charmaps, alloc::vec![0, 1], "the cleared generator is published");
+        disable_a000_color(&mut vga);
+
+        enable_a000_data(&mut vga);
+        for ch in 0..256 {
+            let rows: Vec<u8> = (0..FONT_HEIGHT).map(|row| glyph_row(ch, row)).collect();
+            write_vram(&mut vga, VgaWindow::Legacy, (ch * 32) as u64, &rows);
+        }
+        disable_a000_color(&mut vga);
+        crtc(&mut vga, CRTC_MAX_SCAN_LINE, (FONT_HEIGHT - 1) as u8);
+
+        let loaded = draw(&mut vga);
+        assert_eq!(loaded.charmaps, alloc::vec![0, 1], "the loaded font is published");
+        for ch in 0..256 {
+            for row in 0..FONT_HEIGHT {
+                assert_eq!(
+                    vga.core.charmap[0][ch * 32 + row],
+                    glyph_row(ch, row),
+                    "glyph {ch:#04x}, row {row}"
+                );
+            }
+        }
+    }
+
+    /// Bochs vgacore.cc attribute mode control (0x10): a change of the line
+    /// graphics enable (bit 2) marks the character generator dirty
+    /// (`vga_mem_updated |= 4`), so the next frame republishes it.
+    #[test]
+    fn a_line_graphics_change_republishes_the_character_generator() {
+        let mut vga = card();
+        into_text_mode(&mut vga);
+        let first = draw(&mut vga);
+        assert!(first.text_frames > 0, "the card draws a text screen");
+
+        let mode = vga.core.attr_regs[0x10];
+        attr(&mut vga, 0x10, mode ^ 0x04);
+
+        let after = draw(&mut vga);
+        assert_eq!(after.charmaps, alloc::vec![0, 1]);
+    }
+
+    /// A display attached to a running card (`force_initial_update`) has never
+    /// been sent the character generator, so its first frame carries it with
+    /// the rest of a full redraw.
+    #[test]
+    fn a_display_attached_to_a_running_card_receives_the_character_generator() {
+        let mut vga = card();
+        into_text_mode(&mut vga);
+        let first = draw(&mut vga);
+        assert!(first.text_frames > 0, "the card draws a text screen");
+        let quiet = draw(&mut vga);
+        assert!(quiet.charmaps.is_empty(), "nothing is pending before the attach");
+
+        vga.force_initial_update();
+
+        let attached = draw(&mut vga);
+        assert_eq!(attached.charmaps, alloc::vec![0, 1]);
+    }
+
+    /// Bochs vgacore.cc `after_restore_state()` ends in `vga_redraw_area()`:
+    /// with VBE off that is the core's `redraw_area()`, whose
+    /// `vga_mem_updated |= 0x07` republishes the character generator, so a
+    /// machine restored in a text mode draws with its own font.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_text_mode_restore_republishes_the_character_generator() {
+        const FONT_HEIGHT: usize = 16;
+        let mut source = pci_vga();
+        into_text_mode(&mut source);
+        for ch in 0..256 {
+            for row in 0..FONT_HEIGHT {
+                source.core.vga_memory[((ch * 32 + row) << 2) + 2] = glyph_row(ch, row);
+            }
+        }
+        let mut saved = Vec::new();
+        source.save(&mut saved).unwrap();
+
+        let mut restored = pci_vga();
+        let mut reader: &[u8] = saved.as_slice();
+        let target = restored.restore(&mut reader).unwrap();
+        restored.commit_snapshot_v3_mapping_target(target);
+        restored.rebuild_snapshot_v3_derived_state().unwrap();
+
+        let frame = draw(&mut restored);
+        assert_eq!(frame.charmaps, alloc::vec![0, 1], "the restored generator is published");
+        for ch in 0..256 {
+            for row in 0..FONT_HEIGHT {
+                assert_eq!(
+                    restored.core.charmap[0][ch * 32 + row],
+                    glyph_row(ch, row),
+                    "glyph {ch:#04x}, row {row}"
+                );
+            }
+        }
+    }
+
+    /// Bochs vgacore.cc `update()` re-reads the character generator and hands
+    /// it to the front end before `skip_update()` decides whether the frame
+    /// is drawn, so a font loaded while the sequencer holds the display in
+    /// reset still reaches the screen.
+    #[test]
+    fn a_font_read_during_a_skipped_frame_still_reaches_the_display() {
+        const FONT_HEIGHT: usize = 12;
+        let mut vga = card();
+        into_text_mode(&mut vga);
+        let first = draw(&mut vga);
+        assert!(first.text_frames > 0, "the card draws a text screen");
+
+        enable_a000_data(&mut vga);
+        for ch in 0..256 {
+            let rows: Vec<u8> = (0..FONT_HEIGHT).map(|row| glyph_row(ch, row)).collect();
+            write_vram(&mut vga, VgaWindow::Legacy, (ch * 32) as u64, &rows);
+        }
+        seq(&mut vga, 0, 0x01);
+
+        let skipped = draw(&mut vga);
+        assert_eq!(skipped.text_frames, 0, "a sequencer in reset draws no frame");
+        assert_eq!(skipped.charmaps, alloc::vec![0, 1], "the font reaches the display regardless");
+        for ch in 0..256 {
+            for row in 0..FONT_HEIGHT {
+                assert_eq!(
+                    vga.core.charmap[0][ch * 32 + row],
+                    glyph_row(ch, row),
+                    "glyph {ch:#04x}, row {row}"
+                );
+            }
+        }
+    }
+
+    /// Bochs vgacore.cc attribute address writes: clearing the palette address
+    /// source blanks the display and clears the screen; setting it again
+    /// redraws all of it, the character generator included.
+    #[test]
+    fn blanking_clears_the_screen_and_unblanking_redraws_all_of_it() {
+        let mut vga = card();
+        into_text_mode(&mut vga);
+        let first = draw(&mut vga);
+        assert!(first.text_frames > 0, "the card draws a text screen");
+
+        vga.core.attr_flip_flop = false;
+        port_out(&mut vga, VGA_ATTRIB_ADDR, 0x00);
+        let blanked = draw(&mut vga);
+        assert_eq!(blanked.clears, 1, "blanking clears the screen");
+        assert_eq!(blanked.text_frames, 0, "a blanked display draws no frame");
+
+        vga.core.attr_flip_flop = false;
+        port_out(&mut vga, VGA_ATTRIB_ADDR, 0x20);
+        let shown = draw(&mut vga);
+        assert!(shown.text_frames > 0, "an unblanked display draws again");
+        assert_eq!(
+            shown.charmaps,
+            alloc::vec![0, 1],
+            "unblanking redraws everything, the character generator included"
+        );
+    }
+
+    /// Bochs vgacore.cc `update()` hands the front end the screen's dimensions
+    /// before `skip_update()`, so a cell height changed while the sequencer
+    /// holds the display in reset is announced, and its generator re-read,
+    /// on the next frame even though nothing is drawn.
+    #[test]
+    fn a_skipped_frame_still_announces_new_dimensions() {
+        let mut vga = card();
+        into_text_mode(&mut vga);
+        let first = draw(&mut vga);
+        assert_eq!(first.dimensions.as_ref().map(|dims| dims.font_height), Some(16));
+
+        seq(&mut vga, 0, 0x01);
+        crtc(&mut vga, CRTC_MAX_SCAN_LINE, 11);
+
+        let skipped = draw(&mut vga);
+        assert_eq!(skipped.text_frames, 0, "a sequencer in reset draws no frame");
+        assert_eq!(
+            skipped.dimensions.as_ref().map(|dims| dims.font_height),
+            Some(12),
+            "the new cell height is announced"
+        );
+        assert_eq!(skipped.charmaps, alloc::vec![0, 1], "and its generator re-read");
+    }
+
     // Bochs vgacore.cc write case 0x03c0 data-write mode: per-register bit masks.
     #[test]
     fn attribute_registers_mask_on_store_like_bochs() {
@@ -5351,6 +5843,42 @@ mod tests {
         vga.write_port(VGA_CRTC_DATA, 0x99, 1);
         assert_eq!(vga.crtc_regs[0], 0x99);
     }
+
+    /// A machine restored in a 4bpp DISPI mode keeps addressing its planar
+    /// memory in the framebuffer, as Bochs's single `s.memory` array does —
+    /// here through a bank that puts the byte past the 256 KiB a legacy mode
+    /// can reach, where only the framebuffer holds it.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_4bpp_dispi_restore_reads_its_planar_bytes_from_the_framebuffer() {
+        const BANK: u16 = 4;
+        let mut source = pci_vga();
+        // Chain-4 addressing, through the register a restore re-derives it from.
+        seq(&mut source, 4, 0x0E);
+        source.core.graphics_regs[GFX_REG_MISC] =
+            GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+        source.core.attr_regs[0x10] |= 0x01;
+        write_vbe(&mut source, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
+        write_vbe(&mut source, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
+        write_vbe(&mut source, VBE_DISPI_INDEX_BANK, BANK);
+        write_vram(&mut source, VgaWindow::Legacy, 0, &[0x6d]);
+        let mut before = [0];
+        read_vram(&mut source, VgaWindow::Legacy, 0, &mut before);
+        assert_eq!(before[0], 0x6d, "the banked byte reads back before the save");
+
+        let mut saved = Vec::new();
+        source.save(&mut saved).unwrap();
+        let mut restored = pci_vga();
+        let mut reader: &[u8] = saved.as_slice();
+        let target = restored.restore(&mut reader).unwrap();
+        restored.commit_snapshot_v3_mapping_target(target);
+        restored.rebuild_snapshot_v3_derived_state().unwrap();
+
+        let mut after = [0];
+        read_vram(&mut restored, VgaWindow::Legacy, 0, &mut after);
+        assert_eq!(after[0], 0x6d, "the restored mode reads the same banked byte");
+    }
+
     #[cfg(feature = "std")]
     #[test]
     fn vga_snapshot_restores_planar_vbe_palette_and_forces_redraw() {
@@ -5662,6 +6190,7 @@ impl VgaCard<StdVga> {
             self.ext.vbe.bank[1],
             self.ext.vbe.bank_granularity_kb,
         )?;
+        self.ext.sync_planar_alias(&mut self.core);
         self.ext.recompute_vbe_virtual_start(&mut self.core);
         self.core.calculate_retrace_timing();
 
@@ -5684,7 +6213,17 @@ impl VgaCard<StdVga> {
         self.core.text_snapshot.fill(0);
         self.core.text_dirty = true;
         self.core.text_buffer_update = true;
-        self.core.vga_mem_updated = 1;
+        // Bochs vgacore.cc after_restore_state() ends in vga_redraw_area(0, 0,
+        // max_xres, max_yres). While DISPI is enabled bx_vga_c::redraw_area
+        // answers it and the change flags become exactly 1; otherwise the
+        // core's adds planes 0 to 2, the character generator with them. The
+        // tiles and the text snapshot are invalidated here either way, and the
+        // zeroed last_* make the next frame announce its dimensions afresh.
+        self.core.vga_mem_updated = if self.ext.vbe.enabled != 0 {
+            1
+        } else {
+            self.core.vga_mem_updated | VGA_MEM_UPDATED_REDRAW
+        };
         self.core.last_xres = 0;
         self.core.last_yres = 0;
         self.core.last_fw = 0;
@@ -5808,7 +6347,8 @@ impl rusty_box_core::snap::SnapshotSection for VgaCard<StdVga> {
         // Section version plus the scalar state written before every array.
         // 90 = 84 + feature_control (u8) + y_doublescan (bool)
         //         + charmap_address1/2 (2 x u16). The extracted charmap buffers
-        //         are derived from planar memory and re-extracted on restore.
+        //         are derived from planar memory and never stored; a frame
+        //         re-reads them.
         let mut len = checked_section_len_add(4, 90)?;
         for array_len in [
             pci_len,
@@ -6101,9 +6641,6 @@ impl rusty_box_core::snap::SnapshotSection for VgaCard<StdVga> {
         self.core.y_doublescan = y_doublescan;
         self.core.charmap_address1 = charmap_address1;
         self.core.charmap_address2 = charmap_address2;
-        // Re-derive the character generators from the restored planar memory
-        // (Bochs likewise rebuilds them from state rather than storing glyphs).
-        self.core.update_charmap();
         self.core.ext_y_dblsize = ext_y_dblsize;
         self.ext.pending_lfb_relocate = None;
         self.ext.pending_mmio_base = None;
@@ -6413,7 +6950,15 @@ impl StdVga {
                         if (value16 & VBE_DISPI_NOCLEARMEM) == 0 {
                             core.vbe_memory.fill(0);
                         }
-                        core.redraw_area(0, 0, self.vbe.xres as u32, self.vbe.yres as u32);
+                        self.vbe_redraw_area(
+                            core,
+                            RedrawArea {
+                                x0: 0,
+                                y0: 0,
+                                width: u32::from(self.vbe.xres),
+                                height: u32::from(self.vbe.yres),
+                            },
+                        );
                     }
                     #[cfg(not(feature = "alloc"))]
                     if (value16 & VBE_DISPI_NOCLEARMEM) == 0 {
@@ -6535,15 +7080,36 @@ impl StdVga {
             }
         }
 
+        // Bochs vga.cc vbe_write: `needs_update` sets the change flags to
+        // exactly 1 and marks every tile of the grid.
         if needs_update {
             core.vga_mem_updated = 1;
             #[cfg(feature = "alloc")]
-            core.redraw_area(0, 0, self.vbe.xres as u32, self.vbe.yres as u32);
+            core.mark_every_tile();
         }
         // Enable and depth are the two registers that decide it, and both
         // arrive here.
-        core.vbe_planar_alias = self.vbe.enabled != 0 && self.vbe.bpp == VBE_DISPI_BPP_4;
+        self.sync_planar_alias(core);
+    }
 
+    /// Point the core's planar path at the store the DISPI registers select.
+    /// Bochs keeps one `s.memory` array, and `bx_vga_c::mem_read`/`mem_write`
+    /// hand a 4bpp DISPI mode's accesses to `bx_vgacore_c`, so in that mode the
+    /// planar bytes are the framebuffer's. Every path that changes the enable
+    /// or the depth ends here.
+    fn sync_planar_alias(&self, core: &mut VgaCore) {
+        core.vbe_planar_alias = self.vbe.enabled != 0 && self.vbe.bpp == VBE_DISPI_BPP_4;
+    }
+
+    /// Bochs vga.cc `bx_vga_c::redraw_area()`, the branch it takes while
+    /// DISPI is enabled: the change flags become exactly 1 and the tiles the
+    /// area covers, up to the framebuffer's resolution, are marked.
+    fn vbe_redraw_area(&self, core: &mut VgaCore, area: RedrawArea) {
+        core.vga_mem_updated = 1;
+        #[cfg(feature = "alloc")]
+        core.mark_area_tiles(area, u32::from(self.vbe.xres), u32::from(self.vbe.yres));
+        #[cfg(not(feature = "alloc"))]
+        let _ = area;
     }
 
     fn apply_preferred_mode(&mut self, core: &mut VgaCore) {
@@ -6561,6 +7127,7 @@ impl StdVga {
         self.vbe.bpp = bpp;
         self.vbe.virtual_xres = xres;
         self.vbe.virtual_yres = yres;
+        self.sync_planar_alias(core);
 
         // Grow the dirty-tile grid to cover the (possibly larger) capability.
         let num_x_tiles = ((self.vbe.max_xres as u32 + VGA_X_TILESIZE - 1) / VGA_X_TILESIZE) as u16;
@@ -6712,7 +7279,12 @@ impl StdVga {
         let virtual_xres = self.vbe.virtual_xres.max(1) as BxPhyAddress;
         let x_tile = ((pixel_offset % virtual_xres) as u32) / VGA_X_TILESIZE;
         let y_tile = ((pixel_offset / virtual_xres) as u32) / VGA_Y_TILESIZE;
-        core.mark_tile_updated(x_tile, y_tile);
+        // Bochs vga.cc vbe_mem_write: an onscreen write inside the tile grid
+        // sets the change flags to exactly 1 and marks its tile.
+        if core.tile_index(x_tile, y_tile).is_some() {
+            core.vga_mem_updated = 1;
+            core.mark_tile_updated(x_tile, y_tile);
+        }
     }
 
     #[cfg(feature = "alloc")]
@@ -6735,7 +7307,15 @@ impl StdVga {
             || height != core.last_yres
             || self.vbe.bpp as u32 != core.last_bpp;
         if dimension_changed {
-            core.redraw_area(0, 0, width, height);
+            self.vbe_redraw_area(
+                core,
+                RedrawArea {
+                    x0: 0,
+                    y0: 0,
+                    width,
+                    height,
+                },
+            );
         } else if core.vga_mem_updated == 0 && dirt.reports_nothing() {
             // Both sources must be silent to skip the frame. Bailing out on the
             // device's own bitmap alone would mean a hypervisor's page report

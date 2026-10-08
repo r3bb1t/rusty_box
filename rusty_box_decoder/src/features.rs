@@ -17,6 +17,8 @@ pub enum X86Feature {
     IsaPentium,
     /// P6 new instruction
     IsaP6,
+    /// AMD specific behaviours in x86 ISA handling
+    IsaAmd,
     /// MMX instruction
     IsaMmx,
     /// 3DNow! Instructions (AMD)
@@ -41,13 +43,15 @@ pub enum X86Feature {
     IsaSyscallSysretLegacy,
     /// SYSENTER/SYSEXIT instruction
     IsaSysenterSysexit,
+    /// SYSENTER/SYSEXIT instruction in long mode (Intel only)
+    IsaSysenterSysexitLongmode,
     /// CLFLUSH instruction
     IsaClflush,
     /// CLFLUSHOPT instruction
     IsaClflushopt,
     /// CLWB instruction
     IsaClwb,
-    /// SSE instruction
+    /// SSE  instruction
     IsaSse,
     /// SSE2 instruction
     IsaSse2,
@@ -71,6 +75,8 @@ pub enum X86Feature {
     IsaMonitorxMwaitx,
     /// Long Mode (x86-64) support
     IsaLongMode,
+    /// Long Mode (x86-64) support on AMD hardware
+    IsaLongModeAmd,
     /// Long Mode LAHF/SAHF instruction
     IsaLmLahfSahf,
     /// No-Execute Pages support
@@ -169,9 +175,9 @@ pub enum X86Feature {
     IsaAvx512Bw,
     /// AVX-512 Conflict Detection instruction
     IsaAvx512Cd,
-    /// AVX-512 VBMI: Vector Bit Manipulation Instructions
+    /// AVX-512 VBMI : Vector Bit Manipulation Instructions
     IsaAvx512Vbmi,
-    /// AVX-512 VBMI2: Vector Bit Manipulation Instructions
+    /// AVX-512 VBMI2 : Vector Bit Manipulation Instructions
     IsaAvx512Vbmi2,
     /// AVX-512 IFMA52 Instructions
     IsaAvx512Ifma52,
@@ -195,8 +201,6 @@ pub enum X86Feature {
     IsaAmxBf16,
     /// AMX-FP16 Instructions
     IsaAmxFp16,
-    /// AMX-TF32 Instructions
-    IsaAmxTf32,
     /// AMX-FP8 Instructions
     IsaAmxFp8,
     /// AMX-COMPLEX Instructions
@@ -211,6 +215,8 @@ pub enum X86Feature {
     IsaAvx10_2,
     /// AVX10.2 MOVRS Instructions
     IsaAvx10_2Movrs,
+    /// ACE Instructions
+    IsaAce,
     /// XAPIC support
     IsaXapic,
     /// X2APIC support
@@ -273,8 +279,8 @@ pub enum X86Feature {
     IsaRaoInt,
     /// MOVRS instructions support
     IsaMovrs,
-    /// FRED (Flexible Return and Event Delivery) support
+    /// FRED: Flexible Return and Event Deivery support
     IsaFred,
-    /// USER_MSR: URDMSR/UWRMSR instruction support
+    /// USER_MSR: Support URDMSR/UWRMSR instructions
     IsaUserMsr,
 }

@@ -593,6 +593,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             self.handle_alignment_check();
         }
 
+        // Bochs tasking.cc Step 12, "Begin execution of new task": RSP_SPECULATIVE
+        // before the shadow-stack switch and the error-code push, so a fault
+        // in either restores the stack and shadow stack the new task began on.
+        self.rsp_speculative();
+
         // Bochs tasking.cc \u2014 late CET epilogue (post-segment-load).
         let cpl_post_cet = self.cs_rpl();
         if self.shadow_stack_enabled(cpl_post_cet) || self.endbranch_enabled(cpl_post_cet) {
@@ -640,10 +645,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             }
         }
 
-        // Set speculative RSP before error-code push (Bochs tasking.cc)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.esp() as u64;
-
         // Push error code if needed (Bochs tasking.cc)
         if push_error {
             if tss_descriptor.r#type >= 9 {
@@ -673,12 +674,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 new_eip,
                 cs_limit
             );
-            self.speculative_rsp = false;
             return self.exception(Exception::Gp, 0);
         }
 
         // RSP commit (Bochs tasking.cc)
-        self.speculative_rsp = false;
+        self.rsp_commit();
 
         tracing::trace!(
             "task_switch(): completed, new CS={:#06x} EIP={:#010x} SS={:#06x} ESP={:#010x}",

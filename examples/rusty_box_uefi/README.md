@@ -37,8 +37,10 @@ let emu = MachineBuilder::new(config)
 `build_at` exists only in builds without `alloc`. It places the machine in the
 storage it is given, then runs the same hardware initialisation and reset that
 `MachineBuilder::build` performs, with no `Box`. The machine borrows its CPUs as
-a slice, `cpus`, which also lives in UEFI pages. UEFI pages are never freed here,
-so the `'static` borrows hold for the life of the program.
+a slice, `cpus`, which also lives in UEFI pages. The pages that hold the CPU, the
+slice, guest memory and the machine are never freed, so the `'static` borrows
+hold for the life of the program. Only the run stack is handed back, after the
+run is over.
 
 ## What it does at run time
 
@@ -46,14 +48,23 @@ so the `'static` borrows hold for the life of the program.
    stack is often much smaller.
 2. Allocates and builds the machine as above: 32 MB of guest RAM, PCI enabled,
    and the embedded DLX disk as the primary master.
-3. Queues keystrokes meant as F1, to pass the BIOS keyboard-error prompt.
+3. Taps F1 through `Keyboard::tap`, which renders a key in the guest's active
+   scancode set, before POST. It answers no prompt: Bochs rombios asks for no
+   F1, and its POST reads a key only in `interactive_bootkey`, which first
+   discards every pending keystroke.
 4. Runs the guest with `emu.step(RunBudget::Instructions(100_000))`, up to
    20,000,000,000 instructions in total. After every step it prints what the
    guest wrote to the BIOS debug port (0xE9) and to COM1 on the UEFI console.
-5. After 50,000,000 instructions, types keystrokes meant as a `root` login.
+5. After 50,000,000 instructions, taps `root` and Enter the same way. They
+   land on whatever reads the keyboard then, not on a detected `login:`.
 6. Stops when `outcome.is_terminal()` reports guest power-off, CPU shutdown, a
    stop request or an engine fault, or when a step returns an error. It then
-   waits 30 seconds before returning to the firmware.
+   waits 30 seconds and returns `SUCCESS` to the firmware, a step error
+   included.
+
+Two failures end the app sooner. If the UEFI console refuses a write, the app
+returns at once with the console's status. If the machine cannot be built, it
+logs why, waits 10 seconds and returns `ABORTED`.
 
 ## Current status
 
@@ -66,13 +77,9 @@ re-measured against the run loop described above.
 
 Gaps visible in the code:
 
-- The keystrokes are written as Set 1 scancodes (`0x3B`/`0xBB` for F1;
-  `0x13`/`0x93`, `0x18`/`0x98`, … for `root` and Enter). `Keyboard::scancodes`
-  takes Set 2 bytes whenever the 8042 is translating, which it is at reset
-  (`scancodes_translate: true` in `rusty_box/src/iodev/keyboard.rs`). The guest
-  therefore receives different keys.
 - Nothing presses Enter at DLX's `LILO boot:` prompt, which waits indefinitely.
-  The headless `dlxlinux` example sends one when the prompt appears.
+  The app does not watch the screen; the headless `dlxlinux` example does, and
+  sends one when the prompt appears.
 - Only port 0xE9 and COM1 reach the UEFI console. DLX prints its kernel
   messages and login prompt to the VGA text screen, which this app never shows.
 
@@ -135,10 +142,11 @@ rusty_box_uefi_disk/
 
 `python examples/rusty_box_uefi/make_iso.py` builds the same directory in the
 current directory (the `--output` option names it; the default is
-`rusty_box_uefi_disk`) and prints QEMU commands (without `-m`). `make_vmdk.py`
-builds the same `rusty_box_uefi_disk` directory, whatever `--output` says.
-Despite its name, it writes no VMDK. Both scripts delete the directory first if
-it exists.
+`rusty_box_uefi_disk`) and prints QEMU commands for Windows and Linux, without
+`-m`. `make_vmdk.py` builds the same `rusty_box_uefi_disk` directory, whatever
+`--output` says, and prints one Windows QEMU command (with `-m 512`) and steps
+for VMware Workstation. Despite its name, it writes no VMDK. Both scripts
+delete the directory first if it exists.
 
 Both scripts also create a `rusty_box/` subdirectory in the output directory,
 which the app does not use. If they find an Alpine ISO (given with

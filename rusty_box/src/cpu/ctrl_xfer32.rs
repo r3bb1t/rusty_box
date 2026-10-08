@@ -5,7 +5,7 @@
 use super::{
     cpu::Exception,
     decoder::{BxSegregs, Instruction},
-    error::{CpuError, Result},
+    error::Result,
 };
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
@@ -16,8 +16,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Branch to a near 32-bit address
     /// Matching C++ ctrl_xfer32.cc branch_near32
     pub(super) fn branch_near32(&mut self, new_eip: u32) -> Result<()> {
-        // Check CS limit (matching C++ line 33-37)
-        // Original: Bochs cpu/ctrl_xfer32.cc
+        // Bochs ctrl_xfer32.cc branch_near32: the CS limit is checked always,
+        // not only in protected mode, and a target past it is #GP(0).
         let limit = self.get_segment_limit(BxSegregs::Cs);
         if new_eip > limit {
             tracing::error!(
@@ -25,19 +25,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 new_eip,
                 limit
             );
-            // Original: Bochs calls exception(BX_GP_EXCEPTION, 0) which doesn't return
-            return Err(CpuError::BadVector {
-                vector: Exception::Gp,
-                error_code: 0,
-            });
+            return self.exception(Exception::Gp, 0);
         }
 
-        // Matching C++ line 39: EIP = new_EIP;
         self.set_eip(new_eip);
 
-        // Matching C++ lines 41-44: Set STOP_TRACE when handlers chaining is disabled
-        // In C++, this is conditional on BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS == 0
-        // Since we don't have handlers chaining yet, we always set it
+        // Bochs sets STOP_TRACE here when handler chaining is compiled out,
+        // and this port has no handler chaining.
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         // Note: C++ branch_near16/32 don't call invalidate_prefetch_q() - only far jumps do
         // The STOP_TRACE flag is enough to break the trace loop, and getICacheEntry will fetch from new location
@@ -132,12 +126,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // CALL instructions
     // =========================================================================
 
-    /// CALL rel32 - Near call with 32-bit displacement
+    /// CALL rel32 - Near call with 32-bit displacement (Bochs ctrl_xfer32.cc
+    /// CALL_Jd: the push is speculative, so a #GP on the target puts the
+    /// stack back)
     pub fn call_jd(&mut self, instr: &Instruction) -> Result<()> {
         let disp = instr.id() as i32;
         let eip = self.eip();
 
-        // Push return address
+        self.rsp_speculative();
         self.push_32(eip)?;
         // Bochs ctrl_xfer32.cc CALL_Jd \u2014 shadow stack push only when displacement is non-zero.
         let cpl = self.cs_rpl();
@@ -148,6 +144,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
 
         self.branch_near32(new_eip)?;
+        self.rsp_commit();
         let rip = self.rip();
         self.on_ucnear_branch(super::instrumentation::BranchType::Call, rip);
         Ok(())
@@ -160,12 +157,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let new_eip = self.get_gpr32(dst);
         let eip = self.eip();
 
+        self.rsp_speculative();
         self.push_32(eip)?;
         let cpl = self.cs_rpl();
         if self.shadow_stack_enabled(cpl) {
             self.shadow_stack_push_32(eip)?;
         }
         self.branch_near32(new_eip)?;
+        self.rsp_commit();
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
         let rip = self.rip();
         self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
@@ -189,12 +188,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.prev_rip
             );
         }
+        self.rsp_speculative();
         self.push_32(eip)?;
         let cpl = self.cs_rpl();
         if self.shadow_stack_enabled(cpl) {
             self.shadow_stack_push_32(eip)?;
         }
         self.branch_near32(new_eip)?;
+        self.rsp_commit();
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
         let rip = self.rip();
         self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
@@ -214,40 +215,36 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // RET instructions
     // =========================================================================
 
-    /// RET near - Return from procedure (32-bit)
-    pub fn ret_near32(&mut self, _instr: &Instruction) -> Result<()> {
-        let return_eip = self.pop_32()?;
-        if return_eip > 0x1000_0000 {
-            tracing::trace!(
-                "RET32: return_eip={:#010x} from RIP={:#010x} ESP={:#010x}",
-                return_eip,
-                self.prev_rip,
-                self.get_gpr32(4)
-            );
-        }
-        self.branch_near32(return_eip)?;
-        let rip = self.rip();
-        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
-        Ok(())
-    }
-
-    /// RET near imm16 - Return and pop imm16 bytes (32-bit)
+    /// RET near [imm16] (32-bit) — Bochs ctrl_xfer32.cc RETnear32_Iw, which
+    /// Bochs gives the immediate-less RET as well (its Iw is then zero). The
+    /// pop is speculative, so a #CP or #GP leaves the stack where it was.
     pub fn ret_near32_iw(&mut self, instr: &Instruction) -> Result<()> {
+        self.rsp_speculative();
         let return_eip = self.pop_32()?;
-        let imm16 = instr.iw();
+        let cpl = self.cs_rpl();
+        if self.shadow_stack_enabled(cpl) {
+            let shadow_eip = self.shadow_stack_pop_32()?;
+            if shadow_eip != return_eip {
+                return self.exception(
+                    Exception::Cp,
+                    super::cpu::CpExceptionErrorCode::NearRet as u16,
+                );
+            }
+        }
 
         self.branch_near32(return_eip)?;
-        let rip = self.rip();
-        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
 
-        let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
-        if ss_d_b {
+        let imm16 = instr.iw();
+        if self.get_segment_d_b(BxSegregs::Ss) {
             let esp = self.get_gpr32(4);
-            self.set_gpr32(4, esp.wrapping_add(imm16 as u32));
+            self.set_gpr32(4, esp.wrapping_add(u32::from(imm16)));
         } else {
             let sp = self.get_gpr16(4);
             self.set_gpr16(4, sp.wrapping_add(imm16));
         }
+        self.rsp_commit();
+        let rip = self.rip();
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
         Ok(())
     }
 
@@ -542,10 +539,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     disp32,
                     limit
                 );
-                return Err(CpuError::BadVector {
-                    vector: Exception::Gp,
-                    error_code: 0,
-                });
+                return self.exception(Exception::Gp, 0);
             }
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
@@ -558,14 +552,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// Far call 32-bit (matching C++ call_far32)
-    /// Called by CALL32_Ap and CALL32_Ep
+    /// Called by CALL32_Ap and CALL32_Ep. RSP_SPECULATIVE covers the whole
+    /// call, protected or not, as in Bochs: `call_protected` pushes before it
+    /// has finished checking the target.
     fn call_far32(&mut self, _instr: &Instruction, cs_raw: u16, disp32: u32) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
+        self.rsp_speculative();
         if self.protected_mode() {
-            return self.call_protected(cs_raw, disp32, true);
+            self.call_protected(cs_raw, disp32, true)?;
         } else {
             // Real mode or V8086 mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
@@ -575,10 +572,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     disp32,
                     limit
                 );
-                return Err(CpuError::BadVector {
-                    vector: Exception::Gp,
-                    error_code: 0,
-                });
+                return self.exception(Exception::Gp, 0);
             }
 
             // Push return address (CS:EIP)
@@ -590,6 +584,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
             self.set_eip(disp32);
         }
+        self.rsp_commit();
 
         // Set STOP_TRACE to break trace loop
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -660,45 +655,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // Far RET instructions (32-bit)
     // =========================================================================
 
-    /// RETfar32 - Far return without immediate (32-bit)
-    /// Matching C++ ctrl_xfer32.cc (similar to RETfar16 but 32-bit)
-    pub fn retfar32(&mut self, _instr: &Instruction) -> Result<()> {
-        // Invalidate prefetch queue
-        self.eip_fetch_window = None;
-        self.eip_page_window_size = 0;
-
-        if self.protected_mode() {
-            return self.return_protected(0, true);
-        } else {
-            // Real mode or V8086 mode - pop EIP and CS (32-bit pop, MSW discarded for CS)
-            let eip = self.pop_32()?;
-            let cs_raw = self.pop_32()? as u16; // 32-bit pop, MSW discarded
-
-            // Check CS limit
-            let limit = self.get_segment_limit(BxSegregs::Cs);
-            if eip > limit {
-                tracing::error!(
-                    "retfar32: offset {:#010x} outside of CS limits {:#010x}",
-                    eip,
-                    limit
-                );
-                return Err(CpuError::BadVector {
-                    vector: Exception::Gp,
-                    error_code: 0,
-                });
-            }
-
-            self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
-            self.set_eip(eip);
-        }
-
-        // Set STOP_TRACE to break trace loop
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        Ok(())
-    }
-
-    /// RETfar32_Iw - Far return with immediate (32-bit)
-    /// Matching C++ ctrl_xfer32.cc
+    /// RETF / RETF imm16 with a 32-bit operand size; RETF without an
+    /// immediate decodes with Iw = 0 (Bochs ctrl_xfer32.cc RETfar32_Iw serves
+    /// both RETF_Op32 and RETF_Op32_Iw).
     pub fn retfar32_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_window = None;
@@ -706,8 +665,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let imm16 = instr.iw();
 
+        // Bochs ctrl_xfer32.cc RETfar32_Iw: RSP_SPECULATIVE, so a #GP after
+        // the pops restores ESP.
+        self.rsp_speculative();
         if self.protected_mode() {
-            return self.return_protected(imm16, true);
+            self.return_protected(imm16, true)?;
         } else {
             // Real mode or V8086 mode - pop EIP and CS (32-bit pop, MSW discarded for CS)
             let eip = self.pop_32()?;
@@ -721,10 +683,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     eip,
                     limit
                 );
-                return Err(CpuError::BadVector {
-                    vector: Exception::Gp,
-                    error_code: 0,
-                });
+                return self.exception(Exception::Gp, 0);
             }
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
@@ -740,6 +699,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.set_gpr16(4, sp.wrapping_add(imm16));
             }
         }
+        self.rsp_commit();
 
         // Set STOP_TRACE to break trace loop
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;

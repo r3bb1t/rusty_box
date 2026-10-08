@@ -23,6 +23,9 @@ const MAX_STEM_LEN: usize = 64;
 /// The file recording which VM the shell showed last. Its name has no `.toml`
 /// extension, so the listing never takes it for a VM.
 const LAST_SELECTED_FILE: &str = ".last";
+/// The file recording what closing the app does while VMs run: one word,
+/// `ask`, `hide` or `stop`. Like `.last`, it has no `.toml` extension.
+const CLOSE_CHOICE_FILE: &str = ".on_close";
 /// The extension of every VM file, matched exactly: the library writes no
 /// other spelling, so a `.TOML` file is not one of its own.
 const VM_EXTENSION: &str = "toml";
@@ -89,6 +92,18 @@ impl LibraryContents {
     pub fn is_empty(&self) -> bool {
         self.vms.is_empty() && self.broken.is_empty()
     }
+}
+
+/// What closing the app does while VMs run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CloseChoice {
+    /// Ask each time.
+    #[default]
+    Ask,
+    /// Hide the app; the VMs keep running.
+    Hide,
+    /// Stop every VM, then quit.
+    StopAndQuit,
 }
 
 /// The library folder.
@@ -238,6 +253,30 @@ impl VmLibrary {
     /// Records `stem` as the VM the shell shows at its next launch.
     pub fn remember_selected(&self, stem: &VmStem) -> Result<(), LibraryError> {
         write_atomically(&self.dir.join(LAST_SELECTED_FILE), stem.0.as_bytes())
+    }
+
+    /// The remembered choice; `Ask` when none is recorded or the record is
+    /// unreadable.
+    pub fn close_choice(&self) -> CloseChoice {
+        match fs::read_to_string(self.dir.join(CLOSE_CHOICE_FILE)) {
+            Ok(recorded) => match recorded.trim() {
+                "hide" => CloseChoice::Hide,
+                "stop" => CloseChoice::StopAndQuit,
+                "ask" => CloseChoice::Ask,
+                _ => CloseChoice::Ask,
+            },
+            Err(_) => CloseChoice::Ask,
+        }
+    }
+
+    /// Records `choice` as what every later close does while VMs run.
+    pub fn remember_close_choice(&self, choice: CloseChoice) -> Result<(), LibraryError> {
+        let word = match choice {
+            CloseChoice::Ask => "ask",
+            CloseChoice::Hide => "hide",
+            CloseChoice::StopAndQuit => "stop",
+        };
+        write_atomically(&self.dir.join(CLOSE_CHOICE_FILE), word.as_bytes())
     }
 
     /// Adds the VM a `rusty_box.toml` beside the executable describes and
@@ -954,6 +993,24 @@ mod tests {
         fs::write(dir.join(LAST_SELECTED_FILE), "../escape").expect("write");
         assert_eq!(library.last_selected(), None);
         remove_dir(&root);
+    }
+
+    #[test]
+    fn the_close_choice_is_remembered_and_unreadable_reads_as_ask() {
+        let dir = scratch_dir("close-choice");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        assert_eq!(library.close_choice(), CloseChoice::Ask);
+        library
+            .remember_close_choice(CloseChoice::Hide)
+            .expect("write");
+        assert_eq!(library.close_choice(), CloseChoice::Hide);
+        library
+            .remember_close_choice(CloseChoice::StopAndQuit)
+            .expect("write");
+        assert_eq!(library.close_choice(), CloseChoice::StopAndQuit);
+        fs::write(dir.join(CLOSE_CHOICE_FILE), "maybe").expect("write");
+        assert_eq!(library.close_choice(), CloseChoice::Ask);
+        remove_dir(&dir);
     }
 
     #[test]

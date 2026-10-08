@@ -106,12 +106,12 @@ It passes only if the run exits successfully and its stdout contains `*** LOGIN 
 ### What `ci` does not cover
 
 - It compiles the `rusty_box_gui` tests but does not run them. Run them with `cargo test --release -p rusty_box_gui`.
-- No step runs the tests of `rusty_box_bximage` or of `xtask`. Both are compiled: `rusty_box_bximage` as a dependency of the GUI steps, and `xtask` by the `cargo xtask` alias that runs the gate.
+- No step runs the tests of `rusty_box_bximage` or of `xtask`. Both are compiled: `rusty_box_bximage` as a dependency of the GUI steps, and `xtask` by the `cargo xtask` alias that runs the gate. Run the xtask's own, among them the APK packing's, with `cargo test --release -p xtask`.
 - No step builds `examples/rusty_box_web`, `examples/no_alloc_smoke` or the Android APK. The GUI steps compile the APK's library, the `rusty_box_gui_android` example, only for the host, where it is empty.
 
 ## `cargo xtask perf-baseline`
 
-This command takes no options. It does three things:
+This command takes no options; anything written after it is ignored. It does three things:
 
 1. Builds the `perfbench` example: `cargo build --release -p rusty_box --example perfbench --features std`. The source is `rusty_box/examples/perfbench/perfbench.rs`.
 2. Copies the binary to `target/perf-baselines/<rev>/`, where `<rev>` is `git rev-parse --short=12 HEAD`. The directory is named after `HEAD`, so a build of an uncommitted tree is filed under the last commit's revision.
@@ -136,7 +136,12 @@ This prepares the local Android toolchain and builds `target/android/apk/example
 1. **Android SDK**, skipped with `--skip-sdk`. Finds the SDK under `--sdk`, `ANDROID_HOME`, `ANDROID_SDK_ROOT` or `~/Android/Sdk`, in that order. Downloads the command-line tools if they are missing. Accepts the SDK licenses. Installs `platform-tools`, `platforms;android-34`, `build-tools;35.0.0` and `ndk;29.0.14206865` when missing.
 2. **Rust tools.** Runs `rustup target add aarch64-linux-android`. Installs `cargo-apk` if `cargo apk --version` fails.
 3. **Signing keystore.** If `CARGO_APK_ANDROID_KEYSTORE` and a non-empty `CARGO_APK_ANDROID_KEYSTORE_PASSWORD` are set, they are used. Otherwise it uses `~/.android/rusty_box_android_xtask_debug.keystore`, generating it with `keytool` (from `JAVA_HOME/bin` when present) if it does not exist. That local dev keystore uses the standard non-secret Android password `android`; do not use it for production signing.
-4. **Build.** Runs `cargo apk build -p rusty_box_gui --example rusty_box_gui_android --profile android`. The APK carries the Bochs ROMs only; the ISO a VM boots is chosen on the phone, under Hardware › CD/DVD.
+4. **Build.** Runs `cargo apk build -p rusty_box_gui --example rusty_box_gui_android --profile android`, which builds the native library and an APK around it. The APK carries the Bochs ROMs only; the ISO a VM boots is chosen on the phone, under Hardware › CD/DVD.
+5. **Pack.** cargo-apk can neither declare a service nor compile Java, so the APK the phone installs is packed again, in `target/android/apk/package/`, and written over cargo-apk's:
+   - `aapt2 link` links `rusty_box_gui/android/AndroidManifest.xml`, with the version code and name read from cargo-apk's APK (`aapt2 dump badging`), so the version still follows the crate's;
+   - `javac` (from `JAVA_HOME/bin` when present) compiles the Java under `rusty_box_gui/android/java` against `platforms;android-34`, and `d8` turns it into `classes.dex`;
+   - the APK takes aapt2's manifest, `classes.dex` and cargo-apk's `lib/` entries as they are stored, and leaves cargo-apk's manifest and signature behind;
+   - `zipalign -p 4` aligns it, and `apksigner` signs it with the step 3 keystore, its password passed in the environment, then verifies it. The same key as cargo-apk's means a new build installs over an earlier one and keeps the app's data.
 
 ### The APK's code generation
 
@@ -166,7 +171,9 @@ Captures the connected device's screen through `adb_client`. If `PATH` is omitte
 
 - `--sdk PATH` sets the Android SDK root for this run.
 - `--skip-sdk` skips SDK package installation and license acceptance. Use it when the SDK is already prepared.
-- `--screenshot PATH` (`run` only) captures the screen after launch.
+- `--screenshot PATH` captures the screen 10 seconds after `run` launches the app; for `screenshot` it is the same as the positional `PATH`. `build` accepts it and takes no screenshot.
+
+Options may come in any order after the action.
 
 ### Commit-safety rules
 

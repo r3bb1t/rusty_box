@@ -218,6 +218,10 @@ fn run_alpine() -> Result<()> {
         memory: MemorySize::bytes(ram_bytes),
         ips: Ips::new(300_000_000),
         pci_enabled: true,
+        // The kernel decompressor reports through Bochs's port-0xE9 console,
+        // and this harness prints what it says, so the console is on — what
+        // `port_e9_hack: enabled=1` in a bochsrc does.
+        port_e9_hack: rusty_box::iodev::PortE9Hack::On,
         ..EmulatorConfig::default()
     };
 
@@ -419,7 +423,10 @@ fn run_alpine() -> Result<()> {
     }
 
     // Drain port 0xE9 output (Bochs debug port — used by kernel decompressor __putstr)
-    let e9: Vec<u8> = emu.debug_port().take_output().collect();
+    let e9: Vec<u8> = emu
+        .debug_port()
+        .map(|mut port| port.take_output().collect())
+        .unwrap_or_default();
     if !e9.is_empty() {
         println!("\n--- Port 0xE9 (kernel decompressor) ---");
         let s = String::from_utf8_lossy(&e9);

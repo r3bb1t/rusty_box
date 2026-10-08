@@ -1019,6 +1019,34 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
+    /// Bochs cpu_templates.h `HANDLE_AVX_2OP`: `func` on each 128-bit lane of
+    /// the VEX.vvvv source and the r/m source, the result written with every
+    /// bit above VL cleared (`BX_WRITE_AVX_REGZ`). The memory form has no
+    /// alignment rule at either length (Bochs `LOADU_Wdq` at VL128,
+    /// `LOAD_Vector` at VL256).
+    pub(super) fn avx_2op(
+        &mut self,
+        instr: &Instruction,
+        func: super::simd_int::Xmm2Op,
+    ) -> super::Result<()> {
+        if instr.get_vl() >= 1 {
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut op1 = self.read_ymm_reg(instr.src2());
+            for lane in 0..2 {
+                let mut x = op1.ymm128(lane);
+                func(&mut x, &op2.ymm128(lane));
+                op1.set_ymm128(lane, x);
+            }
+            self.write_ymm_reg(instr.dst(), op1);
+        } else {
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let mut op1 = self.read_xmm_reg(instr.src2());
+            func(&mut op1, &op2);
+            self.write_xmm_reg(instr.dst(), op1);
+        }
+        Ok(())
+    }
+
     /// VPABSB — per-byte absolute value over VL (Bochs HANDLE_AVX_1OP<xmm_pabsb>).
     pub(super) fn vpabsb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.get_vl() >= 1 {

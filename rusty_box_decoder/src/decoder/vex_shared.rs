@@ -16,8 +16,8 @@ use crate::error::{DecodeError, DecodeResult};
 use crate::opcode::Opcode;
 
 use super::opmap_evex::{EVEX_MAPS, EVEX_TABLE};
-use super::tables::BxDecodeError;
-use super::find_opcode_in_table;
+use super::tables::{attrs, BxDecodeError};
+use super::{find_opcode_in_table, form_opcode};
 
 /// Resolve an EVEX-encoded opcode.
 ///
@@ -110,11 +110,9 @@ pub(super) const fn vex_modrm_dst(b1: u32, is_vex_or_evex: bool) -> Option<VexMo
 /// python scripts/gen_vex_slots.py            # emit the replacement table
 /// ```
 ///
-/// Upstream's table also carries maps 4-7. Maps 4 and 6 are empty, map 5 sits
-/// behind `BX_SUPPORT_AMX`, and map 7 holds only WRMSRNS/RDMSR/UWRMSR/URDMSR,
-/// gated on `BX_ISA_MSR_IMM` and `BX_ISA_USER_MSR` — features `Corei7SkylakeX`
-/// does not advertise, so rejecting the map when the prefix is parsed is
-/// observationally identical to Bochs's #UD on the ISA check.
+/// Upstream's table also carries maps 4-7. Maps 4 and 6 are empty and map 5
+/// sits behind `BX_SUPPORT_AMX`. Map 7 shares no legacy table, so it has its
+/// own two groups below ([`lookup_vex_map7`]) instead of bits here.
 const VEX_POPULATED_SLOTS: [[u64; 4]; 3] = [
     // map 1 (0F) — 126 slots
     [
@@ -153,11 +151,54 @@ const VEX_POPULATED_SLOTS: [[u64; 4]; 3] = [
 /// Testing the slot before consulting the shared table restores upstream's
 /// shape for the whole class at once, rather than one opcode at a time.
 pub(super) const fn vex_slot_populated(opcode_map: u8, opcode_byte: u8) -> bool {
+    if opcode_map == VEX_MAP7 {
+        return matches!(opcode_byte, 0xF6 | 0xF8);
+    }
     if opcode_map == 0 || opcode_map > 3 {
         return false;
     }
     let words = VEX_POPULATED_SLOTS[opcode_map as usize - 1];
     (words[(opcode_byte >> 6) as usize] >> (opcode_byte & 0x3F)) & 1 != 0
+}
+
+/// The decoder's number for VEX map 7, the MSR-immediate map. It is the VEX
+/// `mmmmm` value itself; no other path uses 7.
+pub(super) const VEX_MAP7: u8 = 7;
+
+/// Bochs fetchdecode_opmap_avx.cc `BxOpcodeGroup_VEX_MAP7_F6`: WRMSRNS and
+/// RDMSR with the MSR index as a 32-bit immediate.
+const VEX_MAP7_F6: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_F3 | VL128 | VEX_W0 | MOD_REG | NNN0 | IS64),
+        Opcode::WrmsrnsIdEq,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_F2 | VL128 | VEX_W0 | MOD_REG | NNN0 | IS64),
+        Opcode::RdmsrEqId,
+    ),
+];
+
+/// Bochs fetchdecode_opmap_avx.cc `BxOpcodeGroup_VEX_MAP7_F8`: UWRMSR and
+/// URDMSR with the MSR index as a 32-bit immediate.
+const VEX_MAP7_F8: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_F3 | VL128 | VEX_W0 | MOD_REG | NNN0 | IS64),
+        Opcode::UwrmsrIdEq,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_F2 | VL128 | VEX_W0 | MOD_REG | NNN0 | IS64),
+        Opcode::UrdmsrEqId,
+    ),
+];
+
+/// Resolve a VEX map-7 encoding against Bochs's map-7 slots of
+/// `BxOpcodeTableVEX`, which hold groups at F6 and F8 and nothing else.
+pub(super) const fn lookup_vex_map7(opcode_byte: u8, decmask: u32) -> Opcode {
+    match opcode_byte {
+        0xF6 => find_opcode_in_table(&VEX_MAP7_F6, decmask),
+        0xF8 => find_opcode_in_table(&VEX_MAP7_F8, decmask),
+        _ => Opcode::IaError,
+    }
 }
 
 /// Size of the trailing immediate of a VEX/EVEX-encoded instruction, in bytes.
@@ -181,7 +222,9 @@ pub(super) const fn vex_slot_populated(opcode_map: u8, opcode_byte: u8) -> bool 
 /// those are fetches the guest never asked for.
 ///
 /// `opcode_map` is the internal numbering: 1 = `0F`, 2 = `0F38`, 3 = `0F3A`,
-/// and 4/5 are the EVEX map 5/6 blocks, which carry no immediate.
+/// 4/5 are the EVEX map 5/6 blocks, which carry no immediate, and
+/// [`VEX_MAP7`] is VEX map 7, every instruction of which ends in a 32-bit
+/// immediate (Bochs `decoder_vex64` fetches `Id` for `vex_opc_map == 7`).
 pub(super) const fn vex_immediate_size(opcode_map: u8, opcode_byte: u8) -> u8 {
     match opcode_map {
         1 => match opcode_byte {
@@ -189,6 +232,7 @@ pub(super) const fn vex_immediate_size(opcode_map: u8, opcode_byte: u8) -> u8 {
             _ => 0,
         },
         3 => 1,
+        VEX_MAP7 => 4,
         _ => 0,
     }
 }
@@ -477,6 +521,11 @@ pub(super) const fn validate_reserved_vex_vvvv(opcode: Opcode, vex_vvv: u8) -> D
                 | Opcode::V128VpcmpestriVdqWdqIb
                 | Opcode::V128VpcmpistrmVdqWdqIb
                 | Opcode::V128VpcmpistriVdqWdqIb
+                // VEX map 7: an immediate and one GPR, no `H` operand.
+                | Opcode::RdmsrEqId
+                | Opcode::WrmsrnsIdEq
+                | Opcode::UrdmsrEqId
+                | Opcode::UwrmsrIdEq
                 // VEX forms reached through a shared legacy SSE table entry.
                 // None of them has an `H` operand in Bochs ia_opcodes.def, so
                 // VEX.vvvv is reserved for all of them.

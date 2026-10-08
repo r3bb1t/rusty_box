@@ -41,9 +41,9 @@ trunk serve --release --port 8080
 Open http://localhost:8080 and choose **Boot DLX Linux** or **Load Alpine Linux
 ISO**. Nothing is built until you choose.
 
-Input is keyboard only; there is no mouse. Typed text is sent as scancodes, plus
-Enter, Tab, Backspace, Space, Esc, F1–F12, the arrow keys, Home/End,
-PgUp/PgDn and Ins/Del.
+Input is keyboard only; there is no mouse. Typed text, Space included, is sent
+as scancodes, plus Enter, Tab, Backspace, Esc, F1–F12, the arrow keys,
+Home/End, PgUp/PgDn and Ins/Del.
 
 ## Run natively
 
@@ -53,8 +53,10 @@ cargo run --release -p rusty_box_web
 
 This opens the same app in a native window, running the same single-threaded
 loop. The Alpine file picker only exists in the browser build; natively, the
-button logs a warning and does nothing, so only DLX can be booted. For a
-threaded desktop front end, use `cargo run --release -p rusty_box_gui`.
+button does nothing, so only DLX can be booted. It logs a warning, which
+`env_logger` shows only when `RUST_LOG` is `warn` or more verbose; unset, it
+shows errors alone. For a threaded desktop front end, use
+`cargo run --release -p rusty_box_gui`.
 
 ## Frame loop
 

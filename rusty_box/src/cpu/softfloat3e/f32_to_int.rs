@@ -194,3 +194,55 @@ pub(in crate::cpu) fn f32_to_i64_r_min_mag(
         abs_z
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Converted {
+        value: i32,
+        flags: i32,
+    }
+
+    fn convert(a: f32, rounding_mode: u8) -> Converted {
+        let mut status = SoftFloatStatus::default();
+        let value = f32_to_i32(a.to_bits(), rounding_mode, true, &mut status);
+        Converted {
+            value,
+            flags: status.softfloat_exception_flags,
+        }
+    }
+
+    /// A value with no 32-bit integer — a NaN, an infinity, or anything at
+    /// or past 2^31 — is invalid and becomes the integer indefinite (Bochs
+    /// s_roundToI32.cc rejects a significand that does not fit).
+    #[test]
+    fn an_unrepresentable_float_is_the_integer_indefinite() {
+        for a in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 3.0e9, -3.0e9, 2_147_483_648.0] {
+            let converted = convert(a, ROUND_NEAR_EVEN);
+            assert_eq!(converted.value, i32::MIN, "{a}");
+            assert_ne!(converted.flags & FLAG_INVALID, 0, "{a} raises invalid");
+        }
+    }
+
+    /// -2^31 is representable, so it converts exactly, without the invalid
+    /// flag, though its magnitude does not fit a positive i32.
+    #[test]
+    fn minus_two_to_the_31_converts_exactly() {
+        let converted = convert(-2_147_483_648.0, ROUND_NEAR_EVEN);
+        assert_eq!(converted.value, i32::MIN);
+        assert_eq!(converted.flags, 0);
+    }
+
+    /// Rounding away from the truncated value sets the x87 C1 "rounded up"
+    /// bit (Bochs `softfloat_setRoundingUp`); rounding toward it does not.
+    #[test]
+    fn rounding_up_is_reported() {
+        let up = convert(2.5, ROUND_MAX);
+        assert_eq!(up.value, 3);
+        assert_eq!(up.flags, FLAG_INEXACT | RAISE_SW_C1);
+        let down = convert(-2.5, ROUND_MAX);
+        assert_eq!(down.value, -2);
+        assert_eq!(down.flags, FLAG_INEXACT);
+    }
+}

@@ -1,61 +1,50 @@
 # Rusty Box
 
-Rusty Box is a Rust port of the [Bochs](https://bochs.sourceforge.io/) x86 emulator: a whole 32/64-bit x86 PC. It runs guests on its own software interpreter on every host, or on the Windows Hypervisor Platform (WHP) on Windows. Its front end, Rusty Box Workstation, is a VMware-style VM shell that runs on the desktop, on Android and in the browser.
+Rusty Box is a Rust port of the [Bochs](https://bochs.sourceforge.io/) x86 emulator: a whole 32/64-bit x86 PC. It runs guests on its own software interpreter on every host, or on the Windows Hypervisor Platform (WHP) on Windows. Its front end, Rusty Box Workstation, is a VMware-style VM shell that runs on the desktop, on Android and in the browser, and runs several VMs at once.
 
 ## What runs today
 
-| Guest | How far it gets | Engine | Settings on record |
-|-------|-----------------|--------|--------------------|
-| DLX Linux (the Bochs `hd10meg.img`) | The login prompt, then an interactive bash shell. `cargo xtask ci` boots it to `dlx login:` on every run. | Interpreter. It does not reach `login:` on WHP today (see [Execution engines](#execution-engines)). | the `dlxlinux` example |
-| Alpine Linux 3.24.1 (`alpine-virt-3.24.1-x86_64.iso`) | `login:`, a root login and a working shell. No network: the machine has no network adapter. | Interpreter and WHP | 256 MiB, `ips` 300,000,000 |
-| Ubuntu Server 26.04 live-server (`ubuntu-26.04-live-server-amd64.iso`) | Boots to the installer: in under 5 minutes on WHP, against 20–30 minutes on the interpreter (reported by the maintainer, not timed by a harness). | WHP and interpreter | 2048 MiB, one CPU, `ips` 120,000,000, `smp_quantum` 32, a 1280×720×32 display, CD only ([the VM file](#the-ubuntu-server-recipe)) |
-| Windows 10 22H2 | The installer starts: its start screen was reached after 88.2 billion guest instructions (2026-07-14). | Interpreter | 2 GiB, `ips` 120,000,000, PCI on |
-| Windows 7 SP1 | Setup reached: the edition picker (2026-07-25). | Interpreter | 2048 MiB, `ips` 300,000,000 |
+| Guest | What works | Engine |
+|-------|------------|--------|
+| Windows XP | Installs and runs. A full install took about five hours on a phone. | Interpreter |
+| Windows 10 22H2 | Setup runs but has not finished: on a phone it stayed at "Please wait", its animation still moving, after 15 hours. | Interpreter |
+| Windows 7 SP1 | Setup starts and reaches the edition picker. | Interpreter |
+| Alpine Linux 3.24.1 | Boots to `login:` and a working root shell. | Interpreter and WHP |
+| Ubuntu Server 26.04 | Boots to its installer. | Interpreter and WHP |
+| DLX Linux | Boots to a bash shell. `cargo xtask ci` boots it to its login prompt on every run. | Interpreter |
 
-What is not claimed:
+No guest has a network: the machine has no network adapter. No Windows guest has been tried on WHP. The settings each guest runs with are in [Running guests](docs/getting-started.md#running-guests).
 
-- a finished install of Windows or Ubuntu, or an installed system booting;
-- anything past the Windows 10 installer's start screen;
-- a run of any Windows on WHP;
-- networking of any kind, in any guest.
+## Quick start
 
-The table is for the desktop shell and the example harnesses. The Android shell has booted Alpine on a phone as far as the ISOLINUX `boot:` prompt (2026-09-11). The gate checks that the browser shell compiles, and no guest boot in it is recorded.
+Always build with `--release`. Debug builds are far too slow to boot a guest.
 
-The [UEFI application](examples/rusty_box_uefi/) runs the emulator on UEFI firmware with no allocator. It completes BIOS POST and reaches the boot sector.
+1. Get the Bochs ROMs (see [Firmware and disk images](#firmware-and-disk-images)).
+2. Run the shell:
 
-### The Ubuntu Server recipe
+   ```bash
+   cargo run --release -p rusty_box_gui
+   ```
 
-The Ubuntu row's settings as a VM file. Save it in the repository root, next to the ISO, and open it with `cargo run --release -p rusty_box_gui -- --config ubuntu.toml`. It opens as a temporary VM, which `Keep in library` on its Summary page adds to the library.
+3. It opens on the VM library, powered off. A new VM starts at 32 MiB of memory and an IPS target of 4,000,000, too little for any guest above. For Alpine, set the BIOS and VGA BIOS paths under Hardware › Display, the memory to 256 MiB under Hardware › Memory, the IPS target to 300,000,000 under Hardware › Processors, and attach the ISO under Hardware › CD/DVD. Then press `▶ Power on` in the VM bar.
 
-```toml
-[emulator]
-memory_mib = 2048
-host_memory_mib = 2048
-cpu_sockets = 1
-cpu_cores = 1
-cpu_threads = 1
-ips = 120000000
-pci = true
-sync_slowdown = false
-smp_quantum = 32
+The same machine can be given as flags:
 
-[display]
-width = 1280
-height = 720
-bpp = 32
-
-[rom]
-bios = "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"
-vga_bios = "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"
-
-[boot]
-order = ["cdrom"]
-
-[cdrom]
-path = "ubuntu-26.04-live-server-amd64.iso"
+```bash
+cargo run --release -p rusty_box_gui -- \
+  --bios cpp_orig/bochs/bochs/bios/BIOS-bochs-latest \
+  --vga-bios cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin \
+  --cdrom alpine-virt-3.24.1-x86_64.iso --boot cdrom --memory-mib 256 --ips 300000000
 ```
 
-Relative paths in a VM file resolve against the file's own folder.
+On Windows, with the Hypervisor Platform enabled, add `--engine whp` to run it on the hypervisor. A VM given by flags is a temporary VM, marked "(unsaved)", until `Keep in library` on its Summary page keeps it.
+
+[docs/getting-started.md](docs/getting-started.md) walks through the shell, the VM file and the settings for each guest. On Linux, the shell needs the display-server development packages that CI installs:
+
+```bash
+sudo apt-get install -y pkg-config libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
+  libxrandr-dev libxinerama-dev libxkbcommon-dev libwayland-dev
+```
 
 ## Firmware and disk images
 
@@ -67,169 +56,31 @@ The repository does not ship the BIOS ROMs or the DLX disk image. Both locations
 | VGA BIOS | `cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin` | the same checkout |
 | DLX Linux disk | `dlxlinux/hd10meg.img` | [Bochs disk images](https://bochs.sourceforge.io/diskimages.html) |
 
-The Bochs checkout is also the C++ reference source that every port decision is checked against. The browser builds, the UEFI application and `cargo xtask ci` embed or read these files, so they fail without them. [rusty_box/examples/README.md](rusty_box/examples/README.md) lists the other locations the desktop examples search.
+The Bochs checkout is also the C++ reference source that every port decision is checked against. The browser builds, the Android APK, the UEFI application and `cargo xtask ci` embed or read these files, so they fail without them. For Alpine, download the **Virtual** x86_64 ISO from [alpinelinux.org/downloads](https://alpinelinux.org/downloads/); this page and the harnesses use `alpine-virt-3.24.1-x86_64.iso`.
 
-## Quick start
+## Where it runs
 
-Always build with `--release`. Debug builds are far too slow to boot a guest.
-
-1. Clone Bochs for the ROMs, as in the table above.
-2. Run the shell:
-
-   ```bash
-   cargo run --release -p rusty_box_gui
-   ```
-
-3. It opens on the VM library, powered off. A new VM starts at 32 MiB of memory and an IPS target of 4,000,000, and no guest in the table boots with those. For Alpine, set the BIOS and VGA BIOS paths under Hardware › Display, the memory to 256 MiB under Hardware › Memory, the IPS target to 300,000,000 under Hardware › Processors, and attach the ISO under Hardware › CD/DVD. Then press `▶ Power on` in the VM bar.
-
-The same machine can be given as flags. This one boots Alpine with the settings from the table:
-
-```bash
-cargo run --release -p rusty_box_gui -- \
-  --bios cpp_orig/bochs/bochs/bios/BIOS-bochs-latest \
-  --vga-bios cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin \
-  --cdrom alpine-virt-3.24.1-x86_64.iso --boot cdrom --memory-mib 256 --ips 300000000
-```
-
-On Windows, with the Hypervisor Platform enabled, add `--engine whp` to run it on the hypervisor.
-
-Headless harnesses and the gate:
-
-```bash
-# DLX Linux, headless (boots to the login prompt)
-RUSTY_BOX_HEADLESS=1 cargo run --release --example dlxlinux --features std
-
-# Alpine Linux, headless BIOS boot
-ALPINE_ISO=alpine-virt-3.24.1-x86_64.iso RUSTY_BOX_HEADLESS=1 cargo run --release --example alpine_direct --features std
-
-# The full local gate
-cargo xtask ci
-```
-
-`alpine_direct` prints the guest's serial console and a progress line every 50 million instructions. It does not stop at `login:`; it runs until its instruction budget is spent. The repository's `.cargo/config.toml` sets `MAX_INSTRUCTIONS=20000000000` for every cargo command, so the six boot examples, which all read it, stop after 20 billion instructions unless you override it.
-
-Flags and VM files work together:
-
-- Machine flags such as `--bios` or `--cdrom` describe a **temporary VM**, marked "(unsaved)" until you keep it in the library.
-- `--config PATH` opens a file as a temporary VM too.
-- A `--config` file that is already one of the library's VM files opens as that library VM, if nothing on the command line changes it: no machine flag, and none of `--engine`, `--cpu-capabilities` or `--log-level`.
-- Nothing is read from the current directory, and `--no-config` changes nothing.
-- To power on, a VM needs a BIOS path and a hard disk or CD/DVD.
-
-[docs/getting-started.md](docs/getting-started.md) walks through the config file and the settings whose meaning is not obvious. [rusty_box_gui/README.md](rusty_box_gui/README.md) covers the shell in full.
-
-On Linux, the egui GUI needs the display-server development packages that CI installs:
-
-```bash
-sudo apt-get install -y pkg-config libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
-  libxrandr-dev libxinerama-dev libxkbcommon-dev libwayland-dev
-```
+- **Desktop.** `rusty_box_gui` on Windows, Linux and macOS: a VM library that saves itself, several VMs running at once, and the interpreter or, on Windows, WHP. [rusty_box_gui/README.md](rusty_box_gui/README.md) has the detail.
+- **Android.** The same shell as an APK, built and installed by `cargo xtask android build` and `cargo xtask android run`. A finger on the guest's screen works as a trackpad, a Keys pad sends the keys a soft keyboard lacks, and while a VM runs the app keeps running with the screen off, under a notification. It runs the interpreter.
+- **Browser.** The shell in a web page, built with [trunk](https://trunkrs.dev/): `cd rusty_box_gui && trunk serve --release --port 8080`. It boots an uploaded ISO and runs the interpreter. `examples/rusty_box_web` is a smaller standalone demo.
+- **UEFI.** [examples/rusty_box_uefi](examples/rusty_box_uefi/) runs the emulator on UEFI firmware with no allocator. It completes BIOS POST and reaches the boot sector.
 
 ## Execution engines
 
-`rusty_box_gui` runs a guest on one of two engines, chosen per VM under Hardware › Processors › Engine, or with `--engine`.
+A VM runs on one of two engines, chosen under Hardware › Processors › Engine or with `--engine`.
 
-### Interpreter
+- **The interpreter** (`interpreter`, the default) is this port of Bochs. It runs on every host and target, counts every instruction, and can stop a run at `max_instructions`.
+- **WHP** (`whp`) runs the guest's instructions on the host processor through the Windows Hypervisor Platform. The devices stay this port's own models, run on host time, except the local APIC, which is the partition's own. It needs a Windows build with the `hv-whp` feature (on by default) and the Hypervisor Platform enabled; when either is missing, `--engine whp` is refused rather than falling back.
 
-The interpreter (`--engine interpreter`) is the default. It is this port of Bochs, and it runs on every host and target, the Android APK and the browser included. It counts every instruction, so a run can stop at `max_instructions`. The status strip shows the live instruction rate. That rate depends on the host CPU and on the guest's instruction mix: BIOS real-mode code runs slower than a long-mode kernel or userspace. `ips` calibrates the guest clock against it without limiting speed; [docs/getting-started.md](docs/getting-started.md) explains how to choose it.
+Measured with the `alpine_probe` harness at commit `4f46a11` (Intel Core i5-12450H, median of three interleaved runs): Alpine 3.24.1 reaches `login:` in 27.1 s on WHP against 65.0 s on the interpreter, 2.40× faster. BIOS POST is slower on WHP; the gain comes after the boot loader starts. DLX Linux does not reach `login:` on WHP today.
 
-### Windows Hypervisor Platform
-
-The WHP engine (`--engine whp`) runs the guest's instructions on the host processor, through `WinHvPlatform`. The devices are still this port's own models, run on host time by a device thread, except the local APIC: that is the hypervisor partition's own, in x2APIC mode (xAPIC where the host offers only that).
-
-It needs:
-
-- a Windows build of `rusty_box_gui` that carries the hypervisor path: the `hv-whp` feature, on by default, and no `guest-trace`;
-- a Windows host with the Hypervisor Platform enabled.
-
-When the build lacks the path or the host lacks the platform, `--engine whp` is refused. It never falls back to the interpreter.
-
-Measured at commit `4f46a11` with the `alpine_probe` harness:
-
-> Alpine 3.24.1 reaches `login:` in 27.1 s on WHP vs 65.0 s on the interpreter (2.40×), Intel Core i5-12450H, 2026-09-12, commit 4f46a11 (median of 3 interleaved runs per engine, `alpine_probe`, timed from power-on to `login:`).
-
-- From the boot loader (ISOLINUX) to `login:`, WHP is 2.90× faster: 22.2 s against 64.4 s.
-- Ubuntu Server 26.04 reaches its installer in under 5 minutes on WHP, against 20–30 minutes on the interpreter. That is the maintainer's report, not a harness measurement.
-- The firmware stage is slower on WHP. From power-on to the boot loader, BIOS POST takes 4.9 s there against 0.6 s on the interpreter, so the whole gain comes after the boot loader starts.
-- This is a boot-time figure, not a throughput ratio. A WHP machine's devices run on host time, so much of its 27 s is the guest's own timed waits and idle time.
-- DLX Linux does not reach `login:` on WHP today. It gets through the BIOS and LILO, and then its kernel loses disk interrupts.
-
-A machine on the hypervisor differs from an interpreter machine in these ways:
-
-- **One processor runs.** The partition has one virtual processor. On a machine built with more, only processor 0 executes, and the machine is not refused.
-- **No instruction count.** A `max_instructions` limit is refused, and the status strip has no IPS readout: it shows `--- IPS`.
-- **Device timers run on host time**, not on the instruction count.
-- **The guest is always offered `host-shared` CPU capabilities**, whatever `--cpu-capabilities` says. That is the guest's CPU model narrowed to what the host can carry: it drops AVX-512 unless the host holds its state, and always drops `MONITOR`/`MWAIT`. On the interpreter, the default `preset` offers the whole model, the same on every host. [docs/whp-guest-capabilities.md](docs/whp-guest-capabilities.md) explains why.
-- **The local APIC is the hypervisor's.** Every other device is this port's model on both engines; on WHP the local APIC is the partition's own, so the APIC timer and the APIC registers a guest programs are the hypervisor's, not this port's.
-- **One partition per process.** A process can hold only one hypervisor partition at a time.
-- **Windows desktop only.** The Android APK and the browser shell run the interpreter.
-
-`cargo xtask ci` runs the WHP crates' tests; those that need hardware skip when there is no hypervisor. No guest boot on WHP is part of the gate.
-
-## The shell: Rusty Box Workstation
-
-`rusty_box_gui` is the launcher meant for people who want to run a VM rather than program against the library. [rusty_box_gui/README.md](rusty_box_gui/README.md) has the detail. In brief:
-
-- **The VM library.** Every VM is one TOML file in a per-user folder. On Windows that is `%APPDATA%\rusty_box\vms`. Every VM file there is listed at each launch, and an edit is saved to its file when the edit ends. A VM given on the command line is a temporary VM, marked "(unsaved)", until `Keep in library` adds it. A `+` button copies the selected VM, and `Delete VM` removes a VM's file but keeps its disk images.
-- **Four pages per VM.**
-  - **Summary:** the VM's state and settings.
-  - **Console:** the guest's display, with a serial pane that has an input line and a `Copy Log` button.
-  - **Hardware:** memory; processors, with the engine; PCI and boot order; the hard disk; the CD/DVD; ROMs and display resolution. Its edits apply at the next power-on.
-  - **Images:** creates disk images.
-- **The VM bar** carries `▶ Power on`, `■ Power off` and `↻ Restart`. On the Console page it adds `Ctrl+Alt+Del`, `Capture mouse` / `Release mouse` and `Show serial` / `Hide serial`. The status strip below the page shows the state, the engine, memory and CPU count, and the instruction rate.
-- **Disk creation.** The Images page creates bximage-compatible flat hard disks from 10 MiB to just under 8064 GiB, and floppy images in the ten bximage formats. A new hard disk is attached to the selected VM if it is stopped. A floppy image cannot be attached, because the machine has no floppy controller. `--create-disk` provisions a boot disk at startup.
-- **Mouse and keyboard.**
-  - The guest has a PS/2 mouse. Click the guest's display to capture it, or use `Capture mouse`; `Release mouse` releases it.
-  - Capture hides the host cursor over the display but does not lock the pointer, which can leave the display.
-  - The mouse wheel does not reach the guest: the mouse is a plain PS/2 mouse, which is never switched into IntelliMouse wheel mode.
-  - The keyboard is forwarded while the VM runs.
-
-### Android
-
-```bash
-cargo xtask android build
-cargo xtask android run
-cargo xtask android screenshot rustybox_android.png
-```
-
-The APK runs the same shell as the desktop, laid out for a phone:
-
-- Its VMs live in a library in the app's storage.
-- Its Browse buttons open an on-device file browser.
-- A Keys pad sends the keys a soft keyboard lacks.
-- The Bochs ROMs travel inside the APK. The ISO a VM boots is chosen on the phone, under Hardware › CD/DVD.
-- It runs the interpreter only.
-
-`cargo xtask android` installs the Android SDK components, the Rust target and `cargo-apk` as needed. It signs with a generated local dev keystore under your home directory, and uses `adb_client` for install, launch and screenshots. See [xtask/README.md](xtask/README.md).
-
-### Browser
-
-Two front ends build for `wasm32-unknown-unknown` with [trunk](https://trunkrs.dev/) (`rustup target add wasm32-unknown-unknown`, `cargo install --locked trunk`). Both compile the BIOS ROMs in, so the Bochs checkout above must be present:
-
-```bash
-# The GUI's browser shell
-cd rusty_box_gui && trunk serve --release --port 8080
-
-# The standalone web demo: boots the embedded DLX image (needs dlxlinux/hd10meg.img) or an uploaded Alpine ISO
-cd examples/rusty_box_web && trunk serve --release --port 8080
-```
-
-Then open `http://localhost:8080`.
-
-The browser shell:
-
-- boots an uploaded `.iso` or `.img` file as its CD/DVD;
-- sets the memory, from 1 to 4096 MB, and the processor count before boot;
-- downloads blank disk images of up to 64 MiB;
-- forwards the mouse whenever the pointer is over the display, with no capture step;
-- has no host filesystem, no VM files and no command line;
-- runs the interpreter only.
+On WHP one processor runs, nothing counts instructions, device timers run on host time, the guest is always offered `host-shared` CPU capabilities, and a process holds one partition, so one VM at a time runs on it. [Execution engines](docs/getting-started.md#execution-engines) in the getting-started guide says which engine suits which guest, and [docs/whp-guest-capabilities.md](docs/whp-guest-capabilities.md) what the guest is offered.
 
 ## The emulated PC
 
 **CPU**
 
-- Intel Core i7 Skylake-X is the model every machine runs. An AMD Ryzen model, with AMD SVM, is ported and unit-tested, but `MachineBuilder` and the GUI cannot select it.
+- Intel Core i7 Skylake-X is the model every machine runs. An AMD Ryzen model, with AMD SVM, is ported and unit-tested, but `MachineBuilder` and the shell cannot select it.
 - Full x87 FPU on Berkeley SoftFloat 3e (80-bit extended precision).
 - AVX-512 (F, DQ, CD, BW, VL), AVX2, SSE4.2, AES-NI, SHA, BMI1/BMI2.
 - Intel VMX, implemented and unit-tested. No run of a hypervisor inside a guest is recorded.
@@ -284,18 +135,17 @@ Developer harnesses in `rusty_box/examples/`, each run with `cargo run --release
 | `snapshot_resume` | `std` | Boots a guest from CD, saves a snapshot, and restores it in a fresh process (set `RB_ISO` to a bootable ISO) |
 | `perfbench` | `std` | CPU-core microbenchmark, needing no BIOS or disk (`cargo xtask perf-baseline` archives a build of it) |
 
-The WHP engine's harnesses are in `rusty_box_whp_engine/examples/`: `dlx_whp`, `alpine_probe`, `alpine_bench`, `compute_bench` and `step_bench`. The engine figure above comes from `alpine_probe`. [rusty_box/examples/README.md](rusty_box/examples/README.md) documents the environment variables.
+```bash
+# DLX Linux, headless (boots to the login prompt)
+RUSTY_BOX_HEADLESS=1 cargo run --release --example dlxlinux --features std
 
-## Getting an Alpine Linux ISO
+# Alpine Linux, headless BIOS boot
+ALPINE_ISO=alpine-virt-3.24.1-x86_64.iso RUSTY_BOX_HEADLESS=1 cargo run --release --example alpine_direct --features std
+```
 
-1. Visit [alpinelinux.org/downloads](https://alpinelinux.org/downloads/).
-2. Download the **Virtual** x86_64 ISO. This page and the harnesses use `alpine-virt-3.24.1-x86_64.iso`.
-3. Place it in the project root and run from the root. The harnesses look for it differently:
-   - `alpine_strace`, `alpine_bench` and `scripts/boot_gate.sh` open `alpine-virt-3.24.1-x86_64.iso` by default;
-   - `alpine_direct` defaults to `alpine-virt-3.23.3-x86_64.iso`, so pass `ALPINE_ISO=alpine-virt-3.24.1-x86_64.iso`, as in the quick start;
-   - the `rusty_box_egui` example also picks up any `.iso` whose name contains `alpine`, in the workspace root, its parent, or the current directory.
+`alpine_direct` prints the guest's serial console and does not stop at `login:`. The repository's `.cargo/config.toml` sets `MAX_INSTRUCTIONS=20000000000` for every cargo command, so the boot examples stop after 20 billion instructions unless you override it. `alpine_direct` defaults to an older ISO name, `alpine-virt-3.23.3-x86_64.iso`, hence `ALPINE_ISO` above.
 
-The browser builds upload the ISO from the page instead.
+The WHP engine's harnesses are in `rusty_box_whp_engine/examples/`: `dlx_whp`, `alpine_probe`, `alpine_bench`, `compute_bench` and `step_bench`. [rusty_box/examples/README.md](rusty_box/examples/README.md) documents the environment variables and where the harnesses look for their images.
 
 ## Architecture
 
@@ -316,6 +166,14 @@ Emulator<T: Instrumentation = (), E = SoftwareEngine>
 
 `T` is the instrumentation hook, a type rather than a feature: `()` observes nothing, and its empty hook mask makes the CPU skip every dispatch. Instructions execute on an `ExecCtx`, which holds disjoint borrows of one CPU and the machine parts it touches for one scheduler slice.
 
+### Key design principles
+
+- **No global state** -- each `Emulator` is fully self-contained. Interpreter machines run side by side, as the shell's VMs do; a process can hold only one WHP partition at a time.
+- **Bochs parity** -- every behavioural divergence from the Bochs C++ source is a bug. The deliberate exceptions are registered, with evidence, in [docs/bochs-parity-divergences.md](docs/bochs-parity-divergences.md).
+- **no_std + no_alloc core** -- CPU, memory, decoder, devices and the machine compile without `alloc`; fixed-size arrays and ring buffers replace `Vec`/`VecDeque`.
+- **CPU models as data** -- `CpuModel` is a closed runtime enum (Skylake-X, Ryzen); the model answers CPUID leaves and supplies the ISA, VMX and SVM extension bitmasks cached at init. `MachineBuilder` builds every processor as Skylake-X.
+- **`Send` by derivation** -- the tree has no `unsafe impl Send`; the [Safety Doctrine](docs/safety-doctrine.md) (R0-R9) governs every API and safety seam.
+
 ## Feature flags (`rusty_box`)
 
 | Flag | Default | Description |
@@ -327,8 +185,6 @@ Emulator<T: Instrumentation = (), E = SoftwareEngine>
 | `bench` | no | Criterion benchmarks (`benches/cpu_bench.rs`). Implies `std`. |
 
 `rusty_box_gui` has its own features: `gui-egui` and `hv-whp` (both default), `guest-trace` and `windows-gui-subsystem`.
-
-### Build configurations
 
 ```bash
 # The emulator library with its default features
@@ -343,14 +199,6 @@ cargo check --release -p rusty_box --no-default-features --features alloc
 # UEFI application: no allocator, placement construction
 cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi
 ```
-
-### Key design principles
-
-- **No global state** -- each `Emulator` is fully self-contained. Interpreter machines can run side by side; a process can hold only one WHP partition at a time.
-- **Bochs parity** -- every behavioural divergence from the Bochs C++ source is a bug. The deliberate exceptions are registered, with evidence, in [docs/bochs-parity-divergences.md](docs/bochs-parity-divergences.md).
-- **no_std + no_alloc core** -- CPU, memory, decoder, devices and the machine compile without `alloc`; fixed-size arrays and ring buffers replace `Vec`/`VecDeque`.
-- **CPU models as data** -- `CpuModel` is a closed runtime enum (Skylake-X, Ryzen); the model answers CPUID leaves and supplies the ISA, VMX and SVM extension bitmasks cached at init. `MachineBuilder` builds every processor as Skylake-X.
-- **`Send` by derivation** -- the tree has no `unsafe impl Send`; the [Safety Doctrine](docs/safety-doctrine.md) (R0-R9) governs every API and safety seam.
 
 ## Project structure
 
@@ -369,9 +217,9 @@ rusty_box/
 +-- rusty_box_whp_sys/         # Windows Hypervisor Platform FFI leaf (every hypervisor call is confined to its windows.rs)
 +-- rusty_box_whp/             # Safe wrapper over the WHP leaf
 +-- rusty_box_whp_engine/      # Runs a rusty_box machine's guest on WHP
-+-- rusty_box_gui/             # Desktop, Android and browser VM shell (egui): VM library, CLI/TOML config, interpreter or WHP engine, disk image creation
++-- rusty_box_gui/             # Desktop, Android and browser VM shell (egui); android/ holds the APK's manifest and service
 +-- rusty_box_bximage/         # bximage-compatible disk image creation
-+-- xtask/                     # Local CI gate (cargo xtask ci) and automation
++-- xtask/                     # Local CI gate (cargo xtask ci) and the Android build
 +-- examples/rusty_box_web/    # Standalone WASM web demo
 +-- examples/rusty_box_uefi/   # UEFI application (no allocator)
 +-- examples/no_alloc_smoke/   # no_alloc link smoke test for x86_64-unknown-none
@@ -406,14 +254,14 @@ A bare `cargo test` tests only the default workspace member (`rusty_box`), in a 
 1. The doctrine ratchets, over eight source trees, the GUI's included. They check the unsafe-token baselines, that there is no `unsafe impl Send/Sync`, the blanket `dead_code` allows, and that there is no production `unwrap`/`expect`.
 2. A 25-step matrix:
    - It tests `rusty_box_core`, `rusty_box_devices`, the three WHP crates, the decoder and `rusty_box`.
-   - It checks `rusty_box_core` and `rusty_box_devices` for bare metal.
+   - It checks `rusty_box_core` and `rusty_box_devices` for bare metal, and builds the WHP probe examples.
    - It checks `rusty_box` without std (with and without alloc), for bare metal, for wasm, with all features, and with debug assertions.
    - It checks `rusty_box_gui` for the host, with its tests, and for wasm.
    - It builds the UEFI application.
    - It runs the public-API and doc examples and the doctrine compile-fail fixtures.
 3. The DLX boot gate: DLX boots headlessly to its login prompt, on the interpreter. It is the only guest boot in the gate.
 
-The gate does not run the tests of `rusty_box_gui` or `rusty_box_bximage`; run those with `cargo test --release -p <crate>`.
+The gate does not run the tests of `rusty_box_gui`, `rusty_box_bximage` or `xtask`, and does not build the Android APK; run those with `cargo test --release -p <crate>` and `cargo xtask android build`.
 
 It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wasm32-unknown-unknown`, plus the firmware and disk image above. [CONTRIBUTING.md](CONTRIBUTING.md) has the details.
 
@@ -421,9 +269,9 @@ It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wa
 
 **Using Rusty Box**
 
-- [docs/getting-started.md](docs/getting-started.md) -- using the GUI: config file, pacing, CPU topology, disks, display
+- [docs/getting-started.md](docs/getting-started.md) -- using the shell: the guests and their settings, the VM file, pacing, CPU topology, disks, display
+- [rusty_box_gui/README.md](rusty_box_gui/README.md) -- the shell in full: the VM library, pages, engines, disk images, Android, browser
 - [docs/automation.md](docs/automation.md) -- driving a guest from Rust: boot it headless, read the screen, type at it, watch what it does
-- [rusty_box_gui/README.md](rusty_box_gui/README.md) -- the shell: the VM library, pages, engines, disk images, Android, browser
 - [docs/whp-guest-capabilities.md](docs/whp-guest-capabilities.md) -- what a machine on the hypervisor may advertise to its guest
 
 **Contributing**

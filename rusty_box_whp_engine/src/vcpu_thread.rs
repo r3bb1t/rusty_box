@@ -54,14 +54,16 @@ use std::time::{Duration, Instant};
 
 use rusty_box::cpu::arch_state::ArchGroups;
 use rusty_box::cpu::{
-    cpu::BxCpuC, instrumentation::Instrumentation, CpuError, ResetReason, Result,
+    cpu::{BxCpuC, Exception},
+    instrumentation::Instrumentation,
+    CpuError, HardwareEvent, ResetReason, Result,
 };
 use rusty_box::emulator::{DeviceTime, Emulator, PcIo, Processor, ProcessorParts, StopReason};
 use rusty_box::params::OnTripleFault;
 use rusty_box_core::{EngineFault, EngineFaultKind};
 use rusty_box_whp::{
-    ApicStatePage, ApicWriteType, Canceller, Exit, ExitReason, InternalActivity, IoPortAccess,
-    PendingExtIntEvent, Reg, Vcpu, WhpError, WhpResult,
+    ApicStatePage, ApicWriteType, Canceller, Exit, ExitReason, InternalActivity, InterruptedKind,
+    IoPortAccess, PendingExtIntEvent, PendingInterruptionRead, Reg, Vcpu, WhpError, WhpResult,
 };
 
 use crate::engine::{
@@ -1482,7 +1484,7 @@ impl Servicer<'_> {
                     // the trap. TF is read from the exit header, already
                     // here, so a guest that is not stepping pays nothing.
                     self.import(processor.cpu_mut(), ExitClass::StringPort, NO_BYTES)?;
-                    self.finish_the_errand(processor, Trapped::Access)?;
+                    self.finish_the_errand(processor, Trapped::Access, Finish::Instruction)?;
                 } else {
                     service_port_access(self.vcpu, &mut processor.io(), exit, access)?;
                 }
@@ -1498,12 +1500,16 @@ impl Servicer<'_> {
                     access.gpa
                 );
                 let bytes = usize::from(access.instruction_byte_count).min(16);
-                self.import(
-                    processor.cpu_mut(),
-                    ExitClass::Mmio,
-                    &access.instruction_bytes[..bytes],
-                )?;
-                self.finish_the_errand(processor, Trapped::Access)?;
+                // The access may be a delivery's — a stack push or a table
+                // read the partition could not complete — and a delivery the
+                // shadow takes over reads what a fault's delivery reads.
+                let finish = self.take_back_the_interrupted_delivery(exit)?;
+                let class = match finish {
+                    Finish::Instruction => ExitClass::Mmio,
+                    Finish::RaisingInstruction | Finish::Delivery(_) => ExitClass::Exception,
+                };
+                self.import(processor.cpu_mut(), class, &access.instruction_bytes[..bytes])?;
+                self.finish_the_errand(processor, Trapped::Access, finish)?;
                 Ok(Continue::Run)
             }
             // What the guest asked about the processor. Answered by executing
@@ -1512,7 +1518,7 @@ impl Servicer<'_> {
             ExitReason::Cpuid(access) => {
                 let leaf = access.rax as u32;
                 self.import(processor.cpu_mut(), ExitClass::Cpuid, CPUID)?;
-                self.finish_the_errand(processor, Trapped::Cpuid { leaf })?;
+                self.finish_the_errand(processor, Trapped::Cpuid { leaf }, Finish::Instruction)?;
                 Ok(Continue::Run)
             }
             ExitReason::MsrAccess(access) => {
@@ -1521,7 +1527,7 @@ impl Servicer<'_> {
                     ExitClass::Msr,
                     if access.is_write { WRMSR } else { RDMSR },
                 )?;
-                self.finish_the_errand(processor, Trapped::Access)?;
+                self.finish_the_errand(processor, Trapped::Access, Finish::Instruction)?;
                 Ok(Continue::Run)
             }
             ExitReason::Exception => {
@@ -1534,12 +1540,16 @@ impl Servicer<'_> {
                 // enters the guest's own handler. Either way the guest sees
                 // what the interpreter would have shown it, which is the same
                 // treatment an MMIO access, a `CPUID` and a port access get.
+                //
+                // A fault a delivery raised arrives the same way, and then
+                // the shadow takes the whole delivery over.
+                let finish = self.take_back_the_interrupted_delivery(exit)?;
                 self.import(processor.cpu_mut(), ExitClass::Exception, NO_BYTES)?;
                 if reports_each_fault() {
                     let ProcessorParts { cpu, mut io, engine } = processor.parts();
                     describe_the_fault(self.vcpu, cpu, &mut io, exit, &engine.history);
                 }
-                self.finish_the_errand(processor, Trapped::Access)?;
+                self.finish_the_errand(processor, Trapped::Access, finish)?;
                 Ok(Continue::Run)
             }
             // The platform's answer to a notification the injection path armed:
@@ -1681,9 +1691,74 @@ impl Servicer<'_> {
         self.exchange.import_for(self.vcpu, cpu, class, bytes, self.xsave)
     }
 
-    /// The end every errand shares: retire the trapped instruction, deliver the
-    /// trap it owes, republish deliverability from the shadow, and write back
-    /// exactly what was read.
+    /// Take back a delivery this exit interrupted, and answer what the shadow
+    /// must finish in the partition's place.
+    ///
+    /// An exit can land partway through a delivery: the delivery raised a
+    /// fault this engine traps, or touched memory the partition does not back.
+    /// The header says so (`ExecutionState.InterruptionPending`), and the
+    /// platform keeps the delivery in its pending-interruption register to
+    /// make again at the next entry — measured: an `INT 0x80` whose delivery
+    /// raised `#GP` stood there as a software interrupt of length 2. The
+    /// errand then moves the processor on the shadow, so a delivery left there
+    /// would land on a processor it no longer belongs to: inside the handler
+    /// the errand entered. The shadow takes the delivery over, and the
+    /// register is cleared.
+    ///
+    /// What the shadow finishes depends on what raised the event. An
+    /// instruction's own `INT n`, `INT1`, `INT3` or `INTO` still stands at
+    /// `RIP`, and executing it raises the event again, whole. An event the
+    /// processor raised at a boundary has nothing at `RIP` that recreates it —
+    /// an acknowledged vector has left its controller, a trap's instruction has
+    /// retired — so the shadow delivers the event itself.
+    ///
+    /// # Errors
+    /// The register the platform would not give up or take back, or a delivery
+    /// this port has no event for.
+    fn take_back_the_interrupted_delivery(&mut self, exit: &Exit) -> Result<Finish> {
+        if exit.vp.execution_state & INTERRUPTION_PENDING == 0 {
+            return Ok(Finish::Instruction);
+        }
+        let word = self.vcpu.read_reg(Reg::PendingInterruption).map_err(platform_failed)?;
+        let delivery = match PendingInterruptionRead::from_word(word) {
+            PendingInterruptionRead::Empty => return Ok(Finish::Instruction),
+            PendingInterruptionRead::Delivery(delivery) => delivery,
+            PendingInterruptionRead::UnknownKind { kind } => {
+                tracing::error!(
+                    "an exit at {:#x} interrupted a delivery of interruption type {kind}, which no \
+                     event has",
+                    exit.vp.rip
+                );
+                return Err(no_event_for(word));
+            }
+        };
+        let vector = u8::try_from(delivery.vector).map_err(|_| no_event_for(word))?;
+        let finish = match delivery.kind {
+            InterruptedKind::SoftwareInterrupt
+            | InterruptedKind::PrivilegedSoftwareException
+            | InterruptedKind::SoftwareException => Finish::RaisingInstruction,
+            InterruptedKind::ExternalInterrupt => {
+                Finish::Delivery(HardwareEvent::ExternalInterrupt { vector })
+            }
+            InterruptedKind::Nmi => Finish::Delivery(HardwareEvent::Nmi),
+            InterruptedKind::HardwareException => {
+                let exception = Exception::from_vector(vector).ok_or_else(|| no_event_for(word))?;
+                // The interpreter's error codes are sixteen bits wide (Bochs
+                // `exception`'s `Bit16u`); a wider one is not an error code any
+                // exception it models pushes.
+                let error_code = u16::try_from(delivery.error_code.unwrap_or(0))
+                    .map_err(|_| no_event_for(word))?;
+                Finish::Delivery(HardwareEvent::Exception { vector: exception, error_code })
+            }
+        };
+        self.vcpu.write_reg(Reg::PendingInterruption, 0).map_err(platform_failed)?;
+        Ok(finish)
+    }
+
+    /// The end every errand shares: finish what the exit left — the trapped
+    /// instruction, or a delivery the exit interrupted — deliver the trap it
+    /// owes, republish deliverability from the shadow, and write back exactly
+    /// what was read.
     ///
     /// One function rather than a tail repeated in every arm, because each of
     /// those obligations is a safety obligation (R5). The trap first: a
@@ -1703,12 +1778,17 @@ impl Servicer<'_> {
         &mut self,
         processor: &mut Processor<'_, T, WhpEngine>,
         trapped: Trapped,
+        finish: Finish,
     ) -> Result<()> {
-        // The trapped instruction, whole, on the machine's own dispatch path.
-        // Whatever it does — completes the access, moves a sector, or raises a
-        // fault and enters a handler — the processor it leaves behind is the
-        // one the platform must continue from.
-        processor.finish_the_instruction()?;
+        // The trapped instruction, whole, on the machine's own dispatch path —
+        // or the interrupted delivery, through the interpreter's own. Whatever
+        // it does — completes the access, moves a sector, or raises a fault and
+        // enters a handler — the processor it leaves behind is the one the
+        // platform must continue from.
+        match finish {
+            Finish::Instruction | Finish::RaisingInstruction => processor.finish_the_instruction()?,
+            Finish::Delivery(event) => processor.deliver_hardware_event(event)?,
+        }
         processor.deliver_the_trap_owed()?;
         let cpu = processor.cpu_mut();
         self.inject.refresh_from_shadow(cpu.interrupts_enabled(), cpu.in_interrupt_shadow());
@@ -1724,6 +1804,34 @@ impl Servicer<'_> {
             .fetch_add(u64::try_from(calls).unwrap_or(u64::MAX), Ordering::Release);
         Ok(())
     }
+}
+
+/// What the shadow finishes for an exit, in the partition's place.
+#[derive(Clone, Copy, Debug)]
+enum Finish {
+    /// The instruction at `RIP`; no delivery was under way.
+    Instruction,
+    /// The instruction at `RIP`, which raised the delivery the exit
+    /// interrupted and raises it again, whole, when executed.
+    RaisingInstruction,
+    /// A delivery the processor began at an instruction boundary, which only
+    /// delivering it can finish.
+    Delivery(HardwareEvent),
+}
+
+/// `WHV_X64_VP_EXECUTION_STATE.InterruptionPending`, bit 6 of an exit header's
+/// execution state: the exit landed partway through a delivery, which the
+/// platform holds in `WHvRegisterPendingInterruption`.
+const INTERRUPTION_PENDING: u16 = 1 << 6;
+
+/// The error for a delivery the platform reports that this port has no
+/// event for, naming the register word it read.
+fn no_event_for(word: u64) -> CpuError {
+    tracing::error!("the platform interrupted a delivery this port cannot finish: {word:#018x}");
+    CpuError::EngineFault(EngineFault::new(
+        EngineFaultKind::Unserviced,
+        "an interrupted delivery with no event in this port's model",
+    ))
 }
 
 /// What ended a park.

@@ -358,6 +358,234 @@ fn add_first_vm(
     Ok(library.create(name, &config)?)
 }
 
+/// A moment Android recorded: milliseconds since the Unix epoch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct EpochMillis(pub(crate) i64);
+
+/// Memory, KiB, as Android reports a process's resident set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Kib(pub(crate) i64);
+
+/// Why a process of this app ended, as Android names it
+/// (`ApplicationExitInfo.REASON_*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExitReason {
+    Unknown,
+    ExitSelf,
+    Signaled,
+    LowMemory,
+    Crash,
+    CrashNative,
+    Anr,
+    InitializationFailure,
+    PermissionChange,
+    ExcessiveResourceUsage,
+    UserRequested,
+    UserStopped,
+    DependencyDied,
+    Other,
+    Freezer,
+    PackageStateChange,
+    PackageUpdated,
+    /// A code from a later Android than this build knows.
+    Later(i32),
+}
+
+impl ExitReason {
+    /// The reason `ApplicationExitInfo.getReason()` answers with `code`.
+    pub(crate) fn from_code(code: i32) -> Self {
+        match code {
+            0 => Self::Unknown,
+            1 => Self::ExitSelf,
+            2 => Self::Signaled,
+            3 => Self::LowMemory,
+            4 => Self::Crash,
+            5 => Self::CrashNative,
+            6 => Self::Anr,
+            7 => Self::InitializationFailure,
+            8 => Self::PermissionChange,
+            9 => Self::ExcessiveResourceUsage,
+            10 => Self::UserRequested,
+            11 => Self::UserStopped,
+            12 => Self::DependencyDied,
+            13 => Self::Other,
+            14 => Self::Freezer,
+            15 => Self::PackageStateChange,
+            16 => Self::PackageUpdated,
+            later => Self::Later(later),
+        }
+    }
+}
+
+/// Where the app stood with Android when its process ended, from
+/// `ApplicationExitInfo.getImportance()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExitStanding {
+    /// On the screen (`IMPORTANCE_FOREGROUND`).
+    OnScreen,
+    /// Running a foreground service (`IMPORTANCE_FOREGROUND_SERVICE`).
+    Service,
+    /// Visible or noticeable, without the screen to itself.
+    Visible,
+    /// In front, with the screen off (`IMPORTANCE_TOP_SLEEPING`, 325 from
+    /// Android 9 and 150 before).
+    ScreenOff,
+    /// In the background.
+    Background,
+}
+
+impl ExitStanding {
+    pub(crate) fn of(importance: i32) -> Self {
+        match importance {
+            i32::MIN..=100 => Self::OnScreen,
+            101..=125 => Self::Service,
+            150 | 325 => Self::ScreenOff,
+            126..=149 | 151..=230 => Self::Visible,
+            231..=324 | 326..=i32::MAX => Self::Background,
+        }
+    }
+}
+
+/// One end of this app's process, as Android recorded it
+/// (`android.app.ApplicationExitInfo`, Android 11 and later).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExitRecord {
+    pub(crate) reason: ExitReason,
+    /// The exit status, or the signal's number for a signal.
+    pub(crate) status: i32,
+    pub(crate) standing: ExitStanding,
+    pub(crate) at: EpochMillis,
+    /// The process's resident set when it ended.
+    pub(crate) resident: Kib,
+    /// Android's own note, when it wrote one.
+    pub(crate) description: Option<String>,
+}
+
+impl ExitRecord {
+    /// Whether the user should hear of this end: not one they asked for,
+    /// nor an update of the app, nor the app's own clean exit.
+    fn worth_telling(&self) -> bool {
+        match self.reason {
+            ExitReason::UserRequested
+            | ExitReason::UserStopped
+            | ExitReason::PackageUpdated
+            | ExitReason::PackageStateChange => false,
+            ExitReason::ExitSelf => self.status != 0,
+            ExitReason::Unknown
+            | ExitReason::Signaled
+            | ExitReason::LowMemory
+            | ExitReason::Crash
+            | ExitReason::CrashNative
+            | ExitReason::Anr
+            | ExitReason::InitializationFailure
+            | ExitReason::PermissionChange
+            | ExitReason::ExcessiveResourceUsage
+            | ExitReason::DependencyDied
+            | ExitReason::Other
+            | ExitReason::Freezer
+            | ExitReason::Later(_) => true,
+        }
+    }
+}
+
+/// What a launch tells about how the app last ended, and what it remembers
+/// for the next launch.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct UntoldExit<'a> {
+    /// The newest end worth telling that no earlier launch has seen.
+    pub(crate) record: Option<&'a ExitRecord>,
+    /// The newest end of all, which the next launch counts as seen.
+    pub(crate) newest: Option<EpochMillis>,
+}
+
+/// The end a launch tells about: the newest one worth telling after `seen`,
+/// the newest end an earlier launch saw. With nothing seen yet, every
+/// recorded end counts, so the first launch of a build that tells tells of
+/// an end an earlier build saw happen.
+pub(crate) fn untold_exit(records: &[ExitRecord], seen: Option<EpochMillis>) -> UntoldExit<'_> {
+    UntoldExit {
+        record: records
+            .iter()
+            .filter(|record| seen.is_none_or(|seen| record.at > seen))
+            .filter(|record| record.worth_telling())
+            .max_by_key(|record| record.at),
+        newest: records.iter().map(|record| record.at).max(),
+    }
+}
+
+/// What the shell says about `record` at a launch at `now`.
+pub(crate) fn exit_sentence(record: &ExitRecord, now: EpochMillis) -> String {
+    let standing = match record.standing {
+        ExitStanding::OnScreen => "while it was on the screen",
+        ExitStanding::Service => "while it kept VMs running in the background",
+        ExitStanding::Visible => "while it was in view",
+        ExitStanding::ScreenOff => "while the screen was off",
+        ExitStanding::Background => "while it was in the background",
+    };
+    let cause = match record.reason {
+        ExitReason::LowMemory => format!(
+            "Android closed it because the phone ran low on memory, with Rusty Box using {}",
+            memory_words(record.resident)
+        ),
+        ExitReason::Crash | ExitReason::CrashNative => "it crashed".to_owned(),
+        ExitReason::Anr => "it stopped responding, and Android closed it".to_owned(),
+        ExitReason::ExcessiveResourceUsage => {
+            "Android closed it for using too much processor time or battery".to_owned()
+        }
+        ExitReason::Freezer => "Android froze it, then closed it".to_owned(),
+        ExitReason::Signaled => format!("Android ended it with signal {}", record.status),
+        ExitReason::PermissionChange => {
+            "Android closed it because a permission it holds was changed".to_owned()
+        }
+        ExitReason::DependencyDied => {
+            "Android closed it because a process it depends on ended".to_owned()
+        }
+        ExitReason::InitializationFailure => "it could not start".to_owned(),
+        ExitReason::ExitSelf => format!("it exited with status {}", record.status),
+        ExitReason::UserRequested => "it was closed from the recent apps or settings".to_owned(),
+        ExitReason::UserStopped => "its user was stopped".to_owned(),
+        ExitReason::PackageUpdated => "it was updated".to_owned(),
+        ExitReason::PackageStateChange => "the app was turned off or changed".to_owned(),
+        ExitReason::Unknown | ExitReason::Other | ExitReason::Later(_) => {
+            "Android closed it without saying why".to_owned()
+        }
+    };
+    let mut sentence = format!(
+        "Rusty Box ended {}, {standing}: {cause}.",
+        elapsed_words(record.at, now)
+    );
+    if let Some(note) = &record.description {
+        sentence.push_str(" Android's note: ");
+        sentence.push_str(note);
+    }
+    sentence
+}
+
+/// How long before `now` the moment `at` was, in words.
+fn elapsed_words(at: EpochMillis, now: EpochMillis) -> String {
+    let minutes = now.0.saturating_sub(at.0).max(0) / 60_000;
+    match minutes {
+        0 => "less than a minute ago".to_owned(),
+        1 => "a minute ago".to_owned(),
+        2..=59 => format!("{minutes} minutes ago"),
+        60..=119 => "about an hour ago".to_owned(),
+        120..=2_879 => format!("about {} hours ago", minutes / 60),
+        _ => format!("{} days ago", minutes / 1_440),
+    }
+}
+
+/// `resident` as a person reads it: megabytes under a gigabyte, gigabytes
+/// to one decimal above.
+fn memory_words(resident: Kib) -> String {
+    const KIB_PER_MB: i64 = 1_024;
+    const KIB_PER_GB: i64 = 1_024 * 1_024;
+    if resident.0 < KIB_PER_GB {
+        format!("{} MB", resident.0 / KIB_PER_MB)
+    } else {
+        format!("{}.{} GB", resident.0 / KIB_PER_GB, resident.0 % KIB_PER_GB * 10 / KIB_PER_GB)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,5 +962,101 @@ mod tests {
         assert!(notice.contains("No VM was made"), "{notice:?}");
         assert!(library.load().expect("load").vms.is_empty());
         fs::remove_dir_all(&storage).expect("remove scratch dir");
+    }
+
+    const HOUR_MS: i64 = 3_600_000;
+    /// A launch's clock: 6 October 2026, 07:00 UTC.
+    const NOW: EpochMillis = EpochMillis(1_791_270_000_000);
+
+    /// An end of the app `hours` before `NOW`.
+    fn ended(reason: ExitReason, standing: ExitStanding, hours: i64) -> ExitRecord {
+        ExitRecord {
+            reason,
+            status: 0,
+            standing,
+            at: EpochMillis(NOW.0 - hours * HOUR_MS),
+            resident: Kib(2_202_010),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn android_names_each_end_by_its_code() {
+        assert_eq!(ExitReason::from_code(3), ExitReason::LowMemory);
+        assert_eq!(ExitReason::from_code(6), ExitReason::Anr);
+        assert_eq!(ExitReason::from_code(9), ExitReason::ExcessiveResourceUsage);
+        assert_eq!(ExitReason::from_code(14), ExitReason::Freezer);
+        assert_eq!(ExitReason::from_code(42), ExitReason::Later(42));
+        assert_eq!(ExitStanding::of(100), ExitStanding::OnScreen);
+        assert_eq!(ExitStanding::of(125), ExitStanding::Service);
+        assert_eq!(ExitStanding::of(325), ExitStanding::ScreenOff);
+        assert_eq!(ExitStanding::of(400), ExitStanding::Background);
+    }
+
+    /// The night's end is told even though the app was updated and opened
+    /// since: an update, and a close from the recent apps, are the user's own.
+    #[test]
+    fn a_launch_tells_the_newest_end_the_user_did_not_ask_for() {
+        let night = ended(ExitReason::LowMemory, ExitStanding::ScreenOff, 5);
+        let records = [
+            ended(ExitReason::PackageUpdated, ExitStanding::Background, 1),
+            ended(ExitReason::UserRequested, ExitStanding::Background, 2),
+            night.clone(),
+            ended(ExitReason::CrashNative, ExitStanding::OnScreen, 30),
+        ];
+
+        let untold = untold_exit(&records, None);
+
+        assert_eq!(untold.record, Some(&night));
+        assert_eq!(untold.newest, Some(EpochMillis(NOW.0 - HOUR_MS)));
+    }
+
+    #[test]
+    fn an_end_a_launch_has_seen_is_not_told_again() {
+        let records = [ended(ExitReason::Anr, ExitStanding::ScreenOff, 5)];
+        let seen = untold_exit(&records, None).newest;
+
+        let next = untold_exit(&records, seen);
+
+        assert_eq!(next.record, None);
+        assert_eq!(next.newest, seen);
+    }
+
+    #[test]
+    fn a_clean_exit_of_its_own_is_not_told() {
+        let clean = ended(ExitReason::ExitSelf, ExitStanding::OnScreen, 1);
+        let failed = ExitRecord {
+            status: 3,
+            ..clean.clone()
+        };
+        assert_eq!(untold_exit(&[clean], None).record, None);
+        assert_eq!(untold_exit(&[failed.clone()], None).record, Some(&failed));
+    }
+
+    #[test]
+    fn the_shell_says_when_why_and_where_the_app_stood() {
+        let low_memory = ended(ExitReason::LowMemory, ExitStanding::ScreenOff, 5);
+        assert_eq!(
+            exit_sentence(&low_memory, NOW),
+            "Rusty Box ended about 5 hours ago, while the screen was off: Android closed it \
+             because the phone ran low on memory, with Rusty Box using 2.1 GB."
+        );
+
+        let busy = ExitRecord {
+            description: Some("excessive cpu 290000 during 300000".to_owned()),
+            ..ended(ExitReason::ExcessiveResourceUsage, ExitStanding::Background, 0)
+        };
+        assert_eq!(
+            exit_sentence(&busy, NOW),
+            "Rusty Box ended less than a minute ago, while it was in the background: Android \
+             closed it for using too much processor time or battery. Android's note: \
+             excessive cpu 290000 during 300000"
+        );
+
+        let crash = ended(ExitReason::CrashNative, ExitStanding::OnScreen, 50);
+        assert_eq!(
+            exit_sentence(&crash, NOW),
+            "Rusty Box ended 2 days ago, while it was on the screen: it crashed."
+        );
     }
 }

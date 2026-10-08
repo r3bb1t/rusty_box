@@ -293,6 +293,10 @@ pub struct EmulatorConfig {
     pub rtc_time0: crate::iodev::cmos::RtcInitTime,
     /// Which clock this machine's devices run on. See [`DeviceClock`].
     pub device_clock: DeviceClock,
+    /// Whether port 0xE9 is a debug console — Bochs `port_e9_hack` (config.cc
+    /// BXPN_PORT_E9_HACK), off by default as upstream. See
+    /// [`PortE9Hack`](crate::iodev::PortE9Hack).
+    pub port_e9_hack: crate::iodev::PortE9Hack,
 }
 
 /// Which clock the machine's devices run on (R2).
@@ -326,6 +330,7 @@ impl Default for EmulatorConfig {
             cpuid_freq: CpuidFreq::default(),
             rtc_time0: crate::iodev::cmos::RtcInitTime::default(),
             device_clock: DeviceClock::Ticks,
+            port_e9_hack: crate::iodev::PortE9Hack::Off,
         }
     }
 }
@@ -533,11 +538,12 @@ pub struct Emulator<T: Instrumentation = (), E = SoftwareEngine> {
     #[cfg(feature = "alloc")]
     gui: Option<Box<dyn BxGui>>,
     /// Host input the guest's own buffers had no room for, held in order
-    /// until they do — see `gui::host_input::HostInputBacklog`. Drained by
-    /// `pump_gui_input`, which is the only thing that fills it, and emptied
-    /// by a reset.
+    /// until they do — see `gui::host_input::HostInputBacklog`. Filled from
+    /// the front end by `pump_gui_input`, by `HostInputSink::push` and by
+    /// `Serial::send`; drained by `pump_gui_input`. A reset drops the
+    /// keyboard part and a snapshot restore all of it.
     #[cfg(feature = "alloc")]
-    host_input: crate::gui::host_input::HostInputBacklog,
+    pub(crate) host_input: crate::gui::host_input::HostInputBacklog,
     /// Output file for the port-0xE9 debug console (std feature only). BIOS
     /// message ports 0x400-0x403/0x500-0x503 go to the log instead, exactly
     /// like Bochs biosdev.cc.
@@ -770,6 +776,15 @@ impl<'a, T: Instrumentation, E> Processor<'a, T, E> {
     /// processor could not take.
     pub fn deliver_the_trap_owed(&mut self) -> crate::cpu::Result<()> {
         self.io.deliver_the_trap_owed(self.cpu)
+    }
+
+    /// Deliver an event this engine's hardware began delivering and did not
+    /// finish, in place of the instruction at `RIP`.
+    ///
+    /// # Errors
+    /// Whatever the delivery raised that the processor could not take.
+    pub fn deliver_hardware_event(&mut self, event: crate::cpu::HardwareEvent) -> crate::cpu::Result<()> {
+        self.io.deliver_hardware_event(self.cpu, event)
     }
 
     /// Signal a system-management interrupt on this processor. Whether it is
@@ -1187,7 +1202,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             config.memory_block_size,
         )?;
         let memory = BxMemC::new(mem_stub, config.pci_enabled);
-        let devices = BxDevicesC::new();
+        let mut devices = BxDevicesC::new();
+        devices.set_port_e9_hack(config.port_e9_hack);
         let device_manager = DeviceManager::new();
 
         // Emulator contains large fixed arrays. Allocate zeroed on heap
@@ -1261,7 +1277,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         }
 
         let memory = BxMemC::new_from_stub(mem_stub, config.pci_enabled);
-        let devices = BxDevicesC::new();
+        let mut devices = BxDevicesC::new();
+        devices.set_port_e9_hack(config.port_e9_hack);
         let device_manager = DeviceManager::new();
         let pc_system = BxPcSystemC::new();
         for (index, slot) in cpus.iter_mut().take(configured_cpu_count).enumerate() {
@@ -1385,6 +1402,22 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.memory.set_a20_mask(self.pc_system.a20_mask());
     }
 
+    /// Initialize every processor from the machine's CPU parameters — Bochs
+    /// main.cc `BX_CPU(i)->initialize()`, which is where `cpuid: <feature>=`
+    /// overrides edit the model's feature set.
+    ///
+    /// The one place a configured processor is made (R5): the firmware boot
+    /// path and the mode-setup constructors both come through here, so a
+    /// feature a caller added or held back is honoured however the machine
+    /// was built.
+    pub(crate) fn initialize_cpus_from_config(&mut self) -> Result<()> {
+        let cpu_params = self.config.cpu_params.clone();
+        for cpu_index in 0..self.cpu_count() {
+            self.cpu_mut_at(cpu_index).initialize(cpu_params.clone())?;
+        }
+        Ok(())
+    }
+
     /// Initialize CPU and devices (Step 6-11 of initialization)
     ///
     /// This is the second part of the initialization sequence from Bochs main.cc:
@@ -1408,10 +1441,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.smp_tick_remainder = 0;
         self.batch_advanced_pc_system = false;
 
-        let cpu_params = self.config.cpu_params.clone();
-        for cpu_index in 0..self.cpu_count() {
-            self.cpu_mut_at(cpu_index).initialize(cpu_params.clone())?;
-        }
+        self.initialize_cpus_from_config()?;
         tracing::trace!("CPUs initialized");
 
         // Step 7: CPU sanity checks (line 1338) - separate call to match original

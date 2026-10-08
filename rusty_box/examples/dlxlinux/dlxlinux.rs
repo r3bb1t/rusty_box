@@ -221,6 +221,13 @@ fn run_dlxlinux() -> Result<()> {
         memory_block_size: 128 * 1024,
         ips: Ips::new(300_000_000),
         pci_enabled: true,
+        // The Bochs default, off, as the DLX bochsrc leaves it — unless
+        // BIOS_OUTPUT_FILE asks for the port-0xE9 console's output.
+        port_e9_hack: if bios_output_file.is_some() {
+            rusty_box::iodev::PortE9Hack::On
+        } else {
+            rusty_box::iodev::PortE9Hack::Off
+        },
         ..Default::default()
     };
 
@@ -509,7 +516,10 @@ fn run_dlxlinux() -> Result<()> {
 
     // In headless mode (and even with GUI), also print any remaining Bochs-style
     // debug-port output that might not have been drained during execution.
-    let e9: Vec<u8> = emu.debug_port().take_output().collect();
+    let e9: Vec<u8> = emu
+        .debug_port()
+        .map(|mut port| port.take_output().collect())
+        .unwrap_or_default();
     if !e9.is_empty() {
         println!();
         println!("===== BOCHS DEBUG PORT OUTPUT (0xE9) =====");

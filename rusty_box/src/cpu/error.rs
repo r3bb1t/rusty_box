@@ -48,6 +48,10 @@ pub enum CpuError {
     #[error("Unsupported CPU operation: {operation}")]
     UnsupportedCpuOperation { operation: &'static str },
 
+    /// A host read or write of a model-specific register was refused, and why.
+    #[error("MSR {msr:#010x}: {reason}")]
+    MsrRefused { msr: u32, reason: MsrRefusal },
+
     #[error("machine boundary effect failed")]
     MachineBoundaryFailed,
 
@@ -84,4 +88,38 @@ pub enum CpuError {
     VmxInternalError {
         reason: super::vmx::VmxInternalReason,
     },
+}
+
+/// Why a host read or write of an MSR was refused (R0, R5).
+///
+/// A closed set: a host that wants to tell "this processor has no such
+/// register" from "this API does not carry it" matches on these, and a new
+/// reason has to be handled everywhere one is matched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MsrRefusal {
+    /// This processor's CPU model does not have the register: the feature
+    /// that defines it is off, so a guest's RDMSR or WRMSR of it would #GP.
+    Absent,
+    /// The register exists, but the host API does not read or write it.
+    NotCarried,
+    /// The register exists and is read-only, so there is nothing to write.
+    ReadOnly,
+    /// The processor rejects the value: a reserved bit is set, or an address
+    /// is not canonical. A guest's WRMSR of it would #GP.
+    InvalidValue,
+    /// The processor would take the write and then ignore it. Answered as a
+    /// refusal because a host has no other way to see "ignored".
+    WriteIgnored,
+}
+
+impl core::fmt::Display for MsrRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Absent => "this processor's CPU model does not have it",
+            Self::NotCarried => "the host API does not read or write it",
+            Self::ReadOnly => "it is read-only",
+            Self::InvalidValue => "the processor rejects that value",
+            Self::WriteIgnored => "the processor would ignore the write",
+        })
+    }
 }

@@ -54,25 +54,37 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// POP m32 - Pop into 32-bit memory location
     /// Based on Bochs stack32.cc POP_EdM
     pub fn pop_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        // Bochs stack32.cc POP_EdM: the pop is speculative, and the address is
+        // formed after it, so an ESP-relative operand sees ESP already advanced.
+        self.rsp_speculative();
         let value = self.pop_32()?;
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         self.v_write_dword(seg, eaddr, value)?;
+        self.rsp_commit();
         Ok(())
     }
 
-    /// POP segment register (32-bit mode)
-    /// Based on Bochs stack32.cc POP32_Sw
-    /// Pops a 16-bit selector from stack (advancing ESP by 4) and loads it into segment register
+    /// POP segment register (32-bit operand size) — Bochs stack32.cc
+    /// POP32_Sw: the selector is READ as a word at the top of the stack, the
+    /// segment is loaded, and only then does the stack pointer move by 4. A
+    /// selector the load refuses leaves the stack untouched, and no more than
+    /// the word is read.
     pub fn pop32_sw(&mut self, instr: &Instruction) -> Result<(), super::error::CpuError> {
         use crate::cpu::decoder::BxSegregs;
 
-        // Bochs POP32_Sw: pop 32-bit value, use low 16 bits as selector
-        let val32 = self.pop_32()?;
-        let selector_value = val32 as u16;
         let seg = BxSegregs::from(instr.dst());
-
-        self.load_seg_reg(seg, selector_value)?;
+        if self.get_segment_d_b(BxSegregs::Ss) {
+            let esp = self.esp();
+            let selector_value = self.stack_read_word(esp)?;
+            self.load_seg_reg(seg, selector_value)?;
+            self.set_esp(esp.wrapping_add(4));
+        } else {
+            let sp = self.sp();
+            let selector_value = self.stack_read_word(u32::from(sp))?;
+            self.load_seg_reg(seg, selector_value)?;
+            self.set_sp(sp.wrapping_add(4));
+        }
 
         // POP SS inhibits interrupts until next instruction boundary
         // (Bochs stack32.cc)
@@ -249,7 +261,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             | EFlags::ID.bits()
             | EFlags::AC.bits();
 
-        // RF is always zero after the execution of POPF
+        // Bochs flag_ctrl.cc POPF_Fd: RSP_SPECULATIVE, so the #GP a
+        // virtual-8086 POPFD raises leaves ESP on the flags it would have
+        // popped. RF is always zero after the execution of POPF.
+        self.rsp_speculative();
         let flags32 = self.pop_32()? & !EFlags::RF.bits();
 
         if self.protected_mode() {
@@ -276,6 +291,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         self.write_eflags(flags32, change_mask);
+        self.rsp_commit();
         Ok(())
     }
 
@@ -309,6 +325,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let imm16 = instr.iw() as u32;
         let mut level = instr.ib2() & 0x1F;
 
+        // Bochs stack32.cc ENTER32_IwIb: RSP_SPECULATIVE, so a fault in any
+        // push or in the final write check leaves the stack where it began.
+        self.rsp_speculative();
         let ebp = self.ebp();
         self.push_32(ebp)?;
         let frame_ptr32 = self.esp();
@@ -370,6 +389,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         self.set_ebp(frame_ptr32);
+        self.rsp_commit();
         Ok(())
     }
 

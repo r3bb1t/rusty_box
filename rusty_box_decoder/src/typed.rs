@@ -149,24 +149,24 @@ impl Opcode {
         // Use discriminant ranges for large groups
         let d = self as u16;
 
-        // FPU: Fwait(539)..=Fpuesc(675)
+        // FPU: Fwait..=Fpuesc
         if d >= O::Fwait as u16 && d <= O::Fpuesc as u16 {
             return OpcodeCategory::Fpu;
         }
 
-        // MMX + 3DNow!: PunpcklbwPqQd(692)..=PrefetchwMb(774)
+        // MMX + 3DNow!: PunpcklbwPqQd..=PrefetchwMb
         // Includes Emms, Femms, Pf2id..Pswapdw, PrefetchwMb
         if d >= O::PunpcklbwPqQd as u16 && d <= O::PrefetchwMb as u16 {
             return OpcodeCategory::Mmx;
         }
 
-        // SSE/SSE2/SSE3/SSSE3/SSE4/AES/SHA/GFNI: Ldmxcsr(815)..=Gf2p8mulbVdqWdq(1165)
+        // SSE/SSE2/SSE3/SSSE3/SSE4/AES/SHA/GFNI: Ldmxcsr..=Gf2p8mulbVdqWdq
         // Includes all SSE* families, CRC32, MOVBE, POPCNT, XSAVE, AES, SHA, GFNI
         if d >= O::Ldmxcsr as u16 && d <= O::Gf2p8mulbVdqWdq as u16 {
             return OpcodeCategory::Sse;
         }
 
-        // AVX/AVX2/FMA/FMA4/XOP (VEX-encoded): Vzeroupper(1460)..=VphsubdqVdqWdq(2193)
+        // AVX/AVX2/FMA/FMA4/XOP (VEX-encoded): Vzeroupper..=VphsubdqVdqWdq
         if d >= O::Vzeroupper as u16 && d <= O::VphsubdqVdqWdq as u16 {
             return OpcodeCategory::Avx;
         }
@@ -176,13 +176,13 @@ impl Opcode {
             return OpcodeCategory::Evex;
         }
 
-        // AVX mask register ops: KaddwKgwKhwKew(2268)..=KtestdKgdKed(2330)
+        // AVX mask register ops: KaddwKgwKhwKew..=KtestdKgdKed
         if d >= O::KaddwKgwKhwKew as u16 && d <= O::KtestdKgdKed as u16 {
             return OpcodeCategory::Avx;
         }
 
-        // AMX tile ops: Ldtilecfg(2250)..=Tmmultf32psTnnnTrmTreg(2267)
-        // These are extensions (not AVX/EVEX in the traditional sense)
+        // AMX tile ops (Ldtilecfg..=Tdphbf8psTnnnTrmTreg) are extensions, not
+        // AVX/EVEX in the traditional sense, and fall through to the default.
 
         // Everything else is Extension (BMI, TBM, CET, RDRAND, LZCNT, TZCNT,
         // ADX, SMAP, MOVDIRI, RAO-INT, CMPccXADD, AMX, SSE4A, MOVRS, etc.)
@@ -6171,6 +6171,26 @@ pub enum TypedInstruction {
         src: GprIndex,
         imm: u32,
     },
+    /// URDMSR r64, imm32 — user-mode MSR read, index in the immediate
+    UrdmsrEqIdR {
+        dst: GprIndex,
+        imm: u32,
+    },
+    /// UWRMSR imm32, r64 — user-mode MSR write, index in the immediate
+    UwrmsrIdEqR {
+        src: GprIndex,
+        imm: u32,
+    },
+    /// URDMSR r64, r64 — user-mode MSR read, index in the reg operand
+    UrdmsrEqGqR {
+        dst: GprIndex,
+        index: GprIndex,
+    },
+    /// UWRMSR r64, r64 — user-mode MSR write, index in the reg operand
+    UwrmsrGqEqR {
+        index: GprIndex,
+        src: GprIndex,
+    },
     /// RDMSRLIST — read multiple MSRs from list
     Rdmsrlist,
     /// WRMSRLIST — write multiple MSRs from list
@@ -6853,15 +6873,14 @@ pub enum TypedInstruction {
         dst: u8,
         src: u8,
     },
-    InsertqVdqUqIbIbR {
+    /// Register form only (the opcode table accepts mod 11 alone), with the
+    /// field length in `imm1` and its position in `imm2` — Bochs
+    /// `INSERTQ_VdqUqIbIb`, `OP_Ib, OP_Ib2`.
+    InsertqVdqUqIbIb {
         dst: u8,
         src: u8,
-        imm: u8,
-    },
-    InsertqVdqUqIbIbM {
-        dst: u8,
-        src: MemoryOperand,
-        imm: u8,
+        imm1: u8,
+        imm2: u8,
     },
     LarGwEwR {
         dst: GprIndex,
@@ -9489,11 +9508,6 @@ pub enum TypedInstruction {
     TilezeroTnnn {
         reg: u8,
     },
-    Tmmultf32psTnnnTrmTreg {
-        dst: u8,
-        src1: u8,
-        src2: u8,
-    },
     UcomisdVsdWsdR {
         dst: u8,
         src: u8,
@@ -10064,21 +10078,27 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
+    /// Three operands despite the name: Bochs ia_opcodes.def gives
+    /// `V128_VPAVGB_VdqWdq` `OP_Vdq, OP_Hdq, OP_Wdq`.
     V128VpavgbVdqWdqR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
     },
     V128VpavgbVdqWdqM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     V128VpavgwVdqWdqR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
     },
     V128VpavgwVdqWdqM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     V128VpblendvbVdqHdqWdqIbR {
         dst: u8,
@@ -11442,21 +11462,26 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
+    /// Three operands despite the name, as [`Self::V128VpavgbVdqWdqR`].
     V256VpavgbVdqWdqR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
     },
     V256VpavgbVdqWdqM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     V256VpavgwVdqWdqR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
     },
     V256VpavgwVdqWdqM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     V256VpblendvbVdqHdqWdqIbR {
         dst: u8,
@@ -16929,6 +16954,16 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
+    EvexVcvt2ps2phxVphHpsWpsR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexVcvt2ps2phxVphHpsWpsM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+    },
     EvexVcvt2ps2phxVphHpsWpsKmaskR {
         dst: u8,
         src1: u8,
@@ -21883,22 +21918,22 @@ pub enum TypedInstruction {
         src: MemoryOperand,
         imm: u8,
     },
-    EvexVmaxpbf16VphHphWphR {
+    EvexVmaxbf16VphHphWphR {
         dst: u8,
         src1: u8,
         src2: u8,
     },
-    EvexVmaxpbf16VphHphWphM {
+    EvexVmaxbf16VphHphWphM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVmaxpbf16VphHphWphKmaskR {
+    EvexVmaxbf16VphHphWphKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
     },
-    EvexVmaxpbf16VphHphWphKmaskM {
+    EvexVmaxbf16VphHphWphKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
@@ -22093,22 +22128,22 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVminpbf16VphHphWphR {
+    EvexVminbf16VphHphWphR {
         dst: u8,
         src1: u8,
         src2: u8,
     },
-    EvexVminpbf16VphHphWphM {
+    EvexVminbf16VphHphWphM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVminpbf16VphHphWphKmaskR {
+    EvexVminbf16VphHphWphKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
     },
-    EvexVminpbf16VphHphWphKmaskM {
+    EvexVminbf16VphHphWphKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
@@ -26175,16 +26210,6 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVpmultishiftqbVdqHdqWdqR {
-        dst: u8,
-        src1: u8,
-        src2: u8,
-    },
-    EvexVpmultishiftqbVdqHdqWdqM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
-    },
     EvexVpmultishiftqbVdqHdqWdqKmaskR {
         dst: u8,
         src1: u8,
@@ -29431,7 +29456,7 @@ impl Instruction {
             O::Xsetbv => T::Xsetbv,
             O::Emms => T::Emms,
             O::INT3 => T::Int3,
-            O::Int0 => T::Into,
+            O::Into => T::Into,
             O::INT1 => T::Int1,
             O::RetOp16 => T::RetOp16,
             O::RetOp32 => T::RetOp32,
@@ -31682,8 +31707,24 @@ impl Instruction {
             },
             O::Wrmsrns => T::Wrmsrns,
             O::WrmsrnsIdEq => T::WrmsrnsIdEqR {
-                src: self.dst_reg(),
+                src: self.src1_reg(),
                 imm: self.id(),
+            },
+            O::UrdmsrEqId => T::UrdmsrEqIdR {
+                dst: self.dst_reg(),
+                imm: self.id(),
+            },
+            O::UwrmsrIdEq => T::UwrmsrIdEqR {
+                src: self.src1_reg(),
+                imm: self.id(),
+            },
+            O::UrdmsrEqGq => T::UrdmsrEqGqR {
+                dst: self.dst_reg(),
+                index: self.src1_reg(),
+            },
+            O::UwrmsrGqEq => T::UwrmsrGqEqR {
+                index: self.dst_reg(),
+                src: self.src1_reg(),
             },
             O::Rdmsrlist => T::Rdmsrlist,
             O::Wrmsrlist => T::Wrmsrlist,
@@ -31937,7 +31978,12 @@ impl Instruction {
                 dst: self.operands.dst,
                 src: self.operands.src1,
             },
-            O::InsertqVdqUqIbIb => simd_ib!(InsertqVdqUqIbIbR, InsertqVdqUqIbIbM, self),
+            O::InsertqVdqUqIbIb => T::InsertqVdqUqIbIb {
+                dst: self.operands.dst,
+                src: self.operands.src1,
+                imm1: self.ib(),
+                imm2: self.ib2(),
+            },
             O::LddquVdqMdq => T::LddquVdqMdq {
                 dst: self.operands.dst,
                 src: self.memory_operand(),
@@ -32618,11 +32664,6 @@ impl Instruction {
             O::TilezeroTnnn => T::TilezeroTnnn {
                 reg: self.operands.dst,
             },
-            O::Tmmultf32psTnnnTrmTreg => T::Tmmultf32psTnnnTrmTreg {
-                dst: self.operands.dst,
-                src1: self.operands.src2,
-                src2: self.operands.src1,
-            },
             O::UcomisdVsdWsd => simd!(UcomisdVsdWsdR, UcomisdVsdWsdM, self),
             O::UcomissVssWss => simd!(UcomissVssWssR, UcomissVssWssM, self),
             O::UnpckhpdVpdWdq => simd!(UnpckhpdVpdWdqR, UnpckhpdVpdWdqM, self),
@@ -32835,8 +32876,8 @@ impl Instruction {
             }
             O::V128VpandVdqHdqWdq => simd3!(V128VpandVdqHdqWdqR, V128VpandVdqHdqWdqM, self),
             O::V128VpandnVdqHdqWdq => simd3!(V128VpandnVdqHdqWdqR, V128VpandnVdqHdqWdqM, self),
-            O::V128VpavgbVdqWdq => simd!(V128VpavgbVdqWdqR, V128VpavgbVdqWdqM, self),
-            O::V128VpavgwVdqWdq => simd!(V128VpavgwVdqWdqR, V128VpavgwVdqWdqM, self),
+            O::V128VpavgbVdqWdq => simd3!(V128VpavgbVdqWdqR, V128VpavgbVdqWdqM, self),
+            O::V128VpavgwVdqWdq => simd3!(V128VpavgwVdqWdqR, V128VpavgwVdqWdqM, self),
             O::V128VpblendvbVdqHdqWdqIb => {
                 simd3_ib!(V128VpblendvbVdqHdqWdqIbR, V128VpblendvbVdqHdqWdqIbM, self)
             }
@@ -33245,8 +33286,8 @@ impl Instruction {
             }
             O::V256VpandVdqHdqWdq => simd3!(V256VpandVdqHdqWdqR, V256VpandVdqHdqWdqM, self),
             O::V256VpandnVdqHdqWdq => simd3!(V256VpandnVdqHdqWdqR, V256VpandnVdqHdqWdqM, self),
-            O::V256VpavgbVdqWdq => simd!(V256VpavgbVdqWdqR, V256VpavgbVdqWdqM, self),
-            O::V256VpavgwVdqWdq => simd!(V256VpavgwVdqWdqR, V256VpavgwVdqWdqM, self),
+            O::V256VpavgbVdqWdq => simd3!(V256VpavgbVdqWdqR, V256VpavgbVdqWdqM, self),
+            O::V256VpavgwVdqWdq => simd3!(V256VpavgwVdqWdqR, V256VpavgwVdqWdqM, self),
             O::V256VpblendvbVdqHdqWdqIb => {
                 simd3_ib!(V256VpblendvbVdqHdqWdqIbR, V256VpblendvbVdqHdqWdqIbM, self)
             }
@@ -35544,6 +35585,11 @@ impl Instruction {
                 EvexVcvt2ph2hf8sVf8hdqWphKmaskM,
                 self
             ),
+            O::EvexVcvt2ps2phxVphHpsWps => simd3!(
+                EvexVcvt2ps2phxVphHpsWpsR,
+                EvexVcvt2ps2phxVphHpsWpsM,
+                self
+            ),
             O::EvexVcvt2ps2phxVphHpsWpsKmask => simd3!(
                 EvexVcvt2ps2phxVphHpsWpsKmaskR,
                 EvexVcvt2ps2phxVphHpsWpsKmaskM,
@@ -37384,12 +37430,12 @@ impl Instruction {
             O::EvexVinsertpsVpsWssIb => {
                 simd_ib!(EvexVinsertpsVpsWssIbR, EvexVinsertpsVpsWssIbM, self)
             }
-            O::EvexVmaxpbf16VphHphWph => {
-                simd3!(EvexVmaxpbf16VphHphWphR, EvexVmaxpbf16VphHphWphM, self)
+            O::EvexVmaxbf16VphHphWph => {
+                simd3!(EvexVmaxbf16VphHphWphR, EvexVmaxbf16VphHphWphM, self)
             }
-            O::EvexVmaxpbf16VphHphWphKmask => simd3!(
-                EvexVmaxpbf16VphHphWphKmaskR,
-                EvexVmaxpbf16VphHphWphKmaskM,
+            O::EvexVmaxbf16VphHphWphKmask => simd3!(
+                EvexVmaxbf16VphHphWphKmaskR,
+                EvexVmaxbf16VphHphWphKmaskM,
                 self
             ),
             O::EvexVmaxpdVpdHpdWpd => simd3!(EvexVmaxpdVpdHpdWpdR, EvexVmaxpdVpdHpdWpdM, self),
@@ -37451,12 +37497,12 @@ impl Instruction {
                 EvexVminmaxssVssHpsWssIbKmaskM,
                 self
             ),
-            O::EvexVminpbf16VphHphWph => {
-                simd3!(EvexVminpbf16VphHphWphR, EvexVminpbf16VphHphWphM, self)
+            O::EvexVminbf16VphHphWph => {
+                simd3!(EvexVminbf16VphHphWphR, EvexVminbf16VphHphWphM, self)
             }
-            O::EvexVminpbf16VphHphWphKmask => simd3!(
-                EvexVminpbf16VphHphWphKmaskR,
-                EvexVminpbf16VphHphWphKmaskM,
+            O::EvexVminbf16VphHphWphKmask => simd3!(
+                EvexVminbf16VphHphWphKmaskR,
+                EvexVminbf16VphHphWphKmaskM,
                 self
             ),
             O::EvexVminpdVpdHpdWpd => simd3!(EvexVminpdVpdHpdWpdR, EvexVminpdVpdHpdWpdM, self),
@@ -38772,11 +38818,6 @@ impl Instruction {
             O::EvexVpmullwVdqHdqWdqKmask => {
                 simd3!(EvexVpmullwVdqHdqWdqKmaskR, EvexVpmullwVdqHdqWdqKmaskM, self)
             }
-            O::EvexVpmultishiftqbVdqHdqWdq => simd3!(
-                EvexVpmultishiftqbVdqHdqWdqR,
-                EvexVpmultishiftqbVdqHdqWdqM,
-                self
-            ),
             O::EvexVpmultishiftqbVdqHdqWdqKmask => simd3!(
                 EvexVpmultishiftqbVdqHdqWdqKmaskR,
                 EvexVpmultishiftqbVdqHdqWdqKmaskM,

@@ -27,10 +27,11 @@ egui = "0.36"
 eframe = { version = "0.36", default-features = false, features = ["x11", "wayland", "glow"] }
 
 # The default for a library crate here is proof-carrying. A crate opts in with
-# `[lints] workspace = true`; the ones that cannot yet (rusty_box, at 103 unsafe
-# tokens under a decreasing ratchet) simply do not, and P8 is where the last of
-# them joins. Host FFI will live only in named leaf crates, which opt out by
-# name with a `// UNSAFETY:` note and a ratchet baseline of their own.
+# `[lints] workspace = true` and lifts the deny only under a named
+# `#[expect(unsafe_code, reason = "…")]` on a block, an item, a file or the
+# whole crate. rusty_box does not opt in: its unsafe tokens are held by a
+# decreasing baseline in xtask/src/ci.rs instead. rusty_box_decoder carries its
+# own `#![forbid(unsafe_code)]`. docs/safety-doctrine.md, R1, has the rest.
 [workspace.lints.rust]
 unsafe_code = "deny"
 
